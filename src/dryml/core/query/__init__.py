@@ -13,6 +13,7 @@ from .model import (
 from .lowering import CandidateRelation, LoweredEdgeStep, LoweredGraphPlan, ScanPolicy
 from .query import DefinitionQuery
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet, QueryBackedDefinitionResultSet
+from .reference import ObjectRefResultSet, ReferenceOccurrence, ReferenceQuery, ReferenceResultSet, StateRefResultSet
 
 __all__ = [
     "Arg",
@@ -29,6 +30,7 @@ __all__ = [
     "LoweredEdgeStep",
     "LoweredGraphPlan",
     "ObjectResultSet",
+    "ObjectRefResultSet",
     "OccurrenceResultSet",
     "QueryCardinalityError",
     "QueryDomainError",
@@ -41,7 +43,11 @@ __all__ = [
     "QueryWouldScanError",
     "QueryPathError",
     "QueryBackedDefinitionResultSet",
+    "ReferenceOccurrence",
+    "ReferenceQuery",
+    "ReferenceResultSet",
     "ScanPolicy",
     "SetMember",
+    "StateRefResultSet",
     "normalize_path",
 ]

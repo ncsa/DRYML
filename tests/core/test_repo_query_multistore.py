@@ -15,10 +15,10 @@ class MultiState(Serializable):
         self.name = name
         self.value = 0
 
-    def save_state_to_dir_imp(self, dest_dir, revision=None):
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
         pickle_save(self.value, f"{dest_dir}/value.pkl")
 
-    def restore_state_from_dir_imp(self, src_dir, revision=None):
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
         self.value = pickle_load(f"{src_dir}/value.pkl")
 
 
@@ -105,20 +105,23 @@ def test_forced_refresh_replaces_stale_store_reference(tmp_path):
     assert refreshed.replicas(obj.definition) == (new_store,)
 
 
-def test_materialization_uses_store_priority_for_replicated_cdef(tmp_path):
+def test_structural_query_is_fresh_while_exact_state_ref_load_restores_state(tmp_path):
     store1 = DirStore(tmp_path / "store1")
     store2 = DirStore(tmp_path / "store2")
     repo = Repo(stores=[store1, store2])
     obj = MultiState("same", repo=repo)
     obj.value = 1
-    repo.save_object(obj, store=store1)
+    first_state = repo.save_object(obj, store=store1)
     obj.value = 2
-    repo.save_object(obj, store=store2)
+    second_state = repo.save_object(obj, store=store2, deep_capture=True)
 
     repo2 = Repo(stores=[DirStore(store2.base_dir), DirStore(store1.base_dir)])
-    loaded = repo2.query(obj.definition).stored().objects().one()
+    structural = repo2.load_or_build(obj.definition, instance="new", cache="none")
+    exact = repo2.load_state_ref(second_state, reuse_live="never")
 
-    assert loaded.value == 2
+    assert first_state != second_state
+    assert structural.value == 0
+    assert exact.value == 2
 
 
 def test_result_order_is_independent_of_store_order(tmp_path):

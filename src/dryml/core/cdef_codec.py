@@ -410,9 +410,9 @@ def _decode_value(
                 f"Invalid CDef link kind {data['edge_kind']!r}."
             ) from error
         target = _decode_value(data["target"], build, payloads)
-        if not isinstance(target, ConcreteDefinition):
+        if not isinstance(target, (ConcreteDefinition, ObjectRef, StateRef)):
             raise CDefGraphCodecError(
-                "CDef link target must be a CDef reference."
+                "CDef link target must be a CDef, ObjectRef, or StateRef reference."
             )
         return DefLink(edge_kind, target)
     if kind == "dict":

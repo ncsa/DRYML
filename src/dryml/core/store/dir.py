@@ -111,7 +111,7 @@ class DirStore(Store):
         return self._query_index_instance
 
     def mark_query_index_dirty(self, cdef=None) -> str | None:
-        """Publish a durable marker after an authoritative definition mutation.
+        """Publish a durable marker after an authoritative queryable mutation.
 
         Args:
             cdef: Optional definition whose immutable DefinitionRecord changed.
@@ -518,7 +518,12 @@ class DirStore(Store):
         """Install an immutable StateRefRecord after caller closure preflight."""
         if not isinstance(record, StateRefRecord):
             raise TypeError("record must be a StateRefRecord.")
-        return self._install_immutable(self._state_ref_path(record.digest), record, StateRefRecord)
+        path = self._state_ref_path(record.digest)
+        existed = self._read_file(path, StateRefRecord) is not None
+        installed = self._install_immutable(path, record, StateRefRecord)
+        if not existed:
+            self.mark_query_index_dirty()
+        return installed
 
     def iter_state_ref_records(self) -> Iterable[StateRefRecord]:
         """Yield validated StateRef records in deterministic direct-path order."""
@@ -543,7 +548,12 @@ class DirStore(Store):
         """Install one immutable DeclarationRecord."""
         if not isinstance(record, DeclarationRecord):
             raise TypeError("record must be a DeclarationRecord.")
-        return self._install_immutable(self._declaration_path(record.digest), record, DeclarationRecord)
+        path = self._declaration_path(record.digest)
+        existed = self._read_file(path, DeclarationRecord) is not None
+        installed = self._install_immutable(path, record, DeclarationRecord)
+        if not existed:
+            self.mark_query_index_dirty()
+        return installed
 
     def iter_declaration_records(self) -> Iterable[DeclarationRecord]:
         """Yield validated declaration records in deterministic direct-path order."""
@@ -600,6 +610,7 @@ class DirStore(Store):
         self.preflight_publication("write object alias")
         with interprocess_lock(self._writer_lock_path):
             self._atomic_write(self._ref_path("objects", f"{record.alias}.record"), record.to_bytes())
+        self.mark_query_index_dirty()
         return record
 
     def read_state_alias(self, object_digest: str, alias: str) -> StateAliasRecord | None:
@@ -614,7 +625,28 @@ class DirStore(Store):
         digest = record.object_ref.digest()
         with interprocess_lock(self._writer_lock_path):
             self._atomic_write(self._ref_path("states", digest[:2], digest, f"{record.alias}.record"), record.to_bytes())
+        self.mark_query_index_dirty()
         return record
+
+    def iter_object_alias_records(self) -> Iterable[ObjectAliasRecord]:
+        """Yield validated object aliases in deterministic path order."""
+        root = Path(self.base_dir, "refs", "objects")
+        if not root.exists():
+            return ()
+        return tuple(
+            record for path in sorted(root.glob("*.record"))
+            if (record := self._read_file(os.fspath(path), ObjectAliasRecord)) is not None
+        )
+
+    def iter_state_alias_records(self) -> Iterable[StateAliasRecord]:
+        """Yield validated scoped state aliases in deterministic path order."""
+        root = Path(self.base_dir, "refs", "states")
+        if not root.exists():
+            return ()
+        return tuple(
+            record for path in sorted(root.glob("*/*/*.record"))
+            if (record := self._read_file(os.fspath(path), StateAliasRecord)) is not None
+        )
 
     def catalog_key(self) -> str:
         """Return the stable path-backed identity used only by derived indexes."""

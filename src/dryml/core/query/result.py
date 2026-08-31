@@ -152,14 +152,38 @@ class DefinitionResultSet:
             self,
             *,
             instance: InstancePolicy = "reuse",
-            restore_state: bool = True,
+            restore_state: bool = False,
             reuse_weak: bool = True,
             cache: CachePolicy = "weak",
             revision=None,
             options: RepoLoadOptions | None = None) -> "ObjectResultSet":
         from dryml.runtime import materialization_admission
 
+        """Materialize structural definitions without implicitly selecting state.
+
+        Args:
+            instance: Live-instance policy for fresh structural realization.
+            restore_state: Must remain ``False``. Exact restoration requires an
+                explicit StateRef terminal and ``Repo.load_state_ref()``.
+            reuse_weak: Whether weak live candidates may be reused.
+            cache: Cache tier selected for constructed objects.
+            revision: Legacy structural state selector. It has no effect while
+                structural restoration is disabled.
+            options: Optional low-level load policy.
+
+        Returns:
+            Objects built from structural CDefs while preserving Ref/Mat values.
+
+        Raises:
+            QueryDomainError: If the definitions are nonmaterializable.
+            RuntimeTransitionError: If orchestration prohibits materialization.
+        """
+
         with materialization_admission(operation="definition_result_set_objects"):
+            if restore_state:
+                raise TypeError(
+                    "Structural query results cannot restore state; load an explicit StateRef instead."
+                )
             if not self.materializable:
                 raise QueryDomainError(f"Definitions from domain {self.domain!r} cannot be materialized directly.")
             objs = {}

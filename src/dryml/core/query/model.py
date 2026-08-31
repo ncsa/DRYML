@@ -154,8 +154,8 @@ class FeatureRequirement:
 
 
 # This version covers canonical values embedded in query features and CDef rows.
-CANONICAL_QUERY_SEMANTICS_VERSION = 2
-FINGERPRINT_SCHEMA_VERSION = 3
+CANONICAL_QUERY_SEMANTICS_VERSION = 3
+FINGERPRINT_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)

@@ -1954,6 +1954,22 @@ class Repo:
 
         return DefinitionQuery.from_source(self, selector)
 
+    def references(self):
+        """Start an authority-verified query over ObjectRefs and StateRefs.
+
+        Returns:
+            A ReferenceQuery over immutable Definition, Declaration, StateRef,
+            and alias authority in connected Stores.
+
+        Side Effects:
+            None until a terminal is evaluated. Evaluation never materializes an
+            Object or opens local-state payloads.
+        """
+
+        from .query.reference import ReferenceQuery
+
+        return ReferenceQuery(self)
+
     def definition_graph(self, value) -> "ConcreteDefinitionGraph":
         from .cdef_graph import ConcreteDefinitionGraph
 

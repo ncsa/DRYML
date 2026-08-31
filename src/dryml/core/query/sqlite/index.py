@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import shutil
+import sys
 import time
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from ...definition import ConcreteDefinition
 from ..codecs import (
     QueryIndexCodec,
     digest_blob,
+    encode_reference,
 )
 from ..fingerprint import canonical_class_key, target_local_fingerprint
 from ..model import (
@@ -422,7 +424,7 @@ class SQLiteStoreQueryIndex:
     def _rebuild_owned(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False) -> None:
         if self.store is None or not hasattr(self.store, "iter_definition_records"):
             raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with iter_definition_records().")
-        self._assert_sidecar_rebuildable()
+        compatibility = self._assert_sidecar_rebuildable()
 
         dirty_markers = self._dirty_markers()
         generation_seed = self._replacement_generation_seed()
@@ -441,12 +443,18 @@ class SQLiteStoreQueryIndex:
             store=self.store,
         )
         scanned = 0
+        visible_progress = compatibility == "rebuild"
+        if visible_progress:
+            print("DRYML query index metadata is older; rebuilding derived index from Store authority.", file=sys.stderr, flush=True)
         try:
             replacement.initialize_empty(build_state="building", generation=generation_seed)
             for cdefs in chunked(roots, _REBUILD_BATCH_SIZE):
                 scanned += len(cdefs)
+                if visible_progress:
+                    print(f"DRYML query index rebuild progress: {scanned}/{len(roots)} roots", file=sys.stderr, flush=True)
                 graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
                 replacement._register_stored_roots(graph, cdefs, require_ready=False)
+            replacement._register_reference_authority(require_ready=False)
             replacement._validate_rebuild_before_ready(roots=roots)
             replacement._set_build_state("ready")
             con = replacement._connections.connection(readonly=False)
@@ -482,11 +490,62 @@ class SQLiteStoreQueryIndex:
                 raise QueryIndexError(f"Store {self.store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
         return roots
 
-    def _assert_sidecar_rebuildable(self) -> None:
+    def _register_reference_authority(self, *, require_ready: bool) -> None:
+        """Cache immutable reference facts while leaving Store records authoritative.
+
+        The rows are rebuilt as one replacement-sidecar unit. They accelerate no
+        terminal yet: reference queries re-read Store authority so a stale or
+        corrupted derived projection can never omit a result or hide a conflict.
+        """
+
+        rows = tuple(_reference_authority_rows(self.store))
+
+        def operation(con):
+            validate_schema(
+                con,
+                store_key=self.source_key,
+                canonical_version=self.canonical_version,
+                require_ready=require_ready,
+            )
+            con.execute("DELETE FROM reference_object_ids")
+            con.execute("DELETE FROM reference_records")
+            for row in rows:
+                con.execute(
+                    """
+                    INSERT INTO reference_records (
+                        source_kind, source_digest, owner_kind, owner_digest,
+                        path_blob, reference_kind, reference_digest,
+                        reference_blob, state_hashes_blob, alias
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    row[:10],
+                )
+                reference = row[10]
+                state_hashes = row[11]
+                object_ref = reference.object if hasattr(reference, "object") else reference
+                for path, object_id in object_ref.objects.items():
+                    state_hash = None if state_hashes is None else state_hashes.get(path)
+                    con.execute(
+                        """
+                        INSERT OR IGNORE INTO reference_object_ids (
+                            reference_kind, reference_digest, object_id_blob,
+                            namespace_blob, path_blob, state_hash
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row[5], row[6], encode_reference(object_id),
+                            "/".join(object_id.namespace).encode("ascii"),
+                            _CODEC.encode_graph_path(path), state_hash,
+                        ),
+                    )
+
+        self._run_write_transaction(operation)
+
+    def _assert_sidecar_rebuildable(self) -> str:
         """Reject future sidecars before scanning Store authority or index rows."""
 
         if not self.path.exists():
-            return
+            return "missing"
         try:
             con = self._connections.connection(readonly=True)
             decision = stored_compatibility_decision(
@@ -502,6 +561,7 @@ class SQLiteStoreQueryIndex:
             raise QueryIndexIncompatible(
                 "SQLite query-index metadata is future, missing, or malformed; refusing to rebuild over it."
             )
+        return decision
 
     def register_stored_roots(self, graph, roots):
         return self._register_stored_roots(graph, roots, require_ready=True)
@@ -792,6 +852,7 @@ class SQLiteStoreQueryIndex:
         _validate_sqlite_integrity(con, issues)
         self._validate_decodable_rows(con, issues)
         self._validate_stored_roots(con, issues)
+        self._validate_reference_rows(con, issues)
         self._validate_store_roots(con, issues, roots=roots)
         errors = tuple(issue for issue in issues if issue.severity == "error")
         if errors:
@@ -892,6 +953,21 @@ class SQLiteStoreQueryIndex:
         }
         if indexed_roots != actual_roots:
             issues.append(ValidationIssue("error", "SQLite stored roots differ from authoritative Store roots."))
+
+    def _validate_reference_rows(self, con, issues: list[ValidationIssue]) -> None:
+        """Validate reference blobs before a staged index becomes ready."""
+
+        for row in con.execute("SELECT reference_kind, reference_digest, reference_blob, path_blob FROM reference_records"):
+            kind, digest, blob, path_blob = row
+            try:
+                reference = _CODEC.decode_reference(blob)
+                if kind == "object" and reference.digest() != digest:
+                    raise ValueError("ObjectRef digest mismatch")
+                if kind == "state" and reference.digest() != digest:
+                    raise ValueError("StateRef digest mismatch")
+                _CODEC.decode_graph_path(path_blob)
+            except Exception as exc:
+                issues.append(ValidationIssue("error", "Reference row failed to decode.", repr(exc)))
 
     @contextmanager
     def _build_claim(self, *, force: bool = False):
@@ -2195,12 +2271,81 @@ def _relative_def_path(stable_hash: str) -> str:
     return f"objects/{stable_hash[:2]}/{stable_hash}/def.pkl"
 
 
+def _reference_authority_rows(store):
+    """Yield complete derived reference rows from current Store authority.
+
+    Each row retains its authority source and canonical owner/path/reference
+    identity.  This extraction is intentionally shared by replacement rebuilds
+    only; callers must still verify query answers against Store records.
+    """
+
+    from ...store.records import DefinitionRecord
+    from ..reference import ReferenceOccurrence, _iter_embedded_references
+    from ...reference_values import ObjectRef, StateRef
+    from ...utils.graph.path import GraphPath
+
+    def owner_key(value):
+        if isinstance(value, StateRef):
+            return "state", value.digest()
+        if isinstance(value, ObjectRef):
+            return "object", value.digest()
+        return "definition", DefinitionRecord(value).digest
+
+    def encode(source_kind, source_digest, occurrence, *, alias=""):
+        value = occurrence.value
+        kind = "state" if isinstance(value, StateRef) else "object"
+        owner_kind, owner_digest = owner_key(occurrence.owner)
+        states = value.states if isinstance(value, StateRef) else None
+        return (
+            source_kind, source_digest, owner_kind, owner_digest,
+            _CODEC.encode_graph_path(occurrence.path), kind, value.digest(),
+            encode_reference(value),
+            None if states is None else repr(tuple(sorted(states.items(), key=lambda item: str(item[0])))).encode("ascii"),
+            alias, value, states,
+        )
+
+    for record in store.iter_definition_records():
+        for occurrence in _iter_embedded_references(record.definition, owner=record.definition):
+            yield encode("definition", record.digest, occurrence)
+    for record in store.iter_declaration_records():
+        reference = record.object_ref
+        yield encode("declaration", record.digest, ReferenceOccurrence(reference, GraphPath(), reference))
+    for record in store.iter_state_ref_records():
+        state = record.state_ref
+        yield encode("state-ref", record.digest, ReferenceOccurrence(state, GraphPath(), state))
+        yield encode("state-ref", record.digest, ReferenceOccurrence(state, GraphPath(), state.object))
+    for record in store.iter_object_alias_records():
+        reference = record.object_ref
+        yield encode(
+            "object-alias", f"{record.alias}:{reference.digest()}",
+            ReferenceOccurrence(reference, GraphPath(), reference), alias=record.alias,
+        )
+    for record in store.iter_state_alias_records():
+        state_record = store.read_state_ref_record(record.state_ref_digest)
+        if state_record is None or state_record.state_ref.object != record.object_ref:
+            raise QueryIndexError("State alias points to missing or incompatible StateRef authority.")
+        state = state_record.state_ref
+        yield encode(
+            "state-alias", f"{record.alias}:{record.state_ref_digest}",
+            ReferenceOccurrence(state, GraphPath(), state), alias=record.alias,
+        )
+
+
 def _row_counts(con) -> dict[str, int]:
     return {
         table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        for table in ("definitions", "feature_tokens", "postings", "definition_edges", "stored_roots")
+        for table in (
+            "definitions", "feature_tokens", "postings", "definition_edges",
+            "stored_roots", "reference_records", "reference_object_ids",
+        )
     }
 
 
 def _empty_row_counts() -> dict[str, int]:
-    return {table: 0 for table in ("definitions", "feature_tokens", "postings", "definition_edges", "stored_roots")}
+    return {
+        table: 0
+        for table in (
+            "definitions", "feature_tokens", "postings", "definition_edges",
+            "stored_roots", "reference_records", "reference_object_ids",
+        )
+    }

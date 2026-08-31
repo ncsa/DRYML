@@ -41,7 +41,11 @@ from dryml.core.query import (
     Kwarg,
     Parameter,
     ObjectResultSet,
+    ObjectRefResultSet,
     OccurrenceResultSet,
+    ReferenceOccurrence,
+    ReferenceQuery,
+    ReferenceResultSet,
     QueryCardinalityError,
     QueryDomainError,
     QueryError,
@@ -49,6 +53,7 @@ from dryml.core.query import (
     QueryIndexError,
     QueryPathError,
     SetMember,
+    StateRefResultSet,
 )
 
 __all__ = [
@@ -134,7 +139,11 @@ __all__ = [
     "Kwarg",
     "Parameter",
     "ObjectResultSet",
+    "ObjectRefResultSet",
     "OccurrenceResultSet",
+    "ReferenceOccurrence",
+    "ReferenceQuery",
+    "ReferenceResultSet",
     "QueryCardinalityError",
     "QueryDomainError",
     "QueryError",
@@ -142,4 +151,5 @@ __all__ = [
     "QueryIndexError",
     "QueryPathError",
     "SetMember",
+    "StateRefResultSet",
 ]

@@ -58,6 +58,18 @@ _MAX_NESTED_QUERY_RETRIES = 3
 
 @dataclass(frozen=True, slots=True)
 class DefinitionQuery:
+    """Immutable structural query builder with exact-reference preservation.
+
+    A query snapshots and resolves soft ``StateSelectorRef`` leaves before it is
+    finalized, then executes against the selected structural domain. Reference
+    leaves remain complete ``ObjectRef`` or ``StateRef`` values; callers use
+    :meth:`references` for authority-verified reference projections.
+
+    Attributes:
+        repo: Managing Repo used for selector resolution and domain access.
+        original: Resolved source retained for restore operations.
+        selector: Current resolved structural selector.
+    """
     repo: Any
     original: Definition | ConcreteDefinition | None
     selector: Definition | ConcreteDefinition | None
@@ -80,8 +92,26 @@ class DefinitionQuery:
             *,
             domain: QueryDomain | None = None,
             universe: ResultUniverse | None = None) -> "DefinitionQuery":
+        """Create a finalized query from a soft structural source.
+
+        Args:
+            repo: Managing Repo required to resolve StateSelectorRef leaves.
+            source: Optional Definition, CDef, Selector, or Object source.
+            domain: Optional initial query domain.
+            universe: Optional fixed result universe for refinement.
+
+        Returns:
+            A query whose selector contains no soft StateSelectorRef.
+
+        Raises:
+            TypeError: If ``source`` has an unsupported type or no selector
+                resolver is available.
+            KeyError: If a selected state alias is missing.
+            ValueError: If a selector resolves outside its ObjectRef scope.
+            RepoLoadError: If connected Stores provide conflicting alias authority.
+        """
         if isinstance(source, Selector):
-            root = source.root
+            root = _resolve_query_state_selectors(source.root, repo)
             return cls(
                 repo=repo,
                 original=root,
@@ -91,8 +121,24 @@ class DefinitionQuery:
                 strict_policy=source.strict,
                 class_match_policy=source.cls_policy,
             )
-        original = _snapshot_source(source)
+        original = _resolve_query_state_selectors(_snapshot_source(source), repo)
         return cls(repo=repo, original=original, selector=original, domain=domain, universe=universe)
+
+    def references(self):
+        """Start an authority-verified lightweight reference query.
+
+        Returns:
+            A ReferenceQuery whose optional structural source filters referenced
+            CDefs without materializing Objects or loading state payloads.
+
+        Raises:
+            None. StateSelectorRef resolution has already completed when this
+            DefinitionQuery was created.
+        """
+
+        from .reference import ReferenceQuery
+
+        return ReferenceQuery(self.repo, definition=self.selector)
 
     def categorical(
             self,
@@ -713,6 +759,55 @@ def _snapshot_source(source):
     if isinstance(source, Definition):
         return deepcopy(source)
     raise TypeError(f"Query source must be Selector, Definition, ConcreteDefinition, Object, or None, not {type(source).__name__}.")
+
+
+def _resolve_query_state_selectors(source, repo):
+    """Resolve every soft StateSelectorRef before a DefinitionQuery exists.
+
+    Query selectors may remain partial and contain ``Par`` values, so they cannot
+    use Definition-to-CDef concretization as a resolver.  This graph-preserving
+    rewrite only replaces soft selector leaves and retains all selector syntax.
+    """
+
+    from ..cdef_graph import EdgeKind
+    from ..definition import Definition, SKIP_ARGS
+    from ..links import DefLink
+    from ..reference_values import StateSelectorRef
+
+    memo = {}
+
+    def visit(value):
+        if isinstance(value, StateSelectorRef):
+            key = id(value)
+            if key not in memo:
+                resolver = getattr(repo, "resolve_state_selector", None)
+                if not callable(resolver):
+                    raise TypeError("StateSelectorRef query values require a managing Repo.")
+                resolved = resolver(value)
+                if resolved.object != value.object:
+                    raise ValueError("StateSelectorRef query resolution returned a StateRef outside its ObjectRef scope.")
+                memo[key] = resolved
+            return memo[key]
+        if isinstance(value, DefLink):
+            target = visit(value.target)
+            return target if value.kind is EdgeKind.MATERIALIZE else DefLink(value.kind, target)
+        if isinstance(value, Definition):
+            args = (SKIP_ARGS,) if value.args is None else tuple(visit(item) for item in value.args)
+            prefix = () if value.cls is None else (value.cls, *args)
+            if value.cls is None:
+                return Definition(*args, **{key: visit(item) for key, item in value.kwargs.items()})
+            return Definition(*prefix, **{key: visit(item) for key, item in value.kwargs.items()})
+        if isinstance(value, (dict, FrozenDict)):
+            return type(value)({key: visit(item) for key, item in value.items()})
+        if isinstance(value, (list, FrozenList)):
+            return type(value)(visit(item) for item in value)
+        if isinstance(value, (tuple, FrozenTuple)):
+            return type(value)(visit(item) for item in value)
+        if isinstance(value, (set, FrozenSet)):
+            return type(value)(visit(item) for item in value)
+        return value
+
+    return visit(source)
 
 
 def _structural_match(selector, cdef: ConcreteDefinition, *, strict: bool, class_match: ClassMatchPolicy) -> bool:

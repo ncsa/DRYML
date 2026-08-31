@@ -170,6 +170,22 @@ class Store(ABC):
     def write_state_alias(self, record: StateAliasRecord) -> StateAliasRecord:
         """Atomically replace one mutable StateRef alias record."""
 
+    def iter_object_alias_records(self) -> Iterable[ObjectAliasRecord]:
+        """Yield complete object aliases for derived-index rebuilds.
+
+        Backends that cannot enumerate aliases may return no entries; aliases
+        remain authoritative through direct lookup.
+        """
+        return ()
+
+    def iter_state_alias_records(self) -> Iterable[StateAliasRecord]:
+        """Yield complete state aliases for derived-index rebuilds.
+
+        Backends that cannot enumerate aliases may return no entries; aliases
+        remain authoritative through direct lookup.
+        """
+        return ()
+
     # Query remains derived: it only scans immutable definitions.
     def hydrate_index(self):
         """Yield definitions reconstructed from authoritative DefinitionRecords."""

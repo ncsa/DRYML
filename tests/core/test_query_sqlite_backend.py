@@ -1316,6 +1316,8 @@ def test_write_transaction_rolls_back_partial_graph_rows(monkeypatch, tmp_path):
         "postings": 0,
         "definition_edges": 0,
         "stored_roots": 0,
+        "reference_records": 0,
+        "reference_object_ids": 0,
     }
     with index.read_view() as view:
         assert view.exact_ids(obj.definition) == set()

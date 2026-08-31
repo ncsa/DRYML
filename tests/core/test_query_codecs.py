@@ -6,6 +6,7 @@ from dryml.core.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.query.codecs import (
     CDEF_CODEC_VERSION,
+    FEATURE_CODEC_VERSION,
     QUERY_INDEX_CODEC_VERSION,
     QueryCodecError,
     QueryIndexCodec,
@@ -35,11 +36,12 @@ def test_cdef_codec_roundtrip():
     assert decode_cdef(encode_cdef(cdef)) == cdef
 
 
-def test_namespace_promotion_increments_only_the_cdef_codec_marker():
-    """The namespace break rejects old CDef blobs without changing other codecs."""
+def test_reference_query_promotion_increments_its_index_codec_markers():
+    """Reference index rows use a new semantic and feature codec boundary."""
 
     assert CDEF_CODEC_VERSION == 3
-    assert QUERY_INDEX_CODEC_VERSION == 3
+    assert FEATURE_CODEC_VERSION == 3
+    assert QUERY_INDEX_CODEC_VERSION == 4
 
 
 def test_cdef_codec_retains_v1_identity_when_pickle_state_has_no_version():

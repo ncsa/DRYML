@@ -12,7 +12,7 @@ from ..model import CANONICAL_QUERY_SEMANTICS_VERSION, FINGERPRINT_SCHEMA_VERSIO
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
-SQLITE_QUERY_INDEX_SCHEMA_VERSION = 4
+SQLITE_QUERY_INDEX_SCHEMA_VERSION = 6
 IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported"]
 
 
@@ -123,6 +123,36 @@ DDL = (
         indexed_generation INTEGER NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS reference_records (
+        source_kind TEXT NOT NULL,
+        source_digest TEXT NOT NULL,
+        owner_kind TEXT NOT NULL,
+        owner_digest TEXT NOT NULL,
+        path_blob BLOB NOT NULL,
+        reference_kind TEXT NOT NULL CHECK (reference_kind IN ('object', 'state')),
+        reference_digest TEXT NOT NULL,
+        reference_blob BLOB NOT NULL,
+        state_hashes_blob BLOB,
+        alias TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (source_kind, source_digest, owner_kind, owner_digest, path_blob, reference_kind, reference_digest, alias)
+    ) WITHOUT ROWID
+    """,
+    "CREATE INDEX IF NOT EXISTS reference_records_by_reference ON reference_records(reference_kind, reference_digest)",
+    "CREATE INDEX IF NOT EXISTS reference_records_by_alias ON reference_records(alias) WHERE alias <> ''",
+    """
+    CREATE TABLE IF NOT EXISTS reference_object_ids (
+        reference_kind TEXT NOT NULL CHECK (reference_kind IN ('object', 'state')),
+        reference_digest TEXT NOT NULL,
+        object_id_blob BLOB NOT NULL,
+        namespace_blob BLOB NOT NULL,
+        path_blob BLOB NOT NULL,
+        state_hash TEXT,
+        PRIMARY KEY (reference_kind, reference_digest, object_id_blob, path_blob)
+    ) WITHOUT ROWID
+    """,
+    "CREATE INDEX IF NOT EXISTS reference_object_ids_by_object ON reference_object_ids(object_id_blob)",
+    "CREATE INDEX IF NOT EXISTS reference_object_ids_by_state ON reference_object_ids(state_hash) WHERE state_hash IS NOT NULL",
 )
 
 

@@ -4,15 +4,17 @@ import hashlib
 from typing import Any
 
 from ..definition import ConcreteDefinition
+from ..reference_values import ObjectId, ObjectRef, StateRef
 from ..utils.general import pickler, unpickler
 from .model import FeatureToken
 from .path import GRAPH_PATH_SCHEMA_VERSION, GraphPath
 
 
 CDEF_CODEC_VERSION = 3
-FEATURE_CODEC_VERSION = 2
+FEATURE_CODEC_VERSION = 3
 PATH_CODEC_VERSION = GRAPH_PATH_SCHEMA_VERSION
-QUERY_INDEX_CODEC_VERSION = 3
+QUERY_INDEX_CODEC_VERSION = 5
+REFERENCE_CODEC_VERSION = 1
 
 
 class QueryCodecError(ValueError):
@@ -31,6 +33,7 @@ class QueryIndexCodec:
     cdef_version = CDEF_CODEC_VERSION
     feature_version = FEATURE_CODEC_VERSION
     path_version = PATH_CODEC_VERSION
+    reference_version = REFERENCE_CODEC_VERSION
 
     def encode_cdef(self, cdef: ConcreteDefinition) -> bytes:
         """Encode a concrete definition for persistent query-index storage."""
@@ -66,6 +69,16 @@ class QueryIndexCodec:
         """Return the stable digest used for encoded query-index blobs."""
 
         return digest_blob(blob)
+
+    def encode_reference(self, value: ObjectId | ObjectRef | StateRef) -> bytes:
+        """Encode a canonical lightweight reference value for an index row."""
+
+        return encode_reference(value)
+
+    def decode_reference(self, blob: bytes) -> ObjectId | ObjectRef | StateRef:
+        """Decode a canonical lightweight reference value from an index row."""
+
+        return decode_reference(blob)
 
 
 def encode_cdef(cdef: ConcreteDefinition) -> bytes:
@@ -116,6 +129,36 @@ def decode_graph_path(blob: bytes) -> GraphPath:
         return GraphPath.from_data(value)
     except Exception as exc:
         raise QueryCodecError("Decoded graph path payload is invalid.") from exc
+
+
+def encode_reference(value: ObjectId | ObjectRef | StateRef) -> bytes:
+    """Encode one complete reference identity without loading Objects or state."""
+
+    if isinstance(value, ObjectId):
+        kind, data = "object-id", value.to_data()
+    elif isinstance(value, ObjectRef):
+        kind, data = "object-ref", value.to_data()
+    elif isinstance(value, StateRef):
+        kind, data = "state-ref", value.to_data()
+    else:
+        raise TypeError(f"encode_reference expected ObjectId, ObjectRef, or StateRef, got {type(value).__name__}.")
+    return _pack("reference", REFERENCE_CODEC_VERSION, {"kind": kind, "value": data})
+
+
+def decode_reference(blob: bytes) -> ObjectId | ObjectRef | StateRef:
+    """Decode one complete lightweight reference identity from index bytes."""
+
+    value = _unpack(blob, expected_kind="reference", expected_version=REFERENCE_CODEC_VERSION)
+    if not isinstance(value, dict) or set(value) != {"kind", "value"}:
+        raise QueryCodecError("Decoded reference payload must contain kind and value.")
+    decoders = {"object-id": ObjectId.from_data, "object-ref": ObjectRef.from_data, "state-ref": StateRef.from_data}
+    decoder = decoders.get(value["kind"])
+    if decoder is None:
+        raise QueryCodecError(f"Unknown reference kind {value['kind']!r}.")
+    try:
+        return decoder(value["value"])
+    except Exception as exc:
+        raise QueryCodecError("Decoded reference value is invalid.") from exc
 
 
 def digest_blob(blob: bytes) -> bytes:

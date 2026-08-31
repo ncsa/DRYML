@@ -722,7 +722,7 @@ from dryml.core.query.sqlite.utils import wal_runtime_is_known_safe
 
 assert SQLiteQueryIndexConfig is not None
 assert SQLiteConnectionManager is not None
-assert SQLITE_QUERY_INDEX_SCHEMA_VERSION == 4
+assert SQLITE_QUERY_INDEX_SCHEMA_VERSION == 6
 assert wal_runtime_is_known_safe((3, 51, 3))
 assert "sqlite3" not in sys.modules
         """
