@@ -11,6 +11,7 @@ from pathlib import Path
 import weakref
 from contextvars import ContextVar
 from collections.abc import Iterable, Mapping
+from collections import defaultdict
 import numpy as np
 import atexit
 
@@ -24,6 +25,148 @@ from .config import CONFIG_MISSING, ConfigError, ConfigRef
 from .query.federation import RepoQueryIndex
 from .query.memory import AggregateMemoryQueryIndex
 from .query.result import ObjectResultSet
+
+
+def _node_key(key):
+    """Normalize a runtime map key to private CDef node identity."""
+
+    if isinstance(key, ConcreteDefinition):
+        from .cdef_identity import cdef_node_key
+
+        return cdef_node_key(key)
+    return key
+
+
+def _unique_objects(objects):
+    """Return candidates deduplicated by live Object identity."""
+
+    unique = []
+    seen = set()
+    for obj in objects:
+        obj_id = id(obj)
+        if obj_id not in seen:
+            seen.add(obj_id)
+            unique.append(obj)
+    return tuple(unique)
+
+
+class _NodeMap(dict):
+    """Dictionary which never collapses equal but independent CDefs."""
+
+    def __contains__(self, key):
+        return super().__contains__(_node_key(key))
+
+    def __getitem__(self, key):
+        return super().__getitem__(_node_key(key))
+
+    def get(self, key, default=None):
+        return super().get(_node_key(key), default)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(_node_key(key), value)
+
+    def pop(self, key, *args):
+        return super().pop(_node_key(key), *args)
+
+
+class _CandidateCache:
+    """Live Objects grouped by private node identity without structural collapse."""
+
+    def __init__(self, *, weak: bool = False):
+        self._values = defaultdict(list)
+        self._weak = weak
+
+    def _live(self, key):
+        values = self._values.get(key, ())
+        if not self._weak:
+            return tuple(values)
+        live = tuple(obj for ref in values if (obj := ref()) is not None)
+        if live:
+            self._values[key] = [weakref.ref(obj) for obj in live]
+        else:
+            self._values.pop(key, None)
+        return live
+
+    def _keys(self, cdef):
+        node = _node_key(cdef)
+        return tuple(key for key in self._values if key[1] is node)
+
+    def add(self, cdef, obj):
+        key = (getattr(obj, "_realization_scope", None), _node_key(cdef))
+        values = self._live(key)
+        if all(existing is not obj for existing in values):
+            self._values[key].append(weakref.ref(obj) if self._weak else obj)
+
+    def discard(self, cdef, obj=None):
+        if obj is None:
+            for key in self._keys(cdef):
+                self._values.pop(key, None)
+            return None
+        for key in self._keys(cdef):
+            remaining = [item for item in self._live(key) if item is not obj]
+            if remaining:
+                self._values[key] = [weakref.ref(item) for item in remaining] if self._weak else remaining
+            else:
+                self._values.pop(key, None)
+
+    def get(self, cdef, default=None):
+        """Return the sole exact private-node candidate, if present."""
+
+        values = self.candidates(cdef)
+        return values[0] if len(values) == 1 else default
+
+    def candidates(self, cdef):
+        """Return all live candidates for one exact private CDef node."""
+
+        return tuple(
+            obj for key in self._keys(cdef) for obj in self._live(key)
+        )
+
+    def has_unique(self, cdef):
+        """Report whether exactly one candidate exists without returning it."""
+
+        count = 0
+        for key in self._keys(cdef):
+            count += len(self._live(key))
+            if count > 1:
+                return False
+        return count == 1
+
+    def __contains__(self, cdef):
+        return bool(self.candidates(cdef))
+
+    def __getitem__(self, cdef):
+        result = self.get(cdef)
+        if result is None:
+            raise KeyError(cdef)
+        return result
+
+    def pop(self, cdef, default=None):
+        values = self.candidates(cdef)
+        self.discard(cdef)
+        if len(values) != 1:
+            return default
+        return values[0]
+
+    def clear(self):
+        self._values.clear()
+
+    def items(self):
+        for key in tuple(self._values):
+            for obj in self._live(key):
+                yield obj.definition, obj
+
+    def keys(self):
+        for cdef, _ in self.items():
+            yield cdef
+
+    def __iter__(self):
+        """Iterate cached CDefs with candidate multiplicity preserved."""
+
+        return self.keys()
+
+    def __len__(self):
+        return sum(len(self._live(key)) for key in tuple(self._values))
 
 
 class RepoSaveError(Exception):
@@ -81,9 +224,9 @@ class Repo:
     # Helper class for saving objects
     def __init__(self, stores=None, config: Mapping[str, Any] | None = None):
         # Initialize caches
-        self.weak_obj_cache = weakref.WeakValueDictionary()
-        self.strong_obj_cache = {}
-        self.obj_default_store = {}
+        self.weak_obj_cache = _CandidateCache(weak=True)
+        self.strong_obj_cache = _CandidateCache()
+        self.obj_default_store = _NodeMap()
         self.light_index = set()
         self.cdef_cache = weakref.WeakValueDictionary()
         self.obj_config = {}
@@ -172,26 +315,36 @@ class Repo:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_cache_strong"):
-            self.strong_obj_cache[obj.__cdef__] = obj
+            self.strong_obj_cache.add(obj.__cdef__, obj)
             self._query_catalog.register_cached(obj.__cdef__)
 
     def cache_weak(self, obj: Object) -> None:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_cache_weak"):
-            self.weak_obj_cache[obj.__cdef__] = obj
+            self.weak_obj_cache.add(obj.__cdef__, obj)
             self._query_catalog.register_cached(obj.__cdef__)
 
     # --- helpers you already have ---
+    def _cached_candidates(self, cdef, *, reuse_weak: bool) -> tuple[Object, ...]:
+        """Return distinct live candidates for one exact private CDef node."""
+
+        candidates = self.strong_obj_cache.candidates(cdef)
+        if reuse_weak:
+            candidates += self.weak_obj_cache.candidates(cdef)
+        return _unique_objects(candidates)
+
     def get_cached(self, cdef, *, reuse_weak: bool = True):
         """Return a cached Object after live-object admission.
 
         Args:
-            cdef: Exact definition used as the cache key.
+            cdef: Exact private-node definition used as the cache key; this is
+                not a structural-equality lookup.
             reuse_weak: Whether the weak cache may satisfy the lookup.
 
         Returns:
-            The cached Object, or ``None`` when no reusable entry exists.
+            The sole cached Object, or ``None`` when no reusable entry exists
+            or candidates are ambiguous across the selected cache tiers.
 
         Raises:
             RuntimeTransitionError: If strict orchestration prohibits returning
@@ -200,30 +353,26 @@ class Repo:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_get_cached"):
-            obj = self.strong_obj_cache.get(cdef)
-            if obj is not None:
-                return obj
-            if reuse_weak:
-                return self.weak_obj_cache.get(cdef)
-            return None
+            candidates = self._cached_candidates(cdef, reuse_weak=reuse_weak)
+            return candidates[0] if len(candidates) == 1 else None
 
     def has_cached(self, cdef, *, reuse_weak: bool = True) -> bool:
         """Return cache availability without acquiring a live Object.
 
         Args:
-            cdef: Exact definition used as the cache key.
+            cdef: Exact private-node definition used as the cache key; this is
+                not a structural-equality lookup.
             reuse_weak: Whether weak-cache availability counts.
 
         Returns:
-            Whether a reusable strong or permitted weak cache entry exists.
+            Whether exactly one reusable candidate exists across the selected
+            strong and weak cache tiers.
 
         Side Effects:
             None. This metadata-only check is available during strict
             orchestration and does not retain the cached Object.
         """
-        return cdef in self.strong_obj_cache or (
-            reuse_weak and cdef in self.weak_obj_cache
-        )
+        return len(self._cached_candidates(cdef, reuse_weak=reuse_weak)) == 1
 
     def pin(self, obj):
         """Promote to strong cache."""
@@ -231,8 +380,8 @@ class Repo:
 
         with materialization_admission(operation="repo_pin"):
             cdef = obj.__cdef__
-            self.strong_obj_cache[cdef] = obj
-            self.weak_obj_cache.pop(cdef, None)
+            self.strong_obj_cache.add(cdef, obj)
+            self.weak_obj_cache.discard(cdef, obj)
             self._query_catalog.register_cached(cdef)
 
     def unpin(self, obj_or_cdef):
@@ -241,9 +390,10 @@ class Repo:
 
         with materialization_admission(operation="repo_unpin"):
             cdef = obj_or_cdef if isinstance(obj_or_cdef, ConcreteDefinition) else obj_or_cdef.__cdef__
-            obj = self.strong_obj_cache.pop(cdef, None)
+            obj = self.strong_obj_cache.get(cdef)
             if obj is not None:
-                self.weak_obj_cache[cdef] = obj
+                self.strong_obj_cache.discard(cdef, obj)
+                self.weak_obj_cache.add(cdef, obj)
                 self._query_catalog.register_cached(cdef)
 
     def _load_aliases_from_stores(self) -> None:
@@ -304,6 +454,8 @@ class Repo:
             raise ValueError("No store provided for object store binding.")
         cdef = self._object_target_cdef(target)
         self.obj_default_store[cdef] = store
+        if isinstance(target, Object):
+            target._store_affinity = store
         return store
 
     def location(
@@ -658,9 +810,9 @@ class Repo:
         )
 
     def _candidate_cdefs(self, *, reuse_weak: bool = True) -> set[ConcreteDefinition]:
-        cdefs = set(self.strong_obj_cache.keys())
+        cdefs = {obj.definition for _, obj in self.strong_obj_cache.items()}
         if reuse_weak:
-            cdefs.update(self.weak_obj_cache.keys())
+            cdefs.update(obj.definition for _, obj in self.weak_obj_cache.items())
         cdefs.update(self.light_index)
         return cdefs
 
@@ -779,22 +931,25 @@ class Repo:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_load_object"):
-            load_options = self._load_options(
-                options=options,
-                instance=instance,
-                restore_state=restore_state,
-                build_missing=build_missing,
-                reuse_weak=reuse_weak,
-                cache=cache,
-                revision=revision,
-            )
-            memo: dict[ConcreteDefinition, Object] = {}
-            return self._realize(
-                x,
-                options=load_options,
-                path=[""],
-                memo=memo,
-            )
+            from .repo_plan import _NodeBindings, realization_scope
+
+            with realization_scope():
+                load_options = self._load_options(
+                    options=options,
+                    instance=instance,
+                    restore_state=restore_state,
+                    build_missing=build_missing,
+                    reuse_weak=reuse_weak,
+                    cache=cache,
+                    revision=revision,
+                )
+                memo = _NodeBindings()
+                return self._realize(
+                    x,
+                    options=load_options,
+                    path=[""],
+                    memo=memo,
+                )
 
     def load(self, cdef: ConcreteDefinition, **kwargs) -> Object:
         from dryml.runtime import materialization_admission
@@ -1277,9 +1432,8 @@ def make_store(store):
         raise ValueError(f"Cannot open a store pointing to location {store!r}")
 
 
-# Context management for default repo
+# Context management for explicit default repo authority.
 _current_repo: ContextVar["Repo|None"] = ContextVar("_current_repo", default=None)
-_global_repo: "Repo" = Repo()
 
 
 # This cleanup system is required because we use a 'heavy'
@@ -1288,22 +1442,24 @@ _global_repo: "Repo" = Repo()
 # repos so they aren't left until after the module import
 # system is cleaned up.
 def global_repo_cleanup():
-    global _global_repo
-    global _current_repo
     from .session import close_configured_repo
 
     close_configured_repo()
-    _global_repo.close()
-    del _global_repo
-    r = _current_repo.get()
-    if r is not None:
-        r.close()
-        del r
 atexit.register(global_repo_cleanup)
 
 
 # Get the current default repo
-def get_default_repo() -> "Repo":
+def get_default_repo() -> "Repo | None":
+    """Return only explicitly active Repo authority, if any.
+
+    Returns:
+        The innermost context-local or session-configured Repo, or ``None``.
+
+    Side Effects:
+        None. This function never creates a Repo or falls back to process-global
+        mutable state.
+    """
+
     r = _current_repo.get()
     if r is not None:
         return r
@@ -1311,19 +1467,35 @@ def get_default_repo() -> "Repo":
     from .session import current_repo
 
     r = current_repo()
-    return r if r is not None else _global_repo
+    return r
 
 
 # Context manager for isolated repo
 @contextmanager
 def default_repo(r: Repo|None=None):
-    if r is None:
+    """Install an explicit Repo for the dynamic extent of the context.
+
+    Args:
+        r: Repo to install. ``None`` creates a temporary in-memory Repo.
+
+    Yields:
+        The installed Repo.
+
+    Side Effects:
+        Restores the prior context-local authority and closes a Repo created for
+        this context on exit.
+    """
+
+    close_repo = r is None
+    if close_repo:
         r = Repo()
     tok = _current_repo.set(r)
     try:
         yield r
     finally:
         _current_repo.reset(tok)
+        if close_repo:
+            r.close()
 
 
 @contextmanager
@@ -1332,8 +1504,8 @@ def manage_repo(repo=None):
     Handle all the following cases:
 
       * repo is None:
-          - create a fresh Repo() with no stores (pure in-memory)
-          - auto-close at the end of the context
+          - reuse an explicitly context-local/session Repo when present
+          - otherwise create, install, and auto-close a fresh in-memory Repo
 
       * repo is a Repo:
           - use it as-is, do not close it at the end
@@ -1359,6 +1531,9 @@ def manage_repo(repo=None):
 
     if repo is None:
         repo_obj = get_default_repo()
+        if repo_obj is None:
+            repo_obj = Repo()
+            close_repo = True
 
     elif isinstance(repo, Repo):
         # user-supplied repo, don't manage its lifetime
@@ -1380,11 +1555,12 @@ def manage_repo(repo=None):
         repo_obj = Repo(stores=stores)
         close_repo = True
 
-    try:
-        yield repo_obj
-    finally:
-        if close_repo:
-            repo_obj.close()
+    with default_repo(repo_obj):
+        try:
+            yield repo_obj
+        finally:
+            if close_repo:
+                repo_obj.close()
 
 
 # Saving and Loading

@@ -85,8 +85,6 @@ def test_save_2(primary_store_set):
     # Delete the repo
     del repo
 
-    dryml.core.repo._global_repo.clear_cache(weak=True)
-
     # Load the repository objects should not be loaded right away
     repo = dryml.core.Repo(stores=primary_store_set.stores)
 
@@ -110,8 +108,6 @@ def test_save_3(primary_store_set):
 
     # Delete the repo
     del repo
-    dryml.core.repo._global_repo.clear_cache(weak=True)
-
     # Load the repository objects should not be loaded right away
     repo = dryml.core.Repo(stores=primary_store_set.stores)
 

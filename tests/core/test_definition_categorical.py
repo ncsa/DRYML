@@ -1,4 +1,5 @@
 from tests.core import core_objects as objects
+from dryml.core.cdef_identity import cdef_node_key
 from dryml.core.definition import Definition
 from dryml.core.freeze import FrozenList, FrozenTuple
 
@@ -106,9 +107,21 @@ def test_def_4():
     )
 
     obj_def = trainable_obj.definition
+    source_model_def = obj_def.kwargs['model']
+    source_nested_model_def = obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']
+    assert source_model_def is source_nested_model_def
+    assert cdef_node_key(source_model_def) is cdef_node_key(source_nested_model_def)
 
     # Building from plain definition
-    trainable_obj_built = obj_def.thaw().build()
+    thawed = obj_def.thaw()
+    assert thawed.kwargs['model'] is thawed.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']
+    rebuilt_def = thawed.concretize()
+    rebuilt_model_def = rebuilt_def.kwargs['model']
+    rebuilt_nested_model_def = rebuilt_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']
+    assert rebuilt_model_def is rebuilt_nested_model_def
+    assert cdef_node_key(rebuilt_model_def) is cdef_node_key(rebuilt_nested_model_def)
+
+    trainable_obj_built = thawed.build()
 
     assert trainable_obj_built['model'] is \
         trainable_obj_built['train_fn']['optimizer']['model']

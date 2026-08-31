@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+import copy
+from threading import Lock
+import uuid
 from typing import Any, Callable, Generic, Iterable, Iterator, Literal, TypeVar
 
 from .canonical import NodeKind, is_runtime_leaf, node_kind
@@ -11,9 +16,91 @@ from .object import Object, Serializable
 from .policies import RepoGraphOptions, RepoLoadOptions
 from .utils.graph.path import GraphPath
 from .utils.graph.value import iter_value_edges
+from .utils.graph.path import Parameter
+from .cdef_identity import cdef_node_key
 
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class RealizationScope:
+    """Opaque identifier and ephemeral labels for one live realization."""
+
+    token: str
+    workspace_label: str = field(
+        default_factory=lambda: f"scope-{uuid.uuid4().hex}",
+        repr=False,
+    )
+    _workspace_node_labels: dict[object, str] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+        hash=False,
+    )
+    _workspace_lock: Lock = field(
+        default_factory=Lock,
+        repr=False,
+        compare=False,
+        hash=False,
+    )
+
+    def workspace_node_label(self, node_key: object) -> str:
+        """Return one token-neutral label for a private node in this scope."""
+
+        with self._workspace_lock:
+            label = self._workspace_node_labels.get(node_key)
+            if label is None:
+                label = f"node-{uuid.uuid4().hex}"
+                self._workspace_node_labels[node_key] = label
+            return label
+
+
+_CURRENT_REALIZATION_SCOPE: ContextVar[RealizationScope | None] = ContextVar(
+    "dryml_realization_scope", default=None
+)
+
+
+@contextmanager
+def realization_scope() -> Iterator[RealizationScope]:
+    """Install a new scope unless a nested realization already owns one."""
+
+    existing = _CURRENT_REALIZATION_SCOPE.get()
+    if existing is not None:
+        yield existing
+        return
+    scope = RealizationScope(uuid.uuid4().hex)
+    token = _CURRENT_REALIZATION_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _CURRENT_REALIZATION_SCOPE.reset(token)
+
+
+def current_realization_scope() -> RealizationScope | None:
+    """Return the active scope without creating a new realization."""
+
+    return _CURRENT_REALIZATION_SCOPE.get()
+
+
+class _NodeBindings(dict):
+    """Map CDefs by private node token rather than structural equality."""
+
+    @staticmethod
+    def _key(key):
+        return cdef_node_key(key) if isinstance(key, ConcreteDefinition) else key
+
+    def __contains__(self, key):
+        return super().__contains__(self._key(key))
+
+    def __getitem__(self, key):
+        return super().__getitem__(self._key(key))
+
+    def get(self, key, default=None):
+        return super().get(self._key(key), default)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(self._key(key), value)
 
 
 class RuntimeBindingConflict(KeyError):
@@ -38,8 +125,9 @@ class RuntimeRoot:
 class RuntimeGraphBinding:
     graph: ConcreteDefinitionGraph
     roots: tuple[RuntimeRoot, ...]
-    objects: dict[ConcreteDefinition, Object]
-    missing: frozenset[ConcreteDefinition] = frozenset()
+    objects: _NodeBindings
+    missing: frozenset[object] = frozenset()
+    scope: RealizationScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +175,7 @@ def build_runtime_binding(
     roots = collect_runtime_roots(value)
     graph = ConcreteDefinitionGraph.from_roots(root.definition for root in roots)
     materialize_nodes = _materialize_reachable_nodes(graph, roots)
-    objects: dict[ConcreteDefinition, Object] = {}
+    objects = _NodeBindings()
     for root in roots:
         if root.obj is not None:
             bind_runtime_object(objects, root.definition, root.obj, path=root.path)
@@ -96,16 +184,41 @@ def build_runtime_binding(
             continue
         if node.definition in objects:
             continue
+        for root in roots:
+            if root.obj is None:
+                continue
+            relative = graph.primary_path(root.definition, node.definition)
+            if relative is None:
+                continue
+            # Bindings belong to the realized Object, so they are rooted at
+            # that receiver rather than any outer input container occurrence.
+            bound = getattr(root.obj, "_runtime_bindings", {}).get(relative)
+            if isinstance(bound, Object):
+                bind_runtime_object(
+                    objects, node.definition, bound,
+                    path=root.path.join(relative),
+                )
+                break
+        if node.definition in objects:
+            continue
         obj = _cached_object(repo, node.definition, reuse_weak=True, resolve_global=resolve_global)
         if obj is not None:
             path = _node_primary_path(graph, roots, node.definition)
             bind_runtime_object(objects, node.definition, obj, path=path)
-    missing = frozenset(cdef for cdef in materialize_nodes if cdef not in objects)
-    return RuntimeGraphBinding(graph=graph, roots=roots, objects=objects, missing=missing)
+    missing = frozenset(
+        cdef_node_key(cdef) for cdef in materialize_nodes if cdef not in objects
+    )
+    return RuntimeGraphBinding(
+        graph=graph,
+        roots=roots,
+        objects=objects,
+        missing=missing,
+        scope=current_realization_scope(),
+    )
 
 
 def bind_runtime_object(
-        bindings: dict[ConcreteDefinition, Object],
+        bindings: _NodeBindings,
         cdef: ConcreteDefinition,
         obj: Object,
         *,
@@ -116,6 +229,183 @@ def bind_runtime_object(
         return
     if existing is not obj:
         raise RuntimeBindingConflict(definition=cdef, first=existing, second=obj, path=path)
+
+
+def attach_runtime_binding(repo, cdef: ConcreteDefinition, obj: Object, memo) -> None:
+    """Attach completed realization evidence to a successfully built Object.
+
+    Args:
+        repo: Repo that owns the completed realization.
+        cdef: Exact private-node CDef for ``obj``.
+        obj: Successfully initialized live Object.
+        memo: Current private-node materialization memo containing dependencies.
+
+    Side Effects:
+        Stores immutable construction bindings, defensive runtime projections,
+        scope, ObjectId/ObjectRef metadata, and the current Store affinity on
+        ``obj``. No user attributes are inspected.
+    """
+
+    from .canonical import from_canonical
+    from .reference_values import ObjectId, ObjectRef
+
+    bindings = _NodeBindings()
+    bindings[cdef] = obj
+    graph = ConcreteDefinitionGraph.from_root(cdef)
+    for occurrence in graph.iter_occurrences(include_roots=True):
+        candidate = memo.get(occurrence.definition)
+        if candidate is not None:
+            bindings[occurrence.definition] = candidate
+
+    runtime_values: dict[GraphPath, Any] = {GraphPath(): obj}
+    if cdef.identity_version == 1:
+        from .utils.graph.path import Arg, Kwarg
+
+        args = from_canonical(cdef.args, repo=repo, resolve_cdef=lambda child: bindings[child])
+        kwargs = from_canonical(cdef.kwargs, repo=repo, resolve_cdef=lambda child: bindings[child])
+        for index, value in enumerate(cdef.args):
+            _record_runtime_values(value, args[index], GraphPath((Arg(index),)), runtime_values)
+        for name, value in cdef.kwargs.items():
+            _record_runtime_values(value, kwargs[name], GraphPath((Kwarg(name),)), runtime_values)
+    else:
+        projection = from_canonical(
+            cdef.parameters,
+            repo=repo,
+            resolve_cdef=lambda child: bindings[child],
+        )
+        for name, canonical_value in cdef.parameters.items():
+            _record_runtime_values(
+                canonical_value,
+                projection[name],
+                GraphPath((Parameter(name),)),
+                runtime_values,
+            )
+    for occurrence in graph.iter_occurrences(include_roots=True):
+        bound = bindings.get(occurrence.definition)
+        if bound is not None:
+            runtime_values[occurrence.path] = bound
+
+    object_ids = {}
+    for node in graph.nodes():
+        if not getattr(node.definition, "_stateful_role", False):
+            continue
+        bound = bindings.get(node.definition)
+        if bound is None:
+            continue
+        object_id = getattr(bound, "_object_id", None)
+        if object_id is None:
+            object_id = ObjectId()
+            bound._object_id = object_id
+        path = GraphPath() if node.definition is cdef else graph.primary_path(cdef, node.definition)
+        object_ids[path] = object_id
+
+    for name, value in cdef.parameters.items() if cdef.identity_version != 1 else ():
+        _collect_imported_object_ids(value, GraphPath((Parameter(name),)), object_ids)
+
+    obj._realization_scope = current_realization_scope()
+    obj._runtime_bindings = runtime_values
+    obj._runtime_projection = runtime_values
+    obj._store_affinity = repo.obj_default_store.get(cdef)
+    obj._last_state_hash = getattr(obj, "_last_state_hash", None)
+    obj._object_id = getattr(obj, "_object_id", None) if isinstance(obj, Serializable) else None
+    obj._object_ref = ObjectRef(cdef, object_ids) if cdef.identity_version != 1 else None
+
+
+def _collect_imported_object_ids(value: Any, path: GraphPath, out: dict) -> None:
+    """Expand immutable materializing reference IDs under an outer occurrence."""
+
+    from .cdef_graph import EdgeKind
+    from .links import DefLink
+    from .reference_values import ObjectRef, StateRef
+
+    if isinstance(value, StateRef):
+        value = value.object
+    if isinstance(value, ObjectRef):
+        for child_path, object_id in value.objects.items():
+            out[path.join(child_path)] = object_id
+        return
+    if isinstance(value, DefLink):
+        if value.kind is EdgeKind.MATERIALIZE:
+            _collect_imported_object_ids(value.target, path, out)
+        return
+    for edge in iter_value_edges(value):
+        _collect_imported_object_ids(edge.value, path.child(edge.segment), out)
+
+
+def apply_exact_reference_identity(obj: Object, reference) -> None:
+    """Rebind a completed materialized subtree to supplied exact ObjectIds.
+
+    Args:
+        obj: Freshly materialized root for ``reference.definition``.
+        reference: ObjectRef whose topology and ObjectIds are authoritative.
+
+    Raises:
+        ValueError: If a reference path does not resolve to the expected live
+            Object or the supplied topology cannot be retained.
+
+    Side Effects:
+        Replaces IDs and subtree ObjectRefs only after construction has
+        completed. State restoration remains the later exact-load boundary.
+    """
+
+    from .reference_values import ObjectRef
+
+    if not isinstance(reference, ObjectRef):
+        raise TypeError("Exact runtime materialization requires an ObjectRef.")
+    if not obj.definition.graph_equal(reference.definition):
+        raise ValueError("Materialized exact reference topology does not match its ObjectRef.")
+    for path, object_id in reference.objects.items():
+        bound = obj.graph_at(path)
+        if not isinstance(bound, Object):
+            raise ValueError(f"Exact ObjectRef path {path!s} did not resolve to an Object.")
+        bound._object_id = object_id
+        try:
+            bound._object_ref = reference.at(path)
+        except ValueError:
+            # An alias occurrence still names the same completed Object; its
+            # primary ObjectRef remains attached by the corresponding path.
+            pass
+    obj._object_ref = reference
+    obj._object_id = reference.object_id
+
+
+def _record_runtime_values(canonical: Any, runtime: Any, path: GraphPath, out: dict[GraphPath, Any]) -> None:
+    """Record runtime-form values without traversing into materialized Objects."""
+
+    from .links import DefLink
+    from .cdef_graph import EdgeKind
+
+    out[path] = _copy_runtime_value(runtime)
+    if isinstance(canonical, ConcreteDefinition):
+        return
+    if isinstance(canonical, DefLink):
+        if canonical.kind is EdgeKind.REF:
+            out[path] = canonical.target
+        return
+    canonical_edges = tuple(iter_value_edges(canonical))
+    runtime_edges = {edge.segment: edge.value for edge in iter_value_edges(runtime)} if canonical_edges else {}
+    for edge in canonical_edges:
+        if edge.segment in runtime_edges:
+            _record_runtime_values(edge.value, runtime_edges[edge.segment], path.child(edge.segment), out)
+
+
+def _copy_runtime_value(value: Any) -> Any:
+    """Copy mutable runtime data while retaining Object and exact-reference identity."""
+
+    if isinstance(value, Object):
+        return value
+    if isinstance(value, dict):
+        return {key: _copy_runtime_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_runtime_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_runtime_value(item) for item in value)
+    if isinstance(value, set):
+        return {_copy_runtime_value(item) for item in value}
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        return value
 
 
 def iter_graph_objects(repo, root: Any, options: RepoGraphOptions) -> Iterator[Object]:
@@ -149,8 +439,8 @@ def _iter_bound_graph_object_occurrences(
         *,
         resolve_global: bool = False) -> tuple[GraphObjectOccurrence, ...]:
     out: list[GraphObjectOccurrence] = []
-    load_memo: dict[ConcreteDefinition, Object] = {}
-    seen: set[ConcreteDefinition] = set()
+    load_memo = _NodeBindings()
+    seen: set[object] = set()
 
     def visit(cdef: ConcreteDefinition, path: GraphPath, explicit_obj: Object | None = None) -> None:
         obj = explicit_obj if explicit_obj is not None else binding.objects.get(cdef)
@@ -163,9 +453,9 @@ def _iter_bound_graph_object_occurrences(
             bind_runtime_object(binding.objects, cdef, obj, path=path)
 
         if options.dedupe:
-            if cdef in seen:
+            if cdef_node_key(cdef) in seen:
                 return
-            seen.add(cdef)
+            seen.add(cdef_node_key(cdef))
 
         should_apply = options.include_root or bool(path)
         if options.order == "pre" and should_apply:
@@ -315,15 +605,13 @@ def _collect_runtime_roots(value: Any, path: GraphPath, roots: list[RuntimeRoot]
 
 
 def _cached_object(repo, cdef: ConcreteDefinition, *, reuse_weak: bool, resolve_global: bool = False) -> Object | None:
-    obj = repo.get_cached(cdef, reuse_weak=reuse_weak)
-    if obj is not None:
-        return obj
-    if resolve_global:
-        from .repo import _global_repo
+    """Return one unambiguous candidate from the explicitly supplied Repo.
 
-        if repo is not _global_repo:
-            return _global_repo.get_cached(cdef, reuse_weak=reuse_weak)
-    return None
+    ``resolve_global`` remains an ignored compatibility argument while callers
+    migrate; no process-global Repo exists to consult.
+    """
+
+    return repo.get_cached(cdef, reuse_weak=reuse_weak)
 
 
 def _resolve_missing_for_traversal(
@@ -363,9 +651,6 @@ def _node_primary_path(
 
 
 def _add_object_single(repo, obj: Object, *, store=None) -> None:
-    cdef = obj.definition
-    if cdef in repo.strong_obj_cache and (obj is not repo.strong_obj_cache[cdef]):
-        raise KeyError(f"Repo already has a different object matching {cdef}!")
     repo.pin(obj)
     if store is not None:
         repo.set_object_store(obj, store)

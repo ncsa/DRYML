@@ -49,7 +49,8 @@ def test_promoted_package_keeps_the_destination_export_manifest():
     assert core.__all__ == [
         "load_object", "load_alias", "save_object", "Object", "Serializable", "UniqueID",
         "Metadata", "Compute", "Definition", "ConcreteDefinition", "DefLink", "Ref", "Mat",
-        "freeze", "ArgRole", "RefCDef", "RefCDefArg", "SelectorArg", "MaterializeArg",
+        "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace", "freeze",
+        "ArgRole", "RefCDef", "RefCDefArg", "SelectorArg", "MaterializeArg",
         "ValueArg", "QuotedDef", "SelectorSpec", "Selector", "selector", "Par", "Present",
         "Missing", "AnyValue", "Exact", "Choice", "IntRange", "SubclassOf", "Satisfies",
         "UniformIntRange", "UniformFromSet", "SearchSpace", "SKIP_ARGS", "Repo", "configure",

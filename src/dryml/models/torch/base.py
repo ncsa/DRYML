@@ -95,8 +95,12 @@ def _metric_results(metrics):
     return out
 
 
-def _collect_trainable_parameters(target):
-    repo = get_default_repo()
+def _collect_trainable_parameters(target, *, repo=None):
+    """Collect graph trainables using explicit or context-local Repo authority."""
+
+    repo = repo or get_default_repo()
+    if repo is None:
+        raise RuntimeError("Torch trainable-parameter collection requires an active Repo.")
     results = repo.apply_graph(
         target,
         lambda obj: maybe_call_method(

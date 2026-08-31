@@ -10,6 +10,8 @@ from .definition import ConcreteDefinition, Definition
 from .object import Object, Serializable
 from .policies import CachePolicy, RepoLoadOptions
 from .symbol import resolve_symbol
+from .cdef_identity import cdef_node_key
+from .repo_plan import _NodeBindings, attach_runtime_binding, realization_scope
 
 
 MaterializationActionKind = Literal["reuse", "construct"]
@@ -41,7 +43,7 @@ class MaterializationPlan:
     """Definition-only ordered materialization graph and per-node actions."""
 
     graph: ConcreteDefinitionGraph
-    actions: dict[ConcreteDefinition, MaterializationAction]
+    actions: _NodeBindings
     order: tuple[ConcreteDefinition, ...]
     options: RepoLoadOptions
 
@@ -68,13 +70,16 @@ def build_materialization_plan(
 
     graph = ConcreteDefinitionGraph.from_root(cdef)
     included = _included_nodes(repo, graph, cdef, options, memo)
-    order = tuple(node for node in graph.topological_order(dependencies_first=True) if node in included)
+    order = tuple(
+        node for node in graph.topological_order(dependencies_first=True)
+        if cdef_node_key(node) in included
+    )
     primary_paths = _primary_paths(graph)
     root_path = _format_error_path(path)
-    actions = {}
+    actions = _NodeBindings()
     revision = {} if revision is None else revision
     for node in order:
-        memo_reuse = memo.get(node) is not None
+        memo_reuse = memo.get(cdef_node_key(node), memo.get(node)) is not None
         cache_reuse = options.instance == "reuse" and repo.has_cached(
             node, reuse_weak=options.reuse_weak
         )
@@ -86,7 +91,7 @@ def build_materialization_plan(
         actions[node] = MaterializationAction(
             definition=node,
             kind=kind,
-            primary_path=root_path if node == cdef else str(primary_paths.get(node, "<unknown>")),
+            primary_path=root_path if cdef_node_key(node) is cdef_node_key(cdef) else str(primary_paths.get(node, "<unknown>")),
             reuse_source=reuse_source,
             restore_state=options.restore_state,
             store=selected_store,
@@ -109,7 +114,8 @@ def execute_materialization_plan(
     from .repo import RepoLoadError
 
     with materialization_admission(operation="execute_materialization_plan"):
-        return _execute_materialization_plan(repo, plan, memo=memo, revision=revision, root=root)
+        with realization_scope():
+            return _execute_materialization_plan(repo, plan, memo=memo, revision=revision, root=root)
 
 
 def _execute_materialization_plan(
@@ -123,7 +129,9 @@ def _execute_materialization_plan(
 
     from .repo import RepoLoadError
 
-    local_memo = dict(memo)
+    local_memo = _NodeBindings()
+    for key, obj in memo.items():
+        local_memo[key] = obj
     for cdef in plan.order:
         if cdef in local_memo:
             continue
@@ -167,7 +175,7 @@ def _execute_materialization_plan(
                     build_missing=action.build_missing,
                 )
             local_memo[cdef] = obj
-            memo[cdef] = obj
+            memo[cdef_node_key(cdef)] = obj
             continue
 
         if action.kind != "construct":
@@ -218,7 +226,8 @@ def _execute_materialization_plan(
                     raise RepoLoadError(f"Error restoring state for {cdef} at {action.primary_path}: {e}") from e
 
         local_memo[cdef] = obj
-        memo[cdef] = obj
+        attach_runtime_binding(repo, cdef, obj, local_memo)
+        memo[cdef_node_key(cdef)] = obj
         _publish_cache(repo, obj, action.cache, action.instance)
 
     return local_memo[root]
@@ -264,13 +273,14 @@ def project_cdef_call(
 
 
 def _included_nodes(repo, graph: ConcreteDefinitionGraph, root: ConcreteDefinition, options: RepoLoadOptions, memo: dict) -> set[ConcreteDefinition]:
-    included: set[ConcreteDefinition] = set()
+    included: set[object] = set()
 
     def visit(cdef: ConcreteDefinition) -> None:
-        if cdef in included:
+        key = cdef_node_key(cdef)
+        if key in included:
             return
-        included.add(cdef)
-        if cdef in memo:
+        included.add(key)
+        if cdef_node_key(cdef) in memo or cdef in memo:
             return
         cached = options.instance == "reuse" and repo.has_cached(
             cdef, reuse_weak=options.reuse_weak
@@ -285,10 +295,13 @@ def _included_nodes(repo, graph: ConcreteDefinitionGraph, root: ConcreteDefiniti
     return included
 
 
-def _primary_paths(graph: ConcreteDefinitionGraph) -> dict[ConcreteDefinition, str]:
-    paths = {root: "$" for root in graph.roots}
+def _primary_paths(graph: ConcreteDefinitionGraph) -> _NodeBindings:
+    paths = _NodeBindings()
+    for root in graph.roots:
+        paths[root] = "$"
     for occ in graph.iter_occurrences():
-        paths.setdefault(occ.definition, str(occ.path))
+        if occ.definition not in paths:
+            paths[occ.definition] = str(occ.path)
     return paths
 
 

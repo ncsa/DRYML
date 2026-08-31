@@ -148,6 +148,7 @@ class StableHashGraphHasher(GraphHasher):
             NodeKind.POD,
             NodeKind.TYPE,
             NodeKind.IDENTITY_VALUE,
+            NodeKind.REFERENCE_VALUE,
             NodeKind.NDARRAY,
             NodeKind.FROZEN_NDARRAY,
             NodeKind.IMPORT_REF,

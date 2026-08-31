@@ -1185,6 +1185,11 @@ class CategoricalDefinitionTransformer(GraphTransformer):
     def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
         return is_pod(obj) or isinstance(obj, type)
 
+    def memo_key(self, obj: Any, ctx: GraphCtx):
+        if isinstance(obj, Definition):
+            return id(obj)
+        return None
+
     def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
         return obj
 
@@ -1300,6 +1305,7 @@ class SelectorMatcher(GraphMatcher):
             NodeKind.POD,
             NodeKind.TYPE,
             NodeKind.IDENTITY_VALUE,
+            NodeKind.REFERENCE_VALUE,
             NodeKind.IMPORT_REF,
             NodeKind.SOURCE_SPEC,
             NodeKind.UNSUPPORTED,

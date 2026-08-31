@@ -1,14 +1,15 @@
 import pytest
 
 from dryml.core import ConcreteDefinition, Definition, Object, Repo, Serializable
-from dryml.core.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
+from dryml.core.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION, cdef_node_key
 from dryml.core.object import WorkspaceCapable
 from dryml.core.policies import RepoLoadOptions, RepoSaveOptions
-from dryml.core.query.path import Arg, GraphPath, Index, Key, Parameter, SetMember, get_subtree
+from dryml.core.query.path import GraphPath, Index, Key, Parameter, SetMember, get_subtree
 from dryml.core.repo import RepoGraphError, RepoSaveError, default_repo, get_default_repo
-from dryml.core.repo_plan import GraphApplyResult, RuntimeBindingConflict, collect_runtime_roots
+from dryml.core.repo_plan import GraphApplyResult, collect_runtime_roots
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.general import pickle_load, pickle_save
+from dryml.core.workspaces import WorkspaceManager
 
 
 class GraphLeaf(Object):
@@ -168,23 +169,74 @@ def test_runtime_root_set_paths_are_stable_set_members():
     assert first[0].path == second[0].path
 
 
-def test_add_objects_rejects_conflicting_instance_same_cdef():
+def test_add_objects_retains_independent_equal_instances():
     repo = Repo()
     first = GraphLeaf("same", repo=repo)
     second = GraphLeaf("same")
     repo.add_objects(first)
 
-    with pytest.raises(KeyError, match="different object"):
-        repo.add_objects(second)
+    repo.add_objects(second)
+
+    assert repo.strong_obj_cache.candidates(first.definition) == (first,)
+    assert repo.strong_obj_cache.candidates(second.definition) == (second,)
 
 
-def test_binding_rejects_two_live_instances_with_same_cdef_in_one_input():
+def test_binding_keeps_two_live_instances_with_independent_private_nodes():
     repo = Repo()
     first = GraphLeaf("same")
     second = GraphLeaf("same")
 
-    with pytest.raises(RuntimeBindingConflict, match="different object"):
-        repo.add_objects([first, second])
+    repo.add_objects([first, second])
+
+    assert first in repo.strong_obj_cache.candidates(first.definition)
+    assert second in repo.strong_obj_cache.candidates(second.definition)
+
+
+def test_workspace_labels_distinguish_private_nodes_without_exposing_tokens(tmp_path):
+    repo = Repo()
+    repo.workspace_manager = WorkspaceManager(tmp_path / "workspaces")
+
+    direct_first = WorkspaceLeaf("same", repo=repo)
+    direct_second = WorkspaceLeaf("same", repo=repo)
+    shared = Definition(WorkspaceLeaf, "same")
+    aliased = repo.load_or_build(
+        Definition(GraphNode, "aliased", shared, shared), cache="none"
+    )
+    first = Definition(WorkspaceLeaf, "same")
+    second = Definition(WorkspaceLeaf, "same")
+    distinct = repo.load_or_build(
+        Definition(GraphNode, "distinct", first, second), cache="none"
+    )
+
+    assert direct_first.workspace != direct_second.workspace
+    assert aliased.children[0].workspace == aliased.children[1].workspace
+    assert distinct.children[0].workspace != distinct.children[1].workspace
+    assert direct_first.workspace != aliased.children[0].workspace
+    assert aliased.children[0].workspace != distinct.children[0].workspace
+    for obj in (
+            direct_first, direct_second, aliased.children[0],
+            distinct.children[0], distinct.children[1]
+    ):
+        assert repr(cdef_node_key(obj.definition)) not in obj.workspace
+        assert obj._realization_scope.token not in obj.workspace
+
+
+def test_get_cached_is_exact_and_rejects_cross_tier_ambiguity():
+    repo = Repo()
+    first = GraphLeaf("same", repo=repo)
+    second = GraphLeaf("same", repo=repo)
+    repo.cache_strong(first)
+    repo.cache_strong(second)
+
+    assert first.definition == second.definition
+    assert repo.get_cached(first.definition) is first
+    assert repo.get_cached(second.definition) is second
+
+    duplicate = GraphLeaf("same", repo=repo, __cdef__=first.definition)
+    repo.cache_weak(duplicate)
+
+    assert repo.get_cached(first.definition) is None
+    assert not repo.has_cached(first.definition)
 
 
 def test_mixed_v1_v2_cache_workspace_and_store_bindings_remain_independent(tmp_path):
@@ -199,8 +251,10 @@ def test_mixed_v1_v2_cache_workspace_and_store_bindings_remain_independent(tmp_p
             return str(tmp_path / "workspaces" / self.key)
 
     class WorkspaceManager:
-        def alloc(self, key):
-            return WorkspaceHandle(key)
+        def alloc(self, key, *, scope=None, node_key=None):
+            return WorkspaceHandle(
+                f"{key}/{scope.workspace_label}" if scope else key
+            )
 
     repo.workspace_manager = WorkspaceManager()
     v1 = ConcreteDefinition._from_persisted_record(WorkspaceLeaf, ("same",), {})

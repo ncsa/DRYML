@@ -242,6 +242,9 @@ def node_kind(x: Any) -> NodeKind:
     if is_pod(x):
         return NodeKind.POD
 
+    if isinstance(x, (ObjectRef, StateRef)):
+        return NodeKind.REFERENCE_VALUE
+
     if is_identity_value(x):
         return NodeKind.IDENTITY_VALUE
 
@@ -272,9 +275,6 @@ def node_kind(x: Any) -> NodeKind:
 
     if isinstance(x, DefLink):
         return NodeKind.DEFLINK
-
-    if isinstance(x, (ObjectRef, StateRef)):
-        return NodeKind.REFERENCE_VALUE
 
     if isinstance(x, StateSelectorRef):
         return NodeKind.STATE_SELECTOR_REF
@@ -817,7 +817,7 @@ class _ThawValueTransformer(GraphTransformer):
             )
 
         if kind is NodeKind.CONCRETE_DEFINITION:
-            return thaw_definition_surface_value(obj)
+            return thaw_definition_surface_value(obj, memo=ctx.memo)
 
         if kind is NodeKind.REFERENCE_VALUE:
             return obj
@@ -863,7 +863,9 @@ class _FromCanonicalTransformer(GraphTransformer):
 
     def memo_key(self, obj: Any, ctx: GraphCtx):
         if node_kind(obj) is NodeKind.CONCRETE_DEFINITION:
-            return obj
+            from .cdef_identity import cdef_node_key
+
+            return cdef_node_key(obj)
         return None
 
     def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
@@ -900,7 +902,18 @@ class _FromCanonicalTransformer(GraphTransformer):
             )
 
         if kind is NodeKind.REFERENCE_VALUE:
-            return obj
+            from .reference_values import StateRef
+            from .repo_plan import apply_exact_reference_identity
+
+            reference = obj.object if isinstance(obj, StateRef) else obj
+            realized = self.repo._materialize_cdef(
+                reference.definition,
+                options=self.config,
+                memo=ctx.memo,
+                path=list(ctx.path),
+            )
+            apply_exact_reference_identity(realized, reference)
+            return realized
 
         if kind is NodeKind.DEFLINK:
             from .cdef_graph import EdgeKind
@@ -1041,10 +1054,22 @@ def from_canonical(
         return _FromCanonicalTransformer(repo, cfg, resolve_cdef=resolve_cdef).transform(x, ctx)
 
 
-def thaw_definition_surface_value(value: Any) -> Any:
-    """Thaw canonical containers for Definition.thaw while preserving symbols."""
+def thaw_definition_surface_value(value: Any, *, memo: dict | None = None) -> Any:
+    """Thaw canonical values while retaining private CDef graph topology.
+
+    Args:
+        value: Canonical value to project onto a Definition construction surface.
+        memo: Optional operation-local graph memo shared by recursive calls.
+
+    Returns:
+        A mutable Definition surface whose shared CDef nodes remain shared
+        Definition instances.
+    """
 
     from .definition import Definition
+
+    if memo is None:
+        memo = {}
 
     kind = node_kind(value)
     if kind is NodeKind.FROZEN_NDARRAY:
@@ -1061,26 +1086,35 @@ def thaw_definition_surface_value(value: Any) -> Any:
     }:
         return transform_container(
             value,
-            lambda p, v: thaw_definition_surface_value(v),
+            lambda p, v: thaw_definition_surface_value(v, memo=memo),
             target="runtime",
         )
     if kind is NodeKind.CONCRETE_DEFINITION:
+        from .cdef_identity import cdef_node_key
+
+        key = cdef_node_key(value)
+        cached = memo.get(key)
+        if cached is not None:
+            return cached
         if value.identity_version == V2_IDENTITY_VERSION:
             from .materialization import project_cdef_call
 
             args, kwargs = project_cdef_call(value)
-            return Definition(
+            result = Definition(
                 value.cls,
-                *thaw_definition_surface_value(args),
-                **thaw_definition_surface_value(kwargs),
+                *thaw_definition_surface_value(args, memo=memo),
+                **thaw_definition_surface_value(kwargs, memo=memo),
             )
-        args = thaw_definition_surface_value(value.args)
-        kwargs = thaw_definition_surface_value(value.kwargs)
-        return Definition(value.cls, *args, **kwargs)
+        else:
+            args = thaw_definition_surface_value(value.args, memo=memo)
+            kwargs = thaw_definition_surface_value(value.kwargs, memo=memo)
+            result = Definition(value.cls, *args, **kwargs)
+        memo[key] = result
+        return result
     if kind is NodeKind.DEFLINK:
         from .links import DefLink
 
-        return DefLink(value.kind, thaw_definition_surface_value(value.target))
+        return DefLink(value.kind, thaw_definition_surface_value(value.target, memo=memo))
     if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.SELECTOR, NodeKind.PAR}:
         return value
     return value

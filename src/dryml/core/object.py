@@ -102,6 +102,7 @@ class Dryml(type):
 
         from dryml.runtime import materialization_admission
         from .session import _construction_config
+        from .repo_plan import realization_scope
 
         with materialization_admission(operation="direct_object_construction"):
             if __cdef__ is None and object_mode == "load_or_build":
@@ -113,7 +114,7 @@ class Dryml(type):
                     return sub_repo.load_or_build(cdef, cache=session_config.cache)
 
             from .repo import default_repo, manage_repo
-            with _construction_config(), manage_repo(repo=active_repo) as sub_repo:
+            with realization_scope(), _construction_config(), manage_repo(repo=active_repo) as sub_repo:
                 if __cdef__ is None:
                     # First-time construction from a soft Definition
                     _cache_runtime_object_args(sub_repo, args, kwargs)
@@ -148,7 +149,15 @@ class Dryml(type):
 
                 # Set the workspace
                 if isinstance(obj, WorkspaceCapable):
-                    ws = sub_repo.workspace_manager.alloc(cdef.stable_hash())
+                    from .cdef_identity import cdef_node_key
+                    from .repo_plan import current_realization_scope
+
+                    scope = current_realization_scope()
+                    ws = sub_repo.workspace_manager.alloc(
+                        cdef.stable_hash(),
+                        scope=scope,
+                        node_key=cdef_node_key(cdef),
+                    )
                     os.makedirs(ws.path(), exist_ok=True)
                     obj.__ws__ = ws
                 else:
@@ -158,6 +167,14 @@ class Dryml(type):
                 # repo to code that consults get_default_repo().
                 with default_repo(sub_repo):
                     obj.__init__(*rt_args, **rt_kwargs)
+
+                from .repo_plan import _NodeBindings, attach_runtime_binding
+
+                memo = _NodeBindings()
+                _collect_runtime_objects(rt_args, memo)
+                _collect_runtime_objects(rt_kwargs, memo)
+                memo[cdef] = obj
+                attach_runtime_binding(sub_repo, cdef, obj, memo)
 
 
         return obj
@@ -188,6 +205,26 @@ def _cache_runtime_object_args(repo, args, kwargs) -> None:
         visit(arg)
     for value in kwargs.values():
         visit(value)
+
+
+def _collect_runtime_objects(value, memo) -> None:
+    """Seed an exact private-node memo from caller-supplied runtime Objects."""
+
+    if isinstance(value, Object):
+        if value.definition in memo:
+            return
+        memo[value.definition] = value
+        for bound in getattr(value, "_runtime_bindings", {}).values():
+            if isinstance(bound, Object):
+                _collect_runtime_objects(bound, memo)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _collect_runtime_objects(item, memo)
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            _collect_runtime_objects(item, memo)
 
 
 class Object(metaclass=Dryml):
@@ -233,14 +270,55 @@ class Object(metaclass=Dryml):
 
     @property
     def location(self) -> str:
-        from .repo import get_default_repo
-        return get_default_repo().location(self)
+        repo = getattr(self, "_store_affinity", None)
+        if repo is not None:
+            return repo.object_dir(self.definition)
+        raise RuntimeError("Object has no retained Store affinity.")
 
 
     @property
     def definition(self) -> "ConcreteDefinition":
         # Get a `Definition` object for this particular object.
         return self.__cdef__
+
+    @property
+    def object_id(self):
+        """Return this Serializable receiver's durable ObjectId, if any."""
+
+        return getattr(self, "_object_id", None)
+
+    @property
+    def object_ref(self):
+        """Return the completed immutable exact identity for this live graph."""
+
+        return self._object_ref
+
+    def graph_at(self, path="$"):
+        """Return retained realization evidence at a typed graph path.
+
+        Args:
+            path: A ``GraphPath``-compatible path rooted at this Object.
+
+        Returns:
+            The receiver, exact bound Object/reference, or a defensive
+            runtime-form non-Object value.
+
+        Raises:
+            GraphPathError: If the path was not present in the completed
+                realization evidence.
+        """
+
+        from .utils.graph.path import normalize_path, GraphPathError
+        from .repo_plan import _copy_runtime_value
+
+        normalized = normalize_path(path)
+        try:
+            value = self._runtime_projection[normalized]
+        except KeyError as error:
+            raise GraphPathError(
+                f"No completed runtime binding at {normalized!s}."
+            ) from error
+        return value if isinstance(value, Object) else _copy_runtime_value(value)
 
     def __hash__(self):
         # Objects are hashable through through its `ConcreteDefinition`
@@ -310,6 +388,13 @@ class Pickleable(Serializable):
         "__cdef__",
         "__ws__",
         "definition",
+        "_runtime_bindings",
+        "_runtime_projection",
+        "_object_ref",
+        "_object_id",
+        "_last_state_hash",
+        "_store_affinity",
+        "_realization_scope",
     }
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str|None=None):
