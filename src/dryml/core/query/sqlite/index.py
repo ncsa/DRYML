@@ -1024,8 +1024,8 @@ class SQLiteStoreQueryIndex:
         errors = tuple(issue for issue in issues if issue.severity == "error")
         if errors:
             detail = "; ".join(
-                f"{issue.message} ({issue.details})"
-                if issue.details else issue.message
+                f"{issue.message} ({issue.detail})"
+                if issue.detail else issue.message
                 for issue in errors[:3]
             )
             raise QueryIndexError(f"SQLite query-index rebuild validation failed before ready: {detail}")
