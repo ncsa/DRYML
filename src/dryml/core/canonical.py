@@ -29,6 +29,7 @@ from .tensor_spec import TensorSpec
 from .cardinality import Cardinality
 from .config import ConfigRef
 from .factory import FactorySpec
+from .reference_values import ObjectId, ObjectRef, StateRef, StateSelectorRef
 # If Backend is a real runtime type/class, include it too.
 # from .backend import Backend
 
@@ -47,6 +48,9 @@ IDENTITY_VALUE_TYPES = (
     Cardinality,
     ConfigRef,
     FactorySpec,
+    ObjectId,
+    ObjectRef,
+    StateRef,
 )
 
 
@@ -218,6 +222,8 @@ class NodeKind(Enum):
     SELECTOR = auto()
     PAR = auto()
     OBJECT = auto()
+    REFERENCE_VALUE = auto()
+    STATE_SELECTOR_REF = auto()
 
     UNSUPPORTED = auto()
 
@@ -267,6 +273,12 @@ def node_kind(x: Any) -> NodeKind:
     if isinstance(x, DefLink):
         return NodeKind.DEFLINK
 
+    if isinstance(x, (ObjectRef, StateRef)):
+        return NodeKind.REFERENCE_VALUE
+
+    if isinstance(x, StateSelectorRef):
+        return NodeKind.STATE_SELECTOR_REF
+
     if isinstance(x, QuotedDef):
         return NodeKind.QUOTED_DEF
 
@@ -314,6 +326,7 @@ def is_canonical_value(x: Any) -> bool:
         NodeKind.SELECTOR_SPEC,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
+        NodeKind.REFERENCE_VALUE,
     } or _is_naked_core_type(x)
 
 
@@ -336,6 +349,7 @@ def is_runtime_leaf(x: Any) -> bool:
         NodeKind.FUNCTION,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
+        NodeKind.REFERENCE_VALUE,
     }
 
 
@@ -598,7 +612,7 @@ class _ToCanonicalTransformer(GraphTransformer):
         """Memoize graph-bearing sources by Python identity within one scope."""
 
         kind = node_kind(obj)
-        if kind in {NodeKind.DEFINITION, NodeKind.OBJECT}:
+        if kind in {NodeKind.DEFINITION, NodeKind.OBJECT, NodeKind.STATE_SELECTOR_REF}:
             return id(obj)
         return None
 
@@ -659,6 +673,19 @@ class _ToCanonicalTransformer(GraphTransformer):
         if kind is NodeKind.OBJECT:
             repo.cache_weak(obj)
             return obj.__cdef__
+
+        if kind is NodeKind.STATE_SELECTOR_REF:
+            resolver = getattr(repo, "resolve_state_selector", None)
+            if not callable(resolver):
+                raise TypeError(
+                    "StateSelectorRef requires a managing Repo with resolve_state_selector()."
+                )
+            resolved = resolver(obj)
+            if not isinstance(resolved, StateRef):
+                raise TypeError("StateSelectorRef resolution must return a StateRef.")
+            if resolved.object != obj.object:
+                raise ValueError("StateSelectorRef resolution returned a StateRef outside its ObjectRef scope.")
+            return resolved
 
         if kind is NodeKind.DEFLINK:
             from .cdef_graph import EdgeKind
@@ -737,6 +764,7 @@ class _ThawValueTransformer(GraphTransformer):
             NodeKind.POD,
             NodeKind.TYPE,
             NodeKind.IDENTITY_VALUE,
+            NodeKind.STATE_SELECTOR_REF,
         }
 
     def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
@@ -790,6 +818,9 @@ class _ThawValueTransformer(GraphTransformer):
 
         if kind is NodeKind.CONCRETE_DEFINITION:
             return thaw_definition_surface_value(obj)
+
+        if kind is NodeKind.REFERENCE_VALUE:
+            return obj
 
         if kind is NodeKind.DEFLINK:
             return obj
@@ -868,6 +899,9 @@ class _FromCanonicalTransformer(GraphTransformer):
                 path=list(ctx.path),
             )
 
+        if kind is NodeKind.REFERENCE_VALUE:
+            return obj
+
         if kind is NodeKind.DEFLINK:
             from .cdef_graph import EdgeKind
             if obj.kind is EdgeKind.REF:
@@ -938,6 +972,13 @@ def to_canonical(
     path: list[str | int] | tuple[str | int, ...] | None = None,
 ):
     from .repo import manage_repo
+
+    if repo is not None and callable(getattr(repo, "resolve_state_selector", None)):
+        ctx = GraphCtx(
+            path=tuple(path) if path is not None else (),
+            state={"repo": repo},
+        )
+        return _ToCanonicalTransformer().transform(x, ctx)
 
     with manage_repo(repo=repo) as sub_repo:
         ctx = GraphCtx(
@@ -1061,7 +1102,7 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
 
     if isinstance(value, Object):
         return value.definition
-    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, Par)):
+    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, Par, ObjectRef, StateRef, StateSelectorRef)):
         return value
     kind = node_kind(value)
     if kind is NodeKind.NDARRAY:
@@ -1091,6 +1132,8 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
         NodeKind.FROZEN_NDARRAY,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
+        NodeKind.REFERENCE_VALUE,
+        NodeKind.STATE_SELECTOR_REF,
     }:
         return value
     if kind is NodeKind.FUNCTION:
@@ -1201,6 +1244,6 @@ def freeze_link_target(value: Any) -> Any:
 
     if isinstance(value, Object):
         return value.definition
-    if isinstance(value, (Definition, ConcreteDefinition, Selector)):
+    if isinstance(value, (Definition, ConcreteDefinition, Selector, ObjectRef, StateRef, StateSelectorRef)):
         return value
-    raise TypeError(f"DefLink target must be Definition, ConcreteDefinition, Selector, or Object; got {type(value).__name__}.")
+    raise TypeError(f"DefLink target must be Definition, ConcreteDefinition, Selector, ObjectRef, StateRef, StateSelectorRef, or Object; got {type(value).__name__}.")

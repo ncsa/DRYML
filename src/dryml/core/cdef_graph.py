@@ -110,6 +110,10 @@ def _iter_direct_edges_from_value(
         yield path, value, EdgeKind.MATERIALIZE
         return
     if isinstance(value, DefLink):
+        from .reference_values import ObjectRef, StateRef
+
+        if isinstance(value.target, (ObjectRef, StateRef)):
+            return
         if not isinstance(value.target, ConcreteDefinition):
             raise ConcreteDefinitionGraphError(
                 f"DefLink at {path!s} does not resolve to a ConcreteDefinition boundary."
@@ -685,6 +689,12 @@ def _validate_graph_parts(
                 f"Graph edge path {edge.path!s} cannot be resolved on parent {edge.parent}."
             ) from error
         if isinstance(resolved, DefLink):
+            from .reference_values import ObjectRef, StateRef
+
+            if isinstance(resolved.target, (ObjectRef, StateRef)):
+                raise ConcreteDefinitionGraphError(
+                    f"Graph edge path {edge.path!s} resolves to an exact reference, not a CDef boundary."
+                )
             if edge.kind is not resolved.kind:
                 raise ConcreteDefinitionGraphError(
                     f"Graph edge path {edge.path!s} resolves to a different edge kind."

@@ -67,8 +67,12 @@ class SearchSpace:
         params: list[ParameterBinding] = []
 
         def visit(value: Any, path: GraphPath) -> None:
+            from .reference_values import ObjectRef, StateRef, StateSelectorRef
+
             if isinstance(value, Par):
                 params.append(ParameterBinding(path, value))
+                return
+            if isinstance(value, (ObjectRef, StateRef, StateSelectorRef)):
                 return
             for edge in iter_value_edges(value):
                 visit(edge.value, path.child(edge.segment))

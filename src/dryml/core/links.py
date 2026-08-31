@@ -6,7 +6,7 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class DefLink:
-    """Parent-slot edge wrapper for Definition/ConcreteDefinition graph targets."""
+    """Parent-slot edge wrapper for definition and exact-reference targets."""
 
     kind: Any
     target: Any

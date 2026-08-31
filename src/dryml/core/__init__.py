@@ -2,6 +2,7 @@ from dryml.core.object import Object, Serializable, UniqueID, Metadata, Compute,
 from dryml.core.definition import ConcreteDefinition, Definition, SKIP_ARGS, freeze
 from dryml.core.arg_roles import ArgRole, MaterializeArg, RefCDef, RefCDefArg, SelectorArg, ValueArg
 from dryml.core.links import DefLink, Mat, Ref
+from dryml.core.reference_values import ObjectId, ObjectRef, StateRef, StateSelectorRef, object_namespace
 from dryml.core.params import AnyValue, Choice, Exact, IntRange, Missing, Par, Present, Satisfies, SubclassOf, UniformFromSet, UniformIntRange
 from dryml.core.quoted import QuotedDef, SelectorSpec
 from dryml.core.search_space import SearchSpace
@@ -62,6 +63,11 @@ __all__ = [
     "DefLink",
     "Ref",
     "Mat",
+    "ObjectId",
+    "ObjectRef",
+    "StateRef",
+    "StateSelectorRef",
+    "object_namespace",
     "freeze",
     "ArgRole",
     "RefCDef",

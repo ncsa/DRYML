@@ -16,6 +16,7 @@ from .cdef_identity import cdef_node_key
 from .definition import ConcreteDefinition
 from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .links import DefLink
+from .reference_values import ObjectRef, StateRef
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 
@@ -335,6 +336,10 @@ def _graph_and_labels(root: ConcreteDefinition):
 
 
 def _encode_value(value: Any, labels: dict[object, str]) -> dict[str, Any]:
+    if isinstance(value, ObjectRef):
+        return {"kind": "object_ref", "value": value.to_data()}
+    if isinstance(value, StateRef):
+        return {"kind": "state_ref", "value": value.to_data()}
     if isinstance(value, ConcreteDefinition):
         return {"kind": "cdef", "label": labels[cdef_node_key(value)]}
     if isinstance(value, DefLink):
@@ -380,6 +385,12 @@ def _decode_value(
             "CDef graph value payload must be a tagged mapping."
         )
     kind = data["kind"]
+    if kind == "object_ref":
+        _require_exact_keys(data, {"kind", "value"}, "ObjectRef")
+        return ObjectRef.from_data(data["value"])
+    if kind == "state_ref":
+        _require_exact_keys(data, {"kind", "value"}, "StateRef")
+        return StateRef.from_data(data["value"])
     if kind == "cdef":
         _require_exact_keys(data, {"kind", "label"}, "CDef reference")
         label = data["label"]
