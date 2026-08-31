@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import os
 import glob
-from dataclasses import dataclass, replace
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Callable
 from contextlib import contextmanager
 from io import IOBase
@@ -12,12 +11,12 @@ import weakref
 from contextvars import ContextVar
 from collections.abc import Iterable, Mapping
 from collections import defaultdict
-import numpy as np
 import atexit
 import time
 from uuid import uuid4
 
 from .definition import Definition, ConcreteDefinition
+from .cdef_graph import ConcreteDefinitionGraph
 from .object import Object, Serializable
 from .store.store import Store
 from .policies import CachePolicy, LiveReusePolicy, RepoGraphOptions
@@ -550,8 +549,6 @@ class Repo:
 
     def _reference_authoritative_in(self, store: Store, reference) -> bool:
         """Return whether a complete ObjectRef is authoritative in one Store."""
-        from .store.records import DeclarationRecord
-
         declaration = store.read_declaration_record(reference.digest())
         if declaration is not None:
             if declaration.object_ref != reference:
@@ -1264,8 +1261,6 @@ class Repo:
 
     def _complete_initial_state_ref(self, state_ref, store) -> None:
         """Fence initial StateRef publication against the live claim generation."""
-        from .store.records import ClaimRecord
-
         lease = getattr(self, "_publishing_claim_lease", None)
         if not isinstance(lease, _ClaimLease) or lease.store is not store or lease.object_ref != state_ref.object:
             return
@@ -1553,7 +1548,7 @@ class Repo:
             object-alias references can change.
         """
         from dryml.runtime import materialization_admission
-        from .store.records import DefinitionRecord, MainRefRecord, ObjectAliasRecord
+        from .store.records import DefinitionRecord, MainRefRecord
 
         with materialization_admission(operation="repo_save_object"):
             if alias is not None:
@@ -1584,15 +1579,13 @@ class Repo:
 
                 capture_memo.update(
                     action.obj.object_id
-                    for action in build_save_plan(
-                        self, dependency_obj, store=dependency_lease.store
-                    ).actions
+                    for action in build_save_plan(self, dependency_obj).actions
                     if isinstance(action.obj, Serializable)
                 )
             self.add_objects(obj, store=store)
             from .repo_plan import build_save_plan, execute_save_plan
 
-            plan = build_save_plan(self, obj, store=store)
+            plan = build_save_plan(self, obj)
             previous_lease = getattr(self, "_publishing_claim_lease", None)
             self._publishing_claim_lease = lease
             try:
@@ -1903,8 +1896,6 @@ class Repo:
         return ReferenceQuery(self)
 
     def definition_graph(self, value) -> "ConcreteDefinitionGraph":
-        from .cdef_graph import ConcreteDefinitionGraph
-
         def cdef_from(item):
             if isinstance(item, Object):
                 return item.definition
@@ -2035,7 +2026,7 @@ class Repo:
 
     def apply(self,
               func, func_args=None, func_kwargs=None,
-              selector: Optional[Callable] = None,
+              selector: Callable | None = None,
               sel_args=None, sel_kwargs=None,
               verbose: bool = False,
               **kwargs):
@@ -2064,6 +2055,8 @@ class Repo:
 
             obj_iter = objs.items()
             if verbose:
+                from tqdm import tqdm
+
                 obj_iter = tqdm(obj_iter)
             return {
                 obj_def: apply_func(obj) for obj_def, obj in obj_iter

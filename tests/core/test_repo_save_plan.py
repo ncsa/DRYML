@@ -22,7 +22,7 @@ def test_save_plan_uses_retained_primary_bindings_once(tmp_path):
     child = SavePlanLeaf("child", repo=repo)
     parent = SavePlanNode([child, child], repo=repo)
 
-    plan = build_save_plan(repo, parent, store=store)
+    plan = build_save_plan(repo, parent)
 
     assert len(plan.actions) == 1
     assert plan.actions[0].obj is child
@@ -36,6 +36,6 @@ def test_save_plan_keeps_independent_equal_nodes_distinct(tmp_path):
     second = SavePlanLeaf("same", repo=repo)
     parent = SavePlanNode([first, second], repo=repo)
 
-    plan = build_save_plan(repo, parent, store=store)
+    plan = build_save_plan(repo, parent)
 
     assert {action.obj for action in plan.actions} == {first, second}

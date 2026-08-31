@@ -15,7 +15,7 @@ from typing import Any, Callable, Generic, Iterable, Iterator, TypeVar
 
 from .canonical import NodeKind, is_runtime_leaf, node_kind
 from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
-from .definition import ConcreteDefinition, Definition
+from .definition import ConcreteDefinition
 from .object import Object, Serializable
 from .policies import RepoGraphOptions
 from .utils.graph.path import GraphPath, graph_path_sort_key
@@ -196,9 +196,7 @@ def collect_runtime_roots(value: Any) -> tuple[RuntimeRoot, ...]:
 
 def build_runtime_binding(
         repo,
-        value: Any,
-        *,
-        resolve_global: bool = False) -> RuntimeGraphBinding:
+        value: Any) -> RuntimeGraphBinding:
     roots = collect_runtime_roots(value)
     graph = ConcreteDefinitionGraph.from_roots(root.definition for root in roots)
     materialize_nodes = _materialize_reachable_nodes(graph, roots)
@@ -228,7 +226,7 @@ def build_runtime_binding(
                 break
         if node.definition in objects:
             continue
-        obj = _cached_object(repo, node.definition, resolve_global=resolve_global)
+        obj = _cached_object(repo, node.definition)
         if obj is not None:
             path = _node_primary_path(graph, roots, node.definition)
             bind_runtime_object(objects, node.definition, obj, path=path)
@@ -505,16 +503,13 @@ def iter_graph_objects(repo, root: Any, options: RepoGraphOptions) -> Iterator[O
 def _iter_bound_graph_objects(
         repo,
         binding: RuntimeGraphBinding,
-        options: RepoGraphOptions,
-        *,
-        resolve_global: bool = False) -> tuple[Object, ...]:
+        options: RepoGraphOptions) -> tuple[Object, ...]:
     return tuple(
         occurrence.obj
         for occurrence in _iter_bound_graph_object_occurrences(
             repo,
             binding,
             options,
-            resolve_global=resolve_global,
         )
     )
 
@@ -522,17 +517,13 @@ def _iter_bound_graph_objects(
 def _iter_bound_graph_object_occurrences(
         repo,
         binding: RuntimeGraphBinding,
-        options: RepoGraphOptions,
-        *,
-        resolve_global: bool = False) -> tuple[GraphObjectOccurrence, ...]:
+        options: RepoGraphOptions) -> tuple[GraphObjectOccurrence, ...]:
     out: list[GraphObjectOccurrence] = []
     load_memo = _NodeBindings()
     seen: set[object] = set()
 
     def visit(cdef: ConcreteDefinition, path: GraphPath, explicit_obj: Object | None = None) -> None:
         obj = explicit_obj if explicit_obj is not None else binding.objects.get(cdef)
-        if obj is None and resolve_global:
-            obj = _cached_object(repo, cdef, resolve_global=True)
         if obj is None:
             obj = _resolve_missing_for_traversal(repo, cdef, path, options, load_memo)
             if obj is None:
@@ -582,30 +573,25 @@ def apply_graph_objects(
 
 def add_objects(repo, values: Iterable[Any], *, store=None) -> None:
     for value in values:
-        binding = build_runtime_binding(repo, value, resolve_global=True)
+        binding = build_runtime_binding(repo, value)
         for obj in _iter_bound_graph_objects(
                 repo,
                 binding,
-                RepoGraphOptions(include_root=True, order="post", missing="raise", dedupe=False),
-                resolve_global=True):
+                RepoGraphOptions(include_root=True, order="post", missing="raise", dedupe=False)):
             _add_object_single(repo, obj, store=store)
         for missing in binding.missing:
-            if _cached_object(repo, missing, resolve_global=True) is None:
+            if _cached_object(repo, missing) is None:
                 raise KeyError(f"No object linked to definition {missing} found in repo!")
 
 
 def build_save_plan(
         repo,
-        value: Object,
-        *,
-        store=None) -> SavePlan:
+        value: Object) -> SavePlan:
     """Build complete owned-state save evidence from retained U3 bindings.
 
     Args:
         repo: Repository owning live bindings.
         value: Live root Object to publish.
-        store: Selected StateRef target Store.
-
     Returns:
         A graph plan with each unique owned Serializable node exactly once.
 
@@ -615,15 +601,13 @@ def build_save_plan(
     if not isinstance(value, Object):
         raise TypeError("Graph save requires one live Object root.")
     binding = build_runtime_binding(repo, value)
-    if binding.missing:
-        from .repo import RepoSaveError
+    from .repo import RepoSaveError
 
+    if binding.missing:
         missing = next(iter(binding.missing))
         raise RepoSaveError(f"Definition of object {missing} is not reachable in this repo!")
     reference = getattr(value, "_object_ref", None)
     if reference is None or not reference.definition.graph_equal(value.definition):
-        from .repo import RepoSaveError
-
         raise RepoSaveError("Live root lacks complete retained ObjectRef evidence.")
     actions: list[SaveAction] = []
     seeds = _seed_state_refs(value.definition)
@@ -640,8 +624,6 @@ def build_save_plan(
             definition, state_hash = seed
             actions.append(SaveAction(path, definition, value, state_hash=state_hash))
             continue
-        from .repo import RepoSaveError
-
         raise RepoSaveError(f"No retained Serializable binding or exact seed state at {path!s}.")
     return SavePlan(graph=binding.graph, binding=binding, actions=tuple(actions))
 
@@ -830,9 +812,9 @@ def _publish_local_state(obj: Object, definition: ConcreteDefinition, store, pat
         store.install_local_state(stage, manifest)
         obj._last_state_hash = manifest.state_hash
     except BaseException as error:
-        shutil.rmtree(stage, ignore_errors=True)
         raise _save_error(path, f"local state publication failed for codec {codec!r}", error) from error
     finally:
+        shutil.rmtree(stage, ignore_errors=True)
         reservation.release()
     return manifest.state_hash
 
@@ -988,12 +970,8 @@ def _collect_runtime_roots(value: Any, path: GraphPath, roots: list[RuntimeRoot]
     raise RepoGraphError(f"Unexpected object of type {type(value).__name__} at {path.legacy_str()}!")
 
 
-def _cached_object(repo, cdef: ConcreteDefinition, *, resolve_global: bool = False) -> Object | None:
-    """Return one unambiguous candidate from the explicitly supplied Repo.
-
-    ``resolve_global`` remains an ignored compatibility argument while callers
-    migrate; no process-global Repo exists to consult.
-    """
+def _cached_object(repo, cdef: ConcreteDefinition) -> Object | None:
+    """Return one unambiguous candidate from the explicitly supplied Repo."""
 
     return repo.get_cached(cdef)
 

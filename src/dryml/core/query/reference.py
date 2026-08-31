@@ -11,7 +11,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Iterator
 
-from ..cdef_graph import EdgeKind
 from ..definition import ConcreteDefinition, Definition
 from ..links import DefLink
 from ..reference_values import ObjectId, ObjectRef, StateRef
@@ -140,8 +139,6 @@ class _ReferenceValueResultSet:
     typed paths that produced each projection.
     """
 
-    value_type: type
-
     def __init__(self, repo, values: Iterable[ObjectRef | StateRef], occurrences: Iterable[ReferenceOccurrence] = ()):
         self.repo = repo
         unique = {_reference_key(value): value for value in values}
@@ -199,9 +196,6 @@ class ObjectRefResultSet(_ReferenceValueResultSet):
     identity, while :meth:`occurrences` retains distinct owners and paths.
     """
 
-    value_type = ObjectRef
-
-
 class StateRefResultSet(_ReferenceValueResultSet):
     """Deterministic projection of complete StateRefs from Store authority.
 
@@ -209,9 +203,6 @@ class StateRefResultSet(_ReferenceValueResultSet):
     Equal replicas deduplicate by complete StateRef identity, while
     :meth:`occurrences` retains distinct owners and paths.
     """
-
-    value_type = StateRef
-
 
 class ReferenceQuery:
     """Composable authority query for ObjectRef and StateRef metadata.
@@ -398,7 +389,7 @@ class ReferenceQuery:
             RepoLoadError: If authoritative ObjectId or alias sources conflict.
         """
 
-        objects, states, occurrences = self._scan(include_embedded=True)
+        objects, states, occurrences = self._scan()
         return ObjectRefResultSet(self.repo, objects, occurrences)
 
     def objects(self) -> ObjectRefResultSet:
@@ -416,7 +407,7 @@ class ReferenceQuery:
             RepoLoadError: If authoritative ObjectId or alias sources conflict.
         """
 
-        _, states, occurrences = self._scan(include_embedded=True)
+        _, states, occurrences = self._scan()
         return StateRefResultSet(self.repo, states, occurrences)
 
     def states(self) -> StateRefResultSet:
@@ -435,7 +426,7 @@ class ReferenceQuery:
             RepoLoadError: If authoritative ObjectId or alias sources conflict.
         """
 
-        _, _, occurrences = self._scan(include_embedded=True)
+        _, _, occurrences = self._scan()
         return ReferenceResultSet(self.repo, occurrences)
 
     def _replace(self, **values) -> "ReferenceQuery":
@@ -447,7 +438,7 @@ class ReferenceQuery:
         data.update(values)
         return ReferenceQuery(self.repo, **data)
 
-    def _scan(self, *, include_embedded: bool = False):
+    def _scan(self):
         self._refresh_derived_reference_rows()
         roots: list[ObjectRef] = []
         states: list[StateRef] = []
@@ -467,9 +458,8 @@ class ReferenceQuery:
                 source = repr(store)
                 for object_id in record.state_ref.object.objects.values():
                     authority_sources.setdefault(object_id, []).append(source)
-            if include_embedded:
-                for record in store.iter_definition_records():
-                    occurrences.extend(_iter_embedded_references(record.definition, owner=record.definition))
+            for record in store.iter_definition_records():
+                occurrences.extend(_iter_embedded_references(record.definition, owner=record.definition))
 
         for ref in roots:
             for path, object_id in ref.objects.items():
@@ -495,21 +485,18 @@ class ReferenceQuery:
         root_values = [ref for ref in roots if self._matches_object(ref, alias_reference_objects)]
         state_values = [state for state in states if self._matches_state(state, alias_objects, alias_states)]
         allowed = set(root_values) | set(state_values)
-        if include_embedded:
-            occurrences = [item for item in occurrences if (
-                (item.value in allowed and self._matches_occurrence(item))
-                or self._matches_embedded(item)
-            )]
-            root_values.extend(
-                item.value for item in occurrences
-                if isinstance(item.value, ObjectRef) and self._matches_object(item.value, alias_reference_objects)
-            )
-            state_values.extend(
-                item.value for item in occurrences
-                if isinstance(item.value, StateRef) and self._matches_state(item.value, alias_objects, alias_states)
-            )
-        else:
-            occurrences = [item for item in occurrences if item.value in allowed and self._matches_occurrence(item)]
+        occurrences = [item for item in occurrences if (
+            (item.value in allowed and self._matches_occurrence(item))
+            or self._matches_embedded(item)
+        )]
+        root_values.extend(
+            item.value for item in occurrences
+            if isinstance(item.value, ObjectRef) and self._matches_object(item.value, alias_reference_objects)
+        )
+        state_values.extend(
+            item.value for item in occurrences
+            if isinstance(item.value, StateRef) and self._matches_state(item.value, alias_objects, alias_states)
+        )
         if self._path is not None:
             # A path identifies reference occurrences, so value projections must
             # be derived from those occurrences rather than unrelated root refs.
