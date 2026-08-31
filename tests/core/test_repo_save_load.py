@@ -239,7 +239,6 @@ def test_reopening_main_definition_is_read_only_hydration(tmp_path):
     assert tuple(Path(target.base_dir).rglob("*")) == before
 
 
-@pytest.mark.xfail(strict=True, reason="U7 exact StateRef restore has no load seam yet")
 def test_u7_exact_state_ref_restores_published_local_state(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
@@ -252,7 +251,6 @@ def test_u7_exact_state_ref_restores_published_local_state(tmp_path):
     assert loaded.value == 20
 
 
-@pytest.mark.xfail(strict=True, reason="U7 exact StateRef restore has no load seam yet")
 def test_u7_exact_state_ref_restores_nested_independent_local_states(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
@@ -268,7 +266,6 @@ def test_u7_exact_state_ref_restores_nested_independent_local_states(tmp_path):
     assert loaded.children[1].value == 20
 
 
-@pytest.mark.xfail(strict=True, reason="U7 exact StateRef restore has no load seam yet")
 def test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
@@ -282,4 +279,5 @@ def test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph(tmp
 
     assert first.children[0] is first.children[1]
     assert first.children[0].value == 20
-    assert second is first
+    assert second is not first
+    assert second.children[0] is first.children[0]

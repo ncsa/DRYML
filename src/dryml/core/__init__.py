@@ -8,6 +8,7 @@ from dryml.core.quoted import QuotedDef, SelectorSpec
 from dryml.core.search_space import SearchSpace
 from dryml.core.selector import Selector, selector
 from dryml.core.repo import Repo, load_alias, load_object, save_object
+from dryml.core.policies import LiveReusePolicy
 from dryml.core.repo_plan import StoreReport
 from dryml.core.dtype import dtype, DType
 from dryml.core.tensor_spec import (
@@ -54,6 +55,7 @@ __all__ = [
     "load_object",
     "load_alias",
     "save_object",
+    "LiveReusePolicy",
     "StoreReport",
     "Object",
     "Serializable",

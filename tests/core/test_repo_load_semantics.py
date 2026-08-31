@@ -57,9 +57,10 @@ def test_load_or_build_does_not_choose_compatible_sibling(tmp_path):
     assert loaded.name == "new"
 
 
-def test_repo_load_overrides_build_missing_options(tmp_path):
+def test_repo_load_is_structural_and_overrides_restore_options(tmp_path):
     repo = Repo(stores=DirStore(tmp_path / "store"))
     cdef = Definition(PersistentLoadLeaf, "missing").concretize(repo=repo)
 
-    with pytest.raises(RepoLoadError, match="Missing stored state"):
-        repo.load(cdef, options=RepoLoadOptions(build_missing=True))
+    loaded = repo.load(cdef, options=RepoLoadOptions(build_missing=True))
+
+    assert loaded.name == "missing"

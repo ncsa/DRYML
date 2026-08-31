@@ -20,7 +20,7 @@ from uuid import uuid4
 from .definition import Definition, ConcreteDefinition
 from .object import Object, Serializable
 from .store.store import Store
-from .policies import InstancePolicy, CachePolicy, RepoGraphOptions, RepoLoadOptions
+from .policies import InstancePolicy, CachePolicy, LiveReusePolicy, RepoGraphOptions, RepoLoadOptions
 from .repo_graph import manage_revision
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
@@ -425,6 +425,23 @@ class Repo:
         if reuse_weak:
             candidates += self.weak_obj_cache.candidates(cdef)
         return _unique_objects(candidates)
+
+    def _all_live_candidates(self) -> tuple[Object, ...]:
+        """Return all distinct cached live Objects without structural lookup.
+
+        Exact StateRef reuse filters this complete live set by ObjectId, graph
+        topology, bindings, and reservation availability.  It intentionally does
+        not use CDef equality as an identity key.
+        """
+        return _unique_objects(
+            tuple(obj for _, obj in self.strong_obj_cache.items())
+            + tuple(obj for _, obj in self.weak_obj_cache.items())
+        )
+
+    def _evict_live(self, obj: Object) -> None:
+        """Remove one externally mutable failed exact-reuse candidate from caches."""
+        self.strong_obj_cache.discard(obj.definition, obj)
+        self.weak_obj_cache.discard(obj.definition, obj)
 
     def get_cached(self, cdef, *, reuse_weak: bool = True):
         """Return a cached Object after live-object admission.
@@ -1799,6 +1816,10 @@ class Repo:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_load_object"):
+            from .reference_values import StateRef
+
+            if isinstance(x, StateRef):
+                return self.load_state_ref(x)
             from .repo_plan import _NodeBindings, realization_scope
 
             with realization_scope():
@@ -1819,6 +1840,47 @@ class Repo:
                     memo=memo,
                 )
 
+    def load_state_ref(
+            self,
+            state_ref,
+            *,
+            reuse_live: LiveReusePolicy = "matching",
+            cache: CachePolicy = "weak") -> Object:
+        """Exactly restore one authoritative StateRef after complete preflight.
+
+        Args:
+            state_ref: Immutable StateRef record that must be byte-equivalent to
+                current authority in a connected Store.
+            reuse_live: ``"matching"`` reuses one matching live checkpoint,
+                ``"greedy"`` restores one unique candidate in place, and
+                ``"never"`` always builds fresh.
+            cache: Cache tier populated only after the complete realization has
+                succeeded.
+
+        Returns:
+            A fully restored root preserving the StateRef's ObjectIds and graph
+            topology.
+
+        Raises:
+            RepoLoadError: If exact authority preflight, construction, or restore
+                fails. No fresh partial cache entry is published.
+
+        Side Effects:
+            May restore a uniquely eligible greedy live Object. A failed greedy
+            restore clears its state hash and evicts it from Repo caches.
+        """
+        from dryml.runtime import materialization_admission
+        from .materialization import build_exact_state_load_plan, execute_exact_state_load_plan
+        from .reference_values import StateRef
+
+        if not isinstance(state_ref, StateRef):
+            raise TypeError("load_state_ref requires a StateRef.")
+        with materialization_admission(operation="repo_load_state_ref"):
+            plan = build_exact_state_load_plan(self, state_ref)
+            return execute_exact_state_load_plan(
+                self, plan, reuse_live=reuse_live, cache=cache,
+            )
+
     def load(self, cdef: ConcreteDefinition, **kwargs) -> Object:
         from dryml.runtime import materialization_admission
 
@@ -1826,8 +1888,11 @@ class Repo:
             if not isinstance(cdef, ConcreteDefinition):
                 raise TypeError("Repo.load requires an exact ConcreteDefinition.")
             if kwargs.get("options") is not None:
-                kwargs["options"] = replace(kwargs["options"], build_missing=False)
+                kwargs["options"] = replace(
+                    kwargs["options"], build_missing=False, restore_state=False
+                )
             kwargs["build_missing"] = False
+            kwargs["restore_state"] = False
             return self.load_object(cdef, **kwargs)
 
     def load_or_build(self, x: object, **kwargs):
@@ -1841,8 +1906,11 @@ class Repo:
             elif not isinstance(x, ConcreteDefinition):
                 raise TypeError("Repo.load_or_build requires a Definition, ConcreteDefinition, or Object.")
             if kwargs.get("options") is not None:
-                kwargs["options"] = replace(kwargs["options"], build_missing=True)
+                kwargs["options"] = replace(
+                    kwargs["options"], build_missing=True, restore_state=False
+                )
             kwargs["build_missing"] = True
+            kwargs["restore_state"] = False
             return self.load_object(x, **kwargs)
 
 

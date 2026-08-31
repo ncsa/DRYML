@@ -846,10 +846,11 @@ class _ThawValueTransformer(GraphTransformer):
 
 
 class _FromCanonicalTransformer(GraphTransformer):
-    def __init__(self, repo: "Repo", config: RepoLoadOptions, *, resolve_cdef=None):
+    def __init__(self, repo: "Repo", config: RepoLoadOptions, *, resolve_cdef=None, resolve_reference=None):
         self.repo = repo
         self.config = config
         self.resolve_cdef = resolve_cdef
+        self.resolve_reference = resolve_reference
 
     def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
         return node_kind(obj) in {
@@ -904,6 +905,11 @@ class _FromCanonicalTransformer(GraphTransformer):
         if kind is NodeKind.REFERENCE_VALUE:
             from .reference_values import StateRef
             from .repo_plan import apply_exact_reference_identity
+
+            if isinstance(obj, StateRef) and self.resolve_reference is not None:
+                return self.resolve_reference(obj)
+            if isinstance(obj, StateRef):
+                return self.repo.load_state_ref(obj)
 
             reference = obj.object if isinstance(obj, StateRef) else obj
             realized = self.repo._materialize_cdef(
@@ -1031,6 +1037,7 @@ def from_canonical(
     memo: dict | None = None,
     path: list[str | int] | tuple[str | int, ...] | None = None,
     resolve_cdef=None,
+    resolve_reference=None,
 ):
     from dryml.runtime import materialization_admission
 
@@ -1051,7 +1058,10 @@ def from_canonical(
             path=tuple(path) if path is not None else (),
             memo=memo,
         )
-        return _FromCanonicalTransformer(repo, cfg, resolve_cdef=resolve_cdef).transform(x, ctx)
+        return _FromCanonicalTransformer(
+            repo, cfg, resolve_cdef=resolve_cdef,
+            resolve_reference=resolve_reference,
+        ).transform(x, ctx)
 
 
 def thaw_definition_surface_value(value: Any, *, memo: dict | None = None) -> Any:

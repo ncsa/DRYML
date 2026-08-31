@@ -14,6 +14,38 @@ from dryml.core.utils.recurse import iter_leaves
 from .protocol import StoreRef
 
 
+def _contains_exact_reference(value, seen=None) -> bool:
+    """Return whether a transport value contains an ObjectRef or StateRef leaf.
+
+    Current process transport serializes canonical values through a Store but has
+    no topology-preserving exact-reference protocol.  This pure preflight runs
+    before opening or mutating the transfer Store.
+    """
+    from dryml.core.cdef_graph import EdgeKind
+    from dryml.core.definition import ConcreteDefinition
+    from dryml.core.links import DefLink
+    from dryml.core.reference_values import ObjectRef, StateRef
+    from dryml.core.utils.graph.value import iter_value_edges
+
+    if isinstance(value, (ObjectRef, StateRef)):
+        return True
+    if seen is None:
+        seen = set()
+    marker = id(value)
+    if marker in seen:
+        return False
+    seen.add(marker)
+    if isinstance(value, ConcreteDefinition):
+        return any(_contains_exact_reference(edge.value, seen) for edge in iter_value_edges(value))
+    if isinstance(value, DefLink):
+        return value.kind is EdgeKind.MATERIALIZE and _contains_exact_reference(value.target, seen)
+    if isinstance(value, dict):
+        return any(_contains_exact_reference(key, seen) or _contains_exact_reference(item, seen) for key, item in value.items())
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return any(_contains_exact_reference(item, seen) for item in value)
+    return False
+
+
 @dataclass(slots=True)
 class PreparedCall:
     args_canonical: Any
@@ -133,6 +165,12 @@ def prepare_call(
         transfer_store=None,
         result_store=None) -> PreparedCall:
     from dryml.core.repo import manage_repo
+    from .protocol import UnsupportedReferenceTransportError
+
+    if _contains_exact_reference((args, kwargs)):
+        raise UnsupportedReferenceTransportError(
+            "Execution transport does not preserve ObjectRef/StateRef topology."
+        )
 
     with manage_repo(repo=repo) as source_repo:
         if transfer_store is None:

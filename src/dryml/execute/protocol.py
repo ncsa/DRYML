@@ -91,6 +91,10 @@ class ExecutionError(RuntimeError):
     pass
 
 
+class UnsupportedReferenceTransportError(ExecutionError):
+    """Raised before submission when transport would erase exact graph topology."""
+
+
 class RemoteExecutionError(ExecutionError):
     def __init__(self, response: ExecutionResponse):
         msg = f"Remote execution failed with {response.error_type}: {response.error_message}"

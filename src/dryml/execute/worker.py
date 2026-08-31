@@ -5,6 +5,7 @@ import traceback
 
 from dryml.core import Repo
 from dryml.core.canonical import to_canonical
+from dryml.core.object import Object
 from dryml.context import use_context
 
 from .protocol import (
@@ -34,7 +35,7 @@ def execute_request(request) -> ExecutionResponse:
 
         result = fn(*args, **kwargs)
         result_canonical = to_canonical(result, repo=repo)
-        if request.save_result_objects:
+        if request.save_result_objects and isinstance(result, Object):
             repo.save_object(result_canonical, store=result_store)
 
         updated = []

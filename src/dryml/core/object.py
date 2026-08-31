@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from threading import Lock
+import inspect
 
 import uuid
 import time
@@ -180,7 +181,10 @@ class Dryml(type):
                 _collect_runtime_objects(rt_args, memo)
                 _collect_runtime_objects(rt_kwargs, memo)
                 memo[cdef] = obj
-                attach_runtime_binding(sub_repo, cdef, obj, memo)
+                bound = inspect.signature(dryml_cls.__init__).bind(obj, *rt_args, **rt_kwargs)
+                parameters = dict(bound.arguments)
+                parameters.pop("self", None)
+                attach_runtime_binding(sub_repo, cdef, obj, memo, parameters)
 
 
         return obj

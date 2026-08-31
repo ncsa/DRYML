@@ -67,6 +67,8 @@ def test_state_fork_rekeys_materializing_seed_references_and_copies_their_record
             assert target_only.default_store.validate_local_state(
                 reference.object.at(path).definition, state_hash
             )
+    loaded = target_only.load_state_ref(fork, reuse_live="never")
+    assert loaded.child.object_id == fork.object.objects[child_path]
 
 
 def test_federated_fork_retains_verified_dependency_state_in_source_store(tmp_path):

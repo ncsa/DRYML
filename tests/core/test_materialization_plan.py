@@ -46,10 +46,10 @@ class BadRestoreSerializable(Serializable):
         super().__init__()
         self.name = name
 
-    def save_state_to_dir_imp(self, dest_dir, revision=None):
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
         pass
 
-    def restore_state_from_dir_imp(self, src_dir, revision=None):
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
         raise RuntimeError("restore boom")
 
 

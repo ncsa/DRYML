@@ -18,7 +18,7 @@ from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from .definition import ConcreteDefinition, Definition
 from .object import Object, Serializable
 from .policies import RepoGraphOptions, RepoLoadOptions
-from .utils.graph.path import GraphPath
+from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 from .utils.graph.path import Parameter
 from .cdef_identity import cdef_node_key
@@ -258,7 +258,9 @@ def bind_runtime_object(
         raise RuntimeBindingConflict(definition=cdef, first=existing, second=obj, path=path)
 
 
-def attach_runtime_binding(repo, cdef: ConcreteDefinition, obj: Object, memo) -> None:
+def attach_runtime_binding(
+        repo, cdef: ConcreteDefinition, obj: Object, memo,
+        runtime_parameters: dict[str, Any] | None = None) -> None:
     """Attach completed realization evidence to a successfully built Object.
 
     Args:
@@ -266,6 +268,9 @@ def attach_runtime_binding(repo, cdef: ConcreteDefinition, obj: Object, memo) ->
         cdef: Exact private-node CDef for ``obj``.
         obj: Successfully initialized live Object.
         memo: Current private-node materialization memo containing dependencies.
+        runtime_parameters: Optional bound runtime values supplied to the
+            constructor. They are authoritative for materializing reference
+            leaves and avoid decoding an exact StateRef a second time.
 
     Side Effects:
         Stores immutable construction bindings, defensive runtime projections,
@@ -295,15 +300,20 @@ def attach_runtime_binding(repo, cdef: ConcreteDefinition, obj: Object, memo) ->
         for name, value in cdef.kwargs.items():
             _record_runtime_values(value, kwargs[name], GraphPath((Kwarg(name),)), runtime_values)
     else:
-        projection = from_canonical(
+        projection = runtime_parameters or from_canonical(
             cdef.parameters,
             repo=repo,
             resolve_cdef=lambda child: bindings[child],
         )
         for name, canonical_value in cdef.parameters.items():
+            runtime_value = projection.get(name)
+            if name not in projection:
+                runtime_value = from_canonical(
+                    canonical_value, repo=repo,
+                    resolve_cdef=lambda child: bindings[child],
+                )
             _record_runtime_values(
-                canonical_value,
-                projection[name],
+                canonical_value, runtime_value,
                 GraphPath((Parameter(name),)),
                 runtime_values,
             )
@@ -340,7 +350,11 @@ def attach_runtime_binding(repo, cdef: ConcreteDefinition, obj: Object, memo) ->
 
 
 def _collect_imported_object_ids(value: Any, path: GraphPath, out: dict) -> None:
-    """Expand immutable materializing reference IDs under an outer occurrence."""
+    """Expand immutable materializing reference IDs under an outer occurrence.
+
+    Repeated materializing exact references retain one ObjectId entry at the
+    minimum canonical path, matching ObjectRef's alias representation.
+    """
 
     from .cdef_graph import EdgeKind
     from .links import DefLink
@@ -350,7 +364,17 @@ def _collect_imported_object_ids(value: Any, path: GraphPath, out: dict) -> None
         value = value.object
     if isinstance(value, ObjectRef):
         for child_path, object_id in value.objects.items():
-            out[path.join(child_path)] = object_id
+            candidate_path = path.join(child_path)
+            existing_path = next(
+                (known_path for known_path, known_id in out.items()
+                 if known_id == object_id),
+                None,
+            )
+            if existing_path is None:
+                out[candidate_path] = object_id
+            elif graph_path_sort_key(candidate_path) < graph_path_sort_key(existing_path):
+                del out[existing_path]
+                out[candidate_path] = object_id
         return
     if isinstance(value, DefLink):
         if value.kind is EdgeKind.MATERIALIZE:

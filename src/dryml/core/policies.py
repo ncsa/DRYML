@@ -15,6 +15,10 @@ CachePolicy = Literal["none", "weak", "strong"]
 # "none": do not cache (rare, but useful for strict “fresh” eval runs)
 
 
+LiveReusePolicy = Literal["matching", "greedy", "never"]
+"""Policy controlling whether exact StateRef loads may reuse live objects."""
+
+
 @dataclass(frozen=True, slots=True)
 class RepoLoadOptions:
     instance: InstancePolicy = "reuse"
