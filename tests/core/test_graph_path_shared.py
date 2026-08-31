@@ -147,6 +147,13 @@ def test_integer_mapping_key_string_roundtrip_does_not_become_index():
     assert parse_path(str(path)) == path
 
 
+@pytest.mark.parametrize("key", ["caf\u00e9", "quote'and\\slash"])
+def test_text_mapping_key_string_roundtrip_preserves_unicode_and_escapes(key):
+    path = GraphPath((Key(key),))
+
+    assert parse_path(str(path)) == path
+
+
 def test_graph_path_rejects_future_schema_before_segment_use():
     with pytest.raises(QueryPathError, match="schema version"):
         GraphPath.from_data({"schema_version": 999, "segments": [{"kind": "parameter", "name": "model"}]})

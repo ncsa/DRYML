@@ -21,10 +21,10 @@ class ReferenceResultParent(Serializable):
 def test_reference_occurrences_retain_complete_owner_and_typed_path(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     child = repo.save_object(ReferenceResultLeaf(1, repo=repo))
-    first = repo.save_object(ReferenceResultParent(child.object, repo=repo))
-    second = repo.save_object(ReferenceResultParent(child.object, repo=repo))
+    first = repo.save_object(ReferenceResultParent(child, repo=repo))
+    second = repo.save_object(ReferenceResultParent(child, repo=repo))
 
-    occurrences = repo.references().object_id(child.object_id).object_refs().occurrences()
+    occurrences = repo.references().object_id(child.object_id).state_refs().occurrences()
     owners = {item.owner for item in occurrences if item.owner in {first.object, second.object}}
 
     assert owners == {first.object, second.object}
@@ -32,11 +32,16 @@ def test_reference_occurrences_retain_complete_owner_and_typed_path(tmp_path):
 
 
 def test_reference_values_dedupe_identical_store_replicas(tmp_path):
+    from dryml.core.store.records import DefinitionRecord, StateRefRecord
+
     first_store = DirStore(tmp_path / "first")
     repo = Repo(first_store)
     state = repo.save_object(ReferenceResultLeaf(1, repo=repo))
     second_store = DirStore(tmp_path / "second")
-    second_store.write_state_ref_record(__import__("dryml.core.store.records", fromlist=["StateRefRecord"]).StateRefRecord(state))
+    second_store.write_definition_record(
+        DefinitionRecord(state.definition), stored_root=False
+    )
+    second_store.write_state_ref_record(StateRefRecord(state))
     repo.add_store(second_store)
 
     assert list(repo.references().object_id(state.object_id).object_refs()) == [state.object]

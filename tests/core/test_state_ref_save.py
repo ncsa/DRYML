@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef
+from dryml.core.repo import RepoLoadError
 from dryml.core.utils.graph.path import GraphPath, Parameter
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
@@ -35,7 +36,7 @@ def test_unpublished_object_ref_rejects_import_into_a_new_exact_graph(tmp_path):
     leaf = CountingState("nested", repo=repo)
     imported = ImportedWrapper(EphemeralRoot(leaf, repo=repo), repo=repo)
 
-    with pytest.raises(ValueError, match="ObjectRef objects must contain"):
+    with pytest.raises(RepoLoadError, match="declaration Store"):
         ImportedWrapper(imported.object_ref, repo=repo)
 
 

@@ -87,12 +87,18 @@ class Store(ABC):
         """Read one immutable DefinitionRecord by its derived digest."""
 
     @abstractmethod
-    def write_definition_record(self, record: DefinitionRecord) -> DefinitionRecord:
-        """Install an immutable DefinitionRecord or validate an idempotent collision."""
+    def write_definition_record(
+            self, record: DefinitionRecord, *, stored_root: bool = True
+    ) -> DefinitionRecord:
+        """Install a definition and optionally publish stored-root membership."""
 
     @abstractmethod
     def iter_definition_records(self) -> Iterable[DefinitionRecord]:
         """Yield every complete immutable DefinitionRecord in this Store."""
+
+    @abstractmethod
+    def iter_stored_root_records(self):
+        """Yield authoritative stored-root membership records."""
 
     @abstractmethod
     def create_local_state_staging(self) -> object:
@@ -113,6 +119,30 @@ class Store(ABC):
     @abstractmethod
     def copy_local_state_from(self, source: "Store", definition, state_hash: str) -> LocalStateManifest:
         """Copy one verified immutable local state into this Store's authority."""
+
+    def rebind_local_state_from(
+            self, source: "Store", source_definition, target_definition,
+            state_hash: str) -> LocalStateManifest:
+        """Copy payload state under graph-equivalent forked definition authority.
+
+        Args:
+            source: Store containing the verified source local state.
+            source_definition: Definition currently bound to ``state_hash``.
+            target_definition: Rekeyed definition to bind to the same payload.
+            state_hash: Codec-qualified payload identity to preserve.
+
+        Returns:
+            The installed target manifest with the same state hash.
+
+        Raises:
+            NotImplementedError: If the backend cannot copy and rebind payloads.
+
+        Side Effects:
+            May publish an immutable target local-state directory.
+        """
+        raise NotImplementedError(
+            "This Store does not support rebinding local state to forked authority."
+        )
 
     @abstractmethod
     def read_state_ref_record(self, digest: str) -> StateRefRecord | None:
@@ -187,9 +217,67 @@ class Store(ABC):
         return ()
 
     # Query remains derived: it only scans immutable definitions.
+    def authoritative_root_definitions(self):
+        """Return complete query-root definitions reconstructed from authority.
+
+        Returns:
+            Deduplicated definitions named by stored-root, declaration, StateRef,
+            object-alias, or main-reference authority.
+
+        Raises:
+            StoreAuthorityError: If a root reference targets missing definition
+                authority or the backend cannot enumerate current records.
+
+        Side Effects:
+            None. This method validates records without changing Store authority
+            or derived index files.
+        """
+        records = {
+            record.digest: record for record in self.iter_definition_records()
+        }
+        definitions = []
+        by_hash = {}
+
+        def add(definition):
+            bucket = by_hash.setdefault(definition.graph_hash(), [])
+            if any(existing.graph_equal(definition) for existing in bucket):
+                return
+            bucket.append(definition)
+            definitions.append(definition)
+
+        for root in self.iter_stored_root_records():
+            record = records.get(root.definition_digest)
+            if record is None:
+                raise StoreAuthorityError(
+                    "Stored-root membership targets a missing DefinitionRecord."
+                )
+            add(record.definition)
+        for record in self.iter_declaration_records():
+            add(record.object_ref.definition)
+        for record in self.iter_state_ref_records():
+            add(record.state_ref.definition)
+        for record in self.iter_object_alias_records():
+            add(record.object_ref.definition)
+        main = self.read_main_ref()
+        if main is not None:
+            record = records.get(main.definition_digest)
+            if record is None:
+                raise StoreAuthorityError(
+                    "MainRefRecord targets a missing DefinitionRecord."
+                )
+            add(record.definition)
+        return tuple(definitions)
+
     def hydrate_index(self):
-        """Yield definitions reconstructed from authoritative DefinitionRecords."""
-        return (record.definition for record in self.iter_definition_records())
+        """Return validated authoritative roots for memory-index hydration.
+
+        Returns:
+            The definitions returned by :meth:`authoritative_root_definitions`.
+
+        Raises:
+            StoreAuthorityError: If root authority is incomplete or malformed.
+        """
+        return self.authoritative_root_definitions()
 
     def catalog_key(self) -> str:
         """Return a backend-local identity for derived query catalog deduplication."""

@@ -16,7 +16,7 @@ from .locking import interprocess_lock, supports_advisory_locking
 from .records import (
     ClaimRecord, DeclarationRecord, DefinitionRecord, LocalStateManifest,
     MainRefRecord, ObjectAliasRecord, StateAliasRecord, StateRefRecord,
-    StoreFormatRecord, StoreRecordError,
+    StoredRootRecord, StoreFormatRecord, StoreRecordError,
 )
 from .store import Store, StoreAuthorityError, StorePublicationCapabilities
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
@@ -288,6 +288,9 @@ class DirStore(Store):
     def _definition_path(self, digest: str) -> str:
         return self._digest_path(os.path.join(self.base_dir, "definitions"), digest)
 
+    def _stored_root_path(self, digest: str) -> str:
+        return self._digest_path(os.path.join(self.base_dir, "stored-roots"), digest)
+
     def _state_ref_path(self, digest: str) -> str:
         return self._digest_path(os.path.join(self.base_dir, "state-refs"), digest)
 
@@ -343,11 +346,15 @@ class DirStore(Store):
             raise StoreAuthorityError("DefinitionRecord digest does not match its direct path.")
         return record
 
-    def write_definition_record(self, record: DefinitionRecord) -> DefinitionRecord:
-        """Install an immutable DefinitionRecord and dirty SQLite after publication.
+    def write_definition_record(
+            self, record: DefinitionRecord, *, stored_root: bool = True
+    ) -> DefinitionRecord:
+        """Install a definition and optional stored-root membership.
 
         Args:
             record: Complete immutable graph authority to install.
+            stored_root: Whether this definition is independently queryable as a
+                stored root rather than closure-only graph authority.
 
         Returns:
             The installed record. A new publication leaves a durable derived
@@ -358,7 +365,15 @@ class DirStore(Store):
         path = self._definition_path(record.digest)
         existed = self._read_file(path, DefinitionRecord) is not None
         installed = self._install_immutable(path, record, DefinitionRecord)
+        root_installed = False
+        if stored_root:
+            root_record = StoredRootRecord(record.digest)
+            root_path = self._stored_root_path(record.digest)
+            root_installed = self._read_file(root_path, StoredRootRecord) is None
+            self._install_immutable(root_path, root_record, StoredRootRecord)
         if not existed:
+            self.mark_query_index_dirty(record.definition)
+        elif root_installed:
             self.mark_query_index_dirty(record.definition)
         return installed
 
@@ -375,6 +390,31 @@ class DirStore(Store):
             records.append(record)
         return tuple(records)
 
+    def iter_stored_root_records(self) -> Iterable[StoredRootRecord]:
+        """Yield validated stored-root membership in digest order.
+
+        Raises:
+            StoreAuthorityError: If a marker path or DefinitionRecord target is
+                malformed or missing.
+        """
+        root = Path(self.base_dir, "stored-roots")
+        if not root.exists():
+            return ()
+        records = []
+        for path in sorted(root.glob("*/*.record")):
+            record = self._read_file(os.fspath(path), StoredRootRecord)
+            if (
+                    record is None
+                    or path.name != f"{record.definition_digest}.record"
+                    or path.parent.name != record.definition_digest[:2]
+                    or self.read_definition_record(record.definition_digest) is None
+            ):
+                raise StoreAuthorityError(
+                    f"StoredRootRecord is stored under an invalid digest path: {path!s}."
+                )
+            records.append(record)
+        return tuple(records)
+
     def read_definition(self, cdef):
         """Return the direct DefinitionRecord definition matching ``cdef``, if present.
 
@@ -382,10 +422,7 @@ class DirStore(Store):
         object roots. The deterministic DefinitionRecord digest gives the lookup
         its direct authority path.
         """
-        try:
-            record = self.read_definition_record(DefinitionRecord(cdef).digest)
-        except Exception:
-            return None
+        record = self.read_definition_record(DefinitionRecord(cdef).digest)
         if record is not None and record.definition.graph_equal(cdef):
             return record.definition
         return None
@@ -511,6 +548,62 @@ class DirStore(Store):
             manifest = self._read_file(os.path.join(stage, "manifest.record"), LocalStateManifest)
             if manifest is None:
                 raise StoreAuthorityError("source local state lacks a manifest.")
+            self.install_local_state(stage, manifest)
+            return manifest
+        except BaseException:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+
+    def rebind_local_state_from(
+            self, source: Store, source_definition, target_definition,
+            state_hash: str) -> LocalStateManifest:
+        """Copy payload bytes and bind them to rekeyed graph authority.
+
+        Args:
+            source: Store containing the verified source local state.
+            source_definition: Definition currently bound to ``state_hash``.
+            target_definition: Rekeyed definition receiving the same payload.
+            state_hash: Codec-qualified payload identity to preserve.
+
+        Returns:
+            The installed target manifest.
+
+        Raises:
+            StoreAuthorityError: If source authority or payload identity fails.
+
+        Side Effects:
+            Publishes one immutable local-state directory under the target graph.
+        """
+        self.preflight_publication("rebind local state", local_state=True)
+        source_path = source.validate_local_state(source_definition, state_hash)
+        if not isinstance(source_path, (str, os.PathLike)):
+            raise StoreAuthorityError(
+                "source Store does not expose a copyable local-state handle."
+            )
+        stage = self.create_local_state_staging()
+        try:
+            shutil.rmtree(stage)
+            shutil.copytree(os.fspath(source_path), stage)
+            source_manifest = self._read_file(
+                os.path.join(stage, "manifest.record"), LocalStateManifest
+            )
+            if source_manifest is None:
+                raise StoreAuthorityError("source local state lacks a manifest.")
+            definition_record = DefinitionRecord(target_definition)
+            definition_bytes = definition_record.to_bytes()
+            Path(stage, "def.pkl").write_bytes(definition_bytes)
+            manifest = LocalStateManifest(
+                source_manifest.codec,
+                definition_record.graph_hash,
+                definition_record.digest,
+                hashlib.sha256(definition_bytes).hexdigest(),
+                source_manifest.files,
+            )
+            if manifest.state_hash != state_hash:
+                raise StoreAuthorityError(
+                    "rekeyed definition changed local payload state identity."
+                )
+            Path(stage, "manifest.record").write_bytes(manifest.to_bytes())
             self.install_local_state(stage, manifest)
             return manifest
         except BaseException:

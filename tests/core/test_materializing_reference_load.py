@@ -45,6 +45,23 @@ def test_exact_load_resolves_materializing_state_ref_before_parent(tmp_path):
     assert loaded.child.value == 7
 
 
+@pytest.mark.parametrize("reuse_live", ["matching", "greedy", "never"])
+def test_enclosing_state_overrides_materializing_seed_state(tmp_path, reuse_live):
+    repo = Repo(DirStore(tmp_path / "store"))
+    child = SeedValue(1, repo=repo)
+    child.value = 7
+    seed = repo.save_object(child)
+    parent = SeedParent(seed, repo=repo)
+    parent.child.value = 9
+    state = repo.save_object(parent, deep_capture=True)
+
+    loaded = Repo(DirStore(tmp_path / "store")).load_state_ref(
+        state, reuse_live=reuse_live
+    )
+
+    assert loaded.child.value == 9
+
+
 def test_exact_load_restores_a_repeated_materializing_state_ref_once(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     child = SeedValue(1, repo=repo)

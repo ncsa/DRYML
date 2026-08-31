@@ -217,6 +217,7 @@ class ExactStateAction:
     object_id: Any
     state_hash: str
     store: Any
+    payload: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,16 +329,16 @@ def build_exact_state_load_plan(repo, state_ref) -> ExactStateLoadPlan:
             sources = []
             for store in repo.stores:
                 try:
-                    store.validate_local_state(definition, state_hash)
+                    payload = store.validate_local_state(definition, state_hash)
                 except Exception:
                     continue
-                sources.append(store)
+                sources.append((store, payload))
             if not sources:
                 missing.append(f"local state {state_hash} at {path!s}")
             else:
                 actions.append(ExactStateAction(
                     reference, definition, path, reference.object.objects[path], state_hash,
-                    sources[0],
+                    *sources[0],
                 ))
 
     visit(state_ref)
@@ -353,7 +354,8 @@ def execute_exact_state_load_plan(
         reuse_live: LiveReusePolicy,
         cache: CachePolicy = "weak",
         _reference_memo: dict[str, Object] | None = None,
-        _greedy_touched: list[tuple[Object, GraphPath]] | None = None):
+        _greedy_touched: list[tuple[Object, GraphPath]] | None = None,
+        _retained_reservations: list[Object] | None = None):
     """Realize a verified StateRef dependency-first without partial cache publication.
 
     Args:
@@ -367,6 +369,8 @@ def execute_exact_state_load_plan(
         _greedy_touched: Internal realization-scoped list of live candidates
             mutated by greedy restoration. The outer exact realization clears
             and evicts these candidates if any nested seed or parent fails.
+        _retained_reservations: Internal realization-scoped list of reused live
+            candidates reserved until the complete outer graph is realized.
 
     Returns:
         A live root matching ``plan.state_ref``.
@@ -387,10 +391,16 @@ def execute_exact_state_load_plan(
         action.path: action for action in plan.actions
         if action.reference == plan.state_ref
     }
+    action_by_object_id = {
+        action.object_id: action for action in plan.actions
+        if action.reference == plan.state_ref
+    }
     selected = _NodeBindings()
     completed = []
     owns_greedy_touched = _greedy_touched is None
     greedy_touched = [] if owns_greedy_touched else _greedy_touched
+    owns_reservations = _retained_reservations is None
+    retained_reservations = [] if owns_reservations else _retained_reservations
 
     def exact_action(cdef, graph):
         path = GraphPath() if cdef is plan.state_ref.definition else graph.primary_path(
@@ -439,8 +449,9 @@ def execute_exact_state_load_plan(
         try:
             import os
 
-            payload = action.store.validate_local_state(action.definition, action.state_hash)
-            obj.restore_state_from_dir(os.path.join(os.fspath(payload), "data"), codec=codec)
+            obj.restore_state_from_dir(
+                os.path.join(os.fspath(action.payload), "data"), codec=codec
+            )
         except BaseException as error:
             raise RepoLoadError(
                 f"Exact restore at {path!s} with codec {codec!r} failed: {error}"
@@ -462,10 +473,10 @@ def execute_exact_state_load_plan(
                         matching_hash=action.state_hash if reuse_live == "matching" else None,
                     )
                     if candidate is not None:
+                        retained_reservations.append(candidate)
                         if reuse_live == "greedy" and candidate._last_state_hash != action.state_hash:
                             greedy_touched.append((candidate, action.path))
                             restore(candidate, action, action.path)
-                        candidate._save_load_reservation.release()
                         selected[cdef] = candidate
                         completed.append(candidate)
                         continue
@@ -476,14 +487,52 @@ def execute_exact_state_load_plan(
                     validate_cdef_stateful_role(cdef, cls)
                     args, kwargs = project_cdef_call(cdef, cls=cls)
                     def resolve_reference(reference):
-                        known_reference = reference_memo.get(reference.digest())
-                        if known_reference is not None:
-                            return known_reference
-                        return execute_exact_state_load_plan(
-                            repo, build_exact_state_load_plan(repo, reference),
-                            reuse_live=reuse_live, cache="none",
-                            _reference_memo=reference_memo,
-                            _greedy_touched=greedy_touched,
+                        from .reference_values import ObjectRef, StateRef
+
+                        if isinstance(reference, (ObjectRef, StateRef)):
+                            child_object = (
+                                reference.object
+                                if isinstance(reference, StateRef)
+                                else reference
+                            )
+                            child_states = {}
+                            child_actions = []
+                            for child_path, object_id in child_object.objects.items():
+                                action = action_by_object_id.get(object_id)
+                                if action is None:
+                                    raise RepoLoadError(
+                                        "Exact StateRef plan is missing imported "
+                                        f"reference state for {object_id!s}."
+                                    )
+                                child_states[child_path] = action.state_hash
+                                child_actions.append((child_path, action))
+                            child_ref = StateRef(child_object, child_states)
+                            child_plan = ExactStateLoadPlan(
+                                child_ref,
+                                tuple(
+                                    ExactStateAction(
+                                        child_ref,
+                                        action.definition,
+                                        child_path,
+                                        action.object_id,
+                                        action.state_hash,
+                                        action.store,
+                                        action.payload,
+                                    )
+                                    for child_path, action in child_actions
+                                ),
+                            )
+                            return execute_exact_state_load_plan(
+                                repo,
+                                child_plan,
+                                reuse_live=reuse_live,
+                                cache="none",
+                                _reference_memo=reference_memo,
+                                _greedy_touched=greedy_touched,
+                                _retained_reservations=retained_reservations,
+                            )
+                        raise RepoLoadError(
+                            f"Unsupported materializing reference {type(reference).__name__}."
                         )
 
                     runtime_args = from_canonical_local(
@@ -540,6 +589,10 @@ def execute_exact_state_load_plan(
                 f"{', '.join(mutated_paths)}.",
             )
         raise
+    finally:
+        if owns_reservations:
+            for candidate in reversed(retained_reservations):
+                candidate._save_load_reservation.release()
 
 
 def project_cdef_call(

@@ -480,7 +480,8 @@ def test_deleted_direct_definition_is_not_resurrected_from_retired_derived_state
     _definition_path(store, record).unlink()
 
     assert store.read_definition_record(record.digest) is None
-    assert tuple(store.hydrate_index()) == ()
+    with pytest.raises(StoreAuthorityError, match="StoredRootRecord"):
+        tuple(store.hydrate_index())
     assert sidecar.read_bytes() == record.to_bytes()
 
 

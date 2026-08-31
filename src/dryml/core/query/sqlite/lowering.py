@@ -606,6 +606,12 @@ class SQLiteRelationCompiler:
                 (token_hash,)):
             if feature_token_equal(self.codec.decode_feature_token(row_blob), token):
                 return feature_id
+        # Dill envelopes may encode equal canonical payloads with different memo
+        # layouts. Equality remains authoritative when the blob hash misses.
+        for feature_id, row_blob in self.con.execute(
+                "SELECT feature_id, token_blob FROM feature_tokens"):
+            if feature_token_equal(self.codec.decode_feature_token(row_blob), token):
+                return feature_id
         return None
 
     def _estimate_rows(self, selector_graph: SelectorGraph | None, domain_name: str) -> int | None:

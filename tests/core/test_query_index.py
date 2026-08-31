@@ -82,10 +82,10 @@ def test_deleting_derived_index_rebuilds_without_changing_authority(tmp_path):
 def test_reference_results_preserve_exact_occurrences_while_definitions_dedupe(tmp_path):
     repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
     child = repo.save_object(IndexLeaf("shared", repo=repo))
-    first = repo.save_object(IndexParent(child.object, repo=repo))
-    second = repo.save_object(IndexParent(child.object, repo=repo))
+    first = repo.save_object(IndexParent(child, repo=repo))
+    second = repo.save_object(IndexParent(child, repo=repo))
 
-    structural = repo.query(Definition(IndexParent, child.object)).stored(refresh=True).defs()
+    structural = repo.query(Definition(IndexParent, child)).stored(refresh=True).defs()
     occurrences = repo.references().object_id(child.object_id).object_refs().occurrences()
     owners = {
         occurrence.owner
@@ -95,6 +95,25 @@ def test_reference_results_preserve_exact_occurrences_while_definitions_dedupe(t
 
     assert list(structural) == [first.definition]
     assert owners == {first.object, second.object}
+
+
+@pytest.mark.parametrize("query_index", ["memory", "sqlite"])
+def test_closure_definition_does_not_become_stored_root_after_reopen(
+    tmp_path, query_index
+):
+    store = DirStore(tmp_path / "store", query_index=query_index)
+    repo = Repo(store)
+    child = IndexLeaf("closure", repo=repo)
+    parent = IndexParent(child, repo=repo)
+    repo.save_object(parent, deep_capture=True)
+
+    reopened = Repo(DirStore(store.base_dir, query_index=query_index))
+    selector = Definition(IndexLeaf, "closure")
+
+    assert reopened.query(selector).stored(refresh=True).count() == 0
+    assert list(reopened.query(selector).nested().definitions().defs()) == [
+        child.definition
+    ]
 
 
 def test_reference_query_never_treats_retired_object_roots_as_authority(tmp_path):

@@ -188,6 +188,7 @@ def test_zip_commit_builds_valid_complete_sibling_before_atomic_replace(tmp_path
                 assert set(archive.namelist()) == {
                     "store-format.record",
                     f"definitions/{record.digest[:2]}/{record.digest}.record",
+                    f"stored-roots/{record.digest[:2]}/{record.digest}.record",
                 }
             replacements.append(staged)
         return original_replace(source, destination)

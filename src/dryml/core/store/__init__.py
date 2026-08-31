@@ -2,7 +2,7 @@ from .dir import DirStore
 from .records import (
     ClaimRecord, DeclarationRecord, DefinitionRecord, LocalStateManifest,
     MainRefRecord, ObjectAliasRecord, StateAliasRecord, StateRefRecord,
-    StoreFormatRecord, StoreRecordError,
+    StoredRootRecord, StoreFormatRecord, StoreRecordError,
 )
 from .store import (
     Store, StoreAliasConflictError, StoreAuthorityError, StoreCapabilityError,
@@ -14,7 +14,7 @@ __all__ = [
     "ClaimRecord", "DeclarationRecord", "DefinitionRecord", "DirStore",
     "LocalStateManifest", "MainRefRecord", "ObjectAliasRecord",
     "StateAliasRecord", "StateRefRecord", "Store", "StoreAliasConflictError",
-    "StoreAuthorityError", "StoreCapabilityError", "StoreFormatRecord",
+    "StoreAuthorityError", "StoreCapabilityError", "StoredRootRecord", "StoreFormatRecord",
     "StorePublicationCapabilities", "StoreRecordError", "ZipStore",
     "ZipStoreConflictError",
 ]

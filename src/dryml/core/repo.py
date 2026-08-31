@@ -27,6 +27,11 @@ from .query.memory import AggregateMemoryQueryIndex
 from .query.result import ObjectResultSet
 
 
+_active_object_ref_builds: ContextVar[frozenset[tuple[int, str]]] = ContextVar(
+    "dryml_active_object_ref_builds", default=frozenset()
+)
+
+
 def _node_key(key):
     """Normalize a runtime map key to private CDef node identity."""
 
@@ -125,7 +130,7 @@ def _fork_rekey_reference(reference, namespace):
         root = rekey_object(reference)
     else:
         raise TypeError("Fork rekeying requires an ObjectRef or StateRef.")
-    return root, tuple(state_cache.values())
+    return root, dict(state_cache)
 
 
 class _NodeMap(dict):
@@ -152,40 +157,82 @@ class _CandidateCache:
 
     def __init__(self, *, weak: bool = False):
         self._values = defaultdict(list)
+        self._keys_by_node = defaultdict(set)
         self._weak = weak
+
+    def _drop_key(self, key):
+        self._values.pop(key, None)
+        keys = self._keys_by_node.get(key[1])
+        if keys is not None:
+            keys.discard(key)
+            if not keys:
+                self._keys_by_node.pop(key[1], None)
+
+    def _remove_dead_ref(self, key, dead_ref):
+        values = self._values.get(key)
+        if values is None:
+            return
+        self._values[key] = [ref for ref in values if ref is not dead_ref]
+        if not self._values[key]:
+            self._drop_key(key)
 
     def _live(self, key):
         values = self._values.get(key, ())
         if not self._weak:
             return tuple(values)
-        live = tuple(obj for ref in values if (obj := ref()) is not None)
-        if live:
-            self._values[key] = [weakref.ref(obj) for obj in live]
+        retained = []
+        live = []
+        for ref in values:
+            obj = ref()
+            if obj is not None:
+                retained.append(ref)
+                live.append(obj)
+        if retained:
+            self._values[key] = retained
         else:
-            self._values.pop(key, None)
-        return live
+            self._drop_key(key)
+        return tuple(live)
 
     def _keys(self, cdef):
         node = _node_key(cdef)
-        return tuple(key for key in self._values if key[1] is node)
+        return tuple(self._keys_by_node.get(node, ()))
 
     def add(self, cdef, obj):
         key = (getattr(obj, "_realization_scope", None), _node_key(cdef))
         values = self._live(key)
         if all(existing is not obj for existing in values):
-            self._values[key].append(weakref.ref(obj) if self._weak else obj)
+            self._keys_by_node[key[1]].add(key)
+            if self._weak:
+                self._values[key].append(
+                    weakref.ref(
+                        obj,
+                        lambda ref, cache=self, item=key: cache._remove_dead_ref(
+                            item, ref
+                        ),
+                    )
+                )
+            else:
+                self._values[key].append(obj)
 
     def discard(self, cdef, obj=None):
         if obj is None:
             for key in self._keys(cdef):
-                self._values.pop(key, None)
+                self._drop_key(key)
             return None
         for key in self._keys(cdef):
-            remaining = [item for item in self._live(key) if item is not obj]
-            if remaining:
-                self._values[key] = [weakref.ref(item) for item in remaining] if self._weak else remaining
+            if self._weak:
+                remaining = [
+                    ref for ref in self._values.get(key, ())
+                    if ref() is not None and ref() is not obj
+                ]
             else:
-                self._values.pop(key, None)
+                remaining = [
+                    item for item in self._values.get(key, ()) if item is not obj
+                ]
+            if remaining:
+                self._values[key] = remaining
+            else:
+                self._drop_key(key)
 
     def get(self, cdef, default=None):
         """Return the sole exact private-node candidate, if present."""
@@ -228,6 +275,7 @@ class _CandidateCache:
 
     def clear(self):
         self._values.clear()
+        self._keys_by_node.clear()
 
     def items(self):
         for key in tuple(self._values):
@@ -902,12 +950,20 @@ class Repo:
 
     def _assert_compatible_object_ids(self, reference) -> None:
         """Reject reuse of an ObjectId with a different authoritative closure."""
+        expected = set(reference.objects.values())
+        existing_by_id = defaultdict(list)
+        for store, authoritative, _ in self._references():
+            for path, object_id in authoritative.objects.items():
+                if object_id in expected:
+                    existing_by_id[object_id].append(
+                        (store, authoritative.at(path))
+                    )
         for path, object_id in reference.objects.items():
-            try:
-                existing = self.lookup_object_ref(object_id)
-            except KeyError:
+            candidates = existing_by_id.get(object_id, ())
+            if not candidates:
                 continue
-            if existing != reference.at(path):
+            expected_subtree = reference.at(path)
+            if any(existing != expected_subtree for _, existing in candidates):
                 raise RepoLoadError(
                     f"ObjectId {object_id!s} is already authoritative for an incompatible closed subtree."
                 )
@@ -941,7 +997,9 @@ class Repo:
         store.preflight_publication("declare ObjectRef")
         with store.writer_lock():
             self._assert_compatible_object_ids(reference)
-            store.write_definition_record(DefinitionRecord(reference.definition))
+            definition_record = store.write_definition_record(
+                DefinitionRecord(reference.definition), stored_root=False
+            )
             existing = store.read_declaration_record(reference.digest())
             claim = store.read_claim_record(reference.digest())
             if existing is not None:
@@ -949,6 +1007,7 @@ class Repo:
                     raise RepoLoadError("Declaration digest collision has incompatible ObjectRef authority.")
                 if claim is None:
                     raise RepoLoadError("Declaration exists without ClaimRecord; Store authority is corrupt.")
+                store.write_definition_record(definition_record, stored_root=True)
                 return reference
             # An interrupted claim without a declaration is not authority. Its
             # complete record can safely be replaced by registration's fence.
@@ -957,6 +1016,7 @@ class Repo:
             elif claim.status != "available":
                 raise RepoLoadError("Unregistered ObjectRef claim is not available for recovery.")
             store.write_declaration_record(DeclarationRecord(reference))
+            store.write_definition_record(definition_record, stored_root=True)
         return reference
 
     def declare_object(self, cdef: ConcreteDefinition, *, store=None, namespace=None):
@@ -1218,7 +1278,17 @@ class Repo:
             if lease is None:
                 raise RepoLoadError("Declared ObjectRef is complete; load its exact StateRef in U7.")
             acquired.append(lease)
-            obj = self._load_structural(reference.definition)
+            active = _active_object_ref_builds.get()
+            token = _active_object_ref_builds.set(
+                active | {
+                    (id(self), item.object_ref.digest())
+                    for item in acquired
+                }
+            )
+            try:
+                obj = self._load_structural(reference.definition)
+            finally:
+                _active_object_ref_builds.reset(token)
             apply_exact_reference_identity(obj, reference)
             obj._store_affinity = selected
             obj._claim_lease = lease
@@ -1259,9 +1329,8 @@ class Repo:
             raise RepoLoadError("build_object_ref requires an explicit declaration Store or one unambiguous connected Store.")
         return matches[0]
 
-    def _complete_initial_state_ref(self, state_ref, store) -> None:
+    def _complete_initial_state_ref(self, state_ref, store, lease) -> None:
         """Fence initial StateRef publication against the live claim generation."""
-        lease = getattr(self, "_publishing_claim_lease", None)
         if not isinstance(lease, _ClaimLease) or lease.store is not store or lease.object_ref != state_ref.object:
             return
         declaration = store.read_declaration_record(state_ref.object.digest())
@@ -1273,11 +1342,10 @@ class Repo:
                 or claim.status != "claimed" or claim.lease_until <= now):
             raise RepoSaveError("Initial StateRef publication lost its claim generation.")
 
-    def _mark_initial_state_ref_complete(self, state_ref, store) -> None:
+    def _mark_initial_state_ref_complete(self, state_ref, store, lease) -> None:
         """Replace a verified live claim with completed StateRef authority."""
         from .store.records import ClaimRecord
 
-        lease = getattr(self, "_publishing_claim_lease", None)
         if not isinstance(lease, _ClaimLease) or lease.store is not store or lease.object_ref != state_ref.object:
             return
         declaration = store.read_declaration_record(state_ref.object.digest())
@@ -1289,7 +1357,6 @@ class Repo:
                 or claim.status != "claimed" or claim.lease_until <= now):
             raise RepoSaveError("Initial StateRef was published but its claim fence changed.")
         store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "completed", state_ref_digest=state_ref.digest()))
-        self._publishing_claim_lease = None
 
     def fork_object_ref(self, reference, *, store=None, namespace=None):
         """Rekey a non-empty ObjectRef and register a state-free declaration.
@@ -1403,22 +1470,37 @@ class Repo:
                 source = _find_local_state(self, definition, state_hash)
                 if source is None:
                     raise RepoLoadError(f"Fork source lacks verified local state at {path!s}.")
-                sources.append((definition, state_hash, source))
-        fork, forked_seeds = _fork_rekey_reference(state_ref, namespace)
+                sources.append((reference, path, definition, state_hash, source))
+        fork, forked_references = _fork_rekey_reference(state_ref, namespace)
         with selected.writer_lock():
             # DefinitionRecords are graph-aware, but every local-state entry is
             # independently verified against its node definition before copying.
-            for definition, state_hash, source in sources:
-                selected.write_definition_record(DefinitionRecord(definition))
-                if not federated and source is not selected:
+            for reference, path, definition, state_hash, source in sources:
+                target_definition = forked_references[
+                    reference.digest()
+                ].object.at(path).definition
+                selected.write_definition_record(
+                    DefinitionRecord(target_definition), stored_root=False
+                )
+                if not target_definition.graph_equal(definition):
+                    selected.rebind_local_state_from(
+                        source, definition, target_definition, state_hash
+                    )
+                elif not federated and source is not selected:
                     selected.copy_local_state_from(source, definition, state_hash)
-            if not federated:
-                for seed in forked_seeds:
-                    if seed != fork:
-                        selected.write_definition_record(DefinitionRecord(seed.definition))
-                        selected.write_state_ref_record(StateRefRecord(seed))
-            selected.write_definition_record(DefinitionRecord(fork.definition))
+            for seed in forked_references.values():
+                if seed != fork:
+                    selected.write_definition_record(
+                        DefinitionRecord(seed.definition), stored_root=False
+                    )
+                    selected.write_state_ref_record(StateRefRecord(seed))
+            selected.write_definition_record(
+                DefinitionRecord(fork.definition), stored_root=False
+            )
             selected.write_state_ref_record(StateRefRecord(fork))
+            selected.write_definition_record(
+                DefinitionRecord(fork.definition), stored_root=True
+            )
         return fork
 
     def set_config(self, key: str, value: Any) -> None:
@@ -1545,7 +1627,9 @@ class Repo:
 
         Side Effects:
             Publishes every local state and the enclosing StateRef before main or
-            object-alias references can change.
+            object-alias references can change. A completed StateRef and claim
+            remain authoritative if later derived-index or mutable-reference
+            registration fails; completed live claim metadata is still cleared.
         """
         from dryml.runtime import materialization_admission
         from .store.records import DefinitionRecord, MainRefRecord
@@ -1565,54 +1649,52 @@ class Repo:
             # Complete nested declarations before publishing an enclosing graph.
             # The nested immutable StateRef then supplies reusable state for
             # adoption, so deep capture does not serialize it a second time.
-            for dependency_lease, dependency_obj in getattr(obj, "_pending_claim_dependencies", ()):
-                if dependency_lease is lease:
-                    continue
-                self.save_object(
-                    dependency_obj,
-                    store=dependency_lease.store,
-                    deep_capture=deep_capture,
-                    federated=federated,
-                    _capture_memo=capture_memo,
-                )
-                from .repo_plan import build_save_plan
-
-                capture_memo.update(
-                    action.obj.object_id
-                    for action in build_save_plan(self, dependency_obj).actions
-                    if isinstance(action.obj, Serializable)
-                )
-            self.add_objects(obj, store=store)
-            from .repo_plan import build_save_plan, execute_save_plan
-
-            plan = build_save_plan(self, obj)
-            previous_lease = getattr(self, "_publishing_claim_lease", None)
-            self._publishing_claim_lease = lease
             try:
+                for dependency_lease, dependency_obj in getattr(
+                        obj, "_pending_claim_dependencies", ()):
+                    if dependency_lease is lease:
+                        continue
+                    self.save_object(
+                        dependency_obj,
+                        store=dependency_lease.store,
+                        deep_capture=deep_capture,
+                        federated=federated,
+                        _capture_memo=capture_memo,
+                    )
+                    from .repo_plan import build_save_plan
+
+                    capture_memo.update(
+                        action.obj.object_id
+                        for action in build_save_plan(self, dependency_obj).actions
+                        if isinstance(action.obj, Serializable)
+                    )
+                self.add_objects(obj, store=store)
+                from .repo_plan import build_save_plan, execute_save_plan
+
+                plan = build_save_plan(self, obj)
                 result = execute_save_plan(
                     self, plan, store=store, deep_capture=deep_capture,
                     federated=federated, report_stores=report_stores,
-                    capture_memo=capture_memo,
+                    capture_memo=capture_memo, claim_lease=lease,
                 )
             except BaseException:
                 for pending_lease in reversed(
                         getattr(obj, "_claim_leases", (lease,) if lease else ())):
                     self._abandon_claim(pending_lease)
                 raise
-            finally:
-                self._publishing_claim_lease = previous_lease
             state_ref = result[0] if report_stores else result
+            if isinstance(lease, _ClaimLease):
+                obj._claim_lease = None
+            obj._pending_claim_dependencies = ()
+            obj._claim_leases = ()
             # StateRef publication is authoritative; only then may the derived
             # query index expose this root. A registration failure leaves the
             # Store authority intact and the sidecar explicitly dirty.
-            clear_dirty = getattr(store, "clear_query_index_dirty", None)
-            if clear_dirty is not None:
-                clear_dirty()
             self._query_index.register_saved_graph(
-                plan.graph, {store: (obj.definition,)}
+                plan.graph,
+                {store: (obj.definition,)},
+                {store: (state_ref,)},
             )
-            if isinstance(lease, _ClaimLease):
-                obj._claim_lease = None
             if main:
                 store.write_main_ref(MainRefRecord(DefinitionRecord(obj.definition).digest))
                 self.main_def = obj.definition
@@ -1630,7 +1712,36 @@ class Repo:
             deep_capture: bool = False,
             federated: bool = False,
             report_stores: bool = False):
-        """Publish one object graph through the direct StateRef save surface."""
+        """Publish one object graph and flush its Repo.
+
+        Args:
+            obj: Live Object root whose retained runtime graph will be saved.
+            main: Whether to update the target Store's main-definition reference.
+            store: Explicit target Store or Store specification.
+            alias: Optional Store-local ObjectRef alias to update after publication.
+            deep_capture: Whether to serialize every owned live Serializable node.
+            federated: Whether verified dependency state may remain in connected
+                Stores instead of being copied into the target.
+            report_stores: Whether to pair the StateRef with a StoreReport.
+
+        Returns:
+            The immutable StateRef, or ``(StateRef, StoreReport)`` when
+            ``report_stores`` is true.
+
+        Raises:
+            RepoSaveError: If graph bindings, claims, codecs, or hooks fail.
+            StoreAuthorityError: If Store preflight or publication fails.
+            ValueError: If no writable target Store can be selected.
+
+        Side Effects:
+            Publishes immutable definition, local-state, root-membership, and
+            StateRef authority, optionally updates main/alias refs, then flushes
+            every configured Store after successful publication.
+
+        Concurrency:
+            Store publication and initial-claim completion use writer locks and
+            the exact claim lease carried by this save.
+        """
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_save"):
@@ -1722,6 +1833,62 @@ class Repo:
                 memo=memo,
                 root=cdef,
             )
+
+    def _materialize_object_ref(
+            self, reference, *, cache: CachePolicy = "weak", memo=None,
+            path=None):
+        """Materialize an ObjectRef only through its declaration claim.
+
+        Nested ObjectRefs whose claims were acquired by ``build_object_ref`` use
+        that enclosing operation's context-local authorization. Every other call
+        enters the public declaration-and-claim path.
+
+        Args:
+            reference: Exact ObjectRef requested by a materializing CDef edge.
+            cache: Cache policy for an already-authorized nested realization.
+            memo: Current private-node realization memo.
+            path: Current constructor path used for diagnostics.
+
+        Returns:
+            A live graph carrying the supplied exact ObjectIds.
+
+        Raises:
+            TypeError: If ``reference`` is not an ObjectRef.
+            RepoLoadError: If declaration or claim authority is unavailable.
+
+        Side Effects:
+            May acquire declaration claims, construct Objects, and update caches.
+        """
+        from .reference_values import ObjectRef
+        from .repo_plan import apply_exact_reference_identity
+
+        if not isinstance(reference, ObjectRef):
+            raise TypeError("ObjectRef materialization requires an ObjectRef.")
+        if (id(self), reference.digest()) not in _active_object_ref_builds.get():
+            realized = self.build_object_ref(reference)
+            from .repo_plan import current_realization_scope
+
+            scope = current_realization_scope()
+            if scope is not None:
+                def abandon_realized_claims():
+                    first_error = None
+                    leases = getattr(realized, "_claim_leases", ())
+                    for lease in reversed(leases):
+                        try:
+                            self._abandon_claim(lease)
+                        except BaseException as error:
+                            if first_error is None:
+                                first_error = error
+                    if first_error is not None:
+                        raise first_error
+
+                scope.add_claim_cleanup(abandon_realized_claims)
+            return realized
+        realized = self._materialize_cdef(
+            reference.definition, cache=cache, memo=memo, path=path
+        )
+        apply_exact_reference_identity(realized, reference)
+        return realized
 
 
     def _load_structural(

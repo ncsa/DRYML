@@ -1154,7 +1154,24 @@ class RepoQueryIndex:
                 continue
             rebuild()
 
-    def register_saved_graph(self, graph, roots_by_store: Mapping[Any, Sequence[Any]]) -> None:
+    def register_saved_graph(
+            self, graph, roots_by_store: Mapping[Any, Sequence[Any]],
+            state_refs_by_store: Mapping[Any, Sequence[Any]] | None = None) -> None:
+        """Register one completed authoritative save with derived Store indexes.
+
+        Args:
+            graph: Complete query graph published by the save.
+            roots_by_store: Stored roots grouped by owning Store.
+            state_refs_by_store: Newly published StateRefs grouped by Store for
+                incremental advisory-reference registration.
+
+        Raises:
+            QueryIndexError: If a configured derived index rejects registration.
+
+        Side Effects:
+            Updates available derived indexes or leaves their durable dirty
+            markers in place when registration fails.
+        """
         self.refresh_bindings()
         binding_by_key = {binding.source_key: binding for binding in self._bindings}
         for store, roots in roots_by_store.items():
@@ -1170,11 +1187,18 @@ class RepoQueryIndex:
             index = self.open_store_index(binding)
             if index is None:
                 continue
-            register = getattr(index, "register_stored_roots", None)
+            register_saved = getattr(index, "register_saved_graph", None)
+            register = register_saved or getattr(index, "register_stored_roots", None)
             if register is None:
                 continue
             try:
-                register(graph, roots)
+                if register_saved is not None:
+                    references = () if state_refs_by_store is None else tuple(
+                        state_refs_by_store.get(store, ())
+                    )
+                    register(graph, roots, references)
+                else:
+                    register(graph, roots)
             except QueryIndexUnavailable:
                 continue
             except Exception:

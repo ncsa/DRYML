@@ -7,6 +7,7 @@ every result in this module is reconstructed from Store authority.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Iterator
@@ -443,23 +444,51 @@ class ReferenceQuery:
         roots: list[ObjectRef] = []
         states: list[StateRef] = []
         occurrences: list[ReferenceOccurrence] = []
+        definitions = []
         authority_by_id: dict[ObjectId, ObjectRef] = {}
         authority_sources: dict[ObjectId, list[str]] = {}
 
         for store in self.repo.stores:
+            candidates = self._candidate_sources(store)
+            declarations_by_digest = {}
+            states_by_digest = {}
+            definitions_by_digest = {}
+            if candidates is not None:
+                for source_kind, source_digest in candidates:
+                    if source_kind == "declaration":
+                        record = store.read_declaration_record(source_digest)
+                        if record is not None:
+                            declarations_by_digest.setdefault(source_digest, record)
+                    elif source_kind == "state-ref":
+                        record = store.read_state_ref_record(source_digest)
+                        if record is not None:
+                            states_by_digest.setdefault(source_digest, record)
+                    elif source_kind == "definition":
+                        record = store.read_definition_record(source_digest)
+                        if record is not None:
+                            definitions_by_digest.setdefault(source_digest, record)
             for record in store.iter_declaration_records():
+                declarations_by_digest.setdefault(record.object_ref.digest(), record)
+            for record in store.iter_state_ref_records():
+                states_by_digest.setdefault(record.state_ref.digest(), record)
+            for record in store.iter_definition_records():
+                definitions_by_digest.setdefault(record.digest, record)
+            declaration_records = declarations_by_digest.values()
+            state_records = states_by_digest.values()
+            definition_records = definitions_by_digest.values()
+            for record in declaration_records:
                 roots.append(record.object_ref)
                 source = repr(store)
                 for object_id in record.object_ref.objects.values():
                     authority_sources.setdefault(object_id, []).append(source)
-            for record in store.iter_state_ref_records():
+            for record in state_records:
                 states.append(record.state_ref)
                 roots.append(record.state_ref.object)
                 source = repr(store)
                 for object_id in record.state_ref.object.objects.values():
                     authority_sources.setdefault(object_id, []).append(source)
-            for record in store.iter_definition_records():
-                occurrences.extend(_iter_embedded_references(record.definition, owner=record.definition))
+            for record in definition_records:
+                definitions.append(record.definition)
 
         for ref in roots:
             for path, object_id in ref.objects.items():
@@ -482,6 +511,24 @@ class ReferenceQuery:
             alias_objects, alias_states = self._alias_targets(roots)
 
         alias_reference_objects = None if alias_objects is None else alias_objects | {state.object for state in alias_states}
+        if alias_reference_objects is None:
+            for definition in definitions:
+                occurrences.extend(
+                    _iter_embedded_references(definition, owner=definition)
+                )
+            for reference in set(roots):
+                occurrences.extend(
+                    _iter_embedded_references(
+                        reference.definition, owner=reference
+                    )
+                )
+        else:
+            for reference in alias_reference_objects:
+                occurrences.extend(
+                    _iter_embedded_references(
+                        reference.definition, owner=reference
+                    )
+                )
         root_values = [ref for ref in roots if self._matches_object(ref, alias_reference_objects)]
         state_values = [state for state in states if self._matches_state(state, alias_objects, alias_states)]
         allowed = set(root_values) | set(state_values)
@@ -526,7 +573,29 @@ class ReferenceQuery:
             seen.add(key)
             index = store.open_query_index()
             if index is not None:
-                index.refresh("auto")
+                if not os.path.exists(index.path):
+                    index.rebuild(force=True)
+                else:
+                    index.refresh("auto")
+
+    def _candidate_sources(self, store):
+        """Return derived candidates for filters that safely narrow authority."""
+        index = store.open_query_index()
+        if index is None:
+            return None
+        lookup = getattr(index, "reference_candidate_sources", None)
+        if lookup is None:
+            return None
+        candidates = lookup(
+            object_id=self._object_id,
+            namespace=self._namespace,
+            object_ref=self._object_ref,
+            state_hash=self._state_hash,
+        )
+        # Empty derived candidates cannot prove authoritative absence. Fall back
+        # to the Store scan so deletion or corruption of a ready sidecar cannot
+        # silently hide a reference.
+        return candidates or None
 
     def _alias_targets(self, roots):
         objects: set[ObjectRef] = set()

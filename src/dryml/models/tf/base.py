@@ -173,6 +173,7 @@ class Wrapper(Serializable):
         try:
             checkpoint = tf.train.Checkpoint(obj=self.obj)
         except ValueError:
+            shutil.rmtree(ckpt_dir)
             return
 
         manager = tf.train.CheckpointManager(checkpoint, ckpt_dir, max_to_keep=1)
@@ -181,6 +182,7 @@ class Wrapper(Serializable):
             shutil.rmtree(ckpt_dir)
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
+        """Record a checkpoint for restoration after optimizer slots exist."""
         import tensorflow as tf
 
         ckpt_dir = os.path.join(src_dir, "object.ckpt")
@@ -227,12 +229,28 @@ class Optimizer(Wrapper):
         if latest is None:
             return
         self._pending_restore_path = latest
-        self._restore_checkpoint = tf.train.Checkpoint(optimizer=self.obj)
-        self._restore_status = self._restore_checkpoint.restore(latest)
+        self._restore_checkpoint = None
+        self._restore_status = None
 
     def restore_pending(self):
+        """Consume and restore the checkpoint against current optimizer slots.
+
+        Returns:
+            TensorFlow restore status, or ``None`` when no checkpoint is pending.
+
+        Side Effects:
+            Attaches checkpoint state to current variables and consumes the
+            pending path so later training cannot replay old optimizer state.
+        """
         if self._pending_restore_path is None:
             return None
+        import tensorflow as tf
+
+        self._restore_checkpoint = tf.train.Checkpoint(optimizer=self.obj)
+        self._restore_status = self._restore_checkpoint.restore(
+            self._pending_restore_path
+        )
+        self._pending_restore_path = None
         return self._restore_status
 
 
@@ -274,7 +292,11 @@ class Model(BaseModel, Serializable):
         self._restore_status = None
 
     def __call__(self, x, *args, **kwargs):
-        return self.obj(x, *args, **kwargs)
+        result = self.obj(x, *args, **kwargs)
+        if self._pending_restore_path is not None:
+            self.restore_pending()
+            result = self.obj(x, *args, **kwargs)
+        return result
 
     def bind_first(self, first_value, *, input_spec=None):
         if input_spec is None or spec_tree_is_batched(input_spec):
@@ -284,7 +306,7 @@ class Model(BaseModel, Serializable):
 
         def bound_model(x):
             batched = _tree_to_tf_model_batch(tf, x, input_spec)
-            return _unbatch_tree(self.obj(batched))
+            return _unbatch_tree(self(batched))
 
         return bound_model, bound_model(first_value)
 
@@ -351,6 +373,7 @@ class Model(BaseModel, Serializable):
         manager.save()
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
+        """Record a checkpoint for restoration after model variables exist."""
         import tensorflow as tf
 
         ckpt_dir = os.path.join(src_dir, "model.ckpt")
@@ -358,12 +381,31 @@ class Model(BaseModel, Serializable):
         if latest is None:
             return
         self._pending_restore_path = latest
-        self._restore_checkpoint = tf.train.Checkpoint(model=self.obj)
-        self._restore_status = self._restore_checkpoint.restore(latest)
+        self._restore_checkpoint = None
+        self._restore_status = None
+        if getattr(self.obj, "built", False):
+            self.restore_pending()
+            self._pending_restore_path = None
 
     def restore_pending(self):
+        """Consume and restore the checkpoint against current model variables.
+
+        Returns:
+            TensorFlow restore status, or ``None`` when no checkpoint is pending.
+
+        Side Effects:
+            Attaches checkpoint state to current variables and consumes the
+            pending path so later inference or training cannot replay old state.
+        """
         if self._pending_restore_path is None:
             return None
+        import tensorflow as tf
+
+        self._restore_checkpoint = tf.train.Checkpoint(model=self.obj)
+        self._restore_status = self._restore_checkpoint.restore(
+            self._pending_restore_path
+        )
+        self._pending_restore_path = None
         return self._restore_status
 
 
@@ -583,6 +625,7 @@ class Training(BasicTraining):
             val_data = self._prepare_data(exp.val_data, for_training=False)
             val_xy = self._xy_data(val_data)
 
+        optimizer_wrapper = self._optimizer(exp)
         optimizer = self._make_optimizer(tf, exp)
         loss_fn = self._make_loss(tf, exp)
         metrics = self._metric_objects(exp)
@@ -614,6 +657,10 @@ class Training(BasicTraining):
                             trainable_variables = _collect_trainable_parameters(exp.model, repo=repo)
                         if not trainable_variables:
                             raise ValueError("TensorFlow model graph exposes no trainable parameters.")
+                        if hasattr(optimizer, "build"):
+                            optimizer.build(trainable_variables)
+                        if hasattr(optimizer_wrapper, "restore_pending"):
+                            optimizer_wrapper.restore_pending()
 
                     grads = tape.gradient(loss_value, trainable_variables)
                     grad_pairs = [

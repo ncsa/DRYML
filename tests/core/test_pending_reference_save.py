@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from dryml.core import Definition, Repo, Serializable
-from dryml.core.repo import RepoLoadError
+from dryml.core.repo import RepoLoadError, RepoSaveError
 from dryml.core.store.dir import DirStore
 
 
@@ -40,6 +40,11 @@ class CountingPendingParent(PendingParent):
     def __init__(self, child):
         type(self).constructions += 1
         super().__init__(child)
+
+
+class FailingPendingValue(PendingValue):
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        raise RuntimeError("child save failed")
 
 
 def test_pending_declaration_save_completes_its_claim_and_captures_once(tmp_path):
@@ -143,3 +148,42 @@ def test_active_nested_claim_rejects_parent_before_any_constructor_runs(tmp_path
     assert CountingPendingParent.constructions == 0
     assert parent_store.read_claim_record(parent.digest()).status == "available"
     assert repo._abandon_claim(lease)
+
+
+def test_dependency_save_failure_abandons_enclosing_claims(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    child = repo.declare_object(FailingPendingValue(1).definition)
+    parent = repo.declare_object(
+        Definition(PendingParent, child).concretize(repo=repo)
+    )
+    live = repo.build_object_ref(parent)
+
+    with pytest.raises(RepoSaveError, match="local state publication failed"):
+        repo.save_object(live, deep_capture=True)
+
+    assert store.read_claim_record(child.digest()).status == "available"
+    assert store.read_claim_record(parent.digest()).status == "available"
+
+
+def test_derived_index_failure_clears_completed_live_claim(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    reference = repo.declare_object(PendingValue(1).definition)
+    live = repo.build_object_ref(reference)
+
+    monkeypatch.setattr(
+        repo._query_index,
+        "register_saved_graph",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("index registration failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="index registration failed"):
+        repo.save_object(live, deep_capture=True)
+
+    assert store.read_claim_record(reference.digest()).status == "completed"
+    assert live._claim_lease is None
+    assert live._claim_leases == ()
+    assert live._pending_claim_dependencies == ()

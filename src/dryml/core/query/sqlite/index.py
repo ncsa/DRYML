@@ -475,20 +475,36 @@ class SQLiteStoreQueryIndex:
             finally:
                 self._cleanup_replacement(replacement_path)
             raise
-        self._clear_dirty(dirty_markers, roots=roots, clear_unscoped=True)
+        self._clear_dirty(
+            dirty_markers, roots=roots, clear_unscoped=True,
+            clear_scoped=True,
+        )
         if stats is not None:
             stats.store_scan_count += 1
             stats.refresh_action = "sqlite-rebuild"
             stats.result_count = scanned
 
     def _preflight_store_roots(self) -> tuple[ConcreteDefinition, ...]:
-        """Read and type-check every authoritative root before sidecar creation."""
+        """Read and type-check authoritative root membership before rebuild."""
 
-        roots = tuple(record.definition for record in self.store.iter_definition_records())
-        for cdef in roots:
+        roots: list[ConcreteDefinition] = []
+        by_hash: dict[str, list[ConcreteDefinition]] = defaultdict(list)
+
+        def add(cdef) -> None:
             if not isinstance(cdef, ConcreteDefinition):
-                raise QueryIndexError(f"Store {self.store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
-        return roots
+                raise QueryIndexError(
+                    f"Store {self.store!r} yielded {type(cdef).__name__}, "
+                    "not ConcreteDefinition."
+                )
+            bucket = by_hash[cdef.graph_hash()]
+            if any(existing.graph_equal(cdef) for existing in bucket):
+                return
+            bucket.append(cdef)
+            roots.append(cdef)
+
+        for definition in self.store.authoritative_root_definitions():
+            add(definition)
+        return tuple(roots)
 
     def _register_reference_authority(self, *, require_ready: bool) -> None:
         """Cache immutable reference facts while leaving Store records authoritative.
@@ -498,7 +514,15 @@ class SQLiteStoreQueryIndex:
         corrupted derived projection can never omit a result or hide a conflict.
         """
 
-        rows = tuple(_reference_authority_rows(self.store))
+        self._register_reference_rows(
+            tuple(_reference_authority_rows(self.store)),
+            require_ready=require_ready,
+            replace=True,
+        )
+
+    def _register_reference_rows(
+            self, rows, *, require_ready: bool, replace: bool) -> None:
+        """Register complete or incremental advisory reference projections."""
 
         def operation(con):
             validate_schema(
@@ -507,12 +531,13 @@ class SQLiteStoreQueryIndex:
                 canonical_version=self.canonical_version,
                 require_ready=require_ready,
             )
-            con.execute("DELETE FROM reference_object_ids")
-            con.execute("DELETE FROM reference_records")
+            if replace:
+                con.execute("DELETE FROM reference_object_ids")
+                con.execute("DELETE FROM reference_records")
             for row in rows:
                 con.execute(
                     """
-                    INSERT INTO reference_records (
+                    INSERT OR IGNORE INTO reference_records (
                         source_kind, source_digest, owner_kind, owner_digest,
                         path_blob, reference_kind, reference_digest,
                         reference_blob, state_hashes_blob, alias
@@ -540,6 +565,78 @@ class SQLiteStoreQueryIndex:
                     )
 
         self._run_write_transaction(operation)
+
+    def reference_candidate_sources(
+            self, *, object_id=None, namespace=None, object_ref=None,
+            state_hash=None):
+        """Return indexed authority sources for selective reference filters.
+
+        Args:
+            object_id: Optional complete ObjectId containment filter.
+            namespace: Optional ObjectId namespace-prefix filter.
+            object_ref: Optional exact ObjectRef filter.
+            state_hash: Optional local-state hash containment filter.
+
+        Returns:
+            Sorted ``(source_kind, source_digest)`` candidates, or ``None`` when
+            no supplied filter can narrow authority safely.
+
+        Raises:
+            QueryIndexError: If the ready derived sidecar cannot be queried.
+
+        Side Effects:
+            None. Callers must verify every candidate against Store authority.
+        """
+        namespace_filter = namespace if namespace else None
+        if (
+                object_id is None and namespace_filter is None
+                and object_ref is None and state_hash is None
+        ):
+            return None
+        joins = ""
+        conditions = [
+            "rr.source_kind IN ('definition', 'declaration', 'state-ref')"
+        ]
+        parameters = []
+        if object_id is not None or namespace_filter is not None or state_hash is not None:
+            joins = " JOIN reference_object_ids oi USING (reference_kind, reference_digest)"
+        if object_id is not None:
+            conditions.append("oi.object_id_blob = ?")
+            parameters.append(encode_reference(object_id))
+        if namespace_filter is not None:
+            encoded = "/".join(namespace_filter)
+            conditions.append(
+                "(CAST(oi.namespace_blob AS TEXT) = ? "
+                "OR CAST(oi.namespace_blob AS TEXT) LIKE ?)"
+            )
+            parameters.extend((encoded, f"{encoded}/%"))
+        if object_ref is not None:
+            conditions.append("rr.reference_kind = 'object'")
+            conditions.append("rr.reference_digest = ?")
+            parameters.append(object_ref.digest())
+        if state_hash is not None:
+            conditions.append("oi.state_hash = ?")
+            parameters.append(state_hash)
+        try:
+            con = self._connections.connection(readonly=True)
+            validate_schema(
+                con,
+                store_key=self.source_key,
+                canonical_version=self.canonical_version,
+                require_ready=True,
+            )
+            rows = con.execute(
+                "SELECT DISTINCT rr.source_kind, rr.source_digest "
+                f"FROM reference_records rr{joins} WHERE "
+                + " AND ".join(conditions)
+                + " ORDER BY rr.source_kind, rr.source_digest",
+                tuple(parameters),
+            )
+        except Exception as error:
+            raise QueryIndexError(
+                f"Reference candidate lookup failed: {error}"
+            ) from error
+        return tuple((row[0], row[1]) for row in rows)
 
     def _assert_sidecar_rebuildable(self) -> str:
         """Reject future sidecars before scanning Store authority or index rows."""
@@ -572,8 +669,41 @@ class SQLiteStoreQueryIndex:
     def activate_stored_roots(self, graph, roots):
         return self._register_stored_roots(graph, roots, require_ready=True)
 
-    def register_saved_graph(self, graph, roots):
-        return self.register_stored_roots(graph, roots)
+    def register_saved_graph(self, graph, roots, state_refs=()):
+        """Incrementally register roots and StateRefs from one completed save.
+
+        Args:
+            graph: Complete query graph for the publication.
+            roots: Definitions made independently queryable as stored roots.
+            state_refs: Newly published exact StateRefs whose reference rows are
+                advisory acceleration only.
+
+        Returns:
+            IndexWriteResult describing graph and root changes.
+
+        Raises:
+            QueryIndexError: If the ready sidecar cannot accept the update.
+
+        Side Effects:
+            Mutates the SQLite sidecar and clears captured publication markers
+            according to the documented deferred dirty-marker policy.
+        """
+        dirty_markers = self._dirty_markers()
+        result = self.register_stored_roots(graph, roots)
+        rows = tuple(
+            row
+            for state_ref in state_refs
+            for row in _state_reference_authority_rows(state_ref)
+        )
+        if rows:
+            self._register_reference_rows(
+                rows, require_ready=True, replace=False
+            )
+        self._clear_dirty(
+            dirty_markers, roots=tuple(roots), clear_unscoped=True,
+            clear_scoped=True,
+        )
+        return result
 
     def _register_stored_roots(self, graph, roots, *, require_ready: bool):
         if require_ready and self._build_claim_path().exists():
@@ -726,6 +856,16 @@ class SQLiteStoreQueryIndex:
                     stats.fast_path = "exact-root-index"
                 return True
 
+        try:
+            is_stored_root = any(
+                root.graph_equal(cdef)
+                for root in self.store.authoritative_root_definitions()
+            )
+        except (AttributeError, NotImplementedError):
+            return False
+        if not is_stored_root:
+            return False
+
         reader = getattr(self.store, "read_definition", None)
         if reader is None:
             return False
@@ -784,7 +924,8 @@ class SQLiteStoreQueryIndex:
             self,
             markers: tuple[Path, ...], *,
             roots: tuple[ConcreteDefinition, ...],
-            clear_unscoped: bool = False) -> None:
+            clear_unscoped: bool = False,
+            clear_scoped: bool = False) -> None:
         root_keys = {self._root_marker_key(root) for root in roots}
         for marker in markers:
             try:
@@ -795,7 +936,10 @@ class SQLiteStoreQueryIndex:
                 len(mutation) == 64
                 and all(char in "0123456789abcdef" for char in mutation)
             )
-            if mutation not in root_keys and not (clear_unscoped and not is_scoped):
+            if not (
+                    (is_scoped and (clear_scoped or mutation in root_keys))
+                    or (clear_unscoped and not is_scoped)
+            ):
                 continue
             try:
                 marker.unlink()
@@ -925,7 +1069,7 @@ class SQLiteStoreQueryIndex:
             return
         if roots is None:
             try:
-                roots = tuple(record.definition for record in self.store.iter_definition_records())
+                roots = self._preflight_store_roots()
             except Exception as exc:
                 issues.append(ValidationIssue("error", "Store root scan failed.", repr(exc)))
                 return
@@ -2018,6 +2162,10 @@ class SQLiteQueryIndexReadView:
                 (token_hash,)):
             if feature_token_equal(_CODEC.decode_feature_token(row_blob), token):
                 return feature_id
+        for feature_id, row_blob in self._con.execute(
+                "SELECT feature_id, token_blob FROM feature_tokens"):
+            if feature_token_equal(_CODEC.decode_feature_token(row_blob), token):
+                return feature_id
         return None
 
     def _parent_edges(self, child_id: DefinitionId) -> tuple[DefinitionEdgeRecord, ...]:
@@ -2328,6 +2476,28 @@ def _reference_authority_rows(store):
         yield encode(
             "state-alias", f"{record.alias}:{record.state_ref_digest}",
             ReferenceOccurrence(state, GraphPath(), state), alias=record.alias,
+        )
+
+
+def _state_reference_authority_rows(state):
+    """Yield incremental advisory rows for one published StateRef."""
+    from ...reference_values import StateRef
+    from ...utils.graph.path import GraphPath
+
+    if not isinstance(state, StateRef):
+        raise TypeError("Incremental reference registration requires a StateRef.")
+    source_digest = state.digest()
+    for value in (state, state.object):
+        states = value.states if isinstance(value, StateRef) else None
+        kind = "state" if isinstance(value, StateRef) else "object"
+        yield (
+            "state-ref", source_digest, "state", source_digest,
+            _CODEC.encode_graph_path(GraphPath()), kind, value.digest(),
+            encode_reference(value),
+            None if states is None else repr(
+                tuple(sorted(states.items(), key=lambda item: str(item[0])))
+            ).encode("ascii"),
+            "", value, states,
         )
 
 

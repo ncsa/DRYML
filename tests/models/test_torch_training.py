@@ -45,6 +45,42 @@ def test_torch_basic_training_updates_experiment_state():
     assert get_default_repo() is None
 
 
+def test_torch_model_and_optimizer_state_ref_round_trip(tmp_path):
+    from dryml.models.torch import Model, Optimizer, Training
+
+    repo = Repo(stores=tmp_path)
+    x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
+    y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
+    ds = ArrayDataset((x, y), repo=repo)
+    model = Model(torch.nn.Linear, 1, 1, repo=repo)
+    optimizer = Optimizer(
+        torch.optim.SGD, target=model, lr=0.01, momentum=0.9, repo=repo
+    )
+    train_fn = Training(
+        optimizer=optimizer,
+        loss_cls=torch.nn.MSELoss,
+        epochs=2,
+        batch_size=2,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(model, train_fn, train_data=ds, repo=repo)
+    exp.train()
+    expected_model = {
+        key: value.detach().clone() for key, value in model.obj.state_dict().items()
+    }
+    expected_optimizer = optimizer.obj.state_dict()
+
+    state = repo.save_object(exp, deep_capture=True)
+    repo.close(flush=True)
+    loaded = Repo(stores=tmp_path).load_state_ref(state, reuse_live="never")
+
+    torch.testing.assert_close(loaded.model.obj.state_dict(), expected_model)
+    torch.testing.assert_close(
+        loaded.train_fn.optimizer.obj.state_dict(), expected_optimizer
+    )
+
+
 def test_torch_sequential_accepts_constructor_tuple_shorthand():
     from dryml.models.torch import Sequential
 

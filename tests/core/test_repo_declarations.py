@@ -54,7 +54,9 @@ def test_definition_failure_creates_no_claim_or_declaration(tmp_path, monkeypatc
     monkeypatch.setattr(
         store,
         "write_definition_record",
-        lambda record: (_ for _ in ()).throw(OSError("definition failure")),
+        lambda record, **kwargs: (_ for _ in ()).throw(
+            OSError("definition failure")
+        ),
     )
 
     with pytest.raises(OSError, match="definition failure"):

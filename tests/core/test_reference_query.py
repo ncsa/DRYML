@@ -1,5 +1,9 @@
-from dryml.core import Definition, Object, Ref, Repo, Serializable
+import pytest
+
+from dryml.core import Definition, Object, ObjectRef, Ref, Repo, Serializable
+from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DeclarationRecord, DefinitionRecord
 from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
@@ -43,13 +47,13 @@ def test_object_id_lookup_is_closed_but_reference_query_returns_aggregate(tmp_pa
 def test_reference_filters_keep_exact_paths_aliases_and_all_ephemeral_refs(tmp_path):
     repo = Repo(DirStore(tmp_path / "store", query_index="sqlite"))
     child = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-    aggregate = repo.save_object(ReferenceQueryWrapper(child.object, repo=repo))
+    aggregate = repo.save_object(ReferenceQueryWrapper(child, repo=repo))
     repo.set_alias("aggregate", aggregate)
 
     path = GraphPath((Parameter("child"),))
     assert list(repo.references().contains(child.object).object_refs()) == [aggregate.object]
     assert list(repo.references().alias("aggregate").object_refs()) == [aggregate.object]
-    assert list(repo.references().path(path).object_refs()) == [child.object]
+    assert list(repo.references().path(path).state_refs()) == [child]
 
     ephemeral = repo.save_object(ReferenceQueryWrapper("value", repo=repo))
     assert ephemeral.object.objects == {}
@@ -66,3 +70,32 @@ def test_object_terminal_preserves_nested_ref_state_reference(tmp_path):
 
     assert loaded.selected == state
     assert loaded.definition.parameters["selected"].target == state
+
+
+def test_derived_candidates_cannot_hide_conflicting_store_authority(
+    tmp_path, monkeypatch
+):
+    first = DirStore(tmp_path / "first", query_index="sqlite")
+    second = DirStore(tmp_path / "second", query_index="sqlite")
+    repo = Repo([first, second])
+    state = repo.save_object(ReferenceQueryLeaf(1, repo=repo), store=first)
+    incompatible = ObjectRef(
+        ReferenceQueryLeaf(2).definition,
+        {"$": state.object_id},
+    )
+    second.write_definition_record(
+        DefinitionRecord(incompatible.definition), stored_root=False
+    )
+    second.write_declaration_record(DeclarationRecord(incompatible))
+    query = repo.references().object_id(state.object_id)
+
+    monkeypatch.setattr(
+        type(query),
+        "_candidate_sources",
+        lambda self, store: (
+            (("state-ref", state.digest()),) if store is first else ()
+        ),
+    )
+
+    with pytest.raises(RepoLoadError, match="incompatible closed-subtree authority"):
+        query.object_refs()

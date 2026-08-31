@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import dill
 import pytest
 
 from dryml.core.store.dir import DirStore
@@ -23,3 +24,24 @@ def test_nonempty_ungated_store_fails_without_mutation(tmp_path):
         DirStore(root)
 
     assert retired.is_dir()
+
+
+def test_previous_store_format_is_rejected_without_mutation(tmp_path):
+    root = tmp_path / "previous"
+    root.mkdir()
+    gate = root / "store-format.record"
+    payload = {
+        "schema": "store-format",
+        "version": 1,
+        "format_version": 1,
+    }
+    original = (
+        b"DRYML-STORE-RECORD/store-format/1\n"
+        + dill.dumps(payload, protocol=5)
+    )
+    gate.write_bytes(original)
+
+    with pytest.raises(StoreAuthorityError, match="Malformed Store record"):
+        DirStore(root)
+
+    assert gate.read_bytes() == original

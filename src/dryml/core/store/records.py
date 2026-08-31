@@ -160,10 +160,10 @@ class StoreFormatRecord(_Record):
     """The sole Store-wide format gate for current direct-layout authority."""
 
     schema: ClassVar[str] = "store-format"
-    format_version: int = 1
+    format_version: int = 2
 
     def __post_init__(self) -> None:
-        if self.format_version != 1:
+        if self.format_version != 2:
             raise StoreRecordError(f"Unsupported Store format version {self.format_version!r}.")
 
     def to_data(self) -> dict[str, Any]:
@@ -232,6 +232,43 @@ class DefinitionRecord(_Record):
 
 
 @dataclass(frozen=True, slots=True)
+class StoredRootRecord(_Record):
+    """Authoritative membership of one DefinitionRecord as a stored root.
+
+    Args:
+        definition_digest: Digest of the same-Store DefinitionRecord promoted to
+            independent stored-root query authority.
+
+    Raises:
+        StoreRecordError: If the digest is malformed.
+    """
+
+    schema: ClassVar[str] = "stored-root"
+    definition_digest: str
+
+    def __post_init__(self) -> None:
+        _digest_value(self.definition_digest, "stored-root definition digest")
+
+    def to_data(self) -> dict[str, Any]:
+        """Return the closed stored-root membership payload."""
+        return {
+            "schema": self.schema,
+            "version": self.version,
+            "definition_digest": self.definition_digest,
+        }
+
+    @classmethod
+    def from_data(cls, data: Any) -> "StoredRootRecord":
+        """Decode one validated stored-root membership payload."""
+        data = _require_exact(
+            data, {"schema", "version", "definition_digest"}, cls.schema
+        )
+        if data["schema"] != cls.schema or data["version"] != cls.version:
+            raise StoreRecordError("Unsupported StoredRootRecord version.")
+        return cls(data["definition_digest"])
+
+
+@dataclass(frozen=True, slots=True)
 class LocalStateManifest(_Record):
     """Exhaustive immutable payload manifest for one codec-specific local state.
 
@@ -242,6 +279,7 @@ class LocalStateManifest(_Record):
     """
 
     schema: ClassVar[str] = "local-state-manifest"
+    version: ClassVar[int] = 2
     codec: str
     graph_hash: str
     definition_digest: str
@@ -267,7 +305,13 @@ class LocalStateManifest(_Record):
 
     @property
     def local_digest(self) -> str:
-        return _digest("dryml-local-state-manifest-v1", {"codec": self.codec, "graph_hash": self.graph_hash, "definition_digest": self.definition_digest, "definition_file_digest": self.definition_file_digest, "files": self.files})
+        # Definition authority selects the storage namespace and is validated
+        # separately. State identity describes the codec payload so a fork can
+        # rebind identical local state to freshly keyed graph authority.
+        return _digest(
+            "dryml-local-state-manifest-v2",
+            {"codec": self.codec, "files": self.files},
+        )
 
     @property
     def state_hash(self) -> str:

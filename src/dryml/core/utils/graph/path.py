@@ -807,7 +807,15 @@ def _find_bracket_end(token: str, start: int) -> int:
 
 def _parse_bracket_value(text: str) -> int | str:
     if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
-        return bytes(text[1:-1], "utf-8").decode("unicode_escape")
+        try:
+            value = ast.literal_eval(text)
+        except (SyntaxError, ValueError) as error:
+            raise QueryPathError(
+                f"Invalid quoted mapping key {text!r}."
+            ) from error
+        if not isinstance(value, str):
+            raise QueryPathError(f"Quoted mapping key is not a string: {text!r}.")
+        return value
     try:
         return int(text)
     except ValueError:

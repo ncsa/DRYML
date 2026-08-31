@@ -904,22 +904,17 @@ class _FromCanonicalTransformer(GraphTransformer):
 
         if kind is NodeKind.REFERENCE_VALUE:
             from .reference_values import StateRef
-            from .repo_plan import apply_exact_reference_identity
 
-            if isinstance(obj, StateRef) and self.resolve_reference is not None:
+            if self.resolve_reference is not None:
                 return self.resolve_reference(obj)
             if isinstance(obj, StateRef):
                 return self.repo.load_state_ref(obj)
-
-            reference = obj.object if isinstance(obj, StateRef) else obj
-            realized = self.repo._materialize_cdef(
-                reference.definition,
+            return self.repo._materialize_object_ref(
+                obj,
                 cache=self.cache,
                 memo=ctx.memo,
                 path=list(ctx.path),
             )
-            apply_exact_reference_identity(realized, reference)
-            return realized
 
         if kind is NodeKind.DEFLINK:
             from .cdef_graph import EdgeKind

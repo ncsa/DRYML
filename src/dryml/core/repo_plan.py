@@ -48,6 +48,12 @@ class RealizationScope:
         compare=False,
         hash=False,
     )
+    _claim_cleanups: list[Callable[[], Any]] = field(
+        default_factory=list,
+        repr=False,
+        compare=False,
+        hash=False,
+    )
 
     def workspace_node_label(self, node_key: object) -> str:
         """Return one token-neutral label for a private node in this scope."""
@@ -58,6 +64,19 @@ class RealizationScope:
                 label = f"node-{uuid.uuid4().hex}"
                 self._workspace_node_labels[node_key] = label
             return label
+
+    def add_claim_cleanup(self, cleanup: Callable[[], Any]) -> None:
+        """Register claim abandonment if this realization later fails.
+
+        Args:
+            cleanup: No-argument callback that abandons claims owned by this
+                realization without touching successor generations.
+
+        Side Effects:
+            Retains the callback until the scope exits and invokes it in reverse
+            order only when realization raises.
+        """
+        self._claim_cleanups.append(cleanup)
 
 
 _CURRENT_REALIZATION_SCOPE: ContextVar[RealizationScope | None] = ContextVar(
@@ -77,6 +96,16 @@ def realization_scope() -> Iterator[RealizationScope]:
     token = _CURRENT_REALIZATION_SCOPE.set(scope)
     try:
         yield scope
+    except BaseException as error:
+        for cleanup in reversed(scope._claim_cleanups):
+            try:
+                cleanup()
+            except BaseException as cleanup_error:
+                if hasattr(error, "add_note"):
+                    error.add_note(
+                        f"Realization claim cleanup also failed: {cleanup_error!r}"
+                    )
+        raise
     finally:
         _CURRENT_REALIZATION_SCOPE.reset(token)
 
@@ -335,6 +364,30 @@ def attach_runtime_binding(
     obj._last_state_hash = getattr(obj, "_last_state_hash", None)
     obj._object_id = getattr(obj, "_object_id", None) if isinstance(obj, Serializable) else None
     obj._object_ref = ObjectRef(cdef, object_ids)
+
+    pending_claims = []
+    claim_leases = []
+    seen_objects = set()
+    seen_claims = set()
+    for candidate in runtime_values.values():
+        if not isinstance(candidate, Object) or id(candidate) in seen_objects:
+            continue
+        seen_objects.add(id(candidate))
+        pairs = list(getattr(candidate, "_pending_claim_dependencies", ()))
+        lease = getattr(candidate, "_claim_lease", None)
+        if lease is not None:
+            pairs.append((lease, candidate))
+        for dependency_lease, dependency_obj in pairs:
+            key = id(dependency_lease)
+            if key not in seen_claims:
+                pending_claims.append((dependency_lease, dependency_obj))
+                seen_claims.add(key)
+        for dependency_lease in getattr(candidate, "_claim_leases", ()):
+            if dependency_lease not in claim_leases:
+                claim_leases.append(dependency_lease)
+    if pending_claims:
+        obj._pending_claim_dependencies = tuple(pending_claims)
+        obj._claim_leases = tuple(claim_leases)
 
 
 def _collect_imported_object_ids(value: Any, path: GraphPath, out: dict) -> None:
@@ -636,7 +689,8 @@ def execute_save_plan(
         deep_capture: bool = False,
         federated: bool = False,
         report_stores: bool = False,
-        capture_memo: set[object] | None = None):
+        capture_memo: set[object] | None = None,
+        claim_lease: Any = None):
     """Publish local states then the complete enclosing StateRef record last.
 
     Args:
@@ -648,6 +702,7 @@ def execute_save_plan(
         report_stores: Whether to return an ephemeral StoreReport with the StateRef.
         capture_memo: Internal ObjectId set already captured by pending-declaration
             completion; those states are adopted instead of serialized again.
+        claim_lease: Optional exact declaration lease fencing initial publication.
 
     Returns:
         Complete StateRef, optionally paired with StoreReport.
@@ -706,9 +761,13 @@ def execute_save_plan(
                 raise _save_error(GraphPath(), "embedded StateRef local state is not available in a connected Store")
 
     for node in plan.graph.nodes():
-        store.write_definition_record(DefinitionRecord(node.definition))
+        store.write_definition_record(
+            DefinitionRecord(node.definition), stored_root=False
+        )
     for action in state_actions:
-        store.write_definition_record(DefinitionRecord(action.definition))
+        store.write_definition_record(
+            DefinitionRecord(action.definition), stored_root=False
+        )
 
     selected: dict[GraphPath, Any] = {}
     states: dict[GraphPath, str] = {}
@@ -738,9 +797,12 @@ def execute_save_plan(
     # This is the graph-level publication boundary. Nothing mutable is updated
     # until the immutable total StateRef record has been installed.
     with store.writer_lock():
-        repo._complete_initial_state_ref(state_ref, store)
+        repo._complete_initial_state_ref(state_ref, store, claim_lease)
         store.write_state_ref_record(StateRefRecord(state_ref))
-        repo._mark_initial_state_ref_complete(state_ref, store)
+        store.write_definition_record(
+            DefinitionRecord(state_ref.definition), stored_root=True
+        )
+        repo._mark_initial_state_ref_complete(state_ref, store, claim_lease)
     repo._num_saves += 1
     required = [store]
     required.extend(selected.values())
