@@ -71,6 +71,7 @@ def test_deleting_derived_index_rebuilds_without_changing_authority(tmp_path):
 
     # The sidecar is derived state; removing it must trigger an authority scan.
     assert index is not None
+    store.close()
     index.path.unlink()
     reopened = Repo(DirStore(store.base_dir, query_index="sqlite"))
 

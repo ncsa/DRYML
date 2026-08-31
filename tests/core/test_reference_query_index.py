@@ -40,6 +40,7 @@ def test_sqlite_reference_rows_rebuild_from_unchanged_authority(tmp_path):
     assert con.execute("SELECT COUNT(*) FROM reference_object_ids").fetchone()[0] == 2
     con.close()
 
+    repo.close(flush=True)
     index.path.unlink()
     assert repo.references().object_id(state.object_id).state_refs().one() == state
     con = sqlite3.connect(index.path)

@@ -735,8 +735,10 @@ def test_deleting_or_corrupting_sidecar_recovers_without_changing_records(tmp_pa
     authority = _definition_path(store, record).read_bytes()
     sidecar = Path(store.query_index_path)
 
+    store.close()
     sidecar.unlink()
     assert store.reconcile_query_index().action == "rebuild"
+    store.close()
     sidecar.write_bytes(b"not a sqlite database")
     assert store.query_index_status().state == "corrupt"
     assert store.reconcile_query_index().action == "rebuild"

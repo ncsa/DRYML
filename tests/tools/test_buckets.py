@@ -272,11 +272,21 @@ def test_tier_metadata_references_existing_test_files() -> None:
 
 
 def test_tier_metadata_references_collected_test_nodes() -> None:
-    """Reject node overrides left behind by renamed or deleted tests."""
+    """Reject stale overrides in modules collectable with installed extras.
+
+    Optional-framework modules may skip collection in the lightweight CI
+    environment. Their file paths remain covered by the preceding existence
+    gate and their node IDs are validated whenever those extras are installed.
+    """
 
     baseline = load_baseline(DEFAULT_BASELINE)
+    collected = collected_test_nodeids()
+    collected_paths = {path_for_nodeid(nodeid) for nodeid in collected}
     stale = sorted(
-        set(baseline.get("node_tiers", {})) - collected_test_nodeids()
+        nodeid
+        for nodeid in baseline.get("node_tiers", {})
+        if path_for_nodeid(nodeid) in collected_paths
+        and nodeid not in collected
     )
     assert stale == []
 
