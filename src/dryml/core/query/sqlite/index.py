@@ -1023,7 +1023,11 @@ class SQLiteStoreQueryIndex:
         self._validate_store_roots(con, issues, roots=roots)
         errors = tuple(issue for issue in issues if issue.severity == "error")
         if errors:
-            detail = "; ".join(issue.message for issue in errors[:3])
+            detail = "; ".join(
+                f"{issue.message} ({issue.details})"
+                if issue.details else issue.message
+                for issue in errors[:3]
+            )
             raise QueryIndexError(f"SQLite query-index rebuild validation failed before ready: {detail}")
 
     def _validate_decodable_rows(self, con, issues: list[ValidationIssue]) -> None:
