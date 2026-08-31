@@ -12,7 +12,6 @@ import venv
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -36,14 +35,34 @@ def release_artifacts() -> tuple[Path, Path]:
 
 @pytest.fixture(scope="session")
 def installed_python(release_artifacts: tuple[Path, Path]) -> Path:
-    """Install the built wheel into an isolated interpreter and return it."""
+    """Build a wheel from the sdist, install it, and return its interpreter."""
 
-    _, wheel = release_artifacts
+    sdist, _ = release_artifacts
     root = Path("/tmp/dryml/package-installs") / uuid.uuid4().hex
     venv.EnvBuilder(with_pip=True, system_site_packages=True).create(root)
     python = root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    source = root / "source"
+    shutil.unpack_archive(sdist, source, format="gztar")
+    project = next(source.iterdir())
+    wheel_dir = root / "wheel"
+    wheel_dir.mkdir()
     subprocess.run(
-        [str(python), "-m", "pip", "install", "--no-deps", "--force-reinstall", str(wheel)],
+        [str(python), "-m", "build", "--wheel", "--outdir", str(wheel_dir)],
+        cwd=project,
+        check=True,
+        env={**os.environ, "PYTHONPATH": ""},
+    )
+    (wheel,) = wheel_dir.glob("*.whl")
+    subprocess.run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--force-reinstall",
+            str(wheel),
+        ],
         cwd=root,
         check=True,
     )

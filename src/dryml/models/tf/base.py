@@ -4,7 +4,7 @@ import os
 import shutil
 
 from dryml.core.object import Serializable
-from dryml.core.repo import get_default_repo
+from dryml.core.repo import manage_repo
 from dryml.core.tensor_spec import Dynamic, TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
 from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
@@ -31,12 +31,20 @@ def _normalize_list(value):
     return (value,)
 
 
-def _collect_trainable_parameters(target, *, repo=None):
-    """Collect graph trainables using explicit or context-local Repo authority."""
+def _collect_trainable_parameters(target, *, repo):
+    """Collect graph trainables using the supplied explicit Repo authority.
 
-    repo = repo or get_default_repo()
-    if repo is None:
-        raise RuntimeError("TensorFlow trainable-parameter collection requires an active Repo.")
+    Args:
+        target: Live DRYML graph root whose trainable nodes are collected.
+        repo: Bounded Repo authority used to traverse retained runtime bindings.
+
+    Returns:
+        A flat list of TensorFlow trainable variables in post-order graph order.
+
+    Raises:
+        KeyError: If a required runtime binding is unavailable from ``target``.
+    """
+
     results = repo.apply_graph(
         target,
         lambda obj: maybe_call_method(
@@ -546,6 +554,25 @@ class Training(BasicTraining):
     """Low-level TensorFlow training loop for arbitrary TF-callable DRYML models."""
 
     def __call__(self, exp):
+        """Train one Experiment with TensorFlow gradient tapes.
+
+        Args:
+            exp: Experiment providing the model, data, state, and optional
+                optimizer, loss, and metric capabilities.
+
+        Returns:
+            Per-batch scalar loss values in training order.
+
+        Raises:
+            ValueError: If the data is empty or the model exposes no trainable
+                TensorFlow variables.
+            KeyError: If the model graph lacks a retained runtime binding.
+
+        Side Effects:
+            Updates model variables, optimizer state, metrics, progress output,
+            and ``exp.state``. Graph traversal uses a temporary explicit Repo
+            only for the duration of trainable-variable collection.
+        """
         import tensorflow as tf
 
         train_data = self._prepare_data(exp.train_data, for_training=True)
@@ -583,7 +610,8 @@ class Training(BasicTraining):
                         loss_value = tf.reduce_mean(loss_fn(y, y_pred))
 
                     if trainable_variables is None:
-                        trainable_variables = _collect_trainable_parameters(exp.model)
+                        with manage_repo() as repo:
+                            trainable_variables = _collect_trainable_parameters(exp.model, repo=repo)
                         if not trainable_variables:
                             raise ValueError("TensorFlow model graph exposes no trainable parameters.")
 

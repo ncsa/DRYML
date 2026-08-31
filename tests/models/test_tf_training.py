@@ -250,8 +250,10 @@ def test_tf_basic_training_repeats_finite_dataset_for_multiple_epochs():
 
 
 def test_tf_training_gradient_tape_trains_autoencoder():
+    from dryml.core.repo import get_default_repo
     from dryml.models.tf import Loss, Optimizer, Training
 
+    assert get_default_repo() is None
     model = _autoencoder_model()
     train_fn = Training(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01),
@@ -269,3 +271,4 @@ def test_tf_training_gradient_tape_trains_autoencoder():
     assert exp.state.step == 2
     assert model.encoder.obj.trainable_variables
     assert model.decoder.obj.trainable_variables
+    assert get_default_repo() is None

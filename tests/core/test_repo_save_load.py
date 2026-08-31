@@ -1,6 +1,9 @@
 """U5 direct-record save, structural-load, and future exact-restore contracts."""
 
 import inspect
+import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -47,6 +50,20 @@ class FailingSave(Serializable):
     def save_state_to_dir_imp(self, dest_dir, *, codec):
         Path(dest_dir, "partial.txt").write_text("partial", encoding="ascii")
         raise RuntimeError("serializer failed")
+
+
+def _run_fresh_process(code: str) -> subprocess.CompletedProcess[str]:
+    """Run ``code`` with this checkout's source tree first on ``PYTHONPATH``."""
+
+    src = Path(__file__).resolve().parents[2] / "src"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join((str(src), env.get("PYTHONPATH", "")))
+    return subprocess.run(
+        (sys.executable, "-c", code),
+        text=True,
+        capture_output=True,
+        env=env,
+    )
 
 
 def test_public_save_returns_state_ref_and_publishes_local_state(tmp_path):
@@ -145,18 +162,37 @@ def test_failed_local_state_save_never_publishes_a_state_ref(tmp_path):
 
 
 def test_orchestrator_guard_rejects_live_save_before_publication(tmp_path):
-    store = DirStore(tmp_path / "store")
-    repo = Repo(store)
-    obj = SaveLoadValue(10, repo=repo)
+    store_path = tmp_path / "store"
+    completed = _run_fresh_process(
+        f"""
+from pathlib import Path
 
-    session.set_mode("orchestrator")
+from dryml import session
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
+from dryml.runtime.errors import RuntimeTransitionError
+from tests.core.test_repo_save_load import SaveLoadValue
+
+
+store_path = Path({str(store_path)!r})
+repo = Repo(DirStore(store_path))
+obj = SaveLoadValue(10, repo=repo)
+session.set_mode("orchestrator")
+try:
     try:
-        with pytest.raises(RuntimeTransitionError, match="prohibits Object materialization"):
-            repo.save_object(obj)
-    finally:
-        session.reset()
+        repo.save_object(obj)
+    except RuntimeTransitionError as error:
+        assert "prohibits Object materialization" in str(error)
+    else:
+        raise AssertionError("orchestrator save unexpectedly materialized an Object")
+finally:
+    session.reset()
 
-    assert not (tmp_path / "store" / "state-refs").exists()
+assert not (store_path / "state-refs").exists()
+"""
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_changed_save_surface_rejects_retired_revision_options_and_generation_keywords():
