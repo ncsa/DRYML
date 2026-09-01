@@ -1,39 +1,49 @@
-# DRYML Repo Policies
+# DRYML Framework Repository
+
+This active submodule owns DRYML implementation, tests, and durable product
+documentation. The parent development workspace owns workspace policy and
+records this repository's gitlink after coherent child work is complete.
 
 ## Documentation
-Primary documentation is via docstrings, keep those updated for all classes/methods. Docstrings should detail what classes are responsible for and method docstrings should detail their actions as well as arguments/types and return types.
 
-There is a `docs` directory containing explanatory material showing how to use the API. Keep this up to date as well. That may include new .md files, new sections, or editing existing content.
+Keep public classes, functions, methods, and types documented with responsibility,
+behavior, parameters/types, return values, failure behavior, and relevant side
+effects. Update `docs/` alongside changes to public APIs, persistent formats,
+dispatch, concurrency, recovery, or user-visible behavior.
 
 ## Tests
-Running the test suite is handled with `tests.sh`. Ignore tests in `tests/{old,dev}` they are currently old. I usually execute like this: `./tests.sh --ignore tests/old --ignore tests/dev -x tests`. The script passes additional arguments through, and you can run focused tests by specifying the files or folders you want to run.
 
-Try to avoid executing the full test suite often. There are some tests which are very 'heavy' and take a long time to run. `tests/core` is okay to run.
+Use `tests.sh` for DRYML verification. The normal maintained selection is:
 
-## Directory explanation
+```bash
+./tests.sh --ignore tests/old --ignore tests/dev -x tests
+```
 
-### `src/dryml` - The main source code repository
-`core` - core modules of dryml.
+Run focused files or directories by passing them through `tests.sh`. The old and
+development tiers, `tests/old` and `tests/dev`, are excluded unless the user
+explicitly requests them. `./tests.sh full` is the maintained full selection;
+`./tests.sh profile --unknown-only` profiles unclassified test tiers.
 
-`code` - utilities for method instrumentation
-`execute` - The remote execution subsystem of DRYML
-`context` - The compute context subsystem of DRYML
-`graph` - Generic graph algorithms. Used in various places by DRYML
-`data` - The Dataset API submodule
-`models` - The Model API submodule
-`artifacts` - The Artifacts API submodule
-`vis` - A collection of useful visualization methods that integrate with DRYML
-`devtools` - Tools to help the user while developing with DRYML for example in a jupyter notebook.
+## Source Ownership
 
-### Plugins
-`ray` - ray specific DRYML plugin
-`jax` - jax specific DRYML plugin
-`tf` - tf specific DRYML plugin
-`torch` - torch specific DRYML plugin
+`src/dryml` owns framework code:
 
-## Draft Commit Message
+- `core` provides core modules; `core/utils/graph` contains supported generic
+  graph algorithms.
+- `code` provides method instrumentation and analysis; `execute` is remote
+  execution; `context` is compute context.
+- `data`, `models`, `artifacts`, `vis`, and `devtools` own their named API areas.
+- `ray`, `jax`, `tf`, and `torch` are framework-specific plugin areas.
 
-A draft commit message should be written to `COMMIT-MSG`. This file may already exist in which case it includes a draft already in progress. Append your new version after the current text. The user will make final edits given the history of the evolving message. Check the last commit message before editing. A previous draft message may have already been checked in. In which case, inspect the diff and make the commit message reflect that diff.
+There is no tracked `src/dryml/graph` package. Any untracked directory there is
+unsupported user work and must not be inspected, edited, staged, deleted, or
+used as a fixture without explicit user direction. Tracked `examples/` files are
+DRYML examples; pre-existing untracked example files are user work, so stage and
+test only exact paths approved for the task.
 
-### Other
-`examples` - Example dryml programs to illustrate dryml use cases
+## Repository Architecture
+
+Keep `core` independent of `dryml.code`, and keep `dryml.code` independent of
+dispatch policy. Optional framework plugins must remain behind their plugin and
+backend boundaries; do not introduce eager optional-framework imports into
+lightweight package paths.
