@@ -1,4 +1,5 @@
 import pickle
+from dataclasses import replace
 
 import pytest
 
@@ -40,6 +41,84 @@ def test_tensor_spec_dtype_string_equality_normalization():
         shape=(10,),
         backend="numpy",
     )
+
+
+def test_tensor_spec_equal_exact_matches_populated_normalized_specs_bidirectionally():
+    left = TensorSpec(
+        dtype="float32",
+        shape=[Dynamic, 16],
+        batch=8,
+        backend="numpy",
+        layout=Layout.RAGGED,
+        axis_names=["tokens", "features"],
+        batch_axis_name="examples",
+        ragged_rank=1,
+        row_splits_dtype="int64",
+        sparse_format="csr",
+    )
+    right = TensorSpec(
+        dtype=DType("float", 32),
+        shape=(Dynamic, 16),
+        batch=8,
+        backend="numpy",
+        layout="ragged",
+        axis_names=("tokens", "features"),
+        batch_axis_name="examples",
+        ragged_rank=1,
+        row_splits_dtype=DType("int", 64),
+        sparse_format="csr",
+    )
+
+    assert left.equal_exact(right)
+    assert right.equal_exact(left)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("dtype", "float64"),
+        ("shape", (Dynamic, 32)),
+        ("batch", Dynamic),
+        ("layout", Layout.SPARSE),
+        ("axis_names", ("items", "features")),
+        ("batch_axis_name", "items"),
+        ("ragged_rank", 2),
+        ("row_splits_dtype", "int32"),
+        ("sparse_format", "coo"),
+        ("backend", "torch"),
+    ],
+)
+def test_tensor_spec_equal_exact_detects_each_stored_field(field, value):
+    base = TensorSpec(
+        dtype="float32",
+        shape=(Dynamic, 16),
+        batch=8,
+        backend="numpy",
+        layout=Layout.RAGGED,
+        axis_names=("tokens", "features"),
+        batch_axis_name="examples",
+        ragged_rank=1,
+        row_splits_dtype="int64",
+        sparse_format="csr",
+    )
+    changed = replace(base, **{field: value})
+
+    assert not base.equal_exact(changed)
+    assert not changed.equal_exact(base)
+
+
+def test_tensor_spec_equal_exact_distinguishes_backend_without_changing_equality():
+    numpy_spec = TensorSpec("float32", shape=(10,), backend="numpy")
+    torch_spec = TensorSpec("float32", shape=(10,), backend="torch")
+
+    assert numpy_spec == torch_spec
+    assert not numpy_spec.equal_exact(torch_spec)
+
+
+def test_tensor_spec_equal_exact_rejects_non_tensor_spec():
+    spec = TensorSpec("float32", shape=(10,))
+
+    assert not spec.equal_exact(object())
 
 
 def test_tensor_spec_is_hashable_and_pickleable():

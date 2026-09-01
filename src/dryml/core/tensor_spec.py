@@ -236,6 +236,34 @@ class TensorSpec:
             self.row_splits_dtype == rhs.row_splits_dtype and
             self.sparse_format == rhs.sparse_format)
 
+    def equal_exact(self, other: object) -> bool:
+        """Compare all normalized TensorSpec fields, including backend.
+
+        Parameters
+        ----------
+        other:
+            Object to compare with this specification.
+
+        Returns
+        -------
+        bool
+            ``True`` when ``other`` is a TensorSpec with identical normalized
+            dtype, shape, batch, backend, layout, axis, ragged, and sparse
+            metadata; otherwise ``False``. Unlike ``==``, this comparison is
+            backend-sensitive and never raises for non-TensorSpec values.
+        """
+        return isinstance(other, TensorSpec) and (
+            self.dtype == other.dtype and
+            self.shape == other.shape and
+            self.batch == other.batch and
+            self.backend == other.backend and
+            self.layout == other.layout and
+            self.axis_names == other.axis_names and
+            self.batch_axis_name == other.batch_axis_name and
+            self.ragged_rank == other.ragged_rank and
+            self.row_splits_dtype == other.row_splits_dtype and
+            self.sparse_format == other.sparse_format)
+
     def __hash__(self) -> int:
         return hash((
             self.dtype,
