@@ -74,8 +74,14 @@ def test_installed_root_exports_and_version_match_metadata(
 import importlib.metadata
 import json
 import dryml
+import dryml.core
 print(json.dumps({
     "exports": sorted(dryml.__all__),
+    "root_core_conveniences": all(
+        getattr(dryml, name) is getattr(dryml.core, name)
+        for name in dryml.core.__all__
+        if name in dryml.__all__
+    ),
     "module": dryml.__file__,
     "version": dryml.__version__,
     "metadata_version": importlib.metadata.version("dryml"),
@@ -84,6 +90,7 @@ print(json.dumps({
     )
     data = json.loads(result.stdout)
     assert set(data["exports"]) == _EXPECTED_ROOT_EXPORTS
+    assert data["root_core_conveniences"]
     assert data["version"] == data["metadata_version"] == "0.3.0.dev0"
     assert "site-packages" in data["module"].replace("\\", "/")
 
