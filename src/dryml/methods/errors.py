@@ -34,8 +34,7 @@ class ImplementationSelectionError(MethodError):
             non-empty only when ``reason`` is ``"unknown_traits"``.
         message: Optional bounded diagnostic text.
 
-    U3 exposes this carrier for the U4 selection API; U3 does not select
-    alternative implementations.
+    ``unknown_traits`` is populated only for the ``"unknown_traits"`` reason.
     """
 
     def __init__(
@@ -58,12 +57,13 @@ class PreparedCallMismatchError(MethodError):
         expected: The retained normalized call signature.
         observed: The normalized signature supplied by the mismatching call.
 
-    U4 defines signature normalization and cached-call behavior; U3 provides
-    this stable error type without enabling preparation.
+    The expected and observed payloads are immutable Method call signatures when
+    normalization succeeded. A malformed cached runtime call may report the
+    retained signature as both payloads while still failing before user code.
     """
 
     def __init__(self, expected: object, observed: object) -> None:
-        """Retain typed diagnostic payloads for the later preparation contract."""
+        """Retain typed immutable diagnostic payloads for cached-call handling."""
 
         self.expected = expected
         self.observed = observed

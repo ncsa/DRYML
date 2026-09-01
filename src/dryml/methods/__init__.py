@@ -1,8 +1,9 @@
-"""Logical Method authoring, passive traits, and inspectable implementation catalogs.
+"""Logical callable IR, passive traits, selection, and local preparation.
 
-This package owns dependency-light Method declarations. U3 provides direct-call
-forwarding and catalog construction; U4 adds alternative selection and call
-preparation without changing the authored declaration surface.
+The package owns dependency-light Method declarations, deterministic authored
+implementation catalogs, direct eager selection, and exact process-local call
+preparation. It does not own dispatch, managed lifecycle, persistence, or code
+transformation policy.
 """
 
 from dryml.core.backend import Backend
@@ -18,6 +19,7 @@ from .errors import (
 )
 from .implementation import MethodImplementation
 from .method import Method
+from .signature import MethodCallMode, MethodCallNode, MethodCallNodeKind, MethodCallSignature
 from .traits import Traits, traits
 
 __all__ = [
@@ -26,6 +28,10 @@ __all__ = [
     "Traits",
     "traits",
     "MethodImplementation",
+    "MethodCallMode",
+    "MethodCallNodeKind",
+    "MethodCallNode",
+    "MethodCallSignature",
     "Method",
     "MethodError",
     "ImplementationDeclarationError",
