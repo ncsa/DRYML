@@ -5,6 +5,7 @@ from __future__ import annotations
 import types
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from typing import Callable
 from .errors import ImplementationDeclarationError, ImplementationSelectionError
 from .signature import MethodCallNode, runtime_node_for_constraint, satisfies
 from .traits import Traits
@@ -127,9 +128,11 @@ class MethodImplementation:
         target: Exact raw descriptor stored in the authoring class namespace.
         traits: Complete closed trait set supplied by the author.
 
-    Calling the carrier binds its private raw descriptor to its private Method
-    receiver using ordinary Python rules, then forwards all arguments unchanged.
-    The raw ``target`` remains unbound and is never invoked by catalog inspection.
+    Calling the carrier validates its retained first-input constraint and then
+    binds its private raw descriptor to its private Method receiver using ordinary
+    Python rules. A Method-local composite may instead retain a private selected
+    invoker; the raw ``target`` remains inspectable and catalog inspection never
+    invokes it.
     """
 
     name: str
@@ -140,6 +143,7 @@ class MethodImplementation:
     _receiver_type: type | None = field(default=None, repr=False, compare=False)
     _input_spec: MethodCallNode | None = field(default=None, repr=False, compare=False)
     _direct: bool = field(default=False, repr=False, compare=False)
+    _invoker: Callable[..., object] | None = field(default=None, repr=False, compare=False)
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         """Bind and invoke this authored target with unchanged logical arguments.
@@ -177,6 +181,8 @@ class MethodImplementation:
                 raise ImplementationSelectionError("conflict") from error
             if not valid:
                 raise ImplementationSelectionError("conflict")
+        if self._invoker is not None:
+            return self._invoker(*args, **kwargs)
         if not self._direct:
             return invoke_descriptor(
                 self._descriptor,

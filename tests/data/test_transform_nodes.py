@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 
@@ -5,6 +8,7 @@ from dryml.core.cardinality import Cardinality
 from dryml.core.backend import Backend
 from dryml.core.tensor_spec import Dynamic, TensorSpec
 from dryml.data.dataset import Dataset, Map
+from dryml.methods import ImplementationSelectionError, Method, PreparedCallMismatchError, traits
 from dryml.data import (
     ArgMax,
     Batch,
@@ -41,9 +45,59 @@ class CountingCast(Cast):
         super().__init__(dtype)
         self.dispatch_count = 0
 
-    def resolve_impl_for(self, *args, **kwargs):
+    def find_implementation(self, *args, **kwargs):
         self.dispatch_count += 1
-        return super().resolve_impl_for(*args, **kwargs)
+        return super().find_implementation(*args, **kwargs)
+
+    def _prepare_implementation(self, *args, **kwargs):
+        self.dispatch_count += 1
+        return super()._prepare_implementation(*args, **kwargs)
+
+
+class OneShotDataset(Dataset):
+    """A deliberately one-shot source that records each attempted consumption."""
+
+    def __init__(self, items, spec):
+        self._items = iter(items)
+        self.next_calls = 0
+        super().__init__(spec=spec)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.next_calls += 1
+        return next(self._items)
+
+    def __len__(self):
+        return Cardinality.UNKNOWN
+
+
+class CountingNumpy(Method):
+    """Count target calls so selected-call validation can be observed."""
+
+    def __init__(self):
+        self.calls = 0
+
+    @traits(backend="numpy")
+    def numpy(self, value):
+        self.calls += 1
+        return value
+
+    def infer_output_spec(self, input_spec):
+        return input_spec
+
+
+class CountingArgMax(ArgMax):
+    """Record local child specialization without changing ArgMax behavior."""
+
+    def __init__(self):
+        super().__init__()
+        self.dispatch_count = 0
+
+    def find_implementation(self, *args, **kwargs):
+        self.dispatch_count += 1
+        return super().find_implementation(*args, **kwargs)
 
 
 def test_cast_infer_output_spec_and_iteration():
@@ -127,6 +181,107 @@ def test_elementwise_dataset_resolves_dispatch_once_per_iterator():
     assert transform.dispatch_count == 2
 
 
+def test_map_selects_before_consuming_complete_specs():
+    transform = CountingCast("float32")
+    src = OneShotDataset(
+        [np.array([1], dtype=np.int32)],
+        TensorSpec("int32", shape=(1,), backend="numpy"),
+    )
+
+    assert [item.dtype for item in Map(src, transform)] == [np.dtype("float32")]
+    assert transform.dispatch_count == 1
+
+
+def test_empty_complete_spec_map_selects_without_invoking_a_target():
+    transform = CountingCast("float32")
+    src = ListDataset([], TensorSpec("int32", shape=(1,), backend="numpy"))
+
+    assert list(Map(src, transform)) == []
+    assert transform.dispatch_count == 1
+
+
+def test_map_backend_fallback_reads_only_the_first_value_before_selection():
+    src = OneShotDataset(
+        [np.array([1], dtype=np.int32), np.array([2], dtype=np.int32)],
+        TensorSpec("int32", shape=(1,), backend=None),
+    )
+
+    class ObservingCast(CountingCast):
+        def __init__(self):
+            super().__init__("float32")
+            self.next_counts = []
+
+        def find_implementation(self, *args, **kwargs):
+            self.next_counts.append(self.source.next_calls)
+            return super().find_implementation(*args, **kwargs)
+
+    transform = ObservingCast()
+    transform.source = src
+    assert [item.tolist() for item in Map(src, transform)] == [[1.0], [2.0]]
+    assert transform.dispatch_count == 2
+    assert transform.next_counts == [0, 1]
+
+
+def test_map_empty_missing_backend_only_checks_exhaustion():
+    transform = CountingCast("float32")
+    src = OneShotDataset([], TensorSpec("int32", shape=(1,), backend=None))
+
+    assert list(Map(src, transform)) == []
+    assert transform.dispatch_count == 1
+    assert src.next_calls == 1
+
+
+def test_map_selected_callable_rejects_later_backend_conflicts_before_target():
+    transform = CountingNumpy()
+    src = ListDataset(
+        [
+            np.array([1], dtype=np.int32),
+            TensorSpec("int32", shape=(1,), backend="torch"),
+        ],
+        TensorSpec("int32", shape=(1,), backend=None),
+    )
+
+    with pytest.raises(ImplementationSelectionError) as error:
+        list(Map(src, transform))
+    assert error.value.reason == "conflict"
+    assert transform.calls == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        ImplementationSelectionError("ambiguous"),
+        ImplementationSelectionError("conflict"),
+        ImplementationSelectionError("no_candidate"),
+        ImplementationSelectionError("unknown_traits", ("batch_mode",)),
+        ImplementationSelectionError("unknown_traits", ("backend", "batch_mode")),
+        ImplementationSelectionError("unknown_traits", ("backend", "malformed")),
+    ),
+)
+def test_map_only_falls_back_for_the_exact_missing_backend_error(error):
+    class FailingMethod(Method):
+        def __call__(self, value):
+            raise AssertionError("Map must not invoke a failed selection")
+
+        def infer_output_spec(self, input_spec):
+            return input_spec
+
+        def find_implementation(self, *args, **kwargs):
+            raise self.error
+
+    src = OneShotDataset(
+        [np.array([1], dtype=np.int32)],
+        TensorSpec("int32", shape=(1,), backend=None),
+    )
+
+    method = FailingMethod()
+    method.error = error
+    with pytest.raises(ImplementationSelectionError) as observed:
+        list(Map(src, method))
+    assert observed.value is error
+    assert src.next_calls == 0
+
+
 def test_pipe_infer_output_spec_and_call():
     pipe = Pipe(Select("x"), Cast("float32"))
     spec = {
@@ -193,6 +348,31 @@ def test_map_accepts_multiple_transforms_as_pipe():
     assert transform.dispatch_count == 1
 
 
+def test_project_and_pipe_select_children_once_from_structural_specs():
+    first = CountingCast("float32")
+    second = CountingCast("float64")
+    src = ListDataset(
+        [{"x": np.array([1], dtype=np.int32)}, {"x": np.array([2], dtype=np.int32)}],
+        {"x": TensorSpec("int32", shape=(1,), backend="numpy")},
+    )
+
+    projected = Map(src, Project(left=Select("x"), right=Pipe(Select("x"), first)))
+    piped = Map(src, Pipe(Select("x"), second))
+
+    assert [item["right"].dtype for item in projected] == [np.dtype("float32")] * 2
+    assert [item.dtype for item in piped] == [np.dtype("float64")] * 2
+    assert first.dispatch_count == 1
+    assert second.dispatch_count == 1
+
+    argmax = CountingArgMax()
+    vector_src = ListDataset(
+        [np.array([[0.1, 0.9]], dtype=np.float32)],
+        TensorSpec("float32", shape=(1, 2), backend="numpy"),
+    )
+    assert [int(item) for item in Map(vector_src, Pipe(Flatten(), argmax))] == [1]
+    assert argmax.dispatch_count == 1
+
+
 def test_flatten_and_scale_infer_output_spec_and_iteration():
     src = ListDataset(
         [np.array([[0, 255]], dtype=np.uint8)],
@@ -236,6 +416,82 @@ def test_argmax_batched_preserves_batch_axis():
 
     assert ds.spec == TensorSpec("int64", shape=(), batch=2, backend="numpy")
     assert [item.tolist() for item in out] == [[1, 0]]
+
+
+def test_migrated_data_methods_support_preparation_and_explicit_batch_defaults():
+    cast = Cast("float32")
+    first = np.array([1, 2], dtype=np.int32)
+    cast.learn()
+    assert cast(first).dtype == np.dtype("float32")
+    cached = cast.cached_signature
+    cast.implementations = lambda: (_ for _ in ()).throw(AssertionError("must stay cached"))
+    assert cast(np.array([3, 4], dtype=np.int32)).dtype == np.dtype("float32")
+    with pytest.raises(PreparedCallMismatchError):
+        cast(np.array([3, 4, 5], dtype=np.int32))
+    assert cast.cached_signature == cached
+    cast.eager()
+    assert cast.call_mode == "eager"
+
+    argmax = ArgMax()
+    value = np.array([[0.1, 0.9]], dtype=np.float32)
+    with pytest.raises(ImplementationSelectionError) as unknown:
+        argmax(value)
+    assert unknown.value.unknown_traits == ("batch_mode",)
+    argmax.default_batched = False
+    assert int(argmax(value)[0]) == 1
+    argmax.default_batched = True
+    assert argmax(value).tolist() == [1]
+    argmax.eager()
+    argmax.default_batched = False
+    argmax.learn()
+    assert int(argmax(value)[0]) == 1
+    cached_argmax = argmax.cached_signature
+    assert int(argmax(value)[0]) == 1
+    assert argmax.cached_signature == cached_argmax
+    argmax.eager()
+
+    flatten = Flatten()
+    with pytest.raises(ImplementationSelectionError) as flatten_unknown:
+        flatten(value)
+    assert flatten_unknown.value.unknown_traits == ("batch_mode",)
+    flatten.default_batched = False
+    assert flatten(value).shape == (2,)
+    flatten.default_batched = True
+    assert flatten(value).shape == (1, 2)
+
+
+def test_learned_pipe_caches_locally_selected_children():
+    """Composite cached calls bypass both top-level and child candidate discovery."""
+
+    first = CountingCast("float32")
+    second = CountingCast("float64")
+    pipe = Pipe(first, second)
+    value = np.array([1, 2], dtype=np.int32)
+    pipe.learn()
+
+    assert pipe(value).dtype == np.dtype("float64")
+    assert (first.dispatch_count, second.dispatch_count) == (1, 1)
+
+    first.implementations = lambda: (_ for _ in ()).throw(AssertionError("first must stay selected"))
+    second.implementations = lambda: (_ for _ in ()).throw(AssertionError("second must stay selected"))
+    assert pipe(np.array([3, 4], dtype=np.int32)).dtype == np.dtype("float64")
+    assert (first.dispatch_count, second.dispatch_count) == (1, 1)
+
+
+def test_data_import_keeps_optional_backends_unloaded():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import dryml.data; "
+            "assert 'tensorflow' not in sys.modules; assert 'torch' not in sys.modules",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_batch_infer_output_spec_and_iteration():

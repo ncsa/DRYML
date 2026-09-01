@@ -22,7 +22,17 @@ from .implementation import (
     invoke_direct_descriptor,
     invoke_descriptor,
 )
-from .signature import MethodCallMode, MethodCallNode, MethodCallSignature, call_signature, node_facts, runtime_facts, spec_node
+from .signature import (
+    MethodCallMode,
+    MethodCallNode,
+    MethodCallSignature,
+    call_signature,
+    complete_backend_constraint,
+    node_facts,
+    runtime_facts,
+    spec_from_runtime_node,
+    spec_node,
+)
 from .traits import METHOD_TRAITS_KEY, Traits
 
 _DIRECT_CALL_ATTR = "__dryml_method_direct_call__"
@@ -44,6 +54,7 @@ class _CachedInvocation:
     receiver_ref: weakref.ReferenceType[object]
     receiver_type: type
     direct: bool = False
+    invoker: object | None = None
 
     def invoke(self, args: tuple[object, ...], kwargs: dict[str, object]) -> object:
         """Bind the retained descriptor to its still-live receiver and invoke it."""
@@ -51,6 +62,8 @@ class _CachedInvocation:
         receiver = self.receiver_ref()
         if receiver is None:
             raise MethodError("The cached Method receiver is no longer live.")
+        if callable(self.invoker):
+            return self.invoker(*args, **kwargs)
         invocation = invoke_direct_descriptor if self.direct else invoke_descriptor
         return invocation(self.descriptor, receiver, self.receiver_type, args, kwargs, name=self.name)
 
@@ -430,17 +443,58 @@ class Method(Object):
             this Method's eager/learning/cached preparation state.
         """
 
+        return self._find_implementation(
+            input_spec,
+            backend=backend,
+            batch_mode=batch_mode,
+            derive_spec_batch=True,
+        )
+
+    def _find_implementation(
+        self,
+        input_spec: SpecTree | None,
+        *,
+        backend: Backend | str | None,
+        batch_mode: BatchMode | str | None,
+        derive_spec_batch: bool,
+    ) -> MethodImplementation:
+        """Construct one selected callable with explicit spec-fact handling."""
+
         input_node, required_backend, required_batch = self._selection_constraints(
-            input_spec, backend, batch_mode
+            input_spec,
+            backend,
+            batch_mode,
+            derive_spec_batch=derive_spec_batch,
         )
         implementation = self._select(required_backend, required_batch)
-        return replace(implementation, _input_spec=input_node)
+        return replace(
+            implementation,
+            _input_spec=complete_backend_constraint(input_node, required_backend),
+        )
+
+    def _prepare_implementation(
+        self,
+        input_spec: SpecTree | None,
+        *,
+        backend: Backend | None,
+        batch_mode: BatchMode | None,
+    ) -> MethodImplementation:
+        """Select one learning-time callable without guessing batch from shape."""
+
+        return self._find_implementation(
+            input_spec,
+            backend=backend,
+            batch_mode=batch_mode,
+            derive_spec_batch=False,
+        )
 
     def _selection_constraints(
         self,
         input_spec: SpecTree | None,
         backend: Backend | str | None,
         batch_mode: BatchMode | str | None,
+        *,
+        derive_spec_batch: bool = True,
     ) -> tuple[MethodCallNode | None, Backend | None, BatchMode | None]:
         """Normalize API constraints and reject contradictory known facts."""
 
@@ -449,6 +503,8 @@ class Method(Object):
             required_batch = None if batch_mode is None else BatchMode(batch_mode)
             input_node = None if input_spec is None else spec_node(input_spec)
             spec_backend, spec_batch = (None, None) if input_node is None else node_facts(input_node)
+            if not derive_spec_batch:
+                spec_batch = None
         except (TypeError, ValueError) as error:
             raise ImplementationSelectionError("conflict") from error
         if required_backend is not None and spec_backend is not None and required_backend != spec_backend:
@@ -541,7 +597,19 @@ class Method(Object):
             effective_batch = signature.batch_mode
             if effective_batch is None and default_batched is not None:
                 effective_batch = BatchMode.batched if default_batched else BatchMode.element
-            implementation = receiver._select(backend, effective_batch)
+            try:
+                input_spec = (
+                    None
+                    if not signature.args
+                    else spec_from_runtime_node(signature.args[0], effective_batch)
+                )
+                implementation = receiver._prepare_implementation(
+                    input_spec,
+                    backend=backend,
+                    batch_mode=effective_batch,
+                )
+            except TypeError as error:
+                raise MethodError("Method learning could not normalize its first input.") from error
             try:
                 cached = _CachedInvocation(
                     implementation.name,
@@ -549,6 +617,7 @@ class Method(Object):
                     weakref.ref(receiver),
                     implementation._receiver_type,
                     implementation._direct,
+                    implementation._invoker,
                 )
             except TypeError as error:
                 raise MethodError("Method instances must support weak references.") from error

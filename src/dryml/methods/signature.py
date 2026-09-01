@@ -155,6 +155,91 @@ def runtime_node_for_constraint(value: object, constraint: MethodCallNode) -> Me
     return _apply_retained_batch(runtime_node(value), constraint)
 
 
+def complete_backend_constraint(
+    constraint: MethodCallNode | None,
+    backend: Backend | None,
+) -> MethodCallNode | None:
+    """Complete unknown backend leaves in a retained selection constraint.
+
+    Args:
+        constraint: The immutable first-argument constraint retained by a selected
+            implementation, if the caller supplied one.
+        backend: The explicitly selected backend, if known.
+
+    Returns:
+        A recursively copied constraint whose backend-unknown tensor leaves use
+        ``backend``. Known leaf backends remain unchanged.
+
+    This is used only by direct selected-call validation. It neither discovers a
+    backend nor imports optional framework adapters.
+    """
+
+    if constraint is None or backend is None:
+        return constraint
+    if constraint.kind == "tensor":
+        spec = constraint.value  # type: ignore[assignment]
+        if spec.backend is None:
+            spec = replace(spec, backend=backend)
+        return MethodCallNode("tensor", spec)
+    if constraint.kind == "mapping":
+        return MethodCallNode(
+            "mapping",
+            tuple(
+                (key, complete_backend_constraint(value, backend))
+                for key, value in constraint.value  # type: ignore[union-attr]
+            ),
+        )
+    return MethodCallNode(
+        constraint.kind,
+        tuple(
+            complete_backend_constraint(value, backend)
+            for value in constraint.value  # type: ignore[union-attr]
+        ),
+    )
+
+
+def spec_from_runtime_node(
+    node: MethodCallNode,
+    batch_mode: BatchMode | None,
+) -> SpecTree:
+    """Convert one runtime node to a logical first-input specification.
+
+    Args:
+        node: Immutable runtime argument structure.
+        batch_mode: Effective batch intent selected for the learning call.
+
+    Returns:
+        A fresh specification tree. Batched intent moves each physical leading
+        tensor axis into its logical batch field; unknown intent preserves the
+        physical shape without asserting element selection.
+
+    Raises:
+        TypeError: If batched intent is incompatible with a scalar or unknown
+        physical tensor shape.
+    """
+
+    if node.kind == "tensor":
+        spec = node.value  # type: ignore[assignment]
+        if batch_mode is BatchMode.batched and spec.batch is None:
+            if spec.shape is None or not spec.shape:
+                raise TypeError("Batched Method calls require a physical leading axis.")
+            spec = replace(
+                spec,
+                shape=spec.shape[1:],
+                batch=spec.shape[0],
+                batch_axis_name="batch",
+            )
+        return spec
+    if node.kind == "tuple":
+        return tuple(spec_from_runtime_node(child, batch_mode) for child in node.value)  # type: ignore[union-attr]
+    if node.kind == "list":
+        return [spec_from_runtime_node(child, batch_mode) for child in node.value]  # type: ignore[union-attr]
+    return {
+        key: spec_from_runtime_node(child, batch_mode)
+        for key, child in node.value  # type: ignore[union-attr]
+    }
+
+
 def call_signature(args: tuple[object, ...], kwargs: Mapping[str, object]) -> MethodCallSignature:
     """Normalize a complete logical call into an exact immutable signature.
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Generic, Iterator, TypeVar
 
 from dryml.core import Object
+from dryml.core.backend import discover_backends
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import SpecTree
+from dryml.methods import ImplementationSelectionError
 
 
 T = TypeVar("T")
@@ -51,8 +53,15 @@ class Dataset(Object, Generic[T]):
         """
         raise NotImplementedError("Subclasses must implement their lengths")
 
+
 class Map(Dataset):
-    """Dataset node that applies one Method to each source element."""
+    """Dataset node that applies one selected Method callable per source element.
+
+    A complete source specification selects the callable before source
+    consumption. When backend alone is unknown, the iterator contributes one
+    value at most to complete that constraint. Other selection failures propagate
+    without source consumption.
+    """
 
     def __init__(self, src: Dataset, *methods):
         if not methods:
@@ -69,16 +78,35 @@ class Map(Dataset):
         super().__init__(spec=method.infer_output_spec(src.spec))
 
     def __iter__(self):
-        it = iter(self.src)
         try:
-            first = next(it)
-        except StopIteration:
-            return
-
-        impl, first_out = self.method.bind_first(first, input_spec=self.src.spec)
-        yield first_out
+            implementation = self.method.find_implementation(
+                input_spec=self.src.spec,
+            )
+        except ImplementationSelectionError as error:
+            if (
+                error.reason != "unknown_traits"
+                or error.unknown_traits != ("backend",)
+            ):
+                raise
+            it = iter(self.src)
+            try:
+                first = next(it)
+            except StopIteration:
+                return
+            backends = discover_backends(first)
+            if len(backends) != 1:
+                if len(backends) > 1:
+                    raise ImplementationSelectionError("conflict")
+                raise error
+            implementation = self.method.find_implementation(
+                input_spec=self.src.spec,
+                backend=next(iter(backends)),
+            )
+            yield implementation(first)
+        else:
+            it = iter(self.src)
         for item in it:
-            yield impl(item)
+            yield implementation(item)
 
     def __len__(self) -> Cardinality:
         return self.src.__len__()
