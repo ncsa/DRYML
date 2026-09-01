@@ -5,6 +5,7 @@ import pytest
 from dryml.annotations import (
     Annotation,
     AnnotationValidationError,
+    annotations_for_members,
     annotations_for_method,
     attach_annotation,
 )
@@ -82,6 +83,27 @@ def test_hostile_descriptors_are_inspected_without_binding_or_dynamic_lookup():
         method = descriptor
 
     assert annotations_for_method(Subject, "method") == (entry,)
+
+
+def test_member_collection_does_not_bind_hostile_descriptors():
+    """Member discovery preserves a hostile descriptor without executing its hooks."""
+
+    class Hostile:
+        def __getattribute__(self, name):
+            raise AssertionError("dynamic lookup must not run")
+
+        def __get__(self, instance, owner):
+            raise AssertionError("binding must not run")
+
+    descriptor = Hostile()
+    entry = Annotation("consumer.hostile", object())
+    attach_annotation(descriptor, entry)
+
+    class Subject:
+        method = descriptor
+
+    assert annotations_for_members(Subject)[0].descriptor is descriptor
+    assert annotations_for_members(Subject)[0].annotations == (entry,)
 
 
 def test_method_collection_rejects_missing_and_malformed_member_names():

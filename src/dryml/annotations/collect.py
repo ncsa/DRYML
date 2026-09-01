@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import types
 from collections.abc import Iterable
 from typing import Any
 
-from .attachment import _is_class, _native_descriptor_value, _type_dict, _type_mro, own_annotations
+from .attachment import (
+    _has_static_descriptor_protocol,
+    _is_class,
+    _native_descriptor_value,
+    _type_dict,
+    _type_mro,
+    own_annotations,
+)
 from .errors import AnnotationValidationError
-from .model import Annotation, _validate_key
+from .model import AnnotatedMember, Annotation, _validate_key
 
 
 def collect_annotations(target: Any, *, key: str | None = None) -> tuple[Annotation, ...]:
@@ -108,6 +116,60 @@ def annotations_for_method(cls: type, method_name: str, *, key: str | None = Non
     return _filter(_dedupe((*annotations_for_class(cls), *_target_annotations(descriptor))), key)
 
 
+def annotations_for_members(cls: type, *, key: str | None = None) -> tuple[AnnotatedMember, ...]:
+    """Collect annotated member declarations in base-to-subclass C3 order.
+
+    A declaration is included when its direct descriptor annotations match
+    ``key``. Later unannotated declarations with the same name are also
+    included, preserving observable shadow evidence for consumers. Descriptor
+    inspection is static: descriptors are not bound and dynamic attribute hooks
+    are not invoked. Known ``staticmethod`` and ``classmethod`` descriptors
+    contribute direct descriptor entries followed by entries on their underlying
+    function; custom descriptors contribute only direct entries.
+
+    Args:
+        cls: A supplied live class whose declaration namespaces are inspected
+            through the native static attachment boundary.
+        key: Optional exact built-in consumer key used to filter each member's
+            annotations before matching and shadow detection.
+
+    Returns:
+        An immutable tuple of raw declaration evidence. Each member's annotation
+        tuple is identity-deduplicated in direct collection order.
+
+    Raises:
+        AnnotationValidationError: If ``cls`` or ``key`` is invalid, or an
+            inspected direct attachment tuple is malformed.
+        UnsupportedAnnotationTargetError: If an inspectable descriptor member
+            cannot be inspected through the static attachment boundary.
+
+    Side Effects:
+        None. The collector neither binds or invokes descriptors nor assigns
+        consumer semantics to the returned declaration evidence.
+    """
+
+    if not _is_class(cls):
+        raise AnnotationValidationError("annotations_for_members() requires a class")
+    _validate_filter_key(key)
+    matching_names: set[str] = set()
+    members: list[AnnotatedMember] = []
+    for owner in reversed(_type_mro(cls)):
+        if owner is object:
+            continue
+        for name, descriptor in _type_dict(owner).items():
+            if not _is_member_target(descriptor):
+                if name in matching_names:
+                    members.append(AnnotatedMember(owner, name, descriptor, ()))
+                continue
+            annotations = _filter(_target_annotations(descriptor), key)
+            if annotations:
+                matching_names.add(name)
+                members.append(AnnotatedMember(owner, name, descriptor, annotations))
+            elif name in matching_names:
+                members.append(AnnotatedMember(owner, name, descriptor, ()))
+    return tuple(members)
+
+
 def _target_annotations(target: Any) -> tuple[Annotation, ...]:
     """Collect one direct target and known descriptor function without binding."""
 
@@ -117,6 +179,21 @@ def _target_annotations(target: Any) -> tuple[Annotation, ...]:
         function = _native_descriptor_value(descriptor_type, "__func__", target)
         values.extend(own_annotations(function))
     return _dedupe(values)
+
+
+def _is_member_target(target: Any) -> bool:
+    """Return whether a declaration can carry direct annotation evidence."""
+
+    target_type = type(target)
+    return (
+        _is_class(target)
+        or target_type is types.FunctionType
+        or _known_descriptor_type(target) is not None
+        or (
+            target_type not in (types.GetSetDescriptorType, types.MemberDescriptorType)
+            and _has_static_descriptor_protocol(target_type)
+        )
+    )
 
 
 def _filter(annotations: tuple[Annotation, ...], key: str | None) -> tuple[Annotation, ...]:
@@ -157,4 +234,4 @@ def _known_descriptor_type(target: Any) -> type | None:
     return None
 
 
-__all__ = ["annotations_for_class", "annotations_for_method", "collect_annotations"]
+__all__ = ["annotations_for_class", "annotations_for_members", "annotations_for_method", "collect_annotations"]

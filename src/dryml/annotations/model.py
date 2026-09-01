@@ -60,4 +60,28 @@ class Annotation:
         _validate_key(self.key)
 
 
-__all__ = ["Annotation"]
+@dataclass(frozen=True, slots=True)
+class AnnotatedMember:
+    """One statically discovered annotated class-member declaration.
+
+    Args:
+        owner: The exact class namespace that declared ``name``.
+        name: The declared member name.
+        descriptor: The raw unbound object stored in ``owner``'s namespace.
+        annotations: Direct annotations collected from ``descriptor`` in
+            descriptor order. Known ``staticmethod`` and ``classmethod``
+            descriptors also contribute their underlying function annotations.
+
+    Side Effects:
+        None. This immutable evidence carrier retains live objects without
+        binding descriptors, invoking hooks, copying, or interpreting consumer
+        annotation values.
+    """
+
+    owner: type
+    name: str
+    descriptor: object
+    annotations: tuple[Annotation, ...]
+
+
+__all__ = ["AnnotatedMember", "Annotation"]

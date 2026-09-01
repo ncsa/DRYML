@@ -11,11 +11,13 @@ import dryml.annotations as annotations
 
 _PUBLIC = {
     "Annotation",
+    "AnnotatedMember",
     "ANNOTATION_ATTR",
     "attach_annotation",
     "own_annotations",
     "collect_annotations",
     "annotations_for_class",
+    "annotations_for_members",
     "annotations_for_method",
     "AnnotationError",
     "AnnotationValidationError",

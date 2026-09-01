@@ -88,13 +88,29 @@ its known underlying function.
 `annotations_for_method(cls, name)` first returns the class sequence, then the
 descriptor selected by normal static MRO lookup, then its known underlying
 function. An overridden base implementation that is not selected is excluded.
+`annotations_for_members(cls, key=None)` instead returns immutable
+`AnnotatedMember(owner, name, descriptor, annotations)` evidence for every
+matching member declaration in base-to-subclass C3 order. `owner` is the exact
+declaring class, `name` is the declared member name, and `descriptor` is the raw
+unbound namespace value. Its annotation tuple contains direct descriptor entries
+and, for known `staticmethod` and `classmethod` descriptors only, direct entries
+on the underlying function. A safe custom descriptor contributes only its direct
+entries. A later unannotated declaration with a name that previously matched is
+also returned with an empty annotation tuple so consumers can interpret an
+override or shadow themselves.
+
 Collection never binds descriptors or invokes `__get__`, dynamic attribute
 hooks, properties, imports, or user code. If the same `Annotation` object is
 seen through multiple paths, it appears once at its first occurrence; distinct
-objects remain distinct even when their keys and values match.
+objects remain distinct even when their keys and values match. The same
+identity-deduplication rule applies within each `AnnotatedMember` annotation
+tuple. The member collector returns no partial result: unsupported descriptor
+members and malformed direct metadata raise the existing generic annotation
+errors.
 
 All collectors accept `key=` for exact-key filtering. Filtering preserves the
-unfiltered relative order and identity deduplication. Invalid filter keys,
+unfiltered relative order and identity deduplication. For member collection,
+matching and shadow evidence are evaluated after filtering. Invalid filter keys,
 missing members, unsupported targets, and malformed direct metadata raise the
 generic annotation errors instead of returning partial results.
 

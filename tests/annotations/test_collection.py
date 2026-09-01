@@ -9,6 +9,7 @@ from dryml.annotations import (
     AnnotationValidationError,
     UnsupportedAnnotationTargetError,
     annotations_for_class,
+    annotations_for_members,
     attach_annotation,
     collect_annotations,
 )
@@ -146,3 +147,118 @@ def test_collection_rejects_unsupported_targets_and_corrupted_metadata():
     Corrupt.__dryml_annotations__ = ("bad",)
     with pytest.raises(AnnotationValidationError, match="malformed"):
         annotations_for_class(Corrupt)
+
+
+def test_member_collection_preserves_base_to_subclass_declarations_and_shadows():
+    """Member evidence retains raw declarations, including unannotated shadows."""
+
+    class Root:
+        def root_member(self):
+            return "root"
+
+        def shared(self):
+            return "root"
+
+    class Left(Root):
+        def left_member(self):
+            return "left"
+
+    class Right(Root):
+        def right_member(self):
+            return "right"
+
+    class Leaf(Left, Right):
+        def shared(self):
+            return "leaf"
+
+        def leaf_member(self):
+            return "leaf"
+
+    root_entry = Annotation("consumer.member", "root")
+    left_entry = Annotation("consumer.member", "left")
+    right_entry = Annotation("consumer.member", "right")
+    leaf_entry = Annotation("consumer.member", "leaf")
+    attach_annotation(Root.__dict__["root_member"], root_entry)
+    attach_annotation(Root.__dict__["shared"], root_entry)
+    attach_annotation(Left.__dict__["left_member"], left_entry)
+    attach_annotation(Right.__dict__["right_member"], right_entry)
+    attach_annotation(Leaf.__dict__["leaf_member"], leaf_entry)
+
+    members = annotations_for_members(Leaf)
+
+    assert [(member.owner, member.name, member.descriptor, member.annotations) for member in members] == [
+        (Root, "root_member", Root.__dict__["root_member"], (root_entry,)),
+        (Root, "shared", Root.__dict__["shared"], (root_entry,)),
+        (Right, "right_member", Right.__dict__["right_member"], (right_entry,)),
+        (Left, "left_member", Left.__dict__["left_member"], (left_entry,)),
+        (Leaf, "shared", Leaf.__dict__["shared"], ()),
+        (Leaf, "leaf_member", Leaf.__dict__["leaf_member"], (leaf_entry,)),
+    ]
+
+
+def test_member_collection_filters_exact_keys_without_losing_shadows_or_identity_deduplication():
+    """Filtering applies to direct member entries before shadow evidence is retained."""
+
+    class Base:
+        def method(self):
+            return "base"
+
+    class Leaf(Base):
+        def method(self):
+            return "leaf"
+
+    shared = Annotation("consumer.match", "shared")
+    other = Annotation("consumer.other", "other")
+    attach_annotation(Base.__dict__["method"], shared)
+    attach_annotation(Base.__dict__["method"], shared)
+    attach_annotation(Base.__dict__["method"], other)
+
+    members = annotations_for_members(Leaf, key="consumer.match")
+
+    assert [(member.owner, member.name, member.annotations) for member in members] == [
+        (Base, "method", (shared,)),
+        (Leaf, "method", ()),
+    ]
+
+
+def test_member_collection_preserves_non_descriptor_shadows():
+    """A later ordinary value remains visible when it shadows an annotated member."""
+
+    class Base:
+        def method(self):
+            return "base"
+
+    entry = Annotation("consumer.member", "base")
+    attach_annotation(Base.__dict__["method"], entry)
+
+    class Leaf(Base):
+        method = None
+
+    members = annotations_for_members(Leaf)
+
+    assert [(member.owner, member.name, member.descriptor, member.annotations) for member in members] == [
+        (Base, "method", Base.__dict__["method"], (entry,)),
+        (Leaf, "method", None, ()),
+    ]
+
+
+def test_member_collection_rejects_invalid_inputs_and_corrupt_member_metadata():
+    """Member discovery fails atomically through the existing annotation errors."""
+
+    class Subject:
+        def valid(self):
+            return "valid"
+
+        def corrupt(self):
+            return "corrupt"
+
+    entry = Annotation("consumer.member", "valid")
+    attach_annotation(Subject.__dict__["valid"], entry)
+    Subject.__dict__["corrupt"].__dryml_annotations__ = ("bad",)
+
+    with pytest.raises(AnnotationValidationError, match="requires a class"):
+        annotations_for_members(Subject())
+    with pytest.raises(AnnotationValidationError, match="key"):
+        annotations_for_members(Subject, key=0)
+    with pytest.raises(AnnotationValidationError, match="malformed"):
+        annotations_for_members(Subject)
