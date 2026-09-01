@@ -54,9 +54,11 @@ Supported targets are extensible Python functions, classes, `staticmethod` and
 `classmethod` descriptors, and custom descriptors with a real instance
 dictionary and native `object.__setattr__`. Properties, builtins,
 non-extensible objects, and descriptors that override attribute mutation are
-rejected before mutation. `own_annotations(target)` returns only the exact
-target's direct tuple in declaration order; it does not inherit or unwrap
-entries.
+rejected before mutation. A target that defines a data descriptor at the
+reserved `__dryml_annotations__` attribute is also rejected so attachment
+cannot invoke target-owned getter or setter behavior. `own_annotations(target)`
+returns only the exact target's direct tuple in declaration order; it does not
+inherit or unwrap entries.
 
 Attach declarations during import, class definition, or setup before sharing a
 target. Concurrent writes to the same target are unsupported. Concurrent

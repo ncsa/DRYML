@@ -71,6 +71,42 @@ def test_attachment_rejects_unsafe_targets_without_partial_mutation():
             assert ANNOTATION_ATTR not in vars(target)
 
 
+def test_attachment_rejects_reserved_data_descriptor_without_invoking_it():
+    """A target cannot intercept the kernel's reserved attachment attribute."""
+
+    class CollisionDescriptor:
+        def __get__(self, instance, owner):
+            return self
+
+        def get_annotations(self):
+            raise AssertionError("reserved attachment getter must not run")
+
+        def set_annotations(self, value):
+            raise AssertionError("reserved attachment setter must not run")
+
+        __dryml_annotations__ = property(get_annotations, set_annotations)
+
+    target = CollisionDescriptor()
+    with pytest.raises(UnsupportedAnnotationTargetError):
+        attach_annotation(target, Annotation("consumer.collision", object()))
+    assert object.__getattribute__(target, "__dict__") == {}
+
+
+def test_unsupported_error_does_not_invoke_a_hostile_type_name_hook():
+    """Bounded target diagnostics use the native type name."""
+
+    class HostileMeta(type):
+        @property
+        def __name__(cls):
+            raise AssertionError("type name hook must not run")
+
+    class Unsupported(metaclass=HostileMeta):
+        pass
+
+    with pytest.raises(UnsupportedAnnotationTargetError):
+        attach_annotation(Unsupported(), Annotation("consumer.unsupported", object()))
+
+
 def test_direct_lookup_is_exact_ordered_and_rejects_corruption():
     """Direct lookup neither inherits nor repairs malformed target metadata."""
 

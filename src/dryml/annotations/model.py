@@ -12,14 +12,11 @@ _KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 _MAX_KEY_LENGTH = 128
 
 
-def _validate_key(key: str) -> str:
+def _validate_key(key: str) -> None:
     """Validate one consumer-selected annotation key.
 
     Args:
         key: ASCII identifier used for exact collection filtering.
-
-    Returns:
-        The validated key.
 
     Raises:
         AnnotationValidationError: If the key is not a 1-128 character ASCII
@@ -33,7 +30,6 @@ def _validate_key(key: str) -> str:
         or _KEY_PATTERN.fullmatch(key) is None
     ):
         raise AnnotationValidationError("annotation key is invalid", context={"key": key})
-    return key
 
 
 @dataclass(frozen=True, slots=True, eq=False)

@@ -6,7 +6,7 @@ import inspect
 from collections.abc import Iterable
 from typing import Any
 
-from .attachment import own_annotations
+from .attachment import _is_class, _native_descriptor_value, _type_mro, own_annotations
 from .errors import AnnotationValidationError
 from .model import Annotation, _validate_key
 
@@ -33,9 +33,9 @@ def collect_annotations(target: Any, *, key: str | None = None) -> tuple[Annotat
             statically by the attachment boundary.
     """
 
-    _validate_filter_key(key)
     if _is_class(target):
         return annotations_for_class(target, key=key)
+    _validate_filter_key(key)
     return _filter(_target_annotations(target), key)
 
 
@@ -61,7 +61,7 @@ def annotations_for_class(cls: type, *, key: str | None = None) -> tuple[Annotat
     _validate_filter_key(key)
     values = (
         annotation
-        for base in reversed(type.__getattribute__(cls, "__mro__"))
+        for base in reversed(_type_mro(cls))
         if base is not object
         for annotation in own_annotations(base)
     )
@@ -106,16 +106,19 @@ def _target_annotations(target: Any) -> tuple[Annotation, ...]:
     """Collect one direct target and known descriptor function without binding."""
 
     values: list[Annotation] = list(own_annotations(target))
-    if _is_known_descriptor(target):
-        function = object.__getattribute__(target, "__func__")
+    descriptor_type = _known_descriptor_type(target)
+    if descriptor_type is not None:
+        function = _native_descriptor_value(descriptor_type, "__func__", target)
         values.extend(own_annotations(function))
     return _dedupe(values)
 
 
-def _filter(annotations: Iterable[Annotation], key: str | None) -> tuple[Annotation, ...]:
+def _filter(annotations: tuple[Annotation, ...], key: str | None) -> tuple[Annotation, ...]:
     """Apply the already-validated exact key filter after deduplication."""
 
-    return tuple(annotation for annotation in annotations if key is None or annotation.key == key)
+    if key is None:
+        return annotations
+    return tuple(annotation for annotation in annotations if annotation.key == key)
 
 
 def _dedupe(annotations: Iterable[Annotation]) -> tuple[Annotation, ...]:
@@ -137,17 +140,15 @@ def _validate_filter_key(key: str | None) -> None:
         _validate_key(key)
 
 
-def _is_class(target: Any) -> bool:
-    """Return whether ``target`` is a class without dynamic target lookup."""
-
-    return issubclass(type(target), type)
-
-
-def _is_known_descriptor(target: Any) -> bool:
-    """Return whether static native descriptor unwrapping is defined for target."""
+def _known_descriptor_type(target: Any) -> type | None:
+    """Return the built-in descriptor owner used for native unwrapping."""
 
     target_type = type(target)
-    return issubclass(target_type, staticmethod) or issubclass(target_type, classmethod)
+    if issubclass(target_type, staticmethod):
+        return staticmethod
+    if issubclass(target_type, classmethod):
+        return classmethod
+    return None
 
 
 __all__ = ["annotations_for_class", "annotations_for_method", "collect_annotations"]

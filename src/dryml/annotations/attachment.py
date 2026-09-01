@@ -11,6 +11,12 @@ from .model import Annotation
 
 ANNOTATION_ATTR = "__dryml_annotations__"
 
+_OBJECT_SETATTR = object.__dict__["__setattr__"]
+_TYPE_DICT = type.__dict__["__dict__"]
+_TYPE_MRO = type.__dict__["__mro__"]
+_TYPE_NAME = type.__dict__["__name__"]
+_TYPE_SETATTR = type.__dict__["__setattr__"]
+
 
 def own_annotations(target: Any) -> tuple[Annotation, ...]:
     """Return annotations attached directly to one supported live target.
@@ -60,6 +66,8 @@ def attach_annotation(target: Any, annotation: Annotation) -> Any:
     if not isinstance(annotation, Annotation):
         raise AnnotationValidationError("annotation attachment requires an Annotation")
     existing = own_annotations(target)
+    if _has_data_descriptor(type(target), ANNOTATION_ATTR):
+        _unsupported(target)
     if _is_class(target):
         type.__setattr__(target, ANNOTATION_ATTR, existing + (annotation,))
     else:
@@ -71,30 +79,24 @@ def _target_dict(target: Any) -> Mapping[str, Any]:
     """Return a statically accessible direct dictionary or reject the target."""
 
     target_type = type(target)
-    if issubclass(target_type, type):
-        if _native_type_attr(target_type, "__setattr__") is not type.__setattr__:
+    if _is_class(target):
+        if _static_type_attr(target_type, "__setattr__") is not _TYPE_SETATTR:
             _unsupported(target)
-        return type.__getattribute__(target, "__dict__")
-    if _is_known_native_target_type(target_type):
-        if _native_type_attr(target_type, "__setattr__") is not object.__setattr__:
-            _unsupported(target)
-        return object.__getattribute__(target, "__dict__")
-    if (
-        _native_type_attr(target_type, "__setattr__") is not object.__setattr__
-        or not _has_static_descriptor_protocol(target)
-        or not _has_real_instance_dict(target)
-    ):
+        return _type_dict(target)
+    if _static_type_attr(target_type, "__setattr__") is not _OBJECT_SETATTR:
         _unsupported(target)
-    return object.__getattribute__(target, "__dict__")
+    if not _is_known_native_target_type(target_type) and not _has_static_descriptor_protocol(target_type):
+        _unsupported(target)
+    dictionary_descriptor = _instance_dict_descriptor(target_type)
+    if dictionary_descriptor is None:
+        _unsupported(target)
+    return _descriptor_value(dictionary_descriptor, target, target_type)
 
 
-def _has_static_descriptor_protocol(target: Any) -> bool:
+def _has_static_descriptor_protocol(target_type: type) -> bool:
     """Return whether a custom target declares ``__get__`` without lookup hooks."""
 
-    return any(
-        "__get__" in _native_type_attr(base, "__dict__")
-        for base in _native_type_attr(type(target), "__mro__")
-    )
+    return any("__get__" in _type_dict(base) for base in _type_mro(target_type))
 
 
 def _is_class(target: Any) -> bool:
@@ -113,14 +115,28 @@ def _is_known_native_target_type(target_type: type) -> bool:
     )
 
 
-def _has_real_instance_dict(target: Any) -> bool:
-    """Return whether the target inherits Python's native instance dictionary."""
+def _instance_dict_descriptor(target_type: type) -> Any | None:
+    """Return the first native instance-dictionary descriptor in static MRO order."""
 
-    for base in _native_type_attr(type(target), "__mro__"):
-        descriptor = _native_type_attr(base, "__dict__").get("__dict__")
+    for base in _type_mro(target_type):
+        descriptor = _type_dict(base).get("__dict__")
         if descriptor is not None:
-            return isinstance(descriptor, types.GetSetDescriptorType)
-    return False
+            return descriptor if isinstance(descriptor, types.GetSetDescriptorType) else None
+    return None
+
+
+def _has_data_descriptor(target_type: type, name: str) -> bool:
+    """Return whether normal assignment would invoke a statically found descriptor."""
+
+    try:
+        descriptor = _static_type_attr(target_type, name)
+    except AttributeError:
+        return False
+    descriptor_type = type(descriptor)
+    return any(
+        "__set__" in _type_dict(base) or "__delete__" in _type_dict(base)
+        for base in _type_mro(descriptor_type)
+    )
 
 
 def _unsupported(target: Any) -> None:
@@ -128,14 +144,49 @@ def _unsupported(target: Any) -> None:
 
     raise UnsupportedAnnotationTargetError(
         "annotation target does not support static direct metadata",
-        context={"type": type(target).__name__},
+        context={"type": _type_name(type(target))},
     )
 
 
-def _native_type_attr(cls: type, name: str) -> Any:
-    """Read one class attribute without a custom metaclass lookup hook."""
+def _static_type_attr(cls: type, name: str) -> Any:
+    """Return one raw class attribute through the native MRO."""
 
-    return type.__getattribute__(cls, name)
+    for base in _type_mro(cls):
+        namespace = _type_dict(base)
+        if name in namespace:
+            return namespace[name]
+    raise AttributeError(name)
+
+
+def _descriptor_value(descriptor: Any, target: Any, owner: type) -> Any:
+    """Invoke one native storage descriptor without target-side lookup."""
+
+    return type(descriptor).__get__(descriptor, target, owner)
+
+
+def _native_descriptor_value(owner: type, name: str, target: Any) -> Any:
+    """Read a built-in storage member while bypassing subclass overrides."""
+
+    descriptor = _type_dict(owner)[name]
+    return _descriptor_value(descriptor, target, type(target))
+
+
+def _type_dict(cls: type) -> Mapping[str, Any]:
+    """Return a class namespace without invoking its metaclass hooks."""
+
+    return _descriptor_value(_TYPE_DICT, cls, type(cls))
+
+
+def _type_mro(cls: type) -> tuple[type, ...]:
+    """Return a class MRO without invoking its metaclass hooks."""
+
+    return _descriptor_value(_TYPE_MRO, cls, type(cls))
+
+
+def _type_name(cls: type) -> str:
+    """Return a class name without invoking its metaclass hooks."""
+
+    return _descriptor_value(_TYPE_NAME, cls, type(cls))
 
 
 __all__ = ["ANNOTATION_ATTR", "attach_annotation", "own_annotations"]

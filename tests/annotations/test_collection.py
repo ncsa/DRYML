@@ -59,6 +59,22 @@ def test_class_collection_uses_reversed_c3_and_direct_declaration_order():
     ]
 
 
+def test_class_collection_bypasses_hostile_metaclass_mro_hook():
+    """Class traversal reads the native MRO without metaclass interception."""
+
+    class HostileMeta(type):
+        @property
+        def __mro__(cls):
+            raise AssertionError("metaclass MRO hook must not run")
+
+    class Subject(metaclass=HostileMeta):
+        pass
+
+    entry = Annotation("consumer.class", object())
+    attach_annotation(Subject, entry)
+    assert annotations_for_class(Subject) == (entry,)
+
+
 def test_collection_filters_by_exact_key_without_interpreting_consumer_values():
     """Independent consumer types select their own annotations by owner key."""
 

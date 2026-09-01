@@ -49,3 +49,23 @@ def test_known_static_and_class_descriptors_are_unwrapped_without_binding():
 
     assert annotations_for_method(Subject, "static") == (static_entry, static_function_entry)
     assert annotations_for_method(Subject, "method") == (class_entry, class_function_entry)
+
+
+def test_known_descriptor_subclass_bypasses_hostile_func_hook():
+    """Native descriptor storage wins over a subclass's dynamic ``__func__``."""
+
+    class HostileStaticMethod(staticmethod):
+        @property
+        def __func__(self):
+            raise AssertionError("descriptor function hook must not run")
+
+    def function():
+        return "ok"
+
+    descriptor = HostileStaticMethod(function)
+    descriptor_entry = Annotation("consumer.static", "descriptor")
+    function_entry = Annotation("consumer.static", "function")
+    attach_annotation(descriptor, descriptor_entry)
+    attach_annotation(function, function_entry)
+
+    assert collect_annotations(descriptor) == (descriptor_entry, function_entry)
