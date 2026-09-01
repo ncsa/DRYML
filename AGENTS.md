@@ -26,14 +26,37 @@ explicitly requests them. `./tests.sh full` is the maintained full selection;
 
 ## Source Ownership
 
-`src/dryml` owns framework code:
+`src/dryml` owns framework code. The descriptions below are target ownership
+boundaries for the CDef V2 parity end state, not claims that every roadmap stage
+is already implemented:
 
-- `core` provides core modules; `core/utils/graph` contains supported generic
-  graph algorithms.
-- `code` provides method instrumentation and analysis; `execute` is remote
-  execution; `context` is compute context.
-- `data`, `models`, `artifacts`, `vis`, and `devtools` own their named API areas.
-- `ray`, `jax`, `tf`, and `torch` are framework-specific plugin areas.
+- `core` owns CDef, Object, ObjectRef, StateRef, Repo, Store, and query
+  authority; `core/utils/graph` contains supported generic graph algorithms.
+- `formats` owns dependency-light canonical encoding primitives.
+- `annotations` is the passive typed-metadata attachment and deterministic
+  collection kernel; metadata interpretation and policy stay with consumers.
+- `methods` owns logical callable IR, implementation traits, implementation
+  alternatives, direct selection, and reusable preparation.
+- `code` owns generic code analysis and transformation without DRYML product
+  package dependencies.
+- `requirements` owns generic declaration, combination, report, and barrier
+  protocols. `environments`, `worlds`, and `runtime` own their respective
+  requirement semantics and enforcement.
+- `records` provides general sidecar-record utilities rather than domain schemas
+  or a second Object model.
+- `managed` owns the lifecycle of operations that mutate stateful Objects,
+  including interruption, checkpoint association, resume, and StateRef
+  publication.
+- `execute` owns execution-backend contracts and exact resolved-work transport;
+  `dispatch` owns requirement coordination, candidate selection, and submission.
+- `session` and `runtime` remain foundations that do not import dispatch policy
+  or execution backends.
+- `data`, `models`, and `artifacts` consume these foundations for user-facing
+  workflows; `vis`, `metrics`, and `devtools` own their named API areas.
+- `ray`, `jax`, `tf`, and `torch` are framework-specific plugin areas kept
+  behind optional-backend boundaries.
+- `operations` is a legacy package targeted for retirement; do not add new
+  dependencies on it. Reassess legacy `context` only during parity closeout.
 
 There is no tracked `src/dryml/graph` package. Any untracked directory there is
 unsupported user work and must not be inspected, edited, staged, deleted, or
@@ -43,7 +66,12 @@ test only exact paths approved for the task.
 
 ## Repository Architecture
 
-Keep `core` independent of `dryml.code`, and keep `dryml.code` independent of
-dispatch policy. Optional framework plugins must remain behind their plugin and
+Keep each public package independently useful and give it one coherent concept.
+Lower layers do not import their consumers, domain packages own their persistent
+schemas, and integration belongs in higher-level callers or narrow one-way
+adapters. In particular, keep `core` independent of `dryml.code`, keep
+`dryml.code` independent of DRYML product packages and dispatch policy, and keep
+annotations passive. Dispatch coordinates selection while execute runs already
+resolved work. Optional framework plugins must remain behind their plugin and
 backend boundaries; do not introduce eager optional-framework imports into
 lightweight package paths.
