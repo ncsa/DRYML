@@ -13,7 +13,7 @@ kernel retains the exact value object without copying, deep-freezing, comparing,
 hashing, serializing, or assigning it an ID. The frozen carrier provides only
 shallow immutability: consumers must supply and treat their values as immutable.
 
-Keys are ASCII strings of 1 through 128 characters matching
+Keys are exact built-in ASCII strings of 1 through 128 characters matching
 `[A-Za-z_][A-Za-z0-9_.-]*`. They are compared exactly; the kernel does not keep
 a registry or assign meaning to them. Use owner-qualified keys such as
 `"example.policy"` to avoid accidental matches with another consumer.
@@ -52,13 +52,16 @@ binds, calls, replaces, or imports through the target.
 
 Supported targets are extensible Python functions, classes, `staticmethod` and
 `classmethod` descriptors, and custom descriptors with a real instance
-dictionary and native `object.__setattr__`. Properties, builtins,
-non-extensible objects, and descriptors that override attribute mutation are
-rejected before mutation. A target that defines a data descriptor at the
-reserved `__dryml_annotations__` attribute is also rejected so attachment
-cannot invoke target-owned getter or setter behavior. `own_annotations(target)`
-returns only the exact target's direct tuple in declaration order; it does not
-inherit or unwrap entries.
+dictionary and native `object.__setattr__`. Properties, builtins, and
+descriptors that override attribute mutation are rejected without mutation. If
+the final native assignment fails for an otherwise statically safe target, such
+as an immutable built-in class, attachment raises
+`UnsupportedAnnotationTargetError` with the native failure as its cause. A
+target that defines a data descriptor at the reserved
+`__dryml_annotations__` attribute is also rejected so attachment cannot invoke
+target-owned getter or setter behavior. `own_annotations(target)` returns only
+the exact target's direct built-in tuple containing exact `Annotation` entries
+in declaration order; it does not inherit or unwrap entries.
 
 Attach declarations during import, class definition, or setup before sharing a
 target. Concurrent writes to the same target are unsupported. Concurrent

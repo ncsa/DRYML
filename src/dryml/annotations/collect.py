@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Iterable
 from typing import Any
 
-from .attachment import _is_class, _native_descriptor_value, _type_mro, own_annotations
+from .attachment import _is_class, _native_descriptor_value, _type_dict, _type_mro, own_annotations
 from .errors import AnnotationValidationError
 from .model import Annotation, _validate_key
 
@@ -20,7 +19,8 @@ def collect_annotations(target: Any, *, key: str | None = None) -> tuple[Annotat
 
     Args:
         target: A supplied live class or supported directly inspectable target.
-        key: Optional exact consumer key used to filter collected entries.
+        key: Optional exact built-in consumer key used to filter collected
+            entries.
 
     Returns:
         An immutable, identity-deduplicated tuple in deterministic collection
@@ -44,7 +44,8 @@ def annotations_for_class(cls: type, *, key: str | None = None) -> tuple[Annotat
 
     Args:
         cls: A supplied live class whose MRO is inspected without dynamic hooks.
-        key: Optional exact consumer key used to filter collected entries.
+        key: Optional exact built-in consumer key used to filter collected
+            entries.
 
     Returns:
         An immutable identity-deduplicated annotation tuple.
@@ -77,8 +78,10 @@ def annotations_for_method(cls: type, method_name: str, *, key: str | None = Non
 
     Args:
         cls: A supplied live class.
-        method_name: String name resolved by non-binding normal MRO lookup.
-        key: Optional exact consumer key used to filter collected entries.
+        method_name: Exact built-in string name resolved by non-binding normal
+            MRO lookup.
+        key: Optional exact built-in consumer key used to filter collected
+            entries.
 
     Returns:
         An immutable identity-deduplicated annotation tuple.
@@ -92,13 +95,16 @@ def annotations_for_method(cls: type, method_name: str, *, key: str | None = Non
 
     if not _is_class(cls):
         raise AnnotationValidationError("annotations_for_method() requires a class")
-    if not isinstance(method_name, str):
+    if type(method_name) is not str:
         raise AnnotationValidationError("method name must be a string")
     _validate_filter_key(key)
-    try:
-        descriptor = inspect.getattr_static(cls, method_name)
-    except (AttributeError, TypeError) as error:
-        raise AnnotationValidationError("method is not declared on the supplied class") from error
+    for base in _type_mro(cls):
+        namespace = _type_dict(base)
+        if method_name in namespace:
+            descriptor = namespace[method_name]
+            break
+    else:
+        raise AnnotationValidationError("method is not declared on the supplied class")
     return _filter(_dedupe((*annotations_for_class(cls), *_target_annotations(descriptor))), key)
 
 

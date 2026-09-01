@@ -70,6 +70,24 @@ def test_attachment_rejects_unsafe_targets_without_partial_mutation():
         if hasattr(target, "__dict__"):
             assert ANNOTATION_ATTR not in vars(target)
 
+    with pytest.raises(AnnotationValidationError, match="requires an Annotation"):
+        attach_annotation(lambda: None, object())
+
+
+def test_attachment_rejects_class_with_mutation_intercepting_metaclass():
+    """Class attachment never invokes a custom metaclass mutation hook."""
+
+    class InterceptingMeta(type):
+        def __setattr__(cls, name, value):
+            raise AssertionError("metaclass mutation hook must not run")
+
+    class Subject(metaclass=InterceptingMeta):
+        pass
+
+    with pytest.raises(UnsupportedAnnotationTargetError):
+        attach_annotation(Subject, Annotation("consumer.unsupported", object()))
+    assert ANNOTATION_ATTR not in type.__getattribute__(Subject, "__dict__")
+
 
 def test_attachment_rejects_reserved_data_descriptor_without_invoking_it():
     """A target cannot intercept the kernel's reserved attachment attribute."""
@@ -141,6 +159,52 @@ def test_direct_lookup_is_exact_ordered_and_rejects_corruption():
     with pytest.raises(AnnotationValidationError, match="malformed"):
         attach_annotation(function, second)
     assert getattr(function, ANNOTATION_ATTR) == (first, "not-an-annotation")
+
+
+def test_direct_lookup_rejects_hostile_tuple_and_annotation_subclasses_without_hooks():
+    """Metadata validation rejects subclasses before iteration or field access."""
+
+    class HostileTuple(tuple):
+        def __iter__(self):
+            raise AssertionError("metadata iteration hook must not run")
+
+    class HostileAnnotation(Annotation):
+        hooks_enabled = False
+
+        def __getattribute__(self, name):
+            if name == "key" and HostileAnnotation.hooks_enabled:
+                raise AssertionError("annotation field hook must not run")
+            return super().__getattribute__(name)
+
+    entry = Annotation("consumer.entry", object())
+    hostile_entry = HostileAnnotation("consumer.hostile", object())
+    HostileAnnotation.hooks_enabled = True
+
+    def tuple_target():
+        return None
+
+    setattr(tuple_target, ANNOTATION_ATTR, HostileTuple((entry,)))
+    with pytest.raises(AnnotationValidationError, match="malformed"):
+        own_annotations(tuple_target)
+
+    def annotation_target():
+        return None
+
+    setattr(annotation_target, ANNOTATION_ATTR, (hostile_entry,))
+    with pytest.raises(AnnotationValidationError, match="malformed"):
+        own_annotations(annotation_target)
+    with pytest.raises(AnnotationValidationError, match="requires"):
+        attach_annotation(annotation_target, hostile_entry)
+
+
+def test_attachment_maps_immutable_class_assignment_failure_without_mutation():
+    """Immutable built-in classes expose the bounded target error with its cause."""
+
+    with pytest.raises(UnsupportedAnnotationTargetError) as error:
+        attach_annotation(int, Annotation("consumer.immutable", object()))
+
+    assert isinstance(error.value.__cause__, TypeError)
+    assert ANNOTATION_ATTR not in int.__dict__
 
 
 def test_concurrent_read_only_collection_observes_completed_attachment():

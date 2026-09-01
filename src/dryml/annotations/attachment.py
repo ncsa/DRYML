@@ -33,12 +33,13 @@ def own_annotations(target: Any) -> tuple[Annotation, ...]:
     Raises:
         UnsupportedAnnotationTargetError: If static direct inspection is unsafe
             for ``target``.
-        AnnotationValidationError: If the direct attachment attribute is not a
-            tuple containing only :class:`Annotation` entries.
+        AnnotationValidationError: If the direct attachment attribute is not an
+            exact built-in tuple containing only exact :class:`Annotation`
+            entries.
     """
 
     values = _target_dict(target).get(ANNOTATION_ATTR, ())
-    if not isinstance(values, tuple) or not all(isinstance(item, Annotation) for item in values):
+    if type(values) is not tuple or any(type(item) is not Annotation for item in values):
         raise AnnotationValidationError("annotation target contains malformed direct annotation metadata")
     return values
 
@@ -50,28 +51,29 @@ def attach_annotation(target: Any, annotation: Annotation) -> Any:
         target: A supported function, class, known method descriptor, or safe
             custom descriptor. Same-target concurrent attachment is unsupported;
             callers must finish setup before sharing the target.
-        annotation: The immutable :class:`Annotation` carrier to attach.
+        annotation: The exact immutable :class:`Annotation` carrier to attach.
 
     Returns:
         The exact supplied ``target`` object.
 
     Raises:
-        AnnotationValidationError: If ``annotation`` is not an Annotation or
-            existing direct metadata is malformed.
+        AnnotationValidationError: If ``annotation`` is not an exact
+            :class:`Annotation` or existing direct metadata is malformed.
         UnsupportedAnnotationTargetError: If ``target`` cannot be inspected and
             mutated through native, non-binding object operations. No mutation
             occurs in this case.
     """
 
-    if not isinstance(annotation, Annotation):
+    if type(annotation) is not Annotation:
         raise AnnotationValidationError("annotation attachment requires an Annotation")
     existing = own_annotations(target)
     if _has_data_descriptor(type(target), ANNOTATION_ATTR):
         _unsupported(target)
-    if _is_class(target):
-        type.__setattr__(target, ANNOTATION_ATTR, existing + (annotation,))
-    else:
-        object.__setattr__(target, ANNOTATION_ATTR, existing + (annotation,))
+    setter = type.__setattr__ if _is_class(target) else object.__setattr__
+    try:
+        setter(target, ANNOTATION_ATTR, existing + (annotation,))
+    except (AttributeError, TypeError) as error:
+        _unsupported(target, cause=error)
     return target
 
 
@@ -139,13 +141,16 @@ def _has_data_descriptor(target_type: type, name: str) -> bool:
     )
 
 
-def _unsupported(target: Any) -> None:
+def _unsupported(target: Any, *, cause: Exception | None = None) -> None:
     """Raise the bounded unsupported-target error used by static attachment."""
 
-    raise UnsupportedAnnotationTargetError(
+    error = UnsupportedAnnotationTargetError(
         "annotation target does not support static direct metadata",
         context={"type": _type_name(type(target))},
     )
+    if cause is not None:
+        raise error from cause
+    raise error
 
 
 def _static_type_attr(cls: type, name: str) -> Any:

@@ -109,6 +109,26 @@ def test_collection_rejects_invalid_filter_keys(key):
         collect_annotations(Subject, key=key)
 
 
+def test_collection_rejects_hostile_string_filter_subclasses_without_running_hooks():
+    """Filter validation rejects subclasses before their string hooks can run."""
+
+    class HostileString(str):
+        def __len__(self):
+            raise AssertionError("filter length hook must not run")
+
+        def isascii(self):
+            raise AssertionError("filter ASCII hook must not run")
+
+        def __eq__(self, other):
+            raise AssertionError("filter comparison hook must not run")
+
+    class Subject:
+        pass
+
+    with pytest.raises(AnnotationValidationError, match="key"):
+        collect_annotations(Subject, key=HostileString("consumer.hostile"))
+
+
 def test_collection_rejects_unsupported_targets_and_corrupted_metadata():
     """Collection fails rather than returning incomplete generic declarations."""
 

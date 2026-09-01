@@ -15,10 +15,9 @@ No declaration API launches work or reserves host resources.
 | Runtime activation | `RuntimeState`, session generation | Publish `NONE`, `INLINE`, or `ORCHESTRATOR` state |
 | Controls and adapters | Publication statuses | Report visibility, affinity, memory, and framework outcomes |
 
-Annotations add explicit environment, world, or runtime fragments to supported
-targets without wrapping, importing, executing, probing, or persisting them in
-CDef identity. Resolution is inspectable only; callers decide whether and how
-to apply the result.
+`dryml.annotations` carries consumer-owned process-local key/value metadata. It
+has no built-in environment, world, or runtime semantics or resolution, and
+does not serialize or persist annotations. See [Annotations](annotations.md).
 
 ## Planning A Local World
 

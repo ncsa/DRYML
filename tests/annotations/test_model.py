@@ -44,6 +44,20 @@ def test_annotation_rejects_invalid_keys(key):
         Annotation(key, object())
 
 
+def test_annotation_rejects_hostile_string_subclasses_without_running_hooks():
+    """Key validation rejects subclasses before their string hooks can run."""
+
+    class HostileString(str):
+        def __len__(self):
+            raise AssertionError("key length hook must not run")
+
+        def isascii(self):
+            raise AssertionError("key ASCII hook must not run")
+
+    with pytest.raises(AnnotationValidationError, match="key"):
+        Annotation(HostileString("consumer.hostile"), object())
+
+
 def test_annotation_accepts_owner_qualified_key_and_opaque_mutable_value():
     """The kernel preserves opaque value identity without copying or deep freezing."""
 

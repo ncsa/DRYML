@@ -16,15 +16,16 @@ def _validate_key(key: str) -> None:
     """Validate one consumer-selected annotation key.
 
     Args:
-        key: ASCII identifier used for exact collection filtering.
+        key: Exact built-in ASCII string used for exact collection filtering.
 
     Raises:
-        AnnotationValidationError: If the key is not a 1-128 character ASCII
-            identifier matching the kernel grammar.
+        AnnotationValidationError: If the key is not an exact built-in string or
+            is not a 1-128 character ASCII identifier matching the kernel
+            grammar.
     """
 
     if (
-        not isinstance(key, str)
+        type(key) is not str
         or not 1 <= len(key) <= _MAX_KEY_LENGTH
         or not key.isascii()
         or _KEY_PATTERN.fullmatch(key) is None
@@ -37,13 +38,13 @@ class Annotation:
     """One process-local, identity-based consumer annotation entry.
 
     Args:
-        key: A validated consumer-selected classification key.
+        key: A validated exact built-in consumer-selected classification key.
         value: An opaque consumer-owned value retained without copying,
             comparison, hashing, serialization, or deep-freezing.
 
     Raises:
-        AnnotationValidationError: If ``key`` does not satisfy the generic
-            annotation-key grammar.
+        AnnotationValidationError: If ``key`` is not an exact built-in string or
+            does not satisfy the generic annotation-key grammar.
 
     Side Effects:
         None. Values remain process-local until attached to a target by the
