@@ -38,7 +38,6 @@ _EXPECTED_ROOT_EXPORTS = {
     "context",
     "core",
     "definition_mode",
-    "env",
     "environments",
     "execute",
     "freeze",
@@ -60,7 +59,6 @@ _EXPECTED_ROOT_EXPORTS = {
     "space_mode",
     "status",
     "runtime",
-    "world",
     "worlds",
 }
 
@@ -112,6 +110,21 @@ import dryml.session
 import dryml.tf
 import dryml.torch
 import dryml.worlds
+assert set(dryml.annotations.__all__) == {
+    "Annotation", "ANNOTATION_ATTR", "attach_annotation", "own_annotations",
+    "collect_annotations", "annotations_for_class", "annotations_for_method",
+    "AnnotationError", "AnnotationValidationError", "UnsupportedAnnotationTargetError",
+}
+assert "env" not in dryml.__all__
+assert "world" not in dryml.__all__
+assert "default" not in dryml.runtime.__all__
+for name in ("decorators", "env", "world", "runtime", "merge", "namespaces", "storage"):
+    try:
+        importlib.import_module(f"dryml.annotations.{name}")
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise AssertionError(f"retired annotation module remains importable: {name}")
 try:
     retired = importlib.util.find_spec("dryml.core2") is not None
 except ModuleNotFoundError:

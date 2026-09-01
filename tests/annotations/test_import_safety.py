@@ -1,44 +1,91 @@
-"""Annotation imports and resolution are passive with respect to runtime state."""
+"""Tests for the annotation kernel's import and public-surface boundary."""
 
 import subprocess
 import sys
 
+import pytest
+
 import dryml
-from dryml.annotations import resolve_target_requirements
+import dryml.annotations as annotations
 
 
-def test_root_sugar_is_lazy_and_runtime_default_is_passive():
-    assert dryml.env.req is not None
-    assert dryml.world.req is not None
-    assert dryml.runtime.default is not None
+_PUBLIC = {
+    "Annotation",
+    "ANNOTATION_ATTR",
+    "attach_annotation",
+    "own_annotations",
+    "collect_annotations",
+    "annotations_for_class",
+    "annotations_for_method",
+    "AnnotationError",
+    "AnnotationValidationError",
+    "UnsupportedAnnotationTargetError",
+}
+_RETIRED = {
+    "AnnotationFragment",
+    "AnnotationMergeError",
+    "AnnotationTarget",
+    "FRAGMENT_ATTR",
+    "RequirementDiagnostic",
+    "RequirementResolution",
+    "SourceTrace",
+    "UnresolvedAnnotationResult",
+    "attach_fragment",
+    "collect_fragments",
+    "default",
+    "fragments_for_class",
+    "fragments_for_definition_method",
+    "fragments_for_method",
+    "own_fragments",
+    "require",
+    "resolve_fragments",
+    "resolve_target_requirements",
+    "source_from_target",
+    "target_from_live",
+    "validate_namespace",
+}
 
 
-def test_domain_sugar_builds_declarations_without_runtime_effects():
-    @dryml.env.req(requirements=("packaging>=20",))
-    @dryml.world.req(cpus=1)
-    @dryml.world.default(cpus=1)
-    @dryml.runtime.default(limits={"threads": 1})
-    class Subject:
-        pass
+def test_kernel_exports_are_exact_and_retired_submodules_are_absent():
+    """The clean break exposes only the passive kernel and no compatibility shim."""
 
-    result = resolve_target_requirements(Subject)
-    assert result.usable
-    assert result.environment_requirement.requirements == ("packaging>=20",)
-    assert result.world_requirement.roles["main"].resources.cpus.min == 1
-    assert result.world_default.roles["main"].process.resources.cpus == 1
-    assert result.runtime_default["limits"]["threads"] == 1
+    assert set(annotations.__all__) == _PUBLIC
+    assert not {name for name in _RETIRED if hasattr(annotations, name)}
+    for module in ("decorators", "env", "world", "runtime", "merge", "namespaces", "storage"):
+        with pytest.raises(ModuleNotFoundError):
+            __import__(f"dryml.annotations.{module}")
 
 
-def test_fresh_annotation_imports_leave_optional_frameworks_and_session_unchanged():
-    """Declaration modules perform no optional import, inventory, or publication."""
+def test_root_and_runtime_omit_retired_annotation_sugar():
+    """No root or runtime export points at a deleted annotation domain facade."""
+
+    assert "env" not in dryml.__all__
+    assert "world" not in dryml.__all__
+    with pytest.raises(AttributeError):
+        dryml.env
+    with pytest.raises(AttributeError):
+        dryml.world
+    import dryml.runtime as runtime
+
+    assert "default" not in runtime.__all__
+    assert not hasattr(runtime, "default")
+
+
+def test_fresh_annotation_import_has_no_consumer_or_runtime_side_effect():
+    """Importing the kernel loads no consumer, session, worker, or backend module."""
 
     script = """
+import json
 import sys
-import dryml
-before = dryml.session.current().generation
 import dryml.annotations
-assert dryml.session.current().generation == before
-assert not {'tensorflow', 'torch', 'jax', 'jaxlib'} & set(sys.modules)
+forbidden = (
+    'dryml.artifacts', 'dryml.context', 'dryml.core', 'dryml.data',
+    'dryml.environments', 'dryml.execute', 'dryml.formats', 'dryml.models',
+    'dryml.runtime', 'dryml.session', 'dryml.worlds', 'tensorflow', 'torch',
+    'jax', 'jaxlib', 'ray',
+)
+print(json.dumps(sorted(name for name in sys.modules if name in forbidden)))
 """
     completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "[]"

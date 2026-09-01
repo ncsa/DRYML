@@ -1,4 +1,4 @@
-"""Exceptions raised by the direct, declaration-only annotation API."""
+"""Exceptions raised by the passive annotation kernel."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 
 
 class AnnotationError(Exception):
-    """Base error for annotation declaration, collection, and resolution.
+    """Base error for annotation attachment and collection.
 
     Args:
         message: Human-readable explanation of the failed annotation operation.
@@ -20,15 +20,11 @@ class AnnotationError(Exception):
 
 
 class AnnotationValidationError(AnnotationError):
-    """Raised when a closed annotation value or policy is malformed."""
+    """Raised when an annotation key, carrier, or attachment tuple is malformed."""
 
 
 class UnsupportedAnnotationTargetError(AnnotationError):
-    """Raised before metadata is attached to a non-extensible target."""
+    """Raised before static attachment or inspection of an unsafe target."""
 
 
-class AnnotationMergeError(AnnotationError):
-    """Raised for a direct merge request that cannot form a valid declaration."""
-
-
-__all__ = ["AnnotationError", "AnnotationMergeError", "AnnotationValidationError", "UnsupportedAnnotationTargetError"]
+__all__ = ["AnnotationError", "AnnotationValidationError", "UnsupportedAnnotationTargetError"]

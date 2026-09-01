@@ -1,0 +1,135 @@
+"""Tests for direct process-local annotation attachment."""
+
+from concurrent.futures import ThreadPoolExecutor
+import subprocess
+import sys
+
+import pytest
+
+from dryml.annotations import (
+    ANNOTATION_ATTR,
+    Annotation,
+    AnnotationValidationError,
+    UnsupportedAnnotationTargetError,
+    attach_annotation,
+    own_annotations,
+)
+
+
+def test_attachment_preserves_supported_target_identity_and_behavior():
+    """Functions, classes, and safe descriptors retain their ordinary behavior."""
+
+    def function(value):
+        return value + 1
+
+    def class_body(cls, value):
+        return cls.__name__, value
+
+    class Descriptor:
+        def __get__(self, instance, owner):
+            return function
+
+    static_descriptor = staticmethod(function)
+    class_descriptor = classmethod(class_body)
+    descriptor = Descriptor()
+    targets = (function, type("Subject", (), {}), static_descriptor, class_descriptor, descriptor)
+
+    for index, target in enumerate(targets):
+        annotation = Annotation(f"consumer.entry-{index}", index)
+        assert attach_annotation(target, annotation) is target
+        assert own_annotations(target) == (annotation,)
+
+    class Subject:
+        static = static_descriptor
+        method = class_descriptor
+        custom = descriptor
+
+    assert function(1) == 2
+    assert Subject.static(1) == 2
+    assert Subject.method(1) == ("Subject", 1)
+    assert Subject().custom(1) == 2
+
+
+def test_attachment_rejects_unsafe_targets_without_partial_mutation():
+    """Unsupported targets fail before the kernel installs an attachment tuple."""
+
+    class UnsafeDescriptor:
+        def __get__(self, instance, owner):
+            return None
+
+        def __setattr__(self, name, value):
+            object.__setattr__(self, name, value)
+
+    property_target = property(lambda self: 1)
+    unsafe = UnsafeDescriptor()
+    targets = (property_target, int.__add__, object(), unsafe)
+
+    for target in targets:
+        with pytest.raises(UnsupportedAnnotationTargetError):
+            attach_annotation(target, Annotation("consumer.unsupported", object()))
+        if hasattr(target, "__dict__"):
+            assert ANNOTATION_ATTR not in vars(target)
+
+
+def test_direct_lookup_is_exact_ordered_and_rejects_corruption():
+    """Direct lookup neither inherits nor repairs malformed target metadata."""
+
+    class Base:
+        pass
+
+    class Child(Base):
+        pass
+
+    first = Annotation("consumer.first", 1)
+    second = Annotation("consumer.second", 2)
+    assert ANNOTATION_ATTR == "__dryml_annotations__"
+    attach_annotation(Base, first)
+    attach_annotation(Base, second)
+
+    assert own_annotations(Base) == (first, second)
+    assert own_annotations(Child) == ()
+
+    def non_tuple():
+        return None
+
+    setattr(non_tuple, ANNOTATION_ATTR, "not-a-tuple")
+    with pytest.raises(AnnotationValidationError, match="malformed"):
+        own_annotations(non_tuple)
+
+    def function():
+        return None
+
+    setattr(function, ANNOTATION_ATTR, (first, "not-an-annotation"))
+    with pytest.raises(AnnotationValidationError, match="malformed"):
+        own_annotations(function)
+    with pytest.raises(AnnotationValidationError, match="malformed"):
+        attach_annotation(function, second)
+    assert getattr(function, ANNOTATION_ATTR) == (first, "not-an-annotation")
+
+
+def test_concurrent_read_only_collection_observes_completed_attachment():
+    """Readers may collect a stable target only after its setup is complete."""
+
+    class Subject:
+        pass
+
+    annotation = Annotation("consumer.readers", object())
+    attach_annotation(Subject, annotation)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(own_annotations, (Subject,) * 12))
+
+    assert results == [(annotation,)] * 12
+
+
+def test_fresh_interpreter_reconstructs_its_own_annotations():
+    """Process-local attachments are not expected to transfer to a fresh worker."""
+
+    script = """
+from dryml.annotations import Annotation, attach_annotation, own_annotations
+def target():
+    return None
+attach_annotation(target, Annotation('consumer.worker', 1))
+assert [entry.key for entry in own_annotations(target)] == ['consumer.worker']
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

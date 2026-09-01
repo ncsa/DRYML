@@ -1,124 +1,153 @@
-"""Import-free deterministic collection from supplied live annotation targets."""
+"""Static deterministic collection from live annotation targets."""
 
 from __future__ import annotations
 
 import inspect
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import Any
 
-from .model import AnnotationFragment, UnresolvedAnnotationResult
-from .storage import own_fragments
+from .attachment import own_annotations
+from .errors import AnnotationValidationError
+from .model import Annotation, _validate_key
 
 
-def collect_fragments(target: Any, *, namespace: str | None = None, kind: str | None = None) -> tuple[AnnotationFragment, ...] | UnresolvedAnnotationResult:
-    """Collect declarations from only a supplied live target or Definition/CDef.
+def collect_annotations(target: Any, *, key: str | None = None) -> tuple[Annotation, ...]:
+    """Collect annotations from one supplied live target without binding it.
 
-    A symbolic definition never causes a class import; it yields an explicit
-    unresolved value instead.
-
-    Args:
-        target: Live object, Definition, or ConcreteDefinition to inspect.
-        namespace: Optional namespace filter.
-        kind: Optional requirement/default filter.
-
-    Returns:
-        Ordered fragments or an import-free unresolved result.
-    """
-
-    if _definition_like(target):
-        return UnresolvedAnnotationResult("definition collection requires a supplied live target")
-    if isinstance(target, type):
-        return _filter(fragments_for_class(target), namespace, kind)
-    return _filter(_targets_fragments(target), namespace, kind)
-
-
-def fragments_for_method(cls: type, method_name: str, *, namespace: str | None = None, kind: str | None = None) -> tuple[AnnotationFragment, ...]:
-    """Collect class C3 fragments and one normal-MRO selected method body.
+    Classes are traversed in reversed C3 order. Other supported targets return
+    only direct entries, except known static and class method descriptors also
+    contribute their underlying function after descriptor entries.
 
     Args:
-        cls: Supplied live class.
-        method_name: Name found by static normal MRO lookup.
-        namespace: Optional namespace filter.
-        kind: Optional requirement/default filter.
+        target: A supplied live class or supported directly inspectable target.
+        key: Optional exact consumer key used to filter collected entries.
 
     Returns:
-        Class fragments followed by descriptor then underlying-function fragments.
+        An immutable, identity-deduplicated tuple in deterministic collection
+        order.
 
     Raises:
-        TypeError: If arguments do not name a live class and string member.
-        AttributeError: If no normal-MRO implementation is present.
+        AnnotationValidationError: If ``key`` is invalid or direct metadata is
+            malformed.
+        UnsupportedAnnotationTargetError: If the target cannot be inspected
+            statically by the attachment boundary.
     """
 
-    if not isinstance(cls, type) or not isinstance(method_name, str):
-        raise TypeError("fragments_for_method() requires a class and method name")
-    descriptor = inspect.getattr_static(cls, method_name)
-    return _filter(_dedupe((*fragments_for_class(cls), *_targets_fragments(descriptor))), namespace, kind)
+    _validate_filter_key(key)
+    if _is_class(target):
+        return annotations_for_class(target, key=key)
+    return _filter(_target_annotations(target), key)
 
 
-def fragments_for_definition_method(defn: Any, method_name: str, *, live_cls: type | None = None, namespace: str | None = None, kind: str | None = None) -> tuple[AnnotationFragment, ...] | UnresolvedAnnotationResult:
-    """Collect definition method fragments without resolving symbolic classes.
+def annotations_for_class(cls: type, *, key: str | None = None) -> tuple[Annotation, ...]:
+    """Collect direct class annotations in base-to-subclass reversed C3 order.
 
     Args:
-        defn: Definition or ConcreteDefinition being inspected.
-        method_name: Name on the supplied or already-live class.
-        live_cls: Explicit live class; no class lookup occurs when absent.
-        namespace: Optional namespace filter.
-        kind: Optional requirement/default filter.
+        cls: A supplied live class whose MRO is inspected without dynamic hooks.
+        key: Optional exact consumer key used to filter collected entries.
 
     Returns:
-        Method fragments or an unresolved result when no live class is supplied.
+        An immutable identity-deduplicated annotation tuple.
+
+    Raises:
+        AnnotationValidationError: If ``cls`` is not a class, ``key`` is invalid,
+            or a direct attachment tuple is malformed.
+        UnsupportedAnnotationTargetError: If a class cannot be inspected through
+            the native static attachment boundary.
     """
 
+    if not _is_class(cls):
+        raise AnnotationValidationError("annotations_for_class() requires a class")
+    _validate_filter_key(key)
+    values = (
+        annotation
+        for base in reversed(type.__getattribute__(cls, "__mro__"))
+        if base is not object
+        for annotation in own_annotations(base)
+    )
+    return _filter(_dedupe(values), key)
+
+
+def annotations_for_method(cls: type, method_name: str, *, key: str | None = None) -> tuple[Annotation, ...]:
+    """Collect class and one statically selected method's annotations.
+
+    The normal MRO selects exactly one member. Class declarations appear first,
+    followed by direct descriptor declarations and then direct entries on the
+    underlying function of known static and class method descriptors.
+
+    Args:
+        cls: A supplied live class.
+        method_name: String name resolved by non-binding normal MRO lookup.
+        key: Optional exact consumer key used to filter collected entries.
+
+    Returns:
+        An immutable identity-deduplicated annotation tuple.
+
+    Raises:
+        AnnotationValidationError: If arguments are malformed, the method is
+            absent, or any inspected metadata is malformed.
+        UnsupportedAnnotationTargetError: If static inspection of the selected
+            descriptor is unsafe.
+    """
+
+    if not _is_class(cls):
+        raise AnnotationValidationError("annotations_for_method() requires a class")
     if not isinstance(method_name, str):
-        raise TypeError("method_name must be a string")
-    if not _definition_like(defn):
-        raise TypeError("fragments_for_definition_method() requires a Definition or ConcreteDefinition")
-    if not isinstance(live_cls, type):
-        return UnresolvedAnnotationResult("definition method requires a supplied live_cls", method_name)
-    return fragments_for_method(live_cls, method_name, namespace=namespace, kind=kind)
+        raise AnnotationValidationError("method name must be a string")
+    _validate_filter_key(key)
+    try:
+        descriptor = inspect.getattr_static(cls, method_name)
+    except (AttributeError, TypeError) as error:
+        raise AnnotationValidationError("method is not declared on the supplied class") from error
+    return _filter(_dedupe((*annotations_for_class(cls), *_target_annotations(descriptor))), key)
 
 
-def fragments_for_class(cls: type) -> tuple[AnnotationFragment, ...]:
-    """Return direct class fragments in base-to-subclass C3 order.
+def _target_annotations(target: Any) -> tuple[Annotation, ...]:
+    """Collect one direct target and known descriptor function without binding."""
 
-    Args:
-        cls: Supplied live class.
-
-    Returns:
-        One identity-deduplicated tuple ordered through ``cls.__mro__``.
-    """
-
-    if not isinstance(cls, type):
-        raise TypeError("fragments_for_class() requires a class")
-    return _dedupe(fragment for base in reversed(cls.__mro__) if base is not object for fragment in own_fragments(base))
-
-
-def _targets_fragments(target: Any) -> tuple[AnnotationFragment, ...]:
-    values: list[AnnotationFragment] = list(own_fragments(target))
-    function = getattr(target, "__func__", None)
-    if function is not None and function is not target:
-        values.extend(own_fragments(function))
+    values: list[Annotation] = list(own_annotations(target))
+    if _is_known_descriptor(target):
+        function = object.__getattribute__(target, "__func__")
+        values.extend(own_annotations(function))
     return _dedupe(values)
 
 
-def _filter(fragments: Iterable[AnnotationFragment], namespace: str | None, kind: str | None) -> tuple[AnnotationFragment, ...]:
-    return tuple(fragment for fragment in fragments if (namespace is None or fragment.namespace == namespace) and (kind is None or fragment.kind == kind))
+def _filter(annotations: Iterable[Annotation], key: str | None) -> tuple[Annotation, ...]:
+    """Apply the already-validated exact key filter after deduplication."""
+
+    return tuple(annotation for annotation in annotations if key is None or annotation.key == key)
 
 
-def _dedupe(fragments: Iterable[AnnotationFragment]) -> tuple[AnnotationFragment, ...]:
+def _dedupe(annotations: Iterable[Annotation]) -> tuple[Annotation, ...]:
+    """Keep first occurrences by carrier identity, not value equality."""
+
     seen: set[int] = set()
-    result: list[AnnotationFragment] = []
-    for fragment in fragments:
-        if id(fragment) not in seen:
-            seen.add(id(fragment))
-            result.append(fragment)
+    result: list[Annotation] = []
+    for annotation in annotations:
+        if id(annotation) not in seen:
+            seen.add(id(annotation))
+            result.append(annotation)
     return tuple(result)
 
 
-def _definition_like(value: Any) -> bool:
-    """Recognize destination definition values without importing their modules."""
+def _validate_filter_key(key: str | None) -> None:
+    """Validate an optional filter without assigning semantics to its key."""
 
-    return type(value).__module__ == "dryml.core.definition" and type(value).__name__ in {"Definition", "ConcreteDefinition"}
+    if key is not None:
+        _validate_key(key)
 
 
-__all__ = ["collect_fragments", "fragments_for_class", "fragments_for_definition_method", "fragments_for_method"]
+def _is_class(target: Any) -> bool:
+    """Return whether ``target`` is a class without dynamic target lookup."""
+
+    return issubclass(type(target), type)
+
+
+def _is_known_descriptor(target: Any) -> bool:
+    """Return whether static native descriptor unwrapping is defined for target."""
+
+    target_type = type(target)
+    return issubclass(target_type, staticmethod) or issubclass(target_type, classmethod)
+
+
+__all__ = ["annotations_for_class", "annotations_for_method", "collect_annotations"]
