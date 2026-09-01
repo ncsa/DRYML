@@ -45,8 +45,8 @@ this release; they have no automatic enforcement consumer. No axis can weaken
 device visibility, publication integrity, Store safety, or the orchestrator
 materialization floor.
 
-Declarations attached with `dryml.env`, `dryml.world`, or
-`dryml.runtime.default` remain declarations. Collection and resolution do not
+The passive `dryml.annotations` kernel has no session integration. It attaches
+consumer-owned process-local metadata only; it does not resolve requirements,
 mutate the session, launch work, or activate frameworks.
 
 ## Persistent And Scoped Configuration

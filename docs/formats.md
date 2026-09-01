@@ -6,4 +6,6 @@ DirStore format v2 writes a `store-format.record`, digest-sharded DefinitionReco
 
 Missing versions, raw CDef tuple/dict records, previous Store layouts, mutable current-state records, unsupported manifests, and old query metadata are incompatible authority. They are rejected with observed and supported versions and corrective action before hydration or mutation. No migration or conversion format exists.
 
-The separate environment, annotation, world, runtime, and session envelope families retain their documented `v1.1` schemas; those names do not denote CDef or Store compatibility.
+Environment, world, runtime, and session format families retain their documented
+schemas; those names do not denote CDef or Store compatibility. Annotations have
+no kernel-owned envelope, ID, serialization, or persistence format.

@@ -10,19 +10,20 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 2. [Objects and Definitions](objects_and_defs.md)
 3. [Immutable Definition Graph](immutable_definition_graph.md)
 4. [Graph Querying](graph_querying.md)
-5. [Formats](formats.md)
-6. [Environments](environments.md)
-7. [World And Runtime](world_runtime.md)
-8. [Sessions](session.md)
-9. [Repos and Stores](repos.md)
-10. [Tensor Specs](tensor_specs.md)
-11. [Contexts](context.md)
-12. [Data API](data.md)
-13. [Models API](models.md)
-14. [Artifacts API](artifacts.md)
-15. [Query Index Backend Contracts](query_index_backend_contracts.md)
-16. [Testing Workflow](testing.md)
-17. [Release Notes](release_notes.md)
+5. [Annotations](annotations.md)
+6. [Formats](formats.md)
+7. [Environments](environments.md)
+8. [World And Runtime](world_runtime.md)
+9. [Sessions](session.md)
+10. [Repos and Stores](repos.md)
+11. [Tensor Specs](tensor_specs.md)
+12. [Contexts](context.md)
+13. [Data API](data.md)
+14. [Models API](models.md)
+15. [Artifacts API](artifacts.md)
+16. [Query Index Backend Contracts](query_index_backend_contracts.md)
+17. [Testing Workflow](testing.md)
+18. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -31,7 +32,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - A `ConcreteDefinition` is a fully bound V2 structural identity; graph topology is available through graph equality/hash.
 - `Ref` records a non-materializing exact or selector reference in a definition graph.
 - An environment record describes observed Python/software facts without changing object identity.
-- Explicit annotations declare environment, world, and runtime requirements without activation.
+- An `Annotation` is passive process-local key/value metadata; consumers own its meaning.
 - A requested world describes roles and resources; an allocation binds one exact role-qualified process.
 - `dryml.session` publishes persistent `python`, `managed`, or definition-only `orchestrator` state.
 - An `Object` is the runtime instance associated with a concrete definition.
