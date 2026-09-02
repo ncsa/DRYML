@@ -5,7 +5,7 @@ from dryml.core import Repo
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArrayDataset
 from dryml.models import Experiment
-from dryml.models.sklearn import BasicTraining, Model, RegressionModel
+from dryml.models.sklearn import BasicTraining, ClassifierModel, Model, RegressionModel
 
 
 linear_model = pytest.importorskip("sklearn.linear_model")
@@ -93,3 +93,17 @@ def test_sklearn_inference_does_not_probe_estimators_and_pickle_state_stays_loca
     fresh = repo.load_state_ref(state, reuse_live="never")
     assert fresh.call_mode == "eager"
     assert fresh.default_batched is None
+
+
+def test_classifier_probability_spec_matches_fitted_predict_proba_output():
+    model = ClassifierModel(linear_model.LogisticRegression)
+    x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
+    y = np.array([0, 0, 1, 1], dtype=np.int64)
+    model.fit(x, y)
+
+    output = model(np.array([[1.5]], dtype=np.float32))
+    spec = model.infer_output_spec(TensorSpec("float32", shape=(1,), backend="numpy"))
+
+    assert spec == TensorSpec("float64", shape=(2,), backend="numpy")
+    assert output.shape == (1, 2)
+    assert output.dtype == np.dtype("float64")

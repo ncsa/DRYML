@@ -265,17 +265,18 @@ class Pipe(Method):
             return implementation
         selected_methods = []
         spec = input_spec
-        for method in self.methods:
+        for index, method in enumerate(self.methods):
+            child_backend = backend if index == 0 else None
             selected_methods.append(
                 method.find_implementation(
                     spec,
-                    backend=backend,
+                    backend=child_backend,
                     batch_mode=batch_mode,
                 )
                 if derive_spec_batch
                 else method._prepare_implementation(
                     spec,
-                    backend=backend,
+                    backend=child_backend,
                     batch_mode=batch_mode,
                 )
             )

@@ -88,7 +88,7 @@ its known underlying function.
 `annotations_for_method(cls, name)` first returns the class sequence, then the
 descriptor selected by normal static MRO lookup, then its known underlying
 function. An overridden base implementation that is not selected is excluded.
-`annotations_for_members(cls, key=None)` instead returns immutable
+`annotations_for_members(cls, key=None, after=None)` instead returns immutable
 `AnnotatedMember(owner, name, descriptor, annotations)` evidence for every
 matching member declaration in base-to-subclass C3 order. `owner` is the exact
 declaring class, `name` is the declared member name, and `descriptor` is the raw
@@ -98,6 +98,11 @@ on the underlying function. A safe custom descriptor contributes only its direct
 entries. A later unannotated declaration with a name that previously matched is
 also returned with an empty annotation tuple so consumers can interpret an
 override or shadow themselves.
+
+When `after` names a class in `cls`'s MRO, that boundary and all of its base
+classes are excluded. Collection starts at the next subclass, retaining the same
+ordering and shadow semantics. An invalid or unrelated boundary raises
+`AnnotationValidationError` before inspection.
 
 Collection never binds descriptors or invokes `__get__`, dynamic attribute
 hooks, properties, imports, or user code. If the same `Annotation` object is

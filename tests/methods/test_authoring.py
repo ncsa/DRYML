@@ -92,3 +92,30 @@ def test_mixed_direct_and_alternative_authoring_is_rejected():
             @traits(backend="numpy")
             def numpy_call(self, value):
                 return value
+
+
+def test_mixed_direct_and_alternative_inheritance_is_rejected():
+    """Normal Python overrides cannot silently coexist with inherited alternatives."""
+
+    class AlternativeBase(Method):
+        @traits(backend="numpy")
+        def numpy_call(self, value):
+            return value
+
+    class DirectLeaf(AlternativeBase):
+        def __call__(self, value):
+            return value
+
+    class DirectBase(Method):
+        def __call__(self, value):
+            return value
+
+    class AlternativeLeaf(DirectBase):
+        @traits(backend="numpy")
+        def numpy_call(self, value):
+            return value
+
+    with pytest.raises(ImplementationDeclarationError, match="hierarchy"):
+        object.__new__(DirectLeaf).implementations()
+    with pytest.raises(ImplementationDeclarationError, match="hierarchy"):
+        object.__new__(AlternativeLeaf).implementations()

@@ -116,7 +116,12 @@ def annotations_for_method(cls: type, method_name: str, *, key: str | None = Non
     return _filter(_dedupe((*annotations_for_class(cls), *_target_annotations(descriptor))), key)
 
 
-def annotations_for_members(cls: type, *, key: str | None = None) -> tuple[AnnotatedMember, ...]:
+def annotations_for_members(
+    cls: type,
+    *,
+    key: str | None = None,
+    after: type | None = None,
+) -> tuple[AnnotatedMember, ...]:
     """Collect annotated member declarations in base-to-subclass C3 order.
 
     A declaration is included when its direct descriptor annotations match
@@ -132,14 +137,17 @@ def annotations_for_members(cls: type, *, key: str | None = None) -> tuple[Annot
             through the native static attachment boundary.
         key: Optional exact built-in consumer key used to filter each member's
             annotations before matching and shadow detection.
+        after: Optional class boundary excluded with all of its base classes.
+            Collection begins with the next subclass in base-to-subclass order.
 
     Returns:
         An immutable tuple of raw declaration evidence. Each member's annotation
         tuple is identity-deduplicated in direct collection order.
 
     Raises:
-        AnnotationValidationError: If ``cls`` or ``key`` is invalid, or an
-            inspected direct attachment tuple is malformed.
+        AnnotationValidationError: If ``cls``, ``key``, or ``after`` is invalid,
+            ``after`` is outside ``cls``'s MRO, or an inspected direct attachment
+            tuple is malformed.
         UnsupportedAnnotationTargetError: If an inspectable descriptor member
             cannot be inspected through the static attachment boundary.
 
@@ -151,9 +159,18 @@ def annotations_for_members(cls: type, *, key: str | None = None) -> tuple[Annot
     if not _is_class(cls):
         raise AnnotationValidationError("annotations_for_members() requires a class")
     _validate_filter_key(key)
+    mro = _type_mro(cls)
+    if after is not None and (not _is_class(after) or after not in mro):
+        raise AnnotationValidationError("after must be a class in the supplied class MRO")
     matching_names: set[str] = set()
     members: list[AnnotatedMember] = []
-    for owner in reversed(_type_mro(cls)):
+    reached_boundary = after is None
+    for owner in reversed(mro):
+        if owner is after:
+            reached_boundary = True
+            continue
+        if not reached_boundary:
+            continue
         if owner is object:
             continue
         for name, descriptor in _type_dict(owner).items():

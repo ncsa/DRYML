@@ -242,6 +242,31 @@ def test_member_collection_preserves_non_descriptor_shadows():
     ]
 
 
+def test_member_collection_can_start_after_an_mro_boundary():
+    class Framework:
+        @property
+        def unsupported(self):
+            return None
+
+    class Base(Framework):
+        def method(self):
+            return "base"
+
+    class Leaf(Base):
+        def method(self):
+            return "leaf"
+
+    entry = Annotation("consumer.member", "base")
+    attach_annotation(Base.__dict__["method"], entry)
+
+    members = annotations_for_members(Leaf, after=Framework)
+
+    assert [(member.owner, member.name, member.annotations) for member in members] == [
+        (Base, "method", (entry,)),
+        (Leaf, "method", ()),
+    ]
+
+
 def test_member_collection_rejects_invalid_inputs_and_corrupt_member_metadata():
     """Member discovery fails atomically through the existing annotation errors."""
 
@@ -260,5 +285,7 @@ def test_member_collection_rejects_invalid_inputs_and_corrupt_member_metadata():
         annotations_for_members(Subject())
     with pytest.raises(AnnotationValidationError, match="key"):
         annotations_for_members(Subject, key=0)
+    with pytest.raises(AnnotationValidationError, match="after"):
+        annotations_for_members(Subject, after=dict)
     with pytest.raises(AnnotationValidationError, match="malformed"):
         annotations_for_members(Subject)

@@ -121,6 +121,14 @@ def test_tensor_spec_equal_exact_rejects_non_tensor_spec():
     assert not spec.equal_exact(object())
 
 
+def test_tensor_spec_equal_exact_handles_known_and_unknown_backends():
+    unknown = TensorSpec("float32", shape=(10,))
+    known = TensorSpec("float32", shape=(10,), backend="numpy")
+
+    assert not unknown.equal_exact(known)
+    assert not known.equal_exact(unknown)
+
+
 def test_tensor_spec_is_hashable_and_pickleable():
     spec = TensorSpec(
         dtype="float32",

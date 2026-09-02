@@ -181,6 +181,28 @@ def test_tf_sequential_infers_output_spec_without_explicit_output_spec():
     assert Map(ds, model).spec == TensorSpec("float32", shape=(2,), backend="tf")
 
 
+def test_tf_custom_dtype_layer_requires_explicit_output_spec_without_execution():
+    from dryml.models.tf import Model
+
+    class CastLayer(tf.keras.layers.Layer):
+        calls = 0
+
+        def call(self, inputs):
+            self.calls += 1
+            return tf.cast(inputs, tf.int32)
+
+        def compute_output_shape(self, input_shape):
+            return input_shape
+
+    model = object.__new__(Model)
+    model.obj = tf.keras.Sequential([CastLayer()])
+    model.output_spec = None
+
+    with pytest.raises(NotImplementedError, match="pass output_spec explicitly"):
+        model.infer_output_spec(TensorSpec("float32", shape=(3,), backend="tf"))
+    assert model.obj.layers[0].calls == 0
+
+
 def test_tf_inference_never_invokes_an_opaque_model_or_changes_mode():
     from dryml.models.tf import Model
 

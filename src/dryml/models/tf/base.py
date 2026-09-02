@@ -7,7 +7,7 @@ from dataclasses import replace
 
 from dryml.core.object import Serializable
 from dryml.core.repo import manage_repo
-from dryml.core.tensor_spec import Dynamic, TensorSpec, batch_spec_tree, iter_specs, spec_tree_is_batched, unbatch_spec_tree
+from dryml.core.tensor_spec import Dynamic, TensorSpec, batch_spec_tree, iter_specs, maybe_unbatch_output_spec, spec_tree_is_batched
 from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.data import Batch, Map, Project, Select
@@ -130,32 +130,38 @@ def _keras_output_specs(output_shapes, *, dtype):
 
     if hasattr(output_shapes, "as_list"):
         dims = output_shapes.as_list()
-        if dims is None or not dims:
-            raise NotImplementedError("TensorFlow output shape metadata has unknown rank.")
-        return TensorSpec(
-            dtype=dtype,
-            shape=tuple(Dynamic if dim is None else int(dim) for dim in dims[1:]),
-            batch=Dynamic if dims[0] is None else int(dims[0]),
-            backend="tf",
-        )
-    if isinstance(output_shapes, (tuple, list)) and all(
+    elif isinstance(output_shapes, (tuple, list)) and all(
         dimension is None or isinstance(dimension, int) for dimension in output_shapes
     ):
-        if not output_shapes:
-            raise NotImplementedError("TensorFlow output shape metadata has unknown rank.")
-        return TensorSpec(
-            dtype=dtype,
-            shape=tuple(Dynamic if dim is None else int(dim) for dim in output_shapes[1:]),
-            batch=Dynamic if output_shapes[0] is None else int(output_shapes[0]),
-            backend="tf",
-        )
-    if isinstance(output_shapes, dict):
-        return {key: _keras_output_specs(value, dtype=dtype) for key, value in output_shapes.items()}
-    if isinstance(output_shapes, tuple):
-        return tuple(_keras_output_specs(value, dtype=dtype) for value in output_shapes)
-    if isinstance(output_shapes, list):
-        return [_keras_output_specs(value, dtype=dtype) for value in output_shapes]
-    raise TypeError("TensorFlow output shape metadata must be a TensorShape tree.")
+        dims = output_shapes
+    else:
+        if isinstance(output_shapes, dict):
+            return {key: _keras_output_specs(value, dtype=dtype) for key, value in output_shapes.items()}
+        if isinstance(output_shapes, tuple):
+            return tuple(_keras_output_specs(value, dtype=dtype) for value in output_shapes)
+        if isinstance(output_shapes, list):
+            return [_keras_output_specs(value, dtype=dtype) for value in output_shapes]
+        raise TypeError("TensorFlow output shape metadata must be a TensorShape tree.")
+
+    if dims is None or not dims:
+        raise NotImplementedError("TensorFlow output shape metadata has unknown rank.")
+    return TensorSpec(
+        dtype=dtype,
+        shape=tuple(Dynamic if dim is None else int(dim) for dim in dims[1:]),
+        batch=Dynamic if dims[0] is None else int(dims[0]),
+        backend="tf",
+    )
+
+
+def _keras_output_dtype(tf, model, fallback):
+    """Return trustworthy built-in Keras dtype metadata without user calls."""
+
+    layers = tuple(model.layers)
+    for layer in layers:
+        module = type(layer).__module__
+        if isinstance(layer, tf.keras.layers.Lambda) or not module.startswith(("keras.", "tensorflow.")):
+            raise NotImplementedError("Custom TensorFlow layers require an explicit output_spec.")
+    return getattr(layers[-1], "compute_dtype", None) if layers else fallback
 
 
 def _reset_metric(metric):
@@ -367,7 +373,25 @@ class Model(BaseModel, Serializable):
         return self._call_raw(x, *args, **kwargs)
 
     def find_implementation(self, input_spec=None, *, backend=None, batch_mode=None):
-        """Select a model call and attach element adaptation from ``input_spec``."""
+        """Select a model call and attach explicit element batch adaptation.
+
+        Args:
+            input_spec: Optional normalized first-input specification retained
+                for selected-call validation and element adaptation.
+            backend: Optional required backend value or closed string spelling.
+            batch_mode: Optional required element/batched value or spelling.
+
+        Returns:
+            A selected callable that adds and removes one TensorFlow batch axis
+            for element calls when ``input_spec`` is supplied.
+
+        Raises:
+            ImplementationSelectionError: If constraints are malformed,
+                conflicting, unsupported, or select no unique implementation.
+
+        Side Effects:
+            Binds a local selected callable without changing preparation state.
+        """
 
         implementation = super().find_implementation(
             input_spec,
@@ -437,7 +461,7 @@ class Model(BaseModel, Serializable):
             output_shapes = self.obj.compute_output_shape(
                 _keras_input_shapes(tf, model_input_spec)
             )
-            dtype = getattr(self.obj, "compute_dtype", None) or next(iter_specs(source_spec)).dtype
+            dtype = _keras_output_dtype(tf, self.obj, next(iter_specs(source_spec)).dtype)
             output_spec = _keras_output_specs(output_shapes, dtype=dtype)
         except (AttributeError, TypeError, ValueError, NotImplementedError) as error:
             if isinstance(source_spec, tuple):
@@ -450,7 +474,7 @@ class Model(BaseModel, Serializable):
                 f"Cannot infer output spec for {type(self).__name__} without executing the model; "
                 "pass output_spec explicitly."
             ) from error
-        return output_spec if spec_tree_is_batched(source_spec) else unbatch_spec_tree(output_spec)
+        return maybe_unbatch_output_spec(output_spec, source_spec)
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         import tensorflow as tf

@@ -128,22 +128,22 @@ class AutoEncoder(Model):
         if input_spec is None:
             return implementation
         if learning:
-            def select(model, spec):
+            def select(model, spec, selected_backend):
                 return model._prepare_implementation(
                     spec,
-                    backend=backend,
+                    backend=selected_backend,
                     batch_mode=batch_mode,
                 )
         else:
-            def select(model, spec):
+            def select(model, spec, selected_backend):
                 return model.find_implementation(
                     spec,
-                    backend=backend,
+                    backend=selected_backend,
                     batch_mode=batch_mode,
                 )
-        encoder = select(self.encoder, input_spec)
+        encoder = select(self.encoder, input_spec, backend)
         encoded_spec = self.encoder.infer_output_spec(input_spec)
-        decoder = select(self.decoder, encoded_spec)
+        decoder = select(self.decoder, encoded_spec, None)
 
         def invoke_autoencoder(x):
             return decoder(encoder(x))

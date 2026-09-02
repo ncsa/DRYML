@@ -12,6 +12,8 @@ import numpy as np
 from dryml.core.backend import Backend, backend_testers
 from dryml.core.tensor_spec import BatchMode, Dynamic, SpecTree, TensorSpec, is_spec_tree
 
+from .errors import MethodError
+
 MethodCallMode = Literal["eager", "learning", "cached"]
 MethodCallNodeKind = Literal["tensor", "tuple", "list", "mapping"]
 
@@ -72,7 +74,7 @@ class MethodCallSignature:
             isinstance(other, MethodCallSignature)
             and self.args == other.args
             and self.kwargs == other.kwargs
-            and self.backend == other.backend
+            and self.backend is other.backend
             and self.batch_mode == other.batch_mode
         )
 
@@ -116,11 +118,17 @@ def runtime_node(value: object) -> MethodCallNode:
                 raise TypeError("Method mapping keys must be str or int.")
             entries.append((key, runtime_node(item)))
         return MethodCallNode("mapping", tuple(entries))
-    if isinstance(value, (np.ndarray, np.generic)) or np.isscalar(value):
+    if isinstance(value, (np.ndarray, np.generic)):
         array = np.asarray(value)
         return MethodCallNode(
             "tensor",
             TensorSpec(dtype=array.dtype, shape=array.shape, backend=Backend.numpy),
+        )
+    if np.isscalar(value):
+        array = np.asarray(value)
+        return MethodCallNode(
+            "tensor",
+            TensorSpec(dtype=array.dtype, shape=array.shape),
         )
     # Optional adapters are usable only after their framework package has
     # explicitly registered itself. Looking in sys.modules avoids importing a
@@ -130,8 +138,8 @@ def runtime_node(value: object) -> MethodCallNode:
             continue
         try:
             recognized = tester(value)
-        except Exception:
-            recognized = False
+        except Exception as error:
+            raise MethodError(f"The {backend.value!r} backend detector failed.") from error
         if not recognized:
             continue
         module = sys.modules.get(f"dryml.{backend.value}")
@@ -370,7 +378,7 @@ def _runtime_fact_leaves(value: object) -> tuple[tuple[TensorSpec, BatchMode | N
 def _spec_satisfies(expected: TensorSpec, actual: TensorSpec) -> bool:
     if expected.dtype != actual.dtype or expected.layout != actual.layout:
         return False
-    if expected.backend is not None and expected.backend != actual.backend:
+    if expected.backend is not None and expected.backend is not actual.backend:
         return False
     if expected.shape is not None:
         if actual.shape is None or len(expected.shape) != len(actual.shape):

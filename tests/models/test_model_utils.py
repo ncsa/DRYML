@@ -21,6 +21,18 @@ class CountingIdentityModel(Model):
         return super().find_implementation(*args, **kwargs)
 
 
+class BackendChangingModel(Model):
+    def __init__(self, backend):
+        self.backend = backend
+        super().__init__()
+
+    def __call__(self, value):
+        return TensorSpec(value.dtype, shape=value.shape, backend=self.backend)
+
+    def infer_output_spec(self, input_spec):
+        return TensorSpec(input_spec.dtype, shape=input_spec.shape, backend=self.backend)
+
+
 def test_prepare_training_data_unbatches_and_takes_examples():
     x = np.array([[0.0], [1.0], [2.0]], dtype=np.float32)
     y = np.array([[1.0], [2.0], [3.0]], dtype=np.float32)
@@ -69,3 +81,12 @@ def test_autoencoder_selected_invoker_selects_children_once_without_cache_mutati
     assert encoder.selections == 1
     assert decoder.selections == 1
     assert encoder.call_mode == decoder.call_mode == "eager"
+
+
+def test_autoencoder_derives_decoder_backend_from_encoded_spec():
+    model = AutoEncoder(BackendChangingModel("torch"), BackendChangingModel("tf"))
+    source = TensorSpec("float32", shape=(2,), backend="numpy")
+
+    model.learn()
+    assert model(source).backend.value == "tf"
+    assert model.call_mode == "cached"

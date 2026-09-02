@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from dataclasses import replace
 
+from dryml.core.backend import Backend, backend_testers
 from dryml.core.tensor_spec import Dynamic, Layout, TensorSpec
 from dryml.methods import ImplementationSelectionError, Method, MethodError, PreparedCallMismatchError, traits
 
@@ -173,6 +174,62 @@ def test_cached_signature_detects_every_exact_tensor_field_and_preserves_cache()
         assert method.cached_signature == signature
 
     assert method(baseline)[0] == (baseline,)
+
+
+def test_cached_signature_handles_unknown_backend_and_bounds_conflicting_facts():
+    method = ExactPrepared()
+    unknown = TensorSpec("float32", shape=(3,))
+    method.learn()
+    method(unknown, unknown)
+    signature = method.cached_signature
+
+    with pytest.raises(PreparedCallMismatchError):
+        method(TensorSpec("float32", shape=(3,), backend="numpy"), unknown)
+    with pytest.raises(PreparedCallMismatchError):
+        method(
+            TensorSpec("float32", shape=(3,), backend="numpy"),
+            TensorSpec("float32", shape=(3,), backend="torch"),
+        )
+    assert method.cached_signature == signature
+
+
+def test_python_scalar_options_are_backend_neutral_in_eager_and_cached_calls():
+    class BackendOption(Method):
+        @traits(backend="tf")
+        def tf(self, value, *, training):
+            return value, training
+
+    value = TensorSpec("float32", shape=(3,), backend="tf")
+    method = object.__new__(BackendOption)
+    assert method(value, training=False) == (value, False)
+
+    method.learn()
+    assert method(value, training=False) == (value, False)
+    assert method(value, training=False) == (value, False)
+
+
+def test_backend_detector_failures_remain_bounded_and_observable(monkeypatch):
+    class DetectorInput:
+        pass
+
+    class Generic(Method):
+        calls = 0
+
+        @traits()
+        def generic(self, value):
+            self.calls += 1
+            return value
+
+    def fail_detector(value):
+        raise RuntimeError("detector failed")
+
+    monkeypatch.setitem(backend_testers, Backend.jax, fail_detector)
+    method = object.__new__(Generic)
+    with pytest.raises(MethodError, match="detector failed") as error:
+        method(DetectorInput())
+
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert method.calls == 0
 
 
 def test_cached_signature_copies_containers_and_preserves_call_layout():

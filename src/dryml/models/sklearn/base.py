@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import numpy as np
+
 from dryml.core.object import Pickleable
 from dryml.core.tensor_spec import (
     TensorSpec,
@@ -83,18 +85,20 @@ class ClassifierModel(Model):
         if self.output_spec is not None:
             return super().infer_output_spec(input_spec)
 
-        try:
-            return super().infer_output_spec(input_spec)
-        except NotImplementedError:
-            classes = getattr(self.estimator, "classes_", None)
-            if classes is None:
-                raise
+        classes = getattr(self.estimator, "classes_", None)
+        if classes is not None:
             if isinstance(classes, (tuple, list)):
                 raise NotImplementedError("Multi-output classifier spec inference is not implemented.")
+            predicts_probabilities = hasattr(self.estimator, "predict_proba")
             return match_input_batch(
-                TensorSpec(next(iter_specs(input_spec)).dtype, shape=(len(classes),), backend="numpy"),
+                TensorSpec(
+                    "float64" if predicts_probabilities else np.asarray(classes).dtype,
+                    shape=(len(classes),) if predicts_probabilities else (),
+                    backend="numpy",
+                ),
                 input_spec,
             )
+        return super().infer_output_spec(input_spec)
 
 
 class RegressionModel(Model):

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import os
-import types
 import weakref
 from dataclasses import dataclass, replace
 from threading import Lock
-from typing import ClassVar
 
-from dryml.annotations import AnnotatedMember, collect_annotations
+from dryml.annotations import AnnotatedMember, annotations_for_members
 from dryml.core.backend import Backend
 from dryml.core.object import Object
 from dryml.core.tensor_spec import BatchMode, SpecTree
@@ -122,7 +120,7 @@ if hasattr(os, "register_at_fork"):
 class _MethodGatewayDescriptor:
     """Bind the shared gateway while retaining the class that authored a call."""
 
-    __slots__ = ("owner",)
+    __slots__ = ("owner", "__dict__")
 
     def __init__(self, owner: type) -> None:
         self.owner = owner
@@ -137,51 +135,10 @@ class _MethodGatewayDescriptor:
         return invoke
 
 
-def _is_method_descriptor(descriptor: object) -> bool:
-    """Return whether one declaration can carry Method annotation evidence."""
-
-    descriptor_type = type(descriptor)
-    if descriptor_type is types.FunctionType:
-        return True
-    if issubclass(descriptor_type, (staticmethod, classmethod)):
-        return True
-    if isinstance(descriptor, property):
-        return False
-    return any("__get__" in base.__dict__ for base in descriptor_type.__mro__)
-
-
 def _method_members(cls: type) -> tuple[AnnotatedMember, ...]:
-    """Collect passive Method evidence below Object without binding descriptors.
+    """Collect annotation-owned evidence below the Method authoring boundary."""
 
-    ``annotations_for_members`` intentionally scans a complete class MRO and
-    rejects unsupported members. ``Object`` has ordinary unsupported properties,
-    so Method interprets the same U2 annotation primitives only for declarations
-    from ``Method`` through the supplied subclass. This keeps core APIs outside
-    the Method-owned catalog while retaining U2's descriptor annotation rules.
-    """
-
-    matching_names: set[str] = set()
-    members: list[AnnotatedMember] = []
-    reached_method = False
-    for owner in reversed(cls.__mro__):
-        if owner is Method:
-            reached_method = True
-            continue
-        if not reached_method:
-            continue
-        namespace = owner.__dict__
-        for name, descriptor in namespace.items():
-            annotations = () if type(descriptor) is _MethodGatewayDescriptor else (
-                collect_annotations(descriptor, key=METHOD_TRAITS_KEY)
-                if _is_method_descriptor(descriptor)
-                else ()
-            )
-            if annotations:
-                matching_names.add(name)
-                members.append(AnnotatedMember(owner, name, descriptor, annotations))
-            elif name in matching_names:
-                members.append(AnnotatedMember(owner, name, descriptor, ()))
-    return tuple(members)
+    return annotations_for_members(cls, key=METHOD_TRAITS_KEY, after=Method)
 
 
 class Method(Object):
@@ -196,8 +153,6 @@ class Method(Object):
     CDef state; concurrent mode/default transitions on the same instance require
     caller coordination.
     """
-
-    _method_gateway_marker: ClassVar[bool] = True
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         """Capture direct calls and reject local mixed or duplicate trait declarations.
@@ -574,7 +529,7 @@ class Method(Object):
                 raise MethodError("Method cached state is incomplete.")
             try:
                 observed = call_signature(args, kwargs)
-            except TypeError as error:
+            except (TypeError, ValueError) as error:
                 raise PreparedCallMismatchError(expected, expected) from error
             if observed.batch_mode is None:
                 observed = replace(observed, batch_mode=expected.batch_mode)
@@ -700,7 +655,14 @@ class Method(Object):
                     )
                 implementation = self._implementation_for(name, descriptor, declared_traits)
                 self._place_catalog_slot(slots, order, owner, implementation)
-        return tuple(slots[name][1] for name in order)
+        catalog = tuple(slots[name][1] for name in order)
+        if any(candidate._direct for candidate in catalog) and any(
+            not candidate._direct for candidate in catalog
+        ):
+            raise ImplementationDeclarationError(
+                "A Method hierarchy cannot combine a direct __call__ with trait alternatives."
+            )
+        return catalog
 
     def _implementation_for(
         self,

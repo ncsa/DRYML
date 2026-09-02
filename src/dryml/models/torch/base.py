@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import weakref
 from dataclasses import replace
@@ -66,10 +67,7 @@ def _torch_metadata_shape(torch, module, shape):
     if isinstance(module, torch.nn.Flatten):
         if module.start_dim != 1 or module.end_dim not in (-1, len(shape)):
             raise NotImplementedError("Only standard batch-preserving torch Flatten is supported.")
-        size = 1
-        for dimension in shape:
-            size *= int(dimension)
-        return (size,)
+        return (math.prod(int(dimension) for dimension in shape),)
     if isinstance(module, torch.nn.Linear):
         if not shape:
             raise NotImplementedError("torch Linear requires a known feature axis.")
@@ -278,7 +276,26 @@ class Model(BaseModel, Serializable):
         return self._call_raw(x, *args, **kwargs)
 
     def find_implementation(self, input_spec=None, *, backend=None, batch_mode=None):
-        """Select a model call and attach element adaptation from ``input_spec``."""
+        """Select a model call and attach explicit element batch adaptation.
+
+        Args:
+            input_spec: Optional normalized first-input specification retained
+                for selected-call validation and element adaptation.
+            backend: Optional required backend value or closed string spelling.
+            batch_mode: Optional required element/batched value or spelling.
+
+        Returns:
+            A selected callable that moves element inputs to the selected Torch
+            device, adds one batch axis, and removes it from the model output.
+
+        Raises:
+            ImplementationSelectionError: If constraints are malformed,
+                conflicting, unsupported, or select no unique implementation.
+
+        Side Effects:
+            Registers the optional Torch tensor adapter, then binds a local
+            selected callable without changing Method preparation state.
+        """
 
         # Selected-call validation must recognize module outputs in a following
         # Pipe child. This optional backend registration stays in the selected

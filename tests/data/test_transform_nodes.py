@@ -297,6 +297,32 @@ def test_pipe_infer_output_spec_and_call():
     assert out.tolist() == [1.0, 2.0]
 
 
+def test_learning_pipe_derives_each_child_backend_from_intermediate_specs():
+    class ChangeBackend(Method):
+        @traits(backend="numpy")
+        def numpy(self, value):
+            return TensorSpec(value.dtype, shape=value.shape, backend="torch")
+
+        def infer_output_spec(self, input_spec):
+            return TensorSpec(input_spec.dtype, shape=input_spec.shape, backend="torch")
+
+    class ConsumeTorch(Method):
+        @traits(backend="torch")
+        def torch(self, value):
+            return value
+
+        def infer_output_spec(self, input_spec):
+            return input_spec
+
+    source = TensorSpec("float32", shape=(2,), backend="numpy")
+    pipe = object.__new__(Pipe)
+    pipe.methods = (object.__new__(ChangeBackend), object.__new__(ConsumeTorch))
+    pipe.learn()
+
+    assert pipe(source).backend is Backend.torch
+    assert pipe.call_mode == "cached"
+
+
 def test_project_positional_branches_use_one_input_element():
     project = Project(Select("x"), Select("y"))
     spec = {
