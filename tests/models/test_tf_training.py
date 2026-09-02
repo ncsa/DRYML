@@ -1,4 +1,6 @@
+import gc
 import warnings
+import weakref
 
 import numpy as np
 import pytest
@@ -19,6 +21,16 @@ class TinyKerasModel(tf.keras.Model):
 
     def call(self, x):
         return self.dense(x)
+
+
+class EffectfulKerasModel(tf.keras.Model):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def call(self, x):
+        self.calls += 1
+        return x
 
 
 def test_tf_basic_training_updates_experiment_state():
@@ -98,9 +110,8 @@ def test_tf_model_and_optimizer_state_ref_round_trip(tmp_path):
     assert int(loaded_optimizer.iterations.numpy()) == expected_iterations + 1
 
     rebound = Repo(stores=tmp_path).load_state_ref(state, reuse_live="never")
-    _, first = rebound.model.bind_first(
-        tf.convert_to_tensor(x[0]), input_spec=ArrayDataset(x).spec
-    )
+    selected = rebound.model.find_implementation(input_spec=ArrayDataset(x).spec)
+    first = selected(x[0])
     np.testing.assert_allclose(first.numpy(), expected_predictions[0])
 
 
@@ -168,6 +179,56 @@ def test_tf_sequential_infers_output_spec_without_explicit_output_spec():
     model = Sequential(layer_defs=(("Dense", {"units": 2}),))
 
     assert Map(ds, model).spec == TensorSpec("float32", shape=(2,), backend="tf")
+
+
+def test_tf_inference_never_invokes_an_opaque_model_or_changes_mode():
+    from dryml.models.tf import Model
+
+    model = Model(EffectfulKerasModel)
+    model.obj.trainable = False
+
+    with pytest.raises(NotImplementedError, match="pass output_spec explicitly"):
+        model.infer_output_spec(TensorSpec("float32", shape=(3,), backend="numpy"))
+
+    assert model.obj.calls == 0
+    assert model.obj.trainable is False
+
+
+def test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache():
+    from dryml.models.tf import Sequential
+
+    model = Sequential(layer_defs=(("Dense", {"units": 2}),))
+    element_spec = TensorSpec("float32", shape=(3,), backend="numpy")
+    batch_spec = TensorSpec("float32", shape=(3,), batch=2, backend="numpy")
+    element = model.find_implementation(input_spec=element_spec)
+    batched = model.find_implementation(input_spec=batch_spec)
+
+    assert tuple(element(np.zeros((3,), dtype=np.float32)).shape) == (2,)
+    assert tuple(batched(np.zeros((2, 3), dtype=np.float32)).shape) == (2, 2)
+
+    model.learn()
+    direct = model(tf.zeros((1, 3), dtype=tf.float32))
+    assert model.call_mode == "cached"
+    assert tuple(model(tf.zeros((1, 3), dtype=tf.float32)).shape) == tuple(direct.shape)
+    model.eager()
+    assert model.call_mode == "eager"
+
+
+def test_tf_cached_element_invoker_does_not_retain_the_model():
+    """The weak preparation table releases a model with selected element adaptation."""
+
+    from dryml.models.tf import Sequential
+
+    model = Sequential(layer_defs=(("Dense", {"units": 2}),))
+    model.default_batched = False
+    model.learn()
+    model(np.zeros((3,), dtype=np.float32))
+    reference = weakref.ref(model)
+
+    del model
+    gc.collect()
+
+    assert reference() is None
 
 
 def test_tf_sequential_accepts_factory_spec_and_constructor_tuple_shorthand():

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dryml.code import Method
+from dryml.methods import Method
 
 
 class TrainFunction(Method):

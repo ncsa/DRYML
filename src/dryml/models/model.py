@@ -1,11 +1,22 @@
 from __future__ import annotations
 
-from dryml.code import Method
+from dataclasses import replace
+
 from dryml.core.tensor_spec import Dynamic, batch_spec_tree, iter_specs
+from dryml.methods import Method
 
 
 class Model(Method):
-    """Base model API: a model is a Method usable in Dataset Map nodes."""
+    """Base model Method usable directly and in spec-specialized data nodes.
+
+    Args:
+        output_spec: Optional normalized output specification. When its leaves
+            are unbatched, an input batch contract is propagated to the result.
+
+    ``output_spec`` avoids backend-specific inference. Subclasses without a
+    pure metadata inference route must require it rather than execute a model
+    while deriving a specification.
+    """
 
     def __init__(self, output_spec=None):
         self.output_spec = output_spec
@@ -30,6 +41,17 @@ class Model(Method):
 
 
 class AutoEncoder(Model):
+    """Compose an encoder and decoder Model as one locally specialized Method.
+
+    Args:
+        encoder: Model that transforms the input into the decoder input.
+        decoder: Model that transforms the encoded value into the result.
+        output_spec: Optional explicit final output specification.
+
+    Selected AutoEncoder calls select each child once from threaded pure specs;
+    they do not change either child's process-local Method preparation state.
+    """
+
     def __init__(self, encoder: Model, decoder: Model, output_spec=None):
         self.encoder = encoder
         self.decoder = decoder
@@ -46,15 +68,87 @@ class AutoEncoder(Model):
     def __call__(self, x):
         return self.decoder(self.encoder(x))
 
-    def bind_first(self, first_value, *, input_spec=None):
-        encoder_impl, encoded = self.encoder.bind_first(first_value, input_spec=input_spec)
-        encoded_spec = self.encoder.infer_output_spec(input_spec) if input_spec is not None else None
-        decoder_impl, decoded = self.decoder.bind_first(encoded, input_spec=encoded_spec)
+    def find_implementation(self, input_spec=None, *, backend=None, batch_mode=None):
+        """Select this composite and both children from one threaded input spec.
 
-        def bound_autoencoder(x):
-            return decoder_impl(encoder_impl(x))
+        Args:
+            input_spec: Normalized input specification for the encoder.
+            backend: Optional explicit backend selection constraint.
+            batch_mode: Optional explicit batch-mode selection constraint.
 
-        return bound_autoencoder, decoded
+        Returns:
+            A callable implementation that validates the outer input and invokes
+            locally selected encoder and decoder implementations.
+
+        Raises:
+            ImplementationSelectionError: If this Model or either child cannot
+            be selected from the supplied constraints.
+        """
+
+        implementation = super().find_implementation(
+            input_spec,
+            backend=backend,
+            batch_mode=batch_mode,
+        )
+        return self._specialize_implementation(
+            implementation,
+            input_spec,
+            backend=backend,
+            batch_mode=batch_mode,
+            learning=False,
+        )
+
+    def _prepare_implementation(self, input_spec, *, backend, batch_mode):
+        """Build the learning-time local child invoker without shared caches."""
+
+        implementation = super()._prepare_implementation(
+            input_spec,
+            backend=backend,
+            batch_mode=batch_mode,
+        )
+        return self._specialize_implementation(
+            implementation,
+            input_spec,
+            backend=backend,
+            batch_mode=batch_mode,
+            learning=True,
+        )
+
+    def _specialize_implementation(
+        self,
+        implementation,
+        input_spec,
+        *,
+        backend,
+        batch_mode,
+        learning,
+    ):
+        """Attach child callables selected from pure intermediate specifications."""
+
+        if input_spec is None:
+            return implementation
+        if learning:
+            def select(model, spec):
+                return model._prepare_implementation(
+                    spec,
+                    backend=backend,
+                    batch_mode=batch_mode,
+                )
+        else:
+            def select(model, spec):
+                return model.find_implementation(
+                    spec,
+                    backend=backend,
+                    batch_mode=batch_mode,
+                )
+        encoder = select(self.encoder, input_spec)
+        encoded_spec = self.encoder.infer_output_spec(input_spec)
+        decoder = select(self.decoder, encoded_spec)
+
+        def invoke_autoencoder(x):
+            return decoder(encoder(x))
+
+        return replace(implementation, _invoker=invoke_autoencoder)
 
     def infer_output_spec(self, input_spec):
         if self.output_spec is not None:

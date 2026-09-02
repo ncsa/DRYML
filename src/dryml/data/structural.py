@@ -3,7 +3,7 @@ from __future__ import annotations
 import itertools
 
 from dryml.core.cardinality import Cardinality
-from dryml.core.tensor_spec import SpecTree, batch_spec_tree, unbatch_spec_tree
+from dryml.core.tensor_spec import Dynamic, SpecTree, batch_spec_tree, unbatch_spec_tree
 from dryml.data.collate import default_collate
 from dryml.data.dataset import Dataset
 from dryml.data.split import default_split
@@ -22,7 +22,10 @@ class Batch(Dataset):
         self.src = src
         self.batch_size = batch_size
         self.drop_remainder = drop_remainder
-        super().__init__(spec=batch_spec_tree(src.spec, batch=batch_size))
+        # A non-dropping final batch may be shorter than ``batch_size``. Preserve
+        # a fixed size only when dropping that final partial batch is guaranteed.
+        batch = batch_size if drop_remainder else Dynamic
+        super().__init__(spec=batch_spec_tree(src.spec, batch=batch))
 
     def __iter__(self):
         it = iter(self.src)

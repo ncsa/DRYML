@@ -14,8 +14,9 @@ def _install() -> None:
         install_method(DType, "torch", _dtype_torch)
         install_method(TensorSpec, "torch", _tensor_spec_torch)
     except RuntimeError:
-        # methods already installed, so we'll exit here.
-        return
+        # Another import already installed these extension methods. Runtime
+        # recognition still belongs to this optional plugin and must register.
+        pass
 
     from dryml.core.backend import backend_testers, backend_existence_testers
     backend_testers[Backend.torch] = is_torch_value

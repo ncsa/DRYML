@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import shutil
+import weakref
+from dataclasses import replace
 
 from dryml.core.object import Serializable
 from dryml.core.repo import manage_repo
-from dryml.core.tensor_spec import Dynamic, TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
+from dryml.core.tensor_spec import Dynamic, TensorSpec, batch_spec_tree, iter_specs, spec_tree_is_batched, unbatch_spec_tree
 from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.data import Batch, Map, Project, Select
@@ -13,8 +15,8 @@ from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress, metric_value
 from dryml.models.utils import advance_train_state, finite_dataset_len, prepare_training_data, validate_num_examples
-from dryml.tf.tensor_spec import as_tensor_spec as tf_as_tensor_spec
 from dryml.tf.tensor_spec import output_signature as tf_output_signature
+from dryml.methods import MethodError, traits
 
 
 def _unwrap_backend_obj(obj):
@@ -112,6 +114,48 @@ def _tree_to_tf_model_batch(tf, value, input_spec):
 
 def _unbatch_tree(value):
     return map_leaves(value, lambda leaf: leaf[0])
+
+
+def _keras_input_shapes(tf, spec_tree):
+    """Convert normalized input specs into TensorFlow shape metadata only."""
+
+    return map_leaves(
+        spec_tree,
+        lambda spec: tf.TensorShape(_dims_to_keras_shape(spec.framework_shape())),
+    )
+
+
+def _keras_output_specs(output_shapes, *, dtype):
+    """Translate Keras output shape metadata into batched TensorSpecs."""
+
+    if hasattr(output_shapes, "as_list"):
+        dims = output_shapes.as_list()
+        if dims is None or not dims:
+            raise NotImplementedError("TensorFlow output shape metadata has unknown rank.")
+        return TensorSpec(
+            dtype=dtype,
+            shape=tuple(Dynamic if dim is None else int(dim) for dim in dims[1:]),
+            batch=Dynamic if dims[0] is None else int(dims[0]),
+            backend="tf",
+        )
+    if isinstance(output_shapes, (tuple, list)) and all(
+        dimension is None or isinstance(dimension, int) for dimension in output_shapes
+    ):
+        if not output_shapes:
+            raise NotImplementedError("TensorFlow output shape metadata has unknown rank.")
+        return TensorSpec(
+            dtype=dtype,
+            shape=tuple(Dynamic if dim is None else int(dim) for dim in output_shapes[1:]),
+            batch=Dynamic if output_shapes[0] is None else int(output_shapes[0]),
+            backend="tf",
+        )
+    if isinstance(output_shapes, dict):
+        return {key: _keras_output_specs(value, dtype=dtype) for key, value in output_shapes.items()}
+    if isinstance(output_shapes, tuple):
+        return tuple(_keras_output_specs(value, dtype=dtype) for value in output_shapes)
+    if isinstance(output_shapes, list):
+        return [_keras_output_specs(value, dtype=dtype) for value in output_shapes]
+    raise TypeError("TensorFlow output shape metadata must be a TensorShape tree.")
 
 
 def _reset_metric(metric):
@@ -277,7 +321,13 @@ class Metric(Wrapper):
 
 
 class Model(BaseModel, Serializable):
-    """Wrapper around a TensorFlow/Keras model class."""
+    """Wrapper around a TensorFlow/Keras model class.
+
+    Direct calls use the raw Keras model. Spec-selected element calls add and
+    remove one batch axis, while selected batched calls pass their input through.
+    Output specs use Keras shape metadata only; unsupported custom models must
+    receive an explicit ``output_spec``.
+    """
 
     def __init__(self, cls, *args, output_spec=None, **kwargs):
         self.cls = validate_class(cls)
@@ -291,24 +341,68 @@ class Model(BaseModel, Serializable):
         self._restore_checkpoint = None
         self._restore_status = None
 
-    def __call__(self, x, *args, **kwargs):
+    def _call_raw(self, x, *args, **kwargs):
         result = self.obj(x, *args, **kwargs)
         if self._pending_restore_path is not None:
             self.restore_pending()
             result = self.obj(x, *args, **kwargs)
         return result
 
-    def bind_first(self, first_value, *, input_spec=None):
-        if input_spec is None or spec_tree_is_batched(input_spec):
-            return self, self(first_value)
+    @traits()
+    def raw_call(self, x, *args, **kwargs):
+        """Invoke the raw Keras model when batching intent is unavailable."""
 
-        import tensorflow as tf
+        return self._call_raw(x, *args, **kwargs)
 
-        def bound_model(x):
+    @traits(batch_mode="batched")
+    def batched_call(self, x, *args, **kwargs):
+        """Invoke the raw Keras model with an already batched selected input."""
+
+        return self._call_raw(x, *args, **kwargs)
+
+    @traits(batch_mode="element")
+    def element_call(self, x, *args, **kwargs):
+        """Invoke an element directly when no supplied spec selected adaptation."""
+
+        return self._call_raw(x, *args, **kwargs)
+
+    def find_implementation(self, input_spec=None, *, backend=None, batch_mode=None):
+        """Select a model call and attach element adaptation from ``input_spec``."""
+
+        implementation = super().find_implementation(
+            input_spec,
+            backend=backend,
+            batch_mode=batch_mode,
+        )
+        return self._specialize_implementation(implementation, input_spec)
+
+    def _prepare_implementation(self, input_spec, *, backend, batch_mode):
+        """Build a learning-time selected model call without shared state mutation."""
+
+        implementation = super()._prepare_implementation(
+            input_spec,
+            backend=backend,
+            batch_mode=batch_mode,
+        )
+        return self._specialize_implementation(implementation, input_spec)
+
+    def _specialize_implementation(self, implementation, input_spec):
+        """Attach the selected element's explicit one-item batch adaptation."""
+
+        if implementation.name != "element_call" or input_spec is None:
+            return implementation
+        receiver_ref = weakref.ref(self)
+
+        def invoke_element(x, *args, **kwargs):
+            import tensorflow as tf
+
+            receiver = receiver_ref()
+            if receiver is None:
+                raise MethodError("The selected TensorFlow Model is no longer live.")
             batched = _tree_to_tf_model_batch(tf, x, input_spec)
-            return _unbatch_tree(self(batched))
+            return _unbatch_tree(receiver._call_raw(batched, *args, **kwargs))
 
-        return bound_model, bound_model(first_value)
+        return replace(implementation, _invoker=invoke_element)
 
     def fit(self, *args, **kwargs):
         return self.obj.fit(*args, **kwargs)
@@ -331,34 +425,32 @@ class Model(BaseModel, Serializable):
         if self.output_spec is not None:
             return super().infer_output_spec(input_spec)
 
-        import warnings
         import tensorflow as tf
-
-        sample = map_leaves(fake_from_spec_tree(input_spec), tf.convert_to_tensor)
+        if not isinstance(self.obj, tf.keras.Sequential):
+            raise NotImplementedError(
+                f"Cannot infer output spec for {type(self).__name__} without executing the model; "
+                "pass output_spec explicitly."
+            )
+        source_spec = input_spec
+        model_input_spec = input_spec if spec_tree_is_batched(input_spec) else batch_spec_tree(input_spec)
         try:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                output = self.obj(sample, training=False)
-        except ValueError as e:
-            message = str(e)
-            if "input" in message and ("expects" in message or "Arguments received" in message):
+            output_shapes = self.obj.compute_output_shape(
+                _keras_input_shapes(tf, model_input_spec)
+            )
+            dtype = getattr(self.obj, "compute_dtype", None) or next(iter_specs(source_spec)).dtype
+            output_spec = _keras_output_specs(output_shapes, dtype=dtype)
+        except (AttributeError, TypeError, ValueError, NotImplementedError) as error:
+            if isinstance(source_spec, tuple):
                 raise ValueError(
                     "Input spec structure does not match the TensorFlow model input structure. "
                     "If the dataset element contains both features and labels, select the feature branch first, "
                     "for example Map(dataset, Select(0), model)."
-                ) from e
-            raise
-
-        for warning in caught:
-            message = str(warning.message)
-            if "structure of `inputs` doesn't match" in message:
-                raise ValueError(
-                    "Input spec structure does not match the TensorFlow model input structure. "
-                    "If the dataset element contains both features and labels, select the feature branch first, "
-                    "for example Map(dataset, Select(0), model)."
-                )
-
-        return maybe_unbatch_output_spec(tf_as_tensor_spec(output, batched=True), input_spec)
+                ) from error
+            raise NotImplementedError(
+                f"Cannot infer output spec for {type(self).__name__} without executing the model; "
+                "pass output_spec explicitly."
+            ) from error
+        return output_spec if spec_tree_is_batched(source_spec) else unbatch_spec_tree(output_spec)
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         import tensorflow as tf

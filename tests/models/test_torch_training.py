@@ -14,6 +14,16 @@ if not hasattr(torch, "Tensor"):
     pytest.skip("PyTorch is not installed.", allow_module_level=True)
 
 
+class EffectfulModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def forward(self, value):
+        self.calls += 1
+        return value
+
+
 def test_torch_basic_training_updates_experiment_state():
     from dryml.core.repo import get_default_repo
     from dryml.models.torch import Model, Optimizer, Training
@@ -94,6 +104,39 @@ def test_torch_sequential_accepts_constructor_tuple_shorthand():
 
     assert Map(ds, model).spec.backend.value == "torch"
     assert Map(ds, model).spec.shape == (2,)
+
+
+def test_torch_inference_never_invokes_an_opaque_model_or_changes_mode():
+    from dryml.models.torch import Model
+
+    model = Model(EffectfulModule)
+    model.obj.train(True)
+
+    with pytest.raises(NotImplementedError, match="pass output_spec explicitly"):
+        model.infer_output_spec(TensorSpec("float32", shape=(3,), backend="numpy"))
+
+    assert model.obj.calls == 0
+    assert model.obj.training is True
+
+
+def test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache():
+    from dryml.models.torch import Sequential
+
+    model = Sequential(layer_defs=(("Linear", (3, 2), {}),))
+    element_spec = TensorSpec("float32", shape=(3,), backend="numpy")
+    batch_spec = TensorSpec("float32", shape=(3,), batch=2, backend="numpy")
+    element = model.find_implementation(input_spec=element_spec)
+    batched = model.find_implementation(input_spec=batch_spec)
+
+    assert tuple(element(np.zeros((3,), dtype=np.float32)).shape) == (2,)
+    assert tuple(batched(np.zeros((2, 3), dtype=np.float32)).shape) == (2, 2)
+
+    model.learn()
+    direct = model(torch.zeros((1, 3), dtype=torch.float32))
+    assert model.call_mode == "cached"
+    assert tuple(model(torch.zeros((1, 3), dtype=torch.float32)).shape) == tuple(direct.shape)
+    model.eager()
+    assert model.call_mode == "eager"
 
 
 def test_torch_model_map_unbatched_tensor_uses_backend_batch_axis():

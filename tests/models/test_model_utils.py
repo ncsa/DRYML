@@ -1,7 +1,24 @@
 import numpy as np
 
+from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArrayDataset, Batch, collate_xy
+from dryml.models import AutoEncoder, Model
 from dryml.models.utils import prepare_training_data
+
+
+class CountingIdentityModel(Model):
+    def __init__(self):
+        self.selections = 0
+
+    def __call__(self, value):
+        return value
+
+    def infer_output_spec(self, input_spec):
+        return input_spec
+
+    def find_implementation(self, *args, **kwargs):
+        self.selections += 1
+        return super().find_implementation(*args, **kwargs)
 
 
 def test_prepare_training_data_unbatches_and_takes_examples():
@@ -38,3 +55,17 @@ def test_tf_keras_package_only_exports_keras_specific_symbols():
     assert hasattr(keras_models, "Sequential")
     assert not hasattr(keras_models, "BasicTraining")
     assert not hasattr(keras_models, "Optimizer")
+
+
+def test_autoencoder_selected_invoker_selects_children_once_without_cache_mutation():
+    encoder = CountingIdentityModel()
+    decoder = CountingIdentityModel()
+    model = AutoEncoder(encoder, decoder)
+    spec = TensorSpec("float32", shape=(2,), backend="numpy")
+
+    selected = model.find_implementation(input_spec=spec)
+    assert selected(np.ones((2,), dtype=np.float32)).shape == (2,)
+
+    assert encoder.selections == 1
+    assert decoder.selections == 1
+    assert encoder.call_mode == decoder.call_mode == "eager"

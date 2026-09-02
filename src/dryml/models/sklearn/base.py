@@ -3,10 +3,8 @@ from __future__ import annotations
 from dryml.core.object import Pickleable
 from dryml.core.tensor_spec import (
     TensorSpec,
-    as_tensor_spec,
-    fake_from_spec_tree,
+    iter_specs,
     match_input_batch,
-    maybe_unbatch_output_spec,
 )
 from dryml.core.utils.general import validate_class
 from dryml.data import collate_xy
@@ -29,7 +27,12 @@ class Wrapper(Pickleable):
 
 
 class Model(BaseModel, Pickleable):
-    """Wrapper around an sklearn-style estimator class."""
+    """Wrapper around an sklearn-style estimator class.
+
+    Output inference reads fitted estimator metadata only. An estimator without
+    supported metadata requires an explicit ``output_spec`` and is never probed
+    by calling ``predict`` with fabricated values.
+    """
 
     def __init__(self, cls, *args, output_spec=None, **kwargs):
         self.cls = validate_class(cls)
@@ -52,21 +55,21 @@ class Model(BaseModel, Pickleable):
         if self.output_spec is not None:
             return super().infer_output_spec(input_spec)
 
-        try:
-            sample = fake_from_spec_tree(input_spec)
-            output = self(sample)
-            return maybe_unbatch_output_spec(as_tensor_spec(output, batched=True), input_spec)
-        except Exception:
-            pass
-
         n_outputs = getattr(self.estimator, "n_outputs_", None)
+        if n_outputs is None:
+            coefficients = getattr(self.estimator, "coef_", None)
+            if coefficients is not None:
+                n_outputs = 1 if len(getattr(coefficients, "shape", ())) == 1 else coefficients.shape[0]
         if n_outputs is not None:
             shape = () if int(n_outputs) == 1 else (int(n_outputs),)
-            return match_input_batch(TensorSpec("float64", shape=shape, backend="numpy"), input_spec)
+            return match_input_batch(
+                TensorSpec(next(iter_specs(input_spec)).dtype, shape=shape, backend="numpy"),
+                input_spec,
+            )
 
         raise NotImplementedError(
             f"Cannot infer output spec for {type(self).__name__}. "
-            "Fit the estimator first, use a probe-compatible input spec, or pass output_spec explicitly."
+            "Fit the estimator first when it exposes pure metadata, or pass output_spec explicitly."
         )
 
 
@@ -89,7 +92,7 @@ class ClassifierModel(Model):
             if isinstance(classes, (tuple, list)):
                 raise NotImplementedError("Multi-output classifier spec inference is not implemented.")
             return match_input_batch(
-                TensorSpec("float64", shape=(len(classes),), backend="numpy"),
+                TensorSpec(next(iter_specs(input_spec)).dtype, shape=(len(classes),), backend="numpy"),
                 input_spec,
             )
 

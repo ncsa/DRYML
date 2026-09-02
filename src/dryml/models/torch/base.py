@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import weakref
+from dataclasses import replace
 
 from dryml.core.factory import FactorySpec
 from dryml.core.object import Serializable
 from dryml.core.repo import manage_repo
-from dryml.core.tensor_spec import TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
+from dryml.core.tensor_spec import TensorSpec, iter_specs, match_input_batch
 from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.data import Batch, Map, Project, Select
@@ -18,7 +20,7 @@ from dryml.models.utils import (
     prepare_training_data,
     validate_num_examples,
 )
-from dryml.torch.tensor_spec import as_tensor_spec as torch_as_tensor_spec
+from dryml.methods import MethodError, traits
 
 
 def _resolve_device(torch):
@@ -52,6 +54,38 @@ def _tree_to_torch_model_batch(value, torch, input_spec, *, device=None):
 
 def _unbatch_tree(value):
     return map_leaves(value, lambda leaf: leaf[0])
+
+
+def _torch_metadata_shape(torch, module, shape):
+    """Infer selected built-in module output shape without executing a module."""
+
+    if isinstance(module, torch.nn.Sequential):
+        for child in module.children():
+            shape = _torch_metadata_shape(torch, child, shape)
+        return shape
+    if isinstance(module, torch.nn.Flatten):
+        if module.start_dim != 1 or module.end_dim not in (-1, len(shape)):
+            raise NotImplementedError("Only standard batch-preserving torch Flatten is supported.")
+        size = 1
+        for dimension in shape:
+            size *= int(dimension)
+        return (size,)
+    if isinstance(module, torch.nn.Linear):
+        if not shape:
+            raise NotImplementedError("torch Linear requires a known feature axis.")
+        return (*shape[:-1], int(module.out_features))
+    if isinstance(
+        module,
+        (
+            torch.nn.ReLU,
+            torch.nn.Sigmoid,
+            torch.nn.Tanh,
+            torch.nn.Identity,
+            torch.nn.Dropout,
+        ),
+    ):
+        return shape
+    raise NotImplementedError(f"No pure shape metadata route exists for {type(module).__name__}.")
 
 
 def _unwrap_backend_obj(obj):
@@ -200,7 +234,13 @@ class Optimizer(Serializable):
 
 
 class Model(BaseModel, Serializable):
-    """Wrapper around a torch.nn.Module-style class."""
+    """Wrapper around a torch.nn.Module-style class.
+
+    Direct calls retain ordinary tensor conversion and raw module invocation.
+    Spec-selected element calls author the former one-item batch adaptation;
+    selected batched calls invoke the module without a second batch axis. Only
+    recognized static module metadata can infer an output spec.
+    """
 
     def __init__(self, cls, *args, output_spec=None, **kwargs):
         self.cls = validate_class(cls)
@@ -212,26 +252,76 @@ class Model(BaseModel, Serializable):
         self.mdl = self.obj
         self.output_spec = output_spec
 
-    def __call__(self, x, *args, **kwargs):
+    def _call_raw(self, x, *args, **kwargs):
         import torch
 
         device = _resolve_device(torch)
         x = _tree_to_torch(x, torch, device=device)
         return self.obj(x, *args, **kwargs)
 
-    def bind_first(self, first_value, *, input_spec=None):
-        if input_spec is None or spec_tree_is_batched(input_spec):
-            return self, self(first_value)
+    @traits()
+    def raw_call(self, x, *args, **kwargs):
+        """Invoke the raw module when direct-call batching intent is unknown."""
 
-        import torch
+        return self._call_raw(x, *args, **kwargs)
 
-        device = _resolve_device(torch)
+    @traits(batch_mode="batched")
+    def batched_call(self, x, *args, **kwargs):
+        """Invoke one selected already-batched module input without adaptation."""
 
-        def bound_model(x):
+        return self._call_raw(x, *args, **kwargs)
+
+    @traits(batch_mode="element")
+    def element_call(self, x, *args, **kwargs):
+        """Invoke an element directly when no supplied spec selected adaptation."""
+
+        return self._call_raw(x, *args, **kwargs)
+
+    def find_implementation(self, input_spec=None, *, backend=None, batch_mode=None):
+        """Select a model call and attach element adaptation from ``input_spec``."""
+
+        # Selected-call validation must recognize module outputs in a following
+        # Pipe child. This optional backend registration stays in the selected
+        # Torch model path rather than a lightweight package import.
+        import dryml.torch
+
+        implementation = super().find_implementation(
+            input_spec,
+            backend=backend,
+            batch_mode=batch_mode,
+        )
+        return self._specialize_implementation(implementation, input_spec)
+
+    def _prepare_implementation(self, input_spec, *, backend, batch_mode):
+        """Build a learning-time selected model call without shared state mutation."""
+
+        import dryml.torch
+
+        implementation = super()._prepare_implementation(
+            input_spec,
+            backend=backend,
+            batch_mode=batch_mode,
+        )
+        return self._specialize_implementation(implementation, input_spec)
+
+    def _specialize_implementation(self, implementation, input_spec):
+        """Attach the selected element's explicit one-item batch adaptation."""
+
+        if implementation.name != "element_call" or input_spec is None:
+            return implementation
+        receiver_ref = weakref.ref(self)
+
+        def invoke_element(x, *args, **kwargs):
+            import torch
+
+            receiver = receiver_ref()
+            if receiver is None:
+                raise MethodError("The selected Torch Model is no longer live.")
+            device = _resolve_device(torch)
             batched = _tree_to_torch_model_batch(x, torch, input_spec, device=device)
-            return _unbatch_tree(self.obj(batched))
+            return _unbatch_tree(receiver.obj(batched, *args, **kwargs))
 
-        return bound_model, bound_model(first_value)
+        return replace(implementation, _invoker=invoke_element)
 
     def parameters(self):
         return self.trainable_parameters("torch")
@@ -278,17 +368,23 @@ class Model(BaseModel, Serializable):
             return super().infer_output_spec(input_spec)
 
         import torch
-
-        was_training = bool(getattr(self.obj, "training", False))
-        self.prep_eval()
+        if not isinstance(input_spec, TensorSpec) or input_spec.shape is None:
+            raise NotImplementedError(
+                f"Cannot infer output spec for {type(self).__name__} without executing the model; "
+                "pass output_spec explicitly."
+            )
         try:
-            sample = _tree_to_torch(fake_from_spec_tree(input_spec), torch, device=_resolve_device(torch))
-            with torch.no_grad():
-                output = self.obj(sample)
-            return maybe_unbatch_output_spec(torch_as_tensor_spec(output, batched=True), input_spec)
-        finally:
-            if was_training:
-                self.prep_train()
+            shape = _torch_metadata_shape(torch, self.obj, input_spec.shape)
+        except (AttributeError, NotImplementedError, TypeError, ValueError) as error:
+            raise NotImplementedError(
+                f"Cannot infer output spec for {type(self).__name__} without executing the model; "
+                "pass output_spec explicitly."
+            ) from error
+        dtype = next(iter_specs(input_spec)).dtype
+        return match_input_batch(
+            TensorSpec(dtype, shape=shape, backend="torch"),
+            input_spec,
+        )
 
 
 class TrainFunction(BaseTrainFunction):

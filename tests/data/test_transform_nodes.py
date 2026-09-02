@@ -414,7 +414,7 @@ def test_argmax_batched_preserves_batch_axis():
     ds = Map(Batch(src, 2), ArgMax())
     out = list(ds)
 
-    assert ds.spec == TensorSpec("int64", shape=(), batch=2, backend="numpy")
+    assert ds.spec == TensorSpec("int64", shape=(), batch=Dynamic, backend="numpy")
     assert [item.tolist() for item in out] == [[1, 0]]
 
 
@@ -507,7 +507,7 @@ def test_batch_infer_output_spec_and_iteration():
     ds = Batch(src, 2)
     out = list(ds)
 
-    assert ds.spec == TensorSpec("int32", shape=(2,), batch=2, backend="numpy")
+    assert ds.spec == TensorSpec("int32", shape=(2,), batch=Dynamic, backend="numpy")
     assert ds.spec.backend is Backend.numpy
     assert [item.shape for item in out] == [(2, 2), (1, 2)]
     assert out[0].tolist() == [[1, 2], [3, 4]]

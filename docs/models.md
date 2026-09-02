@@ -26,11 +26,18 @@ from dryml.data import Map
 predictions = Map(dataset, model)
 ```
 
-The method interface supports output-spec inference. If a model has an explicit `output_spec`, it can propagate batching information from the input spec.
+The method interface supports direct selection and pure output-spec inference.
+Spec-aware callers such as `Map` select one local implementation from the input
+spec; this does not change the model's eager/learning Method state. If a model
+has an explicit `output_spec`, it propagates batching information from the input
+spec.
 
 ## Output Specs
 
-Models can infer output specs from input specs.
+Models can infer output specs from input specs when the wrapper has pure
+framework metadata. DRYML never calls a model with fabricated data or changes
+train/eval mode to infer a spec. Supply `output_spec` for custom or opaque
+models that have no supported metadata route.
 
 ```python
 from dryml.core import TensorSpec
@@ -39,7 +46,7 @@ from dryml.models import Model
 model = Model(output_spec=TensorSpec("float32", shape=(10,)))
 ```
 
-When the input spec is batched and the output spec is unbatched, DRYML can batch the output spec automatically.
+When the input spec is batched and the output spec is unbatched, DRYML can batch the output spec automatically. A non-dropping data batch has dynamic batch-size metadata because its final batch may be shorter than the requested size. TensorFlow and PyTorch selected element calls add and remove a one-item batch axis; selected batched calls do not add a second axis, while ordinary direct calls retain the wrapper's raw model behavior.
 
 ## AutoEncoder
 
