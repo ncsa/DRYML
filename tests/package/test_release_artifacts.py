@@ -25,6 +25,17 @@ _REQUIRED_MODULES = {
     "dryml/torch/runtime.py",
     "dryml/jax/runtime.py",
     "dryml/ray/__init__.py",
+    "dryml/methods/__init__.py",
+    "dryml/methods/errors.py",
+    "dryml/methods/implementation.py",
+    "dryml/methods/method.py",
+    "dryml/methods/signature.py",
+    "dryml/methods/traits.py",
+}
+
+_RETIRED_CODE_MODULES = {
+    "dryml/code/method.py",
+    "dryml/code/traits.py",
 }
 
 _RETAINED_ANNOTATION_MODULES = {
@@ -62,6 +73,7 @@ def test_wheel_contains_port_modules_without_retired_core(
     }
     assert annotation_modules == _RETAINED_ANNOTATION_MODULES
     assert not _RETIRED_ANNOTATION_MODULES & names
+    assert not _RETIRED_CODE_MODULES & names
     assert not any(name.startswith("dryml/core2/") for name in names)
     assert "dryml/core/repo_graph.py" not in names
 
@@ -83,6 +95,7 @@ def test_sdist_contains_port_modules_without_retired_core(
     }
     assert annotation_modules == _RETAINED_ANNOTATION_MODULES
     assert not {f"src/{name}" for name in _RETIRED_ANNOTATION_MODULES} & names
+    assert not {f"src/{name}" for name in _RETIRED_CODE_MODULES} & names
     assert not any(name.startswith("src/dryml/core2/") for name in names)
     assert "src/dryml/core/repo_graph.py" not in names
     assert not any(name.startswith("tutorials/") for name in names)

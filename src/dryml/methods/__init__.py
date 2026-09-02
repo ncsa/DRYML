@@ -6,9 +6,6 @@ preparation. It does not own dispatch, managed lifecycle, persistence, or code
 transformation policy.
 """
 
-from dryml.core.backend import Backend
-from dryml.core.tensor_spec import BatchMode
-
 from .errors import (
     ImplementationDeclarationError,
     ImplementationSelectionError,
@@ -23,8 +20,6 @@ from .signature import MethodCallMode, MethodCallNode, MethodCallNodeKind, Metho
 from .traits import Traits, traits
 
 __all__ = [
-    "Backend",
-    "BatchMode",
     "Traits",
     "traits",
     "MethodImplementation",

@@ -2,9 +2,9 @@
 
 import pytest
 
+from dryml.core.backend import Backend
+from dryml.core.tensor_spec import BatchMode
 from dryml.methods import (
-    Backend,
-    BatchMode,
     ImplementationDeclarationError,
     Method,
     Traits,

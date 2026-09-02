@@ -43,6 +43,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "freeze",
     "load_object",
     "load_state_ref",
+    "methods",
     "Object",
     "ObjectId",
     "ObjectRef",
@@ -62,6 +63,23 @@ _EXPECTED_ROOT_EXPORTS = {
     "worlds",
 }
 
+_EXPECTED_METHOD_EXPORTS = {
+    "ImplementationDeclarationError",
+    "ImplementationSelectionError",
+    "Method",
+    "MethodCallMode",
+    "MethodCallNode",
+    "MethodCallNodeKind",
+    "MethodCallSignature",
+    "MethodError",
+    "MethodImplementation",
+    "PreparedCallMismatchError",
+    "SelectionFailureReason",
+    "SelectionTraitName",
+    "Traits",
+    "traits",
+}
+
 
 def test_installed_root_exports_and_version_match_metadata(
     installed_python: Path,
@@ -77,11 +95,12 @@ import dryml
 import dryml.core
 print(json.dumps({
     "exports": sorted(dryml.__all__),
-    "root_core_conveniences": all(
-        getattr(dryml, name) is getattr(dryml.core, name)
-        for name in dryml.core.__all__
-        if name in dryml.__all__
-    ),
+     "root_core_conveniences": all(
+         getattr(dryml, name) is getattr(dryml.core, name)
+         for name in dryml.core.__all__
+         if name in dryml.__all__
+     ),
+     "root_methods": dryml.methods is __import__("dryml.methods", fromlist=["*"]),
     "module": dryml.__file__,
     "version": dryml.__version__,
     "metadata_version": importlib.metadata.version("dryml"),
@@ -91,6 +110,7 @@ print(json.dumps({
     data = json.loads(result.stdout)
     assert set(data["exports"]) == _EXPECTED_ROOT_EXPORTS
     assert data["root_core_conveniences"]
+    assert data["root_methods"]
     assert data["version"] == data["metadata_version"] == "0.3.0.dev0"
     assert "site-packages" in data["module"].replace("\\", "/")
 
@@ -120,6 +140,7 @@ import dryml.worlds
 assert set(dryml.annotations.__all__) == {
     "Annotation", "ANNOTATION_ATTR", "attach_annotation", "own_annotations",
     "collect_annotations", "annotations_for_class", "annotations_for_method",
+    "AnnotatedMember", "annotations_for_members",
     "AnnotationError", "AnnotationValidationError", "UnsupportedAnnotationTargetError",
 }
 assert "env" not in dryml.__all__
@@ -143,6 +164,52 @@ print(json.dumps({
 """,
     )
     assert json.loads(result.stdout) == {"heavy": [], "retired": False}
+
+
+def test_installed_methods_manifest_and_retired_imports(
+    installed_python: Path,
+) -> None:
+    """Require the wheel to publish only the new Method owner and its API."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import importlib
+import json
+
+import dryml.code
+import dryml.methods
+
+assert set(dryml.methods.__all__) == {
+    'ImplementationDeclarationError', 'ImplementationSelectionError', 'Method',
+    'MethodCallMode', 'MethodCallNode', 'MethodCallNodeKind',
+    'MethodCallSignature', 'MethodError', 'MethodImplementation',
+    'PreparedCallMismatchError', 'SelectionFailureReason', 'SelectionTraitName',
+    'Traits', 'traits',
+}
+assert not {'Method', 'Traits', 'traits'} & set(dryml.code.__all__)
+for statement in (
+    'from dryml.code import Method',
+    'from dryml.code import Traits',
+    'from dryml.code import traits',
+):
+    try:
+        exec(statement, {})
+    except ImportError:
+        pass
+    else:
+        raise AssertionError(f'retired import succeeded: {statement}')
+for module in ('dryml.code.method', 'dryml.code.traits'):
+    try:
+        importlib.import_module(module)
+    except ModuleNotFoundError as error:
+        assert error.name == module
+    else:
+        raise AssertionError(f'retired module remains importable: {module}')
+print(json.dumps(sorted(dryml.methods.__all__)))
+""",
+    )
+    assert set(json.loads(result.stdout)) == _EXPECTED_METHOD_EXPORTS
 
 
 def test_installed_sdist_wheel_exercises_current_reference_authority(

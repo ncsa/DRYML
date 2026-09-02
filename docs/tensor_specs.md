@@ -86,6 +86,24 @@ Useful helpers include:
 
 Backend integrations can convert a `TensorSpec` into framework-specific shapes, signatures, arrays, or tensors. The spec itself should stay semantic and portable.
 
+## Equality
+
+Ordinary `TensorSpec` equality is backend-neutral semantic equality. Otherwise
+matching NumPy and Torch specs can compare equal when their portable tensor
+meaning agrees. Use `equal_exact(other)` when a Method cache or another exact
+contract must also compare backend and every stored specification field. It
+returns `False` for non-`TensorSpec` values and does not change normal equality
+or hashing.
+
+```python
+from dryml.core import TensorSpec
+
+numpy_spec = TensorSpec("float32", shape=(2,), backend="numpy")
+torch_spec = TensorSpec("float32", shape=(2,), backend="torch")
+assert numpy_spec == torch_spec
+assert not numpy_spec.equal_exact(torch_spec)
+```
+
 Examples of backend-specific consumers:
 
 - TensorFlow model signatures
@@ -123,5 +141,6 @@ Models can infer output specs. When model output specs are unbatched but inputs 
 ## Related Docs
 
 - [Data API](data.md)
+- [Methods](methods.md)
 - [Models API](models.md)
 - [Contexts](context.md)

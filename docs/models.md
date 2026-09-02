@@ -18,7 +18,9 @@ Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBo
 
 ## Model As Method
 
-The base `Model` is a `Method`, which means it can be used in dataset mapping and method pipelines.
+The base `Model` is a `dryml.methods.Method`, which means it can be used in
+dataset mapping and Method pipelines. Import authoring APIs from
+`dryml.methods`; the legacy `dryml.code` Method imports are removed.
 
 ```python
 from dryml.data import Map
@@ -127,6 +129,7 @@ Exact constructor signatures vary by model and experiment class. Prefer backend-
 
 ## Related Docs
 
+- [Methods](methods.md)
 - [Tensor Specs](tensor_specs.md)
 - [Data API](data.md)
 - [Contexts](context.md)

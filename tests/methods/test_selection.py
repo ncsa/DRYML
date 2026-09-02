@@ -139,3 +139,21 @@ def test_explicit_candidate_apis_ignore_default_batched():
     with pytest.raises(ImplementationSelectionError) as unknown:
         method.find_implementation(backend="numpy")
     assert unknown.value.reason == "unknown_traits"
+
+
+def test_find_implementation_preserves_legacy_spec_selected_batch_behavior():
+    """Spec-aware callers select the same element and batched NumPy targets once."""
+
+    method = BatchVariants()
+    element = np.zeros((2,), dtype=np.float32)
+    batched = np.zeros((4, 2), dtype=np.float32)
+
+    element_impl = method.find_implementation(
+        input_spec=TensorSpec("float32", shape=(2,), backend="numpy")
+    )
+    batched_impl = method.find_implementation(
+        input_spec=TensorSpec("float32", shape=(2,), batch=4, backend="numpy")
+    )
+
+    assert element_impl(element)[0] == "element"
+    assert batched_impl(batched)[0] == "batched"

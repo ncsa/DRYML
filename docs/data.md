@@ -42,7 +42,12 @@ dataset = ArrayDataset(
 
 ## Transforming Data
 
-`Map` applies one method or a pipeline of methods to each source element.
+`Map` applies one Method or a pipeline of Methods to each source element. Method
+types and authoring helpers are owned by `dryml.methods`, not `dryml.code`.
+`Map` selects one local callable from a complete source spec before iteration;
+when only the backend is missing, it may inspect one first value to select it.
+That local selection does not change the Method's eager, learning, or cached
+state.
 
 ```python
 from dryml.data import Map, Scale
@@ -123,6 +128,7 @@ pair_spec = (
 
 ## Related Docs
 
+- [Methods](methods.md)
 - [Tensor Specs](tensor_specs.md)
 - [Models API](models.md)
 - [Repos and Stores](repos.md)

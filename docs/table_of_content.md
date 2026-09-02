@@ -17,13 +17,14 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 9. [Sessions](session.md)
 10. [Repos and Stores](repos.md)
 11. [Tensor Specs](tensor_specs.md)
-12. [Contexts](context.md)
-13. [Data API](data.md)
-14. [Models API](models.md)
-15. [Artifacts API](artifacts.md)
-16. [Query Index Backend Contracts](query_index_backend_contracts.md)
-17. [Testing Workflow](testing.md)
-18. [Release Notes](release_notes.md)
+12. [Methods](methods.md)
+13. [Contexts](context.md)
+14. [Data API](data.md)
+15. [Models API](models.md)
+16. [Artifacts API](artifacts.md)
+17. [Query Index Backend Contracts](query_index_backend_contracts.md)
+18. [Testing Workflow](testing.md)
+19. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -40,6 +41,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - `ObjectRef` adds durable ObjectId lineage and `StateRef` adds immutable snapshots.
 - A `Store` owns immutable graph records and local checkpoint state.
 - A `TensorSpec` describes tensor-like values independently from a specific ML backend.
+- A `Method` is a logical callable with inspectable local implementations and optional process-local preparation.
 - A `Context` describes runtime resource and backend compatibility constraints.
 - `Dataset`, `Model`, and `Artifact` are higher-level APIs built on the core object/repo system.
 - Store-owned query indexes accelerate stored and nested queries without changing object identity.

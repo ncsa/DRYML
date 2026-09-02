@@ -1,4 +1,9 @@
-"""Dependency-light root exports for DRYML declarations and core identities."""
+"""Dependency-light root exports for DRYML declarations, core identities, and packages.
+
+Core conveniences and public package modules, including :mod:`dryml.methods`,
+resolve lazily through ``__getattr__`` so importing :mod:`dryml` does not load
+their implementation, runtime state, or optional frameworks.
+"""
 
 import importlib
 
@@ -19,6 +24,7 @@ _SUBMODULE_EXPORTS = {
     "runtime": "dryml.runtime",
     "session": "dryml.session",
     "annotations": "dryml.annotations",
+    "methods": "dryml.methods",
 }
 
 _CORE_EXPORTS = {
@@ -93,6 +99,7 @@ __all__ = [
     "runtime",
     "session",
     "annotations",
+    "methods",
     "config",
     "configure",
     "reset_config",
