@@ -20,6 +20,22 @@ class OpaqueEstimator:
         raise AssertionError("inference must not probe an estimator")
 
 
+class ArrayAPIClassifier:
+    """Expose array-API dtype metadata without permitting prediction probes."""
+
+    classes_ = np.array([0, 1])
+
+    def __init__(self):
+        self.calls = 0
+
+    def __sklearn_tags__(self):
+        return type("Tags", (), {"array_api_support": True})()
+
+    def predict_proba(self, value):
+        self.calls += 1
+        raise AssertionError("inference must not probe an estimator")
+
+
 def _train_data():
     x = np.array([[0.0, 10.0], [1.0, 11.0], [2.0, 12.0]], dtype=np.float32)
     y = np.array([1.0, 2.0, 3.0], dtype=np.float32)
@@ -104,6 +120,14 @@ def test_classifier_probability_spec_matches_fitted_predict_proba_output():
     output = model(np.array([[1.5]], dtype=np.float32))
     spec = model.infer_output_spec(TensorSpec("float32", shape=(1,), backend="numpy"))
 
-    assert spec == TensorSpec("float64", shape=(2,), backend="numpy")
+    assert spec == TensorSpec(output.dtype, shape=(2,), backend="numpy")
     assert output.shape == (1, 2)
-    assert output.dtype == np.dtype("float64")
+
+
+def test_classifier_probability_spec_uses_array_api_input_dtype_without_probing():
+    model = ClassifierModel(ArrayAPIClassifier)
+
+    spec = model.infer_output_spec(TensorSpec("float32", shape=(1,), backend="numpy"))
+
+    assert spec == TensorSpec("float32", shape=(2,), backend="numpy")
+    assert model.estimator.calls == 0

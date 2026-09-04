@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, get_origin
 
 from .errors import InvalidKernelError, KernelDependencyError, MissingOutputError
 from .facts import CodeFact, CodeFacts, Diagnostic, FactRecord
@@ -188,7 +188,12 @@ def _snapshot_calls(calls: Iterable[KernelCall[Any, Any]]) -> tuple[_Snapshot, .
             fusion_safe = kernel_type.fusion_safe
         except Exception:
             raise _invalid() from None
-        if not isinstance(input_type, type) or not isinstance(output_type, type):
+        if (
+            not isinstance(input_type, type)
+            or get_origin(input_type) is not None
+            or not isinstance(output_type, type)
+            or get_origin(output_type) is not None
+        ):
             raise _invalid()
         if target_kinds is not None:
             if type(target_kinds) is not frozenset or not target_kinds or not target_kinds <= _TARGET_KINDS:

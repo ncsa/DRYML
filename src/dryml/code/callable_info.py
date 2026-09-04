@@ -35,8 +35,18 @@ def _function_metadata(func: types.FunctionType) -> tuple[str | None, str | None
     if "__signature__" in namespace or "__wrapped__" in namespace:  # type: ignore[operator]
         raise InvalidTargetError("unsupported callable")
     annotate_slot = types.FunctionType.__dict__.get("__annotate__")
-    if annotate_slot is not None and annotate_slot.__get__(func, types.FunctionType) is not None:
-        raise InvalidTargetError("unsupported callable")
+    if annotate_slot is not None:
+        annotate = annotate_slot.__get__(func, types.FunctionType)
+        if annotate is not None:
+            if type(annotate) is not types.FunctionType:
+                raise InvalidTargetError("unsupported callable")
+            annotate_code = _function_slot(annotate, "__code__")
+            if (
+                annotate_code.co_name != "__annotate__"  # type: ignore[union-attr]
+                or annotate_code.co_names  # type: ignore[union-attr]
+                or annotate_code.co_freevars  # type: ignore[union-attr]
+            ):
+                raise InvalidTargetError("unsupported callable")
     annotations = _function_slot(func, "__annotations__")
     if type(annotations) is not dict:
         raise InvalidTargetError("unsupported callable")

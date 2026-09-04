@@ -84,7 +84,7 @@ def test_analyze_callable_rejects_dynamic_lookup_without_invoking_it() -> None:
         analyze_callable(Dynamic())
 
 
-@pytest.mark.skipif(not hasattr(types.FunctionType, "__annotate__"), reason="deferred annotation hook requires Python 3.14+")
+@pytest.mark.skipif("__annotate__" not in types.FunctionType.__dict__, reason="deferred annotation hook requires Python 3.14+")
 def test_analyze_callable_rejects_deferred_annotations_without_evaluation() -> None:
     """Python 3.14 deferred annotation hooks remain uninvoked."""
 
@@ -95,8 +95,37 @@ def test_analyze_callable_rejects_deferred_annotations_without_evaluation() -> N
         raise RuntimeError("/private/path annotation-secret")
 
     namespace: dict[str, object] = {"marker": marker}
-    exec("def subject(value: marker()):\n    return value\n", namespace)
+    code = compile(
+        "def subject(value: marker()):\n    return value\n",
+        "<deferred-annotations>",
+        "exec",
+        dont_inherit=True,
+    )
+    exec(code, namespace)
 
     with pytest.raises(InvalidTargetError, match="unsupported callable"):
         analyze_callable(namespace["subject"])  # type: ignore[arg-type]
+    assert evaluated == []
+
+
+@pytest.mark.skipif("__annotate__" not in types.FunctionType.__dict__, reason="deferred annotation hook requires Python 3.14+")
+def test_analyze_callable_accepts_stringized_deferred_annotations() -> None:
+    """Compiler-stringized annotations remain inspectable without evaluation."""
+
+    evaluated: list[bool] = []
+
+    def marker() -> type[int]:
+        evaluated.append(True)
+        raise RuntimeError("annotation evaluated")
+
+    namespace: dict[str, object] = {"marker": marker}
+    exec(
+        "from __future__ import annotations\ndef subject(value: marker()) -> int:\n    return value\n",
+        namespace,
+    )
+
+    info = analyze_callable(namespace["subject"])  # type: ignore[arg-type]
+
+    assert info.signature.parameters["value"].annotation == "marker()"
+    assert info.signature.return_annotation == "int"
     assert evaluated == []

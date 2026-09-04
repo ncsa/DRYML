@@ -76,12 +76,18 @@ class Model(BaseModel, Pickleable):
 
 
 class ClassifierModel(Model):
+    """Sklearn classifier wrapper with metadata-only output inference."""
+
     def __call__(self, x, *args, **kwargs):
+        """Return class probabilities when the estimator supports them."""
+
         if hasattr(self.estimator, "predict_proba"):
             return self.estimator.predict_proba(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
 
     def infer_output_spec(self, input_spec):
+        """Infer class output shape and dtype from fitted estimator metadata."""
+
         if self.output_spec is not None:
             return super().infer_output_spec(input_spec)
 
@@ -90,9 +96,19 @@ class ClassifierModel(Model):
             if isinstance(classes, (tuple, list)):
                 raise NotImplementedError("Multi-output classifier spec inference is not implemented.")
             predicts_probabilities = hasattr(self.estimator, "predict_proba")
+            dtype = np.asarray(classes).dtype
+            if predicts_probabilities:
+                dtype = np.dtype("float64")
+                tags_method = getattr(self.estimator, "__sklearn_tags__", None)
+                if tags_method is not None:
+                    try:
+                        if tags_method().array_api_support:
+                            dtype = next(iter_specs(input_spec)).dtype
+                    except Exception:
+                        pass
             return match_input_batch(
                 TensorSpec(
-                    "float64" if predicts_probabilities else np.asarray(classes).dtype,
+                    dtype,
                     shape=(len(classes),) if predicts_probabilities else (),
                     backend="numpy",
                 ),
