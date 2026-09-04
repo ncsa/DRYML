@@ -46,7 +46,10 @@ def installed_python(release_artifacts: tuple[Path, Path]) -> Path:
     python = root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     source = root / "source"
     with tarfile.open(sdist, mode="r:*") as archive:
-        archive.extractall(source, filter="data")
+        if hasattr(tarfile, "data_filter"):
+            archive.extractall(source, filter="data")
+        else:
+            archive.extractall(source)
     project = next(source.iterdir())
     wheel_dir = root / "wheel"
     wheel_dir.mkdir()
