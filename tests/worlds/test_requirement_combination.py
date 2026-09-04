@@ -224,3 +224,25 @@ def test_single_full_envelope_world_value_passes_through_unchanged() -> None:
     result = worlds.requirements_for(Target)
     assert result.value == value
     assert result.value.semantic_id == value.semantic_id
+
+
+def test_multibyte_aggregate_byte_cap_is_complete_or_fails_before_a_result(monkeypatch) -> None:
+    """UTF-8 world aggregation remains complete at its boundary and fails closed above it."""
+
+    @worlds.req(topology={"note": "é"}, source="x")
+    @worlds.req(topology={"note": "é"}, source="x")
+    class Target:
+        pass
+
+    from dryml.worlds import combination
+
+    for limit in (148, 149):
+        monkeypatch.setattr(combination, "_MAX_BYTES", limit)
+        result = worlds.requirements_for(Target)
+        assert result.has_value
+        assert result.value.roles["main"].topology == {"note": "é"}
+
+    monkeypatch.setattr(combination, "_MAX_BYTES", 147)
+    with pytest.raises(worlds.WorldRequirementError) as raised:
+        worlds.requirements_for(Target)
+    assert str(raised.value) == "world requirement collection or combination failed"

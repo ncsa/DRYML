@@ -84,6 +84,25 @@ def test_root_aliases_resolve_domain_annotations_independently() -> None:
     assert world.value.roles["main"].resources.cpus.min == 2
 
 
+def test_cross_domain_unsupported_collection_and_merge_fail_closed() -> None:
+    """Domain boundaries reject unsupported targets and cross-domain values unchanged."""
+
+    target = object()
+    with pytest.raises(dryml.env.EnvironmentRequirementError):
+        dryml.env.requirements_for(target)
+    with pytest.raises(dryml.world.WorldRequirementError):
+        dryml.world.requirements_for(target)
+
+    environment = dryml.env.EnvironmentRequirement(tags=("environment",))
+    world = dryml.world.WorldRequirement({"main": {"resources": {"cpus": 1}}})
+    with pytest.raises(dryml.env.EnvironmentRequirementError):
+        environment.merge(world)
+    with pytest.raises(dryml.world.WorldSpecValidationError):
+        world.merge(environment)
+    assert environment.tags == ("environment",)
+    assert world.roles["main"].resources.cpus == dryml.world.CountConstraint(1, 1)
+
+
 @pytest.mark.parametrize(
     ("action", "inverse"),
     [

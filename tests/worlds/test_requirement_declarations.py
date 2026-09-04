@@ -2,7 +2,7 @@
 
 import pytest
 
-from dryml.annotations import Annotation, attach_annotation
+from dryml.annotations import ANNOTATION_ATTR, Annotation, attach_annotation
 from dryml.requirements import RequirementDeclaration, RequirementSource
 import dryml.worlds as worlds
 
@@ -88,3 +88,14 @@ def test_world_collection_ignores_foreign_annotation_keys() -> None:
 
     attach_annotation(Target, Annotation("dryml.environments.requirement", RequirementDeclaration(object(), source=RequirementSource("environment"))))
     assert worlds.requirements_for(Target).value.roles["main"].resources.cpus.min == 1
+
+
+def test_world_decorator_rejects_unsupported_targets_without_partial_attachment() -> None:
+    """Unsupported live targets fail through the world domain before annotation mutation."""
+
+    target = object()
+
+    with pytest.raises(worlds.WorldRequirementError, match="attachment failed"):
+        worlds.req(cpus=1)(target)
+
+    assert not hasattr(target, ANNOTATION_ATTR)

@@ -70,6 +70,30 @@ def test_package_exclusion_conflict_attributes_both_declarations() -> None:
     assert tuple(source.label for source in issue.sources) == ("1: required", "2: excluded")
 
 
+def test_method_conflict_attributes_inherited_class_and_method_sources() -> None:
+    """Selected-method conflicts retain every deterministic declaration source."""
+
+    @envs.req(python="<3", source="inherited")
+    class Base:
+        pass
+
+    @envs.req(python=">=3", source="class")
+    class Target(Base):
+        @envs.req(python="<2", source="method")
+        def work(self):
+            return None
+
+    result = envs.requirements_for_method(Target(), "work")
+
+    assert result.value is None
+    assert [issue.path for issue in result.report.issues] == ["python"]
+    assert tuple(source.label for source in result.report.issues[0].sources) == (
+        "1: inherited",
+        "2: class",
+        "3: method",
+    )
+
+
 def test_conflict_source_attribution_constructs_paths_once_per_declaration(monkeypatch) -> None:
     """Conflict reporting reuses preflight paths rather than rebuilding them per issue."""
 
@@ -168,3 +192,23 @@ def test_post_release_intersection_is_not_reported_as_a_conflict() -> None:
 
     assert result.has_value
     assert result.value.python == "<1.post2,>1.post0"
+
+
+def test_multibyte_aggregate_byte_cap_is_complete_or_fails_before_a_result(monkeypatch) -> None:
+    """UTF-8 aggregate accounting accepts complete boundary inputs and rejects excess."""
+
+    @envs.req(tags=("é",), source="x")
+    @envs.req(tags=("ü",), source="y")
+    class Target:
+        pass
+
+    for limit in (26, 27):
+        monkeypatch.setattr(combination, "_MAX_BYTES", limit)
+        result = envs.requirements_for(Target)
+        assert result.has_value
+        assert result.value.tags == ("é", "ü")
+
+    monkeypatch.setattr(combination, "_MAX_BYTES", 25)
+    with pytest.raises(envs.EnvironmentRequirementError) as raised:
+        envs.requirements_for(Target)
+    assert str(raised.value) == "environment requirement collection or combination failed"

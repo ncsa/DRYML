@@ -273,6 +273,21 @@ _EXPECTED_METHOD_EXPORTS = {
     "traits",
 }
 
+_EXPECTED_ANNOTATION_EXPORTS = {
+    "ANNOTATION_ATTR",
+    "AnnotatedMember",
+    "Annotation",
+    "AnnotationError",
+    "AnnotationValidationError",
+    "UnsupportedAnnotationTargetError",
+    "annotations_for_class",
+    "annotations_for_members",
+    "annotations_for_method",
+    "attach_annotation",
+    "collect_annotations",
+    "own_annotations",
+}
+
 
 def test_installed_root_exports_and_version_match_metadata(
     installed_python: Path,
@@ -433,6 +448,79 @@ print(json.dumps({
         "world.requirements_for": "(target: 'object') -> 'RequirementResult[WorldRequirement]'",
         "world.requirements_for_method": "(owner: 'type | object', method_name: 'str') -> 'RequirementResult[WorldRequirement]'",
     }
+
+
+def test_installed_stage_four_exports_resolve_with_exact_root_aliases(
+    installed_python: Path,
+) -> None:
+    """Exercise every installed Stage 4 export and its lazy root-owner identity."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+
+import dryml
+from dryml import annotations, env, environments, requirements, world, worlds
+
+modules = {
+    'annotations': annotations,
+    'requirements': requirements,
+    'environments': environments,
+    'worlds': worlds,
+}
+retired = {
+    'annotations': ('decorators', 'env', 'world', 'runtime', 'merge', 'namespaces', 'storage'),
+    'environments': %r,
+    'worlds': ('default', 'default_for', 'set_default', 'reset_default', 'use_default'),
+}
+print(json.dumps({
+    'exports': {key: list(module.__all__) for key, module in modules.items()},
+    'resolved': {
+        key: all(getattr(module, name) is module.__dict__[name] for name in module.__all__)
+        for key, module in modules.items()
+    },
+    'unique': {
+        key: len(module.__all__) == len(set(module.__all__))
+        for key, module in modules.items()
+    },
+    'aliases': {
+        'env': env is environments is dryml.env is dryml.environments,
+        'world': world is worlds is dryml.world is dryml.worlds,
+        'requirements': requirements is dryml.requirements,
+        'root_exports': all(name in dryml.__all__ for name in ('env', 'environments', 'world', 'worlds', 'requirements')),
+    },
+    'retired': {
+        key: [name for name in names if hasattr(modules[key], name)]
+        for key, names in retired.items()
+    },
+}))
+""" % (tuple(sorted(_RETIRED_ENVIRONMENT_SURFACE)),),
+    )
+    data = json.loads(result.stdout)
+    assert set(data["exports"]["annotations"]) == _EXPECTED_ANNOTATION_EXPORTS
+    assert set(data["exports"]["requirements"]) == _EXPECTED_REQUIREMENT_EXPORTS
+    assert set(data["exports"]["environments"]) == _EXPECTED_ENVIRONMENT_EXPORTS
+    assert set(data["exports"]["worlds"]) == _EXPECTED_WORLD_EXPORTS
+    assert data["resolved"] == {
+        "annotations": True,
+        "requirements": True,
+        "environments": True,
+        "worlds": True,
+    }
+    assert data["unique"] == {
+        "annotations": True,
+        "requirements": True,
+        "environments": True,
+        "worlds": True,
+    }
+    assert data["aliases"] == {
+        "env": True,
+        "world": True,
+        "requirements": True,
+        "root_exports": True,
+    }
+    assert data["retired"] == {"annotations": [], "environments": [], "worlds": []}
 
 
 def test_installed_root_entry_points_are_effect_free_and_domain_isolated(

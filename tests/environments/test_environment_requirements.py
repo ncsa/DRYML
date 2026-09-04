@@ -119,6 +119,34 @@ def test_marker_uses_record_platform_machine():
     assert issue_codes(report) == ["package_missing"]
 
 
+def test_markers_use_deterministic_record_facts_for_matching_and_nonmatching_branches():
+    """PEP 508 marker evaluation uses supplied Python and platform facts only."""
+
+    remote = envs.EnvironmentRecord(
+        python=envs.PythonRecord("3.12.4", "CPython"),
+        platform=envs.PlatformRecord("Linux", "1", "v", "aarch64", "Linux-aarch64", sys_platform="linux"),
+        distributions={},
+        dryml=envs.DrymlRuntimeRecord(),
+    )
+    expected_facts = {
+        "python_version": "3.12",
+        "sys_platform": "linux",
+        "platform_machine": "aarch64",
+    }
+
+    marker_environment = envs.marker_environment_from_record(remote)
+    assert {name: marker_environment[name] for name in expected_facts} == expected_facts
+    for name, value in expected_facts.items():
+        matching = envs.EnvironmentRequirement(
+            requirements=(f"missing-package; {name} == '{value}'",)
+        ).check(remote)
+        nonmatching = envs.EnvironmentRequirement(
+            requirements=(f"missing-package; {name} != '{value}'",)
+        ).check(remote)
+        assert issue_codes(matching) == ["package_missing"]
+        assert nonmatching.status == "compatible"
+
+
 def test_marker_uses_record_implementation_name():
     remote = record()
     remote = envs.EnvironmentRecord(
