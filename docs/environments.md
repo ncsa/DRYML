@@ -35,7 +35,7 @@ if not report.ok:
     print(report.explain())
 ```
 
-Policies are `ignore`, `warn`, `compatible`, and `strict`. Reports keep structured `CompatibilityIssue` entries with stable issue codes and readable `explain()` output. `ok` follows the selected compatibility policy, while `admission_ok` is the fail-closed hard-admission decision: an evaluated compatible report under `compatible` or `strict` is admissible, but `warn`, `ignore`, unknown, malformed, and unavailable reports are not.
+Policies are `ignore`, `warn`, `compatible`, and `strict`. Reports keep structured `CompatibilityIssue` entries with stable issue codes and readable `explain()` output. `ok` follows the selected compatibility policy, while `admission_ok` is the fail-closed hard-admission decision: only an internally consistent compatible report returned by `EnvironmentRequirement.check` under `compatible` or `strict` is admissible. Manually constructed or deserialized reports, and `warn`, `ignore`, unknown, malformed, and unavailable reports, are not.
 
 PEP 508 environment markers are evaluated from the `EnvironmentRecord` being checked, not from the coordinator process. If a marker references platform metadata that the record cannot provide, the check reports an `unknown` compatibility issue instead of silently using local platform facts.
 

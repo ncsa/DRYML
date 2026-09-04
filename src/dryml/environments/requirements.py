@@ -12,7 +12,13 @@ from packaging.version import InvalidVersion, Version
 
 from dryml.formats import deep_freeze_json, json_ready, make_envelope, semantic_id, validate_envelope
 
-from .compatibility import CompatibilityIssue, CompatibilityReport, coerce_policy, malformed_report, report_from_issues
+from .compatibility import (
+    CompatibilityIssue,
+    CompatibilityReport,
+    _report_from_evaluation,
+    coerce_policy,
+    malformed_report,
+)
 from .errors import EnvironmentRequirementError
 from .records import EnvironmentRecord
 from .utils import (
@@ -89,7 +95,7 @@ class EnvironmentRequirement:
             return malformed_report("environment compatibility requires a supplied EnvironmentRecord")
         coerced_policy = coerce_policy(policy)
         if coerced_policy == "ignore":
-            return report_from_issues((), policy=coerced_policy)
+            return _report_from_evaluation((), policy=coerced_policy)
 
         issues: list[CompatibilityIssue] = []
         issues.extend(self._check_python(record))
@@ -98,7 +104,7 @@ class EnvironmentRequirement:
         issues.extend(self._check_capabilities(record))
         issues.extend(self._check_dryml(record, strict=coerced_policy == "strict"))
         issues.extend(self._check_tags(record, strict=coerced_policy == "strict"))
-        return report_from_issues(tuple(issues), policy=coerced_policy)
+        return _report_from_evaluation(tuple(issues), policy=coerced_policy)
 
     def explain_sources(self) -> str:
         """Return fragment/source information when this requirement was composed."""

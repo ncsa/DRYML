@@ -100,6 +100,9 @@ class CompatibilityReport:
     issues: tuple[CompatibilityIssue, ...] = ()
     schema_version: int = COMPATIBILITY_REPORT_SCHEMA_VERSION
     details: Mapping[str, Any] = field(default_factory=dict)
+    _evaluation_policy: CompatibilityPolicy | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         """Validate and detach one bounded immutable compatibility report."""
@@ -125,14 +128,19 @@ class CompatibilityReport:
 
     @property
     def admission_ok(self) -> bool:
-        """Whether evaluated non-bypass evidence admits a hard requirement.
+        """Whether evaluated, internally consistent evidence admits hard admission.
 
         This deliberately differs from :attr:`ok`: ``warn`` can permit a caller
         to continue after a mismatch, but cannot authorize hard admission.
-        Manually constructed or bypass-policy reports likewise fail closed.
+        Manually constructed, deserialized, bypass-policy, or inconsistent
+        reports likewise fail closed.
         """
 
-        return self.status == "compatible" and self.details.get("policy") in {"compatible", "strict"}
+        return (
+            self._evaluation_policy in {"compatible", "strict"}
+            and self.status == "compatible"
+            and not self.issues
+        )
 
     def raise_if_incompatible(self) -> None:
         """Raise when the report status is incompatible or unknown."""
@@ -182,11 +190,16 @@ def report_from_issues(
     policy: str = "compatible",
     details: dict[str, Any] | None = None,
 ) -> CompatibilityReport:
-    """Apply a policy at the decision boundary and build a report."""
+    """Apply a policy at the decision boundary and build a non-admitting report.
+
+    ``details`` is diagnostic data only. The applied policy is framework-owned
+    and always replaces any caller-supplied ``policy`` entry.
+    """
 
     coerced = coerce_policy(policy)
+    report_details = {**dict(details or {}), "policy": coerced}
     if coerced == "ignore":
-        return CompatibilityReport("compatible", (), details={"policy": coerced, **dict(details or {})})
+        return CompatibilityReport("compatible", (), details=report_details)
 
     if coerced == "warn":
         converted = tuple(
@@ -205,7 +218,7 @@ def report_from_issues(
         status: CompatibilityStatus = "warning" if converted else "compatible"
         if converted and all(issue.severity == "unknown" for issue in converted):
             status = "unknown"
-        return CompatibilityReport(status, converted, details={"policy": coerced, **dict(details or {})})
+        return CompatibilityReport(status, converted, details=report_details)
 
     if any(issue.severity == "error" for issue in issues):
         status = "incompatible"
@@ -215,7 +228,17 @@ def report_from_issues(
         status = "warning"
     else:
         status = "compatible"
-    return CompatibilityReport(status, issues, details={"policy": coerced, **dict(details or {})})
+    return CompatibilityReport(status, issues, details=report_details)
+
+
+def _report_from_evaluation(
+    issues: tuple[CompatibilityIssue, ...], *, policy: CompatibilityPolicy
+) -> CompatibilityReport:
+    """Build a report carrying transient requirement-evaluation provenance."""
+
+    report = report_from_issues(issues, policy=policy)
+    object.__setattr__(report, "_evaluation_policy", policy)
+    return report
 
 
 def malformed_report(message: str) -> CompatibilityReport:

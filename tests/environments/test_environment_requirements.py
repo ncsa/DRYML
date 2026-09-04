@@ -54,6 +54,7 @@ def test_requirement_check_compatible():
     assert report.status == "compatible"
     assert report.ok
     assert report.admission_ok
+    assert require_admission(report) is None
 
 
 def test_requirement_check_missing_package_and_warn_policy():
@@ -228,14 +229,17 @@ def test_policy_ignore_skips_checks():
 
 
 def test_admission_uses_fail_closed_environment_evidence() -> None:
-    """Warn, ignore, and policy-less reports cannot bypass hard admission."""
+    """Only compatible evidence returned by evaluation can pass admission."""
 
     compatible = envs.EnvironmentRequirement().check(record())
     assert require_admission(compatible) is None
+    deserialized = envs.CompatibilityReport.from_data(compatible.to_data())
+    assert deserialized.to_data() == compatible.to_data()
     for report in (
         envs.EnvironmentRequirement(requirements=("missing",)).check(record(), policy="warn"),
         envs.EnvironmentRequirement(requirements=("missing",)).check(record(), policy="ignore"),
         envs.CompatibilityReport("compatible"),
+        deserialized,
     ):
         with pytest.raises(RequirementBarrierError) as excinfo:
             require_admission(report, operation="environment-check")
