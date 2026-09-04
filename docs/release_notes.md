@@ -1,5 +1,24 @@
 # Release Notes
 
+## 0.3.0.dev1 (unreleased)
+
+Stage 3 adds dependency-light generic code analysis through `dryml.code`. The published
+surface covers closed target normalization, immutable program graphs, per-request
+kernel DAGs and facts, local static `analyze()`/`probe()`, and bounded
+current-thread `trace()`. Results are ephemeral in-process artifacts: consumers
+own any persistence, domain facts, and interpretation.
+
+This is not a transformation, registry, serialized-probe, worker, or process
+transport API. `dryml.code` does not own cross-process isolation or invocation
+policy; future transport and execution isolation remain owned by `dryml.execute`
+and `dryml.dispatch`. Method-specific probing and transformations remain
+deferred.
+
+The root code-analysis namespace intentionally exports only the documented
+principal APIs. Legacy source extraction, compiler hints, analyzer registries,
+probe transport, domain fact, Method, Traits, and transformation compatibility
+surfaces are absent.
+
 ## CDef V2 Completion
 
 CDef V2 is a clean break. Only fully bound V2 CDefs, graph-aware definitions, ObjectRefs, StateRefs, and current Store records are accepted. Pre-port CDefs, missing identity versions, old Store layouts, historical query metadata, and mutable-state generations fail closed. There is no migration, converter, dual reader, or old-release recovery workflow.

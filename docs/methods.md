@@ -3,8 +3,15 @@
 `dryml.methods` owns DRYML's logical callable IR. A `Method` is a CDef-backed
 logical operation: its configured identity is stable, while its selected
 implementation and preparation cache are local runtime details. This package
-does not own code analysis, dispatch, managed lifecycle, persistence, records,
-or backend warmup.
+does not own code-analysis policy, dispatch, managed lifecycle, persistence,
+records, or backend warmup.
+
+Stage 3 supplies `dryml.code` as a local analysis foundation for generic static
+evidence. It does not add Method-specific analysis policy, cross-process Method
+probing, or source transformation. Those capabilities remain deferred beyond
+the Stage 2 local Method contract; any future process isolation and invocation
+policy belongs to `dryml.execute` and `dryml.dispatch`, not to Methods or the
+generic analysis package.
 
 Import the public API from this package. `dryml.code.Method`,
 `dryml.code.Traits`, and `dryml.code.traits` were removed without aliases.
@@ -86,7 +93,8 @@ order. Each immutable carrier has `name`, the exact raw authored `target`, and
 complete `traits`; inspection does not bind, select, invoke, warm, or import a
 candidate. Catalog inspection is an ordinary local operation that may enter
 Object/runtime machinery. It is unsupported inside an active orchestrator in
-Stage 2. Stage 3's isolated probe does not exist in this release.
+Stage 2. Stage 3's generic in-process static analysis does not change that
+constraint: cross-process Method probing remains deferred.
 
 `compatible_implementations(input_spec=None, *, backend=None, batch_mode=None)`
 accepts an optional first-input `SpecTree` and core trait constraints, returns
@@ -205,3 +213,4 @@ signatures. These failures occur before a rejected candidate runs.
 - [Data API](data.md)
 - [Models API](models.md)
 - [Annotations](annotations.md)
+- [Code Analysis](code_analysis.md)

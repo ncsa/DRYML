@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from dryml.code import ImportTarget, KernelCall, SourceLocation, SourceTarget, analyze
+from dryml.code import ImportTarget, KernelCall, SourceTarget, analyze
 from dryml.code.algorithms import (
     LexicalDependencies,
     LexicalDependency,
@@ -15,6 +15,7 @@ from dryml.code.algorithms import (
     collect_lexical_dependencies,
 )
 from dryml.code.errors import SourceUnavailableError
+from dryml.code.facts import SourceLocation
 
 
 _SCOPED_SOURCE = """def subject(

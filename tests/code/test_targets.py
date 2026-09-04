@@ -13,10 +13,10 @@ from dryml.code import (
     CodeFacts,
     ImportTarget,
     InvalidTargetError,
-    SourceLocation,
     SourceTarget,
-    normalize_target,
 )
+from dryml.code.facts import SourceLocation
+from dryml.code.targets import normalize_target
 
 
 def target_function(value: int) -> int:

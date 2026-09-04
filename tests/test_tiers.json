@@ -1097,6 +1097,7 @@
     "tests/core/test_structural_vs_exact_load.py": "medium",
     "tests/data/test_source_adapters.py": "heavy",
     "tests/docs/test_cdef_v2_documentation.py": "medium",
+    "tests/docs/test_code_analysis_documentation.py": "medium",
     "tests/environments/test_compatibility_reports.py": "smoke",
     "tests/environments/test_environment_probe.py": "medium",
     "tests/environments/test_environment_records.py": "medium",

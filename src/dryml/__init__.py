@@ -12,7 +12,7 @@ from ._framework_imports import install_builtin_roots, install_passive_finder
 install_builtin_roots()
 install_passive_finder()
 
-__version__ = "0.3.0.dev0"
+__version__ = "0.3.0.dev1"
 
 _SUBMODULE_EXPORTS = {
     "context": "dryml.context",

@@ -2,10 +2,143 @@
 
 from __future__ import annotations
 
+import dataclasses
+import importlib
+import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
 import subprocess
+
+_EXPECTED_CODE_EXPORTS = [
+    "AccessCollection",
+    "AnalysisErrorCode",
+    "AnalysisKernel",
+    "AnalysisResult",
+    "CallableInfo",
+    "CodeAnalysisError",
+    "CodeFact",
+    "CodeFacts",
+    "CodeTarget",
+    "CodeTargetInput",
+    "Diagnostic",
+    "DescriptorTarget",
+    "FactRecord",
+    "ImportTarget",
+    "InvalidKernelError",
+    "InvalidTargetError",
+    "InvocationOutcome",
+    "KernelCall",
+    "KernelDependencyError",
+    "KernelExecutionError",
+    "KernelOutcome",
+    "MissingOutputError",
+    "ProgramGraph",
+    "SourceInfo",
+    "SourceTarget",
+    "SourceUnavailableError",
+    "TargetInfo",
+    "TraversalKernel",
+    "analyze",
+    "analyze_callable",
+    "extract_source",
+    "get_source_info",
+    "probe",
+    "trace",
+]
+
+_EXPECTED_CODE_MODULE_EXPORTS = {
+    "dryml.code.algorithms": [
+        "LexicalDependencies", "LexicalDependency", "LexicalDependencyKernel",
+        "collect_lexical_dependencies",
+    ],
+    "dryml.code.analysis": ["AnalysisResult", "InvocationOutcome", "analyze"],
+    "dryml.code.ast_tools": [
+        "AccessCollection", "AttrAccess", "MethodCall",
+        "collect_accesses_from_source", "parse_source",
+    ],
+    "dryml.code.callable_info": ["CallableInfo", "analyze_callable"],
+    "dryml.code.errors": [
+        "AnalysisErrorCode", "CodeAnalysisError", "InvalidKernelError",
+        "InvalidTargetError", "KernelDependencyError", "KernelExecutionError",
+        "MissingOutputError", "SourceUnavailableError",
+    ],
+    "dryml.code.facts": [
+        "CodeFact", "CodeFacts", "Diagnostic", "FactRecord", "FactScalar",
+        "FactValue", "SourceLocation",
+    ],
+    "dryml.code.graph": [
+        "ProgramEdge", "ProgramEdgeKind", "ProgramGraph", "ProgramNode",
+        "ProgramNodeKind", "build_program_graph",
+    ],
+    "dryml.code.kernels": [
+        "AnalysisKernel", "KernelCall", "KernelContext", "KernelMode",
+        "KernelOutcome", "TraversalKernel",
+    ],
+    "dryml.code.probe": ["probe"],
+    "dryml.code.source": ["SourceInfo", "extract_source", "get_source_info"],
+    "dryml.code.targets": [
+        "CodeTarget", "CodeTargetInput", "DescriptorKind", "DescriptorTarget",
+        "ImportTarget", "SourceTarget", "TargetInfo", "TargetKind",
+        "normalize_target",
+    ],
+    "dryml.code.trace": ["trace"],
+}
+
+_EXPECTED_CODE_DATACLASS_FIELDS = {
+    "dryml.code.callable_info.CallableInfo": [
+        "original", "func", "bound_self", "signature", "qualname", "module",
+        "is_bound_method", "is_function", "is_callable_instance",
+    ],
+    "dryml.code.source.SourceInfo": ["source", "filename", "start_line"],
+    "dryml.code.ast_tools.AttrAccess": ["root", "chain", "ctx", "lineno", "col_offset"],
+    "dryml.code.ast_tools.MethodCall": ["root", "chain", "lineno", "col_offset"],
+    "dryml.code.ast_tools.AccessCollection": ["attr_accesses", "method_calls"],
+    "dryml.code.targets.SourceTarget": ["source", "name", "filename", "start_line"],
+    "dryml.code.targets.ImportTarget": ["path"],
+    "dryml.code.targets.DescriptorTarget": ["owner", "name"],
+    "dryml.code.targets.TargetInfo": [
+        "kind", "name", "module", "qualname", "owner_module", "owner_qualname",
+        "descriptor_kind", "filename", "start_line", "import_path",
+    ],
+    "dryml.code.targets.CodeTarget": [
+        "info", "original", "callable", "owner", "descriptor", "source",
+        "import_path",
+    ],
+    "dryml.code.graph.ProgramNode": ["id", "kind", "value", "source"],
+    "dryml.code.graph.ProgramEdge": ["source", "target", "kind"],
+    "dryml.code.graph.ProgramGraph": ["target", "nodes", "edges", "diagnostics"],
+    "dryml.code.facts.SourceLocation": ["filename", "line", "column"],
+    "dryml.code.facts.CodeFact": ["kind", "value", "source"],
+    "dryml.code.facts.CodeFacts": ["values"],
+    "dryml.code.facts.FactRecord": ["fact", "producer", "graph_digest", "origin"],
+    "dryml.code.facts.Diagnostic": ["code", "message", "severity", "kernel", "source"],
+    "dryml.code.kernels.KernelCall": ["kernel", "input"],
+    "dryml.code.kernels.KernelOutcome": [
+        "kernel", "graph_digest", "status", "value", "diagnostics", "skipped_for",
+    ],
+    "dryml.code.analysis.InvocationOutcome": ["status", "diagnostic"],
+    "dryml.code.analysis.AnalysisResult": [
+        "target", "base_graph", "graph", "outcomes", "facts", "diagnostics", "invocation",
+    ],
+    "dryml.code.algorithms.LexicalDependency": ["name", "source"],
+    "dryml.code.algorithms.LexicalDependencies": ["dependencies"],
+}
+
+_EXPECTED_CODE_SIGNATURES = {
+    "dryml.code.callable_info.analyze_callable": "(obj: 'Callable[..., Any]') -> 'CallableInfo'",
+    "dryml.code.source.get_source_info": "(obj: 'object') -> 'SourceInfo | None'",
+    "dryml.code.source.extract_source": "(target: 'CodeTargetInput') -> 'SourceInfo'",
+    "dryml.code.ast_tools.parse_source": "(source: 'str | SourceInfo') -> 'ast.Module'",
+    "dryml.code.ast_tools.collect_accesses_from_source": "(source: 'str | SourceInfo') -> 'AccessCollection'",
+    "dryml.code.targets.normalize_target": "(target: 'CodeTargetInput') -> 'CodeTarget'",
+    "dryml.code.graph.build_program_graph": "(target: 'CodeTargetInput') -> 'ProgramGraph'",
+    "dryml.code.analysis.analyze": "(target: 'CodeTargetInput', calls: 'Iterable[KernelCall[Any, Any]]') -> 'AnalysisResult'",
+    "dryml.code.probe.probe": "(target: 'CodeTargetInput', calls: 'Iterable[KernelCall[Any, Any]]') -> 'AnalysisResult'",
+    "dryml.code.trace.trace": "(target: 'CodeTargetInput', calls: 'Iterable[KernelCall[Any, Any]]', *, args: 'tuple[Any, ...]' = (), kwargs: 'Mapping[str, Any] | None' = None, max_events: 'int' = 100000) -> 'AnalysisResult'",
+    "dryml.code.algorithms.collect_lexical_dependencies": "(target: 'CodeTargetInput') -> 'LexicalDependencies'",
+}
 
 _EXPECTED_ROOT_EXPORTS = {
     "AnyValue",
@@ -111,7 +244,7 @@ print(json.dumps({
     assert set(data["exports"]) == _EXPECTED_ROOT_EXPORTS
     assert data["root_core_conveniences"]
     assert data["root_methods"]
-    assert data["version"] == data["metadata_version"] == "0.3.0.dev0"
+    assert data["version"] == data["metadata_version"] == "0.3.0.dev1"
     assert "site-packages" in data["module"].replace("\\", "/")
 
 
@@ -210,6 +343,177 @@ print(json.dumps(sorted(dryml.methods.__all__)))
 """,
     )
     assert set(json.loads(result.stdout)) == _EXPECTED_METHOD_EXPORTS
+
+
+def test_installed_code_analysis_contract_and_removed_apis(
+    installed_python: Path,
+) -> None:
+    """Require the installed Stage 3 code-analysis package to match its contract."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import dataclasses
+import importlib
+import importlib.util
+import inspect
+import json
+
+import dryml.code
+
+modules = {
+    name: list(importlib.import_module(name).__all__)
+    for name in %s
+}
+fields = {}
+for dotted in %s:
+    module_name, class_name = dotted.rsplit('.', 1)
+    fields[dotted] = [field.name for field in dataclasses.fields(
+        getattr(importlib.import_module(module_name), class_name)
+    )]
+signatures = {}
+for dotted in %s:
+    module_name, function_name = dotted.rsplit('.', 1)
+    signatures[dotted] = str(inspect.signature(
+        getattr(importlib.import_module(module_name), function_name)
+    ))
+removed_attributes = (
+    'AttrAccess', 'MethodCall', 'collect_accesses_from_source', 'parse_source',
+    'ProgramNode', 'ProgramEdge', 'ProgramNodeKind', 'ProgramEdgeKind',
+    'build_program_graph', 'TargetKind', 'DescriptorKind', 'normalize_target',
+    'KernelContext', 'KernelMode', 'FactScalar', 'FactValue', 'SourceLocation',
+    'LexicalDependency', 'LexicalDependencies', 'LexicalDependencyKernel',
+    'collect_lexical_dependencies', 'func_source_extract', 'CompilerInfo',
+    'Method', 'Traits', 'traits', 'AnnotationFact', 'RequirementFact',
+    'MethodContractFact', 'ShapeFact', 'CodeTargetSpec', 'FunctionAnalyzer',
+    'register_analyzer', 'get_analyzer', 'available_analyzers', 'CodeProbeRequest',
+    'CodeProbeResult', 'normalize_probe_request', 'probe_target',
+    'probe_target_in_subprocess', 'request_from_data', 'result_from_data',
+    'run_probe_request',
+)
+removed_modules = (
+    'dryml.code.compiler_info', 'dryml.code.method', 'dryml.code.traits',
+    'dryml.code.probe_worker', 'dryml.code.transformation',
+    'dryml.code.algorithms.direct_annotations',
+    'dryml.code.algorithms.method_contracts',
+)
+print(json.dumps({
+    'exports': list(dryml.code.__all__),
+    'modules': modules,
+    'fields': fields,
+    'signatures': signatures,
+    'removed_attributes': [name for name in removed_attributes if hasattr(dryml.code, name)],
+    'removed_modules': [name for name in removed_modules if importlib.util.find_spec(name) is not None],
+}))
+""" % (
+            repr(tuple(_EXPECTED_CODE_MODULE_EXPORTS)),
+            repr(tuple(_EXPECTED_CODE_DATACLASS_FIELDS)),
+            repr(tuple(_EXPECTED_CODE_SIGNATURES)),
+        ),
+    )
+    data = json.loads(result.stdout)
+    _assert_code_analysis_contract(data)
+
+
+def test_source_tree_code_analysis_contract_and_removed_apis() -> None:
+    """Require the source-tree Stage 3 code-analysis package to match its contract."""
+
+    import dryml.code
+
+    modules = {
+        name: list(importlib.import_module(name).__all__)
+        for name in _EXPECTED_CODE_MODULE_EXPORTS
+    }
+    fields = {}
+    for dotted in _EXPECTED_CODE_DATACLASS_FIELDS:
+        module_name, class_name = dotted.rsplit(".", 1)
+        fields[dotted] = [
+            field.name
+            for field in dataclasses.fields(
+                getattr(importlib.import_module(module_name), class_name)
+            )
+        ]
+    signatures = {}
+    for dotted in _EXPECTED_CODE_SIGNATURES:
+        module_name, function_name = dotted.rsplit(".", 1)
+        signatures[dotted] = str(
+            inspect.signature(getattr(importlib.import_module(module_name), function_name))
+        )
+    _assert_code_analysis_contract({
+        "exports": list(dryml.code.__all__),
+        "modules": modules,
+        "fields": fields,
+        "signatures": signatures,
+        "removed_attributes": [
+            name
+            for name in (
+                "AttrAccess", "MethodCall", "collect_accesses_from_source",
+                "parse_source", "ProgramNode", "ProgramEdge", "ProgramNodeKind",
+                "ProgramEdgeKind", "build_program_graph", "TargetKind",
+                "DescriptorKind", "normalize_target", "KernelContext", "KernelMode",
+                "FactScalar", "FactValue", "SourceLocation", "LexicalDependency",
+                "LexicalDependencies", "LexicalDependencyKernel",
+                "collect_lexical_dependencies", "func_source_extract", "CompilerInfo",
+                "Method", "Traits", "traits", "AnnotationFact", "RequirementFact",
+                "MethodContractFact", "ShapeFact", "CodeTargetSpec", "FunctionAnalyzer",
+                "register_analyzer", "get_analyzer", "available_analyzers",
+                "CodeProbeRequest", "CodeProbeResult", "normalize_probe_request",
+                "probe_target", "probe_target_in_subprocess", "request_from_data",
+                "result_from_data", "run_probe_request",
+            )
+            if hasattr(dryml.code, name)
+        ],
+        "removed_modules": [
+            name
+            for name in (
+                "dryml.code.compiler_info", "dryml.code.method", "dryml.code.traits",
+                "dryml.code.probe_worker", "dryml.code.transformation",
+                "dryml.code.algorithms.direct_annotations",
+                "dryml.code.algorithms.method_contracts",
+            )
+            if importlib.util.find_spec(name) is not None
+        ],
+    })
+
+
+def _assert_code_analysis_contract(data: dict[str, object]) -> None:
+    """Compare one source-tree or installed contract probe with Stage 3 values."""
+
+    assert data["exports"] == _EXPECTED_CODE_EXPORTS
+    assert data["modules"] == _EXPECTED_CODE_MODULE_EXPORTS
+    assert data["fields"] == _EXPECTED_CODE_DATACLASS_FIELDS
+    assert data["signatures"] == _EXPECTED_CODE_SIGNATURES
+    assert data["removed_attributes"] == []
+    assert data["removed_modules"] == []
+
+
+def test_installed_code_and_core_imports_are_passive(
+    installed_python: Path,
+) -> None:
+    """Ensure installed code, core, and symbol imports do not load consumers."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+import sys
+
+import dryml.code
+import dryml.core
+import dryml.core.symbol
+
+forbidden = (
+    'dryml.annotations', 'dryml.artifacts', 'dryml.data', 'dryml.dispatch',
+    'dryml.environments', 'dryml.execute', 'dryml.managed', 'dryml.methods',
+    'dryml.models', 'dryml.runtime', 'dryml.session', 'dryml.worlds',
+    'tensorflow', 'torch', 'jax', 'jaxlib', 'ray',
+)
+print(json.dumps(sorted(
+    name for name in sys.modules if name.startswith(forbidden)
+)))
+""",
+    )
+    assert json.loads(result.stdout) == []
 
 
 def test_installed_sdist_wheel_exercises_current_reference_authority(

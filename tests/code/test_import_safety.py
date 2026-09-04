@@ -1,4 +1,4 @@
-"""Tests for the incremental dependency-light package manifest."""
+"""Tests for the exact dependency-light code-analysis package manifest."""
 
 from __future__ import annotations
 
@@ -6,19 +6,61 @@ import subprocess
 import sys
 
 
+_EXPECTED_ROOT_EXPORTS = [
+    "AccessCollection",
+    "AnalysisErrorCode",
+    "AnalysisKernel",
+    "AnalysisResult",
+    "CallableInfo",
+    "CodeAnalysisError",
+    "CodeFact",
+    "CodeFacts",
+    "CodeTarget",
+    "CodeTargetInput",
+    "Diagnostic",
+    "DescriptorTarget",
+    "FactRecord",
+    "ImportTarget",
+    "InvalidKernelError",
+    "InvalidTargetError",
+    "InvocationOutcome",
+    "KernelCall",
+    "KernelDependencyError",
+    "KernelExecutionError",
+    "KernelOutcome",
+    "MissingOutputError",
+    "ProgramGraph",
+    "SourceInfo",
+    "SourceTarget",
+    "SourceUnavailableError",
+    "TargetInfo",
+    "TraversalKernel",
+    "analyze",
+    "analyze_callable",
+    "extract_source",
+    "get_source_info",
+    "probe",
+    "trace",
+]
+
+
 def test_code_exports_implemented_analysis_apis() -> None:
-    """The root manifest exposes implemented APIs but no compatibility names."""
+    """The source-tree root manifest is the exact documented Stage 3 surface."""
 
     import dryml.code as code
 
-    assert "func_source_extract" not in code.__all__
-    assert "CompilerInfo" not in code.__all__
-    assert "normalize_target" in code.__all__
-    assert "ProgramGraph" in code.__all__
-    assert {"AnalysisKernel", "AnalysisResult", "KernelCall", "KernelOutcome", "TraversalKernel", "analyze", "probe", "trace"} <= set(code.__all__)
-    assert "build_program_graph" not in code.__all__
-    assert not hasattr(code, "func_source_extract")
-    assert not hasattr(code, "CompilerInfo")
+    assert code.__all__ == _EXPECTED_ROOT_EXPORTS
+    for name in (
+        "AttrAccess", "MethodCall", "collect_accesses_from_source", "parse_source",
+        "ProgramNode", "ProgramEdge", "ProgramNodeKind", "ProgramEdgeKind",
+        "build_program_graph", "TargetKind", "DescriptorKind", "normalize_target",
+        "KernelContext", "KernelMode", "FactScalar", "FactValue", "SourceLocation",
+        "LexicalDependency", "LexicalDependencies", "LexicalDependencyKernel",
+        "collect_lexical_dependencies", "func_source_extract", "CompilerInfo",
+        "Method", "Traits", "traits", "register_analyzer", "get_analyzer",
+        "available_analyzers", "CodeProbeRequest", "CodeProbeResult",
+    ):
+        assert not hasattr(code, name)
 
 
 def test_fresh_code_import_loads_no_product_or_optional_packages() -> None:

@@ -31,11 +31,30 @@ _REQUIRED_MODULES = {
     "dryml/methods/method.py",
     "dryml/methods/signature.py",
     "dryml/methods/traits.py",
+    "dryml/code/__init__.py",
+    "dryml/code/analysis.py",
+    "dryml/code/ast_tools.py",
+    "dryml/code/callable_info.py",
+    "dryml/code/errors.py",
+    "dryml/code/facts.py",
+    "dryml/code/graph.py",
+    "dryml/code/kernels.py",
+    "dryml/code/probe.py",
+    "dryml/code/source.py",
+    "dryml/code/targets.py",
+    "dryml/code/trace.py",
+    "dryml/code/algorithms/__init__.py",
+    "dryml/code/algorithms/lexical_dependencies.py",
 }
 
 _RETIRED_CODE_MODULES = {
+    "dryml/code/compiler_info.py",
     "dryml/code/method.py",
     "dryml/code/traits.py",
+    "dryml/code/probe_worker.py",
+    "dryml/code/transformation.py",
+    "dryml/code/algorithms/direct_annotations.py",
+    "dryml/code/algorithms/method_contracts.py",
 }
 
 _RETAINED_ANNOTATION_MODULES = {
@@ -66,6 +85,12 @@ def test_wheel_contains_port_modules_without_retired_core(
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
     assert _REQUIRED_MODULES <= names
+    code_modules = {
+        name for name in names if name.startswith("dryml/code/") and name.endswith(".py")
+    }
+    assert code_modules == {
+        name for name in _REQUIRED_MODULES if name.startswith("dryml/code/")
+    }
     annotation_modules = {
         name
         for name in names
@@ -88,6 +113,14 @@ def test_sdist_contains_port_modules_without_retired_core(
         names = {"/".join(name.split("/")[1:]) for name in archive.getnames()}
     required = {f"src/{name}" for name in _REQUIRED_MODULES}
     assert required <= names
+    code_modules = {
+        name.removeprefix("src/")
+        for name in names
+        if name.startswith("src/dryml/code/") and name.endswith(".py")
+    }
+    assert code_modules == {
+        name for name in _REQUIRED_MODULES if name.startswith("dryml/code/")
+    }
     annotation_modules = {
         name.removeprefix("src/")
         for name in names

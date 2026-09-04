@@ -7,7 +7,8 @@ import sys
 
 import pytest
 
-from dryml.code import SourceInfo, SourceUnavailableError, collect_accesses_from_source, parse_source
+from dryml.code import SourceInfo, SourceUnavailableError
+from dryml.code.ast_tools import collect_accesses_from_source, parse_source
 
 
 def test_collect_accesses_preserves_unicode_byte_columns_and_absolute_lines() -> None:
