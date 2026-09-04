@@ -5,6 +5,7 @@ import pytest
 from dryml.annotations import Annotation, attach_annotation
 from dryml.requirements import RequirementDeclaration, RequirementSource
 import dryml.environments as envs
+from dryml.environments import combination
 
 
 def test_combines_inherited_and_selected_method_declarations_deterministically() -> None:
@@ -69,6 +70,33 @@ def test_package_exclusion_conflict_attributes_both_declarations() -> None:
     assert tuple(source.label for source in issue.sources) == ("1: required", "2: excluded")
 
 
+def test_conflict_source_attribution_constructs_paths_once_per_declaration(monkeypatch) -> None:
+    """Conflict reporting reuses preflight paths rather than rebuilding them per issue."""
+
+    paths = tuple(f"package-{index}" for index in range(64))
+    declarations = tuple(
+        RequirementDeclaration(
+            envs.EnvironmentRequirement(requirements=tuple(f"{path}{'<1' if index % 2 else '>=1'}" for path in paths)),
+            source=RequirementSource(str(index)),
+        )
+        for index in range(64)
+    )
+    original_paths = combination._paths
+    calls = 0
+
+    def counted_paths(value):
+        nonlocal calls
+        calls += 1
+        return original_paths(value)
+
+    monkeypatch.setattr(combination, "_paths", counted_paths)
+
+    result = combination._EnvironmentCombiner().combine(declarations)
+
+    assert len(result.report.issues) == 64
+    assert calls == len(declarations)
+
+
 def test_malformed_attached_values_and_declaration_limit_fail_before_results() -> None:
     """Corrupt or oversized environment declarations cannot yield partial results."""
 
@@ -107,3 +135,36 @@ def test_merge_keeps_success_and_conflict_exception_behavior() -> None:
     assert merged.requirements == ("demo<2,>=1",)
     with pytest.raises(envs.EnvironmentRequirementError):
         envs.EnvironmentRequirement(requirements=("demo<1",)).merge(envs.EnvironmentRequirement(requirements=("demo>=1",)))
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        ("demo[feature]>=1", "demo[feature]<2", "demo[feature]<2,>=1"),
+        ("demo @ https://example.invalid/demo-1.0.whl", "demo @ https://example.invalid/demo-1.0.whl", "demo @ https://example.invalid/demo-1.0.whl"),
+        ("demo>=1; extra == 'feature'", "demo<2; extra == 'feature'", 'demo<2,>=1; extra == "feature"'),
+    ],
+)
+def test_public_merge_retains_pep_508_package_forms(left: str, right: str, expected: str) -> None:
+    """The retained two-value API accepts public PEP 508 requirement forms."""
+
+    merged = envs.EnvironmentRequirement(requirements=(left,)).merge(envs.EnvironmentRequirement(requirements=(right,)))
+
+    assert merged.requirements == (expected,)
+
+
+def test_post_release_intersection_is_not_reported_as_a_conflict() -> None:
+    """A valid post-release witness remains usable during declaration combination."""
+
+    @envs.req(python=">1.post0", source="lower")
+    class Lower:
+        pass
+
+    @envs.req(python="<1.post2", source="upper")
+    class Upper(Lower):
+        pass
+
+    result = envs.requirements_for(Upper)
+
+    assert result.has_value
+    assert result.value.python == "<1.post2,>1.post0"

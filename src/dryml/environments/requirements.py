@@ -538,9 +538,6 @@ def _specifier_has_obvious_conflict(specifier: SpecifierSet) -> bool:
     arbitrary_exact_versions = {item.version for item in specifier if item.operator == "==="}
     if len(arbitrary_exact_versions) > 1:
         return True
-    candidates = _specifier_witnesses(specifier)
-    if candidates and not any(candidate in specifier for candidate in candidates):
-        return True
     exact_versions: set[Version] = set()
     lower: tuple[Version, bool] | None = None
     upper: tuple[Version, bool] | None = None
@@ -566,38 +563,6 @@ def _specifier_has_obvious_conflict(specifier: SpecifierSet) -> bool:
     return lower is not None and upper is not None and (
         lower[0] > upper[0] or (lower[0] == upper[0] and (not lower[1] or not upper[1]))
     )
-
-
-def _specifier_witnesses(specifier: SpecifierSet) -> tuple[Version, ...]:
-    candidates: set[Version] = set()
-    for item in specifier:
-        raw = item.version.rstrip(".*")
-        try:
-            version = Version(raw)
-        except InvalidVersion:
-            return ()
-        release = version.release or (0,)
-        candidates.update(
-            (
-                version,
-                Version(".".join(str(part) for part in (*release, 0))),
-                Version(".".join(str(part) for part in (*release, 1))),
-            )
-        )
-        try:
-            candidates.add(Version(f"{version}.post1"))
-        except InvalidVersion:
-            pass
-        if release[-1] > 0:
-            candidates.add(Version(".".join(str(part) for part in (*release[:-1], release[-1] - 1, 999999))))
-        if item.operator == "~=":
-            prefix = release[:-1] if len(release) > 1 else ()
-            upper = (prefix[-1] + 1,) if len(prefix) == 1 else (*prefix[:-1], prefix[-1] + 1) if prefix else (release[0] + 1,)
-            candidates.add(Version(".".join(str(part) for part in (*upper, 0))))
-        if item.operator in {"==", "!="} and item.version.endswith(".*"):
-            candidates.add(Version(".".join(str(part) for part in (*release, 1))))
-            candidates.add(Version(".".join(str(part) for part in (*release[:-1], release[-1] + 1, 0))))
-    return tuple(candidates)
 
 
 def marker_environment_from_record(record: EnvironmentRecord) -> dict[str, str | None]:

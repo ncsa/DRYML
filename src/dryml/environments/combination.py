@@ -65,12 +65,24 @@ def _paths(value: EnvironmentRequirement) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def _preflight(declarations: tuple[RequirementDeclaration[EnvironmentRequirement], ...]) -> None:
-    """Validate full diagnostic work before semantic combination can begin."""
+def _preflight(declarations: tuple[RequirementDeclaration[EnvironmentRequirement], ...]) -> dict[str, tuple[RequirementSource, ...]]:
+    """Validate bounded work and return deterministic conflict-source attribution."""
 
     if len(declarations) > _MAX_DECLARATIONS:
         raise EnvironmentRequirementError("environment declaration limit exceeded")
-    paths = tuple(path for declaration in declarations for path in _paths(declaration.value))
+    paths: list[str] = []
+    sources_by_path: dict[str, list[RequirementSource]] = defaultdict(list)
+    for declaration in declarations:
+        declaration_paths = _paths(declaration.value)
+        paths.extend(declaration_paths)
+        attributed_paths = set(declaration_paths)
+        attributed_paths.update(
+            f"requirements.{path.partition('.')[2]}"
+            for path in declaration_paths
+            if path.startswith("excludes.")
+        )
+        for path in attributed_paths:
+            sources_by_path[path].append(declaration.source)
     if len(set(paths)) > _MAX_PATHS or len(paths) > _MAX_OCCURRENCES:
         raise EnvironmentRequirementError("environment requirement combination exceeds path capacity")
     text_work = sum(len(path.encode("utf-8")) for path in paths)
@@ -91,16 +103,7 @@ def _preflight(declarations: tuple[RequirementDeclaration[EnvironmentRequirement
         )
     if text_work > _MAX_BYTES:
         raise EnvironmentRequirementError("environment requirement combination exceeds byte capacity")
-
-
-def _sources_for(declarations: tuple[RequirementDeclaration[EnvironmentRequirement], ...], path: str) -> tuple:
-    """Return every ordinalized declaration source contributing to one path."""
-
-    field, _, name = path.partition(".")
-    paths = {path}
-    if field == "requirements" and name:
-        paths.add(f"excludes.{name}")
-    return tuple(declaration.source for declaration in declarations if paths & set(_paths(declaration.value)))
+    return {path: tuple(sources) for path, sources in sources_by_path.items()}
 
 
 def _safe_path(path: str, ordinal: int) -> str:
@@ -192,7 +195,7 @@ class _EnvironmentCombiner:
     def combine(self, declarations: tuple[RequirementDeclaration[EnvironmentRequirement], ...]) -> RequirementResult[EnvironmentRequirement]:
         """Return a complete conflict report or one compatible requirement value."""
 
-        _preflight(declarations)
+        sources_by_path = _preflight(declarations)
         values = tuple(declaration.value for declaration in declarations)
         conflicts = _conflicts(values)
         if conflicts:
@@ -201,7 +204,7 @@ class _EnvironmentCombiner:
                     "dryml.environments.requirement_conflict",
                     "conflicting environment requirement constraints",
                     path=_safe_path(path, ordinal),
-                    sources=_sources_for(declarations, path),
+                    sources=sources_by_path[path],
                 )
                 for ordinal, path in enumerate(conflicts, start=1)
             )
@@ -262,12 +265,29 @@ def merge_environment_requirements(left: EnvironmentRequirement, right: Environm
     """Merge two environment values while retaining the legacy exception surface."""
 
     try:
-        _preflight((RequirementDeclaration(left, source=RequirementSource("left")), RequirementDeclaration(right, source=RequirementSource("right"))))
-        conflicts = _conflicts((left, right))
-        if conflicts:
-            raise EnvironmentRequirementError("conflicting environment requirement constraints", context={"path": conflicts[0]})
         details_sources = tuple(left.details.get("sources", ())) + tuple(right.details.get("sources", ())) + tuple(sources)
-        return _combined_value((left, right), details={"sources": details_sources} if details_sources else {})
+        requirements = _merge_package_requirements(left.requirements, right.requirements)
+        excludes = tuple(sorted(set(left.excludes) | set(right.excludes)))
+        required_names = {normalize_distribution_name(Requirement(item).name) for item in requirements}
+        overlap = required_names & set(excludes)
+        if overlap:
+            raise EnvironmentRequirementError(
+                "required distributions cannot also be excluded",
+                context={"path": f"requirements.{sorted(overlap)[0]}"},
+            )
+        schema = dict(left.schema_versions)
+        for name, specifier in right.schema_versions.items():
+            schema[name] = _intersect_specifiers(schema.get(name), specifier, path=f"schema_versions.{name}") or ""
+        return EnvironmentRequirement(
+            python=_intersect_specifiers(left.python, right.python, path="python"),
+            requirements=requirements,
+            excludes=excludes,
+            capabilities=tuple(sorted(set(left.capabilities) | set(right.capabilities))),
+            tags=tuple(sorted(set(left.tags) | set(right.tags))),
+            dryml_protocol=_intersect_specifiers(left.dryml_protocol, right.dryml_protocol, path="dryml_protocol"),
+            schema_versions=schema,
+            details={"sources": details_sources} if details_sources else {},
+        )
     except EnvironmentRequirementError:
         raise
     except Exception:
