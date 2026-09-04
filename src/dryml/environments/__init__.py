@@ -96,7 +96,6 @@ __all__ = [
     "PythonRecord",
     "coerce_policy",
     "malformed_report",
-    "ENVIRONMENT_REQUIREMENT_KEY",
     "normalize_distribution_name",
     "normalize_requirement_string",
     "marker_environment_from_record",

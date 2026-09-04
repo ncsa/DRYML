@@ -171,6 +171,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "context",
     "core",
     "definition_mode",
+    "env",
     "environments",
     "execute",
     "freeze",
@@ -188,12 +189,71 @@ _EXPECTED_ROOT_EXPORTS = {
     "StoreReport",
     "object_namespace",
     "reset_config",
+    "requirements",
     "selector_mode",
     "session",
     "space_mode",
     "status",
     "runtime",
+    "world",
     "worlds",
+}
+
+_EXPECTED_REQUIREMENT_EXPORTS = {
+    "AdmissionReport",
+    "RequirementBarrierError",
+    "RequirementCombinationError",
+    "RequirementCombiner",
+    "RequirementDeclaration",
+    "RequirementError",
+    "RequirementIssue",
+    "RequirementReport",
+    "RequirementResult",
+    "RequirementSource",
+    "combine_requirements",
+    "require_admission",
+}
+
+_EXPECTED_ENVIRONMENT_EXPORTS = {
+    "COMPATIBILITY_REPORT_SCHEMA_VERSION", "ENVIRONMENT_LOCK_REF_SCHEMA_VERSION",
+    "ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION", "ENVIRONMENT_RECORD_SCHEMA_VERSION",
+    "ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION", "ENVIRONMENT_SPEC_SCHEMA_VERSION",
+    "CompatibilityIssue", "CompatibilityReport", "CondaEnvironmentSpec",
+    "ContainerEnvironmentSpec", "CurrentEnvironmentSpec", "DrymlEnvironmentError",
+    "DrymlRuntimeRecord", "EnvironmentCompatibilityError",
+    "EnvironmentFeatureUnavailable", "EnvironmentInternTable", "EnvironmentLockRef",
+    "EnvironmentProbeError", "EnvironmentRecord", "EnvironmentRegistry",
+    "EnvironmentRegistryEntry", "EnvironmentRegistryError", "EnvironmentRequirement",
+    "EnvironmentRequirementError", "EnvironmentSerializationError", "EnvironmentSpecError",
+    "EnvironmentProbeResult", "PackageRecord", "PlatformRecord", "PythonExecutableSpec",
+    "PythonRecord", "coerce_policy", "current", "inspect_current",
+    "malformed_report", "marker_environment_from_record", "normalize_distribution_name",
+    "normalize_requirement_string", "probe", "probe_conda", "probe_current",
+    "probe_python", "req", "requirements_for", "requirements_for_method", "reset_current",
+    "set_current", "spec_from_data", "unavailable_report", "use",
+}
+
+_EXPECTED_WORLD_EXPORTS = {
+    "CountConstraint", "LocalResourceInventory", "ProcessAllocation", "ProcessSpec",
+    "ResourceRequirement", "ResourceSpec", "ResourceValidationError", "RoleRequirement",
+    "RoleSpec", "WorldAllocation", "WorldCompatibilityError", "WorldCompatibilityIssue",
+    "WorldCompatibilityReport", "WorldError", "WorldRequirement", "WorldRequirementError",
+    "WorldSpec", "WorldSpecValidationError", "WorldSynthesisDiagnostic",
+    "WorldSynthesisResult", "assign_local_world", "canonical_byte_size",
+    "check_allocation_satisfies_requirement", "check_world_spec_satisfies_requirement",
+    "current", "local_inventory", "parse_byte_size", "req", "requirements_for",
+    "requirements_for_method", "reset_current", "set_current", "synthesize", "use",
+}
+
+_RETIRED_ENVIRONMENT_SURFACE = {
+    "ENVIRONMENT_FRAGMENT_SCHEMA_VERSION",
+    "FRAGMENT_ATTR",
+    "RequirementFragment",
+    "add_req",
+    "compose_fragments",
+    "fragments_for_class",
+    "override_req",
+    "requirements_for_class",
 }
 
 _EXPECTED_METHOD_EXPORTS = {
@@ -234,6 +294,11 @@ print(json.dumps({
          if name in dryml.__all__
      ),
      "root_methods": dryml.methods is __import__("dryml.methods", fromlist=["*"]),
+     "aliases": {
+         "env": dryml.env is dryml.environments,
+         "world": dryml.world is dryml.worlds,
+         "requirements": dryml.requirements.__name__,
+     },
     "module": dryml.__file__,
     "version": dryml.__version__,
     "metadata_version": importlib.metadata.version("dryml"),
@@ -244,7 +309,8 @@ print(json.dumps({
     assert set(data["exports"]) == _EXPECTED_ROOT_EXPORTS
     assert data["root_core_conveniences"]
     assert data["root_methods"]
-    assert data["version"] == data["metadata_version"] == "0.3.0.dev1"
+    assert data["aliases"] == {"env": True, "world": True, "requirements": "dryml.requirements"}
+    assert data["version"] == data["metadata_version"] == "0.3.0.dev2"
     assert "site-packages" in data["module"].replace("\\", "/")
 
 
@@ -276,8 +342,9 @@ assert set(dryml.annotations.__all__) == {
     "AnnotatedMember", "annotations_for_members",
     "AnnotationError", "AnnotationValidationError", "UnsupportedAnnotationTargetError",
 }
-assert "env" not in dryml.__all__
-assert "world" not in dryml.__all__
+assert dryml.env is dryml.environments
+assert dryml.world is dryml.worlds
+assert "requirements" in dryml.__all__
 assert "default" not in dryml.runtime.__all__
 for name in ("decorators", "env", "world", "runtime", "merge", "namespaces", "storage"):
     try:
@@ -297,6 +364,146 @@ print(json.dumps({
 """,
     )
     assert json.loads(result.stdout) == {"heavy": [], "retired": False}
+
+
+def test_installed_requirement_domain_surface_has_no_defaults_or_fragment_shims(
+    installed_python: Path,
+) -> None:
+    """Require the installed wheel to retain only public domain requirement APIs."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import importlib.util
+import inspect
+import json
+
+import dryml
+from dryml import env, world
+
+retired_modules = (
+    'dryml.env', 'dryml.world', 'dryml.environments.fragments',
+    'dryml.environments.fragment', 'dryml.runtime.default',
+)
+print(json.dumps({
+    'requirements': sorted(dryml.requirements.__all__),
+    'environment': sorted(env.__all__),
+    'world': sorted(world.__all__),
+    'environment_key_exported': 'ENVIRONMENT_REQUIREMENT_KEY' in env.__all__,
+    'world_key_exported': 'WORLD_REQUIREMENT_KEY' in world.__all__,
+    'selectors': {
+        'env': all(hasattr(env, name) for name in ('current', 'set_current', 'reset_current', 'use')),
+        'world': all(hasattr(world, name) for name in ('current', 'set_current', 'reset_current', 'use')),
+    },
+    'defaults': {
+        'env': [name for name in ('default', 'default_for', 'set_default', 'reset_default', 'use_default') if hasattr(env, name)],
+        'world': [name for name in ('default', 'default_for', 'set_default', 'reset_default', 'use_default') if hasattr(world, name)],
+        'runtime': hasattr(dryml.runtime, 'default'),
+    },
+    'retired': [name for name in %r if hasattr(env, name)],
+    'retired_modules': [
+        name for name in retired_modules if importlib.util.find_spec(name) is not None
+    ],
+    'signatures': {
+        'env.req': str(inspect.signature(env.req)),
+        'env.requirements_for': str(inspect.signature(env.requirements_for)),
+        'env.requirements_for_method': str(inspect.signature(env.requirements_for_method)),
+        'world.req': str(inspect.signature(world.req)),
+        'world.requirements_for': str(inspect.signature(world.requirements_for)),
+        'world.requirements_for_method': str(inspect.signature(world.requirements_for_method)),
+    },
+}))
+""" % (tuple(sorted(_RETIRED_ENVIRONMENT_SURFACE)),),
+    )
+    data = json.loads(result.stdout)
+    assert set(data["requirements"]) == _EXPECTED_REQUIREMENT_EXPORTS
+    assert set(data["environment"]) == _EXPECTED_ENVIRONMENT_EXPORTS
+    assert set(data["world"]) == _EXPECTED_WORLD_EXPORTS
+    assert not data["environment_key_exported"]
+    assert not data["world_key_exported"]
+    assert data["selectors"] == {"env": True, "world": True}
+    assert data["defaults"] == {"env": [], "world": [], "runtime": False}
+    assert data["retired"] == []
+    assert data["retired_modules"] == []
+    assert data["signatures"] == {
+        "env.req": "(*, python: 'str | None' = None, requirements: 'Iterable[str]' = (), excludes: 'Iterable[str]' = (), capabilities: 'Iterable[str]' = (), tags: 'Iterable[str]' = (), dryml_protocol: 'str | None' = None, schema_versions: 'Mapping[str, str] | None' = None, source: 'RequirementSource | str | None' = None) -> 'Callable[[T], T]'",
+        "env.requirements_for": "(target: 'object') -> 'RequirementResult[EnvironmentRequirement]'",
+        "env.requirements_for_method": "(owner: 'type | object', method_name: 'str') -> 'RequirementResult[EnvironmentRequirement]'",
+        "world.req": "(*, role: 'str' = 'main', roles: 'Mapping[str, RoleRequirement | Mapping[str, Any]] | None' = None, replicas: 'CountConstraint | int | Mapping[str, int | None] | None' = None, cpus: 'CountConstraint | int | Mapping[str, int | None] | None' = None, memory: 'CountConstraint | int | str | Mapping[str, int | str | None] | None' = None, accelerators: 'Mapping[str, CountConstraint | int | Mapping[str, int | None]] | None' = None, accelerator_memory: 'Mapping[str, CountConstraint | int | str | Mapping[str, int | str | None]] | None' = None, devices: 'Mapping[str, CountConstraint | int | Mapping[str, int | None]] | None' = None, named: 'Mapping[str, CountConstraint | int | Mapping[str, int | None]] | None' = None, topology: 'Mapping[str, Any] | None' = None, source: 'RequirementSource | str | None' = None) -> 'Callable[[T], T]'",
+        "world.requirements_for": "(target: 'object') -> 'RequirementResult[WorldRequirement]'",
+        "world.requirements_for_method": "(owner: 'type | object', method_name: 'str') -> 'RequirementResult[WorldRequirement]'",
+    }
+
+
+def test_installed_root_entry_points_are_effect_free_and_domain_isolated(
+    installed_python: Path,
+) -> None:
+    """Probe each installed root requirement entry point in a fresh interpreter."""
+
+    actions = (
+        ("import dryml.requirements", ("dryml.environments", "dryml.worlds")),
+        ("assert dryml.env is dryml.environments", ("dryml.worlds",)),
+        ("assert dryml.world is dryml.worlds", ("dryml.environments",)),
+        (
+            "from dryml import env, world\nassert env is dryml.environments\nassert world is dryml.worlds",
+            (),
+        ),
+    )
+    for action, inverse in actions:
+        result = _installed_probe(
+            installed_python,
+            """
+import json
+import os
+import platform
+import socket
+import subprocess
+import sys
+
+effects = []
+def blocked(name):
+    def call(*args, **kwargs):
+        effects.append(name)
+        raise AssertionError(f"unexpected {name}")
+    return call
+
+os.cpu_count = blocked("cpu_count")
+platform.system = blocked("platform.system")
+socket.socket = blocked("socket.socket")
+subprocess.Popen = blocked("subprocess.Popen")
+
+import dryml
+%s
+
+forbidden = %r + %r
+print(json.dumps({
+    "effects": effects,
+    "loaded": sorted(
+        name for name in sys.modules
+        if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
+    ),
+}))
+""" % (
+                action,
+                (
+                    "dryml.artifacts", "dryml.context", "dryml.core", "dryml.dispatch",
+                    "dryml.execute", "dryml.runtime", "dryml.session", "tensorflow",
+                    "torch", "jax", "jaxlib", "ray",
+                ),
+                inverse,
+            ),
+        )
+        assert json.loads(result.stdout) == {"effects": [], "loaded": []}
+
+
+def test_source_requirement_domain_surface_matches_installed_contract() -> None:
+    """Keep source exports aligned with the installed requirement-domain manifest."""
+
+    import dryml
+
+    assert set(dryml.requirements.__all__) == _EXPECTED_REQUIREMENT_EXPORTS
+    assert set(dryml.env.__all__) == _EXPECTED_ENVIRONMENT_EXPORTS
+    assert set(dryml.world.__all__) == _EXPECTED_WORLD_EXPORTS
 
 
 def test_installed_methods_manifest_and_retired_imports(

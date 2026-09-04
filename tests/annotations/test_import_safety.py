@@ -58,15 +58,15 @@ def test_kernel_exports_are_exact_and_retired_submodules_are_absent():
             __import__(f"dryml.annotations.{module}")
 
 
-def test_root_and_runtime_omit_retired_annotation_sugar():
-    """No root or runtime export points at a deleted annotation domain facade."""
+def test_root_aliases_restore_domain_views_without_annotation_facades():
+    """Root conveniences are plural-owner identities, not annotation facades."""
 
-    assert "env" not in dryml.__all__
-    assert "world" not in dryml.__all__
-    with pytest.raises(AttributeError):
-        dryml.env
-    with pytest.raises(AttributeError):
-        dryml.world
+    assert dryml.env is dryml.environments
+    assert dryml.world is dryml.worlds
+    assert {"env", "world", "requirements"} <= set(dryml.__all__)
+    for owner in (dryml.env, dryml.world):
+        assert {"current", "set_current", "reset_current", "use"} <= set(owner.__all__)
+        assert not {"default", "default_for", "set_default", "reset_default", "use_default"} & set(owner.__all__)
     import dryml.runtime as runtime
 
     assert "default" not in runtime.__all__

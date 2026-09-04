@@ -1094,7 +1094,21 @@
     "tests/requirements/test_model.py::test_shared_values_reject_malformed_or_ambiguous_states[<lambda>4]": "smoke",
     "tests/requirements/test_model.py::test_shared_values_reject_malformed_or_ambiguous_states[<lambda>5]": "smoke",
     "tests/requirements/test_model.py::test_shared_values_reject_malformed_or_ambiguous_states[<lambda>6]": "smoke",
-    "tests/requirements/test_model.py::test_shared_values_reject_malformed_or_ambiguous_states[<lambda>7]": "smoke"
+    "tests/requirements/test_model.py::test_shared_values_reject_malformed_or_ambiguous_states[<lambda>7]": "smoke",
+    "tests/annotations/test_import_safety.py::test_root_aliases_restore_domain_views_without_annotation_facades": "smoke",
+    "tests/requirements/test_domain_integration.py::test_root_aliases_have_exact_owner_surfaces_and_no_singular_packages": "smoke",
+    "tests/requirements/test_domain_integration.py::test_root_aliases_resolve_domain_annotations_independently": "smoke",
+    "tests/requirements/test_domain_integration.py::test_fresh_source_root_entry_points_are_effect_free_and_isolated[requirements]": "smoke",
+    "tests/requirements/test_domain_integration.py::test_fresh_source_root_entry_points_are_effect_free_and_isolated[env]": "smoke",
+    "tests/requirements/test_domain_integration.py::test_fresh_source_root_entry_points_are_effect_free_and_isolated[world]": "smoke",
+    "tests/requirements/test_domain_integration.py::test_fresh_source_root_entry_points_are_effect_free_and_isolated[both]": "smoke",
+    "tests/package/test_public_imports.py::test_installed_root_exports_and_version_match_metadata": "medium",
+    "tests/package/test_public_imports.py::test_installed_declaration_imports_are_passive": "medium",
+    "tests/package/test_public_imports.py::test_installed_requirement_domain_surface_has_no_defaults_or_fragment_shims": "medium",
+    "tests/package/test_public_imports.py::test_installed_root_entry_points_are_effect_free_and_domain_isolated": "medium",
+    "tests/package/test_public_imports.py::test_source_requirement_domain_surface_matches_installed_contract": "smoke",
+    "tests/package/test_release_artifacts.py::test_wheel_contains_port_modules_without_retired_core": "medium",
+    "tests/package/test_release_artifacts.py::test_sdist_contains_port_modules_without_retired_core": "medium"
   },
   "path_tiers": {
     "tests/core/test_backend_import_safety.py": "medium",

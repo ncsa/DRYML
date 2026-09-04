@@ -12,16 +12,19 @@ from ._framework_imports import install_builtin_roots, install_passive_finder
 install_builtin_roots()
 install_passive_finder()
 
-__version__ = "0.3.0.dev1"
+__version__ = "0.3.0.dev2"
 
 _SUBMODULE_EXPORTS = {
     "context": "dryml.context",
     "core": "dryml.core",
     "artifacts": "dryml.artifacts",
     "execute": "dryml.execute",
+    "env": "dryml.environments",
     "environments": "dryml.environments",
+    "requirements": "dryml.requirements",
     "worlds": "dryml.worlds",
     "runtime": "dryml.runtime",
+    "world": "dryml.worlds",
     "session": "dryml.session",
     "annotations": "dryml.annotations",
     "methods": "dryml.methods",
@@ -94,9 +97,12 @@ __all__ = [
     "core",
     "artifacts",
     "execute",
+    "env",
     "environments",
+    "requirements",
     "worlds",
     "runtime",
+    "world",
     "session",
     "annotations",
     "methods",

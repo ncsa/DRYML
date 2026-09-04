@@ -17,6 +17,12 @@ _REQUIRED_MODULES = {
     "dryml/core/query/reference.py",
     "dryml/core/store/records.py",
     "dryml/formats/__init__.py",
+    "dryml/requirements/__init__.py",
+    "dryml/requirements/barrier.py",
+    "dryml/requirements/collection.py",
+    "dryml/requirements/combination.py",
+    "dryml/requirements/errors.py",
+    "dryml/requirements/model.py",
     "dryml/environments/__init__.py",
     "dryml/worlds/__init__.py",
     "dryml/runtime/__init__.py",
@@ -75,6 +81,23 @@ _RETIRED_ANNOTATION_MODULES = {
     "dryml/annotations/namespaces.py",
 }
 
+_RETIRED_ENVIRONMENT_MODULES = {
+    "dryml/environments/fragment.py",
+    "dryml/environments/fragments.py",
+}
+
+_RETIRED_ENVIRONMENT_SYMBOLS = {
+    "ENVIRONMENT_FRAGMENT_SCHEMA_VERSION",
+    "FRAGMENT_ATTR",
+    "RequirementFragment",
+    "__dryml_environment_fragments__",
+    "add_req",
+    "compose_fragments",
+    "fragments_for_class",
+    "override_req",
+    "requirements_for_class",
+}
+
 
 def test_wheel_contains_port_modules_without_retired_core(
     release_artifacts: tuple[Path, Path],
@@ -84,6 +107,11 @@ def test_wheel_contains_port_modules_without_retired_core(
     _, wheel = release_artifacts
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
+        environment_sources = {
+            name: archive.read(name).decode("utf-8")
+            for name in names
+            if name.startswith("dryml/environments/") and name.endswith(".py")
+        }
     assert _REQUIRED_MODULES <= names
     code_modules = {
         name for name in names if name.startswith("dryml/code/") and name.endswith(".py")
@@ -98,6 +126,12 @@ def test_wheel_contains_port_modules_without_retired_core(
     }
     assert annotation_modules == _RETAINED_ANNOTATION_MODULES
     assert not _RETIRED_ANNOTATION_MODULES & names
+    assert not _RETIRED_ENVIRONMENT_MODULES & names
+    assert not {
+        symbol
+        for symbol in _RETIRED_ENVIRONMENT_SYMBOLS
+        if any(symbol in source for source in environment_sources.values())
+    }
     assert not _RETIRED_CODE_MODULES & names
     assert not any(name.startswith("dryml/core2/") for name in names)
     assert "dryml/core/repo_graph.py" not in names
@@ -110,7 +144,13 @@ def test_sdist_contains_port_modules_without_retired_core(
 
     sdist, _ = release_artifacts
     with tarfile.open(sdist, "r:gz") as archive:
-        names = {"/".join(name.split("/")[1:]) for name in archive.getnames()}
+        archive_names = archive.getnames()
+        names = {"/".join(name.split("/")[1:]) for name in archive_names}
+        environment_sources = {
+            name: archive.extractfile(name).read().decode("utf-8")
+            for name in archive_names
+            if name.startswith("dryml-0.3.0.dev2/src/dryml/environments/") and name.endswith(".py")
+        }
     required = {f"src/{name}" for name in _REQUIRED_MODULES}
     assert required <= names
     code_modules = {
@@ -128,6 +168,12 @@ def test_sdist_contains_port_modules_without_retired_core(
     }
     assert annotation_modules == _RETAINED_ANNOTATION_MODULES
     assert not {f"src/{name}" for name in _RETIRED_ANNOTATION_MODULES} & names
+    assert not {f"src/{name}" for name in _RETIRED_ENVIRONMENT_MODULES} & names
+    assert not {
+        symbol
+        for symbol in _RETIRED_ENVIRONMENT_SYMBOLS
+        if any(symbol in source for source in environment_sources.values())
+    }
     assert not {f"src/{name}" for name in _RETIRED_CODE_MODULES} & names
     assert not any(name.startswith("src/dryml/core2/") for name in names)
     assert "src/dryml/core/repo_graph.py" not in names
