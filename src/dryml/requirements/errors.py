@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from itertools import islice
 from types import MappingProxyType
 import re
 from typing import TYPE_CHECKING, Any
@@ -11,10 +12,14 @@ if TYPE_CHECKING:
     from .barrier import AdmissionReport
     from .model import RequirementReport
 
-_ASSIGNMENT = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|credential)\s*=\s*[^\s,]+")
-_ABSOLUTE_PATH = re.compile(r"(?<![\w:])(?:/[^\s,?#]+|[A-Za-z]:[\\/][^\s,?#]+|\\\\[^\s,?#]+)")
+_ASSIGNMENT = re.compile(
+    r'(?i)(?P<prefix>(?<![\w-])"?(?:password|passwd|secret|token|api[_-]?key|credential|authorization|bearer)"?\s*[:=]\s*)'
+    r'(?P<value>"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[^\s,}\]]+)'
+)
+_AUTHORIZATION = re.compile(r"(?i)(?P<prefix>(?<![\w-])authorization\s*:\s*bearer\s+)[^\r\n]*")
+_ABSOLUTE_PATH = re.compile(r"(?<![\w:/])(?:/(?!\s)[^\r\n]*|[A-Za-z]:[\\/][^\r\n]*|\\\\[^\r\n]*)")
 _URI = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*):\/\/([^\s/?#@]+@)?([^\s/?#]+)(?:\/[^\s?#]*)?(?:\?[^\s#]*)?(?:#[^\s]*)?")
-_FILE_URI = re.compile(r"(?i)\bfile:\/\/[^\s,]+")
+_FILE_URI = re.compile(r"(?i)\bfile:\/\/[^\r\n]*")
 _SECRET_KEY = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|credential)")
 _MAX_TEXT = 512
 _MAX_DEPTH = 8
@@ -23,32 +28,26 @@ _MAX_NODES = 1024
 _MAX_INT_BITS = 4096
 
 
-def _project_text(value: object, *, limit: int = _MAX_TEXT) -> str:
-    """Return one bounded text diagnostic without formatting unknown values."""
+def _sanitize_diagnostic(value: Any, *, strict: bool = False, limit: int = _MAX_TEXT) -> Any:
+    """Return immutable bounded diagnostics without formatting unsupported values.
 
-    if type(value) is not str:
-        return "<unsupported>"
-    text = _ASSIGNMENT.sub(r"\1=<redacted>", value)
-    text = _FILE_URI.sub("file://<redacted>", text)
-    text = _URI.sub(_redact_uri, text)
-    text = _ABSOLUTE_PATH.sub("<local-path>", text)
-    return text[:limit]
-
-
-def _redact_uri(match: re.Match[str]) -> str:
-    """Project a URI without credentials, paths, queries, or fragments."""
-
-    scheme, userinfo, host = match.group(1), match.group(2), match.group(3)
-    if scheme.lower() == "file":
-        return "file://<redacted>"
-    prefix = "<redacted>@" if userinfo else ""
-    return f"{scheme}://{prefix}{host}"
-
-
-def _project_value(value: Any, *, strict: bool = False) -> Any:
-    """Freeze one bounded built-in diagnostic value without user callbacks."""
+    Built-in strings, mappings, and sequences are recursively projected while
+    credentials, local paths, and control characters are removed. Unsupported
+    values use fixed placeholders and strict mode rejects oversized structures.
+    """
 
     state = [0]
+
+    def project_text(item: object, text_limit: int) -> str:
+        if type(item) is not str:
+            return "<unsupported>"
+        text = "".join("?" if ord(char) < 32 or ord(char) == 127 else char for char in item)
+        text = _AUTHORIZATION.sub(r"\g<prefix><redacted>", text)
+        text = _ASSIGNMENT.sub(r"\g<prefix><redacted>", text)
+        text = _FILE_URI.sub("file://<redacted>", text)
+        text = _URI.sub(_redact_uri, text)
+        text = _ABSOLUTE_PATH.sub("<local-path>", text)
+        return text[:text_limit]
 
     def project(item: Any, depth: int, key: str | None = None) -> Any:
         state[0] += 1
@@ -65,7 +64,7 @@ def _project_value(value: Any, *, strict: bool = False) -> Any:
                 return "<unsupported>"
             return item
         if type(item) is str:
-            return _project_text(item)
+            return project_text(item, limit)
         if type(item) in (list, tuple):
             if strict and len(item) > _MAX_ENTRIES:
                 raise ValueError("diagnostic sequence exceeds its entry bound")
@@ -74,8 +73,8 @@ def _project_value(value: Any, *, strict: bool = False) -> Any:
             if strict and len(item) > _MAX_ENTRIES:
                 raise ValueError("diagnostic mapping exceeds its entry bound")
             projected: dict[str, Any] = {}
-            for index, (name, child) in enumerate(tuple(item.items())[:_MAX_ENTRIES], start=1):
-                name_text = _project_text(name) if type(name) is str else f"<key-{index}>"
+            for index, (name, child) in enumerate(islice(item.items(), _MAX_ENTRIES), start=1):
+                name_text = project_text(name, limit) if type(name) is str else f"<key-{index}>"
                 projected[name_text] = project(child, depth + 1, name_text)
             return MappingProxyType(projected)
         return "<unsupported>"
@@ -83,13 +82,25 @@ def _project_value(value: Any, *, strict: bool = False) -> Any:
     return project(value, 0)
 
 
+def _redact_uri(match: re.Match[str]) -> str:
+    """Project a URI without credentials, paths, queries, or fragments."""
+
+    scheme, userinfo, host = match.group(1), match.group(2), match.group(3)
+    if scheme.lower() == "file":
+        return "file://<redacted>"
+    prefix = "<redacted>@" if userinfo else ""
+    return f"{scheme}://{prefix}{host}"
+
+
 class RequirementError(RuntimeError):
     """Raised when shared requirement input or protocol data is invalid.
 
     Args:
-        message: A human-readable diagnostic projected to avoid secrets and local
-            paths.
-        context: Optional built-in mapping of bounded diagnostic details.
+        message: A human-readable diagnostic recursively sanitized to remove
+            credentials, local paths, and control characters.
+        context: Optional built-in mapping of bounded immutable diagnostic
+            details, recursively sanitized with fixed unsupported-value
+            placeholders.
 
     Raises:
         RequirementError: If context exceeds the safe diagnostic structure bound.
@@ -103,10 +114,10 @@ class RequirementError(RuntimeError):
         if context is not None and type(context) not in (dict, MappingProxyType):
             raise RequirementError("invalid requirement error context")
         try:
-            projected = MappingProxyType({}) if context is None else _project_value(context, strict=True)
+            projected = MappingProxyType({}) if context is None else _sanitize_diagnostic(context, strict=True)
         except ValueError:
             raise RequirementError("invalid requirement error context") from None
-        super().__init__(_project_text(message))
+        super().__init__(_sanitize_diagnostic(message))
         self.context = projected
 
 
@@ -148,7 +159,7 @@ class RequirementBarrierError(RequirementError):
             or any(ord(char) < 32 or ord(char) == 127 for char in operation)
         ):
             raise RequirementError("invalid admission operation")
-        self.operation = None if operation is None else _project_text(operation)
+        self.operation = None if operation is None else _sanitize_diagnostic(operation)
 
 
 __all__ = ["RequirementBarrierError", "RequirementCombinationError", "RequirementError"]

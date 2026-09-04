@@ -93,7 +93,11 @@ occurrences, and 1 MiB of caller-controlled text; projected diagnostics are
 bounded to 4 MiB. Source labels are at most 256 characters, while source module,
 qualified name, issue text, paths, and operation labels are at most 512
 characters. These bounds make every accepted conflict report complete rather
-than silently truncated.
+than silently truncated. Direct `RequirementIssue` text and paths reject
+controls and values over 512 characters rather than silently accepting malformed
+combiner output. All retained diagnostic strings, including nested error
+contexts, redact recognizable credentials and local paths, replace C0 and DEL
+controls, and use fixed placeholders for unsupported values.
 
 ## Explicit Admission
 

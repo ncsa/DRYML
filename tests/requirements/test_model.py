@@ -79,6 +79,74 @@ def test_errors_project_context_without_formatting_untrusted_values():
         error.context["new"] = "value"
 
 
+def test_diagnostics_redact_nested_values_and_neutralize_controls():
+    """Every retained diagnostic surface uses the same bounded sanitizer."""
+
+    error = RequirementError(
+        'Authorization: Bearer alpha beta at /home/user/My Secret/file.txt\x1b[2J',
+        context={
+            "nested": {
+                "token": '"alpha beta"',
+                "file": "file:///home/user/My Secret/file.txt",
+                "path": "/home/user/My Secret/file.txt",
+                "control": "safe\r\n\t\x1b[2J",
+                "unknown": object(),
+            },
+        },
+    )
+
+    rendered = str(error)
+    nested = error.context["nested"]
+    assert "alpha beta" not in rendered
+    assert "/home/user/My Secret/file.txt" not in rendered
+    assert all(ord(char) >= 32 and ord(char) != 127 for char in rendered)
+    assert nested["token"] == "<redacted>"
+    assert nested["file"] == "file://<redacted>"
+    assert nested["path"] == "<local-path>"
+    assert nested["control"] == "safe????[2J"
+    assert nested["unknown"] == "<unsupported>"
+
+
+@pytest.mark.parametrize(
+    "message,path",
+    (
+        ("x" * 513, None),
+        ("message\n", None),
+        ("message", "x" * 513),
+        ("message", "path\x7f"),
+    ),
+)
+def test_requirement_issue_rejects_malformed_explicit_text(message, path):
+    """Direct issue construction cannot bypass text protocol boundaries."""
+
+    with pytest.raises(RequirementError, match="invalid requirement issue text"):
+        RequirementIssue("example.conflict", message, path=path)
+
+
+def test_invalid_issue_text_uses_a_fixed_unchained_error():
+    """Rejected caller text cannot escape through the error chain."""
+
+    with pytest.raises(RequirementError) as raised:
+        RequirementIssue("example.conflict", "token=secret\n")
+
+    assert str(raised.value) == "invalid requirement issue text"
+    assert raised.value.__cause__ is None
+
+
+def test_requirement_issue_sanitizes_sensitive_text_with_exact_bound():
+    """Issues retain the exact accepted bound while redacting sensitive text."""
+
+    issue = RequirementIssue(
+        "example.conflict",
+        'token="alpha beta" at /home/user/My Secret/file.txt',
+        path="file:///home/user/My Secret/file.txt",
+    )
+
+    assert issue.message == "token=<redacted> at <local-path>"
+    assert issue.path == "file://<redacted>"
+    assert RequirementIssue("example.conflict", "x" * 512).message == "x" * 512
+
+
 def test_report_enforces_aggregate_projected_diagnostic_capacity():
     """Repeated safe source associations still obey the report byte budget."""
 

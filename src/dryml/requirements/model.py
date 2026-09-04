@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import re
 from typing import Generic, TypeVar
 
-from .errors import RequirementError, _project_text
+from .errors import RequirementError, _sanitize_diagnostic
 
 R = TypeVar("R")
 _MAX_SOURCE_LABEL = 256
@@ -24,7 +24,7 @@ def _validate_source_text(value: str | None, *, label: str) -> str | None:
         return None
     if type(value) is not str or not value or len(value) > _MAX_FIELD_TEXT or any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise RequirementError(f"invalid requirement source {label}")
-    return _project_text(value, limit=_MAX_FIELD_TEXT)
+    return _sanitize_diagnostic(value, limit=_MAX_FIELD_TEXT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +57,7 @@ class RequirementSource:
             ord(char) < 32 or ord(char) == 127 for char in self.label
         ):
             raise RequirementError("invalid requirement source label")
-        object.__setattr__(self, "label", _project_text(self.label, limit=_MAX_SOURCE_LABEL))
+        object.__setattr__(self, "label", _sanitize_diagnostic(self.label, limit=_MAX_SOURCE_LABEL))
         object.__setattr__(self, "module", _validate_source_text(self.module, label="module"))
         object.__setattr__(self, "qualname", _validate_source_text(self.qualname, label="qualified name"))
 
@@ -100,8 +100,9 @@ class RequirementIssue:
         sources: Exact shared source values contributing to this issue.
 
     Raises:
-        RequirementError: If the code, source tuple, or source types are invalid
-            or a per-issue source bound is exceeded.
+        RequirementError: If explicit text is malformed, oversized, or
+            control-bearing; or if the code, source tuple, or source types are
+            invalid or a per-issue source bound is exceeded.
 
     Side Effects:
         None. Diagnostic text is redacted before public retention.
@@ -117,14 +118,24 @@ class RequirementIssue:
 
         if type(self.code) is not str or len(self.code) > _MAX_FIELD_TEXT or not self.code.isascii() or _ISSUE_CODE.fullmatch(self.code) is None:
             raise RequirementError("invalid requirement issue code")
-        if type(self.message) is not str or self.path is not None and type(self.path) is not str:
+        if (
+            type(self.message) is not str
+            or len(self.message) > _MAX_FIELD_TEXT
+            or any(ord(char) < 32 or ord(char) == 127 for char in self.message)
+            or self.path is not None
+            and (
+                type(self.path) is not str
+                or len(self.path) > _MAX_FIELD_TEXT
+                or any(ord(char) < 32 or ord(char) == 127 for char in self.path)
+            )
+        ):
             raise RequirementError("invalid requirement issue text")
         if type(self.sources) is not tuple or len(self.sources) > _MAX_ASSOCIATIONS or any(
             type(source) is not RequirementSource for source in self.sources
         ):
             raise RequirementError("invalid requirement issue sources")
-        object.__setattr__(self, "message", _project_text(self.message))
-        object.__setattr__(self, "path", None if self.path is None else _project_text(self.path))
+        object.__setattr__(self, "message", _sanitize_diagnostic(self.message, limit=_MAX_FIELD_TEXT))
+        object.__setattr__(self, "path", None if self.path is None else _sanitize_diagnostic(self.path, limit=_MAX_FIELD_TEXT))
 
 
 @dataclass(frozen=True, slots=True)
