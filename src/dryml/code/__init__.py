@@ -1,16 +1,70 @@
-"""Generic dependency-light code analysis and source-transformation utilities.
+"""Dependency-light generic static code-analysis primitives.
 
-This package deliberately does not expose Method declaration, trait, selection,
-or preparation policy; those public APIs belong to :mod:`dryml.methods`.
+The package exposes only U1 target, source, AST, fact, and error contracts. It
+does not execute targets, establish product policy, import DRYML product
+packages, or expose future graph, kernel, trace, transformation, or transport
+APIs.
 """
 
+from .ast_tools import AccessCollection, AttrAccess, MethodCall, collect_accesses_from_source, parse_source
 from .callable_info import CallableInfo, analyze_callable
-from .source import SourceInfo, func_source_extract, get_source_info
+from .errors import (
+    AnalysisErrorCode,
+    CodeAnalysisError,
+    InvalidKernelError,
+    InvalidTargetError,
+    KernelDependencyError,
+    KernelExecutionError,
+    MissingOutputError,
+    SourceUnavailableError,
+)
+from .facts import CodeFact, CodeFacts, Diagnostic, FactRecord, FactScalar, FactValue, SourceLocation
+from .source import SourceInfo, extract_source, get_source_info
+from .targets import (
+    CodeTarget,
+    CodeTargetInput,
+    DescriptorKind,
+    DescriptorTarget,
+    ImportTarget,
+    SourceTarget,
+    TargetInfo,
+    TargetKind,
+    normalize_target,
+)
 
 __all__ = [
+    "AccessCollection",
+    "AnalysisErrorCode",
+    "AttrAccess",
     "CallableInfo",
-    "analyze_callable",
+    "CodeAnalysisError",
+    "CodeFact",
+    "CodeFacts",
+    "CodeTarget",
+    "CodeTargetInput",
+    "DescriptorKind",
+    "DescriptorTarget",
+    "Diagnostic",
+    "FactRecord",
+    "FactScalar",
+    "FactValue",
+    "ImportTarget",
+    "InvalidKernelError",
+    "InvalidTargetError",
+    "KernelDependencyError",
+    "KernelExecutionError",
+    "MethodCall",
+    "MissingOutputError",
     "SourceInfo",
+    "SourceLocation",
+    "SourceTarget",
+    "SourceUnavailableError",
+    "TargetInfo",
+    "TargetKind",
+    "analyze_callable",
+    "collect_accesses_from_source",
+    "extract_source",
     "get_source_info",
-    "func_source_extract",
+    "normalize_target",
+    "parse_source",
 ]
