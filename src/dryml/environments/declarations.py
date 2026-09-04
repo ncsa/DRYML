@@ -22,6 +22,10 @@ _MAX_TEXT = 4096
 def _bounded_strings(values: Iterable[str], *, field: str) -> tuple[str, ...]:
     """Consume one string iterable once while enforcing its declaration bound."""
 
+    if type(values) is str:
+        if len(values) > _MAX_TEXT:
+            raise EnvironmentRequirementError("environment requirement text is invalid")
+        return (values,)
     try:
         iterator = iter(values)
     except Exception:
@@ -129,16 +133,19 @@ def req(
     normalized_requirements = _bounded_strings(requirements, field="requirements")
     for requirement in normalized_requirements:
         _validate_hard_package(requirement)
-    value = EnvironmentRequirement(
-        python=python,
-        requirements=normalized_requirements,
-        excludes=_bounded_strings(excludes, field="excludes"),
-        capabilities=_bounded_strings(capabilities, field="capabilities"),
-        tags=_bounded_strings(tags, field="tags"),
-        dryml_protocol=dryml_protocol,
-        schema_versions=_bounded_mapping(schema_versions, field="schema_versions"),
-    )
-    declaration = RequirementDeclaration(value, source=_source(source))
+    try:
+        value = EnvironmentRequirement(
+            python=python,
+            requirements=normalized_requirements,
+            excludes=_bounded_strings(excludes, field="excludes"),
+            capabilities=_bounded_strings(capabilities, field="capabilities"),
+            tags=_bounded_strings(tags, field="tags"),
+            dryml_protocol=dryml_protocol,
+            schema_versions=_bounded_mapping(schema_versions, field="schema_versions"),
+        )
+        declaration = RequirementDeclaration(value, source=_source(source))
+    except Exception:
+        raise EnvironmentRequirementError("environment requirement declaration is invalid") from None
 
     def decorate(target: T) -> T:
         """Attach this prevalidated declaration while preserving target identity."""
