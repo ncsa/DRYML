@@ -18,3 +18,13 @@ def test_invalid_count_constraints_fail(data):
 def test_count_constraint_payload_is_explicit_and_closed():
     assert CountConstraint().to_data() == {"min": None, "max": None}
     assert CountConstraint(2, 2).to_data() == {"min": 2, "max": 2}
+
+
+def test_resource_merge_keeps_nonoverlapping_resource_kinds():
+    """Diagnostic combination delegates legacy map merging without dropping keys."""
+
+    merged = ResourceRequirement.from_data({"accelerators": {"gpu": 1}}).merge(
+        ResourceRequirement.from_data({"devices": {"fpga": 1}})
+    )
+    assert merged.accelerators["gpu"] == CountConstraint(1, 1)
+    assert merged.devices["fpga"] == CountConstraint(1, 1)

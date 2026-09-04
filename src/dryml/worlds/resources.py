@@ -87,11 +87,25 @@ class CountConstraint:
         return (self.min is None or value >= self.min) and (self.max is None or value <= self.max)
 
     def merge(self, other: "CountConstraint") -> "CountConstraint":
-        """Return the intersected range or raise for an empty intersection."""
+        """Return this range's hard intersection with another constraint.
 
-        if not isinstance(other, CountConstraint):
-            raise ResourceValidationError("count constraint merge requires a CountConstraint")
-        return CountConstraint(maximum((self.min, other.min)), minimum((self.max, other.max)))
+        Args:
+            other: Another :class:`CountConstraint` to intersect.
+
+        Returns:
+            A new inclusive range satisfying both constraints.
+
+        Raises:
+            ResourceValidationError: If ``other`` has the wrong type or the
+                intersection is empty.
+
+        Side Effects:
+            None. Neither input constraint is modified.
+        """
+
+        from .combination import merge_count_constraints
+
+        return merge_count_constraints(self, other)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,9 +155,25 @@ class ResourceRequirement:
         return result
 
     def merge(self, other: "ResourceRequirement") -> "ResourceRequirement":
-        """Intersect every hard resource constraint with ``other``."""
+        """Return the hard intersection with another resource requirement.
 
-        return ResourceRequirement(self.cpus.merge(other.cpus), self.memory.merge(other.memory), _merge_maps(self.accelerators, other.accelerators), _merge_maps(self.accelerator_memory, other.accelerator_memory), _merge_maps(self.devices, other.devices), _merge_maps(self.named, other.named))
+        Args:
+            other: Resource requirement whose constraints must also hold.
+
+        Returns:
+            A new requirement retaining every compatible resource-kind bound.
+
+        Raises:
+            ResourceValidationError: If ``other`` has the wrong type or any
+                corresponding resource constraint has no intersection.
+
+        Side Effects:
+            None. Neither input requirement is modified.
+        """
+
+        from .combination import merge_resource_requirements
+
+        return merge_resource_requirements(self, other)
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,10 +290,6 @@ def _frozen_map(data: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     if not isinstance(data, Mapping) or len(data) > _MAX_MAP or any(not isinstance(key, str) or not key for key in data):
         raise ResourceValidationError(f"{name} resources must be a bounded string-keyed mapping")
     return MappingProxyType({key: data[key] for key in sorted(data)})
-
-
-def _merge_maps(left: Mapping[str, CountConstraint], right: Mapping[str, CountConstraint]) -> Mapping[str, CountConstraint]:
-    return MappingProxyType({key: (left[key].merge(right[key]) if key in left and key in right else left.get(key, right[key])) for key in sorted(set(left) | set(right))})
 
 
 def maximum(values: tuple[int | None, int | None]) -> int | None:

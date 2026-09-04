@@ -55,14 +55,27 @@ class RoleRequirement:
         return {"replicas": self.replicas.to_data(), "resources": self.resources.to_data(), "topology": json_ready(self.topology)}
 
     def merge(self, other: "RoleRequirement") -> "RoleRequirement":
-        """Intersect resources and replicas while rejecting contradictory topology."""
+        """Return the hard intersection with another role requirement.
 
-        topology = dict(self.topology)
-        for key, value in other.topology.items():
-            if key in topology and topology[key] != value:
-                raise WorldSpecValidationError("topology declarations conflict", context={"path": f"topology.{key}"})
-            topology[key] = value
-        return RoleRequirement(self.replicas.merge(other.replicas), self.resources.merge(other.resources), topology)
+        Args:
+            other: Role requirement whose replicas, resources, and topology must
+                also be satisfied.
+
+        Returns:
+            A compatible immutable role requirement.
+
+        Raises:
+            ResourceValidationError: If replica or resource constraints conflict.
+            WorldSpecValidationError: If ``other`` has the wrong type or shared
+                topology keys have different values.
+
+        Side Effects:
+            None. Neither input role requirement is modified.
+        """
+
+        from .combination import merge_role_requirements
+
+        return merge_role_requirements(self, other)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,11 +127,26 @@ class WorldRequirement:
         return make_envelope(schema="dryml.world_requirement.v1.1", kind="world_requirement", prefix="worldreq", payload=self.to_payload(), semantic_id=self.semantic_id, identifying_payload=self.to_payload(), metadata=self.metadata, max_bytes=16_777_216, **_BOUNDS)
 
     def merge(self, other: "WorldRequirement") -> "WorldRequirement":
-        """Return the hard-constraint union/intersection by role name."""
-        values = dict(self.roles)
-        for name, role in other.roles.items():
-            values[name] = values[name].merge(role) if name in values else role
-        return WorldRequirement(values)
+        """Return the hard intersection with another world requirement.
+
+        Args:
+            other: World requirement whose role constraints must also hold.
+
+        Returns:
+            A new immutable world requirement containing compatible role unions.
+
+        Raises:
+            ResourceValidationError: If corresponding resource constraints have
+                no intersection.
+            WorldSpecValidationError: If ``other`` has the wrong type or shared
+                topology keys conflict.
+
+        Side Effects:
+            None. Neither input world requirement is modified.
+        """
+        from .combination import merge_world_requirements
+
+        return merge_world_requirements(self, other)
 
 
 @dataclass(frozen=True, slots=True)

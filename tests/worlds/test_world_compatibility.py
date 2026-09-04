@@ -7,3 +7,5 @@ def test_compatibility_checks_memory_for_each_assigned_accelerator_and_topology(
     allocation = WorldAllocation.from_payload({"roles": {"worker": [{"replica": 0, "rank": 0, "local_rank": 0, "resources": {"cpus": [0], "accelerators": {"gpu": [0]}, "accelerator_memory": {"gpu": [{"device": 0, "memory": "1GiB"}]}}}]}})
     assert not check_world_spec_satisfies_requirement(world, requirement).ok
     assert not check_allocation_satisfies_requirement(allocation, requirement).ok
+    assert not check_world_spec_satisfies_requirement(world, requirement).admission_ok
+    assert not check_allocation_satisfies_requirement(allocation, requirement).admission_ok

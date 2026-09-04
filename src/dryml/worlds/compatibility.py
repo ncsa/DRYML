@@ -33,6 +33,12 @@ class WorldCompatibilityReport:
         """Return true only when every asserted constraint is satisfied."""
         return not self.issues
 
+    @property
+    def admission_ok(self) -> bool:
+        """Return the unchanged all-constraints-satisfied admission decision."""
+
+        return self.ok
+
 
 def check_world_spec_satisfies_requirement(world: WorldSpec, requirement: WorldRequirement) -> WorldCompatibilityReport:
     """Check a requested shape against all declared hard supported constraints."""

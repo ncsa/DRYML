@@ -26,3 +26,12 @@ class WorldSpecValidationError(WorldError):
 
 class WorldCompatibilityError(WorldError):
     """Raised when a caller requests an unavailable local compatibility action."""
+
+
+class WorldRequirementError(WorldError):
+    """Raised when passive hard world declarations cannot be resolved safely.
+
+    This error reports malformed decorators, attached declaration metadata, and
+    bounded diagnostic-combination failures without returning a partial result.
+    Its optional ``context`` follows :class:`WorldError`.
+    """
