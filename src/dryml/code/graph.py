@@ -603,7 +603,12 @@ def build_program_graph(target: CodeTargetInput) -> ProgramGraph:
         location = _location(node, source.filename, line_offset)
         fields: list[tuple[str, str, FactValue]] = []
         for field_name, field_value in ast.iter_fields(node):
-            if isinstance(field_value, ast.AST) or type(field_value) is list:
+            if isinstance(field_value, ast.AST):
+                continue
+            if type(field_value) is list:
+                if any(isinstance(child, ast.AST) for child in field_value):
+                    continue
+                fields.append(("field", field_name, tuple(_ast_scalar(child) for child in field_value)))
                 continue
             fields.append(("field", field_name, _ast_scalar(field_value)))
         value: FactValue = (("fields", tuple(fields)), ("type", type(node).__name__))
@@ -638,8 +643,6 @@ def build_program_graph(target: CodeTargetInput) -> ProgramGraph:
                 for child in field_value:
                     if isinstance(child, ast.AST):
                         visit(child, token)
-                    elif child is not None:
-                        raise _graph_error()
         return token
 
     visit(tree, 0)
