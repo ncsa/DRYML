@@ -6,8 +6,8 @@ import subprocess
 import sys
 
 
-def test_code_exports_only_implemented_u3_apis() -> None:
-    """The root manifest exposes U3 APIs but no removed compatibility names."""
+def test_code_exports_implemented_analysis_apis() -> None:
+    """The root manifest exposes implemented APIs but no compatibility names."""
 
     import dryml.code as code
 
@@ -15,7 +15,7 @@ def test_code_exports_only_implemented_u3_apis() -> None:
     assert "CompilerInfo" not in code.__all__
     assert "normalize_target" in code.__all__
     assert "ProgramGraph" in code.__all__
-    assert {"AnalysisKernel", "AnalysisResult", "KernelCall", "KernelOutcome", "TraversalKernel", "analyze", "probe"} <= set(code.__all__)
+    assert {"AnalysisKernel", "AnalysisResult", "KernelCall", "KernelOutcome", "TraversalKernel", "analyze", "probe", "trace"} <= set(code.__all__)
     assert "build_program_graph" not in code.__all__
     assert not hasattr(code, "func_source_extract")
     assert not hasattr(code, "CompilerInfo")
@@ -49,6 +49,7 @@ def test_fresh_code_import_loads_no_product_or_optional_packages() -> None:
         "dryml.code.probe",
         "dryml.code.source",
         "dryml.code.targets",
+        "dryml.code.trace",
         "dryml._framework_imports",
     }
     assert not any(name.startswith(("dryml.core", "dryml.environments", "dryml.worlds")) for name in loaded)

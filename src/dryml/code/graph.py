@@ -219,6 +219,9 @@ def _source_sort_key(source: SourceLocation | None) -> tuple[int, str, int, int]
 def _node_sort_key(node: "ProgramNode") -> tuple[object, ...]:
     """Order target first and all remaining nodes by source then closed content."""
 
+    if node.kind == "trace_event":
+        return (2, dict(node.value)["sequence"])
+
     return (
         0 if node.kind == "target" else 1,
         _source_sort_key(node.source),
@@ -345,18 +348,15 @@ class ProgramGraph:
             raise _graph_error()
         by_id = {node.id: node for node in canonical_nodes}
         edge_keys: set[tuple[str, str, str]] = set()
-        endpoint_kinds: dict[tuple[str, str], str] = {}
         for edge in self.edges:
             if type(edge.source) is not str or type(edge.target) is not str or edge.kind not in _EDGE_KINDS:
                 raise _graph_error()
             if edge.source not in by_id or edge.target not in by_id:
                 raise _graph_error()
             key = (edge.source, edge.target, edge.kind)
-            endpoint_key = (edge.source, edge.target)
-            if key in edge_keys or endpoint_key in endpoint_kinds:
+            if key in edge_keys:
                 raise _graph_error()
             edge_keys.add(key)
-            endpoint_kinds[endpoint_key] = edge.kind
             if not _edge_is_valid(edge, by_id):
                 raise _graph_error()
         index = {node.id: position for position, node in enumerate(canonical_nodes)}

@@ -40,12 +40,13 @@ class InvocationOutcome:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisResult:
-    """Ephemeral structured output of one graph-bound static analysis request.
+    """Ephemeral structured output of one static or trace analysis request.
 
     Args:
         target: Immutable metadata-only target provenance.
         base_graph: Immutable graph from static target normalization.
-        graph: Graph used by returned outcomes; identical to ``base_graph`` here.
+        graph: Graph used by returned outcomes; trace requests derive it from
+            ``base_graph`` after target invocation.
         outcomes: Submitted kernel outcomes in original submission order.
         facts: Exact successful fact-wrapper records in producer submission order.
         diagnostics: Graph and outcome diagnostics in deterministic order.
@@ -67,12 +68,12 @@ class AnalysisResult:
     invocation: InvocationOutcome | None = None
 
     def __post_init__(self) -> None:
-        """Validate framework-owned immutable result fields and static binding."""
+        """Validate framework-owned immutable result fields and graph binding."""
 
         if type(self.target) is not TargetInfo or type(self.base_graph) is not ProgramGraph or type(self.graph) is not ProgramGraph:
             raise ValueError("analysis result is invalid")
-        if self.base_graph is not self.graph or self.graph.target != self.target:
-            raise ValueError("static analysis result graph binding is invalid")
+        if self.base_graph.target != self.target or self.graph.target != self.target:
+            raise ValueError("analysis result graph binding is invalid")
         if type(self.outcomes) is not tuple or type(self.facts) is not tuple or type(self.diagnostics) is not tuple:
             raise ValueError("analysis result containers are invalid")
         if any(type(outcome) is not KernelOutcome for outcome in self.outcomes):

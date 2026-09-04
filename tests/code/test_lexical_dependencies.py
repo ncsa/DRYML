@@ -203,5 +203,6 @@ def test_algorithm_package_is_dependency_light_and_not_reexported_by_code() -> N
         "dryml.code.probe",
         "dryml.code.source",
         "dryml.code.targets",
+        "dryml.code.trace",
         "dryml._framework_imports",
     }
