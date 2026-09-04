@@ -8,7 +8,7 @@ import sys
 import pytest
 
 from dryml.code import AnalysisKernel, CodeFact, KernelCall, SourceTarget, analyze, probe, trace
-from dryml.code.errors import CodeAnalysisError, MissingOutputError
+from dryml.code.errors import CodeAnalysisError
 from dryml.code.targets import DescriptorTarget, ImportTarget
 
 

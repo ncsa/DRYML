@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import ast
 import importlib
-import os
 import types
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, TypeAlias
+from typing import Any, Callable, Literal, TypeAlias, get_args
 
 from .callable_info import _function_from_descriptor, _raw_call_descriptor, analyze_callable
 from .errors import InvalidTargetError, SourceUnavailableError
-from .source import SourceInfo
+from .facts import _sanitize_filename
+from .source import SourceInfo, get_source_info
 
 
 TargetKind: TypeAlias = Literal["function", "bound_method", "callable_instance", "descriptor", "class", "import", "source"]
 DescriptorKind: TypeAlias = Literal["function", "staticmethod", "classmethod"]
+
+_TARGET_KINDS = frozenset(get_args(TargetKind))
+_DESCRIPTOR_KINDS = frozenset(get_args(DescriptorKind))
 
 
 def _metadata(func: types.FunctionType) -> tuple[str | None, str | None, str | None]:
@@ -51,17 +54,7 @@ def _safe_filename(module: str | None, filename: str | None) -> str | None:
 
     if module:
         return module
-    if type(filename) is str and filename:
-        return os.path.basename(filename.replace("\\", "/")) or None
-    return None
-
-
-def _function_source(func: types.FunctionType) -> SourceInfo | None:
-    """Retrieve file-backed source lazily without dynamic source-loader hooks."""
-
-    from .source import get_source_info
-
-    return get_source_info(func)
+    return _sanitize_filename(filename)
 
 
 def _require_source(source: SourceInfo | None) -> SourceInfo:
@@ -213,12 +206,12 @@ class TargetInfo:
     def __post_init__(self) -> None:
         """Validate immutable metadata and sanitize any source path."""
 
-        if self.kind not in ("function", "bound_method", "callable_instance", "descriptor", "class", "import", "source"):
+        if self.kind not in _TARGET_KINDS:
             raise ValueError("target kind is invalid")
         for value in (self.name, self.module, self.qualname, self.owner_module, self.owner_qualname, self.filename, self.import_path):
             if value is not None and type(value) is not str:
                 raise ValueError("target metadata is invalid")
-        if self.descriptor_kind not in (None, "function", "staticmethod", "classmethod"):
+        if self.descriptor_kind is not None and self.descriptor_kind not in _DESCRIPTOR_KINDS:
             raise ValueError("descriptor kind is invalid")
         if self.start_line is not None and (type(self.start_line) is not int or self.start_line < 1):
             raise ValueError("target source line is invalid")
@@ -273,9 +266,9 @@ def _normal_function(func: types.FunctionType) -> CodeTarget:
 
     info = analyze_callable(func)
     name, module, qualname = _metadata(func)
-    source = _require_source(_function_source(func))
+    source = _require_source(get_source_info(func))
     return CodeTarget(
-        TargetInfo("function", name, module, qualname, None, None, None, _safe_filename(module, source.filename if source else None), source.start_line if source else None, None),
+        TargetInfo("function", name, module, qualname, None, None, None, _safe_filename(module, source.filename), source.start_line, None),
         func,
         info.func,
         None,
@@ -292,9 +285,9 @@ def _bound_method(method: types.MethodType) -> CodeTarget:
     name, module, qualname = _metadata(info.func)
     owner = type(info.bound_self)
     _, owner_module, owner_qualname = _class_metadata(owner)
-    source = _require_source(_function_source(info.func))
+    source = _require_source(get_source_info(info.func))
     return CodeTarget(
-        TargetInfo("bound_method", name, module, qualname, owner_module, owner_qualname, None, _safe_filename(module, source.filename if source else None), source.start_line if source else None, None),
+        TargetInfo("bound_method", name, module, qualname, owner_module, owner_qualname, None, _safe_filename(module, source.filename), source.start_line, None),
         method,
         info.func,
         owner,
@@ -311,9 +304,9 @@ def _callable_instance(instance: object) -> CodeTarget:
     owner = type(instance)
     _, owner_module, owner_qualname = _class_metadata(owner)
     name, module, qualname = _metadata(info.func)  # type: ignore[arg-type]
-    source = _require_source(_function_source(info.func))  # type: ignore[arg-type]
+    source = _require_source(get_source_info(info.func))  # type: ignore[arg-type]
     return CodeTarget(
-        TargetInfo("callable_instance", name, module, qualname, owner_module, owner_qualname, None, _safe_filename(module, source.filename if source else None), source.start_line if source else None, None),
+        TargetInfo("callable_instance", name, module, qualname, owner_module, owner_qualname, None, _safe_filename(module, source.filename), source.start_line, None),
         instance,
         info.func,
         owner,
@@ -326,12 +319,10 @@ def _callable_instance(instance: object) -> CodeTarget:
 def _class_target(cls: type) -> CodeTarget:
     """Normalize a class solely as a static source subject."""
 
-    from .source import get_source_info
-
     name, module, qualname = _class_metadata(cls)
     source = _require_source(get_source_info(cls))
     return CodeTarget(
-        TargetInfo("class", name, module, qualname, None, None, None, _safe_filename(module, source.filename if source else None), source.start_line if source else None, None),
+        TargetInfo("class", name, module, qualname, None, None, None, _safe_filename(module, source.filename), source.start_line, None),
         cls,
         None,
         None,
@@ -355,9 +346,9 @@ def _descriptor_target(target: DescriptorTarget) -> CodeTarget:
     analyze_callable(func)
     _, module, qualname = _metadata(func)
     _, owner_module, owner_qualname = _class_metadata(declaring_owner)
-    source = _require_source(_function_source(func))
+    source = _require_source(get_source_info(func))
     return CodeTarget(
-        TargetInfo("descriptor", target.name, module, qualname, owner_module, owner_qualname, kind, _safe_filename(module, source.filename if source else None), source.start_line if source else None, None),
+        TargetInfo("descriptor", target.name, module, qualname, owner_module, owner_qualname, kind, _safe_filename(module, source.filename), source.start_line, None),
         None,
         func,
         target.owner,

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from ..analysis import analyze
 from ..facts import FactValue, SourceLocation
-from ..graph import ProgramGraph, ProgramNode
+from ..graph import ProgramGraph, ProgramNode, _source_sort_key as _source_key
 from ..kernels import KernelCall, KernelContext, TraversalKernel
 from ..targets import CodeTargetInput
 
@@ -114,14 +114,6 @@ def _mapping(value: FactValue) -> dict[str, FactValue]:
     return dict(value)  # type: ignore[arg-type]
 
 
-def _source_key(source: SourceLocation | None) -> tuple[int, str, int, int]:
-    """Return a total source-order key without exposing unsanitized paths."""
-
-    if source is None:
-        return (0, "", 0, 0)
-    return (1, source.filename or "", source.line or 0, source.column or 0)
-
-
 def _node_key(node: _SyntaxNode) -> tuple[object, ...]:
     """Order private syntax projections as their public graph evidence does."""
 
@@ -145,13 +137,14 @@ def _syntax_roots(nodes: list[ProgramNode], graph: ProgramGraph) -> tuple[_Synta
     """Rebuild a private syntax forest from public containment and name evidence."""
 
     by_id = {node.id: node for node in nodes if node.kind == "syntax"}
+    graph_nodes = {node.id: node for node in graph.nodes}
     children: dict[str, list[str]] = {node_id: [] for node_id in by_id}
     names: dict[str, tuple[str, str]] = {}
     for edge in graph.edges:
         if edge.kind == "containment" and edge.source in by_id and edge.target in by_id:
             children[edge.source].append(edge.target)
         elif edge.kind == "lexical_reference" and edge.source in by_id:
-            symbol = next((node for node in graph.nodes if node.id == edge.target), None)
+            symbol = graph_nodes.get(edge.target)
             if symbol is not None and symbol.kind == "lexical_symbol":
                 payload = _mapping(symbol.value)
                 name, role = payload.get("name"), payload.get("role")
@@ -459,8 +452,8 @@ class LexicalDependencyKernel(TraversalKernel[None, _TraversalState, LexicalDepe
     """Collect deterministic free-name evidence from one immutable program graph.
 
     The kernel uses the inherited unfused traversal template and private local
-    state only, so its ``fusion_safe`` declaration remains truthful for a later
-    compatible executor. It neither resolves names nor applies import policy.
+    state only, so its ``fusion_safe`` declaration is valid for the conservative
+    fused executor. It neither resolves names nor applies import policy.
     """
 
     input_type = type(None)

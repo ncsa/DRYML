@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
-from .errors import AnalysisErrorCode
+from .errors import AnalysisErrorCode, _CODES
 
 if TYPE_CHECKING:
     from .kernels import AnalysisKernel
@@ -15,15 +15,6 @@ if TYPE_CHECKING:
 
 FactScalar: TypeAlias = None | bool | int | float | str | bytes
 FactValue: TypeAlias = FactScalar | tuple["FactValue", ...] | tuple[tuple[str, "FactValue"], ...]
-
-_ERROR_CODES = frozenset(
-    {
-        "target.invalid", "target.import_failed", "source.unavailable", "source.invalid",
-        "graph.invalid", "kernel.invalid", "kernel.dependency", "kernel.execution",
-        "kernel.output_type", "analysis.missing_output", "trace.unsupported",
-        "trace.hook_active", "trace.limit", "trace.invocation", "trace.cleanup",
-    }
-)
 
 
 def _sanitize_filename(filename: str | None) -> str | None:
@@ -201,7 +192,7 @@ class Diagnostic:
     def __post_init__(self) -> None:
         """Validate stable fields without formatting consumer values."""
 
-        if self.code not in _ERROR_CODES:
+        if self.code not in _CODES:
             raise ValueError("diagnostic code is invalid")
         if type(self.message) is not str or self.severity not in ("info", "warning", "error"):
             raise ValueError("diagnostic fields are invalid")

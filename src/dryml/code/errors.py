@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias, get_args
 
 if TYPE_CHECKING:
     from .facts import FactValue
@@ -28,14 +28,7 @@ AnalysisErrorCode: TypeAlias = Literal[
     "trace.cleanup",
 ]
 
-_CODES = frozenset(
-    {
-        "target.invalid", "target.import_failed", "source.unavailable", "source.invalid",
-        "graph.invalid", "kernel.invalid", "kernel.dependency", "kernel.execution",
-        "kernel.output_type", "analysis.missing_output", "trace.unsupported",
-        "trace.hook_active", "trace.limit", "trace.invocation", "trace.cleanup",
-    }
-)
+_CODES = frozenset(get_args(AnalysisErrorCode))
 
 
 def _is_fact_value(value: object) -> bool:

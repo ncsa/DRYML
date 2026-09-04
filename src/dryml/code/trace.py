@@ -17,17 +17,17 @@ from .analysis import (
     AnalysisResult,
     InvocationOutcome,
     _Snapshot,
+    _dependency_closure,
     _execution_order,
     _failure_outcome,
     _outcome_for_value,
-    _records_for_outcomes,
     _snapshot_calls,
     _validate_admission,
 )
 from .errors import CodeAnalysisError
 from .facts import Diagnostic, SourceLocation
-from .graph import ProgramEdge, ProgramGraph, ProgramNode, _encode, _node_id, _pack, build_program_graph
-from .kernels import AnalysisKernel, KernelCall, KernelContext, KernelOutcome
+from .graph import ProgramEdge, ProgramGraph, ProgramNode, _encode, _node_id, _pack, _source_value, build_program_graph
+from .kernels import AnalysisKernel, KernelCall, KernelContext, KernelOutcome, _records_for_outcomes
 from .targets import CodeTargetInput, normalize_target
 
 
@@ -113,12 +113,19 @@ def _code_fingerprint(code: types.CodeType) -> tuple[object, ...]:
     )
 
 
-def _code_id(frame: types.FrameType) -> tuple[str, str, int]:
+def _code_id(
+    frame: types.FrameType,
+    cache: dict[tuple[types.CodeType, str | None], tuple[str, str, int]],
+) -> tuple[str, str, int]:
     """Hash current code metadata into a domain-separated opaque code identity."""
 
     code = frame.f_code
     module = frame.f_globals.get("__name__")
     module_name = module if type(module) is str else None
+    cache_key = (code, module_name)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
     code_qualname = getattr(code, "co_qualname", None)
     qualname = code_qualname if type(code_qualname) is str else code.co_name
     filename = SourceLocation(code.co_filename, code.co_firstlineno, None).filename
@@ -130,7 +137,13 @@ def _code_id(frame: types.FrameType) -> tuple[str, str, int]:
         ("module", module_name),
         ("qualname", qualname),
     )
-    return hashlib.sha256(_pack(b"dryml.code.trace-code.v1", _encode(payload))).hexdigest(), qualname, code.co_firstlineno
+    result = (
+        hashlib.sha256(_pack(b"dryml.code.trace-code.v1", _encode(payload))).hexdigest(),
+        qualname,
+        code.co_firstlineno,
+    )
+    cache[cache_key] = result
+    return result
 
 
 def _event_value(event: _TraceEvent) -> tuple[tuple[str, object], ...]:
@@ -141,7 +154,7 @@ def _event_value(event: _TraceEvent) -> tuple[tuple[str, object], ...]:
         ("current_thread_only", True),
         ("depth", event.depth),
         ("event", event.event),
-        ("location", (("column", event.location.column), ("filename", event.location.filename), ("line", event.location.line))),
+        ("location", _source_value(event.location)),
         ("python_only", True),
         ("root", event.root),
         ("sequence", event.sequence),
@@ -153,6 +166,22 @@ def _derived_graph(base: ProgramGraph, events: tuple[_TraceEvent, ...]) -> Progr
 
     nodes = list(base.nodes)
     event_ids: list[str] = []
+    syntax_index: dict[tuple[str | None, int, str], list[ProgramNode]] = {}
+    for node in base.nodes_of_kind("syntax"):
+        if node.source is None or node.source.line is None:
+            continue
+        payload = dict(node.value)
+        if payload["type"] not in ("AsyncFunctionDef", "FunctionDef"):
+            continue
+        names = [
+            field[2]
+            for field in payload["fields"]
+            if field[1] == "name" and type(field[2]) is str
+        ]
+        if len(names) == 1:
+            syntax_index.setdefault(
+                (node.source.filename, node.source.line, names[0]), []
+            ).append(node)
     for event in events:
         value = _event_value(event)
         identifier = _node_id("trace_event", value, event.location, 0)
@@ -166,14 +195,9 @@ def _derived_graph(base: ProgramGraph, events: tuple[_TraceEvent, ...]) -> Progr
             edges.append(ProgramEdge(event_ids[event.parent_sequence], event_ids[index], "frame_descent"))
         expected_name = event.qualname.rsplit(".", 1)[-1]
         if expected_name != "<lambda>":
-            candidates = [
-                node for node in base.nodes_of_kind("syntax")
-                if node.source is not None
-                and node.source.filename == event.location.filename
-                and node.source.line == event.first_line
-                and dict(node.value)["type"] in ("AsyncFunctionDef", "FunctionDef")
-                and any(field[1] == "name" and field[2] == expected_name for field in dict(node.value)["fields"])
-            ]
+            candidates = syntax_index.get(
+                (event.location.filename, event.first_line, expected_name), []
+            )
             if len(candidates) == 1:
                 edges.append(ProgramEdge(event_ids[index], candidates[0].id, "observed_code"))
     return ProgramGraph(base.target, tuple(nodes), tuple(edges), base.diagnostics)
@@ -189,24 +213,15 @@ def _context_for_trace(
     snapshot: _Snapshot,
     snapshots: tuple[_Snapshot, ...],
     artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]],
-    base_graph: ProgramGraph,
     trace_graph: ProgramGraph,
+    base_digest: str,
+    trace_digest: str,
     declarations: dict[type[AnalysisKernel[Any, Any]], tuple[str, type[Any]]],
 ) -> KernelContext:
     """Create a trace context whose static prerequisites retain base provenance."""
 
     by_type = {item.kernel_type: item for item in snapshots}
-    closure: set[type[AnalysisKernel[Any, Any]]] = set()
-
-    def collect(kernel_type: type[AnalysisKernel[Any, Any]]) -> None:
-        for required in by_type[kernel_type].requires:
-            if required not in closure:
-                closure.add(required)
-                collect(required)
-
-    collect(snapshot.kernel_type)
-    base_digest = base_graph.digest
-    trace_digest = trace_graph.digest
+    closure = set(_dependency_closure(snapshot, snapshots))
     outcomes = tuple(
         artifacts[(item.kernel_type, _binding(item, base_digest, trace_digest))]
         for item in snapshots
@@ -222,6 +237,7 @@ def _context_for_trace(
 def _run_static(
     snapshots: tuple[_Snapshot, ...],
     base_graph: ProgramGraph,
+    base_digest: str,
     artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]],
     declarations: dict[type[AnalysisKernel[Any, Any]], tuple[str, type[Any]]],
 ) -> None:
@@ -231,16 +247,15 @@ def _run_static(
 
     static = tuple(snapshot for snapshot in snapshots if snapshot.mode == "static")
     ordered = _execution_order(static)
-    digest = base_graph.digest
     pending = list(ordered)
     while pending:
-        snapshot = next(item for item in pending if all((required, digest) in artifacts for required in item.requires))
-        unavailable = tuple(required for required in snapshot.requires if artifacts[(required, digest)].status != "succeeded")
+        snapshot = next(item for item in pending if all((required, base_digest) in artifacts for required in item.requires))
+        unavailable = tuple(required for required in snapshot.requires if artifacts[(required, base_digest)].status != "succeeded")
         if unavailable:
-            artifacts[(snapshot.kernel_type, digest)] = KernelOutcome(snapshot.kernel_type, digest, "skipped", None, skipped_for=unavailable)
+            artifacts[(snapshot.kernel_type, base_digest)] = KernelOutcome(snapshot.kernel_type, base_digest, "skipped", None, skipped_for=unavailable)
         else:
-            artifacts[(snapshot.kernel_type, digest)] = _run_unfused(
-                snapshot, base_graph, digest, static, ordered, artifacts, declarations,
+            artifacts[(snapshot.kernel_type, base_digest)] = _run_unfused(
+                snapshot, base_graph, base_digest, static, ordered, artifacts, declarations,
             )
         pending.remove(snapshot)
 
@@ -254,8 +269,9 @@ def _trace_failure(snapshot: _Snapshot, digest: str, code: str) -> KernelOutcome
 
 def _run_trace_kernels(
     snapshots: tuple[_Snapshot, ...],
-    base_graph: ProgramGraph,
     trace_graph: ProgramGraph,
+    base_digest: str,
+    trace_digest: str,
     artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]],
     declarations: dict[type[AnalysisKernel[Any, Any]], tuple[str, type[Any]]],
     failure: str | None,
@@ -263,8 +279,7 @@ def _run_trace_kernels(
     """Run trace-mode consumers or fail them closed after trace acquisition failure."""
 
     trace_snapshots = tuple(snapshot for snapshot in snapshots if snapshot.mode == "trace")
-    base_digest = base_graph.digest
-    digest = trace_graph.digest
+    digest = trace_digest
     pending = list(trace_snapshots)
     while pending:
         snapshot = next(
@@ -287,7 +302,15 @@ def _run_trace_kernels(
                 value = snapshot.kernel.run(
                     trace_graph,
                     snapshot.input,
-                    _context_for_trace(snapshot, snapshots, artifacts, base_graph, trace_graph, declarations),
+                    _context_for_trace(
+                        snapshot,
+                        snapshots,
+                        artifacts,
+                        trace_graph,
+                        base_digest,
+                        trace_digest,
+                        declarations,
+                    ),
                 )
             except Exception:
                 artifacts[(snapshot.kernel_type, digest)] = _failure_outcome(snapshot, digest)
@@ -341,9 +364,11 @@ def trace(
     call_kwargs = dict(kwargs) if kwargs is not None else {}
     declarations = {snapshot.kernel_type: (snapshot.mode, snapshot.output_type) for snapshot in snapshots}
     artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]] = {}
-    _run_static(snapshots, base_graph, artifacts, declarations)
+    base_digest = base_graph.digest
+    _run_static(snapshots, base_graph, base_digest, artifacts, declarations)
 
     events: list[_TraceEvent] = []
+    code_ids: dict[tuple[types.CodeType, str | None], tuple[str, str, int]] = {}
     active: dict[int, tuple[int, int | None]] = {}
     root_identifier: int | None = None
     overflow = False
@@ -374,7 +399,7 @@ def trace(
                 overflow = True
                 active.clear()
                 return None
-            code_id, qualname, first_line = _code_id(frame)
+            code_id, qualname, first_line = _code_id(frame, code_ids)
             location = SourceLocation(frame.f_code.co_filename, frame.f_lineno, None)
             depth, latest_sequence = current
             sequence = len(events)
@@ -411,6 +436,7 @@ def trace(
             except BaseException:
                 pass
         active.clear()
+        code_ids.clear()
     if cleanup_failed:
         interrupted = None
         raise _trace_error("trace.cleanup", "trace hook cleanup failed") from None
@@ -418,10 +444,18 @@ def trace(
         raise interrupted.with_traceback(interrupted.__traceback__)
 
     trace_graph = _derived_graph(base_graph, tuple(events))
-    trace_failure = "trace.limit" if overflow else "trace.invocation" if invocation_failed or callback_failed else None
-    _run_trace_kernels(snapshots, base_graph, trace_graph, artifacts, declarations, trace_failure)
-    base_digest = base_graph.digest
+    events.clear()
     trace_digest = trace_graph.digest
+    trace_failure = "trace.limit" if overflow else "trace.invocation" if invocation_failed or callback_failed else None
+    _run_trace_kernels(
+        snapshots,
+        trace_graph,
+        base_digest,
+        trace_digest,
+        artifacts,
+        declarations,
+        trace_failure,
+    )
     outcomes = tuple(artifacts[(snapshot.kernel_type, _binding(snapshot, base_digest, trace_digest))] for snapshot in snapshots)
     facts = _records_for_outcomes(outcomes, declarations)
     invocation = InvocationOutcome(

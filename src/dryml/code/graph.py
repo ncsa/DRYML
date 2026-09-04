@@ -10,12 +10,12 @@ import ast
 import hashlib
 import math
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, get_args
 
-from .ast_tools import parse_source
+from .ast_tools import _flatten_attr, parse_source
 from .errors import CodeAnalysisError
 from .facts import Diagnostic, FactValue, SourceLocation
-from .targets import CodeTargetInput, TargetInfo, normalize_target
+from .targets import CodeTargetInput, TargetInfo, _TARGET_KINDS, normalize_target
 
 
 ProgramNodeKind: TypeAlias = Literal[
@@ -26,8 +26,8 @@ ProgramEdgeKind: TypeAlias = Literal[
     "trace_sequence", "frame_descent", "observed_code",
 ]
 
-_NODE_KINDS = frozenset({"target", "syntax", "lexical_symbol", "attribute_access", "static_call", "trace_event"})
-_EDGE_KINDS = frozenset({"containment", "lexical_reference", "access", "call", "trace_sequence", "frame_descent", "observed_code"})
+_NODE_KINDS = frozenset(get_args(ProgramNodeKind))
+_EDGE_KINDS = frozenset(get_args(ProgramEdgeKind))
 
 
 def _graph_error() -> CodeAnalysisError:
@@ -145,7 +145,7 @@ def _validate_payload(kind: ProgramNodeKind, value: FactValue) -> None:
             "descriptor_kind", "filename", "import_path", "kind", "module", "name",
             "owner_module", "owner_qualname", "qualname", "start_line",
         ))
-        if values["kind"] not in {"function", "bound_method", "callable_instance", "descriptor", "class", "import", "source"}:
+        if values["kind"] not in _TARGET_KINDS:
             raise _graph_error()
         return
     if kind == "syntax":
@@ -316,22 +316,27 @@ class ProgramGraph:
         if any(type(diagnostic) is not Diagnostic or diagnostic.kernel is not None for diagnostic in self.diagnostics):
             raise _graph_error()
         normalized_nodes = tuple(ProgramNode(node.id, node.kind, _canonical_value(node.value), node.source) for node in self.nodes)
-        identity_groups: dict[tuple[ProgramNodeKind, bytes, bytes], list[str]] = {}
+        identity_groups: dict[
+            tuple[ProgramNodeKind, bytes, bytes],
+            tuple[ProgramNode, list[str]],
+        ] = {}
         for node in normalized_nodes:
             if type(node.id) is not str or len(node.id) != 64 or any(character not in "0123456789abcdef" for character in node.id):
                 raise _graph_error()
             if node.kind not in _NODE_KINDS or (node.source is not None and type(node.source) is not SourceLocation):
                 raise _graph_error()
             _validate_payload(node.kind, node.value)
-            identity_groups.setdefault(
-                (node.kind, _encode(node.value), _encode(_source_value(node.source))), []
-            ).append(node.id)
-        for (kind, _, _), identifiers in identity_groups.items():
-            sample = next(
-                node
-                for node in normalized_nodes
-                if node.kind == kind and node.id in identifiers
+            identity_key = (
+                node.kind,
+                _encode(node.value),
+                _encode(_source_value(node.source)),
             )
+            group = identity_groups.get(identity_key)
+            if group is None:
+                identity_groups[identity_key] = (node, [node.id])
+            else:
+                group[1].append(node.id)
+        for (kind, _, _), (sample, identifiers) in identity_groups.items():
             expected = {
                 _node_id(kind, sample.value, sample.source, occurrence)
                 for occurrence in range(len(identifiers))
@@ -536,20 +541,6 @@ def _location(node: ast.AST, filename: str | None, line_offset: int) -> SourceLo
     return SourceLocation(filename, line + line_offset, column if type(column) is int else None)
 
 
-def _flatten_attribute(node: ast.AST) -> tuple[str, tuple[str, ...]] | None:
-    """Return a static name-rooted attribute path without evaluation."""
-
-    chain: list[str] = []
-    current = node
-    while isinstance(current, ast.Attribute):
-        chain.append(current.attr)
-        current = current.value
-    if isinstance(current, ast.Name):
-        chain.reverse()
-        return current.id, tuple(chain)
-    return None
-
-
 def build_program_graph(target: CodeTargetInput) -> ProgramGraph:
     """Build immutable foundational evidence for one admitted static target.
 
@@ -624,14 +615,14 @@ def build_program_graph(target: CodeTargetInput) -> ProgramGraph:
                 symbols[symbol_key] = symbol
             draft_edges.append((token, symbol, "lexical_reference"))
         if isinstance(node, ast.Attribute):
-            flattened = _flatten_attribute(node)
+            flattened = _flatten_attr(node)
             if flattened is not None:
                 root_name, chain = flattened
                 context = "load" if isinstance(node.ctx, ast.Load) else "store" if isinstance(node.ctx, ast.Store) else "del"
                 access = add("attribute_access", (("chain", chain), ("ctx", context), ("root", root_name)), location)
                 draft_edges.append((token, access, "access"))
         if isinstance(node, ast.Call):
-            flattened = _flatten_attribute(node.func)
+            flattened = _flatten_attr(node.func)
             if flattened is not None:
                 root_name, chain = flattened
                 call = add("static_call", (("chain", chain), ("root", root_name)), _location(node.func, source.filename, line_offset))

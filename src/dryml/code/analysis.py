@@ -4,28 +4,28 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import Any, Generic, Iterable, Literal, TypeVar
+from typing import Any, Iterable, Literal
 
 from .errors import InvalidKernelError, KernelDependencyError, MissingOutputError
 from .facts import CodeFact, CodeFacts, Diagnostic, FactRecord
 from .graph import ProgramGraph, build_program_graph
 from .kernels import AnalysisKernel, KernelCall, KernelContext, KernelMode, KernelOutcome, OutputU, _has_instance_state, _inherits_traversal_template, _records_for_outcomes
-from .targets import CodeTargetInput, TargetInfo, TargetKind, normalize_target
+from .targets import CodeTargetInput, TargetInfo, TargetKind, _TARGET_KINDS, normalize_target
 
 
 @dataclass(frozen=True, slots=True)
 class InvocationOutcome:
-    """Reserved structured status for invocation-bearing analysis paths.
+    """Structured status for an invocation-bearing analysis path.
 
     Args:
-        status: Whether a future trace invocation succeeded or failed.
+        status: Whether a trace invocation succeeded or failed.
         diagnostic: Optional redacted invocation diagnostic.
 
     Raises:
         ValueError: If the framework-owned fields are invalid.
 
     Side Effects:
-        None. U3 static analysis always returns ``None`` for this field.
+        None. Static analysis uses no invocation outcome.
     """
 
     status: Literal["succeeded", "failed"]
@@ -50,7 +50,7 @@ class AnalysisResult:
         outcomes: Submitted kernel outcomes in original submission order.
         facts: Exact successful fact-wrapper records in producer submission order.
         diagnostics: Graph and outcome diagnostics in deterministic order.
-        invocation: Optional invocation status for later trace analysis.
+        invocation: Optional invocation status for trace analysis.
 
     Raises:
         ValueError: If framework-created result containers are invalid.
@@ -146,7 +146,6 @@ class AnalysisResult:
 class _Snapshot:
     """Private frozen declaration and input projection for one submitted call."""
 
-    index: int
     kernel: AnalysisKernel[Any, Any]
     kernel_type: type[AnalysisKernel[Any, Any]]
     input: Any
@@ -173,8 +172,7 @@ def _snapshot_calls(calls: Iterable[KernelCall[Any, Any]]) -> tuple[_Snapshot, .
         raise _invalid("kernel calls are invalid") from None
     snapshots: list[_Snapshot] = []
     seen: set[type[AnalysisKernel[Any, Any]]] = set()
-    valid_kinds = frozenset({"function", "bound_method", "callable_instance", "descriptor", "class", "import", "source"})
-    for index, call in enumerate(materialized):
+    for call in materialized:
         if type(call) is not KernelCall or not isinstance(call.kernel, AnalysisKernel):
             raise _invalid()
         kernel_type = type(call.kernel)
@@ -193,7 +191,7 @@ def _snapshot_calls(calls: Iterable[KernelCall[Any, Any]]) -> tuple[_Snapshot, .
         if not isinstance(input_type, type) or not isinstance(output_type, type):
             raise _invalid()
         if target_kinds is not None:
-            if type(target_kinds) is not frozenset or not target_kinds or not target_kinds <= valid_kinds:
+            if type(target_kinds) is not frozenset or not target_kinds or not target_kinds <= _TARGET_KINDS:
                 raise _invalid()
         if type(requires) is not tuple:
             raise _invalid()
@@ -207,7 +205,7 @@ def _snapshot_calls(calls: Iterable[KernelCall[Any, Any]]) -> tuple[_Snapshot, .
                 raise _invalid()
         if type(mode) is not str or mode not in ("static", "trace") or type(fusion_safe) is not bool:
             raise _invalid()
-        snapshots.append(_Snapshot(index, call.kernel, kernel_type, call.input, input_type, output_type, target_kinds, requires, mode, fusion_safe))
+        snapshots.append(_Snapshot(call.kernel, kernel_type, call.input, input_type, output_type, target_kinds, requires, mode, fusion_safe))
     by_type = {snapshot.kernel_type: snapshot for snapshot in snapshots}
     for snapshot in snapshots:
         for required in snapshot.requires:
