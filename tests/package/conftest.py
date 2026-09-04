@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import uuid
 import venv
 
@@ -27,7 +28,9 @@ def release_artifacts() -> tuple[Path, Path]:
         check=True,
         env={**os.environ, "PYTHONPATH": ""},
     )
-    sdists = tuple(output.glob("*.tar.gz"))
+    sdists = tuple(
+        path for path in output.iterdir() if path.is_file() and tarfile.is_tarfile(path)
+    )
     wheels = tuple(output.glob("*.whl"))
     assert len(sdists) == len(wheels) == 1
     return sdists[0], wheels[0]
@@ -42,7 +45,8 @@ def installed_python(release_artifacts: tuple[Path, Path]) -> Path:
     venv.EnvBuilder(with_pip=True, system_site_packages=True).create(root)
     python = root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     source = root / "source"
-    shutil.unpack_archive(sdist, source, format="gztar")
+    with tarfile.open(sdist, mode="r:*") as archive:
+        archive.extractall(source, filter="data")
     project = next(source.iterdir())
     wheel_dir = root / "wheel"
     wheel_dir.mkdir()

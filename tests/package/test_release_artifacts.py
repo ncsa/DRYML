@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tarfile
 from pathlib import Path
+from pathlib import PurePosixPath
 import zipfile
 
 _REQUIRED_MODULES = {
@@ -99,6 +100,12 @@ _RETIRED_ENVIRONMENT_SYMBOLS = {
 }
 
 
+def _sdist_member_path(name: str) -> str:
+    """Return an sdist member path relative to its generated root directory."""
+
+    return "/".join(PurePosixPath(name).parts[1:])
+
+
 def test_wheel_contains_port_modules_without_retired_core(
     release_artifacts: tuple[Path, Path],
 ) -> None:
@@ -143,14 +150,17 @@ def test_sdist_contains_port_modules_without_retired_core(
     """Check source-package paths directly in the built sdist."""
 
     sdist, _ = release_artifacts
-    with tarfile.open(sdist, "r:gz") as archive:
+    with tarfile.open(sdist, mode="r:*") as archive:
         archive_names = archive.getnames()
-        names = {"/".join(name.split("/")[1:]) for name in archive_names}
-        environment_sources = {
-            name: archive.extractfile(name).read().decode("utf-8")
-            for name in archive_names
-            if name.startswith("dryml-0.3.0.dev2/src/dryml/environments/") and name.endswith(".py")
-        }
+        names = {_sdist_member_path(name) for name in archive_names}
+        package_sources = {}
+        for member in archive.getmembers():
+            name = _sdist_member_path(member.name)
+            if not (member.isfile() and name.startswith("src/dryml/") and name.endswith(".py")):
+                continue
+            source = archive.extractfile(member)
+            assert source is not None
+            package_sources[name] = source.read().decode("utf-8")
     required = {f"src/{name}" for name in _REQUIRED_MODULES}
     assert required <= names
     code_modules = {
@@ -172,7 +182,7 @@ def test_sdist_contains_port_modules_without_retired_core(
     assert not {
         symbol
         for symbol in _RETIRED_ENVIRONMENT_SYMBOLS
-        if any(symbol in source for source in environment_sources.values())
+        if any(symbol in source for source in package_sources.values())
     }
     assert not {f"src/{name}" for name in _RETIRED_CODE_MODULES} & names
     assert not any(name.startswith("src/dryml/core2/") for name in names)
