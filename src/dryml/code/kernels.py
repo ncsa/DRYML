@@ -62,8 +62,10 @@ class AnalysisKernel(ABC, Generic[InputT, OutputT]):
 class TraversalKernel(AnalysisKernel[InputT, OutputT], Generic[InputT, StateT, OutputT]):
     """An analysis kernel using the standard canonical program-node traversal.
 
-    The U3 executor invokes this template independently for each kernel. Later
-    fusion may optimize compatible subclasses without changing callback order.
+    The executor normally invokes this template independently for each kernel.
+    A static kernel that truthfully sets :attr:`fusion_safe` may share a node
+    walk only when it has no instance state or ``run`` override and the
+    scheduler can prove the remaining conservative eligibility conditions.
     """
 
     def run(self, graph: ProgramGraph, value: InputT, context: "KernelContext") -> OutputT:
@@ -145,6 +147,46 @@ class TraversalKernel(AnalysisKernel[InputT, OutputT], Generic[InputT, StateT, O
         Side Effects:
             Consumer-defined.
         """
+
+
+def _inherits_traversal_template(kernel_type: type[AnalysisKernel[Any, Any]]) -> bool:
+    """Return whether a concrete type inherits the unmodified traversal template.
+
+    Fusion may only replay :class:`TraversalKernel`'s exact callback sequence.
+    Checking each class before the base rejects direct and intermediate ``run``
+    overrides, including a subclass that merely reassigns the template method.
+    """
+
+    if not issubclass(kernel_type, TraversalKernel):
+        return False
+    for base in kernel_type.__mro__:
+        if base is TraversalKernel:
+            return True
+        if "run" in base.__dict__:
+            return False
+    return False
+
+
+def _has_instance_state(kernel: AnalysisKernel[Any, Any]) -> bool:
+    """Return whether a traversal instance has state fusion cannot verify.
+
+    The fusion contract admits callback-local state only. An instance dictionary
+    with values, or slot declarations on the concrete hierarchy, may affect
+    callback interleaving outside that contract and therefore declines fusion.
+    """
+
+    try:
+        attributes = object.__getattribute__(kernel, "__dict__")
+    except AttributeError:
+        return True
+    if type(attributes) is not dict or attributes:
+        return True
+    for base in type(kernel).__mro__:
+        if base is TraversalKernel:
+            return False
+        if "__slots__" in base.__dict__:
+            return True
+    return True
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import Any, Generic, Iterable, Literal, TypeVar
 
 from .errors import InvalidKernelError, KernelDependencyError, MissingOutputError
-from .facts import Diagnostic, FactRecord
+from .facts import CodeFact, CodeFacts, Diagnostic, FactRecord
 from .graph import ProgramGraph, build_program_graph
-from .kernels import AnalysisKernel, KernelCall, KernelContext, KernelMode, KernelOutcome, OutputU, _records_for_outcomes
+from .kernels import AnalysisKernel, KernelCall, KernelContext, KernelMode, KernelOutcome, OutputU, _has_instance_state, _inherits_traversal_template, _records_for_outcomes
 from .targets import CodeTargetInput, TargetInfo, TargetKind, normalize_target
 
 
@@ -251,6 +251,280 @@ def _execution_order(snapshots: tuple[_Snapshot, ...]) -> tuple[_Snapshot, ...]:
     return tuple(ordered)
 
 
+def _dependency_closure(
+    snapshot: _Snapshot,
+    snapshots: tuple[_Snapshot, ...],
+) -> tuple[type[AnalysisKernel[Any, Any]], ...]:
+    """Return the transitive declared producer closure in execution order."""
+
+    by_type = {item.kernel_type: item for item in snapshots}
+    closure: set[type[AnalysisKernel[Any, Any]]] = set()
+
+    def collect(kernel_type: type[AnalysisKernel[Any, Any]]) -> None:
+        """Collect declared producers without reading consumer-owned outputs."""
+
+        for required in by_type[kernel_type].requires:
+            if required not in closure:
+                closure.add(required)
+                collect(required)
+
+    collect(snapshot.kernel_type)
+    return tuple(item.kernel_type for item in snapshots if item.kernel_type in closure)
+
+
+def _context_for(
+    snapshot: _Snapshot,
+    graph: ProgramGraph,
+    graph_digest: str,
+    snapshots: tuple[_Snapshot, ...],
+    ordered: tuple[_Snapshot, ...],
+    artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]],
+    declarations: dict[type[AnalysisKernel[Any, Any]], tuple[KernelMode, type[Any]]],
+) -> KernelContext:
+    """Create one private dependency snapshot for a scheduled kernel."""
+
+    closure = set(_dependency_closure(snapshot, snapshots))
+    dependency_outcomes = tuple(
+        artifacts[(item.kernel_type, graph_digest)]
+        for item in ordered
+        if item.kernel_type in closure
+    )
+    return KernelContext(
+        graph,
+        {required: artifacts[(required, graph_digest)] for required in snapshot.requires},
+        _records_for_outcomes(dependency_outcomes, declarations),
+    )
+
+
+def _failure_outcome(snapshot: _Snapshot, graph_digest: str) -> KernelOutcome[Any]:
+    """Return the redacted execution failure attributed to one kernel only."""
+
+    return KernelOutcome(
+        snapshot.kernel_type,
+        graph_digest,
+        "failed",
+        None,
+        (Diagnostic("kernel.execution", "kernel execution failed", kernel=snapshot.kernel_type),),
+    )
+
+
+def _outcome_for_value(snapshot: _Snapshot, graph_digest: str, value: Any) -> KernelOutcome[Any]:
+    """Validate one callback result using ordinary scheduler output semantics."""
+
+    if (value is None and snapshot.output_type is not type(None)) or not isinstance(value, snapshot.output_type):
+        return KernelOutcome(
+            snapshot.kernel_type,
+            graph_digest,
+            "failed",
+            None,
+            (Diagnostic("kernel.output_type", "kernel output has wrong type", kernel=snapshot.kernel_type),),
+        )
+    return KernelOutcome(snapshot.kernel_type, graph_digest, "succeeded", value)
+
+
+def _run_unfused(
+    snapshot: _Snapshot,
+    graph: ProgramGraph,
+    graph_digest: str,
+    snapshots: tuple[_Snapshot, ...],
+    ordered: tuple[_Snapshot, ...],
+    artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]],
+    declarations: dict[type[AnalysisKernel[Any, Any]], tuple[KernelMode, type[Any]]],
+) -> KernelOutcome[Any]:
+    """Execute one kernel through the established independent scheduler path."""
+
+    try:
+        value = snapshot.kernel.run(
+            graph,
+            snapshot.input,
+            _context_for(snapshot, graph, graph_digest, snapshots, ordered, artifacts, declarations),
+        )
+    except Exception:
+        return _failure_outcome(snapshot, graph_digest)
+    return _outcome_for_value(snapshot, graph_digest, value)
+
+
+def _has_dependency_path(
+    source: _Snapshot,
+    target: _Snapshot,
+    by_type: dict[type[AnalysisKernel[Any, Any]], _Snapshot],
+) -> bool:
+    """Return whether one declared producer path connects two candidate peers."""
+
+    pending = list(source.requires)
+    seen: set[type[AnalysisKernel[Any, Any]]] = set()
+    while pending:
+        kernel_type = pending.pop()
+        if kernel_type is target.kernel_type:
+            return True
+        if kernel_type not in seen:
+            seen.add(kernel_type)
+            pending.extend(by_type[kernel_type].requires)
+    return False
+
+
+def _has_read_only_dependencies(
+    snapshot: _Snapshot,
+    snapshots: tuple[_Snapshot, ...],
+    graph_digest: str,
+    artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]],
+) -> bool:
+    """Require successful framework-immutable artifacts throughout dependencies.
+
+    Consumer outputs are opaque and only read-only by cooperative contract. The
+    fusion path therefore accepts dependent traversals only when their complete
+    closure consists of successful immutable framework fact carriers or None.
+    """
+
+    by_type = {item.kernel_type: item for item in snapshots}
+    for kernel_type in _dependency_closure(snapshot, snapshots):
+        outcome = artifacts.get((kernel_type, graph_digest))
+        if outcome is None or outcome.status != "succeeded":
+            return False
+        if by_type[kernel_type].output_type not in (CodeFact, CodeFacts, type(None)):
+            return False
+    return True
+
+
+def _fused_batch(
+    ready: tuple[_Snapshot, ...],
+    graph: ProgramGraph,
+    graph_digest: str,
+    snapshots: tuple[_Snapshot, ...],
+    artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]],
+) -> tuple[_Snapshot, ...]:
+    """Return the first contiguous ready batch whose fusion proof is explicit."""
+
+    by_type = {item.kernel_type: item for item in snapshots}
+    batch: list[_Snapshot] = []
+    for snapshot in ready:
+        if (
+            snapshot.mode != "static"
+            or not snapshot.fusion_safe
+            or not _inherits_traversal_template(snapshot.kernel_type)
+            or _has_instance_state(snapshot.kernel)
+            or not _has_read_only_dependencies(snapshot, snapshots, graph_digest, artifacts)
+            or any(
+                _has_dependency_path(snapshot, peer, by_type)
+                or _has_dependency_path(peer, snapshot, by_type)
+                for peer in batch
+            )
+        ):
+            break
+        batch.append(snapshot)
+    return tuple(batch) if len(batch) > 1 else ()
+
+
+def _run_fused(
+    batch: tuple[_Snapshot, ...],
+    graph: ProgramGraph,
+    graph_digest: str,
+    snapshots: tuple[_Snapshot, ...],
+    ordered: tuple[_Snapshot, ...],
+    artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]],
+    declarations: dict[type[AnalysisKernel[Any, Any]], tuple[KernelMode, type[Any]]],
+) -> dict[type[AnalysisKernel[Any, Any]], KernelOutcome[Any]]:
+    """Run compatible traversal callbacks once per node with private state.
+
+    Outcomes remain buffered until every active peer has finished, so a callback
+    failure is attributed only to its own kernel and cannot affect another
+    peer's private context, state, callback sequence, or eventual artifact.
+    """
+
+    contexts = {
+        snapshot.kernel_type: _context_for(snapshot, graph, graph_digest, snapshots, ordered, artifacts, declarations)
+        for snapshot in batch
+    }
+    states: dict[type[AnalysisKernel[Any, Any]], Any] = {}
+    outcomes: dict[type[AnalysisKernel[Any, Any]], KernelOutcome[Any]] = {}
+    active: list[_Snapshot] = []
+    for snapshot in batch:
+        try:
+            states[snapshot.kernel_type] = snapshot.kernel.begin(snapshot.input, contexts[snapshot.kernel_type])  # type: ignore[attr-defined]
+        except Exception:
+            outcomes[snapshot.kernel_type] = _failure_outcome(snapshot, graph_digest)
+        else:
+            active.append(snapshot)
+    for node in graph.nodes:
+        for snapshot in tuple(active):
+            try:
+                states[snapshot.kernel_type] = snapshot.kernel.visit(  # type: ignore[attr-defined]
+                    node,
+                    states[snapshot.kernel_type],
+                    contexts[snapshot.kernel_type],
+                )
+            except Exception:
+                outcomes[snapshot.kernel_type] = _failure_outcome(snapshot, graph_digest)
+                active.remove(snapshot)
+    for snapshot in active:
+        try:
+            value = snapshot.kernel.finish(states[snapshot.kernel_type], contexts[snapshot.kernel_type])  # type: ignore[attr-defined]
+        except Exception:
+            outcomes[snapshot.kernel_type] = _failure_outcome(snapshot, graph_digest)
+        else:
+            outcomes[snapshot.kernel_type] = _outcome_for_value(snapshot, graph_digest, value)
+    return outcomes
+
+
+def _analyze(
+    target: CodeTargetInput,
+    calls: Iterable[KernelCall[Any, Any]],
+    *,
+    fuse_traversals: bool,
+) -> AnalysisResult:
+    """Run static analysis with an internal switch for differential fusion tests."""
+
+    snapshots = _snapshot_calls(calls)
+    if any(snapshot.mode == "trace" for snapshot in snapshots):
+        raise _invalid("static analysis does not accept trace kernels")
+    normalized = normalize_target(target)
+    _validate_admission(snapshots, normalized.info.kind)
+    graph = build_program_graph(normalized)
+    ordered = _execution_order(snapshots)
+    graph_digest = graph.digest
+    declarations = {
+        snapshot.kernel_type: (snapshot.mode, snapshot.output_type)
+        for snapshot in snapshots
+    }
+    artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]] = {}
+    pending = list(ordered)
+    while pending:
+        ready = tuple(
+            snapshot
+            for snapshot in pending
+            if all((required, graph_digest) in artifacts for required in snapshot.requires)
+        )
+        snapshot = ready[0]
+        unavailable = tuple(
+            required
+            for required in snapshot.requires
+            if artifacts[(required, graph_digest)].status != "succeeded"
+        )
+        if unavailable:
+            artifacts[(snapshot.kernel_type, graph_digest)] = KernelOutcome(
+                snapshot.kernel_type, graph_digest, "skipped", None, skipped_for=unavailable,
+            )
+            pending.remove(snapshot)
+            continue
+        batch = _fused_batch(ready, graph, graph_digest, snapshots, artifacts) if fuse_traversals else ()
+        if batch:
+            for kernel_type, outcome in _run_fused(
+                batch, graph, graph_digest, snapshots, ordered, artifacts, declarations,
+            ).items():
+                artifacts[(kernel_type, graph_digest)] = outcome
+            for item in batch:
+                pending.remove(item)
+            continue
+        artifacts[(snapshot.kernel_type, graph_digest)] = _run_unfused(
+            snapshot, graph, graph_digest, snapshots, ordered, artifacts, declarations,
+        )
+        pending.remove(snapshot)
+    submission_outcomes = tuple(artifacts[(snapshot.kernel_type, graph_digest)] for snapshot in snapshots)
+    facts = _records_for_outcomes(submission_outcomes, declarations)
+    diagnostics = graph.diagnostics + tuple(diagnostic for outcome in submission_outcomes for diagnostic in outcome.diagnostics)
+    return AnalysisResult(graph.target, graph, graph, submission_outcomes, facts, diagnostics)
+
+
 def analyze(target: CodeTargetInput, calls: Iterable[KernelCall[Any, Any]]) -> AnalysisResult:
     """Run static consumer kernels over one deterministic immutable graph.
 
@@ -271,80 +545,12 @@ def analyze(target: CodeTargetInput, calls: Iterable[KernelCall[Any, Any]]) -> A
 
     Side Effects:
         May read source or explicitly import an ``ImportTarget`` module. It does
-        not invoke target bodies, fuse traversals, trace, launch workers, or use
-        registries; consumer kernel side effects remain consumer-owned.
+        not invoke target bodies, trace, launch workers, or use registries.
+        Compatible static traversals may share one canonical node walk; consumer
+        kernel side effects remain consumer-owned.
     """
 
-    snapshots = _snapshot_calls(calls)
-    if any(snapshot.mode == "trace" for snapshot in snapshots):
-        raise _invalid("static analysis does not accept trace kernels")
-    normalized = normalize_target(target)
-    _validate_admission(snapshots, normalized.info.kind)
-    graph = build_program_graph(normalized)
-    ordered = _execution_order(snapshots)
-    graph_digest = graph.digest
-    declarations = {
-        snapshot.kernel_type: (snapshot.mode, snapshot.output_type)
-        for snapshot in snapshots
-    }
-    artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]] = {}
-    for snapshot in ordered:
-        unavailable = tuple(
-            required
-            for required in snapshot.requires
-            if artifacts[(required, graph_digest)].status != "succeeded"
-        )
-        if unavailable:
-            artifacts[(snapshot.kernel_type, graph_digest)] = KernelOutcome(
-                snapshot.kernel_type, graph_digest, "skipped", None, skipped_for=unavailable,
-            )
-            continue
-        closure: set[type[AnalysisKernel[Any, Any]]] = set()
-
-        def collect(kernel_type: type[AnalysisKernel[Any, Any]]) -> None:
-            """Collect transitive declared producers without inspecting outputs."""
-
-            for required in next(item for item in snapshots if item.kernel_type is kernel_type).requires:
-                if required not in closure:
-                    closure.add(required)
-                    collect(required)
-
-        collect(snapshot.kernel_type)
-        dependency_outcomes = tuple(
-            artifacts[(item.kernel_type, graph_digest)]
-            for item in ordered
-            if item.kernel_type in closure
-        )
-        context = KernelContext(
-            graph,
-            {required: artifacts[(required, graph_digest)] for required in snapshot.requires},
-            _records_for_outcomes(dependency_outcomes, declarations),
-        )
-        try:
-            value = snapshot.kernel.run(graph, snapshot.input, context)
-        except Exception:
-            artifacts[(snapshot.kernel_type, graph_digest)] = KernelOutcome(
-                snapshot.kernel_type,
-                graph_digest,
-                "failed",
-                None,
-                (Diagnostic("kernel.execution", "kernel execution failed", kernel=snapshot.kernel_type),),
-            )
-            continue
-        if (value is None and snapshot.output_type is not type(None)) or not isinstance(value, snapshot.output_type):
-            artifacts[(snapshot.kernel_type, graph_digest)] = KernelOutcome(
-                snapshot.kernel_type,
-                graph_digest,
-                "failed",
-                None,
-                (Diagnostic("kernel.output_type", "kernel output has wrong type", kernel=snapshot.kernel_type),),
-            )
-            continue
-        artifacts[(snapshot.kernel_type, graph_digest)] = KernelOutcome(snapshot.kernel_type, graph_digest, "succeeded", value)
-    submission_outcomes = tuple(artifacts[(snapshot.kernel_type, graph_digest)] for snapshot in snapshots)
-    facts = _records_for_outcomes(submission_outcomes, declarations)
-    diagnostics = graph.diagnostics + tuple(diagnostic for outcome in submission_outcomes for diagnostic in outcome.diagnostics)
-    return AnalysisResult(graph.target, graph, graph, submission_outcomes, facts, diagnostics)
+    return _analyze(target, calls, fuse_traversals=True)
 
 
 __all__ = ["AnalysisResult", "InvocationOutcome", "analyze"]
