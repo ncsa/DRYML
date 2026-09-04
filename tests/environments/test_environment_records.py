@@ -160,6 +160,18 @@ def test_deterministic_fresh_inspection_has_the_reduced_capability_id(monkeypatc
     monkeypatch.setattr(metadata, "distributions", lambda: [])
     monkeypatch.setattr(metadata, "version", lambda name: "0.3.0")
     monkeypatch.setattr(introspection, "_environment_kind", lambda: "system")
+    monkeypatch.setattr(introspection, "os", types.SimpleNamespace(name="posix", environ={}))
+    monkeypatch.setattr(
+        introspection,
+        "sys",
+        types.SimpleNamespace(
+            executable="/usr/bin/python",
+            prefix="/usr",
+            base_prefix="/usr",
+            platform="linux",
+            implementation=types.SimpleNamespace(name="cpython"),
+        ),
+    )
     monkeypatch.setattr(introspection.platform, "python_version", lambda: "3.12.0")
     monkeypatch.setattr(introspection.platform, "python_implementation", lambda: "CPython")
     monkeypatch.setattr(introspection.platform, "system", lambda: "Linux")
