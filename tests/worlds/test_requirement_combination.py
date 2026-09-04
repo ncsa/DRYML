@@ -63,6 +63,50 @@ def test_reports_all_resource_and_topology_conflicts_with_sources() -> None:
     assert all(tuple(source.label for source in issue.sources) == ("1: first", "2: second") for issue in result.report.issues)
 
 
+def test_dotted_role_and_resource_names_remain_distinct_and_attributed() -> None:
+    """Structured conflict paths distinguish dotted names at different boundaries."""
+
+    class Subject:
+        pass
+
+    declarations = (
+        ("dotted-role-first", "main.resources.named", "license", 1),
+        ("dotted-role-second", "main.resources.named", "license", 2),
+        ("dotted-resource-first", "main", "named.resources.named.license", 1),
+        ("dotted-resource-second", "main", "named.resources.named.license", 2),
+    )
+    for label, role, resource, count in declarations:
+        attach_annotation(
+            Subject,
+            Annotation(
+                worlds.WORLD_REQUIREMENT_KEY,
+                RequirementDeclaration(
+                    worlds.WorldRequirement({role: {"resources": {"named": {resource: count}}}}),
+                    source=RequirementSource(label),
+                ),
+            ),
+        )
+
+    result = worlds.requirements_for(Subject)
+    repeated = worlds.requirements_for(Subject)
+    issues = {issue.path: issue for issue in result.report.issues}
+
+    assert result == repeated
+    assert set(issues) == {
+        'roles.main.resources.named["named.resources.named.license"]',
+        'roles["main.resources.named"].resources.named.license',
+    }
+    assert tuple(source.label for source in issues['roles.main.resources.named["named.resources.named.license"]'].sources) == (
+        "3: dotted-resource-first",
+        "4: dotted-resource-second",
+    )
+    assert tuple(source.label for source in issues['roles["main.resources.named"].resources.named.license'].sources) == (
+        "1: dotted-role-first",
+        "2: dotted-role-second",
+    )
+    assert all(len(path) <= 512 for path in issues)
+
+
 def test_malformed_attached_values_and_over_budget_combinations_fail_before_result() -> None:
     """Corrupt metadata and preflight capacity failures cannot expose a partial value."""
 

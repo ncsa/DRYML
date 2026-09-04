@@ -16,6 +16,14 @@ def test_synthesis_reports_unknown_memory_and_unsupported_topology():
     assert topology.diagnostics[0].code == "unsupported_topology"
 
 
+def test_synthesis_paths_escape_dotted_role_names():
+    """Synthesis diagnostics retain dotted role-name boundaries."""
+
+    result = synthesize({"roles": {"trainer.gpu": {"topology": {"rack": "a"}}}}, inventory=LocalResourceInventory((0,)))
+
+    assert result.diagnostics[0].path == 'roles["trainer.gpu"].topology'
+
+
 def test_synthesis_aligns_memory_for_each_accelerator_kind():
     requirement = WorldRequirement.from_payload({"roles": {"main": {"resources": {
         "accelerators": {

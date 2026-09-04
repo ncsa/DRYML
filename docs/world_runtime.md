@@ -50,6 +50,13 @@ exact class without reading instance state or binding a descriptor. A
 complete `WorldRequirement` when compatible, or valueless with a bounded
 conflict report.
 
+World diagnostic paths preserve ordinary dotted spellings such as
+`roles.main.resources.cpus`. To keep legal dotted role or resource names
+unambiguous, those individual segments use deterministic JSON-style brackets,
+for example `roles["trainer.gpu"].resources.named["license.v2"]`. This syntax
+applies only to diagnostics; world declaration and resource-name contracts are
+unchanged.
+
 Omitted flattened constraints are unconstrained, so an omitted constraint such
 as a replica count is not invented by `cpus=2`. Supplying `roles=` selects the complete multi-role form and
 rejects simultaneous flattened fields rather than silently merging grammars.

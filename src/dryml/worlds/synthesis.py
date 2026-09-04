@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from ._diagnostics import path, render_path
 from .compatibility import WorldCompatibilityReport, check_world_spec_satisfies_requirement
 from .errors import WorldCompatibilityError
 from .inventory import LocalResourceInventory, local_inventory
@@ -67,16 +68,16 @@ def synthesize(requirement: WorldRequirement | Mapping[str, Any] | None, *, inve
     roles, cpus, memory, accelerators = {}, 0, 0, {}
     for name, role in req.roles.items():
         if role.topology:
-            return _failure("unsupported_topology", "non-empty topology is unsupported", f"roles.{name}.topology", requirement=req, inventory=inv)
+            return _failure("unsupported_topology", "non-empty topology is unsupported", render_path(path("roles", name, "topology")), requirement=req, inventory=inv)
         if any(value.min is not None or value.max is not None for value in role.resources.devices.values()) or any(value.min is not None or value.max is not None for value in role.resources.named.values()):
-            return _failure("unsupported_resource", "named device/resource semantics are unsupported", f"roles.{name}.resources", requirement=req, inventory=inv)
+            return _failure("unsupported_resource", "named device/resource semantics are unsupported", render_path(path("roles", name, "resources")), requirement=req, inventory=inv)
         try:
             replicas = _choose(role.replicas, 1)
             role_cpus = _choose(role.resources.cpus, 1)
             role_memory = _choose(role.resources.memory, 0) if role.resources.memory.min is not None or role.resources.memory.max is not None else None
             role_accelerators = {kind: _choose(value, 0) for kind, value in role.resources.accelerators.items()}
         except ValueError:
-            return _failure("unexecutable_constraint", "constraint cannot produce the smallest executable local process", f"roles.{name}", requirement=req, inventory=inv)
+            return _failure("unexecutable_constraint", "constraint cannot produce the smallest executable local process", render_path(path("roles", name)), requirement=req, inventory=inv)
         cpus += replicas * role_cpus
         memory += replicas * (role_memory or 0)
         for kind, count in role_accelerators.items():
@@ -91,7 +92,7 @@ def synthesize(requirement: WorldRequirement | Mapping[str, Any] | None, *, inve
         return _capacity("insufficient_memory", memory, inv.memory, req, inv)
     for kind, count in accelerators.items():
         if count > len(inv.accelerators.get(kind, ())):
-            return _capacity("insufficient_accelerators", count, len(inv.accelerators.get(kind, ())), req, inv, f"resources.accelerators.{kind}")
+            return _capacity("insufficient_accelerators", count, len(inv.accelerators.get(kind, ())), req, inv, render_path(path("resources", "accelerators", kind)))
     world = WorldSpec.from_payload({"roles": roles})
     report = check_world_spec_satisfies_requirement(world, req)
     if not report.ok:

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
+from collections import defaultdict
+import re
 from typing import Any
 
 from dryml.requirements import RequirementDeclaration, RequirementIssue, RequirementReport, RequirementResult, RequirementSource, combine_requirements
 from dryml.requirements.collection import collect_declarations
 
+from ._diagnostics import WorldPath as _Path
+from ._diagnostics import path as _path
+from ._diagnostics import render_path as _render_path
 from .declarations import WORLD_REQUIREMENT_KEY
 from .errors import ResourceValidationError, WorldRequirementError, WorldSpecValidationError
 from .resources import CountConstraint, ResourceRequirement, _is_constrained, maximum, minimum
@@ -22,24 +26,23 @@ _SENSITIVE_SEGMENT = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|
 _RESOURCE_FIELDS = ("cpus", "memory", "accelerators", "accelerator_memory", "devices", "named")
 
 
-def _paths(value: WorldRequirement) -> tuple[str, ...]:
+def _paths(value: WorldRequirement) -> tuple[_Path, ...]:
     """Return strict canonical paths that contribute hard world semantics."""
 
     if type(value) is not WorldRequirement:
         raise WorldRequirementError("world declaration value is invalid")
-    paths: list[str] = []
+    paths: list[_Path] = []
     for role_name, role in value.roles.items():
-        prefix = f"roles.{role_name}"
         if _is_constrained(role.replicas):
-            paths.append(f"{prefix}.replicas")
+            paths.append(_path("roles", role_name, "replicas"))
         for name in ("cpus", "memory"):
             if _is_constrained(getattr(role.resources, name)):
-                paths.append(f"{prefix}.resources.{name}")
+                paths.append(_path("roles", role_name, "resources", name))
         for family in _RESOURCE_FIELDS[2:]:
             for name, constraint in getattr(role.resources, family).items():
                 if _is_constrained(constraint):
-                    paths.append(f"{prefix}.resources.{family}.{name}")
-        paths.extend(f"{prefix}.topology.{name}" for name in role.topology)
+                    paths.append(_path("roles", role_name, "resources", family, name))
+        paths.extend(_path("roles", role_name, "topology", name) for name in role.topology)
     return tuple(paths)
 
 
@@ -59,13 +62,19 @@ def _text_work(value: Any) -> int:
     raise WorldRequirementError("world requirement contains unsupported normalized data")
 
 
-def _preflight(declarations: tuple[RequirementDeclaration[WorldRequirement], ...]) -> None:
-    """Bound all diagnostic work before multi-declaration semantic merging."""
+def _preflight(declarations: tuple[RequirementDeclaration[WorldRequirement], ...]) -> dict[_Path, tuple[RequirementSource, ...]]:
+    """Bound diagnostic work and index each structured path's contributors."""
 
-    paths = tuple(path for declaration in declarations for path in _paths(declaration.value))
+    paths: list[_Path] = []
+    sources_by_path: dict[_Path, list[RequirementSource]] = defaultdict(list)
+    for declaration in declarations:
+        declaration_paths = _paths(declaration.value)
+        paths.extend(declaration_paths)
+        for path in set(declaration_paths):
+            sources_by_path[path].append(declaration.source)
     if len(set(paths)) > _MAX_PATHS or len(paths) > _MAX_OCCURRENCES:
         raise WorldRequirementError("world requirement combination exceeds path capacity")
-    work = sum(len(path.encode("utf-8")) for path in paths)
+    work = sum(len(_render_path(path).encode("utf-8")) for path in paths)
     for declaration in declarations:
         work += _text_work(declaration.value.to_payload())
         work += sum(
@@ -75,6 +84,7 @@ def _preflight(declarations: tuple[RequirementDeclaration[WorldRequirement], ...
         )
     if work > _MAX_BYTES:
         raise WorldRequirementError("world requirement combination exceeds byte capacity")
+    return {path: tuple(sources) for path, sources in sources_by_path.items()}
 
 
 def _intersect(values: tuple[CountConstraint, ...]) -> CountConstraint | None:
@@ -87,39 +97,34 @@ def _intersect(values: tuple[CountConstraint, ...]) -> CountConstraint | None:
     return CountConstraint(lower, upper)
 
 
-def _sources_for(declarations: tuple[RequirementDeclaration[WorldRequirement], ...], path: str) -> tuple[RequirementSource, ...]:
-    """Return every ordinalized declaration source contributing to one path."""
-
-    return tuple(declaration.source for declaration in declarations if path in _paths(declaration.value))
-
-
-def _safe_path(path: str, ordinal: int) -> str:
+def _safe_path(path: _Path, ordinal: int) -> str:
     """Redact sensitive caller-derived path segments without merging diagnostics."""
 
-    segments = path.split(".")
-    if any(_SENSITIVE_SEGMENT.search(segment) or "/" in segment or "\\" in segment for segment in segments):
+    if any(
+        type(segment) is str and (_SENSITIVE_SEGMENT.search(segment) or "/" in segment or "\\" in segment)
+        for segment in path
+    ):
         return f"roles.<redacted-{ordinal}>"
-    return path
+    return _render_path(path)
 
 
-def _combine_values(values: tuple[WorldRequirement, ...]) -> tuple[WorldRequirement | None, tuple[str, ...]]:
+def _combine_values(values: tuple[WorldRequirement, ...]) -> tuple[WorldRequirement | None, tuple[_Path, ...]]:
     """Combine all role paths only after discovering every semantic conflict."""
 
-    conflicts: set[str] = set()
+    conflicts: set[_Path] = set()
     combined: dict[str, tuple[CountConstraint | None, dict[str, Any], dict[str, Any]]] = {}
     role_names = sorted({name for value in values for name in value.roles})
     for name in role_names:
         roles = tuple(value.roles[name] for value in values if name in value.roles)
-        prefix = f"roles.{name}"
         replicas = _intersect(tuple(role.replicas for role in roles))
         if replicas is None:
-            conflicts.add(f"{prefix}.replicas")
+            conflicts.add(_path("roles", name, "replicas"))
 
         resources: dict[str, Any] = {}
         for field in ("cpus", "memory"):
             constraint = _intersect(tuple(getattr(role.resources, field) for role in roles))
             if constraint is None:
-                conflicts.add(f"{prefix}.resources.{field}")
+                conflicts.add(_path("roles", name, "resources", field))
             resources[field] = constraint
         for family in _RESOURCE_FIELDS[2:]:
             result: dict[str, CountConstraint] = {}
@@ -132,7 +137,7 @@ def _combine_values(values: tuple[WorldRequirement, ...]) -> tuple[WorldRequirem
                 )
                 constraint = _intersect(constraints)
                 if constraint is None:
-                    conflicts.add(f"{prefix}.resources.{family}.{resource_name}")
+                    conflicts.add(_path("roles", name, "resources", family, resource_name))
                 result[resource_name] = constraint
             resources[family] = result
 
@@ -141,7 +146,7 @@ def _combine_values(values: tuple[WorldRequirement, ...]) -> tuple[WorldRequirem
         for topology_name in topology_names:
             declarations = tuple(role.topology[topology_name] for role in roles if topology_name in role.topology)
             if any(item != declarations[0] for item in declarations[1:]):
-                conflicts.add(f"{prefix}.topology.{topology_name}")
+                conflicts.add(_path("roles", name, "topology", topology_name))
             else:
                 topology[topology_name] = declarations[0]
         combined[name] = (replicas, resources, topology)
@@ -165,7 +170,7 @@ class _WorldCombiner:
             if type(declarations[0].value) is not WorldRequirement:
                 raise WorldRequirementError("world declaration value is invalid")
             return RequirementResult(declarations[0].value)
-        _preflight(declarations)
+        sources_by_path = _preflight(declarations)
         value, conflicts = _combine_values(tuple(declaration.value for declaration in declarations))
         if conflicts:
             return RequirementResult(
@@ -175,7 +180,7 @@ class _WorldCombiner:
                             "dryml.worlds.requirement_conflict",
                             "conflicting world requirement constraints",
                             path=_safe_path(path, ordinal),
-                            sources=_sources_for(declarations, path),
+                            sources=sources_by_path[path],
                         )
                         for ordinal, path in enumerate(conflicts, start=1)
                     )
