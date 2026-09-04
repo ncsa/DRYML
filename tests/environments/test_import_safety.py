@@ -35,6 +35,21 @@ assert "ray" not in sys.modules
     )
 
 
+def test_environment_requirements_do_not_import_worlds():
+    run_probe(
+        """
+import sys
+import dryml.environments as envs
+@envs.req(requirements=("dryml>=0.3",))
+class Target:
+    pass
+result = envs.requirements_for(Target)
+assert result.has_value
+assert "dryml.worlds" not in sys.modules
+        """
+    )
+
+
 def test_top_level_dryml_submodules_are_lazy_but_accessible():
     run_probe(
         """

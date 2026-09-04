@@ -126,26 +126,9 @@ class EnvironmentRequirement:
 
         if not isinstance(other, EnvironmentRequirement):
             raise EnvironmentRequirementError("environment requirement merge requires an EnvironmentRequirement")
-        details_sources = tuple(self.details.get("sources", ())) + tuple(other.details.get("sources", ())) + tuple(sources)
-        requirements = _merge_package_requirements(self.requirements, other.requirements)
-        excludes = tuple(sorted(set(self.excludes) | set(other.excludes)))
-        required_names = {normalize_distribution_name(Requirement(item).name) for item in requirements}
-        overlap = required_names & set(excludes)
-        if overlap:
-            raise EnvironmentRequirementError(
-                "required distributions cannot also be excluded",
-                context={"path": f"requirements.{sorted(overlap)[0]}"},
-            )
-        return EnvironmentRequirement(
-            python=_intersect_specifiers(self.python, other.python, path="python"),
-            requirements=requirements,
-            excludes=excludes,
-            capabilities=tuple(sorted(set(self.capabilities) | set(other.capabilities))),
-            tags=tuple(sorted(set(self.tags) | set(other.tags))),
-            dryml_protocol=_intersect_specifiers(self.dryml_protocol, other.dryml_protocol, path="dryml_protocol"),
-            schema_versions=_merge_schema_versions(self.schema_versions, other.schema_versions),
-            details={"sources": details_sources} if details_sources else {},
-        )
+        from .combination import merge_environment_requirements
+
+        return merge_environment_requirements(self, other, sources=sources)
 
     def _check_python(self, record: EnvironmentRecord) -> tuple[CompatibilityIssue, ...]:
         if not self.python:

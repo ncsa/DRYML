@@ -17,15 +17,8 @@ from .errors import (
     EnvironmentSerializationError,
     EnvironmentSpecError,
 )
-from .fragments import (
-    RequirementFragment,
-    add_req,
-    compose_fragments,
-    fragments_for_class,
-    override_req,
-    req,
-    requirements_for_class,
-)
+from .combination import requirements_for, requirements_for_method
+from .declarations import ENVIRONMENT_REQUIREMENT_KEY, req
 from .records import (
     DrymlRuntimeRecord,
     EnvironmentInternTable,
@@ -36,7 +29,7 @@ from .records import (
 )
 from .registry import EnvironmentRegistry, EnvironmentRegistryEntry
 from .requirements import EnvironmentRequirement, marker_environment_from_record
-from .schema import COMPATIBILITY_REPORT_SCHEMA_VERSION, ENVIRONMENT_FRAGMENT_SCHEMA_VERSION, ENVIRONMENT_LOCK_REF_SCHEMA_VERSION, ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION, ENVIRONMENT_RECORD_SCHEMA_VERSION, ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION, ENVIRONMENT_SPEC_SCHEMA_VERSION
+from .schema import COMPATIBILITY_REPORT_SCHEMA_VERSION, ENVIRONMENT_LOCK_REF_SCHEMA_VERSION, ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION, ENVIRONMENT_RECORD_SCHEMA_VERSION, ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION, ENVIRONMENT_SPEC_SCHEMA_VERSION
 from .specs import (
     CondaEnvironmentSpec,
     ContainerEnvironmentSpec,
@@ -72,7 +65,6 @@ def __getattr__(name: str):
 
 __all__ = [
     "COMPATIBILITY_REPORT_SCHEMA_VERSION",
-    "ENVIRONMENT_FRAGMENT_SCHEMA_VERSION",
     "ENVIRONMENT_LOCK_REF_SCHEMA_VERSION",
     "ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION",
     "ENVIRONMENT_RECORD_SCHEMA_VERSION",
@@ -102,18 +94,15 @@ __all__ = [
     "PlatformRecord",
     "PythonExecutableSpec",
     "PythonRecord",
-    "RequirementFragment",
-    "add_req",
     "coerce_policy",
     "malformed_report",
-    "compose_fragments",
-    "fragments_for_class",
+    "ENVIRONMENT_REQUIREMENT_KEY",
     "normalize_distribution_name",
     "normalize_requirement_string",
     "marker_environment_from_record",
-    "override_req",
     "req",
-    "requirements_for_class",
+    "requirements_for",
+    "requirements_for_method",
     "spec_from_data",
     "current",
     "reset_current",

@@ -123,6 +123,17 @@ class CompatibilityReport:
 
         return self.ok
 
+    @property
+    def admission_ok(self) -> bool:
+        """Whether evaluated non-bypass evidence admits a hard requirement.
+
+        This deliberately differs from :attr:`ok`: ``warn`` can permit a caller
+        to continue after a mismatch, but cannot authorize hard admission.
+        Manually constructed or bypass-policy reports likewise fail closed.
+        """
+
+        return self.status == "compatible" and self.details.get("policy") in {"compatible", "strict"}
+
     def raise_if_incompatible(self) -> None:
         """Raise when the report status is incompatible or unknown."""
 

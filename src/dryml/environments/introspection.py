@@ -17,7 +17,6 @@ from .records import (
 )
 from .schema import (
     COMPATIBILITY_REPORT_SCHEMA_VERSION,
-    ENVIRONMENT_FRAGMENT_SCHEMA_VERSION,
     ENVIRONMENT_LOCK_REF_SCHEMA_VERSION,
     ENVIRONMENT_RECORD_SCHEMA_VERSION,
     ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION,
@@ -96,7 +95,6 @@ def inspect_current() -> EnvironmentRecord:
             "environment_spec": ENVIRONMENT_SPEC_SCHEMA_VERSION,
             "environment_lock_ref": ENVIRONMENT_LOCK_REF_SCHEMA_VERSION,
             "compatibility_report": COMPATIBILITY_REPORT_SCHEMA_VERSION,
-            "environment_fragment": ENVIRONMENT_FRAGMENT_SCHEMA_VERSION,
         },
         features=("dryml.environments.v1.1",),
     )

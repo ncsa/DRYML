@@ -12,7 +12,7 @@ def test_schema_constants_are_visible():
     assert envs.ENVIRONMENT_SPEC_SCHEMA_VERSION == "1.1"
     assert envs.ENVIRONMENT_LOCK_REF_SCHEMA_VERSION == "1.1"
     assert envs.COMPATIBILITY_REPORT_SCHEMA_VERSION == 1
-    assert envs.ENVIRONMENT_FRAGMENT_SCHEMA_VERSION == "1.1"
+    assert not hasattr(envs, "ENVIRONMENT_FRAGMENT_SCHEMA_VERSION")
 
 
 def test_canonical_serialization_stable_under_dict_order():
@@ -87,5 +87,6 @@ def test_environment_docs_page_exists_and_is_linked():
     assert "EnvironmentRequirement" in text
     assert "probe_python" in text
     assert "CondaEnvironmentSpec" in text
-    assert "req" in text and "add_req" in text
+    assert "req" in text
+    assert "add_req" not in text and "override_req" not in text
     assert "environments.md" in toc

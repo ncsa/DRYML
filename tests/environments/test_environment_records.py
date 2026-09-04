@@ -119,6 +119,59 @@ def test_inspect_current_uses_importlib_metadata(monkeypatch):
     assert record.platform.system
     assert record.distributions["fake-pkg"].version == "1.2.3"
     assert record.dryml.features == ("dryml.environments.v1.1",)
+    assert "environment_fragment" not in record.dryml.schema_versions
+
+
+def test_fresh_record_capability_drop_changes_only_the_fragment_entry():
+    """Fresh introspection no longer advertises the retired fragment format."""
+
+    current = envs.DrymlRuntimeRecord(
+        version="0.3.0",
+        schema_versions={
+            "environment_record": "1.1",
+            "environment_requirement": "1.1",
+            "environment_spec": "1.1",
+            "environment_lock_ref": "1.1",
+            "compatibility_report": 1,
+        },
+        features=("dryml.environments.v1.1",),
+    )
+    legacy = envs.DrymlRuntimeRecord(
+        version=current.version,
+        schema_versions={**current.schema_versions, "environment_fragment": "1.1"},
+        features=current.features,
+    )
+    common = {
+        "python": envs.PythonRecord("3.12.0", "CPython"),
+        "platform": envs.PlatformRecord("Linux", "1", "v", "x86_64", "Linux-x86_64"),
+        "distributions": {},
+        "kind": "system",
+    }
+    fresh = envs.EnvironmentRecord(dryml=current, **common)
+    old = envs.EnvironmentRecord(dryml=legacy, **common)
+    assert fresh.dryml.schema_versions == {key: value for key, value in legacy.schema_versions.items() if key != "environment_fragment"}
+    assert fresh.id == "envrec-v1.1-743ee40a7e5c30f4578f750f67ab48af545d654800e719face81475a2c46746c"
+    assert fresh.id != old.id
+
+
+def test_deterministic_fresh_inspection_has_the_reduced_capability_id(monkeypatch):
+    """The fresh inspection path emits the pinned reduced-capability record ID."""
+
+    monkeypatch.setattr(metadata, "distributions", lambda: [])
+    monkeypatch.setattr(metadata, "version", lambda name: "0.3.0")
+    monkeypatch.setattr(introspection, "_environment_kind", lambda: "system")
+    monkeypatch.setattr(introspection.platform, "python_version", lambda: "3.12.0")
+    monkeypatch.setattr(introspection.platform, "python_implementation", lambda: "CPython")
+    monkeypatch.setattr(introspection.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(introspection.platform, "release", lambda: "1")
+    monkeypatch.setattr(introspection.platform, "version", lambda: "v")
+    monkeypatch.setattr(introspection.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(introspection.platform, "platform", lambda: "Linux-x86_64")
+
+    record = introspection.inspect_current()
+
+    assert "environment_fragment" not in record.dryml.schema_versions
+    assert record.id == "envrec-v1.1-5118a37db47900df6c688dae3f74e8f5caa97a671f0960245ce83e0b82741350"
 
 
 def test_inspect_current_does_not_import_heavy_modules(monkeypatch):

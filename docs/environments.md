@@ -35,7 +35,7 @@ if not report.ok:
     print(report.explain())
 ```
 
-Policies are `ignore`, `warn`, `compatible`, and `strict`. Reports keep structured `CompatibilityIssue` entries with stable issue codes and readable `explain()` output.
+Policies are `ignore`, `warn`, `compatible`, and `strict`. Reports keep structured `CompatibilityIssue` entries with stable issue codes and readable `explain()` output. `ok` follows the selected compatibility policy, while `admission_ok` is the fail-closed hard-admission decision: an evaluated compatible report under `compatible` or `strict` is admissible, but `warn`, `ignore`, unknown, malformed, and unavailable reports are not.
 
 PEP 508 environment markers are evaluated from the `EnvironmentRecord` being checked, not from the coordinator process. If a marker references platform metadata that the record cannot provide, the check reports an `unknown` compatibility issue instead of silently using local platform facts.
 
@@ -82,25 +82,33 @@ match = registry.find(req)
 
 Duplicate names are rejected so selection is deterministic.
 
-## Requirement Fragments
+## Passive Hard Declarations
 
-Decorators are sugar over requirement fragments. They are not the future provider system.
+`req(...)` attaches one process-local hard requirement through passive annotations. It returns the exact class, function, method definition, `staticmethod`, `classmethod`, or supported custom descriptor that it receives; it never wraps a call, probes a host, selects an environment, or activates a runtime.
 
 ```python
 @envs.req(requirements=("torch>=2.4,<2.7",), tags=("torch",))
 class TorchObject:
     pass
 
-@envs.add_req(requirements=("transformers>=4.45",), tags=("nlp",))
+@envs.req(requirements=("transformers>=4.45",), tags=("nlp",))
 class TextTorchObject(TorchObject):
     pass
 
-final = envs.requirements_for_class(TextTorchObject)
-print(final.requirements)
-print(final.explain_sources())
+result = envs.requirements_for(TextTorchObject)
+if result.has_value:
+    print(result.value.requirements)
+else:
+    print(result.report.issues)
 ```
 
-Use `override_req(...)` when a subclass intentionally replaces a field.
+`requirements_for(...)` combines declarations attached directly to a target or inherited by a class. `requirements_for_method(owner, method_name)` combines inherited class declarations with one method selected statically, including when `owner` is an instance; it does not bind a descriptor or read instance state. A `RequirementResult` is either empty when no environment declarations are present, valued with one compatible `EnvironmentRequirement`, or valueless with a complete bounded conflict report. Environment declarations ignore annotations owned by worlds and do not import the world package.
+
+Package requirements accept normalized names, version specifiers, and record-evaluable markers. Extras, direct URLs, and markers that mention `extra` are rejected because an `EnvironmentRecord` cannot prove those constraints. Each iterable or mapping field accepts at most 64 entries; combination accepts at most 64 environment declarations and preserves up to 64 ordinalized source explanations in `EnvironmentRequirement.details["sources"]`.
+
+Hard declarations are not defaults, candidate selection, automatic enforcement, runtime/session state, or dispatch behavior. Consumers explicitly call `check(...)` with environment evidence and may pass its resulting report to the shared admission barrier when they need fail-closed admission.
+
+The retired fragment, additive, and override declaration forms are not supported and have no compatibility decoder or migration path. Fresh inspected records no longer advertise the former fragment schema capability; this changes fresh record IDs while leaving the environment-record schema itself at v1.1.
 
 ## What This Does Not Change
 

@@ -1,6 +1,7 @@
 import pytest
 
 import dryml.environments as envs
+from dryml.requirements import RequirementBarrierError, require_admission
 
 
 def record(packages=None, *, python="3.11.8", features=("dryml.environments.v1.1",), tags=("dev",)):
@@ -52,6 +53,7 @@ def test_requirement_check_compatible():
     report = req.check(record())
     assert report.status == "compatible"
     assert report.ok
+    assert report.admission_ok
 
 
 def test_requirement_check_missing_package_and_warn_policy():
@@ -62,6 +64,8 @@ def test_requirement_check_missing_package_and_warn_policy():
     warn = req.check(record(), policy="warn")
     assert warn.status == "warning"
     assert warn.issues[0].severity == "warning"
+    assert warn.ok
+    assert not warn.admission_ok
 
 
 def test_requirement_check_version_mismatch_and_unknown_version():
@@ -220,6 +224,22 @@ def test_policy_ignore_skips_checks():
     report = envs.EnvironmentRequirement(requirements=("missing-package",)).check(record(), policy="ignore")
     assert report.status == "compatible"
     assert report.issues == ()
+    assert not report.admission_ok
+
+
+def test_admission_uses_fail_closed_environment_evidence() -> None:
+    """Warn, ignore, and policy-less reports cannot bypass hard admission."""
+
+    compatible = envs.EnvironmentRequirement().check(record())
+    assert require_admission(compatible) is None
+    for report in (
+        envs.EnvironmentRequirement(requirements=("missing",)).check(record(), policy="warn"),
+        envs.EnvironmentRequirement(requirements=("missing",)).check(record(), policy="ignore"),
+        envs.CompatibilityReport("compatible"),
+    ):
+        with pytest.raises(RequirementBarrierError) as excinfo:
+            require_admission(report, operation="environment-check")
+        assert excinfo.value.report is report
 
 
 def test_requirement_merge_intersects_constraints_and_preserves_sources():

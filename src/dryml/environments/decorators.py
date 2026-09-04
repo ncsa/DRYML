@@ -1,5 +1,5 @@
-"""Decorator aliases for environment requirement fragments."""
+"""Passive decorators for hard environment requirement declarations."""
 
-from .fragments import add_req, override_req, req
+from .declarations import req
 
-__all__ = ["req", "add_req", "override_req"]
+__all__ = ["req"]
