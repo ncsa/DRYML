@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
 import re
 
 from packaging.requirements import Requirement
@@ -147,13 +146,19 @@ def _conflicts(values: tuple[EnvironmentRequirement, ...]) -> tuple[str, ...]:
         }
         if any(_specifier_has_obvious_conflict(specifier) for specifier in combined.values()):
             conflicts.add(f"requirements.{name}")
+            continue
         marker_items = tuple(sorted(combined.items(), key=lambda item: "" if item[0] is None else item[0]))
+        conflict = False
         for index, (marker, specifier) in enumerate(marker_items):
             for other_marker, other_specifier in marker_items[index + 1:]:
                 if _markers_proven_disjoint(marker, other_marker):
                     continue
                 if _specifier_has_obvious_conflict(SpecifierSet(",".join(filter(None, (str(specifier), str(other_specifier)))))):
                     conflicts.add(f"requirements.{name}")
+                    conflict = True
+                    break
+            if conflict:
+                break
     return tuple(sorted(conflicts))
 
 
@@ -163,19 +168,18 @@ def _combined_value(values: tuple[EnvironmentRequirement, ...], *, details: dict
     python = None
     protocol = None
     schema: dict[str, str] = {}
-    requirements: tuple[str, ...] = ()
+    requirements = _merge_package_requirements((), tuple(item for value in values for item in value.requirements))
     for value in values:
         python = _intersect_specifiers(python, value.python, path="python")
         protocol = _intersect_specifiers(protocol, value.dryml_protocol, path="dryml_protocol")
-        requirements = _merge_package_requirements(requirements, value.requirements)
         for name, specifier in value.schema_versions.items():
             schema[name] = _intersect_specifiers(schema.get(name), specifier, path=f"schema_versions.{name}") or ""
     return EnvironmentRequirement(
         python=python,
         requirements=requirements,
-        excludes=tuple(sorted({item for value in values for item in value.excludes})),
-        capabilities=tuple(sorted({item for value in values for item in value.capabilities})),
-        tags=tuple(sorted({item for value in values for item in value.tags})),
+        excludes=tuple(item for value in values for item in value.excludes),
+        capabilities=tuple(item for value in values for item in value.capabilities),
+        tags=tuple(item for value in values for item in value.tags),
         dryml_protocol=protocol,
         schema_versions=schema,
         details={} if details is None else details,

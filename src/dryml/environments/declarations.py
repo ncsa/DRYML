@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Any, Callable, TypeVar
+from typing import Callable, TypeVar
 
 from packaging.requirements import Requirement
 

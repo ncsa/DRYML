@@ -11,7 +11,7 @@ from dryml.requirements.collection import collect_declarations
 
 from .declarations import WORLD_REQUIREMENT_KEY
 from .errors import ResourceValidationError, WorldRequirementError, WorldSpecValidationError
-from .resources import CountConstraint, ResourceRequirement, maximum, minimum
+from .resources import CountConstraint, ResourceRequirement, _is_constrained, maximum, minimum
 from .specs import RoleRequirement, WorldRequirement
 
 _MAX_PATHS = 1024
@@ -22,12 +22,6 @@ _SENSITIVE_SEGMENT = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|
 _RESOURCE_FIELDS = ("cpus", "memory", "accelerators", "accelerator_memory", "devices", "named")
 
 
-def _constrained(value: CountConstraint) -> bool:
-    """Return whether an otherwise valid range imposes a hard bound."""
-
-    return value.min is not None or value.max is not None
-
-
 def _paths(value: WorldRequirement) -> tuple[str, ...]:
     """Return strict canonical paths that contribute hard world semantics."""
 
@@ -36,14 +30,14 @@ def _paths(value: WorldRequirement) -> tuple[str, ...]:
     paths: list[str] = []
     for role_name, role in value.roles.items():
         prefix = f"roles.{role_name}"
-        if _constrained(role.replicas):
+        if _is_constrained(role.replicas):
             paths.append(f"{prefix}.replicas")
         for name in ("cpus", "memory"):
-            if _constrained(getattr(role.resources, name)):
+            if _is_constrained(getattr(role.resources, name)):
                 paths.append(f"{prefix}.resources.{name}")
         for family in _RESOURCE_FIELDS[2:]:
             for name, constraint in getattr(role.resources, family).items():
-                if _constrained(constraint):
+                if _is_constrained(constraint):
                     paths.append(f"{prefix}.resources.{family}.{name}")
         paths.extend(f"{prefix}.topology.{name}" for name in role.topology)
     return tuple(paths)
@@ -112,7 +106,7 @@ def _combine_values(values: tuple[WorldRequirement, ...]) -> tuple[WorldRequirem
     """Combine all role paths only after discovering every semantic conflict."""
 
     conflicts: set[str] = set()
-    combined: dict[str, RoleRequirement] = {}
+    combined: dict[str, tuple[CountConstraint | None, dict[str, Any], dict[str, Any]]] = {}
     role_names = sorted({name for value in values for name in value.roles})
     for name in role_names:
         roles = tuple(value.roles[name] for value in values if name in value.roles)
@@ -120,14 +114,12 @@ def _combine_values(values: tuple[WorldRequirement, ...]) -> tuple[WorldRequirem
         replicas = _intersect(tuple(role.replicas for role in roles))
         if replicas is None:
             conflicts.add(f"{prefix}.replicas")
-            replicas = CountConstraint()
 
         resources: dict[str, Any] = {}
         for field in ("cpus", "memory"):
             constraint = _intersect(tuple(getattr(role.resources, field) for role in roles))
             if constraint is None:
                 conflicts.add(f"{prefix}.resources.{field}")
-                constraint = CountConstraint()
             resources[field] = constraint
         for family in _RESOURCE_FIELDS[2:]:
             result: dict[str, CountConstraint] = {}
@@ -141,7 +133,6 @@ def _combine_values(values: tuple[WorldRequirement, ...]) -> tuple[WorldRequirem
                 constraint = _intersect(constraints)
                 if constraint is None:
                     conflicts.add(f"{prefix}.resources.{family}.{resource_name}")
-                    constraint = CountConstraint()
                 result[resource_name] = constraint
             resources[family] = result
 
@@ -153,10 +144,15 @@ def _combine_values(values: tuple[WorldRequirement, ...]) -> tuple[WorldRequirem
                 conflicts.add(f"{prefix}.topology.{topology_name}")
             else:
                 topology[topology_name] = declarations[0]
-        combined[name] = RoleRequirement(replicas, ResourceRequirement(**resources), topology)
+        combined[name] = (replicas, resources, topology)
     if conflicts:
         return None, tuple(sorted(conflicts))
-    return WorldRequirement(combined), ()
+    return WorldRequirement(
+        {
+            name: RoleRequirement(replicas, ResourceRequirement(**resources), topology)
+            for name, (replicas, resources, topology) in combined.items()
+        }
+    ), ()
 
 
 class _WorldCombiner:
@@ -259,14 +255,10 @@ def merge_resource_requirements(left: ResourceRequirement, right: ResourceRequir
     for family in _RESOURCE_FIELDS[2:]:
         left_map = getattr(left, family)
         right_map = getattr(right, family)
-        fields[family] = {
-            name: merge_count_constraints(left_map[name], right_map[name])
-            if name in left_map and name in right_map
-            else left_map[name]
-            if name in left_map
-            else right_map[name]
-            for name in sorted(set(left_map) | set(right_map))
-        }
+        values = dict(left_map)
+        for name, value in right_map.items():
+            values[name] = merge_count_constraints(values[name], value) if name in values else value
+        fields[family] = values
     return ResourceRequirement(**fields)
 
 

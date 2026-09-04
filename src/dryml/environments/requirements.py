@@ -534,13 +534,6 @@ def _marker_atoms_have_conflict(atoms: list[tuple[Any, Any, Any]]) -> bool:
     return False
 
 
-def _merge_schema_versions(left: Mapping[str, str], right: Mapping[str, str]) -> dict[str, str]:
-    result = dict(left)
-    for name, specifier in right.items():
-        result[name] = _intersect_specifiers(result.get(name), specifier, path=f"schema_versions.{name}") or ""
-    return result
-
-
 def _specifier_has_obvious_conflict(specifier: SpecifierSet) -> bool:
     arbitrary_exact_versions = {item.version for item in specifier if item.operator == "==="}
     if len(arbitrary_exact_versions) > 1:

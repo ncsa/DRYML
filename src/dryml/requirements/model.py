@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 
 from .errors import RequirementError, _project_text
 

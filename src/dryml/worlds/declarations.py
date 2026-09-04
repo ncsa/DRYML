@@ -9,7 +9,7 @@ from dryml.requirements import RequirementDeclaration, RequirementSource
 from dryml.requirements.collection import attach_declaration
 
 from .errors import WorldRequirementError
-from .resources import CountConstraint, ResourceRequirement
+from .resources import CountConstraint, ResourceRequirement, _coerce_constraint
 from .specs import RoleRequirement, WorldRequirement
 
 T = TypeVar("T")
@@ -27,12 +27,6 @@ def _source(value: RequirementSource | str | None) -> RequirementSource:
     if type(value) is str:
         return RequirementSource(value)
     raise WorldRequirementError("world requirement source is invalid")
-
-
-def _constraint(value: Any) -> CountConstraint:
-    """Normalize one flattened count constraint through resource values."""
-
-    return ResourceRequirement.from_data({"cpus": value}).cpus
 
 
 def _validate_text(value: Any) -> None:
@@ -121,7 +115,7 @@ def req(
             value = WorldRequirement(
                 {
                     role: RoleRequirement(
-                        replicas=_constraint(replicas),
+                        replicas=_coerce_constraint(replicas),
                         resources=resources,
                         topology={} if topology is None else topology,
                     )
