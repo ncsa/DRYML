@@ -1,5 +1,39 @@
 # Release Notes
 
+## 0.3.0.dev2 (unreleased)
+
+Stage 4 adds `dryml.requirements`, the dependency-light shared contract for
+explicit hard requirements. Its public API is `RequirementSource`,
+`RequirementDeclaration`, `RequirementIssue`, `RequirementReport`,
+`RequirementResult`, `RequirementError`, `RequirementCombinationError`,
+`RequirementBarrierError`, `RequirementCombiner`, `combine_requirements`,
+`AdmissionReport`, and `require_admission`. Combination has only empty success,
+valued success, and conflict failure outcomes; malformed input and invalid
+protocols fail before partial authority is exposed. Explicit admission uses the
+policy-independent `admission_ok`, not a domain report's policy-dependent `ok`,
+and does not run work or mutate session/runtime state.
+
+`dryml.environments.req(...)` and `dryml.worlds.req(...)` add passive hard
+declaration APIs for supported live targets, with `requirements_for(...)` and
+`requirements_for_method(...)` for independent domain resolution. The lazy root
+aliases `dryml.env` and `dryml.world` are the exact plural owner modules. World
+declaration omission is unconstrained, and `roles=` remains an exclusive
+complete-role grammar. Requirements are not defaults, candidate selection,
+runtime/session state, dispatch, inference, or automatic enforcement.
+`EnvironmentRequirement.check(...)` now exposes `CompatibilityReport.admission_ok`
+alongside its policy-dependent `ok`; `check_world_spec_satisfies_requirement(...)`
+and `check_allocation_satisfies_requirement(...)` return the independently owned
+`WorldCompatibilityReport.admission_ok` decision.
+
+This is a clean environment-fragment drop. `RequirementFragment`,
+`ENVIRONMENT_FRAGMENT_SCHEMA_VERSION`, `add_req`, `override_req`,
+`fragments_for_class`, `compose_fragments`, `requirements_for_class`, and the
+`dryml.environments.fragments` module are removed. There is no compatibility
+alias, decoder, migration, or legacy-record path. Fresh environment records omit
+only `payload.dryml.schema_versions["environment_fragment"]`; the reduced
+payload changes their semantic IDs and record IDs, while persistent environment
+and world value schemas otherwise remain unchanged.
+
 ## 0.3.0.dev1 (unreleased)
 
 Stage 3 adds dependency-light generic code analysis through `dryml.code`. The published

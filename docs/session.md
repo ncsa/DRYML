@@ -49,6 +49,12 @@ The passive `dryml.annotations` kernel has no session integration. It attaches
 consumer-owned process-local metadata only; it does not resolve requirements,
 mutate the session, launch work, or activate frameworks.
 
+Hard declarations from `dryml.environments.req(...)` and `dryml.worlds.req(...)`
+remain process-local passive metadata. They are not session or worker defaults,
+do not select a runtime or allocation, and receive no automatic enforcement from
+this facade. Consumers resolve, check, and explicitly admit them outside session
+mutation; see [Hard Requirements](requirements.md).
+
 ## Persistent And Scoped Configuration
 
 `dryml.session.configure(...)` atomically replaces persistent process-session

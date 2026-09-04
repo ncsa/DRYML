@@ -123,6 +123,8 @@ When adding tests:
 4. Keep framework imports, training, dataset-backed tests, and multi-framework tests in `heavy`.
 5. Run `./tests.sh smoke` first, then `./tests.sh medium`, then relevant `heavy` tests.
 6. Run `./tests.sh profile --unknown-only` to populate node-tier timings for new tests.
+7. Keep only classifications for the tests added or changed by the current work;
+   remove profiler spillover for unrelated existing nodes before review.
 
 ## CDef V2 Gates
 

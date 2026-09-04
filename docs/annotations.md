@@ -3,7 +3,8 @@
 `dryml.annotations` is a passive, process-local metadata kernel. It attaches
 consumer-owned declarations to live Python targets and collects them in a
 deterministic order. It does not resolve requirements, select Methods, enforce
-runtime policy, wrap calls, launch work, or activate a framework.
+runtime policy, mutate session state, wrap calls, launch work, or activate a
+framework.
 
 ## Carrier And Keys
 
@@ -41,8 +42,11 @@ assert collect_annotations(train, key="example.policy")[0].value == "fast"
 ```
 
 The example decorator is consumer-owned. `dryml.annotations` supplies no
-domain-specific decorators, including Method, requirement, environment, world,
-or runtime decorators. Adoption by those owners remains separate work.
+domain-specific decorators, including Method or runtime decorators. Hard
+environment and world declarations are separately owned by
+`dryml.environments.req(...)` and `dryml.worlds.req(...)`; they use this passive
+kernel without giving it requirement policy, compatibility, defaults, selection,
+or admission authority.
 
 ## Attachment Lifecycle
 
@@ -127,11 +131,12 @@ diagnostics, or interpret values. After collection, the consumer owns semantic
 combination and may produce a separate consumer-owned derived value with its
 own persistence policy.
 
-This clean break removes the old fragment, requirement/default, merge,
+This clean break removes the old fragment, annotation-owned requirement/default, merge,
 resolution, source-diagnostic, envelope/ID, namespace, and Definition helper
 APIs from `dryml.annotations`, including `AnnotationFragment`, `FRAGMENT_ATTR`,
 `attach_fragment`, `collect_fragments`, `own_fragments`, `require`, `default`,
 `resolve_fragments`, and `fragments_for_definition_method`. The retired
 `dryml.annotations.decorators`, `env`, `world`, `runtime`, `merge`,
-`namespaces`, and `storage` modules are not importable. Root `dryml.env` and
-`dryml.world`, plus `dryml.runtime.default`, are also removed.
+`namespaces`, and `storage` modules are not importable. `dryml.runtime.default`
+remains absent. Root `dryml.env` and `dryml.world` are lazy aliases for their
+plural domain owners, not annotation-owned modules or target-level defaults.

@@ -8,6 +8,11 @@ available, but it is distinct from the new process-global `dryml.session`,
 replace persistent session generations or the orchestrator materialization
 floor. See [Sessions](session.md) and [World And Runtime](world_runtime.md).
 
+Stage 4 hard environment and world declarations are passive, process-local
+annotation metadata, not legacy context requirements, context defaults, worker
+state, or runtime/session authority. They neither enter a context scope nor
+automatically enforce a context check. See [Hard Requirements](requirements.md).
+
 DRYML contexts describe runtime execution constraints. They help existing code declare and check requirements such as backend compatibility, CPU/GPU resources, and memory.
 
 ## Core Functions

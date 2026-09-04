@@ -11,21 +11,22 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 3. [Immutable Definition Graph](immutable_definition_graph.md)
 4. [Graph Querying](graph_querying.md)
 5. [Annotations](annotations.md)
-6. [Code Analysis](code_analysis.md)
-7. [Formats](formats.md)
-8. [Environments](environments.md)
-9. [World And Runtime](world_runtime.md)
-10. [Sessions](session.md)
-11. [Repos and Stores](repos.md)
-12. [Tensor Specs](tensor_specs.md)
-13. [Methods](methods.md)
-14. [Contexts](context.md)
-15. [Data API](data.md)
-16. [Models API](models.md)
-17. [Artifacts API](artifacts.md)
-18. [Query Index Backend Contracts](query_index_backend_contracts.md)
-19. [Testing Workflow](testing.md)
-20. [Release Notes](release_notes.md)
+6. [Hard Requirements](requirements.md)
+7. [Code Analysis](code_analysis.md)
+8. [Formats](formats.md)
+9. [Environments](environments.md)
+10. [World And Runtime](world_runtime.md)
+11. [Sessions](session.md)
+12. [Repos and Stores](repos.md)
+13. [Tensor Specs](tensor_specs.md)
+14. [Methods](methods.md)
+15. [Contexts](context.md)
+16. [Data API](data.md)
+17. [Models API](models.md)
+18. [Artifacts API](artifacts.md)
+19. [Query Index Backend Contracts](query_index_backend_contracts.md)
+20. [Testing Workflow](testing.md)
+21. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -35,6 +36,8 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - `Ref` records a non-materializing exact or selector reference in a definition graph.
 - An environment record describes observed Python/software facts without changing object identity.
 - An `Annotation` is passive process-local key/value metadata; consumers own its meaning.
+- A hard requirement is a passive, process-local domain declaration combined and
+  admitted explicitly without selecting or activating a runtime.
 - `dryml.code` provides closed, local static analysis and bounded in-process tracing; its results are ephemeral and consumer-owned.
 - A requested world describes roles and resources; an allocation binds one exact role-qualified process.
 - `dryml.session` publishes persistent `python`, `managed`, or definition-only `orchestrator` state.

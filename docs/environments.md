@@ -104,11 +104,17 @@ else:
 
 `requirements_for(...)` combines declarations attached directly to a target or inherited by a class. `requirements_for_method(owner, method_name)` combines inherited class declarations with one method selected statically, including when `owner` is an instance; it does not bind a descriptor or read instance state. A `RequirementResult` is either empty when no environment declarations are present, valued with one compatible `EnvironmentRequirement`, or valueless with a complete bounded conflict report. Environment declarations ignore annotations owned by worlds and do not import the world package.
 
+Repeat `@envs.req(...)` declarations to express several hard constraints; the
+resolver combines every compatible declaration rather than providing additive or
+override modes. `dryml.env` is a lazy alias for this plural owner. Environment
+resolution is independent of world resolution and does not choose an environment
+candidate.
+
 Package requirements accept normalized names, version specifiers, and record-evaluable markers. Extras, direct URLs, and markers that mention `extra` are rejected because an `EnvironmentRecord` cannot prove those constraints. Each iterable or mapping field accepts at most 64 entries; combination accepts at most 64 environment declarations and preserves up to 64 ordinalized source explanations in `EnvironmentRequirement.details["sources"]`.
 
-Hard declarations are not defaults, candidate selection, automatic enforcement, runtime/session state, or dispatch behavior. Consumers explicitly call `check(...)` with environment evidence and may pass its resulting report to the shared admission barrier when they need fail-closed admission.
+Hard declarations are not defaults, candidate selection, automatic enforcement, runtime/session state, or dispatch behavior. Consumers explicitly call `check(...)` with environment evidence and may pass its resulting report to the shared admission barrier when they need fail-closed admission. They do not infer constraints from code, run probes, or install packages.
 
-The retired fragment, additive, and override declaration forms are not supported and have no compatibility decoder or migration path. Fresh inspected records no longer advertise the former fragment schema capability; this changes fresh record IDs while leaving the environment-record schema itself at v1.1.
+The retired fragment, additive, and override declaration forms are not supported and have no compatibility decoder or migration path. Fresh inspected records no longer advertise the former `environment_fragment` schema capability; this changes fresh record IDs while leaving the environment-record schema itself at v1.1.
 
 ## What This Does Not Change
 
