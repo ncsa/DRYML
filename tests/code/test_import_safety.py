@@ -51,3 +51,4 @@ def test_fresh_code_import_loads_no_product_or_optional_packages() -> None:
         "dryml.code.targets",
         "dryml._framework_imports",
     }
+    assert not any(name.startswith(("dryml.core", "dryml.environments", "dryml.worlds")) for name in loaded)

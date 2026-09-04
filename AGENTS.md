@@ -37,8 +37,8 @@ is already implemented:
   collection kernel; metadata interpretation and policy stay with consumers.
 - `methods` owns logical callable IR, implementation traits, implementation
   alternatives, direct selection, and reusable preparation.
-- `code` owns generic code analysis and transformation without DRYML product
-  package dependencies.
+- `code` owns generic code analysis; transformation is deferred. It has no
+  DRYML product-package dependencies.
 - `requirements` owns generic declaration, combination, report, and barrier
   protocols. `environments`, `worlds`, and `runtime` own their respective
   requirement semantics and enforcement.
@@ -69,9 +69,11 @@ test only exact paths approved for the task.
 Keep each public package independently useful and give it one coherent concept.
 Lower layers do not import their consumers, domain packages own their persistent
 schemas, and integration belongs in higher-level callers or narrow one-way
-adapters. In particular, keep `core` independent of `dryml.code`, keep
-`dryml.code` independent of DRYML product packages and dispatch policy, and keep
-annotations passive. Dispatch coordinates selection while execute runs already
-resolved work. Optional framework plugins must remain behind their plugin and
-backend boundaries; do not introduce eager optional-framework imports into
-lightweight package paths.
+adapters. `dryml.core.symbol` may lazily call
+`dryml.code.algorithms.lexical_dependencies` at call time for generic free-name
+discovery only. No other core module may import `dryml.code`; `dryml.code` must
+not import core, any DRYML product package, or dispatch policy. Keep annotations
+passive. Dispatch coordinates selection while execute runs already resolved work.
+Optional framework plugins must remain behind their plugin and backend
+boundaries; do not introduce eager optional-framework imports into lightweight
+package paths.

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import pytest
+import types
 
 from dryml.core.symbol import ImportRef, SourceSpec, symbol_ref
 from dryml.core.definition import Definition, ConcreteDefinition
 from dryml.core.bound_args import BoundArguments
 from dryml.core.object import Object
+from dryml.core.repo import Repo
+from dryml.core.store.dir import DirStore
 from dryml.core.freeze import FrozenTuple
 from dryml.core.utils.general import pickler, unpickler
 import numpy as np
@@ -40,6 +43,14 @@ def make_multiplier(scale):
     def mul(x):
         return x * scale
     return mul
+
+
+def caller_anchor_template(value):
+    return caller_anchor_dependency.sin(value)
+
+
+def resolution_precedence_template(value):
+    return resolution_precedence_dependency.sin(value)
 
 
 def test_symbol_ref_from_function_import():
@@ -381,3 +392,149 @@ def test_v2_source_spec_semantic_access_does_not_resolve_the_source(monkeypatch)
     assert cdef.parameters["value"] == 7
     with pytest.raises(AttributeError):
         cdef.missing
+
+
+def test_source_spec_characterization_preserves_canonical_bytes_and_identity():
+    """Freeze alias, nested-local, default, and class-header source capture behavior."""
+
+    def outer(scale, dtype=np.dtype("float32")):
+        def nested(value):
+            return dtype.type(value * scale)
+        return nested
+
+    class LocalArray(np.ndarray):
+        pass
+
+    outer_spec = symbol_ref(outer)
+    class_spec = symbol_ref(LocalArray)
+
+    assert isinstance(outer_spec, SourceSpec)
+    assert isinstance(class_spec, SourceSpec)
+    assert {name: ref.import_path() for name, ref in outer_spec.imports.items()} == {"np": "numpy"}
+    assert {name: ref.import_path() for name, ref in class_spec.imports.items()} == {"np": "numpy"}
+    assert outer_spec.__stable_leaf_bytes__() == SourceSpec(
+        "function", outer_spec.source, outer_spec.name, outer_spec.imports
+    ).__stable_leaf_bytes__()
+
+    first = Definition(FunctionHolder, outer).concretize()
+    second = Definition(FunctionHolder, outer).concretize()
+    assert first == second
+    assert hash(first) == hash(second)
+
+
+def test_source_spec_missing_dependency_fails_closed():
+    """A source-backed function with an unresolved free name never gets a spec."""
+
+    def missing_dependency(value):
+        return missing_source_dependency + value
+
+    with pytest.raises(ValueError, match="Missing/unimportable globals"):
+        symbol_ref(missing_dependency)
+
+
+@pytest.mark.parametrize("replacement", [None, object()])
+def test_source_spec_rejects_missing_or_wrong_typed_lexical_output(monkeypatch, replacement):
+    """Malformed generic lexical results cannot publish a source specification."""
+
+    import dryml.code.algorithms.lexical_dependencies as lexical
+
+    def needs_numpy(value):
+        return np.sin(value)
+
+    monkeypatch.setattr(lexical, "collect_lexical_dependencies", lambda target: replacement)
+    with pytest.raises(ValueError, match="Could not capture stable import paths"):
+        symbol_ref(needs_numpy)
+
+
+def test_source_spec_rejects_failed_or_partial_lexical_output(monkeypatch):
+    """Generic execution failures and malformed duplicate evidence fail closed."""
+
+    import dryml.code.algorithms.lexical_dependencies as lexical
+
+    def needs_numpy(value):
+        return np.sin(value)
+
+    monkeypatch.setattr(lexical, "collect_lexical_dependencies", lambda target: (_ for _ in ()).throw(RuntimeError("private generic detail")))
+    with pytest.raises(ValueError, match="Could not capture stable import paths") as error:
+        symbol_ref(needs_numpy)
+    assert "private generic detail" not in str(error.value)
+
+    duplicate = lexical.LexicalDependencies((
+        lexical.LexicalDependency("np", None),
+        lexical.LexicalDependency("np", None),
+    ))
+    monkeypatch.setattr(lexical, "collect_lexical_dependencies", lambda target: duplicate)
+    with pytest.raises(ValueError, match="Could not capture stable import paths"):
+        symbol_ref(needs_numpy)
+
+
+def test_source_spec_captures_caller_anchor_before_lexical_analysis(monkeypatch):
+    """A generic helper local cannot outrank the caller-local resolution anchor."""
+
+    import dryml.code.algorithms.lexical_dependencies as lexical
+
+    detached = types.FunctionType(
+        caller_anchor_template.__code__, {}, name=caller_anchor_template.__name__
+    )
+    detached.__module__ = __name__
+    caller_anchor_dependency = np
+
+    def helper(source):
+        caller_anchor_dependency = __import__("math")
+        return lexical.LexicalDependencies((lexical.LexicalDependency("caller_anchor_dependency", None),))
+
+    monkeypatch.setattr(lexical, "collect_lexical_dependencies", helper)
+    spec = SourceSpec.from_function(detached)
+    assert spec.imports["caller_anchor_dependency"].import_path() == "numpy"
+
+
+def test_source_spec_preserves_globals_module_and_caller_precedence(monkeypatch):
+    """Live dependency projection keeps the documented globals/module/caller order."""
+
+    import math
+    import sys
+
+    globals_first = types.FunctionType(
+        resolution_precedence_template.__code__,
+        {"resolution_precedence_dependency": np},
+        name=resolution_precedence_template.__name__,
+    )
+    globals_first.__module__ = __name__
+    assert SourceSpec.from_function(globals_first).imports[
+        "resolution_precedence_dependency"
+    ].import_path() == "numpy"
+
+    monkeypatch.setattr(sys.modules[__name__], "resolution_precedence_dependency", math, raising=False)
+    module_second = types.FunctionType(
+        resolution_precedence_template.__code__, {}, name=resolution_precedence_template.__name__
+    )
+    module_second.__module__ = __name__
+    assert SourceSpec.from_function(module_second).imports[
+        "resolution_precedence_dependency"
+    ].import_path() == "math"
+
+    caller_third = types.FunctionType(
+        resolution_precedence_template.__code__, {}, name=resolution_precedence_template.__name__
+    )
+    caller_third.__module__ = "missing_source_spec_module"
+    resolution_precedence_dependency = np
+    assert SourceSpec.from_function(caller_third).imports[
+        "resolution_precedence_dependency"
+    ].import_path() == "numpy"
+
+
+def test_source_spec_identity_round_trips_through_store_lookup(tmp_path):
+    """Source-backed CDef identity remains usable for persisted structural lookup."""
+
+    def local(value):
+        return value + 1
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    saved = FunctionHolder(local, repo=repo)
+    repo.save_object(saved)
+
+    loaded = Repo(DirStore(tmp_path / "store")).load(Definition(FunctionHolder, local))
+    assert loaded.definition == saved.definition
+    assert hash(loaded.definition) == hash(saved.definition)
+    assert loaded.fn(3) == 4

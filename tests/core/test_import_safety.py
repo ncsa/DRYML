@@ -121,3 +121,30 @@ def test_core_missing_names_and_star_import_preserve_python_import_behavior() ->
     namespace: dict[str, object] = {}
     exec("from dryml.core import *", namespace)
     assert {name for name in namespace if name != "__builtins__"} == set(_EXPECTED_CORE_EXPORTS)
+
+
+def test_core_and_symbol_imports_keep_code_lazy_until_source_capture() -> None:
+    """Core imports stay passive; only source capture loads the lexical leaf."""
+
+    _run_import_probe(
+        """
+import sys
+import dryml.core
+import dryml.core.symbol
+assert not any(name == "dryml.code" or name.startswith("dryml.code.") for name in sys.modules)
+"""
+    )
+    _run_import_probe(
+        """
+import sys
+import dryml.core.symbol as symbol
+
+symbol._collect_source_imports(object(), "def local(value):\\n    return value + 1", None)
+loaded = {name for name in sys.modules if name.startswith("dryml.")}
+allowed = {"dryml", "dryml._framework_imports", "dryml.core", "dryml.core.symbol"}
+assert all(name in allowed or name.startswith("dryml.code") for name in loaded), loaded
+assert "dryml.code.algorithms.lexical_dependencies" in loaded
+forbidden = ("dryml.data", "dryml.environments", "dryml.execute", "dryml.runtime", "dryml.worlds", "tensorflow", "torch", "jax", "ray")
+assert not [name for name in sys.modules if name.startswith(forbidden)]
+"""
+    )
