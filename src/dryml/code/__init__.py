@@ -1,13 +1,13 @@
 """Dependency-light generic static code-analysis primitives.
 
-The package exposes U1 target, source, AST, fact, error, and foundational graph
-contracts. It does not execute targets, establish product policy, import DRYML
-product packages, or expose future kernel, trace, transformation, or transport
-APIs.
+The package exposes dependency-light static target, graph, kernel, analysis,
+and in-process probe contracts. It does not establish product policy, invoke
+target bodies, import DRYML product packages, trace, transform, or transport.
 """
 
 from .ast_tools import AccessCollection, AttrAccess, MethodCall, collect_accesses_from_source, parse_source
 from .callable_info import CallableInfo, analyze_callable
+from .analysis import AnalysisResult, InvocationOutcome, analyze
 from .errors import (
     AnalysisErrorCode,
     CodeAnalysisError,
@@ -20,6 +20,8 @@ from .errors import (
 )
 from .facts import CodeFact, CodeFacts, Diagnostic, FactRecord, FactScalar, FactValue, SourceLocation
 from .graph import ProgramGraph
+from .kernels import AnalysisKernel, KernelCall, KernelOutcome, TraversalKernel
+from .probe import probe
 from .source import SourceInfo, extract_source, get_source_info
 from .targets import (
     CodeTarget,
@@ -36,6 +38,8 @@ from .targets import (
 __all__ = [
     "AccessCollection",
     "AnalysisErrorCode",
+    "AnalysisKernel",
+    "AnalysisResult",
     "AttrAccess",
     "CallableInfo",
     "CodeAnalysisError",
@@ -52,8 +56,11 @@ __all__ = [
     "ImportTarget",
     "InvalidKernelError",
     "InvalidTargetError",
+    "InvocationOutcome",
+    "KernelCall",
     "KernelDependencyError",
     "KernelExecutionError",
+    "KernelOutcome",
     "MethodCall",
     "MissingOutputError",
     "ProgramGraph",
@@ -63,10 +70,13 @@ __all__ = [
     "SourceUnavailableError",
     "TargetInfo",
     "TargetKind",
+    "TraversalKernel",
+    "analyze",
     "analyze_callable",
     "collect_accesses_from_source",
     "extract_source",
     "get_source_info",
     "normalize_target",
     "parse_source",
+    "probe",
 ]

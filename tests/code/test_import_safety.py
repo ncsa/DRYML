@@ -6,8 +6,8 @@ import subprocess
 import sys
 
 
-def test_code_exports_only_implemented_u2_apis() -> None:
-    """The root manifest exposes the graph but excludes later Stage 3 names."""
+def test_code_exports_only_implemented_u3_apis() -> None:
+    """The root manifest exposes U3 APIs but no removed compatibility names."""
 
     import dryml.code as code
 
@@ -15,6 +15,7 @@ def test_code_exports_only_implemented_u2_apis() -> None:
     assert "CompilerInfo" not in code.__all__
     assert "normalize_target" in code.__all__
     assert "ProgramGraph" in code.__all__
+    assert {"AnalysisKernel", "AnalysisResult", "KernelCall", "KernelOutcome", "TraversalKernel", "analyze", "probe"} <= set(code.__all__)
     assert "build_program_graph" not in code.__all__
     assert not hasattr(code, "func_source_extract")
     assert not hasattr(code, "CompilerInfo")
@@ -43,6 +44,9 @@ def test_fresh_code_import_loads_no_product_or_optional_packages() -> None:
         "dryml.code.errors",
         "dryml.code.facts",
         "dryml.code.graph",
+        "dryml.code.analysis",
+        "dryml.code.kernels",
+        "dryml.code.probe",
         "dryml.code.source",
         "dryml.code.targets",
         "dryml._framework_imports",
