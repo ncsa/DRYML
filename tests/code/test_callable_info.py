@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import types
 
 import pytest
 
@@ -81,3 +82,21 @@ def test_analyze_callable_rejects_dynamic_lookup_without_invoking_it() -> None:
 
     with pytest.raises(InvalidTargetError, match="unsupported callable"):
         analyze_callable(Dynamic())
+
+
+@pytest.mark.skipif(not hasattr(types.FunctionType, "__annotate__"), reason="deferred annotation hook requires Python 3.14+")
+def test_analyze_callable_rejects_deferred_annotations_without_evaluation() -> None:
+    """Python 3.14 deferred annotation hooks remain uninvoked."""
+
+    evaluated: list[bool] = []
+
+    def marker() -> type[int]:
+        evaluated.append(True)
+        raise RuntimeError("/private/path annotation-secret")
+
+    namespace: dict[str, object] = {"marker": marker}
+    exec("def subject(value: marker()):\n    return value\n", namespace)
+
+    with pytest.raises(InvalidTargetError, match="unsupported callable"):
+        analyze_callable(namespace["subject"])  # type: ignore[arg-type]
+    assert evaluated == []

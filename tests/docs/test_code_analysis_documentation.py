@@ -22,6 +22,9 @@ def test_code_analysis_guide_covers_the_public_contract() -> None:
         "separate processes", "ephemeral", "nonserializable", "persistence",
         "core.symbol", "lexical", "transformation", "execute", "dispatch",
         "process isolation",
+        "AnalysisErrorCode", "FactScalar", "FactValue", "ProgramNodeKind",
+        "ProgramEdgeKind", "KernelMode", "TargetKind", "DescriptorKind",
+        "CodeTargetInput",
     )
     for phrase in required:
         assert phrase in guide, phrase

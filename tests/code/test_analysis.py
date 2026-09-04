@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import weakref
+from abc import ABCMeta
 
 import pytest
 
@@ -141,6 +142,32 @@ class WrongOutput(AnalysisKernel[None, int]):
         """Return the wrong runtime value intentionally."""
 
         return "wrong"  # type: ignore[return-value]
+
+
+class RaisingInstanceCheck(type):
+    """Raise when the scheduler performs nominal output validation."""
+
+    def __instancecheck__(cls, instance: object) -> bool:
+        """Simulate a consumer-controlled runtime type-check failure."""
+
+        raise RuntimeError("private output validation failure")
+
+
+class UncheckableOutput(metaclass=RaisingInstanceCheck):
+    """Provide a nominal output class whose instance check raises."""
+
+
+class RaisingOutputCheck(AnalysisKernel[None, UncheckableOutput]):
+    """Return a value that triggers the raising output type check."""
+
+    input_type = type(None)
+    output_type = UncheckableOutput
+
+    def run(self, graph: object, value: None, context: object) -> UncheckableOutput:
+        """Return an opaque value for scheduler-side validation."""
+
+        _RUNS.append("raising-output-check")
+        return object()  # type: ignore[return-value]
 
 
 class NoneOutput(AnalysisKernel[None, None]):
@@ -297,6 +324,45 @@ def test_output_validation_and_missing_output_semantics() -> None:
     assert result.require(NoneOutput) is None
     with pytest.raises(MissingOutputError):
         result.require(WrongOutput)
+
+
+def test_output_validation_failure_is_contained_and_independent_work_continues() -> None:
+    """Consumer-controlled instance checks become redacted failed outcomes."""
+
+    _RUNS.clear()
+    result = analyze(
+        _target(),
+        (KernelCall(RaisingOutputCheck(), None), KernelCall(Independent(), None)),
+    )
+
+    assert _RUNS == ["raising-output-check", "independent"]
+    assert tuple(outcome.status for outcome in result.outcomes) == ("failed", "succeeded")
+    assert result.outcomes[0].diagnostics[0].code == "kernel.output_type"
+    assert result.require(Independent) == 7
+
+
+def test_diagnostic_repr_does_not_invoke_consumer_kernel_repr() -> None:
+    """Rendering redacted diagnostics never formats an opaque kernel class."""
+
+    represented: list[bool] = []
+
+    class SecretReprMeta(ABCMeta):
+        def __repr__(cls) -> str:
+            represented.append(True)
+            return "/private/path diagnostic-secret"
+
+    class SecretFailure(AnalysisKernel[None, int], metaclass=SecretReprMeta):
+        input_type = type(None)
+        output_type = int
+
+        def run(self, graph: object, value: None, context: object) -> int:
+            raise RuntimeError("private")
+
+    diagnostic = analyze(_target(), (KernelCall(SecretFailure(), None),)).diagnostics[0]
+    rendered = repr(diagnostic)
+
+    assert represented == []
+    assert "private" not in rendered and "secret" not in rendered
 
 
 def test_fact_aggregation_is_exact_and_dependency_scoped() -> None:

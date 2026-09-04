@@ -134,6 +134,10 @@ import dryml.core.symbol
 assert not any(name == "dryml.code" or name.startswith("dryml.code.") for name in sys.modules)
 """
     )
+
+    symbol_source = (Path(__file__).resolve().parents[2] / "src" / "dryml" / "core" / "symbol.py").read_text(encoding="utf-8")
+    assert "from dryml.code.targets" not in symbol_source
+    assert "_collect_source_dependencies" in symbol_source
     _run_import_probe(
         """
 import sys

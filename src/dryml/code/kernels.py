@@ -18,6 +18,7 @@ OutputT = TypeVar("OutputT")
 OutputU = TypeVar("OutputU")
 
 KernelMode: TypeAlias = Literal["static", "trace"]
+"""Execution phase and graph provenance assigned to a kernel output."""
 
 
 class AnalysisKernel(ABC, Generic[InputT, OutputT]):

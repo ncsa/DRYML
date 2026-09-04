@@ -14,6 +14,8 @@ from dryml.code.targets import DescriptorTarget, ImportTarget
 
 _CALLS: list[str] = []
 _FINISHED: list[bool] = []
+_FIRST_GLOBAL = 1
+_SECOND_GLOBAL = 2
 
 
 class StaticFact(AnalysisKernel[None, CodeFact]):
@@ -104,6 +106,26 @@ def _same_line_lambda_target() -> None:
     first = lambda: 1 + 2j; second = lambda: 3 + 4j
     first()
     second()
+
+
+def _heterogeneous_frozenset_target(value: object = None) -> bool:
+    """Exercise a compiler-folded constant with incomparable scalar values."""
+
+    return value in {None, 1}
+
+
+def _same_line_name_target() -> None:
+    """Invoke same-line lambdas distinguished only by referenced names."""
+
+    first = lambda: _FIRST_GLOBAL; second = lambda: _SECOND_GLOBAL
+    first()
+    second()
+
+
+def _displacing_target() -> None:
+    """Remove DRYML's active hook to simulate incomplete trace capture."""
+
+    sys.settrace(None)
 
 
 async def _coroutine_target() -> None:
@@ -232,9 +254,24 @@ def test_trace_reraises_interruption_after_restoring_hook() -> None:
     """Interruption-style target failures return no partial result."""
 
     _run_child(
-        "from dryml.code import trace; "
+        "import sys; from dryml.code import trace; "
         "from tests.code.test_trace import _interrupting_target; "
-        "exec(\"try:\\n    trace(_interrupting_target, ())\\nexcept KeyboardInterrupt:\\n    pass\\nelse:\\n    raise AssertionError('interruption was swallowed')\")"
+        "exec(\"try:\\n    trace(_interrupting_target, ())\\nexcept KeyboardInterrupt:\\n    pass\\nelse:\\n    raise AssertionError('interruption was swallowed')\"); "
+        "assert sys.gettrace() is None"
+    )
+
+
+def test_trace_callback_reraises_interruption_after_cleanup() -> None:
+    """Interruption during event projection is not converted to a result."""
+
+    _run_child(
+        "import importlib, sys; from dryml.code import trace; "
+        "from tests.code.test_trace import _target; "
+        "module = importlib.import_module('dryml.code.trace'); "
+        "exec(\"def interrupt(frame, cache):\\n    raise KeyboardInterrupt()\"); "
+        "module._code_id = interrupt; "
+        "exec(\"try:\\n    trace(_target, ())\\nexcept KeyboardInterrupt:\\n    pass\\nelse:\\n    raise AssertionError('callback interruption was swallowed')\"); "
+        "assert sys.gettrace() is None"
     )
 
 
@@ -265,6 +302,18 @@ def test_trace_overflow_preserves_target_failure_outcome() -> None:
     )
 
 
+def test_trace_overflow_without_trace_kernels_is_incomplete() -> None:
+    """Graph-only callers still receive explicit overflow diagnostics."""
+
+    _run_child(
+        "from dryml.code import trace; "
+        "from tests.code.test_trace import _busy_target; "
+        "result = trace(_busy_target, (), max_events=1); "
+        "assert not result.complete; "
+        "assert any(diagnostic.code == 'trace.limit' for diagnostic in result.diagnostics)"
+    )
+
+
 def test_same_line_lambda_constants_distinguish_trace_code_ids() -> None:
     """Constant fingerprints distinguish otherwise identical descendant code."""
 
@@ -274,6 +323,42 @@ def test_same_line_lambda_constants_distinguish_trace_code_ids() -> None:
         "result = trace(_same_line_lambda_target, ()); "
         "calls = [dict(node.value) for node in result.graph.nodes_of_kind('trace_event') if dict(node.value)['event'] == 'call' and dict(node.value)['depth'] == 1]; "
         "assert len(calls) == 2 and len({event['code_id'] for event in calls}) == 2"
+    )
+
+
+def test_heterogeneous_frozenset_constants_trace_successfully() -> None:
+    """Canonical constant ordering never compares heterogeneous scalars."""
+
+    _run_child(
+        "from dryml.code import trace; "
+        "from tests.code.test_trace import _heterogeneous_frozenset_target; "
+        "result = trace(_heterogeneous_frozenset_target, ()); "
+        "assert result.complete and result.invocation.status == 'succeeded'"
+    )
+
+
+def test_same_line_lambda_names_distinguish_trace_code_ids() -> None:
+    """Code identities include referenced-name operand tables."""
+
+    _run_child(
+        "from dryml.code import trace; "
+        "from tests.code.test_trace import _same_line_name_target; "
+        "result = trace(_same_line_name_target, ()); "
+        "calls = [dict(node.value) for node in result.graph.nodes_of_kind('trace_event') if dict(node.value)['event'] == 'call' and dict(node.value)['depth'] == 1]; "
+        "assert len(calls) == 2 and len({event['code_id'] for event in calls}) == 2"
+    )
+
+
+def test_displaced_trace_hook_fails_closed() -> None:
+    """A target cannot disable capture and still receive complete evidence."""
+
+    _run_child(
+        "import sys; from dryml.code import trace; "
+        "from tests.code.test_trace import _displacing_target; "
+        "result = trace(_displacing_target, ()); "
+        "assert not result.complete and result.invocation.status == 'failed'; "
+        "assert result.invocation.diagnostic.code == 'trace.invocation'; "
+        "assert sys.gettrace() is None"
     )
 
 
@@ -321,5 +406,20 @@ def test_trace_cleanup_failure_takes_precedence_in_fresh_child() -> None:
         "exec(\"def broken(hook):\\n    calls.append(hook)\\n    if len(calls) == 2: raise RuntimeError('private')\\n    return original(hook)\"); "
         "module.sys.settrace = broken; "
         "exec(\"try:\\n    trace(_target, ())\\nexcept CodeAnalysisError as error:\\n    assert error.code == 'trace.cleanup' and error.__suppress_context__\\nelse:\\n    raise AssertionError('cleanup failure was swallowed')\"); "
+        "assert len(calls) == 3; module.sys.settrace = original"
+    )
+
+
+def test_trace_cleanup_failure_takes_precedence_over_interruption() -> None:
+    """Restoration failure masks and drops an in-flight interruption."""
+
+    _run_child(
+        "import importlib; "
+        "from dryml.code import CodeAnalysisError, trace; "
+        "from tests.code.test_trace import _interrupting_target; "
+        "module = importlib.import_module('dryml.code.trace'); original = module.sys.settrace; calls = []; "
+        "exec(\"def broken(hook):\\n    calls.append(hook)\\n    if len(calls) == 2: raise RuntimeError('private')\\n    return original(hook)\"); "
+        "module.sys.settrace = broken; "
+        "exec(\"try:\\n    trace(_interrupting_target, ())\\nexcept CodeAnalysisError as error:\\n    assert error.code == 'trace.cleanup' and error.__suppress_context__\\nelse:\\n    raise AssertionError('cleanup failure was swallowed')\"); "
         "assert len(calls) == 3; module.sys.settrace = original"
     )

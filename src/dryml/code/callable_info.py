@@ -10,24 +10,48 @@ from typing import Any, Callable
 from .errors import InvalidTargetError
 
 
+def _function_slot(func: types.FunctionType, name: str) -> object:
+    """Read one exact function slot without invoking deferred annotations."""
+
+    return types.FunctionType.__dict__[name].__get__(func, types.FunctionType)
+
+
+def _type_slot(cls: type, name: str) -> object:
+    """Read one built-in type slot without metaclass descriptor lookup."""
+
+    return type.__dict__[name].__get__(cls, type(cls))
+
+
+def _module_namespace(module: types.ModuleType) -> dict[str, object]:
+    """Return a module's storage without invoking subclass descriptors."""
+
+    return types.ModuleType.__dict__["__dict__"].__get__(module, type(module))
+
+
 def _function_metadata(func: types.FunctionType) -> tuple[str | None, str | None]:
     """Read non-evaluating Python-function provenance after hook rejection."""
 
-    if "__signature__" in func.__dict__ or "__wrapped__" in func.__dict__:
+    namespace = _function_slot(func, "__dict__")
+    if "__signature__" in namespace or "__wrapped__" in namespace:  # type: ignore[operator]
         raise InvalidTargetError("unsupported callable")
-    annotations = func.__annotations__
+    annotate_slot = types.FunctionType.__dict__.get("__annotate__")
+    if annotate_slot is not None and annotate_slot.__get__(func, types.FunctionType) is not None:
+        raise InvalidTargetError("unsupported callable")
+    annotations = _function_slot(func, "__annotations__")
     if type(annotations) is not dict:
         raise InvalidTargetError("unsupported callable")
-    module = func.__module__ if type(func.__module__) is str else None
-    qualname = func.__qualname__ if type(func.__qualname__) is str else None
+    raw_module = _function_slot(func, "__module__")
+    raw_qualname = _function_slot(func, "__qualname__")
+    module = raw_module if type(raw_module) is str else None
+    qualname = raw_qualname if type(raw_qualname) is str else None
     return qualname, module
 
 
 def _raw_call_descriptor(cls: type) -> object | None:
     """Find ``__call__`` in class dictionaries without binding a descriptor."""
 
-    for base in type.__getattribute__(cls, "__mro__"):
-        namespace = type.__getattribute__(base, "__dict__")
+    for base in _type_slot(cls, "__mro__"):  # type: ignore[union-attr]
+        namespace = _type_slot(base, "__dict__")
         if "__call__" in namespace:
             return namespace["__call__"]
     return None

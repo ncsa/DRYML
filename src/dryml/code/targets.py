@@ -8,14 +8,17 @@ import types
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, TypeAlias, get_args
 
-from .callable_info import _function_from_descriptor, _raw_call_descriptor, analyze_callable
+from .callable_info import _function_from_descriptor, _function_slot, _module_namespace, _raw_call_descriptor, _type_slot, analyze_callable
 from .errors import InvalidTargetError, SourceUnavailableError
 from .facts import _sanitize_filename
 from .source import SourceInfo, get_source_info
 
 
 TargetKind: TypeAlias = Literal["function", "bound_method", "callable_instance", "descriptor", "class", "import", "source"]
+"""Closed target categories accepted by static analysis."""
+
 DescriptorKind: TypeAlias = Literal["function", "staticmethod", "classmethod"]
+"""Built-in descriptor wrappers admitted without binding."""
 
 _TARGET_KINDS = frozenset(get_args(TargetKind))
 _DESCRIPTOR_KINDS = frozenset(get_args(DescriptorKind))
@@ -24,21 +27,24 @@ _DESCRIPTOR_KINDS = frozenset(get_args(DescriptorKind))
 def _metadata(func: types.FunctionType) -> tuple[str | None, str | None, str | None]:
     """Return safe raw function name, module, and qualified name."""
 
-    name = func.__name__ if type(func.__name__) is str else None
-    module = func.__module__ if type(func.__module__) is str else None
-    qualname = func.__qualname__ if type(func.__qualname__) is str else None
+    raw_name = _function_slot(func, "__name__")
+    raw_module = _function_slot(func, "__module__")
+    raw_qualname = _function_slot(func, "__qualname__")
+    name = raw_name if type(raw_name) is str else None
+    module = raw_module if _is_module_name(raw_module) else None
+    qualname = raw_qualname if type(raw_qualname) is str else None
     return name, module, qualname
 
 
 def _class_metadata(cls: type) -> tuple[str | None, str | None, str | None]:
     """Read class metadata while bypassing custom metaclass attribute hooks."""
 
-    name = type.__getattribute__(cls, "__name__")
-    module = type.__getattribute__(cls, "__module__")
-    qualname = type.__getattribute__(cls, "__qualname__")
+    name = _type_slot(cls, "__name__")
+    module = _type_slot(cls, "__module__")
+    qualname = _type_slot(cls, "__qualname__")
     return (
         name if type(name) is str else None,
-        module if type(module) is str else None,
+        module if _is_module_name(module) else None,
         qualname if type(qualname) is str else None,
     )
 
@@ -49,10 +55,16 @@ def _is_class(value: object) -> bool:
     return issubclass(type(value), type)
 
 
+def _is_module_name(value: object) -> bool:
+    """Return whether a value is a non-empty dotted Python identifier."""
+
+    return type(value) is str and bool(value) and all(part.isidentifier() for part in value.split("."))
+
+
 def _safe_filename(module: str | None, filename: str | None) -> str | None:
     """Convert raw source provenance to a logical module name or basename."""
 
-    if module:
+    if _is_module_name(module):
         return module
     return _sanitize_filename(filename)
 
@@ -68,8 +80,8 @@ def _require_source(source: SourceInfo | None) -> SourceInfo:
 def _descriptor(owner: type, name: str) -> tuple[object, type] | None:
     """Find an owner-MRO descriptor without binding or invoking it."""
 
-    for base in type.__getattribute__(owner, "__mro__"):
-        namespace = type.__getattribute__(base, "__dict__")
+    for base in _type_slot(owner, "__mro__"):  # type: ignore[union-attr]
+        namespace = _type_slot(base, "__dict__")
         if name in namespace:
             return namespace[name], base
     return None
@@ -211,6 +223,10 @@ class TargetInfo:
         for value in (self.name, self.module, self.qualname, self.owner_module, self.owner_qualname, self.filename, self.import_path):
             if value is not None and type(value) is not str:
                 raise ValueError("target metadata is invalid")
+        if (self.module is not None and not _is_module_name(self.module)) or (
+            self.owner_module is not None and not _is_module_name(self.owner_module)
+        ):
+            raise ValueError("target module metadata is invalid")
         if self.descriptor_kind is not None and self.descriptor_kind not in _DESCRIPTOR_KINDS:
             raise ValueError("descriptor kind is invalid")
         if self.start_line is not None and (type(self.start_line) is not int or self.start_line < 1):
@@ -259,6 +275,7 @@ class CodeTarget:
 
 
 CodeTargetInput: TypeAlias = CodeTarget | SourceTarget | ImportTarget | DescriptorTarget | Callable[..., Any] | type
+"""Supported normalized wrappers and live Python target forms."""
 
 
 def _normal_function(func: types.FunctionType) -> CodeTarget:
@@ -412,7 +429,7 @@ def _static_member(value: object, name: str) -> object | None:
     """Traverse one imported qualified-name segment without dynamic lookup."""
 
     if isinstance(value, types.ModuleType):
-        namespace = types.ModuleType.__getattribute__(value, "__dict__")
+        namespace = _module_namespace(value)
         return namespace.get(name)
     if _is_class(value):
         found = _descriptor(value, name)

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from typing import get_args, get_origin
 
 import pytest
 
-from dryml.code import ImportTarget, KernelCall, SourceTarget, analyze
+from dryml.code import ImportTarget, KernelCall, SourceTarget, TraversalKernel, analyze
 from dryml.code.algorithms import (
     LexicalDependencies,
     LexicalDependency,
@@ -118,6 +119,62 @@ def test_comprehension_targets_named_expressions_and_patterns_do_not_escape() ->
     assert _names(result) == ("transform", "source", "predicate", "candidate", "Point", "guard", "finish")
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    (
+        ("[item for item in items]\n    return item", ("items", "item")),
+        ("return [item for item in item]", ("item",)),
+        ("return [value for value in missing for missing in source]", ("missing", "source")),
+    ),
+)
+def test_comprehension_bindings_respect_enclosing_and_generator_order(
+    body: str,
+    expected: tuple[str, ...],
+) -> None:
+    """Generator targets bind only after their iterable and never escape."""
+
+    result = collect_lexical_dependencies(SourceTarget(f"def subject():\n    {body}\n", name="subject"))
+
+    assert _names(result) == expected
+
+
+def test_class_bindings_are_sequential_and_not_method_closures() -> None:
+    """Class loads use prior class names while methods retain global lookups."""
+
+    result = collect_lexical_dependencies(
+        SourceTarget(
+            """class Subject:
+    first = dependency
+    dependency = 1
+    prior = dependency
+    shadow = 2
+    def method(self):
+        return shadow + method_global
+""",
+            name="Subject",
+        )
+    )
+
+    assert _names(result) == ("dependency", "shadow", "method_global")
+
+
+def test_class_global_declaration_prevents_class_binding() -> None:
+    """A class-level global declaration keeps assignment in module scope."""
+
+    result = collect_lexical_dependencies(
+        SourceTarget(
+            """class Subject:
+    global dependency
+    first = dependency
+    dependency = 1
+""",
+            name="Subject",
+        )
+    )
+
+    assert _names(result) == ("dependency",)
+
+
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="type parameters require Python 3.12+")
 def test_type_parameters_bind_annotations_and_function_body() -> None:
     """Maintained-version type parameters are local while their bounds remain free."""
@@ -144,6 +201,18 @@ def test_convenience_and_direct_kernel_calls_return_identical_evidence() -> None
 
     assert direct == convenience
     assert _names(convenience) == ("missing",)
+
+
+def test_lexical_kernel_uses_the_documented_public_state_type() -> None:
+    """Generic reflection exposes only the planned public state carrier."""
+
+    traversal_base = next(
+        base
+        for base in LexicalDependencyKernel.__orig_bases__
+        if get_origin(base) is TraversalKernel
+    )
+
+    assert get_args(traversal_base) == (type(None), LexicalDependencies, LexicalDependencies)
 
 
 def test_collection_is_static_and_applies_no_live_or_import_policy() -> None:

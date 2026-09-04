@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .callable_info import _function_slot, _module_namespace, _type_slot
 from .errors import SourceUnavailableError
 
 if TYPE_CHECKING:
@@ -68,12 +69,13 @@ def _source_from_file(obj: object) -> SourceInfo | None:
     """Extract a supported function or class directly from its source file."""
 
     if type(obj) is types.FunctionType:
-        filename = obj.__code__.co_filename
-        name = obj.__name__
-        first_line = obj.__code__.co_firstlineno
-        node_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+        code = _function_slot(obj, "__code__")
+        filename = code.co_filename  # type: ignore[union-attr]
+        name = _function_slot(obj, "__name__")
+        first_line = code.co_firstlineno  # type: ignore[union-attr]
+        node_types = (ast.Lambda,) if name == "<lambda>" else (ast.FunctionDef, ast.AsyncFunctionDef)
     elif issubclass(type(obj), type):
-        filename = type.__getattribute__(obj, "__module__")
+        filename = _type_slot(obj, "__module__")
         module_name = filename if type(filename) is str else None
         if module_name is None:
             return None
@@ -82,8 +84,8 @@ def _source_from_file(obj: object) -> SourceInfo | None:
         module = sys.modules.get(module_name)
         if module is None or not isinstance(module, types.ModuleType):
             return None
-        filename = types.ModuleType.__getattribute__(module, "__file__")
-        name = type.__getattribute__(obj, "__name__")
+        filename = _module_namespace(module).get("__file__")
+        name = _type_slot(obj, "__name__")
         first_line = None
         node_types = (ast.ClassDef,)
     else:
@@ -99,7 +101,7 @@ def _source_from_file(obj: object) -> SourceInfo | None:
         node
         for node in ast.walk(tree)
         if isinstance(node, node_types)
-        and (getattr(node, "name", None) == name or isinstance(node, ast.Lambda))
+        and (isinstance(node, ast.Lambda) or getattr(node, "name", None) == name)
         and (first_line is None or node.lineno == first_line or _node_start(node) == first_line)
     ]
     if len(candidates) != 1:

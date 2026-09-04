@@ -27,6 +27,7 @@ AnalysisErrorCode: TypeAlias = Literal[
     "trace.invocation",
     "trace.cleanup",
 ]
+"""Stable machine-readable categories for public analysis failures."""
 
 _CODES = frozenset(get_args(AnalysisErrorCode))
 

@@ -310,7 +310,11 @@ def _failure_outcome(snapshot: _Snapshot, graph_digest: str) -> KernelOutcome[An
 def _outcome_for_value(snapshot: _Snapshot, graph_digest: str, value: Any) -> KernelOutcome[Any]:
     """Validate one callback result using ordinary scheduler output semantics."""
 
-    if (value is None and snapshot.output_type is not type(None)) or not isinstance(value, snapshot.output_type):
+    try:
+        valid = (value is not None or snapshot.output_type is type(None)) and isinstance(value, snapshot.output_type)
+    except Exception:
+        valid = False
+    if not valid:
         return KernelOutcome(
             snapshot.kernel_type,
             graph_digest,

@@ -422,11 +422,10 @@ def _collect_source_imports(obj, source: str, caller_anchor: FrameType | None) -
         from dryml.code.algorithms.lexical_dependencies import (
             LexicalDependencies,
             LexicalDependency,
-            collect_lexical_dependencies,
+            _collect_source_dependencies,
         )
-        from dryml.code.targets import SourceTarget
 
-        evidence = collect_lexical_dependencies(SourceTarget(candidate))
+        evidence = _collect_source_dependencies(candidate)
     except Exception:
         raise _source_import_error(obj) from None
     if type(evidence) is not LexicalDependencies or type(evidence.dependencies) is not tuple:

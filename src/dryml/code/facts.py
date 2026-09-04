@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from .errors import AnalysisErrorCode, _CODES
 
@@ -14,7 +14,10 @@ if TYPE_CHECKING:
 
 
 FactScalar: TypeAlias = None | bool | int | float | str | bytes
+"""Exact scalar values admitted in framework-created fact payloads."""
+
 FactValue: TypeAlias = FactScalar | tuple["FactValue", ...] | tuple[tuple[str, "FactValue"], ...]
+"""Recursive immutable scalar, sequence, or sorted mapping fact payload."""
 
 
 def _sanitize_filename(filename: str | None) -> str | None:
@@ -186,7 +189,7 @@ class Diagnostic:
     code: AnalysisErrorCode
     message: str
     severity: Literal["info", "warning", "error"] = "error"
-    kernel: type[AnalysisKernel[object, object]] | None = None
+    kernel: type[AnalysisKernel[Any, Any]] | None = field(default=None, repr=False)
     source: SourceLocation | None = None
 
     def __post_init__(self) -> None:

@@ -32,6 +32,26 @@ All imported modules, supplied target values, kernel classes, and invoked
 callables are trusted inputs. This API is a correctness boundary for ordinary
 callers, not a sandbox or safe-deserialization facility.
 
+## Public Type Contracts
+
+The public aliases describe closed framework-owned values rather than runtime
+conversion APIs. `TargetKind` and `DescriptorKind` enumerate normalized target
+and descriptor categories, while `CodeTargetInput` names the admitted target
+wrappers and live Python forms. Invalid values fail during carrier or target
+validation; evaluating the aliases has no side effects.
+
+`ProgramNodeKind` and `ProgramEdgeKind` enumerate the only graph node and edge
+categories accepted by construction and query methods. `KernelMode` separates
+static outputs from trace-derived outputs. Unknown values are rejected before
+kernel execution, and these aliases do not build or mutate a graph.
+
+`FactScalar` and recursive `FactValue` define finite immutable payloads made of
+exact scalars, tuples, or sorted unique string-keyed tuple mappings.
+`AnalysisErrorCode` enumerates stable machine-readable failure categories.
+Carrier validation raises `ValueError`; analysis operations expose the
+documented `CodeAnalysisError` subclasses. These aliases retain no target,
+source, exception, or runtime state.
+
 ## Graphs And Kernels
 
 `build_program_graph()` produces a closed immutable `ProgramGraph`: a target

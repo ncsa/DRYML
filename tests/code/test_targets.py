@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import gc
+import sys
+import types
 import weakref
 
 import pytest
@@ -14,6 +16,7 @@ from dryml.code import (
     ImportTarget,
     InvalidTargetError,
     SourceTarget,
+    TargetInfo,
 )
 from dryml.code.facts import SourceLocation
 from dryml.code.targets import normalize_target
@@ -98,6 +101,55 @@ def test_normalize_target_never_invokes_dynamic_protocols() -> None:
     assert dynamic_error.value.code == "target.invalid"
 
 
+def test_normalize_target_bypasses_metaclass_data_descriptors() -> None:
+    """Built-in type slots win without invoking metaclass descriptors."""
+
+    invoked: list[str] = []
+
+    class Trap:
+        def __get__(self, instance: object, owner: type | None = None) -> object:
+            invoked.append("descriptor")
+            raise RuntimeError("/private/path metaclass-secret")
+
+    class Meta(type):
+        __module__ = Trap()  # type: ignore[assignment]
+        __mro__ = Trap()  # type: ignore[assignment]
+        __dict__ = Trap()  # type: ignore[assignment]
+
+    class Subject(metaclass=Meta):
+        pass
+
+    target = normalize_target(Subject)
+
+    assert target.info.kind == "class"
+    assert target.info.module == __name__
+    assert invoked == []
+
+
+def test_import_target_bypasses_module_subclass_descriptors() -> None:
+    """Qualified import traversal reads module storage without descriptor hooks."""
+
+    invoked: list[str] = []
+
+    class StaticModule(types.ModuleType):
+        @property
+        def __dict__(self) -> dict[str, object]:  # type: ignore[override]
+            invoked.append("descriptor")
+            raise RuntimeError("/private/path module-secret")
+
+    module_name = "dryml_stage3_static_module_fixture"
+    module = StaticModule(module_name)
+    module.target = target_function
+    sys.modules[module_name] = module
+    try:
+        target = normalize_target(ImportTarget(f"{module_name}:target"))
+    finally:
+        del sys.modules[module_name]
+
+    assert target.info.kind == "import"
+    assert invoked == []
+
+
 def test_normalize_target_rejects_sourceless_functions() -> None:
     """Interactive and dynamically compiled functions are outside the whitelist."""
 
@@ -137,6 +189,22 @@ def test_target_paths_are_sanitized_and_request_handles_release() -> None:
     del target
     gc.collect()
     assert reference() is None
+
+
+def test_path_shaped_module_metadata_cannot_escape_provenance() -> None:
+    """Mutable function metadata cannot turn module fields into raw paths."""
+
+    original_module = target_function.__module__
+    target_function.__module__ = "/private/project/module-secret"
+    try:
+        target = normalize_target(target_function)
+    finally:
+        target_function.__module__ = original_module
+
+    assert target.info.module is None
+    assert target.info.filename == "test_targets.py"
+    with pytest.raises(ValueError, match="module metadata"):
+        TargetInfo("function", "target", "/private/module", "target", None, None, None, "target.py", 1, None)
 
 
 def test_facts_are_frozen_closed_values() -> None:

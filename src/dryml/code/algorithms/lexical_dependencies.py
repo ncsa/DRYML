@@ -9,7 +9,7 @@ from ..analysis import analyze
 from ..facts import FactValue, SourceLocation
 from ..graph import ProgramGraph, ProgramNode, _source_sort_key as _source_key
 from ..kernels import KernelCall, KernelContext, TraversalKernel
-from ..targets import CodeTargetInput
+from ..targets import CodeTargetInput, SourceTarget
 
 
 _FUNCTION_KINDS = frozenset({"FunctionDef", "AsyncFunctionDef"})
@@ -101,9 +101,9 @@ class _DependencyUse:
     source: SourceLocation | None
 
 
-@dataclass(slots=True)
-class _TraversalState:
-    """Private node accumulator kept local to one inherited traversal run."""
+@dataclass(frozen=True, slots=True)
+class _TraversalDependencies(LexicalDependencies):
+    """Private mutable-node carrier satisfying the public traversal state type."""
 
     nodes: list[ProgramNode]
 
@@ -174,13 +174,7 @@ def _bind_target(node: _SyntaxNode) -> set[str]:
     if node.kind in _FUNCTION_KINDS or node.kind in {"ClassDef", "Lambda"}:
         return set()
     if node.kind in _COMPREHENSION_KINDS:
-        names: set[str] = set()
-        for child in node.children:
-            if child.kind == "NamedExpr":
-                names |= _bind_target(child.children[0]) if child.children else set()
-            else:
-                names |= _bind_target(child)
-        return names
+        return _namedexpr_bindings(node)
     if node.name is not None and node.name[1] == "bind":
         return {node.name[0]}
     names = set()
@@ -204,6 +198,16 @@ def _bind_target(node: _SyntaxNode) -> set[str]:
     for child in node.children:
         names |= _bind_target(child)
     return names
+
+
+def _namedexpr_bindings(node: _SyntaxNode) -> set[str]:
+    """Return assignment-expression targets that escape a comprehension scope."""
+
+    if node.kind in _FUNCTION_KINDS or node.kind in {"ClassDef", "Lambda"}:
+        return set()
+    if node.kind == "NamedExpr":
+        return set().union(*(_bind_target(child) for child in node.children))
+    return set().union(*(_namedexpr_bindings(child) for child in node.children)) if node.children else set()
 
 
 def _argument_names(node: _SyntaxNode) -> set[str]:
@@ -251,13 +255,17 @@ def _scope_bindings(body: tuple[_SyntaxNode, ...], globals_: set[str]) -> set[st
 
     bound: set[str] = set()
     for statement in body:
-        if statement.kind in _FUNCTION_KINDS or statement.kind == "ClassDef":
-            name = _name_field(statement)
-            if name is not None:
-                bound.add(name)
-            continue
-        bound |= _bind_target(statement)
+        bound |= _statement_bindings(statement)
     return bound - globals_
+
+
+def _statement_bindings(statement: _SyntaxNode) -> set[str]:
+    """Return names introduced after one statement executes."""
+
+    if statement.kind in _FUNCTION_KINDS or statement.kind == "ClassDef":
+        name = _name_field(statement)
+        return {name} if name is not None else set()
+    return _bind_target(statement)
 
 
 class _ScopeWalker:
@@ -301,29 +309,46 @@ class _ScopeWalker:
             if use.name not in bound and use.name not in available and use.name not in self._builtins
         ]
 
-    def _collect_scope(self, node: _SyntaxNode, available: set[str]) -> list[_DependencyUse]:
+    def _collect_scope(
+        self,
+        node: _SyntaxNode,
+        available: set[str],
+        body_available: set[str] | None = None,
+    ) -> list[_DependencyUse]:
         """Collect free uses for one function, class, or lambda lexical scope."""
 
+        lexical_available = available if body_available is None else body_available
         if node.kind == "Lambda":
             arguments = next((child for child in node.children if child.kind == "arguments"), None)
             body = tuple(child for child in node.children if child is not arguments)
             header_uses: list[_DependencyUse] = []
+            header_nested: list[_DependencyUse] = []
             if arguments is not None:
-                self._walk(arguments, set(), header_uses, available)
+                self._walk(arguments, set(), header_uses, available, nested_uses=header_nested)
             bound = _argument_names(arguments) if arguments is not None else set()
             body_uses: list[_DependencyUse] = []
+            body_nested: list[_DependencyUse] = []
             for child in body:
-                self._walk(child, bound, body_uses, available | bound)
-            return self._unresolved(header_uses, set(), available) + self._unresolved(body_uses, bound, available)
+                self._walk(child, bound, body_uses, lexical_available | bound, nested_uses=body_nested)
+            return (
+                self._unresolved(header_uses, set(), available)
+                + header_nested
+                + self._unresolved(body_uses, bound, lexical_available)
+                + body_nested
+            )
 
         arguments = next((child for child in node.children if child.kind == "arguments"), None)
         type_parameters = tuple(child for child in node.children if child.kind in _TYPE_PARAMETER_KINDS)
         body = tuple(child for child in node.children if _is_statement(child))
-        header = tuple(child for child in node.children if child is not arguments and child not in type_parameters and child not in body)
+        excluded = {child.node.id for child in type_parameters + body}
+        if arguments is not None:
+            excluded.add(arguments.node.id)
+        header = tuple(child for child in node.children if child.node.id not in excluded)
         type_names = _type_parameter_names(type_parameters)
         header_uses: list[_DependencyUse] = []
+        header_nested: list[_DependencyUse] = []
         for child in type_parameters + header + ((arguments,) if arguments is not None else ()):
-            self._walk(child, type_names, header_uses, available | type_names)
+            self._walk(child, type_names, header_uses, available | type_names, nested_uses=header_nested)
         if node.kind in _FUNCTION_KINDS:
             global_names = _declared_globals(body)
             bound = _scope_bindings(body, global_names) | type_names
@@ -332,16 +357,34 @@ class _ScopeWalker:
             name = _name_field(node)
             if name is not None:
                 bound.add(name)
-        else:
-            global_names = set()
-            bound = _scope_bindings(body, global_names) | type_names
-        body_uses: list[_DependencyUse] = []
+            body_uses: list[_DependencyUse] = []
+            body_nested: list[_DependencyUse] = []
+            for child in body:
+                self._walk(child, bound, body_uses, lexical_available | bound, nested_uses=body_nested)
+            return (
+                self._unresolved(header_uses, type_names, available)
+                + header_nested
+                + self._unresolved(body_uses, bound, lexical_available)
+                + body_nested
+            )
+
+        global_names = _declared_globals(body)
+        class_bound = set(type_names)
+        body_uses = []
+        body_nested = []
         for child in body:
-            self._walk(child, bound, body_uses, available | bound)
-        return (
-            self._unresolved(header_uses, type_names, available)
-            + self._unresolved(body_uses, bound, available)
-        )
+            statement_uses: list[_DependencyUse] = []
+            self._walk(
+                child,
+                class_bound,
+                statement_uses,
+                lexical_available | class_bound,
+                nested_available=lexical_available,
+                nested_uses=body_nested,
+            )
+            body_uses.extend(self._unresolved(statement_uses, class_bound, lexical_available))
+            class_bound |= _statement_bindings(child) - global_names
+        return self._unresolved(header_uses, type_names, available) + header_nested + body_uses + body_nested
 
     def _walk(
         self,
@@ -350,14 +393,31 @@ class _ScopeWalker:
         uses: list[_DependencyUse],
         available: set[str],
         namedexpr_bound: set[str] | None = None,
+        nested_available: set[str] | None = None,
+        nested_uses: list[_DependencyUse] | None = None,
     ) -> None:
         """Collect loads from one syntax node while honoring lexical boundaries."""
 
         if node.kind in _FUNCTION_KINDS or node.kind in {"ClassDef", "Lambda"}:
-            uses.extend(self._collect_scope(node, available | bound))
+            destination = uses if nested_uses is None else nested_uses
+            destination.extend(
+                self._collect_scope(
+                    node,
+                    available | bound,
+                    available | bound if nested_available is None else nested_available,
+                )
+            )
             return
         if node.kind in _COMPREHENSION_KINDS:
-            self._walk_comprehension(node, bound, uses, available, namedexpr_bound)
+            self._walk_comprehension(
+                node,
+                bound,
+                uses,
+                available,
+                namedexpr_bound,
+                nested_available,
+                nested_uses,
+            )
             return
         if node.kind in {"Import", "ImportFrom"}:
             return
@@ -369,37 +429,37 @@ class _ScopeWalker:
             targets = [child for child in node.children if _bind_target(child)]
             for child in node.children:
                 if child not in targets:
-                    self._walk(child, bound, uses, available, namedexpr_bound)
+                    self._walk(child, bound, uses, available, namedexpr_bound, nested_available, nested_uses)
             target_bound = namedexpr_bound if namedexpr_bound is not None else bound
             for target in targets:
                 target_bound |= _bind_target(target)
             return
         if node.kind in {"For", "AsyncFor"}:
-            self._walk_targeted(node, bound, uses, available, namedexpr_bound)
+            self._walk_targeted(node, bound, uses, available, namedexpr_bound, nested_available, nested_uses)
             return
         if node.kind == "ExceptHandler":
             exception = tuple(child for child in node.children if not _is_statement(child))
             body = tuple(child for child in node.children if _is_statement(child))
             for child in exception:
-                self._walk(child, bound, uses, available, namedexpr_bound)
+                self._walk(child, bound, uses, available, namedexpr_bound, nested_available, nested_uses)
             for child in body:
-                self._walk(child, bound, uses, available, namedexpr_bound)
+                self._walk(child, bound, uses, available, namedexpr_bound, nested_available, nested_uses)
             return
         if node.kind == "Match":
             for child in node.children:
-                self._walk(child, bound, uses, available, namedexpr_bound)
+                self._walk(child, bound, uses, available, namedexpr_bound, nested_available, nested_uses)
             return
         if node.kind == "match_case":
             patterns = tuple(child for child in node.children if child.kind.startswith("Match"))
             for pattern in patterns:
-                self._walk(pattern, bound, uses, available, namedexpr_bound)
+                self._walk(pattern, bound, uses, available, namedexpr_bound, nested_available, nested_uses)
             pattern_bound = set().union(*(_bind_target(pattern) for pattern in patterns)) if patterns else set()
             for child in node.children:
                 if child not in patterns:
-                    self._walk(child, bound | pattern_bound, uses, available | pattern_bound, namedexpr_bound)
+                    self._walk(child, bound | pattern_bound, uses, available | pattern_bound, namedexpr_bound, nested_available, nested_uses)
             return
         for child in node.children:
-            self._walk(child, bound, uses, available, namedexpr_bound)
+            self._walk(child, bound, uses, available, namedexpr_bound, nested_available, nested_uses)
 
     def _walk_targeted(
         self,
@@ -408,6 +468,8 @@ class _ScopeWalker:
         uses: list[_DependencyUse],
         available: set[str],
         namedexpr_bound: set[str] | None,
+        nested_available: set[str] | None,
+        nested_uses: list[_DependencyUse] | None,
     ) -> None:
         """Walk a for-loop target after its iterable expression has been read."""
 
@@ -416,7 +478,7 @@ class _ScopeWalker:
         for child in node.children:
             if child is first_target:
                 continue
-            self._walk(child, bound, uses, available, namedexpr_bound)
+            self._walk(child, bound, uses, available, namedexpr_bound, nested_available, nested_uses)
 
     def _walk_comprehension(
         self,
@@ -425,30 +487,54 @@ class _ScopeWalker:
         uses: list[_DependencyUse],
         available: set[str],
         namedexpr_bound: set[str] | None,
+        nested_available: set[str] | None,
+        nested_uses: list[_DependencyUse] | None,
     ) -> None:
         """Interpret comprehension generators as their own lexical scope."""
 
         generators = tuple(child for child in node.children if child.kind == "comprehension")
         expressions = tuple(child for child in node.children if child not in generators)
         local_bound: set[str] = set()
-        local_uses: list[_DependencyUse] = []
         outer_named = namedexpr_bound if namedexpr_bound is not None else bound
-        for generator in generators:
+        scope_available = available | bound if nested_available is None else nested_available
+        for index, generator in enumerate(generators):
             targets = [child for child in generator.children if _bind_target(child)]
             target = targets[0] if targets else None
-            target_index = generator.children.index(target) if target is not None else len(generator.children)
-            for child in generator.children[:target_index]:
-                self._walk(child, local_bound, local_uses, available | bound | local_bound, outer_named)
+            expressions_in_generator = tuple(child for child in generator.children if child is not target)
+            iterator = expressions_in_generator[0] if expressions_in_generator else None
+            if iterator is not None:
+                iterator_uses: list[_DependencyUse] = []
+                iterator_nested: list[_DependencyUse] = []
+                iterator_available = available | bound | local_bound if index == 0 else scope_available | local_bound
+                iterator_bound = bound | local_bound if index == 0 else local_bound
+                self._walk(
+                    iterator,
+                    iterator_bound,
+                    iterator_uses,
+                    iterator_available,
+                    outer_named,
+                    nested_available if index == 0 else None,
+                    iterator_nested,
+                )
+                uses.extend(self._unresolved(iterator_uses, iterator_bound, iterator_available))
+                (uses if nested_uses is None else nested_uses).extend(iterator_nested)
             if target is not None:
                 local_bound |= _bind_target(target)
-            for child in generator.children[target_index + 1:]:
-                self._walk(child, local_bound, local_uses, available | bound | local_bound, outer_named)
+            for child in expressions_in_generator[1:]:
+                filter_uses: list[_DependencyUse] = []
+                filter_nested: list[_DependencyUse] = []
+                self._walk(child, local_bound, filter_uses, scope_available | local_bound, outer_named, nested_uses=filter_nested)
+                uses.extend(self._unresolved(filter_uses, local_bound, scope_available))
+                (uses if nested_uses is None else nested_uses).extend(filter_nested)
         for expression in expressions:
-            self._walk(expression, local_bound, local_uses, available | bound | local_bound, outer_named)
-        uses.extend(self._unresolved(local_uses, local_bound, available | bound))
+            expression_uses: list[_DependencyUse] = []
+            expression_nested: list[_DependencyUse] = []
+            self._walk(expression, local_bound, expression_uses, scope_available | local_bound, outer_named, nested_uses=expression_nested)
+            uses.extend(self._unresolved(expression_uses, local_bound, scope_available))
+            (uses if nested_uses is None else nested_uses).extend(expression_nested)
 
 
-class LexicalDependencyKernel(TraversalKernel[None, _TraversalState, LexicalDependencies]):
+class LexicalDependencyKernel(TraversalKernel[None, LexicalDependencies, LexicalDependencies]):
     """Collect deterministic free-name evidence from one immutable program graph.
 
     The kernel uses the inherited unfused traversal template and private local
@@ -460,7 +546,7 @@ class LexicalDependencyKernel(TraversalKernel[None, _TraversalState, LexicalDepe
     output_type = LexicalDependencies
     fusion_safe = True
 
-    def begin(self, value: None, context: KernelContext) -> _TraversalState:
+    def begin(self, value: None, context: KernelContext) -> LexicalDependencies:
         """Create private graph-node accumulation state.
 
         Args:
@@ -477,9 +563,9 @@ class LexicalDependencyKernel(TraversalKernel[None, _TraversalState, LexicalDepe
             None.
         """
 
-        return _TraversalState([])
+        return _TraversalDependencies((), [])
 
-    def visit(self, node: ProgramNode, state: _TraversalState, context: KernelContext) -> _TraversalState:
+    def visit(self, node: ProgramNode, state: LexicalDependencies, context: KernelContext) -> LexicalDependencies:
         """Accumulate one public graph node without mutating graph data.
 
         Args:
@@ -497,10 +583,12 @@ class LexicalDependencyKernel(TraversalKernel[None, _TraversalState, LexicalDepe
             Mutates only this execution's private traversal state.
         """
 
+        if type(state) is not _TraversalDependencies:
+            raise TypeError("lexical traversal state is invalid")
         state.nodes.append(node)
         return state
 
-    def finish(self, state: _TraversalState, context: KernelContext) -> LexicalDependencies:
+    def finish(self, state: LexicalDependencies, context: KernelContext) -> LexicalDependencies:
         """Convert public syntax and evidence nodes into lexical dependencies.
 
         Args:
@@ -517,6 +605,8 @@ class LexicalDependencyKernel(TraversalKernel[None, _TraversalState, LexicalDepe
             None. No source is executed and no name is resolved or imported.
         """
 
+        if type(state) is not _TraversalDependencies:
+            raise TypeError("lexical traversal state is invalid")
         return _ScopeWalker(_syntax_roots(state.nodes, context.graph)).collect()
 
 
@@ -542,6 +632,12 @@ def collect_lexical_dependencies(target: CodeTargetInput) -> LexicalDependencies
     """
 
     return analyze(target, (KernelCall(LexicalDependencyKernel(), None),)).require(LexicalDependencyKernel)
+
+
+def _collect_source_dependencies(source: str) -> LexicalDependencies:
+    """Keep core's source-only use inside the approved lexical leaf."""
+
+    return collect_lexical_dependencies(SourceTarget(source))
 
 
 __all__ = [

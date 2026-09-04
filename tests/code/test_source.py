@@ -15,6 +15,15 @@ def decorated_source_subject() -> str:
     return "subject"
 
 
+def function_with_lambda_default(callback=lambda: 1) -> object:
+    """Provide a named function whose first line also contains a lambda."""
+
+    return callback
+
+
+def one_line_lambda_body() -> object: return lambda: 1
+
+
 def test_get_source_info_reads_file_backed_function() -> None:
     """File-backed functions expose dedented source and one-based origin lines."""
 
@@ -24,6 +33,16 @@ def test_get_source_info_reads_file_backed_function() -> None:
     assert source.source.startswith("def decorated_source_subject")
     assert source.start_line is not None and source.start_line > 0
     assert source.filename is not None
+
+
+def test_named_function_source_ignores_same_line_lambdas() -> None:
+    """Inline lambdas do not make their containing function ambiguous."""
+
+    default_source = get_source_info(function_with_lambda_default)
+    body_source = get_source_info(one_line_lambda_body)
+
+    assert default_source is not None and default_source.source.startswith("def function_with_lambda_default")
+    assert body_source is not None and body_source.source.startswith("def one_line_lambda_body")
 
 
 def test_extract_source_accepts_static_source_target_without_execution() -> None:

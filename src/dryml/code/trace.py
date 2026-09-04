@@ -91,7 +91,11 @@ def _constant_fingerprint(value: object) -> tuple[object, ...]:
     if value_type is tuple:
         return ("tuple", tuple(("item", index, _constant_fingerprint(item)) for index, item in enumerate(value)))
     if value_type is frozenset:
-        return ("frozenset", tuple(("item", index, item) for index, item in enumerate(sorted(_constant_fingerprint(item) for item in value))))
+        fingerprints = tuple(_constant_fingerprint(item) for item in value)
+        return ("frozenset", tuple(
+            ("item", index, item)
+            for index, item in enumerate(sorted(fingerprints, key=_encode))
+        ))
     if value_type is types.CodeType:
         return ("code", _code_fingerprint(value))
     return ("other", value_type.__module__, value_type.__qualname__)
@@ -108,6 +112,14 @@ def _code_fingerprint(code: types.CodeType) -> tuple[object, ...]:
         qualname,
         filename,
         code.co_firstlineno,
+        code.co_argcount,
+        getattr(code, "co_posonlyargcount", 0),
+        code.co_kwonlyargcount,
+        code.co_flags,
+        code.co_names,
+        code.co_varnames,
+        code.co_freevars,
+        code.co_cellvars,
         hashlib.sha256(code.co_code).hexdigest(),
         tuple(("constant", index, _constant_fingerprint(item)) for index, item in enumerate(code.co_consts)),
     )
@@ -409,7 +421,7 @@ def trace(
             if event == "return":
                 active.pop(identifier, None)
             return hook
-        except BaseException:
+        except Exception:
             callback_failed = True
             active.clear()
             return None
@@ -427,6 +439,8 @@ def trace(
         except BaseException as error:
             interrupted = error
     finally:
+        if sys.gettrace() is not hook:
+            callback_failed = True
         try:
             sys.settrace(prior)
         except BaseException:
@@ -462,7 +476,10 @@ def trace(
         "failed" if invocation_failed or callback_failed else "succeeded",
         Diagnostic("trace.invocation", "target invocation failed") if invocation_failed or callback_failed else None,
     )
-    diagnostics = base_graph.diagnostics + tuple(diagnostic for outcome in outcomes for diagnostic in outcome.diagnostics)
+    diagnostics = base_graph.diagnostics
+    if overflow:
+        diagnostics += (Diagnostic("trace.limit", "trace event limit exceeded"),)
+    diagnostics += tuple(diagnostic for outcome in outcomes for diagnostic in outcome.diagnostics)
     if invocation.diagnostic is not None:
         diagnostics += (invocation.diagnostic,)
     return AnalysisResult(normalized.info, base_graph, trace_graph, outcomes, facts, diagnostics, invocation)

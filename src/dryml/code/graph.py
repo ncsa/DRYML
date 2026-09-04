@@ -21,10 +21,13 @@ from .targets import CodeTargetInput, TargetInfo, _TARGET_KINDS, normalize_targe
 ProgramNodeKind: TypeAlias = Literal[
     "target", "syntax", "lexical_symbol", "attribute_access", "static_call", "trace_event"
 ]
+"""Closed vocabulary for immutable program-graph nodes."""
+
 ProgramEdgeKind: TypeAlias = Literal[
     "containment", "lexical_reference", "access", "call",
     "trace_sequence", "frame_descent", "observed_code",
 ]
+"""Closed vocabulary for immutable program-graph relationships."""
 
 _NODE_KINDS = frozenset(get_args(ProgramNodeKind))
 _EDGE_KINDS = frozenset(get_args(ProgramEdgeKind))
