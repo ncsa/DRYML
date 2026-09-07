@@ -73,7 +73,25 @@ propagate normally.  A target invalidated by failed exact restoration cannot be
 entered again; load fresh state from the retained checkpoint first.
 
 Methods receive a private active `ManagedContext` with read-only selected Stores,
-operation/attempt IDs, resume flag, and associated checkpoint reference.  U7 owns
-checkpoint callbacks and interruption safe points, so `checkpoint()` and
-`interrupt()` explicitly reject use until that protocol is implemented rather
-than publishing partial lifecycle state.
+operation/attempt IDs, resume flag, and associated checkpoint reference.
+`checkpoint()` deep-saves and associates the complete state, then invokes ordered
+callbacks outside control locks before servicing a request that was durable at
+that boundary. A callback failure retains the associated checkpoint and records
+`callback_error`; a checkpoint save or association failure invokes no callbacks
+and records `publication_error`. A request arriving after the post-callback
+decision waits for another checkpoint.
+
+`interrupt(cause=...)` validates its optional exception cause before saving,
+then follows the same checkpoint/callback boundary and commits `interrupted`
+before raising `ManagedInterrupted` chained from that cause. A committed local
+interruption remains terminal even if user code catches it: the context becomes
+inactive, completion is withheld, and further context safe points are rejected.
+Other public `ManagedInterrupted` exceptions, including ones from a disjoint
+nested managed call, are ordinary method or callback failures for the enclosing
+operation. An escaping `KeyboardInterrupt` publishes `interrupted` with the last
+associated checkpoint, does not save arbitrary mutated live state, and raises
+`ManagedInterrupted` chained from the original interrupt. Ordinary and callback
+exceptions are re-raised unchanged after failure recording; when that recording
+is indeterminate or fails, an actionable managed control error is chained from
+the original exception. `SystemExit` and other non-interruption base exceptions
+receive best-effort cleanup and are re-raised unchanged.

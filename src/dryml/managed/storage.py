@@ -121,7 +121,7 @@ class _ManagedStateOwnership(AbstractContextManager):
     """Compose a core live-graph reservation with selected state-Store leases.
 
     The private owner token is created by :func:`_acquire_state_ownership` and is
-    retained through a future U6 invocation, including user callbacks and final
+    retained through a complete managed invocation, including user callbacks and final
     publication.  It never serializes a Repo, Store, or native descriptor.
     """
 

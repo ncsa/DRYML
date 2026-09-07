@@ -370,10 +370,11 @@ class ManagedControlStore:
             attempt_id: Exact active attempt that must still own current authority.
             owner_id: Exact active invocation owner that must still be running.
             build: Function that receives the freshly reread running snapshot and
-                returns its next-generation replacement.
+                returns its next-generation replacement, or ``None`` to make a
+                read-only owner-fenced decision.
 
         Returns:
-            The committed replacement built from the current authority.
+            The committed replacement, or ``None`` when ``build`` made no change.
 
         Raises:
             ManagedConflictError: If the attempt/owner changed or the selected
@@ -402,6 +403,8 @@ class ManagedControlStore:
             if current.generation == _MAX_GENERATION:
                 raise ManagedControlError("generation_overflow", "managed generation cannot advance beyond 2**63-1")
             proposed = build(current)
+            if proposed is None:
+                return None
             if (
                 proposed.operation_id != operation_id
                 or proposed.generation != current.generation + 1
@@ -505,7 +508,7 @@ class ManagedControlStore:
                 available for a reliable probe.
 
         Side Effects:
-            Opens and releases short nonblocking leases only. U6 must re-read the
+            Opens and releases short nonblocking leases only. Callers must re-read the
             selected generation before interpreting this evidence.
         """
 

@@ -108,25 +108,38 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
             context = _create_context(
                 state_store=stores.state_store, control_store=stores.control_store,
                 operation_id=operation_id, attempt_id=running.attempt_id,
-                is_resuming=is_resuming, checkpoint_state_ref=checkpoint,
+                owner_id=running.owner_id, is_resuming=is_resuming,
+                checkpoint_state_ref=checkpoint, obj=instance, state_repo=state_repo,
+                ownership=ownership, control=control, callbacks=options.callbacks,
             )
             try:
                 result = descriptor._target(instance, *args, managed=context, **kwargs)
+                context._raise_if_interrupted()
+            except ManagedInterrupted as error:
+                if context._terminal_interrupted:
+                    raise
+                _record_failure(control, running, context._failure_code or "method_error", error)
+                raise
             except KeyboardInterrupt as error:
-                _record_failure(control, running, "keyboard_interrupt", error)
+                _record_interruption(control, running, error)
                 raise ManagedInterrupted("interrupted", "managed method received KeyboardInterrupt") from error
             except BaseException as error:
-                _record_failure(control, running, "method_error", error)
+                if isinstance(error, ManagedPublicationError) and error.outcome == "indeterminate":
+                    # A visible pending intent is authoritative uncertainty; a
+                    # generic failure transition must not replace it.
+                    raise
+                if isinstance(error, (SystemExit, GeneratorExit)):
+                    _record_base_exception_failure(control, running, error)
+                else:
+                    _record_failure(control, running, context._failure_code or "method_error", error)
                 raise
-            finally:
-                context._deactivate()
-                context = None
             try:
                 final_state = state_repo.save_object(
                     instance, store=stores.state_store, main=False, alias=None,
                     deep_capture=True, federated=False, reservation=ownership.reservation,
                 )
                 validate_state_ref(stores.state_store, final_state)
+                _completion_boundary("final_state_published")
                 control.transition_running_owner(
                     operation_id, attempt_id=running.attempt_id, owner_id=running.owner_id,
                     build=lambda current: replace(
@@ -135,6 +148,7 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
                         final_digest=final_state.digest(), failure_code=None,
                     ),
                 )
+                _completion_boundary("final_associated")
             except BaseException as error:
                 if not isinstance(error, ManagedPublicationError) or error.outcome == "not_committed":
                     _record_failure(control, running, "publication_error", error)
@@ -267,8 +281,59 @@ def _record_failure(control, running: ControlSnapshot, code: str, original: Base
         # A replacement owner or terminal state is authoritative; stale cleanup
         # must not overwrite it or replace the original method failure.
         return
+    except ManagedPublicationError as error:
+        if error.outcome == "indeterminate":
+            raise ManagedPublicationError(
+                "indeterminate", "managed failure publication requires reconciliation",
+            ) from original
+        raise ManagedControlError("failure_recording_failed", "could not publish managed failure") from original
     except BaseException:
         raise ManagedControlError("failure_recording_failed", "could not publish managed failure") from original
+
+
+def _record_base_exception_failure(control, running: ControlSnapshot, original: BaseException) -> None:
+    """Attempt terminal cleanup for non-interruption BaseExceptions without masking them."""
+
+    try:
+        _record_failure(control, running, "method_error", original)
+    except BaseException:
+        pass
+
+
+def _record_interruption(control, running: ControlSnapshot, original: KeyboardInterrupt) -> None:
+    """Commit an honest terminal interruption without saving mutated live state.
+
+    Args:
+        control: Selected current-authority adapter for the active invocation.
+        running: Invocation's owner-fenced running snapshot.
+        original: Escaping caller interruption whose cause must be preserved.
+
+    Raises:
+        ManagedControlError: If interrupted authority cannot be committed safely,
+            chained from ``original`` rather than a storage-side cleanup error.
+
+    Side Effects:
+        Transitions the active authority to ``interrupted`` while retaining its
+        last associated checkpoint, if any.
+    """
+
+    try:
+        control.transition_running_owner(
+            running.operation_id, attempt_id=running.attempt_id, owner_id=running.owner_id,
+            build=lambda current: replace(
+                current, owner_id=None, generation=current.generation + 1,
+                state="interrupted", interrupt_request=None, final_digest=None,
+                failure_code=None,
+            ),
+        )
+    except ManagedConflictError:
+        raise ManagedControlError("interruption_recording_failed", "could not publish managed interruption") from original
+    except ManagedPublicationError as error:
+        raise ManagedPublicationError(
+            error.outcome, "could not publish managed interruption",
+        ) from original
+    except BaseException:
+        raise ManagedControlError("interruption_recording_failed", "could not publish managed interruption") from original
 
 
 def _require_receiver(instance: object) -> None:
@@ -327,6 +392,10 @@ def _validate_attempt_id(attempt_id: str) -> None:
         raise ManagedConfigError(message="expected_attempt_id must be UUID hex") from error
     if parsed.hex != attempt_id:
         raise ManagedConfigError(message="expected_attempt_id must be lowercase UUID hex")
+
+
+def _completion_boundary(stage: str) -> None:
+    """Provide a no-op in-process seam for deterministic final-save crash tests."""
 
 
 __all__ = ["invoke", "request_interrupt", "status"]

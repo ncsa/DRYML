@@ -25,7 +25,7 @@ class ManagedStatus:
         failure_code: Static failure code, if current authority is failed.
 
     Side Effects:
-        None. U6 reads selected lifecycle authority into this value.
+        None. Managed reads selected lifecycle authority into this value.
     """
 
     state: str
@@ -50,7 +50,7 @@ class InterruptRequestResult:
         generation: Committed authority generation observed by the request.
 
     Side Effects:
-        None. U6 publishes and reports the selected request outcome.
+        None. Managed publishes and reports the selected request outcome.
     """
 
     outcome: str

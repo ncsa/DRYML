@@ -1,8 +1,4 @@
-"""Synchronous managed-operation declaration, lifecycle, and selected authority.
-
-U6 provides start, resume, rerun, status, and cooperative request publication.
-U7 owns checkpoint callbacks and interruption safe points.
-"""
+"""Synchronous managed-operation declaration, lifecycle, and safe-point authority."""
 
 from .config import ManagedConfig
 from .descriptor import managed_operation

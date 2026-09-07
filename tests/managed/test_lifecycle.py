@@ -123,6 +123,36 @@ def test_method_error_is_recorded_without_replacing_the_application_exception(tm
     assert (status.state, status.failure_code) == ("failed", "method_error")
 
 
+def test_indeterminate_failure_recording_is_chained_from_the_method_error(tmp_path, monkeypatch):
+    """Failure publication uncertainty preserves the application exception as cause."""
+
+    class IndeterminateFailure(Pickleable):
+        """Receiver that exposes its exact ordinary error for chain assertions."""
+
+        def __init__(self):
+            self.error = ValueError("application failure")
+
+        @managed_operation()
+        def fail(self, *, managed):
+            """Raise the retained application error after lifecycle entry."""
+
+            raise self.error
+
+    store = DirStore(tmp_path / "state")
+    value = IndeterminateFailure(repo=Repo((store,)))
+    original = ManagedControlStore._clear_intent_and_acknowledge
+
+    def leave_failed_pending(self, operation, snapshot, digest):
+        if snapshot.state == "failed":
+            raise ManagedPublicationError("indeterminate", "failure acknowledgement is uncertain")
+        return original(self, operation, snapshot, digest)
+
+    monkeypatch.setattr(ManagedControlStore, "_clear_intent_and_acknowledge", leave_failed_pending)
+    with pytest.raises(ManagedPublicationError) as caught:
+        value.fail(managed=ManagedConfig(state_store=store))
+    assert (caught.value.outcome, caught.value.__cause__) == ("indeterminate", value.error)
+
+
 @pytest.mark.parametrize("member, expected", [("finish", "completed"), ("fail_after_request", "failed")])
 def test_late_request_does_not_stale_owner_completion_or_failure(tmp_path, member, expected):
     """A same-owner request advances generation without invalidating terminal cleanup."""

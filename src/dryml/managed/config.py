@@ -63,7 +63,7 @@ class ManagedConfig:
 
         Returns:
             A private immutable policy value with callbacks copied to a tuple for
-            the current U6 invocation.
+            the current invocation.
 
         Raises:
             ManagedConfigError: If a caller mutated the retained callback list to
