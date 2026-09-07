@@ -24,8 +24,19 @@ temporary files, then atomically published. POSIX publication also synchronizes
 the parent directory; on Windows the adapter synchronizes regular files and uses
 atomic replacement, without claiming unsupported directory-descriptor fsync.
 
-This unit does not yet execute methods, acquire graph-lifetime ownership,
-checkpoint state, expose status, or request interruption. Those lifecycle
-behaviors remain deferred to U5-U7; the U4 primitives are intentionally narrow
-so those units can compose them without introducing histories, journals,
-locators, or a generic records layer.
+Managed lifetime ownership now composes core's process-local exact live-graph
+reservation with nonblocking `dryml.locking` leases for every stateful ObjectId.
+The selected state Store owns `managed/locks/v1/<hh>/<digest>.lock`; its managed
+format gate is bootstrapped through the same U4 Store-writer protocol even when
+control uses another Store. Lock paths normalize a physical DirStore root, so
+separate handles and control Stores cannot bypass active overlapping state
+ownership. Acquisition is all-or-nothing, releases partial leases in reverse
+order, and is retained through the future invocation lifetime without holding a
+Store writer or control lock over workload hooks. A non-mutating complete-lock
+probe is available to U6 status/request handling: contention is inconclusive and
+never itself classifies an owner as dead.
+
+This unit does not yet execute methods, checkpoint state, expose status, or
+request interruption. Those lifecycle behaviors remain deferred to U6-U7; the
+ownership primitives are intentionally narrow so those units can compose them
+without introducing histories, journals, locators, or a generic records layer.

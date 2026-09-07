@@ -22,7 +22,7 @@ from dryml.locking import LockError, interprocess_lock
 
 from .errors import ManagedConflictError, ManagedControlError, ManagedPublicationError, ManagedRecoveryError
 from .identity import _operation_digest_from_object_ref_digest
-from .storage import validate_state_ref
+from .storage import _probe_state_ownership, validate_state_ref
 
 _MAX_SNAPSHOT_BYTES = 64 * 1024
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -371,6 +371,27 @@ class ManagedControlStore:
                 self._validate_references(snapshot)
                 return snapshot
             return self._reconcile_locked(operation, operation_id)
+
+    def probe_state_ownership(self, object_ids) -> bool:
+        """Probe complete selected state-lock availability without changing control.
+
+        Args:
+            object_ids: Exact stateful ObjectIds covered by the selected operation.
+
+        Returns:
+            ``True`` only when every lock was observed free and released again;
+            ``False`` is contention, not evidence about a snapshot owner's life.
+
+        Raises:
+            ManagedStoreError: If state-lock capability or its format gate is not
+                available for a reliable probe.
+
+        Side Effects:
+            Opens and releases short nonblocking leases only. U6 must re-read the
+            selected generation before interpreting this evidence.
+        """
+
+        return _probe_state_ownership(self.state_store, object_ids)
 
     def _publish_replacement(self, operation: str, current: ControlSnapshot, current_payload: bytes, proposed: ControlSnapshot) -> ControlSnapshot:
         """Publish intent then current replacement, retaining evidence on uncertainty."""

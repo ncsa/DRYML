@@ -99,6 +99,18 @@ def test_graph_reservation_rejects_a_sibling_thread_before_hooks(tmp_path):
     assert not thread.is_alive()
 
 
+def test_graph_reservation_orders_object_ids_by_canonical_identity(tmp_path):
+    """Reservation order is a full canonical ObjectId order, not display truncation."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    root = StatelessRoot(ReservedState(3, repo=repo), repo=repo)
+
+    with repo.reserve_state_graph(root) as reservation:
+        assert reservation.object_ids == tuple(
+            sorted(reservation.object_ids, key=lambda object_id: object_id.__stable_leaf_bytes__())
+        )
+
+
 @pytest.mark.parametrize("reuse_live", ["matching", "greedy"])
 def test_reserved_logical_object_is_not_reused_by_a_sibling_thread(tmp_path, reuse_live):
     repo = Repo(DirStore(tmp_path / "store"))

@@ -53,7 +53,7 @@ class StateGraphReservation(AbstractContextManager):
         if authority is not _AUTHORITY:
             raise TypeError("StateGraphReservation instances are created by Repo.reserve_state_graph().")
         self.object_ref = object_ref
-        self.object_ids = tuple(sorted(set(object_ids), key=str))
+        self.object_ids = tuple(sorted(set(object_ids), key=lambda value: value.__stable_leaf_bytes__()))
         self._nodes = tuple(nodes)
         self._node_ids = frozenset(id(node) for node in self._nodes)
         self._object_ids = frozenset(self.object_ids)
