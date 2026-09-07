@@ -11,6 +11,7 @@
     "formats": "medium",
     "jax": "heavy",
     "locking": "medium",
+    "managed": "medium",
     "methods": "medium",
     "models": "heavy",
     "multi_framework": "heavy",
