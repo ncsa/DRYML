@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 import zipfile
 
 _REQUIRED_MODULES = {
+    "dryml/locking.py",
     "dryml/core/__init__.py",
     "dryml/core/cdef_codec.py",
     "dryml/core/cdef_identity.py",
@@ -119,6 +120,13 @@ def test_wheel_contains_port_modules_without_retired_core(
             for name in names
             if name.startswith("dryml/environments/") and name.endswith(".py")
         }
+        native_lock_sources = {
+            name
+            for name in names
+            if name.startswith("dryml/")
+            and name.endswith(".py")
+            and ("import fcntl" in archive.read(name).decode("utf-8") or "import msvcrt" in archive.read(name).decode("utf-8"))
+        }
     assert _REQUIRED_MODULES <= names
     code_modules = {
         name for name in names if name.startswith("dryml/code/") and name.endswith(".py")
@@ -141,6 +149,8 @@ def test_wheel_contains_port_modules_without_retired_core(
     }
     assert not _RETIRED_CODE_MODULES & names
     assert not any(name.startswith("dryml/core2/") for name in names)
+    assert "dryml/core/store/locking.py" not in names
+    assert native_lock_sources == {"dryml/locking.py"}
     assert "dryml/core/repo_graph.py" not in names
 
 
@@ -186,5 +196,11 @@ def test_sdist_contains_port_modules_without_retired_core(
     }
     assert not {f"src/{name}" for name in _RETIRED_CODE_MODULES} & names
     assert not any(name.startswith("src/dryml/core2/") for name in names)
+    assert "src/dryml/core/store/locking.py" not in names
+    assert {
+        name
+        for name, source in package_sources.items()
+        if "import fcntl" in source or "import msvcrt" in source
+    } == {"src/dryml/locking.py"}
     assert "src/dryml/core/repo_graph.py" not in names
     assert not any(name.startswith("tutorials/") for name in names)

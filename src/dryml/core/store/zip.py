@@ -10,7 +10,7 @@ import tempfile
 import zipfile
 
 from .dir import DirStore
-from .locking import interprocess_lock
+from ...locking import interprocess_lock
 from .store import StoreAuthorityError, StoreCapabilityError, StorePublicationCapabilities
 
 

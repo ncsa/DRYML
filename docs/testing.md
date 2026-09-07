@@ -3,7 +3,7 @@
 DRYML tests are organized by feature category and by speed tier.
 
 Maintained categories include `formats`, `annotations`, `environments`,
-`worlds`, `runtime`, `session`, `core`, `package`, `data`, `execute`, `models`,
+`worlds`, `runtime`, `session`, `core`, `locking`, `package`, `data`, `execute`, `models`,
 `ray`, `tf`, `torch`, `jax`, and `multi_framework`. Speed tiers are applied
 automatically from `tests/test_tiers.json` by the DRYML pytest timing plugin.
 
@@ -119,7 +119,7 @@ When adding tests:
 
 1. Put the test in the category directory that best describes the feature.
 2. Prefer small pure tests that can live in `smoke`.
-3. Put integration, subprocess, SQLite, or import-safety tests in `medium` unless they are clearly heavyweight.
+3. Put integration, subprocess, SQLite, locking, or import-safety tests in `medium` unless they are clearly heavyweight.
 4. Keep framework imports, training, dataset-backed tests, and multi-framework tests in `heavy`.
 5. Run `./tests.sh smoke` first, then `./tests.sh medium`, then relevant `heavy` tests.
 6. Run `./tests.sh profile --unknown-only` to populate node-tier timings for new tests.

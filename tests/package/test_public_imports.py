@@ -177,6 +177,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "freeze",
     "load_object",
     "load_state_ref",
+    "locking",
     "methods",
     "Object",
     "ObjectId",
@@ -309,6 +310,7 @@ print(json.dumps({
          if name in dryml.__all__
      ),
      "root_methods": dryml.methods is __import__("dryml.methods", fromlist=["*"]),
+      "root_locking": dryml.locking is __import__("dryml.locking", fromlist=["*"]),
      "aliases": {
          "env": dryml.env is dryml.environments,
          "world": dryml.world is dryml.worlds,
@@ -324,6 +326,7 @@ print(json.dumps({
     assert set(data["exports"]) == _EXPECTED_ROOT_EXPORTS
     assert data["root_core_conveniences"]
     assert data["root_methods"]
+    assert data["root_locking"]
     assert data["aliases"] == {"env": True, "world": True, "requirements": "dryml.requirements"}
     assert data["version"] == data["metadata_version"] == "0.3.0.dev2"
     assert "site-packages" in data["module"].replace("\\", "/")

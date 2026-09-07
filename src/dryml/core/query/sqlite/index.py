@@ -47,17 +47,7 @@ from .connection import SQLiteConnectionManager
 from .schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION, initialize_schema, stored_compatibility_decision, validate_schema
 from .utils import is_sqlite_busy_error, wal_runtime_is_known_safe
 from .lowering import SQLiteOptimizerPolicy, SQLiteRelationCompiler
-
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - selected only on POSIX hosts.
-    fcntl = None
-
-try:
-    import msvcrt
-except ImportError:  # pragma: no cover - selected only on Windows hosts.
-    msvcrt = None
+from ....locking import LockError, try_lock_file, unlock_file
 
 
 _CODEC = QueryIndexCodec()
@@ -66,48 +56,22 @@ _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
 
 
-def _claim_lock_backend() -> str:
-    """Return the platform-selected primitive used for rebuild claim locking."""
-
-    return "windows" if os.name == "nt" else "posix"
-
-
 def _try_lock_claim_file(fd: int) -> bool:
     """Try to hold the cross-process lock for a query-index claim file."""
 
-    if _claim_lock_backend() == "posix":
-        if fcntl is None:
-            raise QueryIndexUnavailable("POSIX claim locking is unavailable for the SQLite query index.")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return False
-        return True
-
-    if msvcrt is None:
-        raise QueryIndexUnavailable("Windows claim locking is unavailable for the SQLite query index.")
-    if os.fstat(fd).st_size == 0:
-        os.write(fd, b"\0")
-    os.lseek(fd, 0, os.SEEK_SET)
     try:
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-    except OSError:
-        return False
-    return True
+        return try_lock_file(fd)
+    except LockError as error:
+        raise QueryIndexUnavailable("SQLite query-index claim locking is unavailable.") from error
 
 
 def _unlock_claim_file(fd: int) -> None:
     """Release a query-index claim file lock held by this process."""
 
-    if _claim_lock_backend() == "posix":
-        if fcntl is None:
-            raise QueryIndexUnavailable("POSIX claim locking is unavailable for the SQLite query index.")
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return
-    if msvcrt is None:
-        raise QueryIndexUnavailable("Windows claim locking is unavailable for the SQLite query index.")
-    os.lseek(fd, 0, os.SEEK_SET)
-    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    try:
+        unlock_file(fd)
+    except LockError as error:
+        raise QueryIndexUnavailable("SQLite query-index claim unlocking is unavailable.") from error
 
 
 class SQLiteStoreQueryIndex:

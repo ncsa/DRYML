@@ -12,7 +12,7 @@ from uuid import uuid4
 from pathlib import Path
 from typing import Iterable, Literal
 
-from .locking import interprocess_lock, supports_advisory_locking
+from ...locking import interprocess_lock, supports_advisory_locking
 from .records import (
     ClaimRecord, DeclarationRecord, DefinitionRecord, LocalStateManifest,
     MainRefRecord, ObjectAliasRecord, StateAliasRecord, StateRefRecord,

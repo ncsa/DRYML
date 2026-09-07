@@ -28,6 +28,7 @@ _SUBMODULE_EXPORTS = {
     "session": "dryml.session",
     "annotations": "dryml.annotations",
     "methods": "dryml.methods",
+    "locking": "dryml.locking",
 }
 
 _CORE_EXPORTS = {
@@ -106,6 +107,7 @@ __all__ = [
     "session",
     "annotations",
     "methods",
+    "locking",
     "config",
     "configure",
     "reset_config",

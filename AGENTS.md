@@ -33,6 +33,8 @@ is already implemented:
 - `core` owns CDef, Object, ObjectRef, StateRef, Repo, Store, and query
   authority; `core/utils/graph` contains supported generic graph algorithms.
 - `formats` owns dependency-light canonical encoding primitives.
+- `locking` owns dependency-light native advisory-lock mechanics; Store and
+  query-index consumers retain their paths and domain lifecycle policies.
 - `annotations` is the passive typed-metadata attachment and deterministic
   collection kernel; metadata interpretation and policy stay with consumers.
 - `methods` owns logical callable IR, implementation traits, implementation

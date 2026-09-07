@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+import dryml.locking as locking_module
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
@@ -536,8 +537,8 @@ def test_windows_claim_seam_unlocks_and_closes_before_cleanup(tmp_path, monkeypa
         assert closed
         original_unlink(path, owner_identity)
 
-    monkeypatch.setattr(sqlite_index_module, "_claim_lock_backend", lambda: "windows")
-    monkeypatch.setattr(sqlite_index_module, "msvcrt", FakeMSVCRT)
+    monkeypatch.setattr(locking_module, "fcntl", None)
+    monkeypatch.setattr(locking_module, "msvcrt", FakeMSVCRT)
     monkeypatch.setattr(sqlite_index_module.os, "close", close)
     monkeypatch.setattr(index, "_unlink_claim_if_owned", unlink_after_close)
 

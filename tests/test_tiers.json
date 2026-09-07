@@ -10,6 +10,7 @@
     "execute": "medium",
     "formats": "medium",
     "jax": "heavy",
+    "locking": "medium",
     "methods": "medium",
     "models": "heavy",
     "multi_framework": "heavy",
@@ -1180,6 +1181,9 @@
     "tests/execute/test_reference_transport_rejection.py": "medium",
     "tests/package/test_public_imports.py": "medium",
     "tests/package/test_release_artifacts.py": "medium",
+    "tests/locking/test_advisory_locking.py": "medium",
+    "tests/locking/test_import_safety.py": "medium",
+    "tests/locking/test_process_lifecycle.py": "medium",
     "tests/ray/test_reference_transport_rejection.py": "heavy"
   },
   "thresholds": {

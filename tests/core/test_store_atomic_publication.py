@@ -356,7 +356,7 @@ def test_store_writer_lock_serializes_processes_at_the_reference_boundary(tmp_pa
         args=(store.base_dir, "2" * 64, attempted, completed, results),
     )
 
-    from dryml.core.store.locking import interprocess_lock
+    from dryml.locking import interprocess_lock
     with interprocess_lock(store._writer_lock_path):
         writer.start()
         assert attempted.wait(10)
