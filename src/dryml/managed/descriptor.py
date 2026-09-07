@@ -1,4 +1,4 @@
-"""Checked managed-method descriptors with inert U3 bound invocation views."""
+"""Checked managed-method descriptors and synchronous bound lifecycle views."""
 
 from __future__ import annotations
 
@@ -9,8 +9,7 @@ import types
 from dryml.annotations import attach_annotation, own_annotations
 
 from .config import ManagedConfig
-from .errors import ManagedConfigError, ManagedControlError, ManagedDeclarationError
-from .identity import argument_digest
+from .errors import ManagedConfigError, ManagedDeclarationError
 
 
 def managed_operation(*, resumable: bool = False):
@@ -146,7 +145,7 @@ class _BoundOperation:
         self.__signature__ = _bound_signature(descriptor.author_signature)
 
     def __call__(self, *args: object, managed: ManagedConfig | None = None, **kwargs: object) -> object:
-        """Validate config and ordinary arguments, then defer lifecycle execution.
+        """Validate and synchronously execute one selected managed lifecycle.
 
         Args:
             *args: Ordinary positional method arguments.
@@ -156,47 +155,52 @@ class _BoundOperation:
         Raises:
             ManagedConfigError: If config or normalized ordinary arguments are
                 unsupported.
-            ManagedControlError: Always in U3, because U6 owns lifecycle entry.
+            ManagedError: If selected lifecycle authority cannot be used safely.
 
         Side Effects:
-            None. The raw method and callbacks are never invoked by this unit.
+            Acquires retained state ownership, then invokes the raw method only
+            after a running control snapshot is committed.
         """
 
         if managed is not None and type(managed) is not ManagedConfig:
             raise ManagedConfigError(message="managed must be a ManagedConfig or None")
-        config = ManagedConfig() if managed is None else managed
-        config.snapshot()
-        supplied = dict(kwargs)
-        supplied["managed"] = managed
-        argument_digest(self._descriptor, self._instance, args, supplied)
-        raise ManagedControlError("lifecycle_unavailable", "managed lifecycle is unavailable until U6")
+        from .runtime import invoke
+
+        return invoke(self._descriptor, self._instance, args, managed, kwargs)
 
     def status(self, *, state_store: object = None, control_store: object = None) -> object:
-        """Reserve the future inert status API without reading authority in U3.
+        """Read only the selected lifecycle authority without invoking workload.
 
         Args:
-            state_store: Future explicit state Store override.
-            control_store: Future explicit control Store override.
+            state_store: Explicit selected state Store override.
+            control_store: Explicit selected control Store override.
 
         Raises:
-            ManagedControlError: Always because U6 owns status inspection.
+            ManagedError: If selected authority or its retained state is invalid.
         """
 
-        raise ManagedControlError("lifecycle_unavailable", "managed status is unavailable until U6")
+        from .runtime import status
+
+        return status(self._descriptor, self._instance, state_store=state_store, control_store=control_store)
 
     def request_interrupt(self, *, state_store: object = None, control_store: object = None, expected_attempt_id: str | None = None) -> object:
-        """Reserve the future inert interruption API without writing authority in U3.
+        """Publish a cooperative interruption request to selected running authority.
 
         Args:
-            state_store: Future explicit state Store override.
-            control_store: Future explicit control Store override.
-            expected_attempt_id: Future stale-attempt precondition.
+            state_store: Explicit selected state Store override.
+            control_store: Explicit selected control Store override.
+            expected_attempt_id: Optional stale-attempt precondition.
 
         Raises:
-            ManagedControlError: Always because U6 owns request publication.
+            ManagedError: If selected authority cannot safely accept a request.
         """
 
-        raise ManagedControlError("lifecycle_unavailable", "managed interruption is unavailable until U6")
+        from .runtime import request_interrupt
+
+        return request_interrupt(
+            self._descriptor, self._instance, state_store=state_store,
+            control_store=control_store, expected_attempt_id=expected_attempt_id,
+        )
 
 
 def _native_signature(target: types.FunctionType) -> inspect.Signature:

@@ -44,9 +44,9 @@ class ManagedConfig:
     def __post_init__(self) -> None:
         """Reject unsupported policy before managed invocation can begin."""
 
-        if self.state_store is not None and not isinstance(self.state_store, DirStore):
+        if self.state_store is not None and type(self.state_store) is not DirStore:
             raise ManagedStoreError(message="state_store must be a DirStore")
-        if self.control_store is not None and not isinstance(self.control_store, DirStore):
+        if self.control_store is not None and type(self.control_store) is not DirStore:
             raise ManagedStoreError(message="control_store must be a DirStore")
         if type(self.rerun) is not bool:
             raise ManagedConfigError(message="rerun must be an exact bool")
@@ -62,7 +62,8 @@ class ManagedConfig:
         """Create one immutable invocation-local view of this caller policy.
 
         Returns:
-            A private immutable policy value with callbacks copied to a tuple.
+            A private immutable policy value with callbacks copied to a tuple for
+            the current U6 invocation.
 
         Raises:
             ManagedConfigError: If a caller mutated the retained callback list to
@@ -93,7 +94,7 @@ class ManagedConfig:
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedManagedConfig:
-    """Private immutable policy snapshot passed to future lifecycle integration."""
+    """Private immutable policy snapshot passed to one lifecycle invocation."""
 
     state_store: DirStore | None
     control_store: DirStore | None

@@ -36,7 +36,44 @@ Store writer or control lock over workload hooks. A non-mutating complete-lock
 probe is available to U6 status/request handling: contention is inconclusive and
 never itself classifies an owner as dead.
 
-This unit does not yet execute methods, checkpoint state, expose status, or
-request interruption. Those lifecycle behaviors remain deferred to U6-U7; the
-ownership primitives are intentionally narrow so those units can compose them
-without introducing histories, journals, locators, or a generic records layer.
+Managed methods now run synchronously in the caller's thread. Invocation requires
+a materialized DRYML `Object` receiver and enters the runtime materialization
+admission barrier, so strict orchestrator mode cannot execute a raw managed
+method through descriptor binding. Invocation
+validates the configured Stores, normalized arguments, and retained receiver graph
+before ownership or control mutation.  It then retains graph and state-Store
+ownership through exact resume restoration, workload execution, deep final save,
+and completed-current publication.  The ordinary method result returns only after
+that completion record commits. Terminal completion and failure reread the exact
+active attempt and owner under the control lock, retaining a concurrent request's
+generation changes instead of writing stale authority. A late external request
+without another method safe point is cleared as unhonored by normal completion.
+An indeterminate completion association withholds the ordinary result and remains
+pending until exact reconciliation. A method error is recorded best-effort and
+re-raised unchanged; an escaping `KeyboardInterrupt` becomes `ManagedInterrupted`
+without an unsafe save.
+
+`operation.status(...)` projects only the caller-selected authority, never runs
+hooks or activates context. It reads immutable `ObjectRef` lock identities, so
+metadata inspection remains available after a failed restore invalidates the live
+target. An absent selected operation is `not_started`; a running snapshot whose
+complete lock set is free across an unchanged generation is reported as a
+read-only `failed`/`owner_lost` observation. Status and `request_interrupt()`
+hold the short control lock across precondition checks, the nonblocking probe,
+and generation reread; adapter failures remain errors rather than owner-loss
+evidence. A different explicit control Store intentionally has independent,
+possibly absent lifecycle metadata; managed maintains no locator.
+
+Default invocation of compatible unfinished work resumes its retained attempt
+after restoring the supplied live graph from its associated checkpoint.  Completed
+or incompatible unfinished work requires `ManagedConfig(rerun=True)`.  Rerun
+creates a new attempt from the current valid live Object state and does not reset
+it.  Changed method code has no revision gate: restoration and workload errors
+propagate normally.  A target invalidated by failed exact restoration cannot be
+entered again; load fresh state from the retained checkpoint first.
+
+Methods receive a private active `ManagedContext` with read-only selected Stores,
+operation/attempt IDs, resume flag, and associated checkpoint reference.  U7 owns
+checkpoint callbacks and interruption safe points, so `checkpoint()` and
+`interrupt()` explicitly reject use until that protocol is implemented rather
+than publishing partial lifecycle state.

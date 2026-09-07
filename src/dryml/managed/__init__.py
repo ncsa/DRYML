@@ -1,8 +1,7 @@
-"""Checked declarations, policy, and persistence primitives for managed operations.
+"""Synchronous managed-operation declaration, lifecycle, and selected authority.
 
-U4 additionally supplies internal Store resolution and current-control authority.
-Invocation lifecycle, status, checkpointing, and interruption remain deferred to
-later managed units.
+U6 provides start, resume, rerun, status, and cooperative request publication.
+U7 owns checkpoint callbacks and interruption safe points.
 """
 
 from .config import ManagedConfig
@@ -22,10 +21,12 @@ from .errors import (
 )
 from .identity import argument_digest, operation_digest
 from .model import InterruptRequestResult, ManagedStatus
+from .context import ManagedContext
 
 __all__ = [
     "InterruptRequestResult",
     "ManagedConfig",
+    "ManagedContext",
     "ManagedConfigError",
     "ManagedConflictError",
     "ManagedContextError",

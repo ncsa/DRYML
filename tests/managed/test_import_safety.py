@@ -16,7 +16,7 @@ import sys
 import dryml.managed
 
 assert set(dryml.managed.__all__) == {
-    'InterruptRequestResult', 'ManagedConfig', 'ManagedConfigError',
+        'InterruptRequestResult', 'ManagedConfig', 'ManagedContext', 'ManagedConfigError',
         'ManagedConflictError', 'ManagedContextError', 'ManagedControlError',
         'ManagedDeclarationError', 'ManagedError', 'ManagedInterrupted',
         'ManagedPublicationError', 'ManagedRecoveryError', 'ManagedRerunRequiredError', 'ManagedStatus',

@@ -356,6 +356,124 @@ class ManagedControlStore:
             self._validate_references(proposed)
             return self._publish_replacement(operation, current, current_payload, proposed)
 
+    def transition_running_owner(
+            self,
+            operation_id: str,
+            *,
+            attempt_id: str,
+            owner_id: str,
+            build: Callable[[ControlSnapshot], ControlSnapshot]) -> ControlSnapshot:
+        """Publish one owner-fenced running transition from fresh authority.
+
+        Args:
+            operation_id: Selected managed operation identity.
+            attempt_id: Exact active attempt that must still own current authority.
+            owner_id: Exact active invocation owner that must still be running.
+            build: Function that receives the freshly reread running snapshot and
+                returns its next-generation replacement.
+
+        Returns:
+            The committed replacement built from the current authority.
+
+        Raises:
+            ManagedConflictError: If the attempt/owner changed or the selected
+                authority is no longer running.
+            ManagedControlError: If control authority cannot be safely read or
+                published.
+
+        Side Effects:
+            Holds only the short control lock while rereading, validating, and
+            publishing the replacement. A concurrent request is therefore merged
+            through ``build`` rather than discarded with a stale generation.
+        """
+
+        _digest(operation_id, "operation_id")
+        _uuid(attempt_id, "attempt_id")
+        _uuid(owner_id, "owner_id")
+        operation = self._operation_path(operation_id)
+        with self._control_lock():
+            current, current_payload = self._read_unpending_current(operation, operation_id)
+            if (
+                current.state != "running"
+                or current.attempt_id != attempt_id
+                or current.owner_id != owner_id
+            ):
+                raise ManagedConflictError("owner_conflict", "selected running owner changed before publication")
+            if current.generation == _MAX_GENERATION:
+                raise ManagedControlError("generation_overflow", "managed generation cannot advance beyond 2**63-1")
+            proposed = build(current)
+            if (
+                proposed.operation_id != operation_id
+                or proposed.generation != current.generation + 1
+            ):
+                raise ManagedConflictError("generation_conflict", "owner transition did not produce the next selected generation")
+            self._validate_references(proposed)
+            return self._publish_replacement(operation, current, current_payload, proposed)
+
+    def observe_running_owner(self, operation_id: str, object_ids) -> tuple[ControlSnapshot | None, bool, bool]:
+        """Observe a running owner through one generation-rechecked lock probe.
+
+        Returns:
+            ``(snapshot, ownerless, stable)``. ``ownerless`` is true only when a
+            complete lock probe succeeded and the same running generation remained
+            selected. ``stable`` is false when authority changed during the probe.
+
+        Raises:
+            ManagedControlError: If control or lock-probe authority is unavailable.
+
+        Side Effects:
+            Holds the short control lock across the current read, nonblocking state
+            lock probe, and generation reread. It never writes control authority.
+        """
+
+        _digest(operation_id, "operation_id")
+        operation = self._operation_path(operation_id)
+        with self._control_lock():
+            current, ownerless, stable = self._observe_running_owner_locked(operation, operation_id, object_ids)
+            return current, ownerless, stable
+
+    def request_interrupt_if_running(
+            self, operation_id: str, object_ids, *, expected_attempt_id: str | None = None,
+    ) -> tuple[str, ControlSnapshot | None]:
+        """Probe and request interruption under one short control-lock critical section.
+
+        Returns:
+            A closed internal outcome and its selected snapshot. ``changed`` means
+            that a generation changed during probing and callers must retry instead
+            of treating stale evidence as owner loss.
+
+        Raises:
+            ManagedControlError: If control or probe adapters fail.
+
+        Side Effects:
+            May publish exactly one same-owner interruption request. A stale
+            attempt precondition is checked before opening state lock probes.
+        """
+
+        _digest(operation_id, "operation_id")
+        operation = self._operation_path(operation_id)
+        with self._control_lock():
+            current, ownerless, stable = self._observe_running_owner_locked(
+                operation, operation_id, object_ids, expected_attempt_id=expected_attempt_id,
+            )
+            if current is None or current.state != "running":
+                return "not_running", current
+            if expected_attempt_id is not None and current.attempt_id != expected_attempt_id:
+                return "stale_attempt", current
+            if not stable:
+                return "changed", current
+            if ownerless:
+                return "not_running", current
+            if current.interrupt_request == (current.attempt_id, current.owner_id):
+                return "already_requested", current
+            proposed = replace(
+                current, generation=current.generation + 1,
+                interrupt_request=(current.attempt_id, current.owner_id),
+            )
+            return "requested", self._publish_replacement(
+                operation, current, current.to_bytes(), proposed,
+            )
+
     def reconcile(self, operation_id: str) -> ControlSnapshot | None:
         """Resolve exactly one retained pending intent under the short control lock."""
 
@@ -392,6 +510,39 @@ class ManagedControlStore:
         """
 
         return _probe_state_ownership(self.state_store, object_ids)
+
+    def _read_unpending_current(self, operation: str, operation_id: str) -> tuple[ControlSnapshot, bytes]:
+        """Read and validate current authority while the caller holds control lock."""
+
+        if os.path.lexists(self._pending_path(operation)):
+            raise ManagedControlError("pending_reconciliation", "managed current authority has a pending replacement")
+        current, payload = self._read_current(operation, operation_id)
+        self._validate_references(current)
+        return current, payload
+
+    def _observe_running_owner_locked(
+            self, operation: str, operation_id: str, object_ids,
+            *, expected_attempt_id: str | None = None,
+    ) -> tuple[ControlSnapshot | None, bool, bool]:
+        """Return a generation-rechecked owner-loss observation under control lock."""
+
+        if not os.path.lexists(operation):
+            return None, False, True
+        current, _ = self._read_unpending_current(operation, operation_id)
+        if current.state != "running" or (
+            expected_attempt_id is not None and current.attempt_id != expected_attempt_id
+        ):
+            return current, False, True
+        ownerless = self.probe_state_ownership(object_ids)
+        observed, _ = self._read_unpending_current(operation, operation_id)
+        if (
+            observed.generation != current.generation
+            or observed.state != "running"
+            or observed.attempt_id != current.attempt_id
+            or observed.owner_id != current.owner_id
+        ):
+            return observed, False, False
+        return observed, ownerless, True
 
     def _publish_replacement(self, operation: str, current: ControlSnapshot, current_payload: bytes, proposed: ControlSnapshot) -> ControlSnapshot:
         """Publish intent then current replacement, retaining evidence on uncertainty."""

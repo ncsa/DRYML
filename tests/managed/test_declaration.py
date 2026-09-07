@@ -86,8 +86,8 @@ def test_descriptor_is_inert_on_class_access_and_records_stable_member_identity(
     assert signature.parameters["value"].default == 3
     assert signature.parameters["managed"].default is None
     assert "ManagedConfig" in str(signature.parameters["managed"].annotation)
-    with pytest.raises(ManagedControlError, match="lifecycle_unavailable"):
-        bound(4, managed=ManagedConfig())
+    # U6 owns lifecycle execution; this declaration-only test must not assume an
+    # unavailable placeholder instead of the real Store-backed behavior.
     assert calls == []
 
 
