@@ -13,7 +13,7 @@ import errno
 import os
 import stat
 import threading
-from weakref import WeakSet
+from weakref import WeakSet, WeakValueDictionary
 
 try:
     import fcntl
@@ -53,7 +53,7 @@ class _PathState:
         self.shared_owners: dict[int, int] = defaultdict(int)
 
 
-_PATH_STATES: dict[str, _PathState] = {}
+_PATH_STATES: WeakValueDictionary[str, _PathState] = WeakValueDictionary()
 _PATH_STATES_GUARD = threading.Lock()
 _ACTIVE_FILE_LOCKS: WeakSet[FileLock] = WeakSet()
 _ACTIVE_FILE_LOCKS_GUARD = threading.Lock()
@@ -185,7 +185,11 @@ def _path_state(path: str) -> _PathState:
     """Return the process-local coordinator for one normalized path."""
 
     with _PATH_STATES_GUARD:
-        return _PATH_STATES.setdefault(path, _PathState())
+        state = _PATH_STATES.get(path)
+        if state is None:
+            state = _PathState()
+            _PATH_STATES[path] = state
+        return state
 
 
 def _reserve_slot(path: str, *, shared: bool, blocking: bool) -> tuple[_PathState, bool] | None:
@@ -481,7 +485,7 @@ def _after_fork_child() -> None:
     global _PATH_STATES, _PATH_STATES_GUARD, _ACTIVE_FILE_LOCKS, _ACTIVE_FILE_LOCKS_GUARD, _LOCK_STATE
     for lock in tuple(_ACTIVE_FILE_LOCKS):
         lock._after_fork_child()
-    _PATH_STATES = {}
+    _PATH_STATES = WeakValueDictionary()
     _PATH_STATES_GUARD = threading.Lock()
     _ACTIVE_FILE_LOCKS = WeakSet()
     _ACTIVE_FILE_LOCKS_GUARD = threading.Lock()

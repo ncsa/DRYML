@@ -469,9 +469,9 @@ class Pickleable(Serializable):
     }
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
-        # Grab all heavy-state data
+        bindings = self._graph_binding_fields()
         heavy_state = {k: v for k, v in self.__dict__.items()
-                       if k not in self._HEAVY_EXCLUDE and k not in self._graph_binding_fields()}
+                       if k not in self._HEAVY_EXCLUDE and k not in bindings}
 
         # Save the entire object as a pickle
         pickle_save(heavy_state, os.path.join(dest_dir, "heavy.pkl"))

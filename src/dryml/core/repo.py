@@ -1729,11 +1729,11 @@ class Repo:
         with materialization_admission(operation="repo_save_object"):
             if alias is not None:
                 self._validate_alias(alias)
-            _, nodes, object_ids = self._state_graph_evidence(obj)
             owns_reservation = reservation is None
             if owns_reservation:
                 reservation = self.reserve_state_graph(obj)
             else:
+                _, nodes, object_ids = self._state_graph_evidence(obj)
                 reservation._covers(nodes, object_ids)
             lease = None
             try:
@@ -1793,12 +1793,11 @@ class Repo:
             # StateRef publication is authoritative; only then may the derived
             # query index expose this root. A registration failure leaves the
             # Store authority intact and the sidecar explicitly dirty.
-            if not self._state_io:
-                self._query_index.register_saved_graph(
-                    plan.graph,
-                    {store: (obj.definition,)},
-                    {store: (state_ref,)},
-                )
+            self._query_index.register_saved_graph(
+                plan.graph,
+                {store: (obj.definition,)},
+                {store: (state_ref,)},
+            )
             if main:
                 store.write_main_ref(MainRefRecord(DefinitionRecord(obj.definition).digest))
                 self.main_def = obj.definition
