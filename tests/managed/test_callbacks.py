@@ -60,6 +60,22 @@ class CallbackValue(Pickleable):
                 except ManagedContextError as error:
                     self.rejected_safe_points.append(error.reason)
 
+    @managed_operation()
+    def catch_callback_error(self, *, managed):
+        """Catch an observer error that must still fail the managed attempt."""
+
+        self.value = 4
+        try:
+            managed.checkpoint()
+        except RuntimeError as error:
+            self.caught_callback_error = error
+        self.value = 5
+        try:
+            managed.checkpoint()
+        except RuntimeError as error:
+            self.second_callback_error = error
+        return "caught"
+
 
 class DerivedValue(Pickleable):
     """Independent object used to prove callback work can hold disjoint ownership."""
@@ -115,6 +131,30 @@ def test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails(tmp_p
     assert (status.state, status.failure_code) == ("failed", "callback_error")
     assert status.checkpoint_state_ref == calls[0]
     assert calls != ["late"]
+
+
+def test_caught_callback_error_remains_terminal_without_final_state(tmp_path):
+    """Method code cannot convert a checkpoint observer failure into completion."""
+
+    store = DirStore(tmp_path / "store")
+    value = CallbackValue(repo=Repo((store,)))
+    error = RuntimeError("observer failed")
+    calls = []
+
+    def fail(obj, context):
+        calls.append(context.checkpoint_state_ref)
+        raise error
+
+    with pytest.raises(RuntimeError) as caught:
+        value.catch_callback_error(managed=ManagedConfig(state_store=store, callbacks=[fail]))
+    status = value.catch_callback_error.status(state_store=store)
+    assert caught.value is error
+    assert value.caught_callback_error is error
+    assert value.second_callback_error is error
+    assert len(calls) == 1
+    assert (status.state, status.failure_code) == ("failed", "callback_error")
+    assert status.checkpoint_state_ref is not None
+    assert status.final_state_ref is None
 
 
 def test_final_save_never_notifies_checkpoint_callbacks(tmp_path):

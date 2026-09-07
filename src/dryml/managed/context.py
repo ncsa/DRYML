@@ -47,6 +47,7 @@ class ManagedContext:
         self._interruption_cause: BaseException | None = None
         self._terminal_interrupted = False
         self._failure_code: str | None = None
+        self._safe_point_error: BaseException | None = None
 
     @property
     def active(self) -> bool:
@@ -137,6 +138,8 @@ class ManagedContext:
         self._require_active()
         if self._checkpointing:
             raise ManagedContextError("recursive_checkpoint", "managed checkpoint entry is not recursive")
+        if self._safe_point_error is not None:
+            raise self._safe_point_error
         self._checkpointing = True
         try:
             try:
@@ -157,16 +160,16 @@ class ManagedContext:
                 )
                 self._checkpoint_state_ref = state_ref
                 _checkpoint_boundary("checkpoint_associated")
-            except BaseException:
-                self._failure_code = "publication_error"
+            except BaseException as error:
+                self._latch_safe_point_error("publication_error", error)
                 raise
             try:
                 _checkpoint_boundary("callbacks_started")
                 for callback in self._callbacks:
                     callback(self._obj, self)
                 _checkpoint_boundary("callbacks_finished")
-            except BaseException:
-                self._failure_code = "callback_error"
+            except BaseException as error:
+                self._latch_safe_point_error("callback_error", error)
                 raise
             try:
                 interrupted = self._control.transition_running_owner(
@@ -177,12 +180,12 @@ class ManagedContext:
                 )
             except BaseException as error:
                 if force_interrupt:
-                    self._failure_code = "publication_error"
+                    self._latch_safe_point_error("publication_error", error)
                     raise ManagedControlError(
                         "interruption_recording_failed",
                         "could not commit managed interruption",
                     ) from error
-                self._failure_code = "publication_error"
+                self._latch_safe_point_error("publication_error", error)
                 raise
             if interrupted is not None:
                 self._interruption_cause = cause
@@ -198,14 +201,23 @@ class ManagedContext:
             self._checkpointing = False
 
     def _raise_if_interrupted(self) -> None:
-        """Prevent user code from converting a committed interruption into success."""
+        """Prevent method code from converting terminal safe-point outcomes into success."""
 
+        if self._safe_point_error is not None:
+            raise self._safe_point_error
         if not self._terminal_interrupted:
             return
         error = ManagedInterrupted("interrupted", "managed operation stopped at a checkpoint")
         if self._interruption_cause is not None:
             raise error from self._interruption_cause
         raise error
+
+    def _latch_safe_point_error(self, code: str, error: BaseException) -> None:
+        """Retain the first genuine safe-point failure for the runtime terminal guard."""
+
+        if self._safe_point_error is None:
+            self._safe_point_error = error
+            self._failure_code = code
 
     def _require_active(self) -> None:
         """Reject stale, cross-thread, or inherited context use."""

@@ -15,6 +15,7 @@ selected control Store: `dryml-managed` v1 gate, `dryml-managed-current` v1
 current snapshot, and `dryml-managed-pending` v1 replacement intent. It records
 operation/attempt identity, lifecycle state, interruption request, and associated
 checkpoint/final StateRef digests, never state payloads or a Python continuation.
-Unsupported, malformed, incomplete, or pending control data fails reconciliation;
-it is not interpreted as completed or not-started work. These v1 records have no
+Unsupported, malformed, incomplete, unreadable, or pending control data or path
+component fails reconciliation; it is not interpreted as completed or not-started
+work. These v1 records have no
 migration or compatibility reader.

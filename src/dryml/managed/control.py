@@ -15,7 +15,7 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_json_load_bytes
 from dryml.locking import LockError, interprocess_lock
@@ -240,8 +240,9 @@ class ManagedControlStore:
         pending check and current/reference validation observe one generation.
 
         Raises:
-            ManagedControlError: If retained current/pending authority is malformed
-                or requires reconciliation.
+            ManagedControlError: If retained current/pending authority or any
+                existing hierarchy component is malformed, unavailable, or requires
+                reconciliation.
             ManagedRecoveryError: If a referenced StateRef closure is incomplete.
         """
 
@@ -250,10 +251,9 @@ class ManagedControlStore:
             return None
         operation = self._operation_path(operation_id)
         with self._control_lock():
-            if not os.path.lexists(operation):
+            if not self._operation_directory_present(operation):
                 return None
-            self._require_directory(operation, "operation directory")
-            if os.path.lexists(self._pending_path(operation)):
+            if self._path_present(self._pending_path(operation), "pending authority"):
                 raise ManagedControlError("pending_reconciliation", "managed current authority has a pending replacement")
             snapshot, _ = self._read_current(operation, operation_id)
             self._validate_references(snapshot)
@@ -265,7 +265,7 @@ class ManagedControlStore:
         try:
             self.control_store.preflight_publication("managed namespace bootstrap")
             with self.control_store.writer_lock():
-                if os.path.lexists(self.root):
+                if self._path_present(self.root, "managed namespace"):
                     self._validate_namespace()
                     return
                 parent = self.control_store.base_dir
@@ -289,6 +289,12 @@ class ManagedControlStore:
         The directory is first installed with an initial-absence pending intent.
         If process death interrupts the final acknowledgement, normal inspection
         blocks until :meth:`reconcile` validates that exact initial generation.
+
+        Raises:
+            ManagedControlError: If the selected hierarchy is malformed or cannot
+                be safely inspected or created.
+            ManagedConflictError: If operation lineage authority already exists.
+            ManagedPublicationError: If initial authority cannot be committed.
         """
 
         if snapshot.generation != 1:
@@ -297,10 +303,13 @@ class ManagedControlStore:
         self.initialize()
         operation = self._operation_path(snapshot.operation_id)
         with self._control_lock():
-            if os.path.lexists(operation):
+            if self._operation_directory_present(operation):
                 raise ManagedConflictError("operation_exists", "operation lineage already exists")
             parent = os.path.dirname(operation)
-            os.makedirs(parent, exist_ok=True)
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError as error:
+                raise ManagedControlError("operation_path_create_failed", "could not create managed operation hierarchy") from error
             staging = tempfile.mkdtemp(prefix=".operation-staging-", dir=parent)
             published = False
             try:
@@ -315,7 +324,7 @@ class ManagedControlStore:
                 _sync_directory(parent)
             except BaseException as error:
                 _remove_tree_if_present(staging)
-                outcome = "indeterminate" if published or os.path.lexists(operation) else "not_committed"
+                outcome = "indeterminate" if published or self._path_present(operation, "operation authority") else "not_committed"
                 raise ManagedPublicationError(outcome, "could not publish initial managed operation authority") from error
             return self._reconcile_locked(operation, snapshot.operation_id)
 
@@ -332,6 +341,13 @@ class ManagedControlStore:
         Args enforce the complete selected current precondition.  The caller must
         supply a generation exactly one greater than authority; no stale cached
         current can overwrite a concurrent request or transition.
+
+        Raises:
+            ManagedControlError: If selected authority or its hierarchy is
+                malformed, unavailable, or requires reconciliation.
+            ManagedConflictError: If the selected current no longer meets an
+                expected precondition.
+            ManagedPublicationError: If replacement publication is uncertain.
         """
 
         _digest(operation_id, "operation_id")
@@ -339,10 +355,7 @@ class ManagedControlStore:
             raise ManagedControlError("operation_mismatch", "proposed operation_id does not match selected authority")
         operation = self._operation_path(operation_id)
         with self._control_lock():
-            if os.path.lexists(self._pending_path(operation)):
-                raise ManagedControlError("pending_reconciliation", "managed current authority has a pending replacement")
-            current, current_payload = self._read_current(operation, operation_id)
-            self._validate_references(current)
+            current, current_payload = self._read_unpending_current(operation, operation_id)
             if current.generation != expected_generation:
                 raise ManagedConflictError("generation_conflict", "current generation changed before publication")
             if expected_attempt_id is not None and current.attempt_id != expected_attempt_id:
@@ -478,16 +491,27 @@ class ManagedControlStore:
             )
 
     def reconcile(self, operation_id: str) -> ControlSnapshot | None:
-        """Resolve exactly one retained pending intent under the short control lock."""
+        """Resolve exactly one retained pending intent under the short control lock.
+
+        Returns:
+            The settled snapshot, or ``None`` when the valid namespace or selected
+            operation authority is absent.
+
+        Raises:
+            ManagedControlError: If retained authority or any existing hierarchy
+                component is malformed or unavailable.
+            ManagedPublicationError: If a reconciled generation cannot be made
+                durable.
+        """
 
         _digest(operation_id, "operation_id")
         if not self._namespace_present():
             return None
         operation = self._operation_path(operation_id)
-        if not os.path.lexists(operation):
-            return None
         with self._control_lock():
-            if not os.path.lexists(self._pending_path(operation)):
+            if not self._operation_directory_present(operation):
+                return None
+            if not self._path_present(self._pending_path(operation), "pending authority"):
                 snapshot, _ = self._read_current(operation, operation_id)
                 self._validate_references(snapshot)
                 return snapshot
@@ -517,7 +541,9 @@ class ManagedControlStore:
     def _read_unpending_current(self, operation: str, operation_id: str) -> tuple[ControlSnapshot, bytes]:
         """Read and validate current authority while the caller holds control lock."""
 
-        if os.path.lexists(self._pending_path(operation)):
+        if not self._operation_directory_present(operation):
+            raise ManagedRecoveryError("missing_current", "managed operation authority is absent")
+        if self._path_present(self._pending_path(operation), "pending authority"):
             raise ManagedControlError("pending_reconciliation", "managed current authority has a pending replacement")
         current, payload = self._read_current(operation, operation_id)
         self._validate_references(current)
@@ -529,7 +555,7 @@ class ManagedControlStore:
     ) -> tuple[ControlSnapshot | None, bool, bool]:
         """Return a generation-rechecked owner-loss observation under control lock."""
 
-        if not os.path.lexists(operation):
+        if not self._operation_directory_present(operation):
             return None, False, True
         current, _ = self._read_unpending_current(operation, operation_id)
         if current.state != "running" or (
@@ -553,13 +579,13 @@ class ManagedControlStore:
         proposed_payload = proposed.to_bytes()
         intent = _PendingIntent(proposed.operation_id, current.generation, _payload_digest(current_payload), proposed.generation, _payload_digest(proposed_payload))
         pending = self._pending_path(operation)
-        if os.path.lexists(pending):
+        if self._path_present(pending, "pending authority"):
             raise ManagedControlError("pending_reconciliation", "managed current authority has a pending replacement")
         try:
             _publish_new_file(pending, intent.to_bytes())
             _sync_directory(operation)
         except BaseException as error:
-            outcome = "indeterminate" if os.path.lexists(pending) else "not_committed"
+            outcome = "indeterminate" if self._path_present(pending, "pending authority") else "not_committed"
             raise ManagedPublicationError(outcome, "could not publish managed replacement intent") from error
         try:
             self._replace_file(self._current_path(operation), proposed_payload)
@@ -597,7 +623,7 @@ class ManagedControlStore:
             _sync_directory(operation)
             _publication_acknowledged()
         except BaseException as error:
-            if not os.path.lexists(pending):
+            if not self._path_present(pending, "pending authority"):
                 self._confirm_current(operation, snapshot, digest)
                 return
             raise ManagedPublicationError("indeterminate", "managed current committed but acknowledgement is uncertain") from error
@@ -613,7 +639,7 @@ class ManagedControlStore:
     def _namespace_present(self) -> bool:
         """Return whether a valid final managed namespace exists without creating it."""
 
-        if not os.path.lexists(self.root):
+        if not self._path_present(self.root, "managed namespace"):
             return False
         self._validate_namespace()
         return True
@@ -623,7 +649,7 @@ class ManagedControlStore:
 
         self._require_directory(self.root, "managed namespace")
         gate = os.path.join(self.root, "format.json")
-        if not os.path.lexists(gate):
+        if not self._path_present(gate, "managed format gate"):
             raise ManagedRecoveryError("invalid_managed_namespace", "managed namespace lacks format.json")
         if _read_format(self._read_regular(gate)) is not True:
             raise ManagedRecoveryError("invalid_managed_namespace", "managed namespace format gate is invalid")
@@ -642,8 +668,10 @@ class ManagedControlStore:
     def _read_current(self, operation: str, operation_id: str) -> tuple[ControlSnapshot, bytes]:
         """Read an existing complete current file; absence is never a restart."""
 
+        if not self._operation_directory_present(operation):
+            raise ManagedRecoveryError("missing_current", "managed operation authority is absent")
         path = self._current_path(operation)
-        if not os.path.lexists(path):
+        if not self._path_present(path, "current authority"):
             raise ManagedRecoveryError("missing_current", "existing managed operation lacks current authority")
         payload = self._read_regular(path)
         return ControlSnapshot.from_bytes(payload, operation_id=operation_id), payload
@@ -671,20 +699,66 @@ class ManagedControlStore:
 
         return interprocess_lock(os.path.join(self.root, "control.lock"))
 
+    def _operation_directory_present(self, operation: str) -> bool:
+        """Validate the operation hierarchy without creating missing directories."""
+
+        operations = os.path.join(self.root, "operations")
+        version = os.path.join(operations, "v1")
+        shard = os.path.dirname(operation)
+        for path, label in (
+            (operations, "operations directory"),
+            (version, "operations version directory"),
+            (shard, "operation shard directory"),
+            (operation, "operation directory"),
+        ):
+            if not self._directory_present(path, label):
+                return False
+        return True
+
+    @staticmethod
+    def _path_present(path: str, label: str) -> bool:
+        """Return whether one authority path exists without suppressing I/O errors."""
+
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise ManagedControlError("control_path_unavailable", f"could not inspect {label}") from error
+        return True
+
+    @classmethod
+    def _directory_present(cls, path: str, label: str) -> bool:
+        """Return whether a present authority path is a non-symlink directory."""
+
+        if not cls._path_present(path, label):
+            return False
+        cls._require_directory(path, label)
+        return True
+
     @staticmethod
     def _read_regular(path: str) -> bytes:
-        mode = os.lstat(path).st_mode
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError as error:
+            raise ManagedControlError("control_path_unavailable", "could not inspect managed authority file") from error
         if not stat.S_ISREG(mode) or stat.S_ISLNK(mode):
             raise ManagedControlError("invalid_control_file", "managed authority files must be regular files")
-        with open(path, "rb") as source:
-            payload = source.read(_MAX_SNAPSHOT_BYTES + 1)
+        try:
+            with open(path, "rb") as source:
+                payload = source.read(_MAX_SNAPSHOT_BYTES + 1)
+        except OSError as error:
+            raise ManagedControlError("control_path_unavailable", "could not read managed authority file") from error
         if len(payload) > _MAX_SNAPSHOT_BYTES:
             raise ManagedControlError("snapshot_too_large", "managed authority file exceeds 64 KiB")
         return payload
 
     @staticmethod
     def _require_directory(path: str, label: str) -> None:
-        mode = os.lstat(path).st_mode
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError as error:
+            raise ManagedControlError("control_path_unavailable", f"could not inspect {label}") from error
         if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
             raise ManagedControlError("invalid_control_path", f"{label} must be a directory")
 

@@ -80,6 +80,73 @@ def test_initial_operation_and_expected_transition_are_atomic(tmp_path):
         control.transition(initial.operation_id, proposed, expected_generation=1)
 
 
+@pytest.mark.parametrize("invalid_ancestor", ("operations", "v1", "shard"))
+def test_operation_ancestor_files_are_never_absent_authority(tmp_path, invalid_ancestor):
+    """Existing non-directory operation ancestors fail closed in every control path."""
+
+    store = DirStore(tmp_path / "store")
+    control = ManagedControlStore(store, store)
+    initial = _snapshot()
+    operations = os.path.join(control.root, "operations")
+    control.initialize()
+    if invalid_ancestor == "operations":
+        ancestor = operations
+    elif invalid_ancestor == "v1":
+        os.mkdir(operations)
+        ancestor = os.path.join(operations, "v1")
+    else:
+        os.makedirs(os.path.join(operations, "v1"))
+        ancestor = os.path.join(operations, "v1", initial.operation_id[:2])
+    with open(ancestor, "xb"):
+        pass
+
+    proposed = ControlSnapshot(
+        initial.operation_id, initial.object_ref_digest, initial.argument_digest,
+        initial.member, initial.attempt_id, initial.owner_id, 2, "running", None,
+        None, None, None,
+    )
+    for operation in (
+        lambda: control.inspect(initial.operation_id),
+        lambda: control.reconcile(initial.operation_id),
+        lambda: control.create_initial(initial),
+        lambda: control.transition(initial.operation_id, proposed, expected_generation=1),
+    ):
+        with pytest.raises(ManagedControlError, match="directory"):
+            operation()
+
+
+def test_absent_operation_hierarchy_is_not_started_without_bootstrap(tmp_path):
+    """A valid gate with no operation directories remains read-only absent authority."""
+
+    store = DirStore(tmp_path / "store")
+    control = ManagedControlStore(store, store)
+    control.initialize()
+    operation_id = _operation_id()
+
+    assert control.inspect(operation_id) is None
+    assert control.reconcile(operation_id) is None
+    assert not os.path.exists(os.path.join(control.root, "operations"))
+
+
+def test_unreadable_operation_ancestor_is_a_typed_control_error(tmp_path, monkeypatch):
+    """An unreadable operation ancestor is not inferred to be absent authority."""
+
+    store = DirStore(tmp_path / "store")
+    control = ManagedControlStore(store, store)
+    control.initialize()
+    operations = os.path.join(control.root, "operations")
+    original_lstat = control_module.os.lstat
+
+    def deny_operations(path):
+        if path == operations:
+            raise PermissionError("operation hierarchy is unreadable")
+        return original_lstat(path)
+
+    monkeypatch.setattr(control_module.os, "lstat", deny_operations)
+    with pytest.raises(ManagedControlError, match="could not inspect"):
+        control.inspect(_operation_id())
+
+
 def test_replace_failure_preserves_old_authority_then_reconciles(tmp_path, monkeypatch):
     """A failure after intent publication blocks inspection and accepts only old current."""
 

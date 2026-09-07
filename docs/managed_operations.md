@@ -68,6 +68,9 @@ The package exports `ManagedConfig`, `ManagedContext`, `ManagedStatus`,
 `InterruptRequestResult`, `managed_operation`, and the `ManagedError` hierarchy.
 `argument_digest` and `operation_digest` are deterministic lifecycle identity
 helpers for integrations that need the same public operation addressing.
+Argument identity accepts only its documented closed typed grammar and enforces
+its 1 MiB complete SHA-256 preimage limit, including canonical domain and
+container framing, before emitting a digest representation.
 
 ## Lifecycle And Recovery
 
@@ -144,7 +147,9 @@ operation/attempt IDs, resume flag, and associated checkpoint reference.
 callbacks outside control locks before servicing a request that was durable at
 that boundary. A callback failure retains the associated checkpoint and records
 `callback_error`; a checkpoint save or association failure invokes no callbacks
-and records `publication_error`. A request arriving after the post-callback
+and records `publication_error`. Catching either failure in method code cannot
+convert the attempt into completion: managed re-raises the original safe-point
+error and withholds final publication. A request arriving after the post-callback
 decision waits for another checkpoint.
 
 `interrupt(cause=...)` validates its optional exception cause before saving,
@@ -188,8 +193,9 @@ global operation locator, journal, or duplicate-work prevention.
 
 Managed control is closed canonical JSON format v1: gate `dryml-managed`, current
 snapshot `dryml-managed-current`, and replacement intent `dryml-managed-pending`.
-Malformed, pending, incomplete, or unsupported control authority is a recovery or
-control error, never absent or successful work. Object state remains the closed
+Malformed, pending, incomplete, unreadable, or unsupported control authority,
+including a non-directory operation-path ancestor, is a recovery or control
+error, never absent or successful work. Object state remains the closed
 DirStore v2/StateRef authority documented in [Formats](formats.md); there is no
 migration, compatibility reader, or separate continuation payload.
 

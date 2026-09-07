@@ -87,19 +87,33 @@ def argument_digest(descriptor: object, instance: object, args: tuple[object, ..
         bound = signature.bind(instance, *args, **supplied)
         bound.apply_defaults()
     except TypeError as error:
-        raise ManagedConfigError(message=f"managed arguments do not bind: {error}") from error
+        raise ManagedConfigError(message="managed arguments do not bind") from error
     values = [(name, value) for name, value in bound.arguments.items() if name not in {instance_parameter, "managed"}]
     encoder = _ArgumentEncoder()
-    encoded = _atom(
-        b"arguments",
-        b"".join(
-            _atom(b"parameter", _atom(b"name", name.encode("utf-8")) + encoder.encode(value, f"$.{name}", 0))
-            for name, value in values
-        ),
-    )
-    if len(encoded) > _MAX_PREIMAGE_BYTES:
-        raise ManagedConfigError(message="managed argument preimage exceeds 1 MiB")
-    return hashlib.sha256(_ARGUMENT_DOMAIN + encoded).hexdigest()
+    budget = _PreimageBudget()
+    budget.add(len(_ARGUMENT_DOMAIN))
+    budget.add(_atom_header_size(b"arguments"))
+    parameters = []
+    arguments_size = 0
+    for name, value in values:
+        name_bytes = _parameter_name_bytes(name)
+        budget.add(_atom_size(b"name", len(name_bytes)))
+        value_size = encoder.measure(value, _parameter_path(name), 0, budget)
+        parameter_size = _atom_size(b"name", len(name_bytes)) + value_size
+        budget.add(_atom_header_size(b"parameter"))
+        parameters.append((name_bytes, value, value_size, parameter_size))
+        arguments_size += _atom_size(b"parameter", parameter_size)
+
+    digest = hashlib.sha256()
+    encoder.set_digest(digest)
+    encoder._write(_ARGUMENT_DOMAIN)
+    encoder._write(_atom_header(b"arguments", arguments_size))
+    for name_bytes, value, value_size, parameter_size in parameters:
+        encoder._write(_atom_header(b"parameter", parameter_size))
+        encoder._write(_atom_header(b"name", len(name_bytes)))
+        encoder._write(name_bytes)
+        encoder.emit(value, value_size)
+    return digest.hexdigest()
 
 
 class _ArgumentEncoder:
@@ -108,9 +122,16 @@ class _ArgumentEncoder:
     def __init__(self) -> None:
         self._values = 0
         self._active: set[int] = set()
+        self._container_sizes: dict[int, int] = {}
+        self._digest: hashlib._Hash | None = None
 
-    def encode(self, value: object, path: str, depth: int) -> bytes:
-        """Encode one value without invoking user serialization or representation hooks."""
+    def set_digest(self, digest: hashlib._Hash) -> None:
+        """Set the SHA-256 sink after validation and preimage measurement succeed."""
+
+        self._digest = digest
+
+    def measure(self, value: object, path: str, depth: int, budget: _PreimageBudget) -> int:
+        """Validate one value and return its exact canonical byte length."""
 
         if depth > _MAX_DEPTH:
             raise ManagedConfigError(message=f"{path}: maximum depth is {_MAX_DEPTH}")
@@ -119,38 +140,44 @@ class _ArgumentEncoder:
             raise ManagedConfigError(message=f"{path}: maximum aggregate values is {_MAX_VALUES}")
         value_type = type(value)
         if value is None:
-            return _atom(b"none", b"")
+            return self._leaf_size(b"none", 0, budget)
         if value_type is bool:
-            return _atom(b"bool", b"1" if value else b"0")
+            return self._leaf_size(b"bool", 1, budget)
         if value_type is int:
             if value.bit_length() > _MAX_INT_BITS:
                 raise ManagedConfigError(message=f"{path}: integers support at most {_MAX_INT_BITS} bits")
-            return _atom(b"int", str(value).encode("ascii"))
+            return self._leaf_size(b"int", len(str(value).encode("ascii")), budget)
         if value_type is float:
             if not math.isfinite(value):
                 raise ManagedConfigError(message=f"{path}: floats must be finite")
-            return _atom(b"float", value.hex().encode("ascii"))
+            return self._leaf_size(b"float", len(value.hex().encode("ascii")), budget)
         if value_type is str:
-            return _atom(b"str", _bounded_text(value, path))
+            return self._leaf_size(b"str", len(_bounded_text(value, path)), budget)
         if value_type is bytes:
             if len(value) > _MAX_TEXT_BYTES:
                 raise ManagedConfigError(message=f"{path}: bytes support at most 64 KiB")
-            return _atom(b"bytes", value)
+            return self._leaf_size(b"bytes", len(value), budget)
         if value_type is ObjectId:
-            return _atom(b"object-id", value.__stable_leaf_bytes__())
+            return self._leaf_size(b"object-id", len(value.__stable_leaf_bytes__()), budget)
         if value_type is ObjectRef:
-            return _atom(b"object-ref", value.digest().encode("ascii"))
+            return self._leaf_size(b"object-ref", len(value.digest().encode("ascii")), budget)
         if value_type is StateRef:
-            return _atom(b"state-ref", value.digest().encode("ascii"))
+            return self._leaf_size(b"state-ref", len(value.digest().encode("ascii")), budget)
         if value_type in (list, tuple, dict):
-            return self._encode_container(value, path, depth)
+            return self._measure_container(value, path, depth, budget)
         object_ref = _live_object_ref(value)
         if object_ref is not None:
-            return _atom(b"live-object", object_ref.digest().encode("ascii"))
-        raise ManagedConfigError(message=f"{path}: unsupported argument type {value_type.__name__}")
+            return self._leaf_size(b"live-object", len(object_ref.digest().encode("ascii")), budget)
+        raise ManagedConfigError(message=f"{path}: unsupported argument type")
 
-    def _encode_container(self, value: list[object] | tuple[object, ...] | dict[object, object], path: str, depth: int) -> bytes:
-        """Encode exact containers, preserving sequence kind and sorted string keys."""
+    def _measure_container(
+        self,
+        value: list[object] | tuple[object, ...] | dict[object, object],
+        path: str,
+        depth: int,
+        budget: _PreimageBudget,
+    ) -> int:
+        """Validate an exact container and account for its canonical byte length."""
 
         if len(value) > _MAX_CONTAINER_ENTRIES:
             raise ManagedConfigError(message=f"{path}: containers support at most {_MAX_CONTAINER_ENTRIES} entries")
@@ -160,18 +187,93 @@ class _ArgumentEncoder:
         self._active.add(value_id)
         try:
             if type(value) is dict:
-                entries = []
                 for key in value:
                     if type(key) is not str:
                         raise ManagedConfigError(message=f"{path}: dictionary keys must be exact strings")
+                budget.add(_atom_header_size(b"dict"))
+                payload_size = 0
                 for key in sorted(value):
                     self._count_value(f"{path}.<key>")
-                    entries.append(_atom(b"key", _bounded_text(key, f"{path}.<key>")) + self.encode(value[key], f"{path}[{key!r}]", depth + 1))
-                return _atom(b"dict", b"".join(entries))
+                    key_size = self._leaf_size(b"key", len(_bounded_text(key, f"{path}.<key>")), budget)
+                    value_size = self.measure(value[key], f"{path}.<value>", depth + 1, budget)
+                    payload_size += key_size + value_size
+                size = _atom_header_size(b"dict") + payload_size
+                self._container_sizes[value_id] = size
+                return size
             tag = b"list" if type(value) is list else b"tuple"
-            return _atom(tag, b"".join(self.encode(item, f"{path}[{index}]", depth + 1) for index, item in enumerate(value)))
+            budget.add(_atom_header_size(tag))
+            payload_size = sum(
+                self.measure(item, f"{path}[{index}]", depth + 1, budget) for index, item in enumerate(value)
+            )
+            size = _atom_header_size(tag) + payload_size
+            self._container_sizes[value_id] = size
+            return size
         finally:
             self._active.remove(value_id)
+
+    def emit(self, value: object, size: int) -> None:
+        """Write a measured value's unchanged canonical bytes to the digest sink."""
+
+        value_type = type(value)
+        if value is None:
+            self._emit_atom(b"none", b"")
+        elif value_type is bool:
+            self._emit_atom(b"bool", b"1" if value else b"0")
+        elif value_type is int:
+            self._emit_atom(b"int", str(value).encode("ascii"))
+        elif value_type is float:
+            self._emit_atom(b"float", value.hex().encode("ascii"))
+        elif value_type is str:
+            self._emit_atom(b"str", _bounded_text(value, "argument"))
+        elif value_type is bytes:
+            self._emit_atom(b"bytes", value)
+        elif value_type is ObjectId:
+            self._emit_atom(b"object-id", value.__stable_leaf_bytes__())
+        elif value_type is ObjectRef:
+            self._emit_atom(b"object-ref", value.digest().encode("ascii"))
+        elif value_type is StateRef:
+            self._emit_atom(b"state-ref", value.digest().encode("ascii"))
+        elif value_type in (list, tuple, dict):
+            self._emit_container(value, size)
+        else:
+            object_ref = _live_object_ref(value)
+            if object_ref is None:
+                raise ManagedConfigError(message="managed arguments changed while encoding")
+            self._emit_atom(b"live-object", object_ref.digest().encode("ascii"))
+
+    def _emit_container(self, value: list[object] | tuple[object, ...] | dict[object, object], size: int) -> None:
+        """Write a measured container without constructing a joined child payload."""
+
+        tag = b"dict" if type(value) is dict else b"list" if type(value) is list else b"tuple"
+        self._write(_atom_header(tag, size - _atom_header_size(tag)))
+        if type(value) is dict:
+            for key in sorted(value):
+                key_bytes = _bounded_text(key, "dictionary key")
+                self._emit_atom(b"key", key_bytes)
+                self.emit(value[key], self._container_sizes.get(id(value[key]), 0))
+            return
+        for item in value:
+            self.emit(item, self._container_sizes.get(id(item), 0))
+
+    def _leaf_size(self, tag: bytes, payload_size: int, budget: _PreimageBudget) -> int:
+        """Account for one leaf atom and return its encoded size."""
+
+        size = _atom_size(tag, payload_size)
+        budget.add(size)
+        return size
+
+    def _emit_atom(self, tag: bytes, payload: bytes) -> None:
+        """Write one leaf atom in bounded header and payload chunks."""
+
+        self._write(_atom_header(tag, len(payload)))
+        self._write(payload)
+
+    def _write(self, data: bytes) -> None:
+        """Update the measured digest with one bounded canonical chunk."""
+
+        if self._digest is None:
+            raise RuntimeError("argument digest sink is not initialized")
+        self._digest.update(data)
 
     def _count_value(self, path: str) -> None:
         """Count one dictionary key against the aggregate input support limit."""
@@ -197,23 +299,85 @@ def _live_object_ref(value: object) -> ObjectRef | None:
 def _validate_member(member: str) -> None:
     """Validate the member component of an operation identity."""
 
-    if type(member) is not str or not member or not member.isidentifier() or len(member.encode("utf-8")) > 255:
+    if type(member) is not str or not member or not member.isidentifier():
+        raise ManagedConfigError(message="operation member must be a bounded Python identifier")
+    try:
+        member_bytes = member.encode("utf-8")
+    except UnicodeError as error:
+        raise ManagedConfigError(message="operation member must be valid UTF-8") from error
+    if len(member_bytes) > 255:
         raise ManagedConfigError(message="operation member must be a bounded Python identifier")
 
 
 def _bounded_text(value: str, path: str) -> bytes:
     """Encode one exact string under the managed per-value size limit."""
 
-    encoded = value.encode("utf-8")
+    if len(value) > _MAX_TEXT_BYTES:
+        raise ManagedConfigError(message=f"{path}: strings support at most 64 KiB")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError as error:
+        raise ManagedConfigError(message=f"{path}: strings must be valid UTF-8") from error
     if len(encoded) > _MAX_TEXT_BYTES:
         raise ManagedConfigError(message=f"{path}: strings support at most 64 KiB")
     return encoded
 
 
+class _PreimageBudget:
+    """Incrementally enforce the complete SHA-256 preimage support limit."""
+
+    def __init__(self) -> None:
+        self._size = 0
+
+    def add(self, size: int) -> None:
+        """Count canonical bytes and reject before a joined representation exists."""
+
+        self._size += size
+        if self._size > _MAX_PREIMAGE_BYTES:
+            raise ManagedConfigError(message="managed argument preimage exceeds 1 MiB")
+
+
+def _parameter_name_bytes(name: object) -> bytes:
+    """Encode a native parameter name without allowing raw UTF-8 errors to escape."""
+
+    if type(name) is not str:
+        raise ManagedConfigError(message="managed declaration has an invalid parameter name")
+    try:
+        return name.encode("utf-8")
+    except UnicodeError as error:
+        raise ManagedConfigError(message="managed declaration parameter names must be valid UTF-8") from error
+
+
+def _parameter_path(name: object) -> str:
+    """Return a bounded diagnostic path for a native parameter name."""
+
+    if type(name) is str and len(name) <= 64 and name.isascii() and name.isidentifier():
+        return f"$.{name}"
+    return "$.<parameter>"
+
+
+def _atom_header_size(tag: bytes) -> int:
+    """Return the fixed canonical framing size for an atom tag."""
+
+    return 2 + len(tag) + 8
+
+
+def _atom_size(tag: bytes, payload_size: int) -> int:
+    """Return the full canonical size of one atom without allocating its payload."""
+
+    return _atom_header_size(tag) + payload_size
+
+
+def _atom_header(tag: bytes, payload_size: int) -> bytes:
+    """Return the fixed canonical framing for an atom payload of known size."""
+
+    return len(tag).to_bytes(2, "big") + tag + payload_size.to_bytes(8, "big")
+
+
 def _atom(tag: bytes, payload: bytes) -> bytes:
     """Return an unambiguous length-delimited canonical atom."""
 
-    return len(tag).to_bytes(2, "big") + tag + len(payload).to_bytes(8, "big") + payload
+    return _atom_header(tag, len(payload)) + payload
 
 
 __all__ = ["argument_digest", "operation_digest"]
