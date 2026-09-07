@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+import subprocess
+import sys
 from threading import Event, Thread
 
 from dryml.core import Object, Repo
@@ -12,8 +14,6 @@ from dryml.managed import ManagedConfig, managed_operation
 from dryml.managed import control as control_module
 from dryml.managed.control import ManagedControlStore
 from dryml.managed.errors import ManagedControlError, ManagedPublicationError
-from dryml.runtime.errors import RuntimeTransitionError
-from dryml import session
 
 
 class LifecycleValue(Pickleable):
@@ -255,13 +255,28 @@ def test_managed_workload_requires_a_materialized_receiver_and_runtime_admission
     with pytest.raises(ManagedConfigError, match="materialized Object"):
         invoke(AdmissionValue.run, object(), (), None, {})
 
-    store = DirStore(tmp_path / "state")
-    value = AdmissionValue(repo=Repo((store,)))
-    AdmissionValue.calls = 0
-    session.set_mode("orchestrator")
-    try:
-        with pytest.raises(RuntimeTransitionError, match="prohibits Object materialization"):
-            value.run(managed=ManagedConfig(state_store=store))
-        assert AdmissionValue.calls == 0
-    finally:
-        session.reset()
+    # Runtime mode changes require a fresh interpreter after optional frameworks
+    # have been imported by unrelated maintained tests.
+    subprocess.run(
+        [sys.executable, "-c", """
+import sys
+import pytest
+from dryml import session
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
+from dryml.managed import ManagedConfig
+from dryml.runtime.errors import RuntimeTransitionError
+from tests.managed.test_lifecycle import AdmissionValue
+
+store = DirStore(sys.argv[1])
+value = AdmissionValue(repo=Repo((store,)))
+session.set_mode("orchestrator")
+try:
+    with pytest.raises(RuntimeTransitionError, match="prohibits Object materialization"):
+        value.run(managed=ManagedConfig(state_store=store))
+    assert AdmissionValue.calls == 0
+finally:
+    session.reset()
+""", str(tmp_path / "state")],
+        check=True, capture_output=True, text=True, timeout=30,
+    )
