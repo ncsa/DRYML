@@ -3,7 +3,7 @@
 DRYML tests are organized by feature category and by speed tier.
 
 Maintained categories include `formats`, `annotations`, `environments`,
-`worlds`, `runtime`, `session`, `core`, `locking`, `package`, `data`, `execute`, `models`,
+`worlds`, `runtime`, `session`, `core`, `locking`, `managed`, `package`, `data`, `execute`, `models`,
 `ray`, `tf`, `torch`, `jax`, and `multi_framework`. Speed tiers are applied
 automatically from `tests/test_tiers.json` by the DRYML pytest timing plugin.
 
@@ -50,6 +50,14 @@ combining coverage through `pytest-cov` append mode.
 `package` tests build an sdist and wheel beneath `/tmp/dryml`, inspect their
 contents, install the wheel into an isolated interpreter, verify exact public
 exports, and prove declaration imports remain free of optional frameworks.
+
+`managed` tests cover synchronous lifecycle publication, selected Store authority,
+checkpoint callbacks, interruption boundaries, resume/rerun recovery, local
+ownership, and lightweight root/package imports. Use focused checks while working:
+
+```bash
+./tests.sh tests/managed tests/package/test_public_imports.py tests/package/test_release_artifacts.py
+```
 
 ## How Buckets Are Selected
 

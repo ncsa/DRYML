@@ -14,4 +14,11 @@ Object aliases resolve with `get_alias()` to complete `ObjectRef` authority. Sta
 
 `DirStore` is the supported directory checkpoint backend. It publishes immutable definition, local-state, declaration, and StateRef records, plus mutable aliases and claims. SQLite indexes and dirty markers are derived state. Rebuild is visible and may take time; it never replaces authoritative records. Supported concurrency relies on local filesystem atomic replacement, locks, and SQLite behavior. Distributed filesystems and cross-host coordination are unsupported.
 
+Managed operations select a `DirStore` for immutable Object state and independently
+select one for mutable lifecycle control. Their authority-only Repo view does not
+open a query index or change session configuration. Callers own Store lifecycle
+and must retain explicitly selected control-store locations for inspection:
+managed has no locator or control journal. See [Managed Operations](managed_operations.md)
+for reconciliation, interruption, callback, and invalid-target recovery rules.
+
 Old Store layouts, format generations, and mutable current-state records reject before catalog registration, row decoding, restore, or index-ready activation. There is no migration or fallback reader.

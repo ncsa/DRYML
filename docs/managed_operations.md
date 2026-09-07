@@ -1,11 +1,77 @@
 # Managed Operations
 
-`dryml.managed` begins with checked declaration and input-matching support for
-synchronous instance methods. Use `@managed_operation(resumable=...)` with a
-required keyword-only `managed` parameter, and pass caller policy through
-`ManagedConfig`.
+`dryml.managed` provides a synchronous, checkpointed lifecycle for ordinary
+methods that mutate DRYML `Object` state. It is lazy at `dryml.managed`:
+importing `dryml` does not import this package. Managed does not submit work,
+return a job, start a thread, import dispatch/execute/records, or import optional
+frameworks.
 
-The internal U4 persistence layer resolves explicit `DirStore` bindings, or an
+## Public API
+
+Declare an exact synchronous instance method with a required keyword-only
+`managed` parameter. `@managed_operation(resumable=True)` permits an unfinished
+compatible attempt to restore Object state and enter the current method body
+again. Coroutine, generator, static/class, property, wrapped, and arbitrary
+callable targets are rejected; `**kwargs` does not substitute for the slot.
+
+```python
+from dryml import Repo
+from dryml.core.object import Pickleable
+from dryml.core.store.dir import DirStore
+from dryml.managed import ManagedConfig, ManagedInterrupted, managed_operation
+
+
+class Counter(Pickleable):
+    def __init__(self, value=0):
+        self.value = value
+
+    @managed_operation(resumable=True)
+    def advance(self, amount, *, managed):
+        self.value += amount
+        managed.checkpoint()  # An author-selected safe point.
+        if self.value >= 10:
+            managed.interrupt()
+        return self.value
+
+
+store = DirStore("./counter-store")
+counter = Counter(repo=Repo((store,)))
+try:
+    counter.advance(2, managed=ManagedConfig(state_store=store))
+except ManagedInterrupted:
+    raise
+```
+
+The bound operation takes ordinary arguments plus reserved
+`managed: ManagedConfig | None`; method code receives a private
+`ManagedContext`, not the configuration. `ManagedConfig` accepts optional exact
+`DirStore` `state_store` and `control_store`, exact-bool `rerun`, and `callbacks`
+as `None` or a list of at most 64 callables. It is immutable, and invocation
+snapshots its caller-owned callback list without mutating or probing it.
+
+Bound operations expose `status(*, state_store=None, control_store=None)` and
+`request_interrupt(*, state_store=None, control_store=None,
+expected_attempt_id=None)`. Status does not run workload hooks and reports an
+immutable `ManagedStatus`: `not_started`, `running`, `interrupted`, `failed`, or
+`completed`. A request returns an immutable `InterruptRequestResult` with
+`requested`, `already_requested`, `not_running`, or `stale_attempt`; publication
+does not promise that another checkpoint will occur.
+
+The invocation-only context exposes read-only `state_store`, `control_store`,
+`operation_id`, `attempt_id`, `is_resuming`, and `checkpoint_state_ref`.
+`checkpoint()` publishes/associates a complete StateRef, while
+`interrupt(cause=None)` performs that safe point then raises `ManagedInterrupted`
+and chains an optional cause. Contexts cannot be caller-constructed, reused after
+exit, transferred across a thread/process, or entered recursively.
+
+The package exports `ManagedConfig`, `ManagedContext`, `ManagedStatus`,
+`InterruptRequestResult`, `managed_operation`, and the `ManagedError` hierarchy.
+`argument_digest` and `operation_digest` are deterministic lifecycle identity
+helpers for integrations that need the same public operation addressing.
+
+## Lifecycle And Recovery
+
+The persistence layer resolves explicit `DirStore` bindings, or an
 omitted state Store from `dryml.core.session.current_repo`: one physical Store is
 selected directly, while multiple physical Stores require exactly one full match
 for the live object's exact current `StateRef`. Omitted control authority uses
@@ -27,13 +93,13 @@ atomic replacement, without claiming unsupported directory-descriptor fsync.
 Managed lifetime ownership now composes core's process-local exact live-graph
 reservation with nonblocking `dryml.locking` leases for every stateful ObjectId.
 The selected state Store owns `managed/locks/v1/<hh>/<digest>.lock`; its managed
-format gate is bootstrapped through the same U4 Store-writer protocol even when
+format gate is bootstrapped through the same Store-writer protocol even when
 control uses another Store. Lock paths normalize a physical DirStore root, so
 separate handles and control Stores cannot bypass active overlapping state
 ownership. Acquisition is all-or-nothing, releases partial leases in reverse
 order, and is retained through the future invocation lifetime without holding a
 Store writer or control lock over workload hooks. A non-mutating complete-lock
-probe is available to U6 status/request handling: contention is inconclusive and
+probe is available to status/request handling: contention is inconclusive and
 never itself classifies an owner as dead.
 
 Managed methods now run synchronously in the caller's thread. Invocation requires
@@ -95,3 +161,49 @@ exceptions are re-raised unchanged after failure recording; when that recording
 is indeterminate or fails, an actionable managed control error is chained from
 the original exception. `SystemExit` and other non-interruption base exceptions
 receive best-effort cleanup and are re-raised unchanged.
+
+## Callback And Store Responsibilities
+
+Callbacks receive `(live_object, context)` synchronously in supplied-list order
+only after both state publication and control association succeed. A callback may
+inspect `context.checkpoint_state_ref` and save a separate disjoint result through
+`context.state_store`. Callbacks are trusted developer code and must not mutate
+the managed object or context. Their exception stops later callbacks, retains the
+checkpoint, records failure best-effort, and propagates; managed neither retries
+them nor rolls back external effects. Final completion is not a callback boundary
+and cannot honor a request that arrived after the last checkpoint decision.
+
+| Concern | DRYML behavior | Caller responsibility |
+| --- | --- | --- |
+| State Store | Publishes complete checkpoint/final Object-state graphs. | Supply a usable `DirStore` or unambiguous current-Repo authority. |
+| Control Store | Stores bounded status, attempts, requests, and StateRef associations. | Retain explicit control-store location; managed has no locator. |
+| Omitted Store | Selects the sole current-Repo Store or unique matching current StateRef Store; control defaults to state. | Pass `state_store` for absent or ambiguous discovery. |
+| Local ownership | Combines core reservations with `dryml.locking` advisory leases. | Use supported local filesystem semantics and handle conflict/recovery errors. |
+| Platform matrix | Exercises the current in-house environment and portable adapter seams. | Do not infer Windows, network, distributed, or multi-host certification. |
+
+Control data does not change CDef, ObjectRef, or StateRef identity. Separate
+control storage does not copy checkpoint payloads. A different explicit empty
+control Store may start fresh work after ownership ends because managed has no
+global operation locator, journal, or duplicate-work prevention.
+
+Managed control is closed canonical JSON format v1: gate `dryml-managed`, current
+snapshot `dryml-managed-current`, and replacement intent `dryml-managed-pending`.
+Malformed, pending, incomplete, or unsupported control authority is a recovery or
+control error, never absent or successful work. Object state remains the closed
+DirStore v2/StateRef authority documented in [Formats](formats.md); there is no
+migration, compatibility reader, or separate continuation payload.
+
+Resume restores Object state, not a Python stack or unsaved external resources.
+Exact receiver identity, normalized arguments, and the current resumable
+declaration must match. There is deliberately no authored version, capability
+digest, source fingerprint, or semantic code-compatibility guarantee. Changed
+code may run or raise from restore/method code; silent semantic mismatches are
+not detected.
+
+Restore preflight happens before hooks. A hook failure after restore begins
+invalidates the supplied live target graph for state IO, resume, and rerun. Its
+immutable checkpoint remains authoritative: inspect explicit Store status, load a
+fresh exact graph with `Repo.load_state_ref(checkpoint, reuse_live="never")`, and
+resume that object. Default `Pickleable` restoration replaces ordinary payload
+fields, removing stale fields absent from the checkpoint while preserving graph
+bindings and framework runtime metadata.

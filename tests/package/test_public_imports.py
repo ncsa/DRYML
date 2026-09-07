@@ -179,6 +179,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "load_state_ref",
     "locking",
     "methods",
+    "managed",
     "Object",
     "ObjectId",
     "ObjectRef",
@@ -198,6 +199,27 @@ _EXPECTED_ROOT_EXPORTS = {
     "runtime",
     "world",
     "worlds",
+}
+
+_EXPECTED_MANAGED_EXPORTS = {
+    "InterruptRequestResult",
+    "ManagedConfig",
+    "ManagedContext",
+    "ManagedConfigError",
+    "ManagedConflictError",
+    "ManagedContextError",
+    "ManagedControlError",
+    "ManagedDeclarationError",
+    "ManagedError",
+    "ManagedInterrupted",
+    "ManagedPublicationError",
+    "ManagedRecoveryError",
+    "ManagedRerunRequiredError",
+    "ManagedStatus",
+    "ManagedStoreError",
+    "argument_digest",
+    "managed_operation",
+    "operation_digest",
 }
 
 _EXPECTED_REQUIREMENT_EXPORTS = {
@@ -310,6 +332,12 @@ print(json.dumps({
          if name in dryml.__all__
      ),
      "root_methods": dryml.methods is __import__("dryml.methods", fromlist=["*"]),
+      "root_managed": dryml.managed is __import__("dryml.managed", fromlist=["*"]),
+      "managed_exports": sorted(dryml.managed.__all__),
+      "state_graph_reservation": {
+          "core": "StateGraphReservation" in dryml.core.__all__,
+          "root": hasattr(dryml, "StateGraphReservation"),
+      },
       "root_locking": dryml.locking is __import__("dryml.locking", fromlist=["*"]),
      "aliases": {
          "env": dryml.env is dryml.environments,
@@ -326,6 +354,9 @@ print(json.dumps({
     assert set(data["exports"]) == _EXPECTED_ROOT_EXPORTS
     assert data["root_core_conveniences"]
     assert data["root_methods"]
+    assert data["root_managed"]
+    assert set(data["managed_exports"]) == _EXPECTED_MANAGED_EXPORTS
+    assert data["state_graph_reservation"] == {"core": True, "root": False}
     assert data["root_locking"]
     assert data["aliases"] == {"env": True, "world": True, "requirements": "dryml.requirements"}
     assert data["version"] == data["metadata_version"] == "0.3.0.dev2"

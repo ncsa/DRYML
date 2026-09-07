@@ -9,3 +9,12 @@ Missing versions, raw CDef tuple/dict records, previous Store layouts, mutable c
 Environment, world, runtime, and session format families retain their documented
 schemas; those names do not denote CDef or Store compatibility. Annotations have
 no kernel-owned envelope, ID, serialization, or persistence format.
+
+Managed lifecycle control is separate bounded canonical-JSON authority in the
+selected control Store: `dryml-managed` v1 gate, `dryml-managed-current` v1
+current snapshot, and `dryml-managed-pending` v1 replacement intent. It records
+operation/attempt identity, lifecycle state, interruption request, and associated
+checkpoint/final StateRef digests, never state payloads or a Python continuation.
+Unsupported, malformed, incomplete, or pending control data fails reconciliation;
+it is not interpreted as completed or not-started work. These v1 records have no
+migration or compatibility reader.

@@ -21,4 +21,13 @@ Hooks receive only a framework-provided payload directory and opaque validated c
 
 `Object.last_state_ref` is a read-only runtime receipt for the last fully published top-level `StateRef`, or `None` before one completes. It is installed after immutable state authority is complete and before derived index, main-reference, or alias updates, so a later failure can propagate while the valid receipt remains available. A successful top-level exact load also installs its requested receipt. Embedded descendants never receive projected/synthetic receipts, and ordinary unsaved mutation does not change the receipt. The receipt is excluded from serialized payload state and does not promise that the live object remains unchanged since publication.
 
+`Repo.restore_state_ref_into()` restores only the supplied exact live graph after
+preflight; it never searches for or substitutes another object. If a restore hook
+fails after hooks begin, that graph is invalid for further state IO. Load a fresh
+exact graph from the preserved StateRef instead. Default `Pickleable` restoration
+replaces ordinary payload fields rather than merging them, removing attributes
+added after a checkpoint while preserving graph bindings and framework runtime
+metadata. A stateless `Object` root may own stateful descendants; checkpoint state
+comes from those descendants rather than unsaved root-only attributes.
+
 Pre-V2 CDef records, raw tuples, missing identity versions, and mixed graphs are rejected before construction. There is no migration, converter, or dual reader.

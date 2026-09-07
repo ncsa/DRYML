@@ -28,6 +28,7 @@ _SUBMODULE_EXPORTS = {
     "session": "dryml.session",
     "annotations": "dryml.annotations",
     "methods": "dryml.methods",
+    "managed": "dryml.managed",
     "locking": "dryml.locking",
 }
 
@@ -78,7 +79,24 @@ _CORE_EXPORTS = {
 }
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> object:
+    """Resolve one documented lazy root export.
+
+    Args:
+        name: A name listed in :data:`__all__`.
+
+    Returns:
+        The requested public package module or core-owned convenience value.
+
+    Raises:
+        AttributeError: If ``name`` is not a documented root export.
+
+    Side Effects:
+        Imports the owning lightweight package or core module on first access and
+        caches the resolved value in this module. Importing :mod:`dryml` alone
+        does not resolve these exports.
+    """
+
     if name in _SUBMODULE_EXPORTS:
         module = importlib.import_module(_SUBMODULE_EXPORTS[name])
         globals()[name] = module
@@ -107,6 +125,7 @@ __all__ = [
     "session",
     "annotations",
     "methods",
+    "managed",
     "locking",
     "config",
     "configure",

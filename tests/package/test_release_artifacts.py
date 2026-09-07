@@ -9,6 +9,7 @@ import zipfile
 
 _REQUIRED_MODULES = {
     "dryml/locking.py",
+    "dryml/core/state.py",
     "dryml/core/__init__.py",
     "dryml/core/cdef_codec.py",
     "dryml/core/cdef_identity.py",
@@ -53,6 +54,16 @@ _REQUIRED_MODULES = {
     "dryml/code/trace.py",
     "dryml/code/algorithms/__init__.py",
     "dryml/code/algorithms/lexical_dependencies.py",
+    "dryml/managed/__init__.py",
+    "dryml/managed/config.py",
+    "dryml/managed/context.py",
+    "dryml/managed/control.py",
+    "dryml/managed/descriptor.py",
+    "dryml/managed/errors.py",
+    "dryml/managed/identity.py",
+    "dryml/managed/model.py",
+    "dryml/managed/runtime.py",
+    "dryml/managed/storage.py",
 }
 
 _RETIRED_CODE_MODULES = {
@@ -150,6 +161,7 @@ def test_wheel_contains_port_modules_without_retired_core(
     assert not _RETIRED_CODE_MODULES & names
     assert not any(name.startswith("dryml/core2/") for name in names)
     assert "dryml/core/store/locking.py" not in names
+    assert "dryml/managed/locking.py" not in names
     assert native_lock_sources == {"dryml/locking.py"}
     assert "dryml/core/repo_graph.py" not in names
 
@@ -197,6 +209,7 @@ def test_sdist_contains_port_modules_without_retired_core(
     assert not {f"src/{name}" for name in _RETIRED_CODE_MODULES} & names
     assert not any(name.startswith("src/dryml/core2/") for name in names)
     assert "src/dryml/core/store/locking.py" not in names
+    assert "src/dryml/managed/locking.py" not in names
     assert {
         name
         for name, source in package_sources.items()
