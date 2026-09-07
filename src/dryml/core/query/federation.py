@@ -38,8 +38,9 @@ RepoGenerationVector = IndexGenerationVector
 
 
 class RepoQueryIndex:
-    def __init__(self, repo):
+    def __init__(self, repo, *, authority_only: bool = False):
         self.repo = repo
+        self._authority_only = authority_only
         self._opened_indexes: dict[str, Any] = {}
         self._memory_indexes: dict[str, MemoryStoreQueryIndex] = {}
         self._bindings: tuple[StoreIndexBinding, ...] = ()
@@ -1037,6 +1038,10 @@ class RepoQueryIndex:
         return relation, plan
 
     def open_store_index(self, binding: StoreIndexBinding):
+        if self._authority_only:
+            raise QueryIndexUnavailable(
+                "This private state-IO Repo view cannot open persistent query indexes."
+            )
         existing = self._opened_indexes.get(binding.source_key)
         if existing is not None:
             return existing
@@ -1172,6 +1177,8 @@ class RepoQueryIndex:
             Updates available derived indexes or leaves their durable dirty
             markers in place when registration fails.
         """
+        if self._authority_only:
+            return
         self.refresh_bindings()
         binding_by_key = {binding.source_key: binding for binding in self._bindings}
         for store, roots in roots_by_store.items():

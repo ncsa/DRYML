@@ -13,7 +13,7 @@ import pytest
 
 _EXPECTED_CORE_EXPORTS = (
     "load_object", "save_object", "load_state_ref", "LiveReusePolicy",
-    "StoreReport", "Object", "Serializable", "UniqueID", "Metadata",
+    "StoreReport", "StateGraphReservation", "Object", "Serializable", "UniqueID", "Metadata",
     "Compute", "Definition", "ConcreteDefinition", "DefLink", "Ref", "Mat",
     "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace",
     "freeze", "ArgRole", "RefCDef", "RefCDefArg", "SelectorArg",
@@ -48,6 +48,7 @@ _EXPORT_MODULES = {
     **dict.fromkeys(("Repo", "load_object", "load_state_ref", "save_object"), "dryml.core.repo"),
     "LiveReusePolicy": "dryml.core.policies",
     "StoreReport": "dryml.core.repo_plan",
+    "StateGraphReservation": "dryml.core.state",
     **dict.fromkeys(("dtype", "DType"), "dryml.core.dtype"),
     **dict.fromkeys(("SpecHint", "TensorSpec", "as_tensor_spec"), "dryml.core.tensor_spec"),
     **dict.fromkeys(("CONFIG_MISSING", "ConfigError", "ConfigRef"), "dryml.core.config"),

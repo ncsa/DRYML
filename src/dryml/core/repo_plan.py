@@ -653,6 +653,10 @@ def build_save_plan(
     """
     if not isinstance(value, Object):
         raise TypeError("Graph save requires one live Object root.")
+    if getattr(value, "_restore_failed", False):
+        from .repo import RepoSaveError
+
+        raise RepoSaveError("Cannot save an invalidated restore target.")
     binding = build_runtime_binding(repo, value)
     from .repo import RepoSaveError
 
@@ -670,6 +674,10 @@ def build_save_plan(
         except Exception:
             obj = None
         if isinstance(obj, Serializable):
+            if getattr(obj, "_restore_failed", False):
+                raise RepoSaveError(
+                    f"Cannot save invalidated restore target at {path!s}."
+                )
             actions.append(SaveAction(path, obj.definition, obj))
             continue
         seed = seeds.get(path)
@@ -852,6 +860,9 @@ def _publish_local_state(obj: Object, definition: ConcreteDefinition, store, pat
         local state may remain unreferenced if a later graph publication fails.
     """
     from .store.records import DefinitionRecord, LocalStateManifest
+
+    if getattr(obj, "_restore_failed", False):
+        raise _save_error(path, "cannot save an invalidated restore target")
 
     codec = obj.state_codec
     stage = os.fspath(store.create_local_state_staging())

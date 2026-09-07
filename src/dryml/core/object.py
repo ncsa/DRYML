@@ -152,6 +152,9 @@ class Dryml(type):
                 obj._save_load_reservation = Lock()
                 # A completed StateRef is runtime metadata, not saved payload.
                 obj._last_state_ref = None
+                # A failed in-place restore has no rollback boundary. The object
+                # must be replaced by a fresh exact load before further state IO.
+                obj._restore_failed = False
 
                 # Attach the definition to the object.
                 obj.__cdef__ = cdef
@@ -460,6 +463,7 @@ class Pickleable(Serializable):
         "_last_state_hash",
         "_last_state_ref",
         "_save_load_reservation",
+        "_restore_failed",
         "_store_affinity",
         "_realization_scope",
     }
@@ -467,16 +471,56 @@ class Pickleable(Serializable):
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         # Grab all heavy-state data
         heavy_state = {k: v for k, v in self.__dict__.items()
-                       if k not in self._HEAVY_EXCLUDE}
+                       if k not in self._HEAVY_EXCLUDE and k not in self._graph_binding_fields()}
 
         # Save the entire object as a pickle
         pickle_save(heavy_state, os.path.join(dest_dir, "heavy.pkl"))
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
-        # heavy-state data is stored in heavy.pkl
-        heavy_state = pickle_load(os.path.join(src_dir, "heavy.pkl"))
+        """Replace this object's non-framework payload from its checkpoint.
 
-        self.__dict__.update(heavy_state)
+        Args:
+            src_dir: Checkpoint payload directory containing ``heavy.pkl``.
+            codec: Opaque selected codec, accepted for hook compatibility.
+
+        Side Effects:
+            Removes current ordinary payload attributes absent from the saved
+            payload, then installs the checkpoint payload. Framework identity,
+            runtime bindings, reservations, and invalidation state remain live.
+        """
+
+        heavy_state = pickle_load(os.path.join(src_dir, "heavy.pkl"))
+        bindings = self._graph_binding_fields()
+        for key in tuple(self.__dict__):
+            if key not in self._HEAVY_EXCLUDE and key not in bindings and key not in heavy_state:
+                del self.__dict__[key]
+        self.__dict__.update({
+            key: value for key, value in heavy_state.items() if key not in bindings
+        })
+
+    def _graph_binding_fields(self) -> set[str]:
+        """Return direct payload fields that retain live graph object identity."""
+
+        from .utils.graph.value import iter_value_edges
+
+        graph_nodes = {
+            id(value) for value in getattr(self, "_runtime_projection", {}).values()
+            if isinstance(value, Object)
+        }
+
+        def retains_graph_node(value, seen):
+            value_id = id(value)
+            if value_id in graph_nodes:
+                return True
+            if value_id in seen:
+                return False
+            seen.add(value_id)
+            return any(retains_graph_node(edge.value, seen) for edge in iter_value_edges(value))
+
+        return {
+            key for key, value in self.__dict__.items()
+            if key not in self._HEAVY_EXCLUDE and retains_graph_node(value, set())
+        }
 
 
 class UniqueID(Object):

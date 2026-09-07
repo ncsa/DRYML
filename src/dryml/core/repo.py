@@ -362,7 +362,8 @@ class Repo:
             self, stores=None, config: Mapping[str, Any] | None = None,
             *, clock: Callable[[], float] | None = None,
             lease_duration: float = 30.0,
-            owner_token_factory: Callable[[], str] | None = None):
+            owner_token_factory: Callable[[], str] | None = None,
+            _state_io: bool = False):
         # Initialize caches
         self.weak_obj_cache = _CandidateCache(weak=True)
         self.strong_obj_cache = _CandidateCache()
@@ -376,6 +377,7 @@ class Repo:
         self._clock = clock or time.time
         self._lease_duration = float(lease_duration)
         self._owner_token_factory = owner_token_factory or (lambda: uuid4().hex)
+        self._state_io = _state_io
         self.alias_index = {}
         self._aliases_dirty = False
         # Compatibility facade and live cache overlay. Store-owned indexes handle
@@ -401,7 +403,7 @@ class Repo:
                     self.stores.append(make_store(store))
                 else:
                     self.stores.append(store)
-        self._query_index = RepoQueryIndex(self)
+        self._query_index = RepoQueryIndex(self, authority_only=_state_io)
 
         # Main remains a structural reference in current Store authority.
         if len(self.stores) > 0:
@@ -453,6 +455,8 @@ class Repo:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_cache_strong"):
+            if getattr(obj, "_restore_failed", False):
+                return
             self.strong_obj_cache.add(obj.__cdef__, obj)
             self._query_catalog.register_cached(obj.__cdef__)
 
@@ -460,6 +464,8 @@ class Repo:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_cache_weak"):
+            if getattr(obj, "_restore_failed", False):
+                return
             self.weak_obj_cache.add(obj.__cdef__, obj)
             self._query_catalog.register_cached(obj.__cdef__)
 
@@ -468,7 +474,12 @@ class Repo:
         """Return distinct live candidates for one exact private CDef node."""
 
         candidates = self.strong_obj_cache.candidates(cdef) + self.weak_obj_cache.candidates(cdef)
-        return _unique_objects(candidates)
+        from .state import is_reserved
+
+        return _unique_objects(
+            candidate for candidate in candidates
+            if not getattr(candidate, "_restore_failed", False) and not is_reserved(candidate)
+        )
 
     def _all_live_candidates(self) -> tuple[Object, ...]:
         """Return all distinct cached live Objects without structural lookup.
@@ -477,15 +488,90 @@ class Repo:
         topology, bindings, and reservation availability.  It intentionally does
         not use CDef equality as an identity key.
         """
+        from .state import is_reserved
+
         return _unique_objects(
-            tuple(obj for _, obj in self.strong_obj_cache.items())
-            + tuple(obj for _, obj in self.weak_obj_cache.items())
+            obj for obj in (
+                tuple(obj for _, obj in self.strong_obj_cache.items())
+                + tuple(obj for _, obj in self.weak_obj_cache.items())
+            ) if not getattr(obj, "_restore_failed", False) and not is_reserved(obj)
         )
 
     def _evict_live(self, obj: Object) -> None:
         """Remove one externally mutable failed exact-reuse candidate from caches."""
         self.strong_obj_cache.discard(obj.definition, obj)
         self.weak_obj_cache.discard(obj.definition, obj)
+
+    def _state_graph_evidence(self, obj: Object):
+        """Return the exact live nodes and ObjectIds covered by state IO.
+
+        The retained save plan is the common authoritative binding check for
+        graph reservations, ordinary saves, and targeted restores. A stateless
+        root remains a live node while stateful descendants provide ObjectId
+        ownership.
+        """
+
+        from .repo_plan import build_save_plan
+
+        if not isinstance(obj, Object):
+            raise TypeError("State graph operations require a live Object root.")
+        plan = build_save_plan(self, obj)
+        nodes = [obj]
+        node_ids = {id(obj)}
+        for candidate in getattr(obj, "_runtime_projection", {}).values():
+            if isinstance(candidate, Object) and id(candidate) not in node_ids:
+                nodes.append(candidate)
+                node_ids.add(id(candidate))
+        for action in plan.actions:
+            if isinstance(action.obj, Object) and id(action.obj) not in node_ids:
+                nodes.append(action.obj)
+                node_ids.add(id(action.obj))
+        if any(getattr(node, "_restore_failed", False) for node in nodes):
+            raise RepoSaveError("State graph contains an invalidated restore target.")
+        return plan, tuple(nodes), tuple(obj.object_ref.objects.values())
+
+    def reserve_state_graph(self, obj: Object):
+        """Reserve one exact live state graph for this process and thread.
+
+        Args:
+            obj: Live root with complete retained ObjectRef/runtime bindings.
+
+        Returns:
+            An active :class:`StateGraphReservation` context manager covering the
+            exact root, stateful ObjectIds, and live state nodes.
+
+        Raises:
+            RepoSaveError: If bindings are incomplete, a target was invalidated,
+                or any covered ObjectId/live identity is already reserved.
+
+        Side Effects:
+            Installs a process-local nonblocking ownership token. Store authority
+            is not opened or mutated.
+        """
+
+        from .state import reserve
+
+        _, nodes, object_ids = self._state_graph_evidence(obj)
+        return reserve(obj.object_ref, nodes, object_ids)
+
+    @classmethod
+    def _for_state_io(cls, stores):
+        """Create a non-owning authority-only Repo view over caller Stores.
+
+        Args:
+            stores: Existing Store instances selected by the caller for exact
+                state authority and any immutable seed reads.
+
+        Returns:
+            A call-owned Repo with independent memory caches and query federation
+            disabled from opening or registering persistent indexes.
+
+        Side Effects:
+            Does not close, commit, or otherwise take ownership of caller Stores
+            or their existing query-index connections.
+        """
+
+        return cls(stores, _state_io=True)
 
     def get_cached(self, cdef):
         """Return a cached Object after live-object admission.
@@ -1605,7 +1691,8 @@ class Repo:
             deep_capture: bool = False,
             federated: bool = False,
             report_stores: bool = False,
-            _capture_memo: set[object] | None = None):
+            _capture_memo: set[object] | None = None,
+            reservation=None):
         """Publish one live graph as immutable local states and a StateRef.
 
         Args:
@@ -1616,6 +1703,8 @@ class Repo:
             deep_capture: Whether every owned Serializable node is serialized.
             federated: Whether reusable dependencies may remain external.
             report_stores: Whether to return an ephemeral StoreReport.
+            reservation: Optional active exact graph reservation reused by an
+                enclosing state operation; callers normally omit this.
 
         Returns:
             The complete StateRef, or it with the requested StoreReport.
@@ -1640,19 +1729,26 @@ class Repo:
         with materialization_admission(operation="repo_save_object"):
             if alias is not None:
                 self._validate_alias(alias)
-            store = self._ensure_store(store) or self.default_store
-            if store is None:
-                raise RepoSaveError("No Store available to save object.")
-            lease = getattr(obj, "_claim_lease", None)
-            if isinstance(lease, _ClaimLease):
-                if store is not lease.store:
-                    raise RepoSaveError("The initial StateRef must be published in the declaration Store.")
-                self._renew_claim(lease)
-            capture_memo = set() if _capture_memo is None else _capture_memo
-            # Complete nested declarations before publishing an enclosing graph.
-            # The nested immutable StateRef then supplies reusable state for
-            # adoption, so deep capture does not serialize it a second time.
+            _, nodes, object_ids = self._state_graph_evidence(obj)
+            owns_reservation = reservation is None
+            if owns_reservation:
+                reservation = self.reserve_state_graph(obj)
+            else:
+                reservation._covers(nodes, object_ids)
+            lease = None
             try:
+                store = self._ensure_store(store) or self.default_store
+                if store is None:
+                    raise RepoSaveError("No Store available to save object.")
+                lease = getattr(obj, "_claim_lease", None)
+                if isinstance(lease, _ClaimLease):
+                    if store is not lease.store:
+                        raise RepoSaveError("The initial StateRef must be published in the declaration Store.")
+                    self._renew_claim(lease)
+                capture_memo = set() if _capture_memo is None else _capture_memo
+                # Complete nested declarations before publishing an enclosing graph.
+                # The nested immutable StateRef then supplies reusable state for
+                # adoption, so deep capture does not serialize it a second time.
                 for dependency_lease, dependency_obj in getattr(
                         obj, "_pending_claim_dependencies", ()):
                     if dependency_lease is lease:
@@ -1663,6 +1759,7 @@ class Repo:
                         deep_capture=deep_capture,
                         federated=federated,
                         _capture_memo=capture_memo,
+                        reservation=reservation,
                     )
                     from .repo_plan import build_save_plan
 
@@ -1685,6 +1782,9 @@ class Repo:
                         getattr(obj, "_claim_leases", (lease,) if lease else ())):
                     self._abandon_claim(pending_lease)
                 raise
+            finally:
+                if owns_reservation:
+                    reservation.release()
             state_ref = result[0] if report_stores else result
             if isinstance(lease, _ClaimLease):
                 obj._claim_lease = None
@@ -1693,11 +1793,12 @@ class Repo:
             # StateRef publication is authoritative; only then may the derived
             # query index expose this root. A registration failure leaves the
             # Store authority intact and the sidecar explicitly dirty.
-            self._query_index.register_saved_graph(
-                plan.graph,
-                {store: (obj.definition,)},
-                {store: (state_ref,)},
-            )
+            if not self._state_io:
+                self._query_index.register_saved_graph(
+                    plan.graph,
+                    {store: (obj.definition,)},
+                    {store: (state_ref,)},
+                )
             if main:
                 store.write_main_ref(MainRefRecord(DefinitionRecord(obj.definition).digest))
                 self.main_def = obj.definition
@@ -1994,6 +2095,156 @@ class Repo:
             return execute_exact_state_load_plan(
                 self, plan, reuse_live=reuse_live, cache=cache,
             )
+
+    def restore_state_ref_into(self, obj: Object, state_ref, *, reservation=None):
+        """Restore an authoritative snapshot into the exact supplied live graph.
+
+        Args:
+            obj: Existing live root whose ObjectRef and retained runtime bindings
+                must exactly match ``state_ref``.
+            state_ref: Complete authoritative StateRef to restore.
+            reservation: Optional active reservation returned for this exact graph.
+
+        Returns:
+            The requested ``state_ref`` after every local restore hook succeeds.
+
+        Raises:
+            RepoLoadError: If authority, topology, paths, IDs, or payloads fail
+                preflight, or if a hook fails. A post-hook failure invalidates all
+                covered live nodes and requires a fresh exact load.
+            RepoSaveError: If graph ownership is unavailable or ``reservation``
+                is inactive, foreign, or does not cover the supplied graph.
+
+        Side Effects:
+            Runs local hooks dependency-first without candidate search or object
+            replacement. Successful completion updates only ``obj.last_state_ref``.
+        """
+
+        from .materialization import build_exact_state_load_plan
+        from .reference_values import StateRef
+
+        if not isinstance(obj, Object):
+            raise TypeError("restore_state_ref_into requires a live Object target.")
+        if not isinstance(state_ref, StateRef):
+            raise TypeError("restore_state_ref_into requires a StateRef.")
+        if getattr(obj, "_restore_failed", False):
+            raise RepoLoadError("Cannot restore an invalidated live target; load a fresh exact graph.")
+
+        # Authority validation, retained binding validation, and reservation all
+        # complete before the first user restore hook can run.
+        plan = build_exact_state_load_plan(self, state_ref)
+        _, nodes, object_ids = self._state_graph_evidence(obj)
+        if obj.object_ref != state_ref.object:
+            raise RepoLoadError("Target object does not carry the requested exact ObjectRef.")
+        owns_reservation = reservation is None
+        if owns_reservation:
+            reservation = self.reserve_state_graph(obj)
+        else:
+            reservation._covers(nodes, object_ids)
+
+        locks = []
+        hooks_started = False
+        try:
+            targets = {}
+            for path, object_id in state_ref.object.objects.items():
+                try:
+                    target = obj.graph_at(path)
+                except Exception as error:
+                    raise RepoLoadError(
+                        f"Target graph lacks retained binding at {path!s}."
+                    ) from error
+                if not isinstance(target, Object) or target.object_id != object_id:
+                    raise RepoLoadError(
+                        f"Target graph identity does not match ObjectRef at {path!s}."
+                    )
+                targets[object_id] = target
+            if set(targets) != set(object_ids):
+                raise RepoLoadError("Target graph has incomplete stateful ObjectId bindings.")
+
+            # Existing per-instance exclusion remains meaningful for code outside
+            # the graph-token protocol. Acquire every lock before invalidation or
+            # hook entry so a failure here leaves the target usable.
+            for object_id in sorted(targets, key=str):
+                lock = getattr(targets[object_id], "_save_load_reservation", None)
+                if lock is None or not lock.acquire(blocking=False):
+                    raise RepoLoadError("Target local state is already reserved by save or restore.")
+                locks.append(lock)
+
+            # A StateRef embeds materializing StateRefs below ordinary CDef graph
+            # edges. Keep the full preflight closure, selecting the outer action
+            # where it explicitly supersedes a seed state for the same ObjectId.
+            actions = {}
+            for action in plan.actions:
+                if action.object_id not in targets:
+                    raise RepoLoadError("Exact StateRef closure has an unbound live ObjectId.")
+                if action.object_id not in actions or action.reference == state_ref:
+                    actions[action.object_id] = action
+            if set(actions) != set(object_ids):
+                raise RepoLoadError("Exact StateRef preflight did not retain every live state action.")
+
+            reference_depths = {state_ref.digest(): 0}
+
+            def visit_reference_values(value, depth):
+                from .cdef_graph import EdgeKind
+                from .links import DefLink
+                from .reference_values import StateRef
+                from .utils.graph.value import iter_value_edges
+
+                if isinstance(value, StateRef):
+                    digest = value.digest()
+                    reference_depths[digest] = max(reference_depths.get(digest, 0), depth)
+                    for parameter in value.definition.parameters.values():
+                        visit_reference_values(parameter, depth + 1)
+                    return
+                if isinstance(value, DefLink):
+                    if value.kind is EdgeKind.MATERIALIZE:
+                        visit_reference_values(value.target, depth)
+                    return
+                for edge in iter_value_edges(value):
+                    visit_reference_values(edge.value, depth)
+
+            for parameter in state_ref.definition.parameters.values():
+                visit_reference_values(parameter, 1)
+            ordered = sorted(
+                actions.values(),
+                key=lambda action: (
+                    -reference_depths.get(action.reference.digest(), 0),
+                    -len(action.path), str(action.path), str(action.object_id),
+                ),
+            )
+            obj._last_state_ref = None
+            for action in ordered:
+                target = targets[action.object_id]
+                codec = action.state_hash.split("-", 1)[0]
+                hooks_started = True
+                target.restore_state_from_dir(
+                    os.path.join(os.fspath(action.payload), "data"), codec=codec
+                )
+                target._last_state_hash = action.state_hash
+            obj._last_state_ref = state_ref
+            return state_ref
+        except RepoLoadError:
+            if hooks_started:
+                self._invalidate_restoration_target(nodes)
+            raise
+        except BaseException as error:
+            if hooks_started:
+                self._invalidate_restoration_target(nodes)
+            raise RepoLoadError(f"Targeted exact restore failed: {error}") from error
+        finally:
+            for lock in reversed(locks):
+                lock.release()
+            if owns_reservation:
+                reservation.release()
+
+    def _invalidate_restoration_target(self, nodes) -> None:
+        """Conservatively retire live instances after an in-place hook failure."""
+
+        for node in nodes:
+            node._restore_failed = True
+            node._last_state_hash = None
+            node._last_state_ref = None
+            self._evict_live(node)
 
     def load(self, cdef: ConcreteDefinition, *, cache: CachePolicy = "weak") -> Object:
         from dryml.runtime import materialization_admission
@@ -2357,9 +2608,11 @@ class Repo:
         self._aliases_dirty = False
 
     def close(self, flush=True):
-        if flush:
+        if flush and not self._state_io:
             self.flush()
         self._query_index.close()
+        if self._state_io:
+            self.clear_cache(strong=True, weak=True)
 
     def __del__(self):
         if self.save_objs_on_deletion:

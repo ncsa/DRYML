@@ -47,7 +47,7 @@ def test_promoted_package_keeps_the_destination_export_manifest():
     core = importlib.import_module("dryml.core")
 
     assert core.__all__ == [
-        "load_object", "save_object", "load_state_ref", "LiveReusePolicy", "StoreReport", "Object", "Serializable", "UniqueID",
+        "load_object", "save_object", "load_state_ref", "LiveReusePolicy", "StoreReport", "StateGraphReservation", "Object", "Serializable", "UniqueID",
         "Metadata", "Compute", "Definition", "ConcreteDefinition", "DefLink", "Ref", "Mat",
         "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace", "freeze",
         "ArgRole", "RefCDef", "RefCDefArg", "SelectorArg", "MaterializeArg",

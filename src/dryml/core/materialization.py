@@ -355,7 +355,10 @@ def execute_exact_state_load_plan(
         cache: CachePolicy = "weak",
         _reference_memo: dict[str, Object] | None = None,
         _greedy_touched: list[tuple[Object, GraphPath]] | None = None,
-        _retained_reservations: list[Object] | None = None):
+        _retained_reservations: list[Object] | None = None,
+        _retained_graph_reservations: list[tuple[Object, object]] | None = None,
+        _failure_targets: list[Object] | None = None,
+        _restore_started: list[bool] | None = None):
     """Realize a verified StateRef dependency-first without partial cache publication.
 
     Args:
@@ -407,6 +410,17 @@ def execute_exact_state_load_plan(
     greedy_touched = [] if owns_greedy_touched else _greedy_touched
     owns_reservations = _retained_reservations is None
     retained_reservations = [] if owns_reservations else _retained_reservations
+    owns_graph_reservations = _retained_graph_reservations is None
+    retained_graph_reservations = (
+        [] if owns_graph_reservations else _retained_graph_reservations
+    )
+    owns_failure_targets = _failure_targets is None
+    failure_targets = [] if owns_failure_targets else _failure_targets
+    restore_started = [False] if _restore_started is None else _restore_started
+
+    def retain_failure_target(obj):
+        if obj not in failure_targets:
+            failure_targets.append(obj)
 
     def exact_action(cdef, graph):
         path = GraphPath() if cdef is plan.state_ref.definition else graph.primary_path(
@@ -435,6 +449,9 @@ def execute_exact_state_load_plan(
         return candidates
 
     def reserve_unique(candidates, *, matching_hash=None):
+        from .repo import RepoSaveError
+        from .state import reserve_node
+
         retained = []
         for candidate in candidates:
             reservation = getattr(candidate, "_save_load_reservation", None)
@@ -448,13 +465,25 @@ def execute_exact_state_load_plan(
             for candidate in retained:
                 candidate._save_load_reservation.release()
             return None
-        return retained[0]
+        candidate = retained[0]
+        # Competing instances can share an ObjectId. Reserve that identity only
+        # after ambiguity is resolved, or our own token hides later candidates.
+        try:
+            graph_reservation = reserve_node(candidate)
+        except RepoSaveError:
+            candidate._save_load_reservation.release()
+            return None
+        except BaseException:
+            candidate._save_load_reservation.release()
+            raise
+        return candidate, graph_reservation
 
     def restore(obj, action, path):
         codec = action.state_hash.split("-", 1)[0]
         try:
             import os
 
+            restore_started[0] = True
             obj.restore_state_from_dir(
                 os.path.join(os.fspath(action.payload), "data"), codec=codec
             )
@@ -474,12 +503,15 @@ def execute_exact_state_load_plan(
                 action = exact_action(cdef, graph)
                 if action is not None and reuse_live != "never":
                     candidates = eligible(cdef, action, direct)
-                    candidate = reserve_unique(
+                    retained = reserve_unique(
                         candidates,
                         matching_hash=action.state_hash if reuse_live == "matching" else None,
                     )
-                    if candidate is not None:
+                    if retained is not None:
+                        candidate, graph_reservation = retained
                         retained_reservations.append(candidate)
+                        retained_graph_reservations.append((candidate, graph_reservation))
+                        retain_failure_target(candidate)
                         if reuse_live == "greedy" and candidate._last_state_hash != action.state_hash:
                             greedy_touched.append((candidate, action.path))
                             restore(candidate, action, action.path)
@@ -536,6 +568,9 @@ def execute_exact_state_load_plan(
                                 _reference_memo=reference_memo,
                                 _greedy_touched=greedy_touched,
                                 _retained_reservations=retained_reservations,
+                                _retained_graph_reservations=retained_graph_reservations,
+                                _failure_targets=failure_targets,
+                                _restore_started=restore_started,
                             )
                         raise RepoLoadError(
                             f"Unsupported materializing reference {type(reference).__name__}."
@@ -559,6 +594,7 @@ def execute_exact_state_load_plan(
                     attach_runtime_binding(
                         repo, cdef, obj, selected, parameters
                     )
+                    retain_failure_target(obj)
                     if action is not None:
                         reservation = obj._save_load_reservation
                         if not reservation.acquire(blocking=False):
@@ -588,9 +624,12 @@ def execute_exact_state_load_plan(
         if not owns_greedy_touched:
             raise
         mutated_paths = tuple(dict.fromkeys(str(path) for _, path in greedy_touched))
-        for candidate, path in greedy_touched:
-            candidate._last_state_hash = None
-            repo._evict_live(candidate)
+        if restore_started[0]:
+            repo._invalidate_restoration_target(failure_targets)
+        else:
+            for candidate, path in greedy_touched:
+                candidate._last_state_hash = None
+                repo._evict_live(candidate)
         if mutated_paths:
             error.args = (
                 f"{error} Greedy restore mutated and evicted candidates at "
@@ -601,6 +640,9 @@ def execute_exact_state_load_plan(
         if owns_reservations:
             for candidate in reversed(retained_reservations):
                 candidate._save_load_reservation.release()
+        if owns_graph_reservations:
+            for _, reservation in reversed(retained_graph_reservations):
+                reservation.release()
 
 
 def project_cdef_call(

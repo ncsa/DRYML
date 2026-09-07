@@ -83,4 +83,5 @@ def test_failed_fresh_exact_restore_leaves_no_cache_or_state_hash(tmp_path):
 
     assert isinstance(error.value.__cause__, RuntimeError)
     assert FailedRestoreValue.constructed._last_state_hash is None
+    assert FailedRestoreValue.constructed._restore_failed
     assert reopened._all_live_candidates() == ()
