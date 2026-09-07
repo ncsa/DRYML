@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from dryml.core.reference_values import StateRef
 
+from .control import ControlSnapshot
+
 
 @dataclass(frozen=True, slots=True)
 class ManagedStatus:
@@ -57,4 +59,4 @@ class InterruptRequestResult:
     generation: int
 
 
-__all__ = ["InterruptRequestResult", "ManagedStatus"]
+__all__ = ["ControlSnapshot", "InterruptRequestResult", "ManagedStatus"]

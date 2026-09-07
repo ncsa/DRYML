@@ -50,6 +50,26 @@ class ManagedControlError(ManagedError):
     default_reason = "control_error"
 
 
+class ManagedPublicationError(ManagedControlError):
+    """Raised when current-control publication has a classified uncertain outcome.
+
+    Args:
+        outcome: ``not_committed``, ``committed``, or ``indeterminate``.
+        message: Optional static diagnostic detail.
+
+    Attributes:
+        outcome: Publication state callers must preserve rather than guessing.
+    """
+
+    def __init__(self, outcome: str, message: str | None = None):
+        """Initialize a publication error with a closed outcome classification."""
+
+        if outcome not in {"not_committed", "committed", "indeterminate"}:
+            raise TypeError("managed publication outcomes must be closed values")
+        self.outcome = outcome
+        super().__init__("publication_" + outcome, message)
+
+
 class ManagedConflictError(ManagedError):
     """Raised when a managed operation conflicts with an active owner."""
 
@@ -88,6 +108,7 @@ __all__ = [
     "ManagedDeclarationError",
     "ManagedError",
     "ManagedInterrupted",
+    "ManagedPublicationError",
     "ManagedRecoveryError",
     "ManagedRerunRequiredError",
     "ManagedStoreError",

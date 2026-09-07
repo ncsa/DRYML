@@ -39,8 +39,18 @@ def operation_digest(object_ref: ObjectRef, member: str) -> str:
     if type(object_ref) is not ObjectRef:
         raise ManagedConfigError(message="operation object_ref must be an exact ObjectRef")
     _validate_member(member)
+    return _operation_digest_from_object_ref_digest(object_ref.digest(), member)
+
+
+def _operation_digest_from_object_ref_digest(object_ref_digest: str, member: str) -> str:
+    """Return the operation identity from already validated control components.
+
+    This internal helper keeps control persistence on the same canonical encoding
+    as :func:`operation_digest` without constructing an ObjectRef from a digest.
+    """
+
     return hashlib.sha256(
-        _OPERATION_DOMAIN + _atom(b"object-ref", object_ref.digest().encode("ascii")) + _atom(b"member", member.encode("utf-8"))
+        _OPERATION_DOMAIN + _atom(b"object-ref", object_ref_digest.encode("ascii")) + _atom(b"member", member.encode("utf-8"))
     ).hexdigest()
 
 

@@ -1,8 +1,8 @@
-"""Checked declarations, caller policy, and identities for managed operations.
+"""Checked declarations, policy, and persistence primitives for managed operations.
 
-U3 establishes authoring and input matching only. Invocation lifecycle, status,
-checkpointing, and interruption authority are intentionally deferred to later
-managed units.
+U4 additionally supplies internal Store resolution and current-control authority.
+Invocation lifecycle, status, checkpointing, and interruption remain deferred to
+later managed units.
 """
 
 from .config import ManagedConfig
@@ -15,6 +15,7 @@ from .errors import (
     ManagedDeclarationError,
     ManagedError,
     ManagedInterrupted,
+    ManagedPublicationError,
     ManagedRecoveryError,
     ManagedRerunRequiredError,
     ManagedStoreError,
@@ -32,6 +33,7 @@ __all__ = [
     "ManagedDeclarationError",
     "ManagedError",
     "ManagedInterrupted",
+    "ManagedPublicationError",
     "ManagedRecoveryError",
     "ManagedRerunRequiredError",
     "ManagedStatus",
