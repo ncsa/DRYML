@@ -1154,6 +1154,7 @@
     "tests/core/test_state_ref_load.py": "medium",
     "tests/core/test_state_ref_load_preflight.py": "medium",
     "tests/core/test_state_ref_save.py": "medium",
+    "tests/core/test_state_ref_receipt.py": "medium",
     "tests/core/test_state_selector_query.py": "medium",
     "tests/core/test_store_direct_layout.py": "medium",
     "tests/core/test_store_format.py": "medium",

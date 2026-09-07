@@ -55,6 +55,8 @@ def test_load_state_ref_restores_saved_identity_and_shared_topology(tmp_path):
     assert loaded.left.value == 9
     assert loaded.object_ref == state.object
     assert loaded.left.object_id == leaf.object_id
+    assert loaded.last_state_ref == state
+    assert loaded.left.last_state_ref is None
 
 
 def test_exact_load_restores_dependencies_before_parent_construction(tmp_path):

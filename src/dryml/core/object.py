@@ -150,6 +150,8 @@ class Dryml(type):
                 # Save and exact restore use it to prevent concurrent mutation
                 # of one live object during a state transition.
                 obj._save_load_reservation = Lock()
+                # A completed StateRef is runtime metadata, not saved payload.
+                obj._last_state_ref = None
 
                 # Attach the definition to the object.
                 obj.__cdef__ = cdef
@@ -295,6 +297,25 @@ class Object(metaclass=Dryml):
 
         return self._object_ref
 
+    @property
+    def last_state_ref(self) -> "StateRef | None":
+        """Return this object's last fully published top-level StateRef receipt.
+
+        Returns:
+            The immutable exact StateRef most recently published for this object
+            as a top-level graph root or requested by an exact top-level load, or
+            ``None`` when no such receipt has completed.
+
+        Raises:
+            None. This read-only property never performs Store access.
+
+        Side Effects:
+            None. The receipt is runtime metadata and does not establish that the
+            current live state still matches the returned snapshot.
+        """
+
+        return self._last_state_ref
+
     def graph_at(self, path="$"):
         """Return retained realization evidence at a typed graph path.
 
@@ -357,6 +378,12 @@ class Object(metaclass=Dryml):
         Raises:
             StoreAuthorityError: If checkpoint or graph publication cannot be
                 completed atomically.
+
+        Side Effects:
+            Publishes immutable StateRef authority and installs that StateRef as
+            this top-level object's last-state receipt before later derived-index,
+            main-reference, or alias updates. A later update failure propagates
+            while the completed receipt remains available.
         """
         from dryml.runtime import materialization_admission
         from .repo import save_object
@@ -431,6 +458,7 @@ class Pickleable(Serializable):
         "_object_ref",
         "_object_id",
         "_last_state_hash",
+        "_last_state_ref",
         "_save_load_reservation",
         "_store_affinity",
         "_realization_scope",

@@ -39,6 +39,7 @@ def test_hook_failure_leaves_no_state_ref_or_last_hash(tmp_path):
         obj.save(repo=repo)
 
     assert obj._last_state_hash is None
+    assert obj.last_state_ref is None
     assert not (tmp_path / "store" / "state-refs").exists()
 
 
@@ -57,6 +58,42 @@ def test_alias_replacement_failure_preserves_completed_state_ref(tmp_path, monke
         obj.save(repo=repo, alias="latest", deep_capture=True)
 
     assert store.read_state_ref_record(first.digest()).state_ref == first
+    assert obj.last_state_ref != first
+    assert store.read_state_ref_record(obj.last_state_ref.digest()).state_ref == obj.last_state_ref
+
+
+def test_state_ref_record_install_failure_preserves_the_prior_receipt(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    obj = GoodState(repo=repo)
+    first = obj.save(repo=repo)
+    obj.value = 2
+
+    monkeypatch.setattr(
+        store,
+        "write_state_ref_record",
+        lambda record: (_ for _ in ()).throw(OSError("state ref install failed")),
+    )
+    with pytest.raises(OSError, match="state ref install failed"):
+        obj.save(repo=repo, deep_capture=True)
+
+    assert obj.last_state_ref == first
+
+
+def test_derived_index_failure_propagates_after_installing_the_receipt(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    obj = GoodState(repo=repo)
+
+    monkeypatch.setattr(
+        repo._query_index,
+        "register_saved_graph",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("index registration failed")),
+    )
+    with pytest.raises(RuntimeError, match="index registration failed"):
+        obj.save(repo=repo)
+
+    assert store.read_state_ref_record(obj.last_state_ref.digest()).state_ref == obj.last_state_ref
 
 
 def test_empty_payload_hook_receives_an_empty_data_root_and_publishes_exact_state(tmp_path):

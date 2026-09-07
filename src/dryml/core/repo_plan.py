@@ -714,7 +714,9 @@ def execute_save_plan(
     Side Effects:
         Publishes local state directories and then the enclosing StateRef. A later
         hook or immutable install failure can leave only unreferenced completed
-        local-state directories.
+        local-state directories. Once all root StateRef authority is complete,
+        installs the receipt on the supplied top-level live root before callers
+        update derived indexes or mutable references.
 
     Concurrency:
         The final StateRef publication executes under the target Store writer
@@ -803,6 +805,9 @@ def execute_save_plan(
             DefinitionRecord(state_ref.definition), stored_root=True
         )
         repo._mark_initial_state_ref_complete(state_ref, store, claim_lease)
+        # The enclosing record, root DefinitionRecord, and claim fence now make
+        # this root StateRef complete authority before derived updates begin.
+        plan.binding.roots[0].obj._last_state_ref = state_ref
     repo._num_saves += 1
     required = [store]
     required.extend(selected.values())

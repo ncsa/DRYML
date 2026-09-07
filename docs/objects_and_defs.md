@@ -19,4 +19,6 @@ class Counter(Serializable):
 
 Hooks receive only a framework-provided payload directory and opaque validated codec. They must write a complete semantic checkpoint; DRYML does not detect arbitrary Python mutation. `Object.save()` publishes a complete immutable `StateRef`; use `Repo.load_state_ref()` to restore a snapshot into a new realization.
 
+`Object.last_state_ref` is a read-only runtime receipt for the last fully published top-level `StateRef`, or `None` before one completes. It is installed after immutable state authority is complete and before derived index, main-reference, or alias updates, so a later failure can propagate while the valid receipt remains available. A successful top-level exact load also installs its requested receipt. Embedded descendants never receive projected/synthetic receipts, and ordinary unsaved mutation does not change the receipt. The receipt is excluded from serialized payload state and does not promise that the live object remains unchanged since publication.
+
 Pre-V2 CDef records, raw tuples, missing identity versions, and mixed graphs are rejected before construction. There is no migration, converter, or dual reader.

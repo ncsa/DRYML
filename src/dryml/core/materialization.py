@@ -377,13 +377,19 @@ def execute_exact_state_load_plan(
 
     Raises:
         RepoLoadError: If construction, reuse validation, or restoration fails.
+
+    Side Effects:
+        May restore or cache live Objects. The outer exact-load call installs its
+        requested StateRef receipt on the returned root after completion; nested
+        materializing references do not install descendant receipts.
     """
     from .repo import RepoLoadError
     from .repo_plan import _NodeBindings, apply_exact_reference_identity, attach_runtime_binding, realization_scope
 
     if reuse_live not in {"matching", "greedy", "never"}:
         raise ValueError("reuse_live must be 'matching', 'greedy', or 'never'.")
-    reference_memo = {} if _reference_memo is None else _reference_memo
+    owns_reference_memo = _reference_memo is None
+    reference_memo = {} if owns_reference_memo else _reference_memo
     known = reference_memo.get(plan.state_ref.digest())
     if known is not None:
         return known
@@ -575,6 +581,8 @@ def execute_exact_state_load_plan(
                 elif cache == "weak":
                     repo.cache_weak(obj)
             reference_memo[plan.state_ref.digest()] = root
+            if owns_reference_memo:
+                root._last_state_ref = plan.state_ref
             return root
     except BaseException as error:
         if not owns_greedy_touched:

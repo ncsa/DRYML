@@ -1630,6 +1630,9 @@ class Repo:
             object-alias references can change. A completed StateRef and claim
             remain authoritative if later derived-index or mutable-reference
             registration fails; completed live claim metadata is still cleared.
+            Once that authority is complete, installs the StateRef as ``obj``'s
+            read-only last-state receipt before any derived index, main, or alias
+            update that may later raise.
         """
         from dryml.runtime import materialization_admission
         from .store.records import DefinitionRecord, MainRefRecord
@@ -1736,7 +1739,9 @@ class Repo:
         Side Effects:
             Publishes immutable definition, local-state, root-membership, and
             StateRef authority, optionally updates main/alias refs, then flushes
-            every configured Store after successful publication.
+            every configured Store after successful publication. The completed
+            top-level StateRef becomes the live root's last-state receipt before
+            any derived index, main-reference, or alias update can fail.
 
         Concurrency:
             Store publication and initial-claim completion use writer locks and
@@ -1974,6 +1979,9 @@ class Repo:
         Side Effects:
             May restore a uniquely eligible greedy live Object. A failed greedy
             restore clears its state hash and evicts it from Repo caches.
+            A successful top-level exact load installs ``state_ref`` as the
+            returned root's last-state receipt; descendants receive no synthetic
+            receipt.
         """
         from dryml.runtime import materialization_admission
         from .materialization import build_exact_state_load_plan, execute_exact_state_load_plan
@@ -2555,7 +2563,33 @@ def save_object(
         deep_capture: bool = False,
         federated: bool = False,
         report_stores: bool = False):
-    """Publish one Object graph through its current immutable StateRef boundary."""
+    """Publish one Object graph through its current immutable StateRef boundary.
+
+    Args:
+        obj: Live Object graph root to publish.
+        repo: Optional Repo or Store authority used for publication.
+        main: Whether to update the target Store's main definition after StateRef
+            authority is complete.
+        store: Optional explicit target Store.
+        alias: Optional object alias written after StateRef publication.
+        deep_capture: Whether to serialize every owned Serializable node.
+        federated: Whether validated immutable dependency state may remain in
+            connected Stores.
+        report_stores: Whether to return a StoreReport with the StateRef.
+
+    Returns:
+        The complete StateRef, or ``(StateRef, StoreReport)`` when requested.
+
+    Raises:
+        RepoSaveError: If bindings, claims, local state, or StateRef publication
+            cannot complete.
+        StoreAuthorityError: If the selected Store rejects authoritative writes.
+
+    Side Effects:
+        Publishes immutable graph state and installs the completed StateRef as
+        ``obj.last_state_ref`` before derived index, main, or alias work. Later
+        failures propagate without clearing that valid receipt.
+    """
     from dryml.runtime import materialization_admission
 
     with materialization_admission(operation="global_save_object"):
@@ -2610,6 +2644,11 @@ def load_state_ref(state_ref, repo=None, *, reuse_live: LiveReusePolicy = "match
 
     Raises:
         RepoLoadError: If exact authority or its local-state closure is missing.
+
+    Side Effects:
+        May construct or reuse live Objects. On success, installs ``state_ref``
+        as the returned top-level root's last-state receipt only; descendants do
+        not receive projected or synthetic receipts.
     """
     with manage_repo(repo=repo) as sub_repo:
         return sub_repo.load_state_ref(state_ref, reuse_live=reuse_live, cache=cache)

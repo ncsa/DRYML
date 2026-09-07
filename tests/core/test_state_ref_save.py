@@ -68,6 +68,7 @@ def test_stateful_save_publishes_verified_exact_state_ref(tmp_path):
     assert state.object == obj.object_ref
     assert state.states[next(iter(state.states))] == obj._last_state_hash
     assert store.read_state_ref_record(state.digest()).state_ref == state
+    assert obj.last_state_ref == state
     assert "local-state" in {path.name for path in (tmp_path / "store").iterdir()}
 
 
