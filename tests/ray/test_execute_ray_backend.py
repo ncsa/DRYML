@@ -18,15 +18,12 @@ from dryml.execute.errors import ExecutionDeadlineExceeded
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.ray import RayBackendConfig, RayFuture
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
+from .conftest import require_ray_integration
 
 
 def _ray_address() -> str:
     """Require an explicit caller-owned Ray endpoint for enabled integration."""
-    if os.environ.get("DRYML_EXECUTE_INTEGRATION") != "1":
-        pytest.skip("set DRYML_EXECUTE_INTEGRATION=1 to run existing-Ray proof")
-    address = os.environ.get("DRYML_TEST_RAY_ADDRESS")
-    assert address, "DRYML_TEST_RAY_ADDRESS is required when integration is enabled"
-    return address
+    return require_ray_integration()
 
 
 def _emit(value: str) -> str:

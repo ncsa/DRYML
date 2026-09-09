@@ -11,12 +11,12 @@ from dryml.environments import EnvironmentRequirement
 from dryml.environments.specs import CondaEnvironmentSpec, PythonExecutableSpec
 from dryml.execute.executor import Executor
 from dryml.execute.ray import RayBackendConfig
+from .conftest import require_ray_integration
 
 
 def _enabled(name: str) -> Path:
     """Require real caller-provided runtime targets when integration is enabled."""
-    if os.environ.get("DRYML_EXECUTE_INTEGRATION") != "1":
-        pytest.skip("set DRYML_EXECUTE_INTEGRATION=1 to run existing-Ray environments")
+    require_ray_integration()
     value = os.environ.get(name)
     assert value, f"{name} is required when integration is enabled"
     path = Path(value)
@@ -26,11 +26,7 @@ def _enabled(name: str) -> Path:
 
 def _address() -> str:
     """Require the explicit existing-server endpoint without filesystem probing."""
-    if os.environ.get("DRYML_EXECUTE_INTEGRATION") != "1":
-        pytest.skip("set DRYML_EXECUTE_INTEGRATION=1 to run existing-Ray environments")
-    value = os.environ.get("DRYML_TEST_RAY_ADDRESS")
-    assert value, "DRYML_TEST_RAY_ADDRESS is required when integration is enabled"
-    return value
+    return require_ray_integration()
 
 
 @pytest.mark.parametrize("kind", ["conda", "venv"])

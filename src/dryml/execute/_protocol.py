@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import io
 import ipaddress
+import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -123,7 +124,7 @@ class BootstrapDescriptor:
     invocation_limit_bytes: int
     result_limit_bytes: int
     output_frame_limit_bytes: int
-    output_final_timeout_milliseconds: int = 5_000
+    output_final_timeout: float = 5.0
 
     def __post_init__(self) -> None:
         """Validate values that must be known before the first frame is read."""
@@ -145,10 +146,16 @@ class BootstrapDescriptor:
             ("invocation_limit_bytes", self.invocation_limit_bytes, _MAX_PAYLOAD_LENGTH),
             ("result_limit_bytes", self.result_limit_bytes, _MAX_PAYLOAD_LENGTH),
             ("output_frame_limit_bytes", self.output_frame_limit_bytes, _MAX_PAYLOAD_LENGTH),
-            ("output_final_timeout_milliseconds", self.output_final_timeout_milliseconds, _MAX_PAYLOAD_LENGTH),
         )
         for name, value, maximum in values:
             _validate_limit(name, value, maximum)
+        if (
+            isinstance(self.output_final_timeout, bool)
+            or not isinstance(self.output_final_timeout, (int, float))
+            or not math.isfinite(self.output_final_timeout)
+            or self.output_final_timeout <= 0
+        ):
+            raise FrameError("output_final_timeout is invalid")
         if self.control_header_limit_bytes > self.admission_message_limit_bytes:
             raise FrameError("control header limit exceeds admission message limit")
 
@@ -449,7 +456,7 @@ def encode_bootstrap_descriptor(descriptor: BootstrapDescriptor) -> bytes:
         "invocation_limit_bytes": descriptor.invocation_limit_bytes,
         "result_limit_bytes": descriptor.result_limit_bytes,
         "output_frame_limit_bytes": descriptor.output_frame_limit_bytes,
-        "output_final_timeout_milliseconds": descriptor.output_final_timeout_milliseconds,
+        "output_final_timeout": descriptor.output_final_timeout,
     }
     try:
         encoded = canonical_json_bytes(data, max_depth=1, max_nodes=15, max_entries=13, max_string=128, max_int_bits=64)
@@ -469,11 +476,11 @@ def decode_bootstrap_descriptor(data: bytes, *, header_limit: int) -> BootstrapD
         value = canonical_json_load_bytes(data, max_depth=1, max_nodes=15, max_entries=13, max_string=128, max_int_bits=64)
     except CanonicalJSONError as exc:
         raise FrameError("bootstrap descriptor is not canonical") from exc
-    fields = {"attempt", "generation", "rendezvous_token", "rendezvous_host", "rendezvous_port", "submission_id", "control_header_limit_bytes", "owner_envelope_limit_bytes", "admission_message_limit_bytes", "invocation_limit_bytes", "result_limit_bytes", "output_frame_limit_bytes", "output_final_timeout_milliseconds"}
+    fields = {"attempt", "generation", "rendezvous_token", "rendezvous_host", "rendezvous_port", "submission_id", "control_header_limit_bytes", "owner_envelope_limit_bytes", "admission_message_limit_bytes", "invocation_limit_bytes", "result_limit_bytes", "output_frame_limit_bytes", "output_final_timeout"}
     if not isinstance(value, Mapping) or set(value) != fields:
         raise FrameError("bootstrap descriptor has an invalid shape")
     try:
-        return BootstrapDescriptor(Correlation(value["submission_id"], value["attempt"], value["generation"]), value["rendezvous_token"], value["rendezvous_host"], value["rendezvous_port"], value["control_header_limit_bytes"], value["owner_envelope_limit_bytes"], value["admission_message_limit_bytes"], value["invocation_limit_bytes"], value["result_limit_bytes"], value["output_frame_limit_bytes"], value["output_final_timeout_milliseconds"])
+        return BootstrapDescriptor(Correlation(value["submission_id"], value["attempt"], value["generation"]), value["rendezvous_token"], value["rendezvous_host"], value["rendezvous_port"], value["control_header_limit_bytes"], value["owner_envelope_limit_bytes"], value["admission_message_limit_bytes"], value["invocation_limit_bytes"], value["result_limit_bytes"], value["output_frame_limit_bytes"], value["output_final_timeout"])
     except (FrameError, TypeError) as exc:
         raise FrameError("bootstrap descriptor is invalid") from exc
 

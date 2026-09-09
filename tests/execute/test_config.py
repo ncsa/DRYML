@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from dryml.execute.config import BackendConfig
+from dryml.execute.ray import RayBackendConfig
+from dryml.execute.subprocess import SubProcessConfig
 from dryml.environments.specs import CurrentEnvironmentSpec
 
 
@@ -128,3 +130,35 @@ def test_every_count_and_byte_control_uses_the_supplied_valid_limits(field, smal
     for value in (small, large):
         config = FakeConfig(**related, **{field: value})
         assert getattr(config, field) == value
+
+
+@pytest.mark.parametrize("config_type", [FakeConfig, SubProcessConfig, RayBackendConfig])
+@pytest.mark.parametrize(
+    ("field", "small", "large"),
+    [
+        ("admission_timeout", 0.0001, 60.0),
+        ("discovery_timeout", 0.0001, 60.0),
+        ("termination_timeout", 0.0001, 60.0),
+        ("one_off_cleanup_retry_interval", 0.0001, 60.0),
+        ("output_final_timeout", 0.0001, 60.0),
+        ("process_poll_interval", 0.0001, 60.0),
+    ],
+)
+def test_every_duration_control_is_shared_by_both_backend_configurations(config_type, field, small, large):
+    """Every common duration accepts nondefault finite values without backend initialization."""
+    for value in (small, large):
+        config = config_type(**{field: value})
+        assert getattr(config, field) == value
+    for invalid in (0, -1, True, math.inf, math.nan):
+        with pytest.raises((TypeError, ValueError)):
+            config_type(**{field: invalid})
+
+
+@pytest.mark.parametrize("config_type", [FakeConfig, SubProcessConfig, RayBackendConfig])
+@pytest.mark.parametrize("field", ["one_off_cleanup_attempts", "discovery_directory_entry_limit", "process_read_chunk_bytes"])
+def test_newly_exposed_count_controls_are_shared_by_both_backend_configurations(config_type, field):
+    """Cleanup, discovery, and process controls reject invalid counts on every backend config."""
+    assert getattr(config_type(**{field: 2}), field) == 2
+    for invalid in (0, -1, True, 1.5):
+        with pytest.raises((TypeError, ValueError)):
+            config_type(**{field: invalid})

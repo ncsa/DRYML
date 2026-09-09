@@ -280,7 +280,7 @@ def _invoke(connection: socket.socket, send_lock: threading.Lock, descriptor: Bo
         _flush_standard_streams()
         # Final fences are emitted only by a drainer that observed EOF.  A child
         # retaining a descriptor therefore leaves capture incomplete, not forged.
-        finish_at = time.monotonic() + descriptor.output_final_timeout_milliseconds / 1000
+        finish_at = time.monotonic() + descriptor.output_final_timeout
         for reader in readers:
             reader.join(max(0.0, finish_at - time.monotonic()))
         if outcome is not None and outcome_type is not None:

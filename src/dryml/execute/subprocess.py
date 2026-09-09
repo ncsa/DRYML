@@ -315,7 +315,7 @@ class SubProcessBackend(Backend):
             listener.listen(1)
             listener.settimeout(max(0.001, call.admission_deadline - time.monotonic()))
             correlation = Correlation(call.submission_id, 0, 1)
-            descriptor = BootstrapDescriptor(correlation, secrets.token_hex(32), "127.0.0.1", listener.getsockname()[1], self._config.control_header_limit_bytes, self._config.owner_envelope_limit_bytes, self._config.admission_message_limit_bytes, self._config.invocation_limit_bytes, self._config.result_limit_bytes, self._config.output_frame_limit_bytes, int(self._config.output_final_timeout * 1000))
+            descriptor = BootstrapDescriptor(correlation, secrets.token_hex(32), "127.0.0.1", listener.getsockname()[1], self._config.control_header_limit_bytes, self._config.owner_envelope_limit_bytes, self._config.admission_message_limit_bytes, self._config.invocation_limit_bytes, self._config.result_limit_bytes, self._config.output_frame_limit_bytes, self._config.output_final_timeout)
             encoded_descriptor = base64.urlsafe_b64encode(encode_bootstrap_descriptor(descriptor)).decode("ascii")
             process = self._launch(executable, encoded_descriptor, candidate)
             owner = OwnedProcess(process)

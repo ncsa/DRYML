@@ -11,6 +11,7 @@ from dryml.execute.executor import Executor
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.environments import EnvironmentRequirement
 from dryml.environments.specs import CondaEnvironmentSpec
+from .conftest import require_integration
 
 
 def _runtime_details() -> tuple[str, str, int, str | None, str]:
@@ -24,8 +25,7 @@ def _runtime_details() -> tuple[str, str, int, str | None, str]:
 
 def _enabled_path(name: str) -> Path:
     """Require an explicit existing integration target when integration is enabled."""
-    if os.environ.get("DRYML_EXECUTE_INTEGRATION") != "1":
-        pytest.skip("set DRYML_EXECUTE_INTEGRATION=1 to run existing-environment proof")
+    require_integration()
     value = os.environ.get(name)
     assert value, f"{name} is required when DRYML_EXECUTE_INTEGRATION=1"
     path = Path(value)

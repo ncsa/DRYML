@@ -1005,7 +1005,7 @@ class RayBackend(Backend):
 
     def _descriptor(self, call: SubmittedCall[T], listener: socket.socket) -> BootstrapDescriptor:
         """Create the sole bounded native task argument using effective config limits."""
-        return BootstrapDescriptor(Correlation(call.submission_id, 0, 1), secrets.token_hex(32), "127.0.0.1", listener.getsockname()[1], self._config.control_header_limit_bytes, self._config.owner_envelope_limit_bytes, self._config.admission_message_limit_bytes, self._config.invocation_limit_bytes, self._config.result_limit_bytes, self._config.output_frame_limit_bytes, int(self._config.output_final_timeout * 1000))
+        return BootstrapDescriptor(Correlation(call.submission_id, 0, 1), secrets.token_hex(32), "127.0.0.1", listener.getsockname()[1], self._config.control_header_limit_bytes, self._config.owner_envelope_limit_bytes, self._config.admission_message_limit_bytes, self._config.invocation_limit_bytes, self._config.result_limit_bytes, self._config.output_frame_limit_bytes, self._config.output_final_timeout)
 
     def _require_connection(self) -> _Connection:
         """Return the started connection or reject uninitialized backend use."""
