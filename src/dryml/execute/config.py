@@ -63,10 +63,16 @@ def _positive_limit(name: str, value: object, *, allow_zero: bool = False) -> No
 class BackendConfig(ABC):
     """Describe backend policy without discovery, filesystem access, or launch.
 
-    All duration, transport, output, discovery, and spool controls are public so
+    All duration, transport, output, discovery, spool, and one-off cleanup
+    controls are public so
     callers can choose operational bounds. Construction validates values and
     freezes nested containers only; a future executor validates live resources
     and joins a process-wide spool budget when it first preflights work.
+
+    ``one_off_cleanup_attempts`` is the positive bounded number of automatic
+    reconciliation attempts retained one-off owners make per cleanup budget.
+    ``one_off_cleanup_retry_interval`` schedules later attempts while a retained
+    owner remains incomplete. An owner remains inspectable when attempts fail.
 
     Raises:
         TypeError: If a field has an unsupported type.
@@ -77,6 +83,8 @@ class BackendConfig(ABC):
     admission_timeout: float = 30.0
     discovery_timeout: float = 30.0
     termination_timeout: float = 5.0
+    one_off_cleanup_attempts: int = 2
+    one_off_cleanup_retry_interval: float = 0.1
     execution_timeout: float | None = None
     output_final_timeout: float = 5.0
     spool_directory: Path | None = None
@@ -104,11 +112,11 @@ class BackendConfig(ABC):
 
     def __post_init__(self) -> None:
         """Validate relationships and defensively detach caller containers."""
-        for name in ("admission_timeout", "discovery_timeout", "termination_timeout", "output_final_timeout"):
+        for name in ("admission_timeout", "discovery_timeout", "termination_timeout", "output_final_timeout", "one_off_cleanup_retry_interval"):
             _positive_duration(name, getattr(self, name))
         _positive_duration("execution_timeout", self.execution_timeout, allow_none=True)
         for name in (
-            "spool_limit_bytes", "spool_file_limit", "preflight_limit", "invocation_limit_bytes",
+            "one_off_cleanup_attempts", "spool_limit_bytes", "spool_file_limit", "preflight_limit", "invocation_limit_bytes",
             "result_limit_bytes", "control_header_limit_bytes", "owner_envelope_limit_bytes",
             "admission_message_limit_bytes", "output_frame_limit_bytes", "output_limit_bytes",
             "live_output_queue_limit_bytes", "diagnostic_text_limit_bytes", "diagnostic_issue_limit",

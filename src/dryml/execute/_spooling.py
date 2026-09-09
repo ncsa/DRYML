@@ -376,14 +376,13 @@ class _OwnedSpool:
 class PayloadSpooler:
     """Publish, receive, and reconcile two bounded files inside one owned child."""
 
-    def __init__(self, config: "BackendConfig", lease: SpoolLease) -> None:
+    def __init__(self, config: "BackendConfig", lease: SpoolLease, *, parent: Path | None = None) -> None:
         """Capture the selected spool parent once without inspecting its existence."""
         self._config = config
         self._lease = lease
         configured = config.spool_directory
-        self._parent = Path(tempfile.gettempdir()) if configured is None else (Path.cwd() / configured if not configured.is_absolute() else configured)
+        self._parent = parent if parent is not None else (Path(tempfile.gettempdir()) if configured is None else (Path.cwd() / configured if not configured.is_absolute() else configured))
         self._owned: dict[SpoolReservation, _OwnedSpool] = {}
-        self._disposed: dict[SpoolReservation, PayloadSpool] = {}
         self._lock = threading.RLock()
 
     def snapshot(self, fn: object, args: tuple[object, ...], kwargs: dict[str, object]) -> tuple[PayloadSpool, SpoolReservation]:
@@ -509,9 +508,7 @@ class PayloadSpooler:
         try:
             owned = self._owned_for(reservation)
         except ExecutionError:
-            with self._lock:
-                disposed_payload = self._disposed.get(reservation)
-            if expected_payload is not None and disposed_payload == expected_payload:
+            if expected_payload is not None and reservation._released:
                 return
             raise
         with owned.lock:
@@ -534,8 +531,6 @@ class PayloadSpooler:
                 raise CleanupError("unable to dispose Execute-owned spool storage") from exc
             with self._lock:
                 del self._owned[reservation]
-                if owned.payload is not None:
-                    self._disposed[reservation] = owned.payload
             reservation.release()
             owned.disposed = True
 

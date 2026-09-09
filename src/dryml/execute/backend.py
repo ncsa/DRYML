@@ -16,6 +16,7 @@ from .protocol import (
     save_request,
 )
 from .worker import execute_request
+from .future import ExecutionFuture as NewExecutionFuture
 
 if TYPE_CHECKING:
     from dryml.environments import EnvironmentRequirement
@@ -45,11 +46,11 @@ class Backend(abc.ABC):
         """Return supported control capability names without claiming admission."""
 
     @abc.abstractmethod
-    def create_future(self, submission_id: str, output: "ExecutionOutput") -> "ExecutionFuture[T]":
+    def create_future(self, submission_id: str, output: "ExecutionOutput") -> "NewExecutionFuture[T]":
         """Create one inert concrete future without launching or binding output."""
 
     @abc.abstractmethod
-    def submit(self, call: "SubmittedCall[T]", *, future: "ExecutionFuture[T]") -> None:
+    def submit(self, call: "SubmittedCall[T]", *, future: "NewExecutionFuture[T]") -> None:
         """Schedule one accepted descriptor-only call on its matching future."""
 
     @abc.abstractmethod

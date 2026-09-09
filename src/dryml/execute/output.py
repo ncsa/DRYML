@@ -83,6 +83,7 @@ class ExecutionOutput:
         output_final_timeout: float = 5.0,
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
+        start_live: bool = True,
     ) -> None:
         """Atomically bind this owner to a successful submission preflight.
 
@@ -120,7 +121,17 @@ class ExecutionOutput:
                 self._live_stopped.clear()
                 thread = Thread(target=self._deliver_live, name="dryml-execute-output", daemon=True)
                 self._live_thread = thread
-        if thread is not None:
+        if thread is not None and start_live:
+            try:
+                thread.start()
+            except BaseException:
+                self._disable_live("live_delivery_unavailable", "live output delivery could not start")
+
+    def _start_live_delivery(self) -> None:
+        """Start a previously accepted live-delivery thread outside lifecycle locks."""
+        with self._lock:
+            thread = self._live_thread
+        if thread is not None and not thread.is_alive():
             try:
                 thread.start()
             except BaseException:

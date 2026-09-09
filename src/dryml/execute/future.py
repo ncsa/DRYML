@@ -380,7 +380,7 @@ class ExecutionFuture(Generic[T]):
                 raise RuntimeError("cleanup reconciliation is already running")
             self._cleanup_reconciler = reconciler
 
-    def _prepare(self, *, diagnostic_text_limit_bytes: int, diagnostic_issue_limit: int) -> None:
+    def _prepare(self, *, diagnostic_text_limit_bytes: int, diagnostic_issue_limit: int, termination_timeout: float | None = None) -> None:
         """Install validated effective diagnostic limits before backend admission.
 
         Args:
@@ -397,11 +397,15 @@ class ExecutionFuture(Generic[T]):
                 raise TypeError(f"{name} must be a positive integer")
             if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if termination_timeout is not None:
+            self._validate_duration("termination_timeout", termination_timeout)
         with self._condition:
             if self._state != "pending" or self._outcome is not _MISSING:
                 raise RuntimeError("diagnostic limits must be prepared before admission")
             self._diagnostic_text_limit_bytes = diagnostic_text_limit_bytes
             self._diagnostic_issue_limit = diagnostic_issue_limit
+            if termination_timeout is not None:
+                self._termination_timeout = float(termination_timeout)
 
     def _set_cancel_requester(self, requester: Callable[[], bool]) -> None:
         """Install the U3/U5 running-work cancellation request hook."""
