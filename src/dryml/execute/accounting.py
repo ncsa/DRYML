@@ -380,12 +380,12 @@ def _sum_mapping(values: Iterable[ResourceAmounts], name: str) -> dict[str, floa
 
 
 def _subtract(total: ResourceAmounts, charges: ResourceAmounts) -> ResourceAmounts:
-    """Subtract known charges and retain unknown evidence instead of zero capacity."""
+    """Subtract charges while preserving unknown capacity and explicit unknown charges."""
     def sub(left: float | int | None, right: float | int | None) -> float | int | None:
         return None if left is None or right is None else max(0, left - right)
 
     def mappings(left: Mapping[str, float | None], right: Mapping[str, float | None]) -> dict[str, float | None]:
-        return {key: sub(left.get(key) if key in left else None, right.get(key) if key in right else None) for key in set(left) | set(right)}
+        return {key: sub(left.get(key) if key in left else None, right.get(key, 0)) for key in set(left) | set(right)}
 
     return ResourceAmounts(sub(total.cpus, charges.cpus), sub(total.memory_bytes, charges.memory_bytes), mappings(total.accelerators, charges.accelerators), mappings(total.named, charges.named))
 

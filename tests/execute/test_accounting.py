@@ -37,6 +37,44 @@ def test_backend_types_have_no_common_allocator_and_unknown_is_not_free():
     assert snapshot.accounting_scope == "coordinator-and-backend"
 
 
+def test_known_sparse_accelerator_and_named_capacity_accepts_first_reservation():
+    """An empty charge ledger leaves known accelerator and named capacity usable."""
+    authority = ResourceAuthorityRegistry().get("ray", "cluster")
+    total = ResourceAmounts(4, None, {"gpu": 2}, {"license": 3})
+
+    snapshot = authority.snapshot(total=total)
+    assert snapshot.available.cpus == 4
+    assert snapshot.available.accelerators["gpu"] == 2
+    assert snapshot.available.named["license"] == 3
+
+    reservation = authority.reserve(
+        "first-gpu",
+        ResourceAmounts(0, None, {"gpu": 1}, {"license": 1}),
+        generation="g",
+        attempt="a",
+        total=total,
+    )
+    assert reservation is not None
+
+
+def test_explicit_unknown_charge_remains_unknown_while_sparse_charge_is_zero():
+    """Only an explicit unknown charge hides known capacity in that dimension."""
+    authority = ResourceAuthorityRegistry().get("ray", "cluster")
+    total = ResourceAmounts(4, None, {"gpu": 2}, {"license": 3})
+    assert authority.reserve(
+        "unknown-gpu",
+        ResourceAmounts(1, None, {"gpu": None}, {}),
+        generation="g",
+        attempt="a",
+        total=total,
+    )
+
+    snapshot = authority.snapshot(total=total)
+    assert snapshot.available.cpus == 3
+    assert snapshot.available.accelerators["gpu"] is None
+    assert snapshot.available.named["license"] == 3
+
+
 def test_native_net_capacity_does_not_subtract_running_charge_twice():
     """A native net observation deducts only reservations it cannot already include."""
     authority = ResourceAuthorityRegistry().get("ray", "cluster")
