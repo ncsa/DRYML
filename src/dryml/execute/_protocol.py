@@ -20,6 +20,9 @@ from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_js
 
 
 PROTOCOL_VERSION = 1
+# This is deliberately a protocol identity, rather than a package version: a
+# selected interpreter must execute the same worker implementation contract.
+WORKER_PROTOCOL_ID = "dryml.execute.worker.v1"
 _HEADER_LENGTH_BYTES = 4
 _PAYLOAD_LENGTH_BYTES = 8
 _MAX_HEADER_LENGTH = (1 << (_HEADER_LENGTH_BYTES * 8)) - 1
@@ -120,6 +123,7 @@ class BootstrapDescriptor:
     invocation_limit_bytes: int
     result_limit_bytes: int
     output_frame_limit_bytes: int
+    output_final_timeout_milliseconds: int = 5_000
 
     def __post_init__(self) -> None:
         """Validate values that must be known before the first frame is read."""
@@ -141,6 +145,7 @@ class BootstrapDescriptor:
             ("invocation_limit_bytes", self.invocation_limit_bytes, _MAX_PAYLOAD_LENGTH),
             ("result_limit_bytes", self.result_limit_bytes, _MAX_PAYLOAD_LENGTH),
             ("output_frame_limit_bytes", self.output_frame_limit_bytes, _MAX_PAYLOAD_LENGTH),
+            ("output_final_timeout_milliseconds", self.output_final_timeout_milliseconds, _MAX_PAYLOAD_LENGTH),
         )
         for name, value, maximum in values:
             _validate_limit(name, value, maximum)
@@ -316,6 +321,53 @@ def decode_frame(stream: BinaryIO, *, header_limit: int, payload_limit: int | Ma
     return Frame(state, frame_type, correlation, payload, owner, stream_name, sequence)
 
 
+class SocketFrameReader:
+    """Read typed bounded frames directly from one connected socket.
+
+    Args:
+        connection: A connected socket-like object exposing ``recv``.
+        header_limit: Effective control-header bound for this conversation.
+        payload_limit: Effective per-frame-type payload bounds.
+
+    Returns:
+        :meth:`read` returns one parsed frame after applying its typed payload
+        limit before reading the payload body.
+
+    Failure behavior:
+        Closed or malformed transports raise :class:`FrameError` or ``EOFError``;
+        no caller receives an oversized opaque payload buffer.
+    """
+
+    def __init__(self, connection: object, *, header_limit: int, payload_limit: int | Mapping[FrameType, int]) -> None:
+        """Retain one narrow socket adapter and its already-effective bounds."""
+        self._connection = connection
+        self._header_limit = header_limit
+        self._payload_limit = payload_limit
+
+    def read(self) -> Frame:
+        """Decode one frame using the common framing parser and typed limits."""
+        return decode_frame(_SocketStream(self._connection), header_limit=self._header_limit, payload_limit=self._payload_limit)
+
+
+class _SocketStream:
+    """Adapt ``recv`` to the minimal bounded ``read`` protocol used by framing."""
+
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+
+    def read(self, size: int = -1) -> bytes:
+        """Read at most one requested socket segment without an unbounded default."""
+        if size < 0:
+            raise FrameError("socket frame reads must be bounded")
+        try:
+            data = self._connection.recv(size)  # type: ignore[attr-defined]
+        except OSError:
+            raise
+        if not data:
+            raise EOFError("protocol peer closed the transport")
+        return data
+
+
 def decode_exact_frame(encoded: bytes, *, header_limit: int, payload_limit: int | Mapping[FrameType, int]) -> Frame:
     """Decode one byte string and reject a trailing frame or trailing garbage."""
     stream = io.BytesIO(encoded)
@@ -397,9 +449,10 @@ def encode_bootstrap_descriptor(descriptor: BootstrapDescriptor) -> bytes:
         "invocation_limit_bytes": descriptor.invocation_limit_bytes,
         "result_limit_bytes": descriptor.result_limit_bytes,
         "output_frame_limit_bytes": descriptor.output_frame_limit_bytes,
+        "output_final_timeout_milliseconds": descriptor.output_final_timeout_milliseconds,
     }
     try:
-        encoded = canonical_json_bytes(data, max_depth=1, max_nodes=14, max_entries=12, max_string=128, max_int_bits=64)
+        encoded = canonical_json_bytes(data, max_depth=1, max_nodes=15, max_entries=13, max_string=128, max_int_bits=64)
     except CanonicalJSONError as exc:
         raise FrameError("bootstrap descriptor is not canonical") from exc
     if len(encoded) > descriptor.control_header_limit_bytes:
@@ -413,14 +466,14 @@ def decode_bootstrap_descriptor(data: bytes, *, header_limit: int) -> BootstrapD
     if not isinstance(data, bytes) or len(data) > header_limit:
         raise FrameError("bootstrap descriptor exceeds control header limit")
     try:
-        value = canonical_json_load_bytes(data, max_depth=1, max_nodes=14, max_entries=12, max_string=128, max_int_bits=64)
+        value = canonical_json_load_bytes(data, max_depth=1, max_nodes=15, max_entries=13, max_string=128, max_int_bits=64)
     except CanonicalJSONError as exc:
         raise FrameError("bootstrap descriptor is not canonical") from exc
-    fields = {"attempt", "generation", "rendezvous_token", "rendezvous_host", "rendezvous_port", "submission_id", "control_header_limit_bytes", "owner_envelope_limit_bytes", "admission_message_limit_bytes", "invocation_limit_bytes", "result_limit_bytes", "output_frame_limit_bytes"}
+    fields = {"attempt", "generation", "rendezvous_token", "rendezvous_host", "rendezvous_port", "submission_id", "control_header_limit_bytes", "owner_envelope_limit_bytes", "admission_message_limit_bytes", "invocation_limit_bytes", "result_limit_bytes", "output_frame_limit_bytes", "output_final_timeout_milliseconds"}
     if not isinstance(value, Mapping) or set(value) != fields:
         raise FrameError("bootstrap descriptor has an invalid shape")
     try:
-        return BootstrapDescriptor(Correlation(value["submission_id"], value["attempt"], value["generation"]), value["rendezvous_token"], value["rendezvous_host"], value["rendezvous_port"], value["control_header_limit_bytes"], value["owner_envelope_limit_bytes"], value["admission_message_limit_bytes"], value["invocation_limit_bytes"], value["result_limit_bytes"], value["output_frame_limit_bytes"])
+        return BootstrapDescriptor(Correlation(value["submission_id"], value["attempt"], value["generation"]), value["rendezvous_token"], value["rendezvous_host"], value["rendezvous_port"], value["control_header_limit_bytes"], value["owner_envelope_limit_bytes"], value["admission_message_limit_bytes"], value["invocation_limit_bytes"], value["result_limit_bytes"], value["output_frame_limit_bytes"], value["output_final_timeout_milliseconds"])
     except (FrameError, TypeError) as exc:
         raise FrameError("bootstrap descriptor is invalid") from exc
 
@@ -452,6 +505,14 @@ class ProtocolConversation:
         if self._terminal:
             raise FrameError("frame follows a terminal protocol state")
         frame = decode_exact_frame(encoded, header_limit=self._header_limit, payload_limit=self._limits)
+        return self.accept_frame(frame)
+
+    def accept_frame(self, frame: Frame) -> Frame:
+        """Validate an already bounded frame without re-reading or re-encoding it."""
+        if not isinstance(frame, Frame):
+            raise FrameError("protocol frame is invalid")
+        if self._terminal:
+            raise FrameError("frame follows a terminal protocol state")
         if frame.correlation != self._correlation:
             raise FrameError("frame correlation does not match conversation")
         if self._phase == "hello":

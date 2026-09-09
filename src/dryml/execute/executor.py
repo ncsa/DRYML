@@ -22,7 +22,7 @@ from typing import Any, Generic, Literal, TypeVar
 from dryml.environments import EnvironmentRequirement
 from dryml.worlds import WorldRequirement
 
-from ._spooling import PayloadSpooler, SpoolBudget, SpoolLease, SpoolReservation
+from ._spooling import PayloadSpooler, SpoolBudget, SpoolLease, SpoolReservation, deserialize_result, validate_result
 from .backend import Backend
 from .config import BackendConfig
 from .errors import AdmissionError, CleanupError, ExecutionError
@@ -246,6 +246,7 @@ class Executor:
                     raise RuntimeError("executor is closing or closed")
                 spooler.accept(payload, reservation)
                 future._set_cleanup_reconciler(lambda timeout, target=future: self._cleanup_submission(target, timeout))
+                future._set_result_receiver(lambda data, target=future: self._receive_result(target, data))
                 try:
                     output_owner._bind(
                         submission_id,
@@ -649,8 +650,18 @@ class Executor:
                     record = self._submissions.get(future)
                     if record is None or future.done():
                         return
+                    # A synchronous backend can publish terminality from submit(),
+                    # so association must exist before that call.  Roll it back if
+                    # submit raises before accepting the Future.
                     record.backend_seen = True
-                replacement = backend.submit(call, future=future)
+                try:
+                    replacement = backend.submit(call, future=future)
+                except BaseException:
+                    with self._condition:
+                        record = self._submissions.get(future)
+                        if record is not None:
+                            record.backend_seen = False
+                    raise
                 if replacement is not None:
                     raise ExecutionError("backend.submit must return None and retain the supplied Future")
             except BaseException as exc:
@@ -683,6 +694,36 @@ class Executor:
         with self._condition:
             self._submissions.pop(future, None)
             self._condition.notify_all()
+
+    def _receive_result(self, future: ExecutionFuture[T], data: bytes) -> T:
+        """Publish and decode one backend-validated result through its reserved slot.
+
+        Concrete backends call this narrow accepted-submission hook after protocol
+        validation. It keeps result-spool ownership in the Executor so a backend
+        cannot bypass the reservation that was held before the invocation launched.
+
+        Args:
+            future: The exact accepted Future receiving this result.
+            data: One bounded serialized result payload from its worker.
+
+        Returns:
+            The decoded ordinary result value.
+
+        Raises:
+            ExecutionError: If the Future is unknown or belongs to another owner.
+            ValueError or TypeError: If the result cannot pass descriptor/codec
+                validation. No successful outcome is published by this hook.
+        """
+        if not isinstance(data, bytes):
+            raise TypeError("serialized result must be bytes")
+        with self._condition:
+            record = self._submissions.get(future)
+            spooler = self._spooler
+        if record is None or spooler is None:
+            raise ExecutionError("result belongs to no accepted execution")
+        result = spooler.receive_result(record.reservation, data)
+        validate_result(result, data, limit_bytes=self._config.result_limit_bytes)
+        return deserialize_result(data, limit_bytes=self._config.result_limit_bytes)  # type: ignore[return-value]
 
     def _set_acceptance_hook(self, hook: Callable[[ExecutionFuture[Any]], None]) -> None:
         """Install one private owner hook before this executor can accept work."""

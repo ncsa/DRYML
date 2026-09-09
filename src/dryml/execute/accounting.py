@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from threading import RLock
+from threading import Condition, RLock
 
-from dryml.worlds import WorldAllocation
+from dryml.worlds import LocalResourceInventory, WorldAllocation, WorldRequirement, assign_local_world, synthesize
 
 from .models import ActiveAllocation, ExecutionIssue, ResourceAmounts, ResourceSnapshot
 
@@ -39,6 +39,7 @@ class ResourceAuthority:
     def __init__(self) -> None:
         """Create an empty in-memory authority with no native side effects."""
         self._lock = RLock()
+        self._changed = Condition(self._lock)
         self._reservations: dict[str, Reservation] = {}
 
     def reserve(
@@ -80,13 +81,89 @@ class ResourceAuthority:
             raise TypeError("total must be ResourceAmounts or None")
         if total is None:
             return None
-        with self._lock:
+        with self._changed:
             if submission_id in self._reservations:
                 return None
             if not _fits(_subtract(total, _sum(item.resources for item in self._reservations.values())), resources):
                 return None
             reservation = Reservation(submission_id, generation, attempt, resources, executor_id=executor_id)
             self._reservations[submission_id] = reservation
+            self._changed.notify_all()
+            return reservation
+
+    def reserve_local(
+        self,
+        submission_id: str,
+        world: WorldRequirement,
+        inventory: LocalResourceInventory,
+        *,
+        generation: str,
+        attempt: str,
+        executor_id: str | None = None,
+    ) -> Reservation | None:
+        """Atomically select an exact free local allocation and charge it.
+
+        The supplied inventory is a fresh Execute-owned observation.  Selection is
+        pure and occurs while the authority lock is held, so sibling subprocess
+        executors cannot choose the same CPU or accelerator ID.  An outstanding
+        unconstrained/unknown charge deliberately blocks constrained admission: it
+        cannot be treated as free affinity capacity.
+        """
+        _handle("submission_id", submission_id)
+        _handle("generation", generation)
+        _handle("attempt", attempt)
+        if executor_id is not None:
+            _handle("executor_id", executor_id)
+        if not isinstance(world, WorldRequirement) or not isinstance(inventory, LocalResourceInventory):
+            raise TypeError("world and inventory must be owner-defined local values")
+        with self._changed:
+            if submission_id in self._reservations or any(_unknown_charge(item) for item in self._reservations.values()):
+                return None
+            used_cpus = {cpu for item in self._reservations.values() if item.allocation is not None for process in _processes(item.allocation) for cpu in process.cpus}
+            used_accelerators = {
+                (kind, device)
+                for item in self._reservations.values()
+                if item.allocation is not None
+                for process in _processes(item.allocation)
+                for kind, devices in process.accelerators.items()
+                for device in devices
+            }
+            remaining_cpus = tuple(cpu for cpu in inventory.cpus if cpu not in used_cpus)
+            # LocalResourceInventory intentionally cannot represent zero CPUs. A
+            # constrained local worker always needs a concrete CPU binding.
+            if not remaining_cpus:
+                return None
+            remaining = LocalResourceInventory(
+                remaining_cpus,
+                {
+                    kind: tuple(device for device in devices if (kind, device) not in used_accelerators)
+                    for kind, devices in inventory.accelerators.items()
+                },
+                inventory.memory,
+                {
+                    kind: {
+                        device: amount
+                        for device, amount in values.items()
+                        if (kind, device) not in used_accelerators
+                    }
+                    for kind, values in inventory.accelerator_memory.items()
+                },
+                inventory.metadata,
+            )
+            synthesis = synthesize(world, inventory=remaining)
+            if not synthesis.ok or synthesis.world is None:
+                return None
+            try:
+                allocation = assign_local_world(synthesis.world, inventory=remaining)
+            except Exception:
+                return None
+            resources = _allocation_amounts(allocation)
+            reservation = Reservation(
+                submission_id, generation, attempt, resources,
+                executor_id=executor_id, allocation=allocation,
+            )
+            self._reservations[submission_id] = reservation
+            self._changed.notify_all()
             return reservation
 
     def mark_submitted(self, submission_id: str, *, generation: str, attempt: str, backend_job_id: str | None = None) -> bool:
@@ -100,11 +177,12 @@ class ResourceAuthority:
         _handle("attempt", attempt)
         if backend_job_id is not None:
             _handle("backend_job_id", backend_job_id)
-        with self._lock:
+        with self._changed:
             current = self._matching(submission_id, generation, attempt)
             if current is None or current.submitted:
                 return False
             self._reservations[submission_id] = replace(current, submitted=True, backend_job_id=backend_job_id, state="reserved")
+            self._changed.notify_all()
             return True
 
     def confirm_grant(
@@ -137,13 +215,16 @@ class ResourceAuthority:
             raise TypeError("resources must be ResourceAmounts")
         if allocation is not None and not isinstance(allocation, WorldAllocation):
             raise TypeError("allocation must be WorldAllocation or None")
-        with self._lock:
+        with self._changed:
             current = self._matching(submission_id, generation, attempt)
             if current is None or current.state != "reserved" or (current.worker_id is not None and current.worker_id != worker_id):
                 return False
             if not _fits(current.resources, resources):
                 return False
+            if current.allocation is not None and (allocation is None or not _same_bindings(current.allocation, allocation)):
+                return False
             self._reservations[submission_id] = replace(current, submitted=True, worker_id=worker_id, backend_job_id=backend_job_id or current.backend_job_id, pid=pid, allocation=allocation, resources=resources, state="running")
+            self._changed.notify_all()
             return True
 
     def release(
@@ -168,18 +249,36 @@ class ResourceAuthority:
             _handle("worker_id", worker_id)
         if not isinstance(never_submitted, bool) or not isinstance(qualified_terminal, bool):
             raise TypeError("release qualification flags must be bool")
-        with self._lock:
+        with self._changed:
             current = self._matching(submission_id, generation, attempt)
             if current is None:
                 return False
             if never_submitted and not current.submitted:
                 del self._reservations[submission_id]
+                self._changed.notify_all()
                 return True
-            if qualified_terminal and worker_id is not None and current.worker_id == worker_id:
+            # A locally owned group that stopped before READY has no confirmed
+            # worker identity, but it is still qualified release evidence for its
+            # own pre-launch reservation.  PID/cancellation alone remains invalid.
+            if qualified_terminal and (current.worker_id == worker_id or current.worker_id is None):
                 del self._reservations[submission_id]
+                self._changed.notify_all()
                 return True
             self._reservations[submission_id] = replace(current, state="unconfirmed")
+            self._changed.notify_all()
             return False
+
+    def wait_for_change(self, timeout: float) -> None:
+        """Wait once for a reservation/release transition without polling I/O."""
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout < 0:
+            raise ValueError("timeout must be a nonnegative duration")
+        with self._changed:
+            self._changed.wait(timeout)
+
+    def has_unknown_charge(self) -> bool:
+        """Return whether a live unbound charge prevents safe exact allocation."""
+        with self._lock:
+            return any(_unknown_charge(item) for item in self._reservations.values())
 
     def snapshot(
         self,
@@ -311,6 +410,47 @@ def _fits(available: ResourceAmounts, requested: ResourceAmounts) -> bool:
 def _amounts_complete(amounts: ResourceAmounts) -> bool:
     """Return whether every represented capacity or charge value is known."""
     return amounts.cpus is not None and amounts.memory_bytes is not None and all(value is not None for value in amounts.accelerators.values()) and all(value is not None for value in amounts.named.values())
+
+
+def _processes(allocation: WorldAllocation):
+    """Yield the exact assigned processes without interpreting requirement policy."""
+    return (process for processes in allocation.roles.values() for process in processes)
+
+
+def _allocation_amounts(allocation: WorldAllocation) -> ResourceAmounts:
+    """Summarize exact local bindings for the authority's scalar charge view."""
+    processes = tuple(_processes(allocation))
+    return ResourceAmounts(
+        float(sum(len(process.cpus) for process in processes)),
+        None if all(process.memory is None for process in processes) else sum(process.memory or 0 for process in processes),
+        {
+            kind: float(sum(len(process.accelerators.get(kind, ())) for process in processes))
+            for kind in {kind for process in processes for kind in process.accelerators}
+        },
+        {},
+    )
+
+
+def _same_bindings(expected: WorldAllocation, observed: WorldAllocation) -> bool:
+    """Compare exclusive IDs while allowing worker control evidence to differ."""
+    return tuple(
+        (name, tuple((process.cpus, tuple((kind, devices) for kind, devices in process.accelerators.items())) for process in processes))
+        for name, processes in expected.roles.items()
+    ) == tuple(
+        (name, tuple((process.cpus, tuple((kind, devices) for kind, devices in process.accelerators.items())) for process in processes))
+        for name, processes in observed.roles.items()
+    )
+
+
+def _unknown_charge(reservation: Reservation) -> bool:
+    """Keep only an unbound charge from becoming fabricated exact-ID capacity.
+
+    An exact local allocation safely identifies its occupied CPUs/accelerators even
+    when unrelated dimensions, such as unenforced memory, remain unknown.  Treating
+    that unrelated uncertainty as an unknown CPU charge would unnecessarily
+    serialize independently affinitized workers.
+    """
+    return reservation.allocation is None
 
 
 __all__ = ["RESOURCE_AUTHORITIES", "Reservation", "ResourceAuthority", "ResourceAuthorityRegistry"]

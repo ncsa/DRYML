@@ -79,6 +79,7 @@ class ExecutionFuture(Generic[T]):
         self._diagnostic_text_limit_bytes = 65_536
         self._diagnostic_issue_limit = 64
         self._cancel_requester: Callable[[], bool] | None = None
+        self._result_receiver: Callable[[bytes], T] | None = None
         self._callback_queue: deque[Callable[[ExecutionFuture[T]], None]] = deque()
         self._backend_job_id: str | None = None
         self._worker_id: str | None = None
@@ -413,6 +414,27 @@ class ExecutionFuture(Generic[T]):
             raise TypeError("requester must be callable")
         with self._condition:
             self._cancel_requester = requester
+
+    def _set_result_receiver(self, receiver: Callable[[bytes], T]) -> None:
+        """Install the executor-owned reserved result-spool receive hook.
+
+        Backends use this only after validating their transport result frame. The
+        receiver remains coordinator-local and is never serialized to a worker.
+        """
+        if not callable(receiver):
+            raise TypeError("result receiver must be callable")
+        with self._condition:
+            if self._state != "pending" or self._outcome is not _MISSING:
+                raise RuntimeError("result receiver must be installed before admission")
+            self._result_receiver = receiver
+
+    def _receive_result(self, data: bytes) -> T:
+        """Delegate one validated result payload to the accepted executor owner."""
+        with self._condition:
+            receiver = self._result_receiver
+        if receiver is None:
+            raise ExecutionError("execution has no authorized result receiver")
+        return receiver(data)
 
     def _set_association(self, *, backend_job_id: str | None | object = _MISSING, worker_id: str | None | object = _MISSING, pid: int | None | object = _MISSING, environment: Any = _MISSING, allocation: Any = _MISSING, report: Any = _MISSING) -> None:
         """Update coordinator-observed U3/U5 association fields without changing outcome."""

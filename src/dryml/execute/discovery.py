@@ -216,6 +216,17 @@ def probe_candidate(
     eligibility = _execute_eligibility(record)
     if eligibility is not None:
         return EnvironmentCandidate(key, spec, record, None, None, (eligibility,))
+    # Environment records intentionally do not invent Execute features. Prove the
+    # editable bootstrap directly in the selected runtime after owner inspection.
+    try:
+        bootstrap = _bootstrap_command(spec, interpreter)
+        bootstrap_result = run_bounded(bootstrap, timeout=timeout, deadline=deadline, output_limit=output_limit, cancelled=cancelled, env=env, termination_timeout=termination_timeout, read_chunk_bytes=read_chunk_bytes, poll_interval=poll_interval)
+    except OSError:
+        return EnvironmentCandidate(key, spec, record, None, False, (ExecutionIssue("candidate_unlaunchable", "candidate Execute bootstrap could not start"),))
+    if bootstrap_result.timed_out or bootstrap_result.cancelled or not bootstrap_result.cleanup_complete:
+        return EnvironmentCandidate(key, spec, record, None, None, (ExecutionIssue("candidate_execute_unproven", "candidate Execute bootstrap could not be verified"),))
+    if bootstrap_result.returncode != 0:
+        return EnvironmentCandidate(key, spec, record, None, False, (ExecutionIssue("candidate_execute_unlaunchable", "candidate cannot import the Execute bootstrap"),))
     return EnvironmentCandidate(key, spec, record, None, True, ())
 
 
@@ -232,10 +243,21 @@ def _execute_eligibility(record: EnvironmentRecord) -> ExecutionIssue | None:
         return ExecutionIssue("candidate_python_unproven", "candidate Python identity is not supported")
     if "dill" not in record.distributions:
         return ExecutionIssue("candidate_dill_unproven", "candidate lacks required serializer evidence")
-    features = () if record.dryml is None else record.dryml.features
-    if "dryml.execute.v0.3" not in features:
-        return ExecutionIssue("candidate_execute_unproven", "candidate lacks Execute bootstrap feature evidence")
     return None
+
+
+def _bootstrap_command(spec: EnvironmentSpec, interpreter: Path) -> list[str]:
+    """Return the selected runtime's bounded Execute bootstrap import probe."""
+    check = "import dill; from dryml.execute._protocol import PROTOCOL_VERSION; assert PROTOCOL_VERSION == 1"
+    if isinstance(spec, CurrentEnvironmentSpec):
+        return [str(interpreter), "-c", check]
+    if isinstance(spec, PythonExecutableSpec):
+        return [spec.executable, "-c", check]
+    if isinstance(spec, CondaEnvironmentSpec):
+        if spec.launch_mode == "direct":
+            return [spec.direct_python_executable(), "-c", check]
+        return [spec.conda_executable, "run", "-p" if spec.prefix else "-n", spec.prefix or spec.name or "", "--no-capture-output", "--", "python", "-c", check]
+    raise TypeError("unsupported Execute bootstrap selector")
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
