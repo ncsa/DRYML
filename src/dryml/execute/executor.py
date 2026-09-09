@@ -928,7 +928,7 @@ class Executor:
     @staticmethod
     def _capture_temp_parent(cwd: Path) -> Path:
         """Choose a stable platform temporary parent without probing it at construction."""
-        names = ("TEMP", "TMP", "LOCALAPPDATA", "USERPROFILE") if os.name == "nt" else ("TMPDIR",)
+        names = ("TMPDIR", "TEMP", "TMP", "LOCALAPPDATA", "USERPROFILE") if os.name == "nt" else ("TMPDIR",)
         for name in names:
             value = os.environ.get(name)
             if value:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from threading import Barrier, Thread
 from time import monotonic, sleep
@@ -11,11 +12,27 @@ import pytest
 
 from dryml.environments import EnvironmentRequirement
 from dryml.environments.specs import CurrentEnvironmentSpec
+from dryml.execute import subprocess as subprocess_module
 from dryml.execute.errors import AdmissionError
 from dryml.execute.accounting import ResourceAuthority
 from dryml.execute.executor import Executor
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.worlds import CountConstraint, LocalResourceInventory, ResourceRequirement, RoleRequirement, WorldRequirement
+
+
+def _require_cpu_affinity() -> None:
+    """Skip only tests whose real worker contract requires native CPU affinity."""
+    if not all(callable(getattr(os, name, None)) for name in ("sched_getaffinity", "sched_setaffinity")):
+        pytest.skip("native CPU affinity is unavailable on this platform")
+
+
+def _simulated_affinity_os(monkeypatch) -> SimpleNamespace:
+    """Install CPU-affinity shims in an isolated subprocess-module OS proxy."""
+    platform_os = SimpleNamespace(**vars(os))
+    monkeypatch.setattr(platform_os, "sched_getaffinity", lambda _pid: {0}, raising=False)
+    monkeypatch.setattr(platform_os, "sched_setaffinity", lambda _pid, _cpus: None, raising=False)
+    monkeypatch.setattr(subprocess_module, "os", platform_os)
+    return platform_os
 
 
 def test_environment_is_checked_against_actual_worker_owner_evidence(tmp_path: Path):
@@ -29,6 +46,7 @@ def test_environment_is_checked_against_actual_worker_owner_evidence(tmp_path: P
 
 def test_world_cpu_grant_applies_and_reports_exact_worker_affinity(tmp_path: Path):
     """A constrained worker observes only its authority-reserved CPU ID."""
+    _require_cpu_affinity()
     world = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(1, 1)))})
     executor = Executor(SubProcessConfig(spool_directory=tmp_path))
     try:
@@ -45,6 +63,7 @@ def test_world_cpu_grant_applies_and_reports_exact_worker_affinity(tmp_path: Pat
 
 def test_combined_admission_checks_both_axes_and_rejects_unsupported_controls_preload(tmp_path: Path):
     """Environment/world evidence is joint, while memory never fakes enforcement."""
+    _require_cpu_affinity()
     sentinel = tmp_path / "combined-loaded"
     world = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(1, 1)))})
     executor = Executor(SubProcessConfig(spool_directory=tmp_path, automatic_environment_discovery=False, environment_candidates=(CurrentEnvironmentSpec(),)))
@@ -64,7 +83,8 @@ def test_combined_admission_checks_both_axes_and_rejects_unsupported_controls_pr
 
 def test_shared_local_authority_keeps_constrained_executors_disjoint_and_releases_waiters(tmp_path: Path, monkeypatch):
     """Exact IDs cannot overlap across executors, and cleanup wakes a blocked grant."""
-    cpu = min(__import__("os").sched_getaffinity(0))
+    _require_cpu_affinity()
+    cpu = min(os.sched_getaffinity(0))
     world = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(1, 1)))})
     first = Executor(SubProcessConfig(spool_directory=tmp_path, admission_timeout=2))
     second = Executor(SubProcessConfig(spool_directory=tmp_path, admission_timeout=0.2))
@@ -96,7 +116,8 @@ def test_shared_local_authority_keeps_constrained_executors_disjoint_and_release
 
 def test_injected_gpu_allocation_applies_exact_cuda_visibility(tmp_path: Path, monkeypatch):
     """The accelerator branch verifies a real worker control without hardware claims."""
-    cpu = min(__import__("os").sched_getaffinity(0))
+    _simulated_affinity_os(monkeypatch)
+    cpu = 0
     world = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(accelerators={"gpu": CountConstraint(1, 1)}))})
     executor = Executor(SubProcessConfig(spool_directory=tmp_path))
     executor.start()
@@ -112,7 +133,8 @@ def test_injected_gpu_allocation_applies_exact_cuda_visibility(tmp_path: Path, m
 
 def test_contended_local_admission_reprobes_only_after_authority_transition(tmp_path: Path, monkeypatch):
     """Busy waiters poll cancellation/deadlines without repeatedly spawning probes."""
-    cpu = min(__import__("os").sched_getaffinity(0))
+    _simulated_affinity_os(monkeypatch)
+    cpu = 0
     world = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(1, 1)))})
     inventory = LocalResourceInventory((cpu,))
     authority = ResourceAuthority()

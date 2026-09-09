@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Lock, Thread
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -302,6 +304,25 @@ def test_factory_uses_captured_working_directory_and_specialized_interpreter(tmp
     assert backend.factory_config.python_executable == Path(sys.executable)
     assert backend.calls[0][0].payload.path.parent.parent == spool
     executor.close()
+
+
+@pytest.mark.parametrize(
+    ("platform", "environment"),
+    (
+        ("nt", {"TMPDIR": "spool", "TEMP": "fallback-temp", "TMP": "fallback-tmp"}),
+        ("posix", {"TMPDIR": "spool", "TEMP": "ignored-temp"}),
+    ),
+)
+def test_capture_temp_parent_uses_isolated_platform_environment(tmp_path, monkeypatch, platform, environment):
+    """Temporary-parent policy honors TMPDIR without mutating the ambient environment."""
+    from dryml.execute import executor as executor_module
+    from dryml.execute.executor import Executor
+
+    captured = tmp_path / "captured"
+    platform_os = SimpleNamespace(**{**vars(os), "name": platform, "environ": environment})
+    monkeypatch.setattr(executor_module, "os", platform_os)
+
+    assert Executor._capture_temp_parent(captured) == captured / "spool"
 
 
 def test_waiters_observe_their_own_failed_backend_start_generation(tmp_path):

@@ -16,7 +16,7 @@ import pytest
 from dryml.execute import executor as executor_module
 from dryml.execute import subprocess as subprocess_module
 from dryml.execute.accounting import ResourceAuthority
-from dryml.execute.errors import ExecutionUncertainError
+from dryml.execute.errors import AdmissionError, ExecutionUncertainError
 from dryml.execute.executor import Executor
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.subprocess import SubProcessConfig, SubProcessFuture
@@ -26,6 +26,12 @@ from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, 
 def _os_with_name(name: str) -> SimpleNamespace:
     """Return an isolated OS module copy with one platform name for a module seam."""
     return SimpleNamespace(**{**vars(os), "name": name})
+
+
+def _require_cpu_affinity() -> None:
+    """Skip only the real worker proof when native CPU affinity is unavailable."""
+    if not all(callable(getattr(os, name, None)) for name in ("sched_getaffinity", "sched_setaffinity")):
+        pytest.skip("native CPU affinity is unavailable on this platform")
 
 
 def _add(left: int, right: int = 0) -> int:
@@ -177,21 +183,36 @@ def test_subprocess_rejects_oversized_worker_result_without_success(tmp_path: Pa
     executor.close(timeout=5)
 
 
-def test_real_constrained_workers_are_disjoint_and_release_queued_demand(tmp_path: Path):
-    """Two real workers hold distinct one-CPU grants until file markers release them."""
+def test_real_constrained_workers_are_disjoint_and_release_queued_demand(tmp_path: Path, monkeypatch):
+    """Busy real grants reject waiting demand, then release it with exact affinity."""
+    _require_cpu_affinity()
     available = sorted(os.sched_getaffinity(0))
     if len(available) < 2:
         pytest.skip("requires at least two available host CPUs for real affinity proof")
-    world = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(1, 1)))})
+    one_cpu_world = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(1, 1)))})
+    busy_world = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(len(available) - 1, len(available) - 1)))})
     for name in ("first", "second", "queued", "reopened"):
         (tmp_path / name).mkdir()
     first = Executor(SubProcessConfig(spool_directory=tmp_path / "first", admission_timeout=3))
     second = Executor(SubProcessConfig(spool_directory=tmp_path / "second", admission_timeout=3))
-    queued = Executor(SubProcessConfig(spool_directory=tmp_path / "queued", admission_timeout=0.2))
-    reopened = Executor(SubProcessConfig(spool_directory=tmp_path / "reopened", admission_timeout=3))
+    queued = Executor(SubProcessConfig(spool_directory=tmp_path / "queued", admission_timeout=5))
+    reopened = Executor(SubProcessConfig(spool_directory=tmp_path / "reopened", admission_timeout=5))
+    first.start()
+    second.start()
+    queued.start()
+    reopened.start()
+    authority = queued._backend._authority
+    wait_started = Event()
+    original_wait_for_change = authority.wait_for_change
+
+    def observe_wait_for_change(*args, **kwargs):
+        wait_started.set()
+        return original_wait_for_change(*args, **kwargs)
+
+    monkeypatch.setattr(authority, "wait_for_change", observe_wait_for_change)
     try:
-        one = first.submit(_hold_affinity, str(tmp_path), "one", world=world)
-        two = second.submit(_hold_affinity, str(tmp_path), "two", world=world)
+        one = first.submit(_hold_affinity, str(tmp_path), "one", world=one_cpu_world)
+        two = second.submit(_hold_affinity, str(tmp_path), "two", world=one_cpu_world)
         _wait_for(tmp_path / "one.running")
         if two.done():
             two.result(timeout=0)
@@ -205,24 +226,29 @@ def test_real_constrained_workers_are_disjoint_and_release_queued_demand(tmp_pat
         second_snapshot = second.resources(timeout=3)
         assert first_snapshot.allocated.cpus == second_snapshot.allocated.cpus == 1.0
         assert first_snapshot.available.cpus == second_snapshot.available.cpus == len(available) - 2
-        sentinel = tmp_path / "busy-sentinel"
-        busy = queued.submit(_write_sentinel, str(sentinel), world=world)
-        with pytest.raises(Exception):
-            busy.result(timeout=3)
-        assert not sentinel.exists()
-        busy.cleanup(timeout=3)
+        blocked = queued.submit(_write_sentinel, str(tmp_path / "busy-sentinel"), world=busy_world)
+        assert wait_started.wait(timeout=3)
+        with pytest.raises(AdmissionError, match="waiting for local resources"):
+            blocked.result(timeout=7)
+        assert not (tmp_path / "busy-sentinel").exists()
+        blocked.cleanup(timeout=3)
         (tmp_path / "one.release").touch()
         assert one.result(timeout=5) in [list(value) for value in observed]
         one.cleanup(timeout=3)
-        released = reopened.submit(_hold_affinity, str(tmp_path), "reopened", world=world)
+        released = reopened.submit(_hold_affinity, str(tmp_path), "reopened", world=busy_world)
         _wait_for(tmp_path / "reopened.running")
+        reopened_affinity = tuple(map(int, (tmp_path / "reopened.running").read_text(encoding="ascii").split(",")))
+        assert len(reopened_affinity) == len(available) - 1
+        assert len(set(reopened_affinity)) == len(available) - 1
         (tmp_path / "reopened.release").touch()
-        assert len(released.result(timeout=5)) == 1
+        assert released.result(timeout=5) == list(reopened_affinity)
         released.cleanup(timeout=3)
         (tmp_path / "two.release").touch()
         assert two.result(timeout=5) in [list(value) for value in observed]
         two.cleanup(timeout=3)
     finally:
+        for name in ("one", "two", "reopened"):
+            (tmp_path / f"{name}.release").touch()
         for executor in (first, second, queued, reopened):
             executor.close(cancel=True, timeout=5)
 
