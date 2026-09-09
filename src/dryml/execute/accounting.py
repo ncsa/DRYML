@@ -345,7 +345,9 @@ class ResourceAuthorityRegistry:
         _handle("backend_identity", backend_identity)
         key = (backend_type, backend_identity)
         with self._lock:
-            return self._authorities.setdefault(key, ResourceAuthority())
+            if key not in self._authorities:
+                self._authorities[key] = ResourceAuthority()
+            return self._authorities[key]
 
 
 RESOURCE_AUTHORITIES = ResourceAuthorityRegistry()

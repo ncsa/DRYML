@@ -101,12 +101,12 @@ class Executor:
         self._backend_creating = False
         self._backend_generation = 0
         self._backend_results: dict[int, BaseException | Backend] = {}
-        self._backend_ready = Event()
+        self._backend_result_waiters: dict[int, int] = {}
         self._backend_starting = False
         self._backend_started = False
         self._backend_start_generation = 0
         self._backend_start_results: dict[int, BaseException | None] = {}
-        self._backend_started_event = Event()
+        self._backend_start_result_waiters: dict[int, int] = {}
         self._dispatches = 0
         self._queries = 0
         self._close_active = False
@@ -264,7 +264,7 @@ class Executor:
             if hook is not None:
                 try:
                     hook(future)
-                except BaseException as exc:
+                except BaseException:
                     future._publish_exception(ExecutionError("accepted execution ownership could not be installed"))
                     return future
             if effective_stream:
@@ -532,26 +532,27 @@ class Executor:
                 self._backend_generation += 1
                 generation = self._backend_generation
                 self._backend_creating = True
-                self._backend_ready.clear()
                 try:
                     Thread(target=self._create_backend, args=(generation,), name="dryml-execute-create", daemon=False).start()
                 except BaseException as exc:
                     self._backend_creating = False
-                    self._backend_results[generation] = exc
-                    self._backend_ready.set()
                     self._condition.notify_all()
                     raise ExecutionError("backend factory worker could not start") from exc
             else:
                 generation = self._backend_generation
-            while generation not in self._backend_results:
-                remaining = self._remaining(deadline)
-                if remaining is not None and remaining <= 0:
-                    raise TimeoutError("backend construction exceeded timeout")
-                self._condition.wait(remaining)
-            result = self._backend_results[generation]
-            if isinstance(result, BaseException):
-                raise result
-            return result
+            self._backend_result_waiters[generation] = self._backend_result_waiters.get(generation, 0) + 1
+            try:
+                while generation not in self._backend_results:
+                    remaining = self._remaining(deadline)
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError("backend construction exceeded timeout")
+                    self._condition.wait(remaining)
+                result = self._backend_results[generation]
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+            finally:
+                self._consume_backend_result(generation)
 
     def _create_backend(self, generation: int) -> None:
         """Run the inert factory outside lifecycle locks and wake all bounded waiters."""
@@ -563,14 +564,12 @@ class Executor:
             with self._condition:
                 self._backend_results[generation] = exc
                 self._backend_creating = False
-                self._backend_ready.set()
                 self._condition.notify_all()
             return
         with self._condition:
             self._backend_results[generation] = backend
             self._backend = backend
             self._backend_creating = False
-            self._backend_ready.set()
             self._condition.notify_all()
 
     def _start_backend(self, deadline: float | None, *, accepted: bool = False) -> Backend:
@@ -590,7 +589,6 @@ class Executor:
             if not self._backend_starting:
                 self._backend_start_generation += 1
                 generation = self._backend_start_generation
-                self._backend_started_event.clear()
                 self._backend_starting = True
                 if self._state != "closing":
                     self._state = "starting"
@@ -598,21 +596,23 @@ class Executor:
                     Thread(target=self._run_backend_start, args=(backend, generation), name="dryml-execute-start", daemon=False).start()
                 except BaseException as exc:
                     self._backend_starting = False
-                    self._backend_start_results[generation] = exc
-                    self._backend_started_event.set()
                     self._condition.notify_all()
                     raise ExecutionError("backend initialization worker could not start") from exc
             else:
                 generation = self._backend_start_generation
-            while generation not in self._backend_start_results:
-                remaining = self._remaining(deadline)
-                if remaining is not None and remaining <= 0:
-                    raise TimeoutError("backend initialization exceeded timeout")
-                self._condition.wait(remaining)
-            result = self._backend_start_results[generation]
-            if isinstance(result, BaseException):
-                raise result
-            return backend
+            self._backend_start_result_waiters[generation] = self._backend_start_result_waiters.get(generation, 0) + 1
+            try:
+                while generation not in self._backend_start_results:
+                    remaining = self._remaining(deadline)
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError("backend initialization exceeded timeout")
+                    self._condition.wait(remaining)
+                result = self._backend_start_results[generation]
+                if isinstance(result, BaseException):
+                    raise result
+                return backend
+            finally:
+                self._consume_backend_start_result(generation)
 
     def _run_backend_start(self, backend: Backend, generation: int) -> None:
         """Start an already-created backend outside lifecycle locks for all waiters."""
@@ -622,7 +622,6 @@ class Executor:
             with self._condition:
                 self._backend_start_results[generation] = exc
                 self._backend_starting = False
-                self._backend_started_event.set()
                 self._condition.notify_all()
             return
         with self._condition:
@@ -631,8 +630,25 @@ class Executor:
             self._backend_starting = False
             if self._state == "starting":
                 self._state = "open"
-            self._backend_started_event.set()
             self._condition.notify_all()
+
+    def _consume_backend_result(self, generation: int) -> None:
+        """Discard one completed factory result after its bound waiter detaches."""
+        remaining = self._backend_result_waiters[generation] - 1
+        if remaining:
+            self._backend_result_waiters[generation] = remaining
+            return
+        self._backend_result_waiters.pop(generation, None)
+        self._backend_results.pop(generation, None)
+
+    def _consume_backend_start_result(self, generation: int) -> None:
+        """Discard one completed start result after its bound waiter detaches."""
+        remaining = self._backend_start_result_waiters[generation] - 1
+        if remaining:
+            self._backend_start_result_waiters[generation] = remaining
+            return
+        self._backend_start_result_waiters.pop(generation, None)
+        self._backend_start_results.pop(generation, None)
 
     def _dispatch(self, call: SubmittedCall[T], future: ExecutionFuture[T], backend: Backend) -> None:
         """Start lazy backend/admission work without delaying the accepted submitter."""
@@ -640,7 +656,7 @@ class Executor:
             try:
                 try:
                     self._start_backend(call.admission_deadline, accepted=True)
-                except TimeoutError as exc:
+                except TimeoutError:
                     future._publish_exception(AdmissionError("admission deadline exceeded"))
                     return
                 if future.done() or time.monotonic() >= call.admission_deadline:

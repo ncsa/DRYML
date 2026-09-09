@@ -11,7 +11,7 @@ from time import monotonic
 from dryml.environments import CompatibilityReport, EnvironmentRecord, EnvironmentRequirement
 from dryml.requirements import RequirementBarrierError, RequirementError, require_admission
 from dryml.worlds import LocalResourceInventory, WorldAllocation, WorldCompatibilityReport, WorldRequirement, WorldSpec, assign_local_world, synthesize
-from dryml.worlds.compatibility import check_allocation_satisfies_requirement
+from dryml.worlds.compatibility import check_allocation_satisfies_requirement, check_world_spec_satisfies_requirement
 
 from .models import AdmissionReport, ExecutionIssue
 
@@ -173,6 +173,69 @@ def admit(
             issues.append(ExecutionIssue("worker_environment_unassociated", "worker allocation is not associated with its checked environment"))
     issues.extend(_gate_issues(deadline, cancelled))
     return AdmissionDecision(not issues, AdmissionReport(environment_report, world_report, tuple(issues)), selected_world, allocation if allocation is not None else planned_allocation, False)
+
+
+def _admit_observed_logical(
+    *,
+    environment: EnvironmentRequirement | None = None,
+    world: WorldRequirement | None = None,
+    record: EnvironmentRecord | None = None,
+    observed_world: WorldSpec | None = None,
+    controls: Mapping[str, str] | None = None,
+    deadline: float,
+) -> AdmissionDecision:
+    """Admit a backend's actual logical grant without inventing exact bindings.
+
+    Ray exposes scheduler-assigned logical CPU, memory, and accelerator amounts,
+    but not an exact CPU allocation compatible with :class:`WorldAllocation`.
+    This private helper preserves owner requirement/barrier evaluation for that
+    evidence while keeping ``allocation`` absent in the returned decision.
+
+    Args:
+        environment: Optional actual-worker environment requirement.
+        world: Optional single-process world requirement.
+        record: Fresh actual-worker environment record.
+        observed_world: World shape reconstructed from the backend's raw grant.
+        controls: Backend-proven logical controls by resource family.
+        deadline: Absolute finite monotonic admission deadline.
+
+    Returns:
+        A final admission decision with no fabricated exact allocation.
+    """
+    issues = _gate_issues(deadline, None)
+    environment_report: CompatibilityReport | None = None
+    world_report: WorldCompatibilityReport | None = None
+    if environment is not None:
+        if record is None:
+            issues.append(ExecutionIssue("environment_evidence_unavailable", "actual worker environment evidence is unavailable"))
+        else:
+            environment_report, environment_issue = _environment_report(environment, record)
+            if environment_issue is not None:
+                issues.append(environment_issue)
+    if world is not None:
+        shape_issue = _shape_issue(world)
+        if shape_issue is not None:
+            issues.append(shape_issue)
+        elif observed_world is None:
+            issues.append(ExecutionIssue("world_grant_unavailable", "actual logical worker grant is unavailable"))
+        else:
+            world_report = check_world_spec_satisfies_requirement(observed_world, world)
+            try:
+                require_admission(world_report, operation="execute logical admission")
+            except RequirementBarrierError:
+                issues.append(ExecutionIssue("world_incompatible", "actual logical worker grant does not satisfy the requirement"))
+            except RequirementError:
+                issues.append(ExecutionIssue("world_evidence_unavailable", "actual logical worker grant is not admissible"))
+            requested = next(iter(world.roles.values())).resources
+            logical_controls = controls if isinstance(controls, Mapping) else {}
+            if (requested.cpus.min is not None or requested.cpus.max is not None) and logical_controls.get("cpus") != "logical":
+                issues.append(ExecutionIssue("world_cpu_control_unsupported", "backend cannot prove its logical CPU grant"))
+            if requested.accelerators and logical_controls.get("accelerators") != "logical":
+                issues.append(ExecutionIssue("world_accelerator_control_unsupported", "backend cannot prove assigned accelerator identities"))
+            if (requested.memory.min is not None or requested.memory.max is not None) and logical_controls.get("memory") != "logical":
+                issues.append(ExecutionIssue("world_memory_control_unsupported", "backend cannot prove its logical memory grant"))
+    issues.extend(_gate_issues(deadline, None))
+    return AdmissionDecision(not issues, AdmissionReport(environment_report, world_report, tuple(issues)), observed_world, None, False)
 
 
 def _gate_issues(deadline: float, cancelled: Event | None) -> list[ExecutionIssue]:

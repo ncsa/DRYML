@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
 import dill
 
@@ -32,7 +32,6 @@ from dryml.worlds import LocalResourceInventory, WorldAllocation
 
 from ._process import OwnedProcess, _WindowsJob, minimal_environment, run_bounded
 from ._protocol import (
-    PROTOCOL_VERSION,
     WORKER_PROTOCOL_ID,
     BootstrapDescriptor,
     Correlation,
@@ -495,7 +494,7 @@ class SubProcessBackend(Backend):
                 outcome_seen = True
                 try:
                     value = self._receive_result(future, frame.payload)
-                except BaseException as exc:
+                except BaseException:
                     future._publish_exception(ExecutionError("worker result could not be decoded"))
                 else:
                     future._publish_result(value)

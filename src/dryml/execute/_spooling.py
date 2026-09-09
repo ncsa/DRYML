@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 
 
 _LOCK_TYPES = (type(threading.Lock()), type(threading.RLock()))
+_EXECUTE_RESOURCE_BASES = frozenset({
+    "Backend", "BackendBase", "ExecutionFuture", "ExecutionOutput", "Executor", "ExecutorView",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,8 +229,7 @@ def _reject_live_resource(value: object) -> None:
         raise TypeError(f"live resource: {value_type.__name__} is unsupported by Execute transport")
     if isinstance(value, Connection):
         raise TypeError("live resource: Connection is unsupported by Execute transport")
-    execute_resource_bases = {"Backend", "BackendBase", "ExecutionFuture", "ExecutionOutput", "Executor", "ExecutorView"}
-    if any(cls.__module__.startswith("dryml.execute") and cls.__name__ in execute_resource_bases for cls in value_type.__mro__):
+    if any(cls.__module__.startswith("dryml.execute") and cls.__name__ in _EXECUTE_RESOURCE_BASES for cls in value_type.__mro__):
         raise TypeError(f"live resource: {value_type.__name__} is unsupported by Execute transport")
 
 

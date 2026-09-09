@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import os
 import secrets
 import socket
@@ -17,11 +16,11 @@ import dill
 
 from dryml.environments import EnvironmentRequirement, inspect_current
 from dryml.formats import canonical_json_bytes, canonical_json_load_bytes
-from dryml.worlds import WorldAllocation, WorldRequirement
+from dryml.worlds import ProcessSpec, ResourceSpec, RoleSpec, WorldAllocation, WorldRequirement, WorldSpec
 
 from ._protocol import WORKER_PROTOCOL_ID, BootstrapDescriptor, FrameError, FrameState, FrameType, OwnerEnvelopeType, ProtocolConversation, SocketFrameReader, decode_bootstrap_descriptor, decode_control, decode_owner_envelopes, encode_control, encode_frame, encode_owner_envelope
 from ._spooling import deserialize_call, serialize_result
-from .admission import admit
+from .admission import _admit_observed_logical, admit
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,20 +44,25 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _run(descriptor: BootstrapDescriptor) -> None:
+def _run(descriptor: BootstrapDescriptor, *, worker_id: str | None = None, native: Mapping[str, object] | None = None) -> None:
     """Exchange one checked handshake, then invoke exactly once after GO."""
     connection = socket.create_connection((descriptor.rendezvous_host, descriptor.rendezvous_port), timeout=5)
     send_lock = threading.Lock()
     conversation: ProtocolConversation | None = None
     try:
         conversation = _conversation(descriptor)
-        worker_id = f"subprocess:{secrets.token_hex(16)}"
-        hello = encode_control(FrameState.HELLO, descriptor.correlation, {
+        worker_id = worker_id or f"subprocess:{secrets.token_hex(16)}"
+        hello_control: dict[str, object] = {
             "dill": dill.__version__, "implementation": sys.implementation.name,
             "pid": os.getpid(), "protocol": WORKER_PROTOCOL_ID,
             "python": list(sys.version_info[:2]), "token": descriptor.rendezvous_token,
             "worker_id": worker_id,
-        }, header_limit=descriptor.control_header_limit_bytes)
+        }
+        # HELLO controls have a closed shape.  Subprocess retains its established
+        # shape while the Ray bootstrap explicitly opts into native evidence.
+        if native is not None:
+            hello_control["native"] = dict(native)
+        hello = encode_control(FrameState.HELLO, descriptor.correlation, hello_control, header_limit=descriptor.control_header_limit_bytes)
         _send(connection, send_lock, hello)
         conversation.accept(hello)
         reader = SocketFrameReader(connection, header_limit=descriptor.control_header_limit_bytes, payload_limit=_limits(descriptor))
@@ -93,15 +97,24 @@ def _run(descriptor: BootstrapDescriptor) -> None:
             environment = EnvironmentRequirement.from_data(_json(envelopes[OwnerEnvelopeType.ENVIRONMENT], descriptor.owner_envelope_limit_bytes))
         if OwnerEnvelopeType.WORLD in envelopes:
             world = WorldRequirement.from_data(_json(envelopes[OwnerEnvelopeType.WORLD], descriptor.owner_envelope_limit_bytes))
-            if OwnerEnvelopeType.ALLOCATION not in envelopes:
+            if native is None and OwnerEnvelopeType.ALLOCATION not in envelopes:
                 _send_error(connection, send_lock, descriptor, conversation, "AdmissionError")
                 return
-            allocation = WorldAllocation.from_data(_json(envelopes[OwnerEnvelopeType.ALLOCATION], descriptor.owner_envelope_limit_bytes))
+            if OwnerEnvelopeType.ALLOCATION in envelopes:
+                allocation = WorldAllocation.from_data(_json(envelopes[OwnerEnvelopeType.ALLOCATION], descriptor.owner_envelope_limit_bytes))
         record = inspect_current() if environment is not None else None
         if allocation is not None:
             allocation = _apply_allocation(allocation, environment_id=None if record is None else record.semantic_id)
         os.chdir(cwd)
-        if not admit(environment=environment, world=world, record=record, allocation=allocation, deadline=deadline).go:
+        if native is not None and world is not None:
+            logical_world, controls = _ray_logical_world(world, native)
+            decision = _admit_observed_logical(
+                environment=environment, world=world, record=record,
+                observed_world=logical_world, controls=controls, deadline=deadline,
+            )
+        else:
+            decision = admit(environment=environment, world=world, record=record, allocation=allocation, deadline=deadline)
+        if not decision.go:
             _send_error(connection, send_lock, descriptor, conversation, "AdmissionError")
             return
         ready = encode_control(FrameState.READY, descriptor.correlation, {"pid": os.getpid(), "ready": True, "worker_id": worker_id}, header_limit=descriptor.control_header_limit_bytes)
@@ -147,6 +160,89 @@ def _run(descriptor: BootstrapDescriptor) -> None:
                 pass
     finally:
         connection.close()
+
+
+def run_ray_bootstrap(encoded_descriptor: bytes) -> dict[str, str]:
+    """Run one Ray-isolated Execute worker and return only a completion marker.
+
+    Args:
+        encoded_descriptor: The closed, bounded bootstrap descriptor supplied as
+            the sole native Ray task argument.
+
+    Returns:
+        A closed bootstrap receipt naming the exact Ray task and worker after the
+        common Execute channel has reached its terminal worker boundary.
+
+    Raises:
+        BaseException: Propagates bootstrap validation or worker failures to the
+            Ray task.  User payload values never enter Ray's task arguments.
+
+    Side Effects:
+        Opens the descriptor's loopback channel and invokes at most one accepted
+        payload.  Ray is imported only inside this native task entry point.
+    """
+    from dryml.execute._protocol import decode_bootstrap_descriptor
+    import psutil
+    import ray
+
+    if not isinstance(encoded_descriptor, bytes):
+        raise TypeError("Ray bootstrap descriptor must be bytes")
+    descriptor = decode_bootstrap_descriptor(encoded_descriptor, header_limit=len(encoded_descriptor))
+    context = ray.get_runtime_context()
+    worker = str(context.get_worker_id())
+    node = str(context.get_node_id())
+    task = str(context.get_task_id())
+    native = {
+        "accelerator_ids": context.get_accelerator_ids(),
+        "assigned_resources": context.get_assigned_resources(),
+        "node_id": node,
+        "process_create_time": psutil.Process().create_time(),
+        "python": list(sys.version_info[:3]),
+        "ray": ray.__version__,
+        "task_id": task,
+        "worker_id": worker,
+    }
+    _run(descriptor, worker_id=f"ray:{worker}", native=native)
+    return {"marker": "dryml.execute.ray.bootstrap.v1", "node_id": node, "task_id": task, "worker_id": worker}
+
+
+def _ray_logical_world(requirement: WorldRequirement, native: Mapping[str, object]) -> tuple[WorldSpec | None, dict[str, str]]:
+    """Reconstruct one Ray logical grant for owner checks without exact CPU IDs.
+
+    The Ray scheduler reports process-level logical quantities and assigned GPU
+    identifiers.  It never exposes an exact CPU affinity allocation, so this
+    helper deliberately returns a :class:`WorldSpec`, not ``WorldAllocation``.
+    """
+    if len(requirement.roles) != 1:
+        return None, {}
+    assigned = native.get("assigned_resources")
+    accelerator_ids = native.get("accelerator_ids")
+    if not isinstance(assigned, Mapping) or not isinstance(accelerator_ids, Mapping):
+        return None, {}
+    role_name = next(iter(requirement.roles))
+    cpu = _logical_count(assigned.get("CPU"))
+    memory = _logical_count(assigned.get("memory"))
+    gpu_ids = accelerator_ids.get("GPU", accelerator_ids.get("gpu"))
+    gpu = tuple(gpu_ids) if isinstance(gpu_ids, (list, tuple)) and not isinstance(gpu_ids, (str, bytes)) else ()
+    granted_gpu = _logical_count(assigned.get("GPU"))
+    accelerators: dict[str, int] = {}
+    controls: dict[str, str] = {}
+    if cpu is not None:
+        controls["cpus"] = "logical"
+    if memory is not None:
+        controls["memory"] = "logical"
+    if granted_gpu is not None and len(gpu) == granted_gpu:
+        accelerators["gpu"] = granted_gpu
+        controls["accelerators"] = "logical"
+    resources = ResourceSpec(cpus=cpu or 0, memory=memory, accelerators=accelerators)
+    return WorldSpec({role_name: RoleSpec(1, ProcessSpec(resources))}, backend={"kind": "ray", "logical_grant": True}), controls
+
+
+def _logical_count(value: object) -> int | None:
+    """Return a nonnegative integral Ray logical quantity or unavailable evidence."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or int(value) != value:
+        return None
+    return int(value)
 
 
 def _invoke(connection: socket.socket, send_lock: threading.Lock, descriptor: BootstrapDescriptor, payload: bytes, deadline: float | None) -> None:

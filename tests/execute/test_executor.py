@@ -395,8 +395,40 @@ def test_waiters_observe_their_own_failed_backend_factory_generation(tmp_path, m
     second.join(1)
     assert len(failures) == 2
     assert all(isinstance(failure, RuntimeError) and str(failure) == "first factory failed" for failure in failures)
+    assert executor._backend_results == {}
+    assert executor._backend_result_waiters == {}
     assert executor.submit(lambda: 3).result(timeout=1) == 3
     executor.close()
+
+
+def test_failed_backend_generations_do_not_retain_results_or_tracebacks(tmp_path):
+    """Completed factory/start failures are retained only for their joined waiters."""
+    from dryml.execute.executor import Executor
+
+    @dataclass(frozen=True, kw_only=True)
+    class FailingFactoryConfig(BackendConfig):
+        def create_backend(self) -> Backend:
+            raise RuntimeError("factory failure")
+
+    factory = Executor(FailingFactoryConfig(spool_directory=tmp_path))
+    for _ in range(8):
+        with pytest.raises(RuntimeError, match="factory failure"):
+            factory.start()
+        assert factory._backend_results == {}
+        assert factory._backend_result_waiters == {}
+    factory.close()
+
+    class FailingStartBackend(FakeBackend):
+        def start(self) -> None:
+            raise RuntimeError("start failure")
+
+    starter = Executor(config(tmp_path / "start", FailingStartBackend()))
+    for _ in range(8):
+        with pytest.raises(RuntimeError, match="start failure"):
+            starter.start()
+        assert starter._backend_start_results == {}
+        assert starter._backend_start_result_waiters == {}
+    starter.close()
 
 
 def _capture_failure(failures: list[BaseException], call) -> None:
