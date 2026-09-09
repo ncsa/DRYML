@@ -180,6 +180,35 @@ class _RaySDK:
             raise ExecutionError("Ray driver did not expose a valid namespace")
         return address, namespace, cluster_id
 
+    def canonical_address(self, address: str) -> str:
+        """Normalize one explicit address using Ray's pinned connection rules.
+
+        Args:
+            address: Validated explicit ``host:port`` endpoint selected by the
+                caller.
+
+        Returns:
+            Ray's canonical existing-cluster endpoint. Loopback aliases become
+            the Ray-visible address of this host.
+
+        Raises:
+            ExecutionError: If Ray cannot produce a concrete endpoint.
+
+        Side Effects:
+            May inspect local network configuration as Ray does for an explicit
+            ``ray.init(address=...)`` connection. It neither initializes a
+            driver nor contacts or changes a deployment.
+        """
+        try:
+            from ray._private.services import canonicalize_bootstrap_address
+
+            canonical = canonicalize_bootstrap_address(address)
+        except BaseException:
+            raise ExecutionError("Ray could not normalize the requested address") from None
+        if not isinstance(canonical, str) or not canonical:
+            raise ExecutionError("Ray did not normalize the requested address")
+        return canonical
+
 
 _SDK_FACTORY = _RaySDK
 
@@ -340,7 +369,7 @@ class _ConnectionRegistry:
             if not borrowed:
                 sdk.connect(connection.address, connection.namespace)
             resolved, namespace, cluster_id = sdk.connection_identity()
-            if borrowed and connection.address != "auto" and connection.address != resolved:
+            if borrowed and connection.address != "auto" and sdk.canonical_address(connection.address) != resolved:
                 raise ExecutionError("borrowed Ray connection address is incompatible")
             if borrowed and connection.namespace != namespace:
                 raise ExecutionError("borrowed Ray connection namespace is incompatible")

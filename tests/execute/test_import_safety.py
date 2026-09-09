@@ -34,10 +34,15 @@ if sys.argv[1] == "dryml.execute":
 '''
 
 
-@pytest.mark.parametrize("module", ["dryml.execute", "dryml.execute.subprocess", "dryml.execute.ray"])
+@pytest.mark.parametrize("module", [
+    "dryml.execute", "dryml.execute.subprocess", "dryml.execute.ray",
+    "tests.ray.test_execute_ray_backend",
+])
 def test_execute_imports_are_safe_in_a_fresh_blocked_interpreter(module):
     """Common and specialization imports avoid core/runtime and optional SDK imports."""
     environment = dict(os.environ)
+    environment.pop("DRYML_EXECUTE_INTEGRATION", None)
+    environment.pop("DRYML_TEST_RAY_ADDRESS", None)
     environment["PYTHONPATH"] = os.pathsep.join(path for path in sys.path if path)
     result = subprocess.run(
         [sys.executable, "-c", _SCRIPT, module],

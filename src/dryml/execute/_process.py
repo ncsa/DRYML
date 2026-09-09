@@ -399,7 +399,16 @@ def _close_pipes(process: subprocess.Popen[bytes], streams: object = ()) -> None
 def _retain_cleanup_owner(error: BaseException, owner: OwnedProcess) -> None:
     """Attach recovery ownership to an interruption without replacing its cause."""
     setattr(error, "cleanup_owner", owner)
-    error.add_note("owned process cleanup was not confirmed; reconcile with exception.cleanup_owner")
+    _add_exception_note(error, "owned process cleanup was not confirmed; reconcile with exception.cleanup_owner")
+
+
+def _add_exception_note(error: BaseException, message: str) -> None:
+    """Attach a supplementary diagnostic on every supported Python version."""
+    add_note = getattr(error, "add_note", None)
+    if callable(add_note):
+        add_note(message)
+    else:
+        setattr(error, "__notes__", [*getattr(error, "__notes__", ()), message])
 
 
 class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
@@ -523,7 +532,7 @@ class _WindowsJob:
                 raise _windows_error("AssignProcessToJobObject failed for owned Job")
         except BaseException as error:
             if not kernel32.CloseHandle(handle):
-                error.add_note("CloseHandle failed while releasing an unassigned owned Job")
+                _add_exception_note(error, "CloseHandle failed while releasing an unassigned owned Job")
                 setattr(error, "windows_job", cls(handle, kernel32, assigned=False))
             raise
         return cls(handle, kernel32)

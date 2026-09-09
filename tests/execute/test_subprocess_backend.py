@@ -23,6 +23,11 @@ from dryml.execute.subprocess import SubProcessConfig, SubProcessFuture
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
 
 
+def _os_with_name(name: str) -> SimpleNamespace:
+    """Return an isolated OS module copy with one platform name for a module seam."""
+    return SimpleNamespace(**{**vars(os), "name": name})
+
+
 def _add(left: int, right: int = 0) -> int:
     """Return a simple importable workload value."""
     return left + right
@@ -353,7 +358,7 @@ def test_windows_assignment_failure_retains_run_and_charge_until_retry(monkeypat
         calls.append(_owner)
         return len(calls) > 1
 
-    monkeypatch.setattr(subprocess_module.os, "name", "nt")
+    monkeypatch.setattr(subprocess_module, "os", _os_with_name("nt"))
     monkeypatch.setattr(backend, "_reserve", lambda *_args: reservation)
     runtime = ["conda", "run", "python"] if wrapped else [sys.executable]
     monkeypatch.setattr(backend, "_select_environment", lambda _call: (runtime, None))

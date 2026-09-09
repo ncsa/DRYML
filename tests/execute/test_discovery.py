@@ -99,13 +99,15 @@ def test_duplicate_inventory_and_directory_entries_cannot_exceed_examined_bound(
     assert any(issue.code == "discovery_candidate_limit" for issue in result.issues)
 
 
-def test_malformed_probe_evidence_is_not_launchable_or_compatible(tmp_path: Path):
-    """A fake executable cannot turn malformed owner evidence into a candidate record."""
-    executable = tmp_path / "fake-python"
-    executable.write_text("#!/bin/sh\nprintf not-json\n", encoding="utf-8")
-    executable.chmod(0o755)
+def test_malformed_probe_evidence_is_not_launchable_or_compatible(monkeypatch):
+    """A real bounded child returning invalid JSON cannot become a candidate record."""
+    monkeypatch.setattr(
+        PythonExecutableSpec,
+        "probe_command",
+        lambda _spec: [sys.executable, "-c", "import sys; sys.stdout.write('not-json')"],
+    )
     candidate = probe_candidate(
-        PythonExecutableSpec(executable=str(executable)), interpreter=Path(sys.executable), timeout=1, output_limit=1024,
+        PythonExecutableSpec(executable=sys.executable), interpreter=Path(sys.executable), timeout=1, output_limit=1024,
     )
     assert candidate.record is None
     assert candidate.launchable is None

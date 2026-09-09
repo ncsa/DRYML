@@ -15,7 +15,13 @@ from time import monotonic, sleep
 import pytest
 
 from dryml.execute import _process as process_module
+from dryml.execute import subprocess as subprocess_module
 from dryml.execute._process import run_bounded
+
+
+def _os_with_name(name: str) -> SimpleNamespace:
+    """Return an isolated OS module copy with one platform name for a module seam."""
+    return SimpleNamespace(**{**vars(os), "name": name})
 
 
 def _running(pid: int) -> bool:
@@ -236,6 +242,22 @@ def test_windows_job_preserves_large_handles_and_rejects_assignment_failure(monk
     assert not raised.value.windows_job.assigned
 
 
+def test_windows_job_assignment_failure_preserves_diagnostic_without_add_note(monkeypatch):
+    """Python 3.10 keeps supplemental cleanup evidence without ``BaseException.add_note``."""
+    class OSErrorWithoutAddNote(OSError):
+        add_note = None
+
+    unclosable = _FakeWindowsApi(assign=0, close=0)
+    monkeypatch.setattr(process_module, "_windows_kernel32", lambda: unclosable)
+    monkeypatch.setattr(process_module, "_windows_error", lambda message: OSErrorWithoutAddNote(message))
+
+    with pytest.raises(OSErrorWithoutAddNote, match="AssignProcessToJobObject") as raised:
+        process_module._WindowsJob.assign(_FakeProcess())
+
+    assert raised.value.__notes__ == ["CloseHandle failed while releasing an unassigned owned Job"]
+    assert not raised.value.windows_job.assigned
+
+
 def test_windows_job_checks_termination_and_active_process_evidence(monkeypatch):
     """Termination errors and nonempty Job accounting cannot report cleanup success."""
     failing = _FakeWindowsApi(terminate=0)
@@ -244,7 +266,7 @@ def test_windows_job_checks_termination_and_active_process_evidence(monkeypatch)
         job.terminate()
 
     active = _FakeWindowsApi(active=1)
-    monkeypatch.setattr(process_module.os, "name", "nt")
+    monkeypatch.setattr(process_module, "os", _os_with_name("nt"))
     assert not process_module._terminate_owned(_FakeProcess(), deadline=monotonic(), poll_interval=0.001, job=process_module._WindowsJob(1 << 40, active))
 
 
@@ -252,14 +274,13 @@ def test_windows_job_membership_accepts_wrapped_worker_with_large_handles(monkey
     """A distinct wrapper child passes only through an exact Job membership proof."""
     api = _FakeWindowsApi()
     job = process_module._WindowsJob(1 << 40, api)
-    from dryml.execute.subprocess import SubProcessBackend
-
-    monkeypatch.setattr(process_module.os, "name", "nt")
+    monkeypatch.setattr(process_module, "os", _os_with_name("nt"))
+    monkeypatch.setattr(subprocess_module, "os", _os_with_name("nt"))
 
     assert job.contains_pid(99)
     owner = process_module.OwnedProcess(_FakeProcess(), job=job)
     assert owner.job is job
-    assert SubProcessBackend._worker_belongs_to_owner(99, owner)
+    assert subprocess_module.SubProcessBackend._worker_belongs_to_owner(99, owner)
     assert api.closed_handles[-1] == (1 << 42) + 99
     api.member = False
     assert not job.contains_pid(99)

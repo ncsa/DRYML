@@ -19,6 +19,26 @@ from dryml.execute.subprocess import SubProcessBackend, SubProcessConfig
 from dryml.execute._protocol import BootstrapDescriptor, Correlation, FrameState, decode_control, encode_control
 
 
+def test_address_normalization_failure_does_not_chain_sdk_details(monkeypatch):
+    """New SDK normalization preserves the fixed diagnostic boundary."""
+    import sys
+    import traceback
+    from types import ModuleType
+
+    services = ModuleType("ray._private.services")
+
+    def fail(_address):
+        raise ValueError("token=synthetic-private-value")
+
+    services.canonicalize_bootstrap_address = fail
+    monkeypatch.setitem(sys.modules, "ray._private.services", services)
+    sdk = object.__new__(ray_module._RaySDK)
+    with pytest.raises(ExecutionError) as failure:
+        sdk.canonical_address("localhost:6379")
+    assert failure.value.__cause__ is None
+    assert "synthetic-private-value" not in "".join(traceback.format_exception(failure.value))
+
+
 class _FakeRemote:
     """Record options and descriptor-only native task submissions."""
 
@@ -65,6 +85,10 @@ class _FakeSDK:
     def connection_identity(self):
         """Provide the connected GCS identity without runtime-context creation."""
         return "127.0.0.1:6379", None, "cluster"
+
+    def canonical_address(self, address):
+        """Keep fake endpoints literal unless a test models Ray alias handling."""
+        return address
 
     def nodes(self):
         """Return the one local node required by the backend."""
@@ -156,6 +180,71 @@ def test_incompatible_borrowed_connection_is_never_disconnected(monkeypatch):
     with pytest.raises(ExecutionError, match="namespace"):
         RayBackendConfig(address="127.0.0.1:6379", namespace="execute").create_backend().start()
     assert _BorrowedSDK.disconnects == 0
+
+
+def test_borrowed_loopback_aliases_match_rays_canonical_gcs_address(monkeypatch):
+    """Accept only Ray-normalized loopback aliases for a borrowed driver."""
+    class BorrowedAliasSDK(_FakeSDK):
+        def initialized(self):
+            return True
+
+        def connection_identity(self):
+            return "10.1.0.248:6379", "caller", "cluster"
+
+        def canonical_address(self, address):
+            assert address in {"127.0.0.1:6379", "localhost:6379"}
+            return "10.1.0.248:6379"
+
+        def disconnect(self):
+            raise AssertionError("borrowed driver must not be disconnected")
+
+    _reset(monkeypatch)
+    monkeypatch.setattr(ray_module, "_SDK_FACTORY", BorrowedAliasSDK)
+    for address in ("127.0.0.1:6379", "localhost:6379"):
+        backend = RayBackendConfig(address=address, namespace="caller").create_backend()
+        backend.start()
+        assert backend._connection is not None
+        assert backend._connection.resolved_address == "10.1.0.248:6379"
+        backend.close(cancel=False, timeout=1)
+    assert BorrowedAliasSDK.connects == []
+    assert BorrowedAliasSDK.disconnects == 0
+
+
+@pytest.mark.parametrize(
+    ("address", "canonical"),
+    [
+        ("127.0.0.1:6380", "10.1.0.248:6380"),
+        ("192.168.2.31:6379", "192.168.2.31:6379"),
+        ("10.1.0.249:6379", "10.1.0.249:6379"),
+    ],
+    ids=("different-port", "nonlocal-endpoint", "different-cluster-endpoint"),
+)
+def test_borrowed_address_mismatch_rejects_before_creating_a_task(monkeypatch, address, canonical):
+    """Reject nonmatching port, nonlocal, and cluster endpoints before task setup."""
+    class BorrowedMismatchSDK(_FakeSDK):
+        remote_calls = 0
+
+        def initialized(self):
+            return True
+
+        def connection_identity(self):
+            return "10.1.0.248:6379", "caller", "active-cluster"
+
+        def canonical_address(self, requested):
+            assert requested == address
+            return canonical
+
+        def remote_bootstrap(self):
+            type(self).remote_calls += 1
+            raise AssertionError("address mismatch must reject before task setup")
+
+    _reset(monkeypatch)
+    monkeypatch.setattr(ray_module, "_SDK_FACTORY", BorrowedMismatchSDK)
+    with pytest.raises(ExecutionError, match="address is incompatible"):
+        RayBackendConfig(address=address, namespace="caller").create_backend().start()
+    assert BorrowedMismatchSDK.remote_calls == 0
+    assert BorrowedMismatchSDK.connects == []
+    assert BorrowedMismatchSDK.disconnects == 0
 
 
 def test_start_thread_failure_does_not_leave_a_stuck_generation(monkeypatch):

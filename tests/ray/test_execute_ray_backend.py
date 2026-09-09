@@ -26,6 +26,21 @@ def _ray_address() -> str:
     return require_ray_integration()
 
 
+def _loopback_ray_address() -> str:
+    """Reuse the supplied Ray port through its documented loopback alias."""
+    _, _, port = _ray_address().rpartition(":")
+    return f"127.0.0.1:{port}"
+
+
+def _borrowed_ray_addresses() -> tuple[str, ...]:
+    """Exercise both Ray's node endpoint and its loopback alias when distinct."""
+    from ray._private.services import canonicalize_bootstrap_address
+
+    node_address = canonicalize_bootstrap_address(_ray_address())
+    assert isinstance(node_address, str)
+    return tuple(dict.fromkeys((node_address, _loopback_ray_address())))
+
+
 def _emit(value: str) -> str:
     """Write both captured streams and return a closure-compatible value."""
     os.write(1, b"ray stdout\n")
@@ -143,8 +158,10 @@ def test_existing_ray_execution_deadline_requires_confirmed_termination(tmp_path
         executor.close(cancel=True, timeout=30)
 
 
-def test_existing_ray_admission_failure_cancels_its_queued_native_task(tmp_path: Path):
+@pytest.mark.parametrize("address_kind", ("node", "loopback"))
+def test_existing_ray_admission_failure_cancels_its_queued_native_task(tmp_path: Path, address_kind: str):
     """Cancel an exact queued bootstrap after its pre-GO admission deadline expires."""
+    address = _borrowed_ray_addresses()[0] if address_kind == "node" else _loopback_ray_address()
     script = textwrap.dedent(
         f"""
         from pathlib import Path
@@ -157,28 +174,30 @@ def test_existing_ray_admission_failure_cancels_its_queued_native_task(tmp_path:
         from dryml.execute.ray import RayBackendConfig
         from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
 
-        ray.init(address={_ray_address()!r}, namespace="dryml-queued-admission")
+        ray.init(address={address!r}, namespace="dryml-queued-admission")
 
         @ray.remote(num_cpus=4)
         def occupy() -> None:
             import time
             time.sleep(20)
 
-        blocker = occupy.remote()
-        deadline = monotonic() + 10
-        while ray.available_resources().get("CPU", 0) != 0:
-            if monotonic() >= deadline:
-                raise RuntimeError("external test task did not consume fixture CPUs")
-            sleep(0.05)
         world = WorldRequirement({{
             "main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(1, 1))),
         }})
         executor = Executor(RayBackendConfig(
-            address={_ray_address()!r}, namespace="dryml-queued-admission",
+            address={address!r}, namespace="dryml-queued-admission",
             spool_directory=Path({str(tmp_path)!r}), admission_timeout=0.5,
             connect_timeout=30, termination_timeout=10,
         ))
+        blocker = None
         try:
+            executor.start()
+            blocker = occupy.remote()
+            deadline = monotonic() + 10
+            while ray.available_resources().get("CPU", 0) != 0:
+                if monotonic() >= deadline:
+                    raise RuntimeError("external test task did not consume fixture CPUs")
+                sleep(0.05)
             future = executor.submit(lambda: "must-not-run", world=world)
             try:
                 future.result(timeout=15)
@@ -187,7 +206,8 @@ def test_existing_ray_admission_failure_cancels_its_queued_native_task(tmp_path:
             else:
                 raise AssertionError("queued task passed admission")
             reference = future.object_ref
-            assert reference is not None
+            error = future.exception(timeout=0)
+            assert reference is not None, f"queued task was not submitted: {{type(error).__name__}}: {{error}}"
             future.cleanup(timeout=15)
             try:
                 ray.get(reference, timeout=5)
@@ -197,11 +217,12 @@ def test_existing_ray_admission_failure_cancels_its_queued_native_task(tmp_path:
                 raise AssertionError("admission-failed task was left queued")
         finally:
             executor.close(cancel=True, timeout=20)
-            ray.cancel(blocker, force=True, recursive=False)
-            try:
-                ray.get(blocker, timeout=5)
-            except Exception:
-                pass
+            if blocker is not None:
+                ray.cancel(blocker, force=True, recursive=False)
+                try:
+                    ray.get(blocker, timeout=5)
+                except Exception:
+                    pass
             ray.shutdown()
         """
     )
@@ -400,10 +421,10 @@ def test_existing_borrowed_ray_driver_survives_close_and_namespace_conflict(tmp_
         def workload() -> str:
             return "borrowed-driver-result"
 
-        ray.init(address={_ray_address()!r}, namespace={namespace!r})
+        ray.init(address={_loopback_ray_address()!r}, namespace={namespace!r})
         try:
             executor = Executor(RayBackendConfig(
-                address={_ray_address()!r}, namespace={namespace!r},
+                address={_loopback_ray_address()!r}, namespace={namespace!r},
                 spool_directory=Path({str(tmp_path)!r}), admission_timeout=90,
                 connect_timeout=60,
             ))
@@ -413,7 +434,7 @@ def test_existing_borrowed_ray_driver_survives_close_and_namespace_conflict(tmp_
             executor.close(cancel=True, timeout=20)
             assert ray.is_initialized()
             conflicting = Executor(RayBackendConfig(
-                address={_ray_address()!r}, namespace="dryml-u6-conflict",
+                address={_loopback_ray_address()!r}, namespace="dryml-u6-conflict",
                 spool_directory=Path({str(tmp_path)!r}) / "conflict",
                 admission_timeout=90, connect_timeout=60,
             ))
