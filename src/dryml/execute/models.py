@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Generic, Literal, TypeVar
 
 from dryml.environments import CompatibilityReport, EnvironmentRecord, EnvironmentRequirement
 from dryml.environments.specs import EnvironmentSpec
@@ -16,6 +16,9 @@ from dryml.worlds import LocalResourceInventory, WorldAllocation, WorldCompatibi
 
 if TYPE_CHECKING:
     from dryml.execute.output import ExecutionOutput
+
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +87,7 @@ class OutputSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class SubmittedCall:
+class SubmittedCall(Generic[T]):
     """Hold accepted coordinator data without retaining the live callable graph."""
 
     submission_id: str
