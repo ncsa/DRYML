@@ -34,7 +34,9 @@ class DirStore(Store):
     ``local-state/<hh>/<graph-hash>/<codec>-<manifest-digest>/``.  All mutable
     references use a sibling temporary file and atomic replacement while the
     Store writer lock is held.  The old ``objects/`` generation layout is not a
-    recognized authority format.
+    recognized authority format.  Initial root creation and format-gate
+    publication use a derived sibling advisory lock, so simultaneous trusted
+    constructors never mistake a live temporary format file for old authority.
     """
 
     def __init__(
@@ -234,20 +236,43 @@ class DirStore(Store):
         """Return the only Store-wide authority format record path."""
         return os.path.join(self.base_dir, "store-format.record")
 
+    @property
+    def _bootstrap_lock_path(self) -> str:
+        """Return the derived sibling lock for this canonical Store root.
+
+        The durable lock file is named from the SHA-256 digest of the ``os.fsencode``
+        bytes of the normalized real root path and is never authority or removed
+        by a Store handle.
+        Keeping it outside the root lets bootstrap reject arbitrary nonempty
+        roots without first adding a Store-owned entry to them.
+        """
+        root = os.path.normcase(os.path.realpath(self.base_dir))
+        identity = hashlib.sha256(os.fsencode(root)).hexdigest()
+        return os.path.join(os.path.dirname(root), f".dryml-bootstrap-{identity}.lock")
+
     def _initialize_format(self) -> None:
         root = Path(self.base_dir)
         if root.exists() and not root.is_dir():
             raise StoreAuthorityError(f"DirStore root is not a directory: {self.base_dir!r}.")
-        if not root.exists():
-            root.mkdir(parents=True)
         if os.path.lexists(self.store_format_path):
             self._read_file(self.store_format_path, StoreFormatRecord)
             return
-        # A non-empty root without the current gate is retired/incompatible;
-        # do not create a new format marker over unknown authority.
-        if any(root.iterdir()):
-            raise StoreAuthorityError("Store lacks current store-format.record; old or mixed authority is unsupported.")
-        self._atomic_write(self.store_format_path, StoreFormatRecord().to_bytes())
+        # This lease covers root creation through final marker replacement.  It
+        # remains outside authority so an unmarked root can still be rejected
+        # without treating a Store-created lock as permission to overwrite it.
+        with interprocess_lock(self._bootstrap_lock_path):
+            if root.exists() and not root.is_dir():
+                raise StoreAuthorityError(f"DirStore root is not a directory: {self.base_dir!r}.")
+            if not root.exists():
+                root.mkdir(parents=True, exist_ok=True)
+            if os.path.lexists(self.store_format_path):
+                self._read_file(self.store_format_path, StoreFormatRecord)
+                return
+            # A non-empty root without the current gate is retired/incompatible;
+            # do not create a new format marker over unknown authority.
+            if any(root.iterdir()):
+                raise StoreAuthorityError("Store lacks current store-format.record; old or mixed authority is unsupported.")
+            self._atomic_write(self.store_format_path, StoreFormatRecord().to_bytes())
 
     def _read_file(self, path: str, record_type):
         try:
