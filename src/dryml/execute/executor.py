@@ -37,13 +37,14 @@ _ExecutorState = Literal["new", "starting", "open", "closing", "cleanup_incomple
 
 @dataclass(slots=True)
 class _Submission(Generic[T]):
-    """Keep the exact accepted spool ownership until its Future reconciles it."""
+    """Keep accepted backend and spool ownership until both cleanup phases finish."""
 
     future: ExecutionFuture[T]
     payload: Any
     reservation: SpoolReservation
     backend: Backend
     backend_seen: bool = False
+    backend_reconciled: bool = False
 
 
 class Executor:
@@ -703,8 +704,9 @@ class Executor:
             record = self._submissions.get(future)
         if record is None:
             return
-        if record.backend_seen:
+        if record.backend_seen and not record.backend_reconciled:
             record.backend.reconcile_cleanup(record.future.submission_id, timeout=timeout)
+            record.backend_reconciled = True
         assert self._spooler is not None
         self._spooler.dispose(record.payload, record.reservation)
         with self._condition:

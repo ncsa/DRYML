@@ -106,6 +106,39 @@ def test_subprocess_future_runs_descriptor_payload_and_retains_output(tmp_path: 
         executor.close(cancel=True, timeout=5)
 
 
+def test_subprocess_spool_retry_skips_retired_backend_cleanup(tmp_path: Path, monkeypatch):
+    """A failed spool removal retries without re-entering retired native cleanup."""
+    from dryml.execute._spooling import SpoolBudget
+    from dryml.execute.errors import CleanupError
+
+    executor = Executor(SubProcessConfig(spool_directory=tmp_path))
+    future = executor.submit(_add, 1, 2)
+    assert future.result(timeout=10) == 3
+    backend = executor._backend
+    assert backend is not None
+    payload = executor._submissions[future].payload
+    original_rmdir = Path.rmdir
+    failed = False
+
+    def fail_payload_rmdir_once(path: Path) -> None:
+        nonlocal failed
+        if path == payload.path.parent and not failed:
+            failed = True
+            raise OSError("busy")
+        original_rmdir(path)
+
+    monkeypatch.setattr(Path, "rmdir", fail_payload_rmdir_once)
+    with pytest.raises(CleanupError):
+        future.cleanup(timeout=5)
+    assert failed
+    assert future.submission_id not in backend._known
+    assert SpoolBudget.snapshot().reserved_bytes > 0
+
+    future.cleanup(timeout=5)
+    executor.close(timeout=5)
+    assert SpoolBudget.snapshot().reserved_bytes == 0
+
+
 def test_subprocess_supports_lambda_closure_and_remote_failure(tmp_path: Path):
     """Dill snapshots supported closures once and sanitizes remote failures."""
     offset = 4

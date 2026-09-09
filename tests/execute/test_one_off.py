@@ -9,6 +9,11 @@ from dryml.execute.errors import CleanupError
 from .test_executor import FakeBackend, config
 
 
+def _return_one() -> int:
+    """Return one through the real subprocess one-off regression path."""
+    return 1
+
+
 def test_one_off_future_cleanup_closes_its_hidden_owner(tmp_path):
     """One-off cleanup reconciles the one call and then its retained private executor."""
     from dryml.execute.executor import submit
@@ -19,6 +24,46 @@ def test_one_off_future_cleanup_closes_its_hidden_owner(tmp_path):
     future.cleanup(timeout=1)
     assert backend.cleaned == [future.submission_id]
     assert backend.closed
+
+
+def test_one_off_subprocess_spool_retry_closes_retained_owner(tmp_path, monkeypatch):
+    """One-off cleanup retries spool disposal after native cleanup retires its ID."""
+    from pathlib import Path
+
+    from dryml.execute._spooling import SpoolBudget
+    from dryml.execute.executor import _one_off_owners, submit
+    from dryml.execute.subprocess import SubProcessConfig
+
+    before = set(_one_off_owners)
+    original_rmdir = Path.rmdir
+    failed = Event()
+
+    def fail_payload_rmdir_once(path: Path) -> None:
+        if path.parent == tmp_path and path.name.startswith("dryml-execute-") and not failed.is_set():
+            failed.set()
+            raise OSError("busy")
+        original_rmdir(path)
+
+    monkeypatch.setattr(Path, "rmdir", fail_payload_rmdir_once)
+    future = submit(
+        _return_one,
+        backend=SubProcessConfig(
+            spool_directory=tmp_path,
+            one_off_cleanup_attempts=1,
+            one_off_cleanup_retry_interval=30,
+        ),
+    )
+    assert future.result(timeout=10) == 1
+    owner = next(iter(set(_one_off_owners) - before))
+    backend = owner.executor._backend
+    assert backend is not None
+    assert failed.wait(10)
+    assert future.submission_id not in backend._known
+    assert SpoolBudget.snapshot().reserved_bytes > 0
+
+    future.cleanup(timeout=5)
+    assert owner not in _one_off_owners
+    assert SpoolBudget.snapshot().reserved_bytes == 0
 
 
 def test_blocking_one_off_cleanup_error_preserves_future(tmp_path, monkeypatch):
