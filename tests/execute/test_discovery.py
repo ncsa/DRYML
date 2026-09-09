@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from time import monotonic
 from pathlib import Path
 
 from dryml.environments.specs import CondaEnvironmentSpec, CurrentEnvironmentSpec, PythonExecutableSpec
 from dryml.execute.config import BackendConfig
-from dryml.execute.discovery import discover_candidates, identity, probe_candidate
+from dryml.execute.discovery import CandidateInventory, discover_candidates, identity, probe_candidate
+from dryml.execute.models import ExecutionIssue, ResourceAmounts, ResourceSnapshot
+from dryml.execute.ray import RayBackendConfig
+from dryml.execute.subprocess import SubProcessConfig
 
 
 class Config(BackendConfig):
@@ -122,3 +126,77 @@ def test_probe_applies_spec_environment_and_rejects_truncated_owner_evidence(tmp
     )
     assert candidate.launchable is None
     assert candidate.issues[0].code == "probe_output_incomplete"
+
+
+def _complete_resources() -> ResourceSnapshot:
+    """Provide an inert complete resource observation for backend discovery tests."""
+    amounts = ResourceAmounts(1.0, 1, {}, {})
+    return ResourceSnapshot(datetime.now(), "coordinator-and-backend", None, amounts, ResourceAmounts(0.0, 0, {}, {}), amounts, (), True, ())
+
+
+def test_subprocess_discovery_propagates_bounded_inventory_issues(tmp_path: Path, monkeypatch):
+    """Public local discovery never reports a capped candidate inventory as complete."""
+    from dryml.execute import subprocess as subprocess_module
+
+    backend = SubProcessConfig(spool_directory=tmp_path, python_executable=Path(sys.executable), environment_candidates=(CurrentEnvironmentSpec(),)).create_backend()
+    monkeypatch.setattr(backend, "_resource_inventory", lambda _deadline: _complete_resources())
+    monkeypatch.setattr(
+        subprocess_module,
+        "discover_candidates",
+        lambda *_args, **_kwargs: CandidateInventory((), (ExecutionIssue("discovery_candidate_limit", "candidate cap"), ExecutionIssue("discovery_directory_limit", "directory cap")), False),
+    )
+    monkeypatch.setattr(subprocess_module, "probe_candidate", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("empty inventory must not probe")))
+
+    snapshot = backend.discover(timeout=1)
+
+    assert not snapshot.complete
+    assert {issue.code for issue in snapshot.issues} == {"discovery_candidate_limit", "discovery_directory_limit"}
+
+
+def test_ray_discovery_propagates_bounded_inventory_issues(tmp_path: Path, monkeypatch):
+    """Public Ray discovery carries candidate enumeration limits without reserving."""
+    from dryml.execute import ray as ray_module
+
+    backend = RayBackendConfig(address="127.0.0.1:6379", spool_directory=tmp_path, environment_candidates=(CurrentEnvironmentSpec(),)).create_backend()
+    monkeypatch.setattr(backend, "_resources_until", lambda _deadline: _complete_resources())
+    monkeypatch.setattr(
+        ray_module,
+        "discover_candidates",
+        lambda *_args, **_kwargs: CandidateInventory((), (ExecutionIssue("discovery_candidate_limit", "candidate cap"), ExecutionIssue("discovery_directory_limit", "directory cap")), False),
+    )
+    monkeypatch.setattr(ray_module, "probe_candidate", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("empty inventory must not probe")))
+
+    snapshot = backend.discover(timeout=1)
+
+    assert not snapshot.complete
+    assert {issue.code for issue in snapshot.issues} == {"discovery_candidate_limit", "discovery_directory_limit"}
+
+
+def test_resource_only_discovery_does_not_scan_environments(tmp_path: Path, monkeypatch):
+    """Resource-only discovery returns resource facts without candidate enumeration."""
+    from dryml.execute import subprocess as subprocess_module
+
+    backend = SubProcessConfig(spool_directory=tmp_path, python_executable=Path(sys.executable), automatic_environment_discovery=False).create_backend()
+    monkeypatch.setattr(backend, "_resource_inventory", lambda _deadline: _complete_resources())
+    monkeypatch.setattr(subprocess_module, "discover_candidates", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("resource-only discovery must not scan environments")))
+
+    snapshot = backend.discover(timeout=1)
+
+    assert snapshot.complete
+    assert snapshot.environments == ()
+    assert snapshot.resources.total.cpus == 1.0
+
+
+def test_ray_resource_only_discovery_does_not_scan_environments(tmp_path: Path, monkeypatch):
+    """Resource-only Ray discovery does not enumerate candidate environments."""
+    from dryml.execute import ray as ray_module
+
+    backend = RayBackendConfig(address="127.0.0.1:6379", spool_directory=tmp_path, automatic_environment_discovery=False).create_backend()
+    monkeypatch.setattr(backend, "_resources_until", lambda _deadline: _complete_resources())
+    monkeypatch.setattr(ray_module, "discover_candidates", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("resource-only discovery must not scan environments")))
+
+    snapshot = backend.discover(timeout=1)
+
+    assert snapshot.complete
+    assert snapshot.environments == ()
+    assert snapshot.resources.total.cpus == 1.0

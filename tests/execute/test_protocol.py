@@ -22,6 +22,7 @@ from dryml.execute._protocol import (
     encode_bootstrap_descriptor,
     encode_control,
     encode_frame,
+    encode_frame_parts,
     encode_owner_envelope,
 )
 
@@ -145,6 +146,25 @@ def test_known_outcome_allows_later_other_stream_final_but_not_duplicate_outcome
     conversation.accept(encode_control(FrameState.OUTPUT_FINAL, _correlation(), {"stream": "stderr", "next_sequence": 0}, header_limit=512))
     with pytest.raises(FrameError, match="terminal"):
         conversation.accept(encode_frame(FrameState.ERROR, FrameType.ERROR, _correlation(), b"duplicate", header_limit=512))
+
+
+def test_sender_frame_parts_preserve_wire_bytes_without_self_decoding():
+    """A near-limit payload can advance a conversation from its validated Frame."""
+    payload = b"x" * 128
+    frame, prefix, payload_view = encode_frame_parts(
+        FrameState.PAYLOAD, FrameType.PAYLOAD, _correlation(), payload,
+        header_limit=512,
+    )
+    assert prefix + payload_view == encode_frame(
+        FrameState.PAYLOAD, FrameType.PAYLOAD, _correlation(), payload,
+        header_limit=512,
+    )
+    assert payload_view.obj is payload
+
+    conversation = _conversation()
+    for state, control in ((FrameState.HELLO, {"worker": "w"}), (FrameState.PREPARE, {"controls": []}), (FrameState.READY, {"ready": True}), (FrameState.GO, {"permit": True})):
+        conversation.accept(encode_control(state, _correlation(), control, header_limit=512))
+    assert conversation.accept_frame(frame) is frame
 
 
 def test_output_streams_require_contiguous_sequences_and_closed_fences():

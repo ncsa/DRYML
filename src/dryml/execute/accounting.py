@@ -41,6 +41,7 @@ class ResourceAuthority:
         self._lock = RLock()
         self._changed = Condition(self._lock)
         self._reservations: dict[str, Reservation] = {}
+        self._revision = 0
 
     def reserve(
         self,
@@ -88,7 +89,7 @@ class ResourceAuthority:
                 return None
             reservation = Reservation(submission_id, generation, attempt, resources, executor_id=executor_id)
             self._reservations[submission_id] = reservation
-            self._changed.notify_all()
+            self._transition()
             return reservation
 
     def reserve_local(
@@ -163,7 +164,7 @@ class ResourceAuthority:
                 executor_id=executor_id, allocation=allocation,
             )
             self._reservations[submission_id] = reservation
-            self._changed.notify_all()
+            self._transition()
             return reservation
 
     def mark_submitted(self, submission_id: str, *, generation: str, attempt: str, backend_job_id: str | None = None) -> bool:
@@ -182,7 +183,7 @@ class ResourceAuthority:
             if current is None or current.submitted:
                 return False
             self._reservations[submission_id] = replace(current, submitted=True, backend_job_id=backend_job_id, state="reserved")
-            self._changed.notify_all()
+            self._transition()
             return True
 
     def confirm_grant(
@@ -224,7 +225,7 @@ class ResourceAuthority:
             if current.allocation is not None and (allocation is None or not _same_bindings(current.allocation, allocation)):
                 return False
             self._reservations[submission_id] = replace(current, submitted=True, worker_id=worker_id, backend_job_id=backend_job_id or current.backend_job_id, pid=pid, allocation=allocation, resources=resources, state="running")
-            self._changed.notify_all()
+            self._transition()
             return True
 
     def release(
@@ -255,25 +256,37 @@ class ResourceAuthority:
                 return False
             if never_submitted and not current.submitted:
                 del self._reservations[submission_id]
-                self._changed.notify_all()
+                self._transition()
                 return True
             # A locally owned group that stopped before READY has no confirmed
             # worker identity, but it is still qualified release evidence for its
             # own pre-launch reservation.  PID/cancellation alone remains invalid.
             if qualified_terminal and (current.worker_id == worker_id or current.worker_id is None):
                 del self._reservations[submission_id]
-                self._changed.notify_all()
+                self._transition()
                 return True
-            self._reservations[submission_id] = replace(current, state="unconfirmed")
-            self._changed.notify_all()
+            if current.state != "unconfirmed":
+                self._reservations[submission_id] = replace(current, state="unconfirmed")
+                self._transition()
             return False
 
-    def wait_for_change(self, timeout: float) -> None:
-        """Wait once for a reservation/release transition without polling I/O."""
+    def revision(self) -> int:
+        """Return the current reservation-transition revision without probing I/O."""
+        with self._lock:
+            return self._revision
+
+    def wait_for_change(self, revision: int, timeout: float) -> bool:
+        """Wait for a transition after ``revision`` and report whether one occurred.
+
+        Callers can use a short explicit polling timeout to notice cancellation or
+        admission expiry without repeating an external inventory observation.
+        """
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("revision must be a nonnegative integer")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout < 0:
             raise ValueError("timeout must be a nonnegative duration")
         with self._changed:
-            self._changed.wait(timeout)
+            return self._changed.wait_for(lambda: self._revision != revision, timeout)
 
     def has_unknown_charge(self) -> bool:
         """Return whether a live unbound charge prevents safe exact allocation."""
@@ -329,6 +342,11 @@ class ResourceAuthority:
         """Return a reservation only for its exact generation-qualified handles."""
         current = self._reservations.get(submission_id)
         return current if current is not None and current.generation == generation and current.attempt == attempt else None
+
+    def _transition(self) -> None:
+        """Publish one actual reservation-state transition to waiting admitters."""
+        self._revision += 1
+        self._changed.notify_all()
 
 
 class ResourceAuthorityRegistry:

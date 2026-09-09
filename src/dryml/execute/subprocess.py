@@ -45,7 +45,7 @@ from ._protocol import (
     encode_bootstrap_descriptor,
     encode_control,
     encode_owner_envelope,
-    encode_frame,
+    encode_frame_parts,
 )
 from .accounting import RESOURCE_AUTHORITIES, Reservation, ResourceAuthority
 from .admission import admit, plan_admission
@@ -211,10 +211,14 @@ class SubProcessBackend(Backend):
         candidates: list[EnvironmentCandidate] = []
         issues: list[ExecutionIssue] = []
         plans: list[FeasiblePlan] = []
+        inventory_complete = True
         # Discovery is the sole API that lists allowed environments without a
         # requirement; ordinary unconstrained submission must not scan them.
         if environment is not None or self._config.automatic_environment_discovery or self._config.environment_candidates or self._config.environment_search_roots:
-            for spec in discover_candidates(self._config, cwd=self._config.working_directory, interpreter=self._python(), deadline=deadline).specs:
+            discovered = discover_candidates(self._config, cwd=self._config.working_directory, interpreter=self._python(), deadline=deadline)
+            inventory_complete = discovered.complete
+            issues.extend(discovered.issues)
+            for spec in discovered.specs:
                 if time.monotonic() >= deadline:
                     issues.append(ExecutionIssue("discovery_timeout", "environment discovery exceeded its bounded deadline"))
                     break
@@ -230,7 +234,7 @@ class SubProcessBackend(Backend):
                 plans.append(FeasiblePlan(None, decision.world, decision.allocation, decision.report))
         if time.monotonic() >= deadline:
             issues.append(ExecutionIssue("discovery_timeout", "discovery exceeded its total deadline"))
-        return DiscoverySnapshot(datetime.now(timezone.utc), tuple(candidates), resources, tuple(plans), resources.complete and not issues, tuple(issues))
+        return DiscoverySnapshot(datetime.now(timezone.utc), tuple(candidates), resources, tuple(plans), resources.complete and inventory_complete and not issues, tuple(issues))
 
     def resources(self, *, timeout: float) -> ResourceSnapshot:
         """Observe current local inventory without launching or reserving a worker."""
@@ -296,12 +300,12 @@ class SubProcessBackend(Backend):
 
     def _run(self, call: SubmittedCall[T], future: SubProcessFuture[T]) -> None:
         """Perform one complete handshake, permit, invocation, and outcome receive."""
-        if not future._begin_admission():
-            return
         listener: socket.socket | None = None
         run: _Run | None = None
         reservation: Reservation | None = None
         try:
+            if not future._begin_admission():
+                return
             reservation = self._reserve(call, future)
             if reservation is None:
                 return
@@ -319,22 +323,23 @@ class SubProcessBackend(Backend):
             descriptor = BootstrapDescriptor(correlation, secrets.token_hex(32), "127.0.0.1", listener.getsockname()[1], self._config.control_header_limit_bytes, self._config.owner_envelope_limit_bytes, self._config.admission_message_limit_bytes, self._config.invocation_limit_bytes, self._config.result_limit_bytes, self._config.output_frame_limit_bytes, self._config.output_final_timeout)
             encoded_descriptor = base64.urlsafe_b64encode(encode_bootstrap_descriptor(descriptor)).decode("ascii")
             process = self._launch(executable, encoded_descriptor, candidate)
-            owner = OwnedProcess(process)
+            # Only a direct pre-GO bootstrap can use root exit proof. A wrapper
+            # such as conda run may already have created a separate worker.
+            owner = OwnedProcess(process, root_termination_sufficient=os.name == "nt" and len(executable) == 1)
+            run = _Run(future, owner, None, Lock(), terminal_event=Event(), reservation=reservation)
+            with self._lock:
+                self._runs[call.submission_id] = run
+            future._set_process(process)
             try:
                 if os.name == "nt":
                     owner.job = _WindowsJob.assign(process)
             except BaseException:
                 owner.reconcile(deadline=time.monotonic() + self._config.termination_timeout, poll_interval=self._config.process_poll_interval)
                 raise
-            run = _Run(future, owner, None, Lock(), terminal_event=Event(), reservation=reservation)
-            with self._lock:
-                self._runs[call.submission_id] = run
-                self._launching[call.submission_id].set()
             if not self._authority.mark_submitted(
                 call.submission_id, generation=reservation.generation, attempt=reservation.attempt,
             ):
                 raise ExecutionError("subprocess resource reservation was lost before launch")
-            future._set_process(process)
             future._set_cancel_requester(lambda: self._request_cancel(run))
             connection, hello, conversation = self._accept_worker(listener, descriptor, call.admission_deadline)
             connection.settimeout(max(0.001, call.admission_deadline - time.monotonic()))
@@ -372,7 +377,7 @@ class SubProcessBackend(Backend):
         if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
             raise AdmissionError("worker bootstrap reported an invalid PID")
         worker_id = hello_control["worker_id"]
-        if not isinstance(worker_id, str) or not worker_id.startswith("subprocess:") or len(worker_id) > 128 or not self._worker_belongs_to_owner(pid, run.owner.process):
+        if not isinstance(worker_id, str) or not worker_id.startswith("subprocess:") or len(worker_id) > 128 or not self._worker_belongs_to_owner(pid, run.owner):
             raise AdmissionError("worker bootstrap is not associated with its launcher")
         future._set_association(worker_id=worker_id, pid=pid, environment=candidate)
         run.worker_id = worker_id
@@ -446,11 +451,11 @@ class SubProcessBackend(Backend):
         payload = call.payload.path.read_bytes()
         if len(payload) != call.payload.size_bytes or hashlib.sha256(payload).hexdigest() != call.payload.sha256:
             raise ExecutionError("coordinator invocation spool changed before transfer")
-        message = encode_frame(FrameState.PAYLOAD, FrameType.PAYLOAD, descriptor.correlation, payload, header_limit=self._config.control_header_limit_bytes)
+        payload_frame, payload_prefix, payload_view = encode_frame_parts(FrameState.PAYLOAD, FrameType.PAYLOAD, descriptor.correlation, payload, header_limit=self._config.control_header_limit_bytes)
         with run.lock:
             run.payload_transfer_started = True
-        self._send(run.connection, message)
-        conversation.accept(message)
+        self._send(run.connection, (payload_prefix, payload_view))
+        conversation.accept_frame(payload_frame)
         # The admission socket bound cannot turn an explicitly unlimited workload
         # into an invented execution deadline.
         run.connection.settimeout(None)
@@ -586,6 +591,7 @@ class SubProcessBackend(Backend):
             plan = plan_admission(world=call.world, inventory=inventory, deadline=call.admission_deadline)
             if not plan.feasible:
                 raise AdmissionError("world requirement is unsupported or incompatible with local inventory", report=plan.report)
+            revision = self._authority.revision()
             reservation = self._authority.reserve_local(
                 call.submission_id, call.world, inventory, generation=generation, attempt=attempt,
                 executor_id=self._executor_id,
@@ -594,10 +600,17 @@ class SubProcessBackend(Backend):
                 return reservation
             if self._authority.has_unknown_charge():
                 raise AdmissionError("local resource availability is unknown because another charge is unbound")
-            remaining = call.admission_deadline - time.monotonic()
-            if remaining <= 0:
-                raise AdmissionError("admission deadline elapsed waiting for local resources")
-            self._authority.wait_for_change(min(remaining, self._config.process_poll_interval))
+            while True:
+                if future.done():
+                    return None
+                remaining = call.admission_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AdmissionError("admission deadline elapsed waiting for local resources")
+                if self._authority.wait_for_change(
+                    revision,
+                    min(remaining, self._config.process_poll_interval),
+                ):
+                    break
 
     def _command_interpreter(self, spec: Any) -> list[str]:
         """Resolve one selected existing runtime without rewriting Conda launch form."""
@@ -721,19 +734,23 @@ class SubProcessBackend(Backend):
             return True
 
     @staticmethod
-    def _worker_belongs_to_owner(worker_pid: int, launcher: subprocess.Popen[bytes]) -> bool:
+    def _worker_belongs_to_owner(worker_pid: int, owner: OwnedProcess) -> bool:
         """Verify a direct or wrapped worker remains in this launcher's owned group."""
         try:
             if os.name == "posix":
-                return os.getpgid(worker_pid) == os.getpgid(launcher.pid)
-            return worker_pid == launcher.pid
+                return os.getpgid(worker_pid) == os.getpgid(owner.process.pid)
+            return owner.job is not None and owner.job.contains_pid(worker_pid)
         except OSError:
             return False
 
     @staticmethod
-    def _send(connection: socket.socket, data: bytes) -> None:
+    def _send(connection: socket.socket, data: bytes | tuple[bytes, memoryview]) -> None:
         """Write one complete validated frame or propagate the transport failure."""
-        connection.sendall(data)
+        if isinstance(data, tuple):
+            connection.sendall(data[0])
+            connection.sendall(data[1])
+        else:
+            connection.sendall(data)
 
 
 def _owner_json(data: Mapping[str, Any], limit: int) -> bytes:

@@ -7,11 +7,15 @@ import subprocess
 import sys
 from concurrent.futures import CancelledError
 from pathlib import Path
+from threading import Event
 from time import monotonic, sleep
+from types import SimpleNamespace
 
 import pytest
 
 from dryml.execute import executor as executor_module
+from dryml.execute import subprocess as subprocess_module
+from dryml.execute.accounting import ResourceAuthority
 from dryml.execute.errors import ExecutionUncertainError
 from dryml.execute.executor import Executor
 from dryml.execute.output import ExecutionOutput
@@ -300,3 +304,74 @@ def test_subprocess_launch_thread_failure_leaves_only_executor_spool_cleanup(tmp
         future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=5)
+
+
+def test_cancel_before_subprocess_admission_settles_launch_cleanup(tmp_path: Path, monkeypatch):
+    """An accepted cancellation before backend admission remains executor-cleanable."""
+    executor = Executor(SubProcessConfig(spool_directory=tmp_path))
+    executor.start()
+    backend = executor._backend
+    assert backend is not None
+    entered = Event()
+    release = Event()
+    original_run = backend._run
+
+    def paused_run(call, future):
+        entered.set()
+        assert release.wait(timeout=2)
+        original_run(call, future)
+
+    monkeypatch.setattr(backend, "_run", paused_run)
+    try:
+        future = executor.submit(_add, 1, 2)
+        assert entered.wait(timeout=2)
+        assert future.cancel()
+        release.set()
+        future.cleanup(timeout=2)
+        executor.close(timeout=2)
+    finally:
+        release.set()
+        executor.close(cancel=True, timeout=2)
+
+
+@pytest.mark.parametrize("wrapped", (False, True))
+def test_windows_assignment_failure_retains_run_and_charge_until_retry(monkeypatch, tmp_path: Path, wrapped):
+    """Unconfirmed pre-GO Windows cleanup retains the launcher and reservation owner."""
+    backend = SubProcessConfig(spool_directory=tmp_path, python_executable=Path(sys.executable)).create_backend()
+    authority = ResourceAuthority()
+    backend._authority = authority
+    future = backend.create_future("windows-assignment-failure", ExecutionOutput())
+    reservation = authority.reserve(
+        future.submission_id, subprocess_module.ResourceAmounts(1.0, None, {}, {}),
+        generation="subprocess-v1", attempt="0", total=subprocess_module.ResourceAmounts(1.0, None, {}, {}),
+    )
+    assert reservation is not None
+    process = SimpleNamespace(pid=101, poll=lambda: None)
+    calls: list[object] = []
+
+    def reconcile(_owner, **_kwargs):
+        calls.append(_owner)
+        return len(calls) > 1
+
+    monkeypatch.setattr(subprocess_module.os, "name", "nt")
+    monkeypatch.setattr(backend, "_reserve", lambda *_args: reservation)
+    runtime = ["conda", "run", "python"] if wrapped else [sys.executable]
+    monkeypatch.setattr(backend, "_select_environment", lambda _call: (runtime, None))
+    monkeypatch.setattr(backend, "_launch", lambda *_args: process)
+    monkeypatch.setattr(subprocess_module._WindowsJob, "assign", lambda _process: (_ for _ in ()).throw(OSError("AssignProcessToJobObject failed")))
+    monkeypatch.setattr(subprocess_module.OwnedProcess, "reconcile", reconcile)
+    with backend._lock:
+        backend._known.add(future.submission_id)
+        backend._launching[future.submission_id] = Event()
+    call = SimpleNamespace(submission_id=future.submission_id, admission_deadline=monotonic() + 1)
+
+    backend._run(call, future)
+
+    assert future.done()
+    assert calls[0].root_termination_sufficient is (not wrapped)
+    assert future.process is process
+    assert future.submission_id in backend._runs
+    assert authority.snapshot(total=subprocess_module.ResourceAmounts(1.0, None, {}, {})).allocated.cpus == 1.0
+    backend.reconcile_cleanup(future.submission_id, timeout=1)
+    assert future.submission_id not in backend._runs
+    assert authority.snapshot(total=subprocess_module.ResourceAmounts(1.0, None, {}, {})).allocated.cpus == 0

@@ -10,6 +10,7 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import BinaryIO, Protocol, Sequence
 
 
@@ -29,6 +30,8 @@ class OwnedProcess:
         process: The launched root process that identifies the POSIX group or
             supplies the Windows process handle.
         job: The assigned Windows Job Object, if one was established.
+        root_termination_sufficient: Permit root-only confirmation solely for a
+            pre-GO bootstrap that never acquired a Windows Job.
 
     ``reconcile`` only acts on the group or Job established by ``run_bounded``.
     Escaped descendants are deliberately outside this owner and remain caller
@@ -37,6 +40,7 @@ class OwnedProcess:
 
     process: subprocess.Popen[bytes]
     job: "_WindowsJob | None" = None
+    root_termination_sufficient: bool = False
 
     def reconcile(self, *, deadline: float, poll_interval: float = 0.005) -> bool:
         """Attempt bounded termination and report whether the owned boundary stopped.
@@ -52,7 +56,7 @@ class OwnedProcess:
             Native permission, status, or termination failures return ``False`` so
             callers retain this owner for a later reconciliation pass.
         """
-        return _terminate_owned(self.process, deadline=deadline, poll_interval=poll_interval, job=self.job)
+        return _terminate_owned(self.process, deadline=deadline, poll_interval=poll_interval, job=self.job, root_termination_sufficient=self.root_termination_sufficient)
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,7 +318,7 @@ def _unregister_stream(streams: dict[str, BinaryIO], selector: selectors.BaseSel
     stream.close()
 
 
-def _terminate_owned(process: subprocess.Popen[bytes], *, deadline: float, poll_interval: float, job: "_WindowsJob | None") -> bool:
+def _terminate_owned(process: subprocess.Popen[bytes], *, deadline: float, poll_interval: float, job: "_WindowsJob | None", root_termination_sufficient: bool = False) -> bool:
     """Release an owned group/Job by a finite deadline and confirm its absence."""
     if os.name == "posix":
         try:
@@ -331,6 +335,17 @@ def _terminate_owned(process: subprocess.Popen[bytes], *, deadline: float, poll_
             process.poll()
             return not _group_exists(process.pid)
         except (OSError, PermissionError):
+            return False
+    if job is None and root_termination_sufficient:
+        # Before GO, Execute's bootstrap performs no workload or descendant work;
+        # a confirmed launcher exit therefore proves this narrow unassigned launch.
+        try:
+            if process.poll() is None:
+                process.kill()
+            while process.poll() is None and time.monotonic() < deadline:
+                time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+            return process.poll() is not None
+        except OSError:
             return False
     if job is None or not job.assigned:
         # A failed ownership handshake is never reported as root-only success.
@@ -437,6 +452,7 @@ class _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
     ]
 
 
+@lru_cache(maxsize=1)
 def _windows_kernel32() -> object:
     """Return kernel32 with typed Job and pipe-control entry points."""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -454,6 +470,10 @@ def _windows_kernel32() -> object:
     kernel32.QueryInformationJobObject.restype = ctypes.c_int
     kernel32.CloseHandle.argtypes = (handle,)
     kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.OpenProcess.argtypes = (dword, ctypes.c_int, dword)
+    kernel32.OpenProcess.restype = handle
+    kernel32.IsProcessInJob.argtypes = (handle, handle, ctypes.POINTER(ctypes.c_int))
+    kernel32.IsProcessInJob.restype = ctypes.c_int
     kernel32.PeekNamedPipe.argtypes = (handle, ctypes.c_void_p, dword, ctypes.c_void_p, ctypes.POINTER(dword), ctypes.c_void_p)
     kernel32.PeekNamedPipe.restype = ctypes.c_int
     return kernel32
@@ -522,6 +542,31 @@ class _WindowsJob:
         if returned.value and returned.value < ctypes.sizeof(info):
             raise OSError("QueryInformationJobObject returned incomplete accounting information")
         return int(info.ActiveProcesses)
+
+    def contains_pid(self, pid: int) -> bool:
+        """Return whether an extant process belongs to this exact owned Job.
+
+        Native query/open failures are deliberately reported as ``False`` so a
+        wrapped worker cannot pass admission without an exact Job membership proof.
+        """
+        if not self.assigned or isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            return False
+        process = None
+        try:
+            process = self._kernel32.OpenProcess(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not process:
+                return False
+            member = ctypes.c_int()
+            contained = bool(self._kernel32.IsProcessInJob(process, self._handle, ctypes.byref(member)) and member.value)
+            if not self._kernel32.CloseHandle(process):
+                return False
+            process = None
+            return contained
+        except (AttributeError, OSError, TypeError):
+            return False
+        finally:
+            if process:
+                self._kernel32.CloseHandle(process)
 
     def close(self) -> None:
         """Close a confirmed-empty Job Object or raise OSError on handle failure."""

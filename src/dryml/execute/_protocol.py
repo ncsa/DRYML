@@ -218,6 +218,31 @@ def encode_frame(
     Raises ``FrameError`` before writing a nonconforming frame.  The opaque
     payload bound belongs to the caller's typed channel, not this encoder.
     """
+    _, prefix, payload_view = encode_frame_parts(
+        state, frame_type, correlation, payload, header_limit=header_limit,
+        owner=owner, stream=stream, sequence=sequence,
+    )
+    return prefix + payload_view
+
+
+def encode_frame_parts(
+    state: FrameState,
+    frame_type: FrameType,
+    correlation: Correlation,
+    payload: bytes,
+    *,
+    header_limit: int,
+    owner: OwnerEnvelopeType | None = None,
+    stream: str | None = None,
+    sequence: int | None = None,
+) -> tuple[Frame, bytes, memoryview]:
+    """Validate one frame and return its identity plus zero-copy wire parts.
+
+    The prefix is the header-length, canonical header, and payload-length fields.
+    Callers may write it followed by the returned payload view and advance a
+    :class:`ProtocolConversation` with the returned frame without decoding their
+    own already-validated payload bytes.
+    """
     if not isinstance(state, FrameState) or not isinstance(frame_type, FrameType):
         raise FrameError("frame state or type is invalid")
     if not isinstance(correlation, Correlation) or not isinstance(payload, bytes):
@@ -260,7 +285,9 @@ def encode_frame(
         raise FrameError("frame header is not canonical") from exc
     if len(header) > header_limit:
         raise FrameError("frame header exceeds configured limit")
-    return len(header).to_bytes(_HEADER_LENGTH_BYTES, "big") + header + len(payload).to_bytes(_PAYLOAD_LENGTH_BYTES, "big") + payload
+    frame = Frame(state, frame_type, correlation, payload, owner, stream, sequence)
+    prefix = len(header).to_bytes(_HEADER_LENGTH_BYTES, "big") + header + len(payload).to_bytes(_PAYLOAD_LENGTH_BYTES, "big")
+    return frame, prefix, memoryview(payload)
 
 
 def _payload_limit_for(frame_type: FrameType, payload_limit: int | Mapping[FrameType, int]) -> int:
@@ -642,4 +669,4 @@ class ProtocolConversation:
             self._terminal = True
 
 
-__all__ = ["BootstrapDescriptor", "Correlation", "Frame", "FrameError", "FrameState", "FrameType", "OwnerEnvelopeType", "PROTOCOL_VERSION", "ProtocolConversation", "decode_bootstrap_descriptor", "decode_control", "decode_exact_frame", "decode_frame", "decode_owner_envelopes", "encode_bootstrap_descriptor", "encode_control", "encode_frame", "encode_owner_envelope"]
+__all__ = ["BootstrapDescriptor", "Correlation", "Frame", "FrameError", "FrameState", "FrameType", "OwnerEnvelopeType", "PROTOCOL_VERSION", "ProtocolConversation", "decode_bootstrap_descriptor", "decode_control", "decode_exact_frame", "decode_frame", "decode_owner_envelopes", "encode_bootstrap_descriptor", "encode_control", "encode_frame", "encode_frame_parts", "encode_owner_envelope"]

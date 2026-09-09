@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Barrier, Thread
+from time import monotonic, sleep
+from types import SimpleNamespace
 
 import pytest
 
 from dryml.environments import EnvironmentRequirement
 from dryml.environments.specs import CurrentEnvironmentSpec
 from dryml.execute.errors import AdmissionError
+from dryml.execute.accounting import ResourceAuthority
 from dryml.execute.executor import Executor
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.worlds import CountConstraint, LocalResourceInventory, ResourceRequirement, RoleRequirement, WorldRequirement
@@ -104,3 +108,88 @@ def test_injected_gpu_allocation_applies_exact_cuda_visibility(tmp_path: Path, m
         future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=5)
+
+
+def test_contended_local_admission_reprobes_only_after_authority_transition(tmp_path: Path, monkeypatch):
+    """Busy waiters poll cancellation/deadlines without repeatedly spawning probes."""
+    cpu = min(__import__("os").sched_getaffinity(0))
+    world = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(1, 1)))})
+    inventory = LocalResourceInventory((cpu,))
+    authority = ResourceAuthority()
+    holder = authority.reserve_local("holder", world, inventory, generation="subprocess-v1", attempt="0")
+    assert holder is not None
+    backends = [SubProcessConfig(spool_directory=tmp_path / str(index), admission_timeout=1).create_backend() for index in range(2)]
+    for backend in backends:
+        backend._authority = authority
+    barrier = Barrier(2)
+    probe_count = 0
+
+    def observe(_deadline):
+        nonlocal probe_count
+        probe_count += 1
+        if probe_count <= 2:
+            barrier.wait(timeout=1)
+        return inventory
+
+    for backend in backends:
+        monkeypatch.setattr(backend, "_observe_inventory", observe)
+    calls = [SimpleNamespace(submission_id=f"waiter-{index}", world=world, admission_deadline=monotonic() + 1) for index in range(2)]
+    futures = [backend.create_future(call.submission_id, None) for backend, call in zip(backends, calls)]
+    results: list[tuple[str, object]] = []
+    errors: list[BaseException] = []
+
+    def reserve(backend, call, future):
+        try:
+            results.append((call.submission_id, backend._reserve(call, future)))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [Thread(target=reserve, args=(backend, call, future)) for backend, call, future in zip(backends, calls, futures)]
+    for thread in threads:
+        thread.start()
+    deadline = monotonic() + 1
+    while probe_count < 2 and monotonic() < deadline:
+        sleep(0.005)
+    assert probe_count == 2
+    sleep(0.05)
+    assert probe_count == 2
+
+    revision = authority.revision()
+    assert not authority.release("holder", generation="subprocess-v1", attempt="0", worker_id=None)
+    assert authority.revision() == revision + 1
+    assert not authority.release("holder", generation="subprocess-v1", attempt="0", worker_id=None)
+    assert authority.revision() == revision + 1
+    assert authority.release("holder", generation="subprocess-v1", attempt="0", worker_id=None, qualified_terminal=True)
+    deadline = monotonic() + 1
+    while not results and monotonic() < deadline:
+        sleep(0.005)
+    assert len(results) == 1 and results[0][1]
+    assert authority.release(results[0][0], generation="subprocess-v1", attempt="0", worker_id=None, qualified_terminal=True)
+    for thread in threads:
+        thread.join(timeout=2)
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors
+    assert len(results) == 2 and all(reservation for _, reservation in results)
+    assert probe_count >= 3
+    for submission_id, _reservation in results[1:]:
+        assert authority.release(submission_id, generation="subprocess-v1", attempt="0", worker_id=None, qualified_terminal=True)
+
+    blocked = SubProcessConfig(spool_directory=tmp_path / "deadline", admission_timeout=0.05).create_backend()
+    blocked._authority = authority
+    deadline_probes = 0
+
+    def deadline_observe(_deadline):
+        nonlocal deadline_probes
+        deadline_probes += 1
+        return inventory
+
+    monkeypatch.setattr(blocked, "_observe_inventory", deadline_observe)
+    holder = authority.reserve_local("deadline-holder", world, inventory, generation="subprocess-v1", attempt="0")
+    assert holder is not None
+    with pytest.raises(AdmissionError, match="deadline"):
+        blocked._reserve(
+            SimpleNamespace(submission_id="deadline-waiter", world=world, admission_deadline=monotonic() + 0.05),
+            blocked.create_future("deadline-waiter", None),
+        )
+    assert deadline_probes == 1
+    assert authority.release("deadline-holder", generation="subprocess-v1", attempt="0", worker_id=None, qualified_terminal=True)

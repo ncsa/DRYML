@@ -6,6 +6,8 @@ import ctypes
 import os
 import signal
 import sys
+from types import SimpleNamespace
+from unittest.mock import Mock
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic, sleep
@@ -168,6 +170,7 @@ class _FakeWindowsApi:
         self.job_handle = 1 << 40
         self.assigned_handles: list[int] = []
         self.closed_handles: list[int] = []
+        self.member = True
 
     def CreateJobObjectW(self, _security, _name):
         return self.job_handle
@@ -190,6 +193,13 @@ class _FakeWindowsApi:
     def CloseHandle(self, handle):
         self.closed_handles.append(handle)
         return self.close_result
+
+    def OpenProcess(self, _access, _inherit, pid):
+        return (1 << 42) + pid
+
+    def IsProcessInJob(self, _process, _job, member):
+        ctypes.cast(member, ctypes.POINTER(ctypes.c_int)).contents.value = int(self.member)
+        return 1
 
 
 class _FakeProcess:
@@ -236,3 +246,38 @@ def test_windows_job_checks_termination_and_active_process_evidence(monkeypatch)
     active = _FakeWindowsApi(active=1)
     monkeypatch.setattr(process_module.os, "name", "nt")
     assert not process_module._terminate_owned(_FakeProcess(), deadline=monotonic(), poll_interval=0.001, job=process_module._WindowsJob(1 << 40, active))
+
+
+def test_windows_job_membership_accepts_wrapped_worker_with_large_handles(monkeypatch):
+    """A distinct wrapper child passes only through an exact Job membership proof."""
+    api = _FakeWindowsApi()
+    job = process_module._WindowsJob(1 << 40, api)
+    from dryml.execute.subprocess import SubProcessBackend
+
+    monkeypatch.setattr(process_module.os, "name", "nt")
+
+    assert job.contains_pid(99)
+    owner = process_module.OwnedProcess(_FakeProcess(), job=job)
+    assert owner.job is job
+    assert SubProcessBackend._worker_belongs_to_owner(99, owner)
+    assert api.closed_handles[-1] == (1 << 42) + 99
+    api.member = False
+    assert not job.contains_pid(99)
+
+
+def test_windows_kernel32_binding_is_cached_outside_pipe_polling(monkeypatch):
+    """Repeated Windows pipe checks reuse one typed kernel32 binding factory call."""
+    kernel32 = Mock()
+    kernel32.PeekNamedPipe.return_value = 0
+    factory = Mock(return_value=kernel32)
+    monkeypatch.setattr(process_module.ctypes, "WinDLL", factory, raising=False)
+    monkeypatch.setattr(process_module.ctypes, "get_last_error", lambda: 109, raising=False)
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(get_osfhandle=lambda _fd: 1 << 40))
+    process_module._windows_kernel32.cache_clear()
+    try:
+        stream = SimpleNamespace(fileno=lambda: 3)
+        for _ in range(8):
+            assert process_module._windows_pipe_available(stream)
+        assert factory.call_count == 1
+    finally:
+        process_module._windows_kernel32.cache_clear()

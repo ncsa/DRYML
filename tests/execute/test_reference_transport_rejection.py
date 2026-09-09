@@ -18,7 +18,7 @@ class Envelope:
 try:
     serialize_call(lambda value: value, (Envelope(CoreSemanticMarker()),), {}, limit_bytes=1_000_000)
 except TypeError as error:
-    assert "core semantic" in str(error)
+    assert str(error) == "live resource is unsupported by Execute transport"
 else:
     raise AssertionError("core semantic value was accepted")
 assert "dryml.core" not in sys.modules

@@ -39,7 +39,7 @@ from ._protocol import (
     decode_control,
     encode_bootstrap_descriptor,
     encode_control,
-    encode_frame,
+    encode_frame_parts,
     encode_owner_envelope,
 )
 from .accounting import RESOURCE_AUTHORITIES, Reservation, ResourceAuthority
@@ -618,8 +618,12 @@ class RayBackend(Backend):
         issues: list[ExecutionIssue] = []
         candidates: list[EnvironmentCandidate] = []
         plans: list[FeasiblePlan] = []
+        inventory_complete = True
         if environment is not None or self._config.automatic_environment_discovery or self._config.environment_candidates or self._config.environment_search_roots:
-            for spec in discover_candidates(self._config, cwd=self._config.working_directory, interpreter=Path(sys.executable), deadline=deadline).specs:
+            discovered = discover_candidates(self._config, cwd=self._config.working_directory, interpreter=Path(sys.executable), deadline=deadline)
+            inventory_complete = discovered.complete
+            issues.extend(discovered.issues)
+            for spec in discovered.specs:
                 if time.monotonic() >= deadline:
                     issues.append(ExecutionIssue("discovery_timeout", "Ray environment discovery exceeded its deadline"))
                     break
@@ -633,7 +637,7 @@ class RayBackend(Backend):
             decision = _logical_plan(None, world, None, resources.total, deadline)
             if decision.go and decision.world is not None:
                 plans.append(FeasiblePlan(None, decision.world, None, decision.report))
-        return DiscoverySnapshot(datetime.now(timezone.utc), tuple(candidates), resources, tuple(plans), resources.complete and not issues, tuple(issues))
+        return DiscoverySnapshot(datetime.now(timezone.utc), tuple(candidates), resources, tuple(plans), resources.complete and inventory_complete and not issues, tuple(issues))
 
     def resources(self, *, timeout: float) -> ResourceSnapshot:
         """Observe native Ray capacity and subtract only unrepresented reservations."""
@@ -907,9 +911,9 @@ class RayBackend(Backend):
         payload = call.payload.path.read_bytes()
         if len(payload) != call.payload.size_bytes or hashlib.sha256(payload).hexdigest() != call.payload.sha256:
             raise ExecutionError("coordinator invocation spool changed before Ray transfer")
-        message = encode_frame(FrameState.PAYLOAD, FrameType.PAYLOAD, descriptor.correlation, payload, header_limit=self._config.control_header_limit_bytes)
-        self._send(run.connection, message)
-        conversation.accept(message)
+        payload_frame, payload_prefix, payload_view = encode_frame_parts(FrameState.PAYLOAD, FrameType.PAYLOAD, descriptor.correlation, payload, header_limit=self._config.control_header_limit_bytes)
+        self._send(run.connection, (payload_prefix, payload_view))
+        conversation.accept_frame(payload_frame)
         run.connection.settimeout(None)
         self._receive_active(call, future, run, descriptor, conversation)
 
@@ -1202,13 +1206,14 @@ class RayBackend(Backend):
         if not _amounts_cover(total, requested):
             raise AdmissionError("Ray resource requirement is unsupported, unavailable, or incompatible")
         while True:
+            revision = self._authority.revision()
             reservation = self._authority.reserve(call.submission_id, requested, generation=self._generation(), attempt="0", total=total, executor_id=self._executor_id)
             if reservation is not None:
                 return reservation
             remaining = call.admission_deadline - time.monotonic()
             if remaining <= 0:
                 raise AdmissionError("admission deadline elapsed waiting for Ray resources")
-            self._authority.wait_for_change(min(remaining, 0.05))
+            self._authority.wait_for_change(revision, min(remaining, 0.05))
 
     def _descriptor(self, call: SubmittedCall[T], listener: socket.socket) -> BootstrapDescriptor:
         """Create the sole bounded native task argument using effective config limits."""
@@ -1234,9 +1239,13 @@ class RayBackend(Backend):
         return ProtocolConversation(descriptor.correlation, header_limit=descriptor.control_header_limit_bytes, invocation_limit=descriptor.invocation_limit_bytes, result_limit=descriptor.result_limit_bytes, output_limit=descriptor.output_frame_limit_bytes, owner_limit=descriptor.owner_envelope_limit_bytes, admission_limit=descriptor.admission_message_limit_bytes)
 
     @staticmethod
-    def _send(connection: socket.socket, data: bytes) -> None:
+    def _send(connection: socket.socket, data: bytes | tuple[bytes, memoryview]) -> None:
         """Write one validated common frame without logging private controls."""
-        connection.sendall(data)
+        if isinstance(data, tuple):
+            connection.sendall(data[0])
+            connection.sendall(data[1])
+        else:
+            connection.sendall(data)
 
     def _send_stop(self, run: _Run, descriptor: BootstrapDescriptor) -> None:
         """Best-effort rejection before payload transfer."""
