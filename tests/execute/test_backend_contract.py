@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dryml.execute.backend import Backend
 from dryml.execute.models import ResourceAmounts, SubmittedCall
+from dryml.execute.ray import RayBackendConfig
+from dryml.execute.subprocess import SubProcessConfig
 
 
 class FakeBackend(Backend):
@@ -52,3 +54,13 @@ def test_resource_value_mappings_are_defensively_frozen():
     accelerators["gpu"] = 2.0
 
     assert amounts.accelerators["gpu"] == 1.0
+
+
+def test_builtin_backend_capabilities_are_stable_and_truthful():
+    """Public selection features match each built-in backend's implemented scope."""
+    assert SubProcessConfig().create_backend().capabilities() == frozenset({
+        "environment_selection", "world_admission", "live_output", "running_cancellation",
+    })
+    assert RayBackendConfig().create_backend().capabilities() == frozenset({
+        "environment_selection", "world_admission", "live_output", "running_cancellation", "ray_existing_deployment",
+    })

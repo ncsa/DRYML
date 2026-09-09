@@ -5,15 +5,18 @@ from __future__ import annotations
 import socket
 from threading import Event, Thread
 from time import monotonic
+from types import SimpleNamespace
 
 import pytest
 
 from dryml.execute import ray as ray_module
-from dryml.execute.accounting import ResourceAuthority
-from dryml.execute.errors import BackendUnavailableError, CleanupError, ExecutionError
+from dryml.execute.accounting import Reservation, ResourceAuthority
+from dryml.execute.errors import BackendUnavailableError, CleanupError, ExecutionError, ExecutionUncertainError
 from dryml.execute.models import ResourceAmounts
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.ray import RayBackendConfig, RayFuture
+from dryml.execute.subprocess import SubProcessBackend, SubProcessConfig
+from dryml.execute._protocol import BootstrapDescriptor, Correlation, FrameState, decode_control, encode_control
 
 
 class _FakeRemote:
@@ -296,11 +299,12 @@ def test_native_failure_before_hello_wakes_only_its_listener_and_retains_its_ref
     listener.listen(1)
     run = ray_module._Run(future, None, reservation, listener=listener, reference=reference, native_submission_attempted=True)
     backend._runs[future.submission_id] = run
+    descriptor = backend._descriptor(SimpleNamespace(submission_id=future.submission_id), listener)
     accept_done = Event()
 
     def accept() -> None:
         try:
-            backend._accept_worker(listener, run, monotonic() + 10)
+            backend._accept_worker(listener, run, descriptor, monotonic() + 10)
         except ExecutionError:
             pass
         finally:
@@ -348,3 +352,538 @@ def test_ambiguous_native_observation_does_not_release_a_submitted_ray_charge(mo
     with pytest.raises(CleanupError, match="release remains unconfirmed"):
         backend.reconcile_cleanup(future.submission_id, timeout=0.5)
     assert authority.snapshot(total=ResourceAmounts(1.0, None, {}, {})).allocations[0].state == "unconfirmed"
+
+
+def test_native_diagnostics_discard_initialization_and_resource_exception_text(monkeypatch):
+    """SDK failures retain only their type, never credential or local-path values."""
+    class CredentialError(Exception):
+        pass
+
+    class InitializationSDK(_FakeSDK):
+        def connect(self, address, namespace):
+            raise CredentialError("token=dummy-secret path=/private/dryml/credentials")
+
+    _reset(monkeypatch)
+    monkeypatch.setattr(ray_module, "_SDK_FACTORY", InitializationSDK)
+    with pytest.raises(ExecutionError) as initialization:
+        RayBackendConfig(address="127.0.0.1:6379").create_backend().start()
+    assert "CredentialError" in str(initialization.value)
+    assert "dummy-secret" not in str(initialization.value)
+    assert "/private/dryml" not in str(initialization.value)
+
+    class ObservationSDK:
+        def cluster_resources(self):
+            raise CredentialError("uri=ray://user:dummy-secret@host/private/dryml")
+
+        def available_resources(self):
+            return {"CPU": 1.0}
+
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend._connection = ray_module._Connection("127.0.0.1:6379", None, 256, sdk=ObservationSDK(), leases=1)
+    backend._authority = ResourceAuthority()
+    with pytest.raises(BackendUnavailableError) as observation:
+        backend.resources(timeout=0.5)
+    assert "CredentialError" in str(observation.value)
+    assert "dummy-secret" not in str(observation.value)
+    assert "/private/dryml" not in str(observation.value)
+
+
+def test_owned_disconnect_failure_retains_the_final_lease_for_retry(monkeypatch):
+    """A failed owned disconnect remains the same backend's cleanup responsibility."""
+    class RetrySDK(_FakeSDK):
+        attempts = 0
+
+        def connect(self, address, namespace):
+            return None
+
+        def disconnect(self):
+            type(self).attempts += 1
+            if type(self).attempts == 1:
+                raise RuntimeError("token=dummy-secret")
+
+    _reset(monkeypatch)
+    monkeypatch.setattr(ray_module, "_SDK_FACTORY", RetrySDK)
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend.start()
+    connection = backend._connection
+    assert connection is not None
+
+    with pytest.raises(ExecutionError, match="disconnect failed"):
+        backend.close(cancel=False, timeout=1)
+    assert connection.leases == 1
+    assert ray_module._CONNECTIONS._current is connection
+
+    backend.close(cancel=False, timeout=1)
+    assert RetrySDK.attempts == 2
+    assert ray_module._CONNECTIONS._current is None
+
+
+def test_overlapping_owned_disconnects_never_touch_a_replacement_generation(monkeypatch):
+    """One disconnect owner serializes overlapping closes before a later acquire."""
+    class BlockingDisconnectSDK(_FakeSDK):
+        disconnect_entered = Event()
+        disconnect_release = Event()
+        attempts = 0
+
+        def connect(self, address, namespace):
+            return None
+
+        def disconnect(self):
+            type(self).attempts += 1
+            type(self).disconnect_entered.set()
+            assert type(self).disconnect_release.wait(1)
+
+    _reset(monkeypatch)
+    BlockingDisconnectSDK.disconnect_entered = Event()
+    BlockingDisconnectSDK.disconnect_release = Event()
+    monkeypatch.setattr(ray_module, "_SDK_FACTORY", BlockingDisconnectSDK)
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend.start()
+    old_connection = backend._connection
+    assert old_connection is not None
+    first = Thread(target=lambda: backend.close(cancel=False, timeout=1))
+    second = Thread(target=lambda: backend.close(cancel=False, timeout=1))
+    first.start()
+    assert BlockingDisconnectSDK.disconnect_entered.wait(1)
+    second.start()
+    BlockingDisconnectSDK.disconnect_release.set()
+    first.join(1)
+    second.join(1)
+    assert not first.is_alive() and not second.is_alive()
+    assert BlockingDisconnectSDK.attempts == 1
+
+    replacement = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    replacement.start()
+    assert replacement._connection is not old_connection
+    replacement.close(cancel=False, timeout=1)
+
+
+def test_late_initializer_disconnect_failure_is_retried_before_a_new_generation(monkeypatch):
+    """An unleased late initializer cannot be forgotten or race a replacement driver."""
+    class LateRetrySDK(_FakeSDK):
+        attempts = 0
+        disconnect_attempted = Event()
+
+        def connect(self, address, namespace):
+            type(self).connect_entered.set()
+            assert type(self).connect_release.wait(1)
+
+        def disconnect(self):
+            type(self).attempts += 1
+            type(self).disconnect_attempted.set()
+            if type(self).attempts == 1:
+                raise RuntimeError("token=dummy-secret")
+
+    _reset(monkeypatch)
+    LateRetrySDK.disconnect_attempted = Event()
+    monkeypatch.setattr(ray_module, "_SDK_FACTORY", LateRetrySDK)
+    timed_out = RayBackendConfig(address="127.0.0.1:6379", connect_timeout=0.01).create_backend()
+    with pytest.raises(TimeoutError):
+        timed_out.start()
+    assert LateRetrySDK.connect_entered.wait(1)
+    LateRetrySDK.connect_release.set()
+    assert LateRetrySDK.disconnect_attempted.wait(1)
+    retained = ray_module._CONNECTIONS._current
+    assert retained is not None and retained.closing
+
+    replacement = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    replacement.start()
+    assert LateRetrySDK.attempts == 2
+    assert replacement._connection is not retained
+    replacement.close(cancel=False, timeout=1)
+
+
+def test_failed_initializer_retains_a_disconnect_failure_for_recovery(monkeypatch):
+    """A failed post-connect initializer cannot discard its owned driver generation."""
+    class FailedInitializationSDK(_FakeSDK):
+        attempts = 0
+        connected = False
+
+        def connect(self, address, namespace):
+            type(self).connected = True
+            return None
+
+        def initialized(self):
+            return type(self).connected
+
+        def connection_identity(self):
+            if type(self).attempts == 0:
+                raise RuntimeError("token=dummy-secret")
+            return super().connection_identity()
+
+        def disconnect(self):
+            type(self).attempts += 1
+            if type(self).attempts == 1:
+                raise RuntimeError("token=dummy-secret")
+
+    _reset(monkeypatch)
+    monkeypatch.setattr(ray_module, "_SDK_FACTORY", FailedInitializationSDK)
+    with pytest.raises(ExecutionError, match="initialization failed"):
+        RayBackendConfig(address="127.0.0.1:6379").create_backend().start()
+    retained = ray_module._CONNECTIONS._current
+    assert retained is not None and retained.closing and retained.owned
+
+    replacement = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    replacement.start()
+    assert FailedInitializationSDK.attempts == 2
+    replacement.close(cancel=False, timeout=1)
+
+
+def test_last_borrowed_lease_drops_stale_driver_identity(monkeypatch):
+    """A caller restart is revalidated instead of reusing a cached borrowed driver."""
+    class BorrowedSDK(_FakeSDK):
+        namespace = "first"
+        cluster = "first-cluster"
+
+        def initialized(self):
+            return True
+
+        def connection_identity(self):
+            return "127.0.0.1:6379", type(self).namespace, type(self).cluster
+
+        def disconnect(self):
+            raise AssertionError("borrowed driver must not be disconnected")
+
+    _reset(monkeypatch)
+    monkeypatch.setattr(ray_module, "_SDK_FACTORY", BorrowedSDK)
+    first = RayBackendConfig(address="127.0.0.1:6379", namespace="first").create_backend()
+    first.start()
+    first.close(cancel=False, timeout=1)
+    assert ray_module._CONNECTIONS._current is None
+
+    BorrowedSDK.namespace = "second"
+    BorrowedSDK.cluster = "replacement-cluster"
+    second = RayBackendConfig(address="127.0.0.1:6379", namespace="second").create_backend()
+    second.start()
+    assert second._connection is not None
+    assert second._connection.cluster_id == "replacement-cluster"
+    second.close(cancel=False, timeout=1)
+
+
+def test_settled_pre_admission_cancellation_reconciles_without_a_native_run(monkeypatch):
+    """A cancelled accepted submission settles its launch marker before cleanup."""
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    future = RayFuture("cancel-before-admission", output=ExecutionOutput(), termination_timeout=1)
+    assert future.cancel()
+    backend._known.add(future.submission_id)
+    backend._launching[future.submission_id] = Event()
+
+    backend._run(SimpleNamespace(submission_id=future.submission_id), future)
+    backend.reconcile_cleanup(future.submission_id, timeout=0.5)
+    assert future.submission_id not in backend._known
+
+
+def test_environment_rejection_settles_known_cleanup_without_a_native_run(monkeypatch):
+    """A pre-native admission rejection leaves an accepted submission cleanable."""
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend._connection = ray_module._Connection("127.0.0.1:6379", None, 256, sdk=object())
+    future = RayFuture("rejected-before-native", output=ExecutionOutput(), termination_timeout=1)
+    backend._known.add(future.submission_id)
+    backend._launching[future.submission_id] = Event()
+
+    def reject(call):
+        raise ExecutionError("environment rejected")
+
+    monkeypatch.setattr(backend, "_select_environment", reject)
+    backend._run(SimpleNamespace(submission_id=future.submission_id), future)
+    with pytest.raises(ExecutionError, match="environment rejected"):
+        future.result(timeout=0)
+    backend.reconcile_cleanup(future.submission_id, timeout=0.5)
+    assert future.submission_id not in backend._known
+
+
+def test_cancel_startup_failures_roll_back_for_a_retry(monkeypatch):
+    """SDK and monitor-start failures do not claim cancellation before it starts."""
+    class CancelSDK:
+        fail_cancel = True
+        calls = 0
+
+        def cancel(self, reference):
+            type(self).calls += 1
+            if type(self).fail_cancel:
+                raise RuntimeError("cancel unavailable")
+
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend._connection = ray_module._Connection("127.0.0.1:6379", None, 256, sdk=CancelSDK())
+    future = RayFuture("retry-cancel", output=ExecutionOutput(), termination_timeout=1)
+    assert future._begin_admission()
+    assert future._authorize(deadline=monotonic() + 1)
+    run = ray_module._Run(future, None, Reservation("retry-cancel", "generation", "0", ResourceAmounts(1.0, None, {}, {})), reference=object())
+    future._set_cancel_requester(lambda: backend._request_cancel(run))
+
+    with pytest.raises(ExecutionError, match="cancellation request failed"):
+        future.request_cancel()
+    assert not run.cancelling and not run.cancellation_starting
+
+    CancelSDK.fail_cancel = False
+    original_thread = ray_module.Thread
+
+    class FailingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(ray_module, "Thread", FailingThread)
+    assert future.request_cancel()
+    assert run.cancelling and not run.cancellation_starting
+    with pytest.raises(ExecutionUncertainError, match="could not be confirmed"):
+        future.result(timeout=0)
+    assert CancelSDK.calls == 2
+    monkeypatch.setattr(ray_module, "Thread", original_thread)
+
+
+def test_deadline_cancellation_start_failure_is_uncertain_not_a_late_result():
+    """A deadline that cannot start exact cancellation publishes a retryable uncertainty."""
+    class FailingCancelSDK:
+        def cancel(self, reference):
+            raise RuntimeError("cancel unavailable")
+
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend._connection = ray_module._Connection("127.0.0.1:6379", None, 256, sdk=FailingCancelSDK())
+    future = RayFuture("deadline-cancel", output=ExecutionOutput(), termination_timeout=1)
+    assert future._begin_admission()
+    assert future._authorize(deadline=monotonic() + 1)
+    run = ray_module._Run(future, None, Reservation("deadline-cancel", "generation", "0", ResourceAmounts(1.0, None, {}, {})), reference=object())
+
+    backend._deadline_watch(run, monotonic())
+    with pytest.raises(ExecutionUncertainError, match="deadline cancellation could not start"):
+        future.result(timeout=0)
+    assert run.deadline_expired and not run.cancelling
+
+
+def test_ray_deadline_claim_order_is_stable_without_result_deserialization():
+    """Validated frames win before expiry, while expiry rejects later frames."""
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    first = RayFuture("result-first", output=ExecutionOutput(), termination_timeout=1)
+    first_run = ray_module._Run(first, None, Reservation("result-first", "generation", "0", ResourceAmounts(1.0, None, {}, {})), terminal_event=Event())
+    assert backend._claim_outcome(first_run)
+    backend._deadline_watch(first_run, monotonic())
+    assert first_run.outcome_claimed and first_run.terminal_event.is_set() and not first_run.deadline_expired
+
+    second = RayFuture("deadline-first", output=ExecutionOutput(), termination_timeout=1)
+    second_run = ray_module._Run(second, None, Reservation("deadline-first", "generation", "0", ResourceAmounts(1.0, None, {}, {})), terminal_event=Event())
+    backend._deadline_watch(second_run, monotonic())
+    assert second_run.deadline_expired
+    assert not backend._claim_outcome(second_run)
+
+
+def test_ray_deadline_monitor_wakes_when_a_terminal_event_is_signalled():
+    """A long deadline does not retain a completed call's watcher thread."""
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    future = RayFuture("wake-deadline", output=ExecutionOutput(), termination_timeout=1)
+    run = ray_module._Run(future, None, Reservation("wake-deadline", "generation", "0", ResourceAmounts(1.0, None, {}, {})), terminal_event=Event())
+    watcher = Thread(target=backend._deadline_watch, args=(run, monotonic() + 3600))
+    watcher.start()
+    run.terminal_event.set()
+    watcher.join(1)
+    assert not watcher.is_alive()
+
+
+def test_uncertain_native_submission_never_releases_its_reservation():
+    """A submission exception without an ObjectRef stays actionable, not cleanable."""
+    connection = ray_module._Connection("127.0.0.1:6379", None, 256, sdk=object())
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend._connection = connection
+    authority = ResourceAuthority()
+    backend._authority = authority
+    future = RayFuture("uncertain-native-submit", output=ExecutionOutput(), termination_timeout=1)
+    assert future._begin_admission()
+    future._publish_uncertain(ExecutionUncertainError("Ray native submission is uncertain; native task identity is unavailable"))
+    reservation = authority.reserve(future.submission_id, ResourceAmounts(1.0, None, {}, {}), generation=connection.generation, attempt="0", total=ResourceAmounts(1.0, None, {}, {}))
+    assert reservation is not None
+    run = ray_module._Run(future, None, reservation, native_submission_uncertain=True)
+    backend._runs[future.submission_id] = run
+
+    with pytest.raises(CleanupError, match="submission is uncertain"):
+        backend.reconcile_cleanup(future.submission_id, timeout=0.5)
+    assert authority.snapshot(total=ResourceAmounts(1.0, None, {}, {})).allocated.cpus == 1.0
+
+
+def test_pre_go_admission_failure_cancels_the_exact_terminal_future_reference():
+    """A terminal admission failure still cancels its concrete queued ObjectRef."""
+    class CancelSDK:
+        cancelled: list[object] = []
+
+        def cancel(self, reference):
+            type(self).cancelled.append(reference)
+
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend._connection = ray_module._Connection("127.0.0.1:6379", None, 256, sdk=CancelSDK())
+    future = RayFuture("terminal-admission-failure", output=ExecutionOutput(), termination_timeout=1)
+    assert future._begin_admission()
+    future._publish_exception(ExecutionError("admission failed"))
+    reference = object()
+    run = ray_module._Run(future, None, Reservation("terminal-admission-failure", "generation", "0", ResourceAmounts(1.0, None, {}, {})), reference=reference)
+    run.native_done.set()
+
+    assert backend._request_cancel(run, allow_terminal=True)
+    assert CancelSDK.cancelled == [reference]
+
+
+def test_native_submission_exception_is_redacted_and_retained_as_uncertain():
+    """A fake native submit failure cannot leak text or release an unknown task."""
+    class NativeSubmitCredentialError(Exception):
+        pass
+
+    class FailingRemote:
+        def options(self, **options):
+            return self
+
+        def remote(self, descriptor):
+            raise NativeSubmitCredentialError("token=dummy-secret path=/private/dryml")
+
+    class SDK:
+        def node_affinity(self, node_id, soft):
+            return (node_id, soft)
+
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    connection = ray_module._Connection("127.0.0.1:6379", None, 256, sdk=SDK(), node_id="node")
+    authority = ResourceAuthority()
+    backend._connection = connection
+    backend._authority = authority
+    backend._remote = FailingRemote()
+    future = RayFuture("native-submit-failure", output=ExecutionOutput(), termination_timeout=1)
+    reservation = authority.reserve(future.submission_id, ResourceAmounts(1.0, None, {}, {}), generation=connection.generation, attempt="0", total=ResourceAmounts(1.0, None, {}, {}))
+    assert reservation is not None
+    backend._reserve = lambda call: reservation
+    call = SimpleNamespace(submission_id=future.submission_id, admission_deadline=monotonic() + 1, world=None, environment=None)
+
+    backend._run(call, future)
+    with pytest.raises(ExecutionUncertainError) as failure:
+        future.result(timeout=0)
+    assert "dummy-secret" not in str(failure.value)
+    assert "/private/dryml" not in str(failure.value)
+    with pytest.raises(CleanupError, match="submission is uncertain"):
+        backend.reconcile_cleanup(future.submission_id, timeout=0.5)
+    assert authority.snapshot(total=ResourceAmounts(1.0, None, {}, {})).allocated.cpus == 1.0
+
+
+@pytest.mark.parametrize("backend_kind", ("ray", "subprocess"))
+def test_listener_skips_a_stale_hello_before_accepting_the_matching_worker(tmp_path, backend_kind):
+    """A wrong-generation connector cannot consume a later call's listener."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(2)
+    descriptor = BootstrapDescriptor(
+        Correlation("fresh-submission", 0, 1), "fresh-token", "127.0.0.1", listener.getsockname()[1],
+        1024, 1024, 4096, 4096, 4096, 1024, 1.0,
+    )
+    accepted: list[object] = []
+    if backend_kind == "ray":
+        backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+        future = RayFuture("fresh-submission", output=ExecutionOutput(), termination_timeout=1)
+        run = ray_module._Run(future, None, Reservation("fresh-submission", "generation", "0", ResourceAmounts(1.0, None, {}, {})))
+        waiter = Thread(target=lambda: accepted.extend(backend._accept_worker(listener, run, descriptor, monotonic() + 1)))
+    else:
+        backend = SubProcessBackend(SubProcessConfig(spool_directory=tmp_path))
+        waiter = Thread(target=lambda: accepted.extend(backend._accept_worker(listener, descriptor, monotonic() + 1)))
+    waiter.start()
+    stale = socket.create_connection(listener.getsockname())
+    stale.sendall(encode_control(FrameState.HELLO, Correlation("stale-submission", 0, 1), {"token": "stale-token"}, header_limit=1024))
+    stale.close()
+    hello_control = {
+        "dill": ray_module.dill.__version__, "implementation": ray_module.sys.implementation.name,
+        "pid": 123, "protocol": ray_module.WORKER_PROTOCOL_ID,
+        "python": list(ray_module.sys.version_info[:2]),
+        "token": descriptor.rendezvous_token, "worker_id": f"{backend_kind}:worker",
+    }
+    if backend_kind == "ray":
+        hello_control["native"] = {"node_id": "node", "worker_id": "worker"}
+    matching = socket.create_connection(listener.getsockname())
+    matching.sendall(encode_control(FrameState.HELLO, descriptor.correlation, hello_control, header_limit=1024))
+    waiter.join(1)
+    matching.close()
+    listener.close()
+    assert not waiter.is_alive()
+    assert accepted[0] is not None
+    assert decode_control(accepted[1], limit_bytes=1024, required_keys=set(hello_control)) == hello_control
+    accepted[0].close()
+
+
+def test_pre_go_correlated_terminal_receipt_qualifies_cleanup():
+    """A STOP-confirmed exact worker receipt can release an unissued task attempt."""
+    connection = ray_module._Connection("127.0.0.1:6379", None, 256, sdk=object())
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend._connection = connection
+    authority = ResourceAuthority()
+    backend._authority = authority
+    future = RayFuture("pre-go-receipt", output=ExecutionOutput(), termination_timeout=1)
+    assert future.cancel()
+    reservation = authority.reserve(
+        future.submission_id, ResourceAmounts(1.0, None, {}, {}), generation=connection.generation,
+        attempt="0", total=ResourceAmounts(1.0, None, {}, {}),
+    )
+    assert reservation is not None
+    assert authority.mark_submitted(future.submission_id, generation=connection.generation, attempt="0")
+    run = ray_module._Run(
+        future, None, reservation, reference=object(), native_submission_attempted=True,
+        worker_id="ray:worker", native_node_id="node", native_task_id="task",
+        native_receipt={"marker": ray_module._BOOTSTRAP_MARKER, "worker_id": "worker", "node_id": "node", "task_id": "task"},
+    )
+    ray_module.RayBackend._qualify_native_terminal(run)
+    assert run.native_terminal
+    run.native_done.set()
+    backend._runs[future.submission_id] = run
+
+    backend.reconcile_cleanup(future.submission_id, timeout=0.5)
+    assert authority.snapshot(total=ResourceAmounts(1.0, None, {}, {})).allocated.cpus == 0.0
+
+
+def test_pre_go_receipt_with_the_wrong_worker_remains_unconfirmed():
+    """A terminal receipt remains unusable unless it names the exact HELLO worker."""
+    connection = ray_module._Connection("127.0.0.1:6379", None, 256, sdk=object())
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend._connection = connection
+    authority = ResourceAuthority()
+    backend._authority = authority
+    future = RayFuture("wrong-pre-go-receipt", output=ExecutionOutput(), termination_timeout=1)
+    assert future.cancel()
+    reservation = authority.reserve(
+        future.submission_id, ResourceAmounts(1.0, None, {}, {}), generation=connection.generation,
+        attempt="0", total=ResourceAmounts(1.0, None, {}, {}),
+    )
+    assert reservation is not None
+    assert authority.mark_submitted(future.submission_id, generation=connection.generation, attempt="0")
+    run = ray_module._Run(
+        future, None, reservation, reference=object(), native_submission_attempted=True,
+        worker_id="ray:worker", native_node_id="node", native_task_id="task",
+        native_receipt={"marker": ray_module._BOOTSTRAP_MARKER, "worker_id": "other-worker", "node_id": "node", "task_id": "task"},
+    )
+    ray_module.RayBackend._qualify_native_terminal(run)
+    assert not run.native_terminal
+    run.native_done.set()
+    backend._runs[future.submission_id] = run
+
+    with pytest.raises(CleanupError, match="release remains unconfirmed"):
+        backend.reconcile_cleanup(future.submission_id, timeout=0.5)
+
+
+def test_pre_go_receipt_with_the_wrong_generation_remains_unconfirmed():
+    """A matching worker receipt cannot release a reservation from another generation."""
+    connection = ray_module._Connection("127.0.0.1:6379", None, 256, sdk=object())
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend._connection = connection
+    authority = ResourceAuthority()
+    backend._authority = authority
+    future = RayFuture("stale-pre-go-receipt", output=ExecutionOutput(), termination_timeout=1)
+    assert future.cancel()
+    reservation = authority.reserve(
+        future.submission_id, ResourceAmounts(1.0, None, {}, {}), generation="stale-generation",
+        attempt="0", total=ResourceAmounts(1.0, None, {}, {}),
+    )
+    assert reservation is not None
+    assert authority.mark_submitted(future.submission_id, generation="stale-generation", attempt="0")
+    run = ray_module._Run(
+        future, None, reservation, reference=object(), native_submission_attempted=True,
+        worker_id="ray:worker", native_node_id="node", native_task_id="task",
+        native_receipt={"marker": ray_module._BOOTSTRAP_MARKER, "worker_id": "worker", "node_id": "node", "task_id": "task"},
+    )
+    ray_module.RayBackend._qualify_native_terminal(run)
+    assert run.native_terminal
+    run.native_done.set()
+    backend._runs[future.submission_id] = run
+
+    with pytest.raises(CleanupError, match="release remains unconfirmed"):
+        backend.reconcile_cleanup(future.submission_id, timeout=0.5)

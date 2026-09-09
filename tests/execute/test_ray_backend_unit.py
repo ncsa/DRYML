@@ -9,7 +9,9 @@ import pytest
 
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.admission import _admit_observed_logical
-from dryml.execute.ray import RayBackendConfig, RayFuture, _logical_world, _native_options, _requested_amounts, _resource_amounts
+from dryml.execute.models import EnvironmentCandidate
+from dryml.execute.ray import RayBackendConfig, RayFuture, _logical_world, _native_error, _native_options, _requested_amounts, _resource_amounts
+from dryml.environments.specs import PythonExecutableSpec
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
 
 
@@ -39,6 +41,53 @@ def test_ray_native_options_omit_unconstrained_defaults():
     """An unconstrained task leaves scheduler defaults untouched."""
     assert _native_options(None) == {}
     assert _requested_amounts(None).cpus == 1.0
+
+
+def test_ray_native_options_request_a_valid_two_cpu_world():
+    """A two-CPU logical world maps to Ray's explicit scheduler request."""
+    world = WorldRequirement({
+        "main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(2, 2))),
+    })
+
+    assert _requested_amounts(world).cpus == 2.0
+    assert _native_options(world)["num_cpus"] == 2.0
+
+
+def test_ray_native_errors_never_include_native_exception_text():
+    """Native exception values cannot expose credentials or filesystem paths."""
+    class CredentialError(Exception):
+        pass
+
+    message = _native_error(
+        "Ray initialization failed",
+        CredentialError("token=dummy-secret path=/private/dryml/credentials uri=ray://user:pass@host"),
+        256,
+    )
+
+    assert message == "Ray initialization failed (CredentialError)"
+    assert len(message.encode("utf-8")) <= 256
+
+
+def test_ray_config_rejects_native_device_visibility_override():
+    """Ray scheduler-selected device visibility cannot be contradicted per task."""
+    with pytest.raises(ValueError, match="device visibility"):
+        RayBackendConfig(env_vars={"CUDA_VISIBLE_DEVICES": "0"})
+
+
+def test_ray_runtime_environment_merges_candidate_then_explicit_overrides():
+    """Selected runtime variables survive while explicit config wins collisions."""
+    candidate = EnvironmentCandidate(
+        "candidate", PythonExecutableSpec("/existing/python", env={"FROM_CANDIDATE": "candidate", "OVERRIDE": "candidate"}),
+        None, None, True, (),
+    )
+    backend = RayBackendConfig(env_vars={"OVERRIDE": "config", "FROM_CONFIG": "config"}).create_backend()
+
+    runtime = backend._runtime_environment({"py_executable": "/existing/python"}, candidate)
+
+    assert runtime == {
+        "py_executable": "/existing/python",
+        "env_vars": {"FROM_CANDIDATE": "candidate", "OVERRIDE": "config", "FROM_CONFIG": "config"},
+    }
 
 
 def test_ray_resource_observation_preserves_unknown_dimensions():

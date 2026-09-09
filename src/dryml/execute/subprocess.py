@@ -59,6 +59,7 @@ from .output import ExecutionOutput
 
 
 T = TypeVar("T")
+_HELLO_FIELDS = {"dill", "implementation", "pid", "protocol", "python", "token", "worker_id"}
 @dataclass(frozen=True, kw_only=True)
 class SubProcessConfig(BackendConfig):
     """Describe one inert local subprocess backend.
@@ -335,10 +336,10 @@ class SubProcessBackend(Backend):
                 raise ExecutionError("subprocess resource reservation was lost before launch")
             future._set_process(process)
             future._set_cancel_requester(lambda: self._request_cancel(run))
-            connection, _ = listener.accept()
+            connection, hello, conversation = self._accept_worker(listener, descriptor, call.admission_deadline)
             connection.settimeout(max(0.001, call.admission_deadline - time.monotonic()))
             run.connection = connection
-            self._handshake(call, future, run, descriptor, candidate)
+            self._handshake(call, future, run, descriptor, candidate, hello, conversation)
         except BaseException as exc:
             if run is None and reservation is not None:
                 self._authority.release(
@@ -358,14 +359,11 @@ class SubProcessBackend(Backend):
             if listener is not None:
                 listener.close()
 
-    def _handshake(self, call: SubmittedCall[T], future: SubProcessFuture[T], run: _Run, descriptor: BootstrapDescriptor, candidate: EnvironmentCandidate | None) -> None:
+    def _handshake(self, call: SubmittedCall[T], future: SubProcessFuture[T], run: _Run, descriptor: BootstrapDescriptor, candidate: EnvironmentCandidate | None, hello: Any, conversation: ProtocolConversation) -> None:
         """Authorize a ready worker before transmitting the immutable payload bytes."""
         assert run.connection is not None
-        conversation = self._conversation(descriptor)
         reader = SocketFrameReader(run.connection, header_limit=descriptor.control_header_limit_bytes, payload_limit=self._limits())
-        frame = reader.read()
-        conversation.accept_frame(frame)
-        hello_control = decode_control(frame, limit_bytes=self._config.control_header_limit_bytes, required_keys={"dill", "implementation", "pid", "protocol", "python", "token", "worker_id"})
+        hello_control = decode_control(hello, limit_bytes=self._config.control_header_limit_bytes, required_keys=_HELLO_FIELDS)
         if hello_control["token"] != descriptor.rendezvous_token or hello_control["protocol"] != WORKER_PROTOCOL_ID or hello_control["dill"] != dill.__version__:
             raise AdmissionError("worker bootstrap identity is incompatible")
         if hello_control["implementation"] != sys.implementation.name or hello_control["python"] != list(sys.version_info[:2]):
@@ -457,6 +455,34 @@ class SubProcessBackend(Backend):
         # into an invented execution deadline.
         run.connection.settimeout(None)
         self._receive_active(call, future, run, descriptor, conversation)
+
+    def _accept_worker(self, listener: socket.socket, descriptor: BootstrapDescriptor, deadline: float) -> tuple[socket.socket, Any, ProtocolConversation]:
+        """Return only a correlation/token-validated HELLO before accepting a worker.
+
+        Mismatched stale loopback connectors are closed and cannot consume the
+        listener's one admission attempt or receive owner/payload bytes.
+        """
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("worker handshake exceeded admission deadline")
+            listener.settimeout(min(remaining, self._config.process_poll_interval))
+            try:
+                connection, _ = listener.accept()
+            except socket.timeout:
+                continue
+            try:
+                # Once accepted, the HELLO may legitimately span more than one
+                # poll tick; its read remains bounded by admission instead.
+                connection.settimeout(max(0.001, remaining))
+                hello = SocketFrameReader(connection, header_limit=descriptor.control_header_limit_bytes, payload_limit=self._limits()).read()
+                conversation = self._conversation(descriptor)
+                conversation.accept_frame(hello)
+                if decode_control(hello, limit_bytes=self._config.control_header_limit_bytes, required_keys=_HELLO_FIELDS)["token"] != descriptor.rendezvous_token:
+                    raise FrameError("worker rendezvous token does not match")
+                return connection, hello, conversation
+            except (OSError, EOFError, FrameError, ValueError):
+                connection.close()
 
     def _receive_active(self, call: SubmittedCall[T], future: SubProcessFuture[T], run: _Run, descriptor: BootstrapDescriptor, conversation: ProtocolConversation) -> None:
         """Route ordered output and publish only a validated one-shot worker outcome."""

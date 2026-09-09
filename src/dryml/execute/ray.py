@@ -57,6 +57,7 @@ from dryml.worlds import ProcessSpec, ResourceSpec, RoleSpec, WorldSpec
 T = TypeVar("T")
 _RAY_VERSION = "2.56.0"
 _BOOTSTRAP_MARKER = "dryml.execute.ray.bootstrap.v1"
+_HELLO_FIELDS = {"dill", "implementation", "native", "pid", "protocol", "python", "token", "worker_id"}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -101,6 +102,8 @@ class RayBackendConfig(BackendConfig):
         if self.namespace is not None and (not isinstance(self.namespace, str) or not self.namespace):
             raise TypeError("namespace must be non-empty text or None")
         _positive_duration("connect_timeout", self.connect_timeout)
+        if {"CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "XLA_VISIBLE_DEVICES"} & self.env_vars.keys():
+            raise ValueError("Ray env_vars cannot override native device visibility")
 
     def create_backend(self) -> "RayBackend":
         """Create an inert backend without importing or initializing Ray."""
@@ -199,6 +202,7 @@ class _Connection:
     leases: int = 0
     waiters: int = 0
     closing: bool = False
+    disconnecting: bool = False
     observations: dict[str, "_Observation"] = field(default_factory=dict)
 
 
@@ -220,40 +224,53 @@ class _ConnectionRegistry:
 
     def acquire(self, config: RayBackendConfig, deadline: float) -> _Connection:
         """Join one compatible initializer and acquire a lease before returning it."""
-        with self._condition:
-            current = self._current
-            if current is None:
-                current = _Connection(config.address, config.namespace, config.diagnostic_text_limit_bytes)
-                self._current = current
-                try:
-                    Thread(target=self._initialize, args=(current,), name="dryml-execute-ray-connect", daemon=True).start()
-                except BaseException as exc:
-                    current.error = ExecutionError(_native_error("Ray initialization could not start", exc, current.diagnostic_limit))
-                    current.event.set()
-                    self._current = None
-                    self._condition.notify_all()
-            elif not self._compatible(current, config):
-                raise ExecutionError("Ray connection conflicts with the active address or namespace")
-            current.waiters += 1
-            try:
-                while not current.event.is_set():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError("Ray connection initialization exceeded timeout")
-                    self._condition.wait(remaining)
-                if current.error is not None:
-                    if self._current is current:
+        while True:
+            disconnect: _RaySDK | None = None
+            with self._condition:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Ray connection initialization exceeded timeout")
+                current = self._current
+                if current is not None and current.closing:
+                    if current.address != config.address or current.namespace != config.namespace or current.sdk is None:
+                        raise ExecutionError("Ray connection conflicts with the active address or namespace")
+                    disconnect = current.sdk
+                elif current is None:
+                    current = _Connection(config.address, config.namespace, config.diagnostic_text_limit_bytes)
+                    self._current = current
+                    try:
+                        Thread(target=self._initialize, args=(current,), name="dryml-execute-ray-connect", daemon=True).start()
+                    except BaseException as exc:
+                        current.error = ExecutionError(_native_error("Ray initialization could not start", exc, current.diagnostic_limit))
+                        current.event.set()
                         self._current = None
-                    raise current.error
-                if current.closing:
-                    raise ExecutionError("Ray connection is closing")
-                current.leases += 1
-                return current
-            finally:
-                current.waiters -= 1
-                self._condition.notify_all()
+                        self._condition.notify_all()
+                elif not self._compatible(current, config):
+                    raise ExecutionError("Ray connection conflicts with the active address or namespace")
+                if disconnect is None:
+                    current.waiters += 1
+                    try:
+                        while not current.event.is_set():
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise TimeoutError("Ray connection initialization exceeded timeout")
+                            self._condition.wait(remaining)
+                        if current.error is not None:
+                            if self._current is current and not current.closing:
+                                self._current = None
+                            raise current.error
+                        if current.closing:
+                            continue
+                        current.leases += 1
+                        return current
+                    finally:
+                        current.waiters -= 1
+                        self._condition.notify_all()
+            # A failed owned disconnect keeps this generation current.  A new
+            # initializer may begin only after retrying that exact connection.
+            assert current is not None and disconnect is not None
+            self._disconnect_pending(current, disconnect, deadline)
 
-    def release(self, connection: _Connection) -> None:
+    def release(self, connection: _Connection, *, deadline: float | None = None) -> None:
         """Release one executor lease and disconnect only an owned idle generation."""
         sdk: _RaySDK | None = None
         with self._condition:
@@ -261,25 +278,61 @@ class _ConnectionRegistry:
                 return
             if connection.observations:
                 raise CleanupError("Ray resource observation remains in flight")
-            connection.leases -= 1
-            if connection.leases == 0 and connection.owned and connection.event.is_set() and connection.error is None:
+            if connection.leases > 1:
+                connection.leases -= 1
+            elif not connection.owned:
+                connection.leases = 0
+                if self._current is connection:
+                    # Caller-owned drivers can restart outside Execute.  Retain
+                    # no identity cache after their final borrower departs.
+                    self._current = None
+            elif connection.event.is_set() and connection.error is None:
                 connection.closing = True
                 sdk = connection.sdk
+            else:
+                connection.leases -= 1
             self._condition.notify_all()
         if sdk is not None:
+            self._disconnect_pending(connection, sdk, deadline)
+
+    def _disconnect_pending(self, connection: _Connection, sdk: _RaySDK, deadline: float | None) -> None:
+        """Serialize a retained generation's disconnect without touching a replacement.
+
+        A concurrent releaser joins the exact in-flight disconnect rather than
+        calling the SDK again.  A failed attempt remains owned by this generation
+        and a later compatible caller may retry it before a new driver starts.
+        """
+        with self._condition:
+            while connection.disconnecting:
+                if deadline is None:
+                    raise CleanupError("Ray driver disconnect remains in flight")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CleanupError("Ray driver disconnect remains in flight")
+                self._condition.wait(remaining)
+            if self._current is not connection:
+                return
+            connection.disconnecting = True
+        try:
             # Ray shutdown disconnects this owned driver, not the existing server.
-            try:
-                sdk.disconnect()
-            finally:
-                with self._condition:
-                    if self._current is connection:
-                        self._current = None
-                    self._condition.notify_all()
+            sdk.disconnect()
+        except BaseException as exc:
+            with self._condition:
+                connection.disconnecting = False
+                self._condition.notify_all()
+            raise ExecutionError(_native_error("Ray disconnect failed", exc, connection.diagnostic_limit)) from None
+        with self._condition:
+            connection.disconnecting = False
+            connection.leases = 0
+            if self._current is connection:
+                self._current = None
+            self._condition.notify_all()
 
     def _initialize(self, connection: _Connection) -> None:
         """Perform exactly one SDK operation, retaining late completion ownership."""
         sdk: _RaySDK | None = None
         owned = False
+        disconnect_failed = False
         try:
             sdk = _SDK_FACTORY()
             borrowed = sdk.initialized()
@@ -303,14 +356,20 @@ class _ConnectionRegistry:
                 try:
                     sdk.disconnect()
                 except BaseException:
-                    pass
+                    disconnect_failed = True
             with self._condition:
+                if disconnect_failed:
+                    # A setup failure after connecting still owns this driver;
+                    # retain it until a later compatible acquisition disconnects it.
+                    connection.sdk = sdk
+                    connection.owned = True
+                    connection.closing = True
                 connection.error = exc if isinstance(exc, ExecutionError) else ExecutionError(_native_error("Ray initialization failed", exc, connection.diagnostic_limit))
         finally:
             disconnect: _RaySDK | None = None
             with self._condition:
                 connection.event.set()
-                if connection.error is not None and self._current is connection:
+                if connection.error is not None and self._current is connection and not connection.closing:
                     self._current = None
                 if connection.error is None and connection.owned and connection.leases == 0 and connection.waiters == 0:
                     # Every waiter detached before this owned init completed. Do
@@ -320,12 +379,11 @@ class _ConnectionRegistry:
                 self._condition.notify_all()
             if disconnect is not None:
                 try:
-                    disconnect.disconnect()
-                finally:
-                    with self._condition:
-                        if self._current is connection:
-                            self._current = None
-                        self._condition.notify_all()
+                    self._disconnect_pending(connection, disconnect, None)
+                except ExecutionError:
+                    # With no eligible executor lease, the next compatible
+                    # acquisition retries this retained generation's disconnect.
+                    pass
 
     def resources(self, connection: _Connection, deadline: float) -> tuple[Mapping[str, float], Mapping[str, float]]:
         """Join one live capacity refresh or start a fresh bounded caller observation."""
@@ -448,6 +506,7 @@ class _Run:
     listener: socket.socket | None = None
     reference: Any | None = None
     native_submission_attempted: bool = False
+    native_submission_uncertain: bool = False
     worker_id: str | None = None
     worker_pid: int | None = None
     worker_create_time: float | None = None
@@ -461,8 +520,11 @@ class _Run:
     termination_qualified: bool = False
     native_receipt: Mapping[str, object] | None = None
     native_done: Event = field(default_factory=Event)
+    cancellation_starting: bool = False
     cancelling: bool = False
+    outcome_claimed: bool = False
     deadline_expired: bool = False
+    terminal_event: Event | None = None
     lock: Lock = field(default_factory=Lock)
 
 
@@ -482,7 +544,9 @@ class RayBackend(Backend):
         self._connection: _Connection | None = None
         self._remote: Any | None = None
         self._runs: dict[str, _Run] = {}
+        self._pre_run_reservations: dict[str, Reservation] = {}
         self._known: set[str] = set()
+        self._launching: dict[str, Event] = {}
         self._lock = RLock()
         self._closed = False
         self._executor_id = secrets.token_hex(16)
@@ -520,7 +584,7 @@ class RayBackend(Backend):
 
     def capabilities(self) -> frozenset[str]:
         """Report the controls supported by the same-host pinned implementation."""
-        return frozenset({"environment_selection", "live_output", "running_cancellation", "ray_existing_deployment"})
+        return frozenset({"environment_selection", "world_admission", "live_output", "running_cancellation", "ray_existing_deployment"})
 
     def create_future(self, submission_id: str, output: ExecutionOutput) -> RayFuture[Any]:
         """Create the exact inert concrete Future before workload acceptance."""
@@ -536,11 +600,13 @@ class RayBackend(Backend):
             if call.submission_id in self._known:
                 raise ExecutionError("duplicate Ray submission ID")
             self._known.add(call.submission_id)
+            self._launching[call.submission_id] = Event()
         try:
             Thread(target=self._run, args=(call, future), name="dryml-execute-ray", daemon=False).start()
         except BaseException:
             with self._lock:
                 self._known.discard(call.submission_id)
+                self._launching.pop(call.submission_id, None)
             raise
 
     def discover(self, *, environment: EnvironmentRequirement | None = None, world: Any = None, timeout: float) -> DiscoverySnapshot:
@@ -590,17 +656,45 @@ class RayBackend(Backend):
         """Release only a terminal attempt with matching worker and native evidence."""
         with self._lock:
             run = self._runs.get(submission_id)
-        if run is None:
+            known = submission_id in self._known
+            launching = self._launching.get(submission_id)
+        if run is None and not known:
             raise ExecutionError("unknown Ray submission")
+        if run is None:
+            if launching is None or not launching.wait(timeout):
+                raise CleanupError("Ray launch ownership is still unresolved")
+            with self._lock:
+                run = self._runs.get(submission_id)
+                known = submission_id in self._known
+            if run is None:
+                if known:
+                    with self._lock:
+                        reservation = self._pre_run_reservations.get(submission_id)
+                    if reservation is not None:
+                        assert self._authority is not None
+                        if not self._authority.release(
+                            submission_id, generation=reservation.generation, attempt=reservation.attempt,
+                            worker_id=None, never_submitted=True,
+                        ):
+                            raise CleanupError("Ray pre-submission release remains unconfirmed")
+                    with self._lock:
+                        self._known.discard(submission_id)
+                        self._launching.pop(submission_id, None)
+                        self._pre_run_reservations.pop(submission_id, None)
+                return
         if not run.future.done():
             raise RuntimeError("cleanup requires a terminal Ray execution")
         deadline = time.monotonic() + timeout
+        with run.lock:
+            if run.native_submission_uncertain:
+                raise CleanupError("Ray native submission is uncertain; native task identity is unavailable", execution=run.future)
         if run.native_submission_attempted and not run.native_done.wait(max(0.0, deadline - time.monotonic())):
             raise CleanupError("Ray task terminal evidence remains unavailable", execution=run.future)
         with run.lock:
             qualified = run.worker_id is not None and (
                 run.outcome_validated and run.native_terminal
                 or run.termination_qualified
+                or run.native_terminal and not run.issued
             ) or run.terminal_before_hello and not run.issued
         assert self._authority is not None
         if not run.native_submission_attempted:
@@ -618,9 +712,13 @@ class RayBackend(Backend):
             run.listener = None
         run.future._clear_native()
         run.future._set_association(worker_id=None, pid=None)
+        if run.terminal_event is not None:
+            run.terminal_event.set()
         with self._lock:
             self._runs.pop(submission_id, None)
             self._known.discard(submission_id)
+            self._launching.pop(submission_id, None)
+            self._pre_run_reservations.pop(submission_id, None)
 
     def close(self, *, cancel: bool, timeout: float | None) -> None:
         """Cancel/reconcile only owned tasks, then release this executor's SDK lease."""
@@ -631,8 +729,8 @@ class RayBackend(Backend):
         deadline = time.monotonic() + (self._config.termination_timeout if timeout is None else timeout)
         unresolved: list[_Run] = []
         for run in runs:
-            if cancel and not run.future.done():
-                self._request_cancel(run)
+            if cancel and run.reference is not None:
+                self._request_cancel(run, allow_terminal=True)
             if run.future.done():
                 self.reconcile_cleanup(run.future.submission_id, timeout=max(0.001, deadline - time.monotonic()))
             else:
@@ -640,7 +738,7 @@ class RayBackend(Backend):
         if unresolved:
             raise CleanupError("Ray backend retains unresolved owned tasks", execution=unresolved[0].future)
         if connection is not None:
-            _CONNECTIONS.release(connection)
+            _CONNECTIONS.release(connection, deadline=deadline)
             with self._lock:
                 self._connection = None
 
@@ -654,6 +752,8 @@ class RayBackend(Backend):
             connection = self._require_connection()
             candidate, runtime_env = self._select_environment(call)
             reservation = self._reserve(call)
+            with self._lock:
+                self._pre_run_reservations[call.submission_id] = reservation
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", 0))
@@ -663,17 +763,28 @@ class RayBackend(Backend):
             encoded = encode_bootstrap_descriptor(descriptor)
             options = {"scheduling_strategy": connection.sdk.node_affinity(connection.node_id, soft=False)}
             options.update(_native_options(call.world))
-            if runtime_env is not None:
-                options["runtime_env"] = runtime_env
+            effective_runtime_env = self._runtime_environment(runtime_env, candidate)
+            if effective_runtime_env:
+                options["runtime_env"] = effective_runtime_env
             run = _Run(future, None, reservation, listener=listener)
             with self._lock:
                 self._runs[call.submission_id] = run
+                self._pre_run_reservations.pop(call.submission_id, None)
             future._set_cancel_requester(lambda: self._request_cancel(run))
             if future.done():
                 return
-            run.native_submission_attempted = True
-            reference = self._remote.options(**options).remote(encoded)
+            try:
+                reference = self._remote.options(**options).remote(encoded)
+            except BaseException:
+                # Ray does not promise that a raised submission call was never
+                # accepted. There is no ObjectRef to monitor or cancel, so retain
+                # the charge as an explicitly recoverable uncertainty.
+                with run.lock:
+                    run.native_submission_uncertain = True
+                run.native_done.set()
+                raise
             run.reference = reference
+            run.native_submission_attempted = True
             future._set_native(reference, connection.resolved_address or self._config.address, connection.node_id or "")
             future._set_association(backend_job_id=_reference_id(reference))
             # Observe this exact ObjectRef as soon as it exists: bootstrap failure
@@ -681,24 +792,43 @@ class RayBackend(Backend):
             Thread(target=self._watch_native, args=(run,), name="dryml-execute-ray-terminal", daemon=True).start()
             if not self._authority.mark_submitted(call.submission_id, generation=self._generation(), attempt="0", backend_job_id=_reference_id(reference)):
                 raise ExecutionError("Ray resource reservation was lost before native submission")
-            worker_connection = self._accept_worker(listener, run, call.admission_deadline)
+            worker_connection, hello, conversation = self._accept_worker(listener, run, descriptor, call.admission_deadline)
             worker_connection.settimeout(max(0.001, call.admission_deadline - time.monotonic()))
             run.connection = worker_connection
-            self._handshake(call, future, run, descriptor, candidate, connection)
+            self._handshake(call, future, run, descriptor, candidate, connection, hello, conversation)
         except BaseException as exc:
             if run is None:
                 try:
                     reservation = locals().get("reservation")
                     if reservation is not None and self._authority is not None:
-                        self._authority.release(call.submission_id, generation=self._generation(), attempt="0", worker_id=None, never_submitted=True)
+                        released = self._authority.release(call.submission_id, generation=reservation.generation, attempt=reservation.attempt, worker_id=None, never_submitted=True)
+                        if released:
+                            with self._lock:
+                                self._pre_run_reservations.pop(call.submission_id, None)
+                except BaseException:
+                    pass
+            if run is not None and run.reference is not None and not run.issued:
+                try:
+                    # Admission failures after a concrete native submission must
+                    # retire that exact queued task even after the common Future
+                    # has received its admission outcome.
+                    self._request_cancel(run, allow_terminal=True)
                 except BaseException:
                     pass
             if not future.done():
                 if run is not None and run.issued:
                     future._publish_uncertain(ExecutionUncertainError("Ray execution failed after payload transfer began"))
+                elif run is not None and run.native_submission_uncertain:
+                    future._publish_uncertain(ExecutionUncertainError("Ray native submission is uncertain; native task identity is unavailable"))
                 else:
                     future._publish_exception(exc if isinstance(exc, ExecutionError) else ExecutionError("Ray execution failed"))
+                if run is not None and run.terminal_event is not None:
+                    run.terminal_event.set()
         finally:
+            with self._lock:
+                launching = self._launching.get(call.submission_id)
+                if launching is not None:
+                    launching.set()
             if listener is not None:
                 listener.close()
             if run is not None:
@@ -706,14 +836,11 @@ class RayBackend(Backend):
                     if run.listener is listener:
                         run.listener = None
 
-    def _handshake(self, call: SubmittedCall[T], future: RayFuture[T], run: _Run, descriptor: BootstrapDescriptor, candidate: EnvironmentCandidate | None, connection: _Connection) -> None:
+    def _handshake(self, call: SubmittedCall[T], future: RayFuture[T], run: _Run, descriptor: BootstrapDescriptor, candidate: EnvironmentCandidate | None, connection: _Connection, hello: Any, conversation: ProtocolConversation) -> None:
         """Validate native node/worker locality before owner controls or payload egress."""
         assert run.connection is not None
-        conversation = self._conversation(descriptor)
         reader = SocketFrameReader(run.connection, header_limit=descriptor.control_header_limit_bytes, payload_limit=self._limits())
-        hello = reader.read()
-        conversation.accept_frame(hello)
-        control = decode_control(hello, limit_bytes=self._config.control_header_limit_bytes, required_keys={"dill", "implementation", "native", "pid", "protocol", "python", "token", "worker_id"})
+        control = decode_control(hello, limit_bytes=self._config.control_header_limit_bytes, required_keys=_HELLO_FIELDS)
         if control["token"] != descriptor.rendezvous_token or control["protocol"] != WORKER_PROTOCOL_ID or control["dill"] != dill.__version__ or control["implementation"] != sys.implementation.name or control["python"] != list(sys.version_info[:2]):
             raise AdmissionError("Ray worker runtime is incompatible")
         native = control["native"]
@@ -772,7 +899,9 @@ class RayBackend(Backend):
         go = encode_control(FrameState.GO, descriptor.correlation, {"deadline": execution_deadline, "permit": descriptor.rendezvous_token}, header_limit=self._config.control_header_limit_bytes)
         self._send(run.connection, go)
         conversation.accept(go)
-        run.issued = True
+        with run.lock:
+            run.issued = True
+            run.terminal_event = run.terminal_event or Event()
         if execution_deadline is not None:
             Thread(target=self._deadline_watch, args=(run, execution_deadline), name="dryml-execute-ray-deadline", daemon=True).start()
         payload = call.payload.path.read_bytes()
@@ -798,6 +927,8 @@ class RayBackend(Backend):
                     return
                 if not future.done():
                     future._publish_uncertain(ExecutionUncertainError("Ray worker disconnected before a validated outcome"))
+                    if run.terminal_event is not None:
+                        run.terminal_event.set()
                 return
             if frame.state is FrameState.OUTPUT:
                 assert frame.stream is not None and frame.sequence is not None
@@ -806,7 +937,7 @@ class RayBackend(Backend):
                 data = _json(frame.payload, self._config.control_header_limit_bytes)
                 call.output._finalize(data["stream"], data["next_sequence"])
             elif frame.state is FrameState.RESULT:
-                if outcome_seen:
+                if outcome_seen or not self._claim_outcome(run):
                     return
                 outcome_seen = True
                 try:
@@ -815,7 +946,7 @@ class RayBackend(Backend):
                     future._publish_exception(ExecutionError("Ray worker result could not be decoded"))
                 run.outcome_validated = True
             elif frame.state is FrameState.ERROR:
-                if outcome_seen:
+                if outcome_seen or not self._claim_outcome(run):
                     return
                 outcome_seen = True
                 data = _json(frame.payload, self._config.result_limit_bytes)
@@ -838,7 +969,7 @@ class RayBackend(Backend):
                     if task_cancelled:
                         with run.lock:
                             run.native_cancelled = True
-                            cancelling = run.cancelling
+                            cancelling = run.cancelling or run.cancellation_starting
                             before_hello = run.worker_id is None and not run.issued
                             if before_hello and terminal_task:
                                 run.terminal_before_hello = True
@@ -867,6 +998,8 @@ class RayBackend(Backend):
                 else:
                     run.future._publish_running_cancellation()
         finally:
+            if run.future.done() and run.terminal_event is not None:
+                run.terminal_event.set()
             run.native_done.set()
 
     @staticmethod
@@ -880,8 +1013,8 @@ class RayBackend(Backend):
             except OSError:
                 pass
 
-    def _accept_worker(self, listener: socket.socket, run: _Run, deadline: float) -> socket.socket:
-        """Await one HELLO connection while honoring this run's terminal signal."""
+    def _accept_worker(self, listener: socket.socket, run: _Run, descriptor: BootstrapDescriptor, deadline: float) -> tuple[socket.socket, Any, ProtocolConversation]:
+        """Return only a correlation/token-validated HELLO before payload transfer."""
         while True:
             with run.lock:
                 if run.terminal_before_hello:
@@ -892,7 +1025,20 @@ class RayBackend(Backend):
             listener.settimeout(min(remaining, self._config.process_poll_interval))
             try:
                 connection, _ = listener.accept()
-                return connection
+                try:
+                    # Poll listener acceptance frequently so native terminal
+                    # evidence wakes promptly, but permit a complete bounded
+                    # HELLO to use the remaining admission budget.
+                    connection.settimeout(max(0.001, remaining))
+                    hello = SocketFrameReader(connection, header_limit=descriptor.control_header_limit_bytes, payload_limit=self._limits()).read()
+                    conversation = self._conversation(descriptor)
+                    conversation.accept_frame(hello)
+                    if decode_control(hello, limit_bytes=self._config.control_header_limit_bytes, required_keys=_HELLO_FIELDS)["token"] != descriptor.rendezvous_token:
+                        raise FrameError("Ray worker rendezvous token does not match")
+                    return connection, hello, conversation
+                except (OSError, EOFError, FrameError, ValueError):
+                    connection.close()
+                    continue
             except socket.timeout:
                 continue
             except OSError as exc:
@@ -917,23 +1063,45 @@ class RayBackend(Backend):
                 and receipt.get("task_id") == run.native_task_id
             )
 
-    def _request_cancel(self, run: _Run) -> bool:
+    def _request_cancel(self, run: _Run, *, allow_terminal: bool = False) -> bool:
         """Request cancellation for exactly this task without claiming release early."""
-        if run.reference is None or run.future.done():
+        if run.reference is None or run.future.done() and not allow_terminal:
             return False
         with run.lock:
             if run.cancelling:
                 return True
+            if run.cancellation_starting:
+                return False
+            run.cancellation_starting = True
+        try:
+            self._require_connection().sdk.cancel(run.reference)
+        except BaseException:
+            with run.lock:
+                run.cancellation_starting = False
+            raise
+        try:
+            Thread(target=self._cancel_monitor, args=(run,), name="dryml-execute-ray-cancel", daemon=True).start()
+        except BaseException:
+            with run.lock:
+                # The SDK may have synchronously caused native terminal evidence
+                # before thread startup failed. Keep one synchronous monitor owner
+                # rather than reporting a cancellation that nobody can confirm.
+                run.cancellation_starting = False
+                run.cancelling = True
+            self._cancel_monitor(run)
+            return True
+        with run.lock:
+            run.cancellation_starting = False
             run.cancelling = True
-        self._require_connection().sdk.cancel(run.reference)
-        Thread(target=self._cancel_monitor, args=(run,), name="dryml-execute-ray-cancel", daemon=True).start()
         return True
 
     def _cancel_monitor(self, run: _Run) -> None:
         """Publish cancellation only after the exact native task reaches a known stop."""
-        if not run.native_done.wait(self._config.termination_timeout) or run.future.done():
+        if not run.native_done.wait(self._config.termination_timeout):
             if not run.future.done():
                 run.future._publish_uncertain(ExecutionUncertainError("Ray task cancellation could not be confirmed"))
+                if run.terminal_event is not None:
+                    run.terminal_event.set()
             return
         with run.lock:
             confirmed = run.native_terminal
@@ -949,9 +1117,13 @@ class RayBackend(Backend):
         if confirmed:
             with run.lock:
                 run.termination_qualified = True
+                if run.terminal_event is not None:
+                    run.terminal_event.set()
         if not confirmed or run.future.done():
             if not run.future.done():
                 run.future._publish_uncertain(ExecutionUncertainError("Ray task termination evidence is inconclusive"))
+                if run.terminal_event is not None:
+                    run.terminal_event.set()
         elif deadline_expired:
             run.future._expire(ExecutionDeadlineExceeded("execution deadline exceeded"))
         else:
@@ -959,13 +1131,32 @@ class RayBackend(Backend):
 
     def _deadline_watch(self, run: _Run, deadline: float) -> None:
         """Request exact-task cancellation after a workload deadline without replay."""
-        delay = max(0.0, deadline - time.monotonic())
-        time.sleep(delay)
-        if run.future.done():
+        event = run.terminal_event
+        if event is not None and event.wait(max(0.0, deadline - time.monotonic())):
             return
         with run.lock:
+            if run.outcome_claimed or run.future.done():
+                return
             run.deadline_expired = True
-        self._request_cancel(run)
+        try:
+            accepted = self._request_cancel(run)
+        except BaseException:
+            accepted = False
+        if not accepted and not run.future.done():
+            run.future._publish_uncertain(ExecutionUncertainError("Ray execution deadline cancellation could not start"))
+            if run.terminal_event is not None:
+                run.terminal_event.set()
+
+    @staticmethod
+    def _claim_outcome(run: _Run) -> bool:
+        """Linearize a validated frame against deadline cancellation without decoding under lock."""
+        with run.lock:
+            if run.deadline_expired or run.outcome_claimed or run.cancelling or run.cancellation_starting:
+                return False
+            run.outcome_claimed = True
+            if run.terminal_event is not None:
+                run.terminal_event.set()
+            return True
 
     def _select_environment(self, call: SubmittedCall[T]) -> tuple[EnvironmentCandidate | None, Mapping[str, str] | None]:
         """Select only pre-existing Conda or experimental venv runtime forms."""
@@ -985,6 +1176,22 @@ class RayBackend(Backend):
             if isinstance(spec, CurrentEnvironmentSpec):
                 return candidate, None
         raise AdmissionError("no existing Ray runtime satisfies the supplied environment requirement")
+
+    def _runtime_environment(self, selector: Mapping[str, str] | None, candidate: EnvironmentCandidate | None) -> dict[str, object]:
+        """Merge selected runtime form with explicit worker overrides without ambient state.
+
+        Candidate selector fields such as Conda names and Python executables remain
+        intact. Candidate environment declarations apply first, and the explicit
+        backend configuration wins where both declare the same variable.
+        """
+        runtime_env: dict[str, object] = dict(selector or {})
+        worker_env: dict[str, str] = {}
+        if candidate is not None and isinstance(candidate.spec, (CondaEnvironmentSpec, PythonExecutableSpec)):
+            worker_env.update(candidate.spec.env)
+        worker_env.update(self._config.env_vars)
+        if worker_env:
+            runtime_env["env_vars"] = worker_env
+        return runtime_env
 
     def _reserve(self, call: SubmittedCall[T]) -> Reservation:
         """Reserve known native capacity before task scheduling, not after its grant."""
@@ -1104,8 +1311,9 @@ def _requested_amounts(world: Any) -> ResourceAmounts:
     if not role.replicas.satisfied_by(1) or role.topology or role.resources.devices or role.resources.named or role.resources.accelerator_memory:
         raise AdmissionError("Ray world requirement contains unsupported exact controls")
     resources = role.resources
-    if not resources.cpus.satisfied_by(1):
-        raise AdmissionError("Ray's default one-CPU task cannot satisfy the CPU constraint")
+    requested_cpus = max(1, resources.cpus.min or 0)
+    if not resources.cpus.satisfied_by(requested_cpus):
+        raise AdmissionError("Ray CPU constraint is incompatible with Ray's one-CPU floor")
     accelerators: dict[str, float] = {}
     for key, constraint in resources.accelerators.items():
         if key.lower() != "gpu":
@@ -1117,7 +1325,7 @@ def _requested_amounts(world: Any) -> ResourceAmounts:
     memory = resources.memory.min
     if memory is not None and resources.memory.max is not None and memory > resources.memory.max:
         raise AdmissionError("Ray memory requirement is internally incompatible")
-    return ResourceAmounts(max(1.0, float(resources.cpus.min or 0)), memory, accelerators, {})
+    return ResourceAmounts(float(requested_cpus), memory, accelerators, {})
 
 
 def _native_options(world: Any) -> dict[str, object]:
@@ -1249,9 +1457,9 @@ def _terminal_task_error(error: BaseException) -> bool:
 
 
 def _native_error(prefix: str, error: BaseException, limit: int) -> str:
-    """Render a configured-bounded native exception type and text for diagnostics."""
-    detail = str(error).encode("utf-8")[:limit].decode("utf-8", errors="replace")
-    return f"{prefix} ({type(error).__name__}{': ' + detail if detail else ''})"
+    """Render only a configured-bounded native exception type for diagnostics."""
+    value = f"{prefix} ({type(error).__name__})"
+    return value.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 
 def _owner_json(data: Mapping[str, Any], limit: int) -> bytes:

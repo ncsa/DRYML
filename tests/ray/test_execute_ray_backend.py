@@ -40,6 +40,13 @@ def _one_cpu_world() -> WorldRequirement:
     })
 
 
+def _two_cpu_world() -> WorldRequirement:
+    """Require two logical Ray CPUs from the supplied four-CPU fixture."""
+    return WorldRequirement({
+        "main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(2, 2))),
+    })
+
+
 def _one_cpu_small_memory_world() -> WorldRequirement:
     """Require Ray's supported one-byte logical memory grant without device claims."""
     return WorldRequirement({
@@ -136,6 +143,72 @@ def test_existing_ray_execution_deadline_requires_confirmed_termination(tmp_path
         executor.close(cancel=True, timeout=30)
 
 
+def test_existing_ray_admission_failure_cancels_its_queued_native_task(tmp_path: Path):
+    """Cancel an exact queued bootstrap after its pre-GO admission deadline expires."""
+    script = textwrap.dedent(
+        f"""
+        from pathlib import Path
+        from time import monotonic, sleep
+
+        import ray
+
+        from dryml.execute.errors import ExecutionError
+        from dryml.execute.executor import Executor
+        from dryml.execute.ray import RayBackendConfig
+        from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
+
+        ray.init(address={_ray_address()!r}, namespace="dryml-queued-admission")
+
+        @ray.remote(num_cpus=4)
+        def occupy() -> None:
+            import time
+            time.sleep(20)
+
+        blocker = occupy.remote()
+        deadline = monotonic() + 10
+        while ray.available_resources().get("CPU", 0) != 0:
+            if monotonic() >= deadline:
+                raise RuntimeError("external test task did not consume fixture CPUs")
+            sleep(0.05)
+        world = WorldRequirement({{
+            "main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(1, 1))),
+        }})
+        executor = Executor(RayBackendConfig(
+            address={_ray_address()!r}, namespace="dryml-queued-admission",
+            spool_directory=Path({str(tmp_path)!r}), admission_timeout=0.5,
+            connect_timeout=30, termination_timeout=10,
+        ))
+        try:
+            future = executor.submit(lambda: "must-not-run", world=world)
+            try:
+                future.result(timeout=15)
+            except ExecutionError:
+                pass
+            else:
+                raise AssertionError("queued task passed admission")
+            reference = future.object_ref
+            assert reference is not None
+            future.cleanup(timeout=15)
+            try:
+                ray.get(reference, timeout=5)
+            except Exception as exc:
+                assert type(exc).__name__ == "TaskCancelledError"
+            else:
+                raise AssertionError("admission-failed task was left queued")
+        finally:
+            executor.close(cancel=True, timeout=20)
+            ray.cancel(blocker, force=True, recursive=False)
+            try:
+                ray.get(blocker, timeout=5)
+            except Exception:
+                pass
+            ray.shutdown()
+        """
+    )
+    completed = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, text=True, capture_output=True, timeout=90)
+    assert completed.returncode == 0, completed.stderr[-4000:]
+
+
 def test_existing_ray_result_before_deadline_is_not_rewritten(tmp_path: Path):
     """Keep a completed user result when the later deadline watcher wakes."""
     def complete() -> str:
@@ -175,6 +248,36 @@ def test_existing_ray_small_logical_memory_grant_is_admitted(tmp_path: Path):
         assert future.result(timeout=20) == "logical-memory-granted"
         assert future.snapshot().report is not None
         future.cleanup(timeout=20)
+    finally:
+        executor.close(cancel=True, timeout=30)
+
+
+def test_existing_ray_two_cpu_world_is_admitted(tmp_path: Path):
+    """Schedule a valid two-CPU task against the explicit four-CPU fixture."""
+    executor = Executor(RayBackendConfig(address=_ray_address(), spool_directory=tmp_path, admission_timeout=90, connect_timeout=60, termination_timeout=10))
+    try:
+        future = executor.submit(lambda: "two-cpu", world=_two_cpu_world())
+        assert future.result(timeout=20) == "two-cpu"
+        assert future.snapshot().report is not None
+        future.cleanup(timeout=20)
+    finally:
+        executor.close(cancel=True, timeout=30)
+
+
+def test_existing_ray_worker_receives_explicit_environment_override(tmp_path: Path):
+    """Pass only the configured task override to the existing Ray worker."""
+    def configured_value() -> str | None:
+        """Read the explicit task override without consulting coordinator state."""
+        import os
+
+        return os.environ.get("DRYML_EXECUTE_RAY_OVERRIDE")
+
+    executor = Executor(RayBackendConfig(
+        address=_ray_address(), spool_directory=tmp_path, admission_timeout=90,
+        connect_timeout=60, env_vars={"DRYML_EXECUTE_RAY_OVERRIDE": "configured"},
+    ))
+    try:
+        assert executor.run(configured_value, world=_one_cpu_world()) == "configured"
     finally:
         executor.close(cancel=True, timeout=30)
 
