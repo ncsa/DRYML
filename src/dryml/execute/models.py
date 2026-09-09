@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -127,9 +127,9 @@ class EnvironmentCandidate:
     """Describe one environment candidate inside a discovery snapshot."""
 
     key: str
-    spec: EnvironmentSpec
-    record: EnvironmentRecord | None
-    report: CompatibilityReport | None
+    spec: EnvironmentSpec = field(repr=False)
+    record: EnvironmentRecord | None = field(repr=False)
+    report: CompatibilityReport | None = field(repr=False)
     launchable: bool | None
     issues: tuple[ExecutionIssue, ...]
 

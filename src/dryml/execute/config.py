@@ -102,9 +102,14 @@ class BackendConfig(ABC):
     diagnostic_text_limit_bytes: int = 65_536
     diagnostic_issue_limit: int = 64
     discovery_candidate_limit: int = 128
+    discovery_directory_entry_limit: int = 1024
+    process_read_chunk_bytes: int = 8192
+    process_poll_interval: float = 0.005
     environment_search_depth: int = 2
     stream_output: bool = False
     automatic_environment_discovery: bool = True
+    conda_executable: str = "conda"
+    conda_launch_mode: str = "direct"
     environment_candidates: tuple[EnvironmentSpec, ...] = ()
     environment_search_roots: tuple[Path, ...] = ()
     working_directory: Path | None = None
@@ -112,7 +117,7 @@ class BackendConfig(ABC):
 
     def __post_init__(self) -> None:
         """Validate relationships and defensively detach caller containers."""
-        for name in ("admission_timeout", "discovery_timeout", "termination_timeout", "output_final_timeout", "one_off_cleanup_retry_interval"):
+        for name in ("admission_timeout", "discovery_timeout", "termination_timeout", "output_final_timeout", "one_off_cleanup_retry_interval", "process_poll_interval"):
             _positive_duration(name, getattr(self, name))
         _positive_duration("execution_timeout", self.execution_timeout, allow_none=True)
         for name in (
@@ -120,7 +125,7 @@ class BackendConfig(ABC):
             "result_limit_bytes", "control_header_limit_bytes", "owner_envelope_limit_bytes",
             "admission_message_limit_bytes", "output_frame_limit_bytes", "output_limit_bytes",
             "live_output_queue_limit_bytes", "diagnostic_text_limit_bytes", "diagnostic_issue_limit",
-            "discovery_candidate_limit",
+            "discovery_candidate_limit", "discovery_directory_entry_limit", "process_read_chunk_bytes",
         ):
             _positive_limit(name, getattr(self, name))
         if self.control_header_limit_bytes > _MAX_HEADER_LENGTH:
@@ -129,6 +134,10 @@ class BackendConfig(ABC):
         for name in ("stream_output", "automatic_environment_discovery"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be bool")
+        if not isinstance(self.conda_executable, str) or not self.conda_executable:
+            raise TypeError("conda_executable must be a non-empty string")
+        if self.conda_launch_mode not in {"direct", "conda-run"}:
+            raise ValueError("conda_launch_mode must be direct or conda-run")
         for name in ("spool_directory", "working_directory"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, Path):
