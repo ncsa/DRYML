@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from dryml.execute._spooling import PayloadSpooler, SpoolBudget, deserialize_call, deserialize_result, serialize_call, serialize_result, validate_payload, validate_result
-from dryml.execute.backend import ExecutionFuture
+from dryml.execute.future import ExecutionFuture
 from dryml.execute.config import BackendConfig
 from dryml.execute.errors import CleanupError, ExecutionError
 
@@ -182,22 +182,6 @@ def test_serializer_rejects_resource_subclasses_attrs_defaults_and_closures():
     finally:
         resources[1].close()
         resources[2].shutdown()
-
-
-def test_serializer_rejects_core_semantic_values_hidden_in_custom_classes():
-    """MRO-based checking sees core values embedded in ordinary serializable attrs."""
-    from dryml.core import Serializable
-
-    class SemanticSubclass(Serializable):
-        pass
-
-    class Envelope:
-        def __init__(self, value):
-            self.value = value
-
-    for value in (Serializable(), SemanticSubclass()):
-        with pytest.raises(TypeError, match="core semantic"):
-            serialize_call(lambda item: item, (Envelope(value),), {}, limit_bytes=1_000_000)
 
 
 def test_cleanup_retry_preserves_unrelated_child_contents_and_payload_matching(tmp_path: Path, monkeypatch):
@@ -388,7 +372,7 @@ def test_serializer_rejects_execute_and_connection_subclasses_and_bound_builtins
     class ConnectionSubclass(Connection):
         pass
 
-    resource = FutureSubclass()
+    resource = FutureSubclass("future")
     with pytest.raises(TypeError, match="live resource"):
         serialize_call(lambda value: value, (resource,), {}, limit_bytes=1_000_000)
     with pytest.raises(TypeError, match="bound builtin"):

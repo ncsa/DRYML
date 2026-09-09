@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 _LOCK_TYPES = (type(threading.Lock()), type(threading.RLock()))
 _EXECUTE_RESOURCE_BASES = frozenset({
-    "Backend", "BackendBase", "ExecutionFuture", "ExecutionOutput", "Executor", "ExecutorView",
+    "Backend", "ExecutionFuture", "ExecutionOutput", "Executor", "ExecutorView",
 })
 
 
