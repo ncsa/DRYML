@@ -115,3 +115,52 @@ jobs:
       - name: Run heavy framework tests
         run: |
           ./tests.sh heavy --ignore tests/old --ignore tests/dev -x
+
+  ray-integration:
+    name: Existing Ray integration (Ubuntu, Python 3.12)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up coordinator Conda environment
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: dryml-ray
+          auto-activate-base: false
+          python-version: "3.12"
+
+      - name: Build and install the test artifact in existing targets
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r ray_test_requirements.txt
+          python -m build
+          python -m pip install --force-reinstall dist/*.whl
+          export VENV_ROOT="$RUNNER_TEMP/dryml-ray-venv"
+          python -m venv "$VENV_ROOT"
+          export VENV_PYTHON="$VENV_ROOT/bin/python"
+          "$VENV_PYTHON" -m pip install --upgrade pip
+          "$VENV_PYTHON" -m pip install -r ray_test_requirements.txt
+          "$VENV_PYTHON" -m pip install --force-reinstall dist/*.whl
+
+      - name: Start job-owned Ray test server
+        run: |
+          ray start --head --port=6379 --num-cpus=4 --num-gpus=0 --object-store-memory=100000000 --temp-dir="$RUNNER_TEMP/dryml-ray" --disable-usage-stats
+
+      - name: Run enabled existing-Ray integration
+        run: |
+          export CONDA_PREFIX
+          export VENV_PYTHON="$RUNNER_TEMP/dryml-ray-venv/bin/python"
+          export DRYML_EXECUTE_INTEGRATION=1
+          export DRYML_TEST_RAY_ADDRESS=127.0.0.1:6379
+          export DRYML_TEST_CONDA_PREFIX="$CONDA_PREFIX"
+          export DRYML_TEST_VENV_PYTHON="$VENV_PYTHON"
+          ./tests.sh tests/ray/test_execute_ray_backend.py tests/ray/test_execute_ray_environments.py tests/execute/test_backend_conformance.py tests/execute/test_existing_environments.py --ignore tests/old --ignore tests/dev -x
+
+      - name: Stop job-owned Ray test server
+        if: always()
+        run: |
+          ray stop --force

@@ -60,6 +60,14 @@ is already implemented:
 - `operations` is a legacy package targeted for retirement; do not add new
   dependencies on it. Reassess legacy `context` only during parity closeout.
 
+`dryml.execute` accepts trusted ordinary callable graphs only through an explicit
+backend configuration. Its coordinator-owned spools, local worker groups, and
+existing same-host Ray attachment are execution lifecycle boundaries, not Store
+transport, Dispatch policy, environment provisioning, cluster provisioning, a
+safe-deserialization boundary, or a cross-coordinator resource ledger. Keep Ray
+optional and lazy; tests may prepare ephemeral CI fixtures, but product runtime
+and ordinary integration tests use caller-supplied existing targets only.
+
 There is no tracked `src/dryml/graph` package. Any untracked directory there is
 unsupported user work and must not be inspected, edited, staged, deleted, or
 used as a fixture without explicit user direction. Tracked `examples/` files are

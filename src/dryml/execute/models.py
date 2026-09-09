@@ -23,7 +23,15 @@ T = TypeVar("T")
 
 @dataclass(frozen=True, slots=True)
 class ExecutionIssue:
-    """Hold one bounded Execute diagnostic code and message."""
+    """Hold one bounded Execute diagnostic.
+
+    Args:
+        code: Stable machine-oriented issue identifier.
+        message: Bounded safe explanation retained for the coordinator.
+
+    Side Effects:
+        None. This immutable value never retains workload payloads or secrets.
+    """
 
     code: str
     message: str
@@ -31,7 +39,17 @@ class ExecutionIssue:
 
 @dataclass(frozen=True, slots=True)
 class AdmissionReport:
-    """Aggregate optional domain evidence and bounded Execute issues."""
+    """Aggregate environment/world admission evidence and Execute diagnostics.
+
+    Args:
+        environment: Optional immutable environment compatibility report.
+        world: Optional immutable world compatibility report.
+        issues: Bounded Execute-owned issues, copied to an immutable tuple.
+
+    Side Effects:
+        Construction detaches the issue sequence; it neither admits work nor
+        alters owner-domain reports.
+    """
 
     environment: CompatibilityReport | None = None
     world: WorldCompatibilityReport | None = None
@@ -44,7 +62,20 @@ class AdmissionReport:
 
 @dataclass(frozen=True, slots=True)
 class PayloadSpool:
-    """Describe one immutable, validated coordinator-owned call snapshot."""
+    """Describe one immutable validated coordinator-owned invocation snapshot.
+
+    Attributes:
+        path: Private spool path, valid only through its submission cleanup.
+        size_bytes: Serialized payload size after validation.
+        sha256: Coordinator integrity digest.
+        serializer: Serializer name and version used for the payload.
+        python_implementation: Producing Python implementation name.
+        python_version: Producing Python major, minor, and patch tuple.
+        pickle_protocol: Serializer protocol number.
+
+    Side Effects:
+        None. The descriptor does not grant durable file ownership or transport.
+    """
 
     path: Path
     size_bytes: int
@@ -58,10 +89,20 @@ class PayloadSpool:
 
 @dataclass(frozen=True, slots=True)
 class ResultSpool:
-    """Describe one immutable, validated coordinator-owned result snapshot.
+    """Describe one immutable validated coordinator-owned result snapshot.
 
-    Result files share a submission-owned spool child with the invocation and
-    remain private implementation descriptors rather than durable references.
+    Attributes:
+        path: Private result spool path, valid only through submission cleanup.
+        size_bytes: Validated serialized result size.
+        sha256: Coordinator integrity digest.
+        serializer: Serializer name and version used for the result.
+        python_implementation: Producing worker Python implementation name.
+        python_version: Producing worker Python major, minor, and patch tuple.
+        pickle_protocol: Serializer protocol number.
+
+    Side Effects:
+        Result files share a submission-owned spool child with the invocation and
+        remain private descriptors, not durable references or caller file rights.
     """
 
     path: Path
@@ -76,7 +117,19 @@ class ResultSpool:
 
 @dataclass(frozen=True, slots=True)
 class OutputSnapshot:
-    """Provide an immutable retained-output observation for one submission."""
+    """Provide one immutable retained-output observation.
+
+    Attributes:
+        stdout: Retained decoded stdout prefix.
+        stderr: Retained decoded stderr prefix.
+        stdout_truncated: Whether stdout exceeded its configured byte allowance.
+        stderr_truncated: Whether stderr exceeded its configured byte allowance.
+        complete: Whether both validated final fences arrived in time.
+        live_delivery_issue: Optional best-effort live-mirroring failure.
+
+    Side Effects:
+        None. Captured workload output remains caller-private coordinator data.
+    """
 
     stdout: str
     stderr: str
@@ -88,7 +141,21 @@ class OutputSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class SubmittedCall(Generic[T]):
-    """Hold accepted coordinator data without retaining the live callable graph."""
+    """Hold accepted coordinator metadata without the live callable graph.
+
+    Attributes:
+        submission_id: Coordinator-unique accepted submission identifier.
+        admission_deadline: Monotonic deadline for backend admission.
+        payload: Validated private invocation spool descriptor.
+        environment: Optional owner-defined environment requirement.
+        world: Optional owner-defined world requirement.
+        execution_timeout: Optional post-GO workload deadline.
+        stream_output: Whether accepted output mirrors live best-effort.
+        output: Bound caller-owned output holder.
+
+    Side Effects:
+        None. Backends receive this transport record, not a live callable object.
+    """
 
     submission_id: str
     admission_deadline: float
@@ -102,7 +169,25 @@ class SubmittedCall(Generic[T]):
 
 @dataclass(frozen=True, slots=True)
 class ExecutionSnapshot:
-    """Describe one Future's outcome and independently tracked cleanup state."""
+    """Describe one future outcome and independent cleanup state.
+
+    Attributes:
+        submission_id: Coordinator correlation identifier.
+        state: Current execution lifecycle state.
+        cleanup_state: Independent cleanup/recovery lifecycle state.
+        cleanup_scope: Backend-owned worker or owned-group boundary.
+        cleanup_issues: Immutable bounded cleanup diagnostics.
+        backend_job_id: Optional backend-native diagnostic identifier.
+        worker_id: Optional qualified worker identity.
+        pid: Optional worker-confirmed process identifier.
+        environment: Selected environment candidate, when applicable.
+        allocation: Observed allocation, when applicable.
+        cancel_requested: Whether running cancellation was accepted by a backend.
+        report: Optional admission evidence.
+
+    Side Effects:
+        Construction copies cleanup issues and never changes future state.
+    """
 
     submission_id: str
     state: Literal["pending", "admitting", "running", "succeeded", "failed", "cancelled", "uncertain"]
@@ -124,7 +209,19 @@ class ExecutionSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentCandidate:
-    """Describe one environment candidate inside a discovery snapshot."""
+    """Describe one bounded discovered environment candidate.
+
+    Attributes:
+        key: Stable local candidate key for this observation.
+        spec: Candidate selection specification.
+        record: Optional observed environment record.
+        report: Optional requirement compatibility evidence.
+        launchable: Whether a bounded probe established launchability.
+        issues: Immutable candidate probe/discovery diagnostics.
+
+    Side Effects:
+        Construction copies issues; discovery does not provision this candidate.
+    """
 
     key: str
     spec: EnvironmentSpec = field(repr=False)
@@ -140,7 +237,17 @@ class EnvironmentCandidate:
 
 @dataclass(frozen=True, slots=True)
 class FeasiblePlan:
-    """Describe a non-reserving single-process environment/world plan."""
+    """Describe a non-reserving environment/world feasibility observation.
+
+    Attributes:
+        environment_key: Optional selected discovery candidate key.
+        world: Observed single-process world shape.
+        allocation: Optional exact local allocation evidence.
+        report: Environment/world admission evidence.
+
+    Side Effects:
+        None. This plan does not reserve capacity or invoke work.
+    """
 
     environment_key: str | None
     world: WorldSpec
@@ -165,7 +272,21 @@ def _freeze_amount_mapping(name: str, values: Mapping[str, float | None]) -> Map
 
 @dataclass(frozen=True, slots=True)
 class ResourceAmounts:
-    """Summarize observed or charged resource quantities without requirement algebra."""
+    """Summarize observed or charged logical resources without requirement algebra.
+
+    Args:
+        cpus: Optional finite nonnegative logical CPU amount.
+        memory_bytes: Optional nonnegative integer logical memory amount.
+        accelerators: Accelerator-kind amounts, copied into an immutable mapping.
+        named: Named-resource amounts, copied into an immutable mapping.
+
+    Raises:
+        TypeError: If mappings, keys, or memory type are invalid.
+        ValueError: If a supplied amount is negative or non-finite.
+
+    Side Effects:
+        Construction detaches mappings; quantities do not reserve physical devices.
+    """
 
     cpus: float | None
     memory_bytes: int | None
@@ -185,7 +306,20 @@ class ResourceAmounts:
 
 @dataclass(frozen=True, slots=True)
 class ActiveAllocation:
-    """Describe one outstanding coordinator/backend resource charge."""
+    """Describe one outstanding coordinator/backend resource charge.
+
+    Attributes:
+        submission_id: Charged submission correlation identifier.
+        backend_job_id: Optional backend-native task identifier.
+        worker_id: Optional qualified worker identity for release evidence.
+        pid: Optional observed worker PID.
+        resources: Charged logical amounts.
+        allocation: Optional owner-domain allocation observation.
+        state: Reservation, running, release, or unconfirmed charge state.
+
+    Side Effects:
+        None. A record is local accounting evidence, not a global resource lease.
+    """
 
     submission_id: str
     backend_job_id: str | None
@@ -198,7 +332,22 @@ class ActiveAllocation:
 
 @dataclass(frozen=True, slots=True)
 class ResourceSnapshot:
-    """Provide one timestamped backend-scoped capacity observation."""
+    """Provide one timestamped backend-scoped capacity observation.
+
+    Attributes:
+        observed_at: UTC observation timestamp.
+        accounting_scope: Fixed coordinator-and-backend scope marker.
+        inventory: Optional exact local inventory.
+        total: Observed backend logical capacity.
+        allocated: Known coordinator/backend charges.
+        available: Backend-observable available capacity.
+        allocations: Immutable outstanding charge observations.
+        complete: Whether all required observation evidence was available.
+        issues: Immutable bounded observation diagnostics.
+
+    Side Effects:
+        Construction copies collections; it does not reserve or isolate resources.
+    """
 
     observed_at: datetime
     accounting_scope: Literal["coordinator-and-backend"]
@@ -218,7 +367,19 @@ class ResourceSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class DiscoverySnapshot:
-    """Provide one timestamped non-reserving discovery observation."""
+    """Provide one timestamped non-reserving discovery observation.
+
+    Attributes:
+        observed_at: UTC observation timestamp.
+        environments: Immutable bounded candidate observations.
+        resources: Backend-scoped resource observation.
+        plans: Immutable non-reserving feasible plans.
+        complete: Whether all bounded discovery work completed.
+        issues: Immutable bounded discovery diagnostics.
+
+    Side Effects:
+        Construction copies collections. Discovery never launches workload code.
+    """
 
     observed_at: datetime
     environments: tuple[EnvironmentCandidate, ...]

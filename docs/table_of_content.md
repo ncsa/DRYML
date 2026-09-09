@@ -27,8 +27,9 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 19. [Query Index Backend Contracts](query_index_backend_contracts.md)
 20. [Advisory Locking](locking.md)
 21. [Managed Operations](managed_operations.md)
-22. [Testing Workflow](testing.md)
-23. [Release Notes](release_notes.md)
+22. [Generic Execute](execute.md)
+23. [Testing Workflow](testing.md)
+24. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -56,6 +57,9 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
   or query-index lifecycle policy.
 - `dryml.managed` synchronously checkpoints selected Object state and records
   resumable lifecycle control without dispatch or a background execution backend.
+- `dryml.execute` runs trusted ordinary callables through an explicit local
+  subprocess or existing same-host Ray backend without Store transport or
+  environment/cluster provisioning.
 - Tests are grouped by feature category and automatically bucketed into smoke, medium, and heavy speed tiers.
 
 ## Documentation Status

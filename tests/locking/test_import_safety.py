@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import ast
 import os
 from pathlib import Path
 import subprocess
 import sys
+
+from tests.tools.native_lock_audit import native_advisory_lock_offenders
 
 
 def test_locking_import_is_dependency_light_and_root_export_is_lazy():
@@ -32,17 +33,41 @@ def test_locking_import_is_dependency_light_and_root_export_is_lazy():
 
 
 def test_native_file_lock_calls_have_one_framework_owner():
-    """Only the shared module may import native advisory-lock adapters."""
+    """Only the shared module may use native advisory-lock adapters."""
 
     source_root = Path(__file__).resolve().parents[2] / "src" / "dryml"
-    offenders = []
+    native_lock_sources = set()
     for path in source_root.rglob("*.py"):
-        if path == source_root / "locking.py":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import) and any(alias.name in {"fcntl", "msvcrt"} for alias in node.names):
-                offenders.append(str(path.relative_to(source_root)))
-            if isinstance(node, ast.ImportFrom) and node.module in {"fcntl", "msvcrt"}:
-                offenders.append(str(path.relative_to(source_root)))
-    assert offenders == []
+        if native_advisory_lock_offenders(path.read_bytes(), filename=str(path)):
+            native_lock_sources.add(str(path.relative_to(source_root)))
+    assert native_lock_sources == {"locking.py"}
+
+
+def test_native_lock_guard_permits_only_windows_handle_conversion():
+    """Allow the non-locking Windows file-descriptor handle conversion."""
+
+    source = (
+        "import msvcrt\n"
+        "handle = msvcrt.get_osfhandle(fd)\n"
+        "description = 'msvcrt.locking remains reserved for dryml.locking'\n"
+        "# import fcntl\n"
+    )
+
+    assert native_advisory_lock_offenders(source) == []
+    assert native_advisory_lock_offenders(source.encode()) == []
+
+
+def test_native_lock_guard_rejects_windows_advisory_lock_escapes():
+    """Reject direct, imported, and aliased native advisory-lock access."""
+
+    sources = (
+        "import msvcrt\nmsvcrt.locking(fd, operation, 1)\n",
+        "from msvcrt import locking\nlocking(fd, operation, 1)\n",
+        "from msvcrt import locking as native_lock\nnative_lock(fd, operation, 1)\n",
+        "import msvcrt as native\nnative.locking(fd, operation, 1)\n",
+        "import fcntl\nfcntl.flock(fd, operation)\n",
+        "from fcntl import flock as native_lock\nnative_lock(fd, operation)\n",
+    )
+
+    for source in sources:
+        assert native_advisory_lock_offenders(source)

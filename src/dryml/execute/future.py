@@ -29,6 +29,12 @@ class ExecutionFuture(Generic[T]):
     or native Future.  Its stored result/error and retained output therefore stay
     inspectable while backend cleanup continues or is retried.
 
+    Backend authors use the existing protected producer interface
+    (``_begin_admission``, ``_authorize``, association setters, result receiver,
+    and terminal publication hooks) only while owning an accepted concrete Future.
+    Those hooks coordinate one producer with the Executor; they are not a public
+    controller API and callers use the public methods below.
+
     Args:
         submission_id: Coordinator-unique correlation identifier for this call.
         output: Optional caller-owned retained output object.  A fresh object is
@@ -40,6 +46,10 @@ class ExecutionFuture(Generic[T]):
     Raises:
         TypeError: If construction controls have unsupported types.
         ValueError: If the identifier or default cleanup timeout is invalid.
+
+    Side Effects:
+        Construction allocates only process-local synchronization and output state.
+        It does not start a backend, serialize work, or launch native execution.
     """
 
     def __init__(
@@ -94,7 +104,14 @@ class ExecutionFuture(Generic[T]):
 
     @property
     def output(self) -> ExecutionOutput:
-        """Return the retained output owner that survives backend cleanup."""
+        """Return the retained output owner that survives backend cleanup.
+
+        Returns:
+            The exact caller-owned or Future-created :class:`ExecutionOutput`.
+
+        Side Effects:
+            None. Reading it neither starts capture nor changes cleanup ownership.
+        """
         return self._output
 
     def snapshot(self) -> ExecutionSnapshot:
@@ -198,6 +215,11 @@ class ExecutionFuture(Generic[T]):
         Returns:
             ``True`` when this call prevented invocation and published confirmed
             cancellation; ``False`` after authorization or terminal publication.
+
+        Side Effects:
+            On success publishes a terminal ``CancelledError``, notifies output,
+            and schedules callbacks. It never terminates already-running work;
+            use :meth:`request_cancel` to ask the backend for that operation.
         """
         callbacks = self._publish_cancel_if_prestart()
         if callbacks is None:

@@ -443,6 +443,8 @@ class RayFuture(ExecutionFuture[T]):
 
     Native references are intentionally separate from the common managed result;
     cleanup clears them only after qualified backend release evidence is observed.
+    Accessing native properties never imports Ray, contacts the server, or changes
+    task cleanup ownership.
     """
 
     def __init__(self, submission_id: str, *, output: ExecutionOutput, termination_timeout: float) -> None:
@@ -455,29 +457,69 @@ class RayFuture(ExecutionFuture[T]):
 
     @property
     def object_ref(self) -> Any | None:
-        """Return this call's real bootstrap ObjectRef until qualified cleanup."""
+        """Return this call's real bootstrap ObjectRef until qualified cleanup.
+
+        Returns:
+            The backend-created one-shot bootstrap reference, or ``None`` before
+            submission and after qualified cleanup. It is not the user result.
+
+        Side Effects:
+            None. Access is inert and does not call Ray or retain the task.
+        """
         with self._native_lock:
             return self._object_ref
 
     @property
     def server_address(self) -> str | None:
-        """Return the generation-qualified resolved server address when known."""
+        """Return the generation-qualified resolved server address when known.
+
+        Returns:
+            The validated existing server address for this task generation, or
+            ``None`` before association and after qualified cleanup.
+
+        Side Effects:
+            None. Access does not initialize or reconnect Ray.
+        """
         with self._native_lock:
             return self._server_address
 
     @property
     def worker_pid(self) -> int | None:
-        """Return the worker-confirmed PID without inferring identity from it."""
+        """Return the worker-confirmed PID without inferring identity from it.
+
+        Returns:
+            Positive PID after validated worker HELLO, otherwise ``None``; it is
+            cleared during qualified cleanup.
+
+        Side Effects:
+            None. This is an inert observed association, not a native probe.
+        """
         return self.snapshot().pid
 
     @property
     def worker_id(self) -> str | None:
-        """Return the qualified Ray worker identity when it passed HELLO."""
+        """Return the qualified Ray worker identity when it passed HELLO.
+
+        Returns:
+            The verified worker identity, or ``None`` before validation and after
+            qualified cleanup.
+
+        Side Effects:
+            None. Access does not contact Ray or change task cleanup.
+        """
         return self.snapshot().worker_id
 
     @property
     def node_id(self) -> str | None:
-        """Return the verified native node identity for this bootstrap task."""
+        """Return the verified native node identity for this bootstrap task.
+
+        Returns:
+            The task's verified same-host node identity, or ``None`` before
+            native submission and after qualified cleanup.
+
+        Side Effects:
+            None. Access is inert and does not query native node state.
+        """
         with self._native_lock:
             return self._node_id
 
@@ -553,7 +595,20 @@ class RayBackend(Backend):
         self._authority: ResourceAuthority | None = None
 
     def start(self) -> None:
-        """Attach to an existing compatible Ray deployment within caller bounds."""
+        """Attach to an existing compatible Ray deployment within caller bounds.
+
+        Returns:
+            ``None`` after attaching to one compatible same-host deployment.
+
+        Raises:
+            ExecutionError: If the backend is closed, Ray is unavailable, its
+                version/identity is incompatible, or connection setup fails.
+            TimeoutError: If the caller's configured connection wait expires.
+
+        Side Effects:
+            Lazily imports Ray and may attach an Execute-owned driver to an
+            existing deployment. It never provisions or stops the server.
+        """
         with self._lock:
             if self._closed:
                 raise ExecutionError("Ray backend is closed")
@@ -583,15 +638,55 @@ class RayBackend(Backend):
             raise ExecutionError("Ray backend closed during initialization")
 
     def capabilities(self) -> frozenset[str]:
-        """Report the controls supported by the same-host pinned implementation."""
+        """Report the controls supported by the same-host pinned implementation.
+
+        Returns:
+            The immutable common capability set plus ``ray_existing_deployment``.
+            ``world_admission`` is limited to one role with logical CPU, memory,
+            and GPU quantities.
+
+        Side Effects:
+            None. This inert query does not import Ray or inspect a cluster.
+        """
         return frozenset({"environment_selection", "world_admission", "live_output", "running_cancellation", "ray_existing_deployment"})
 
     def create_future(self, submission_id: str, output: ExecutionOutput) -> RayFuture[Any]:
-        """Create the exact inert concrete Future before workload acceptance."""
+        """Create the exact inert concrete Future before workload acceptance.
+
+        Args:
+            submission_id: Nonempty executor-generated submission identifier.
+            output: Exact unbound output holder for that submission.
+
+        Returns:
+            An inert :class:`RayFuture` retaining the supplied identity.
+
+        Raises:
+            TypeError: If Future construction controls are invalid.
+            ValueError: If ``submission_id`` is invalid.
+
+        Side Effects:
+            Does not import Ray, attach a driver, bind output, or schedule a task.
+        """
         return RayFuture(submission_id, output=output, termination_timeout=self._config.termination_timeout)
 
     def submit(self, call: SubmittedCall[T], *, future: ExecutionFuture[T]) -> None:
-        """Schedule the supplied Future only; native arguments never include user code."""
+        """Schedule the supplied Future only; native arguments never include user code.
+
+        Args:
+            call: Exact accepted spool and admission metadata.
+            future: Exact matching inert :class:`RayFuture`.
+
+        Returns:
+            ``None``; asynchronous admission outcomes publish on ``future``.
+
+        Raises:
+            ExecutionError: If Ray was not started, the backend is closed, or
+                call/Future identity is mismatched or duplicated.
+
+        Side Effects:
+            Starts one coordinator thread that may schedule one descriptor-only
+            native bootstrap task; user callable bytes never enter native options.
+        """
         if not isinstance(future, RayFuture) or future.submission_id != call.submission_id or future.output is not call.output:
             raise ExecutionError("Ray backend received a mismatched Future or call")
         with self._lock:
@@ -610,7 +705,25 @@ class RayBackend(Backend):
             raise
 
     def discover(self, *, environment: EnvironmentRequirement | None = None, world: Any = None, timeout: float) -> DiscoverySnapshot:
-        """Return bounded existing-environment and native-resource observations."""
+        """Return bounded existing-environment and native-resource observations.
+
+        Args:
+            environment: Optional environment requirement for candidate evidence.
+            world: Optional supported one-role world requirement for plans.
+            timeout: Positive total observation budget in seconds.
+
+        Returns:
+            A non-reserving Ray discovery snapshot, possibly incomplete.
+
+        Raises:
+            TimeoutError: If the supplied budget has elapsed.
+            BackendUnavailableError: If the existing Ray connection cannot observe
+                its resources.
+
+        Side Effects:
+            May perform bounded candidate probes and Ray capacity reads; it does
+            not provision a server, reserve capacity, or invoke workload code.
+        """
         if timeout <= 0:
             raise TimeoutError("Ray discovery timeout elapsed")
         deadline = time.monotonic() + timeout
@@ -640,7 +753,23 @@ class RayBackend(Backend):
         return DiscoverySnapshot(datetime.now(timezone.utc), tuple(candidates), resources, tuple(plans), resources.complete and inventory_complete and not issues, tuple(issues))
 
     def resources(self, *, timeout: float) -> ResourceSnapshot:
-        """Observe native Ray capacity and subtract only unrepresented reservations."""
+        """Observe native Ray capacity and subtract only unrepresented reservations.
+
+        Args:
+            timeout: Positive total native observation budget in seconds.
+
+        Returns:
+            A backend-scoped logical Ray resource snapshot, possibly incomplete.
+
+        Raises:
+            TimeoutError: If the supplied budget has elapsed.
+            BackendUnavailableError: If the existing Ray connection cannot observe
+                scheduler capacity.
+
+        Side Effects:
+            Calls existing Ray capacity APIs but does not schedule, reserve, or
+            provision native work.
+        """
         if timeout <= 0:
             raise TimeoutError("Ray resource observation timeout elapsed")
         return self._resources_until(time.monotonic() + timeout)
@@ -657,7 +786,25 @@ class RayBackend(Backend):
         return self._authority.snapshot(total=total, native_available=available, native_available_is_net=True, executor_id=self._executor_id)
 
     def reconcile_cleanup(self, submission_id: str, *, timeout: float) -> None:
-        """Release only a terminal attempt with matching worker and native evidence."""
+        """Release only a terminal attempt with matching worker and native evidence.
+
+        Args:
+            submission_id: Exact accepted Ray submission identifier.
+            timeout: Positive maximum task reconciliation time in seconds.
+
+        Returns:
+            ``None`` after qualified native task, socket, and charge release.
+
+        Raises:
+            ExecutionError: If the submission is unknown.
+            RuntimeError: If the matching Future is not terminal.
+            CleanupError: If launch, native task, or resource release evidence is
+                unavailable; state remains retryable.
+
+        Side Effects:
+            May close only this submission's channel and clear its native Future
+            associations. It releases no caller-owned Ray driver or server.
+        """
         with self._lock:
             run = self._runs.get(submission_id)
             known = submission_id in self._known
@@ -725,7 +872,23 @@ class RayBackend(Backend):
             self._pre_run_reservations.pop(submission_id, None)
 
     def close(self, *, cancel: bool, timeout: float | None) -> None:
-        """Cancel/reconcile only owned tasks, then release this executor's SDK lease."""
+        """Cancel/reconcile only owned tasks, then release this executor's SDK lease.
+
+        Args:
+            cancel: Whether to request cancellation of outstanding owned tasks.
+            timeout: Optional cleanup budget; ``None`` uses termination policy.
+
+        Returns:
+            ``None`` after owned tasks and this executor's connection lease close.
+
+        Raises:
+            CleanupError: If an owned task or the Execute-owned driver disconnect
+                remains incomplete; retry ownership is preserved.
+
+        Side Effects:
+            Stops backend admission, may cancel exact native tasks, and releases
+            only an Execute-owned driver lease, never the caller-owned server.
+        """
         with self._lock:
             self._closed = True
             runs = tuple(self._runs.values())

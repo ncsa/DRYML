@@ -156,10 +156,31 @@ and Windows for Python 3.10 through 3.14, then runs smoke/medium and installed
 artifact checks. Python 3.14 is explicitly framework-reduced.
 
 The heavy matrix runs on Ubuntu for Python 3.10 through 3.13. It installs and
-preflights TensorFlow, Torch, JAX/JAXlib, and Ray before heavy tests so missing
+preflights TensorFlow, Torch, JAX/JAXlib, and pinned `ray[default]==2.56.0` before heavy tests so missing
 or broken frameworks fail rather than skip. Each job prints the resolved Python,
 DRYML, and framework versions. Workflow configuration is not support evidence
 until the jobs pass on the exact child commit.
+
+The separate `Existing Ray integration (Ubuntu, Python 3.12)` job uses an
+ephemeral Conda coordinator and a venv derived from that same interpreter. It
+builds DRYML once, installs that artifact with `dill` and
+`ray[default]==2.56.0` into both existing test targets, starts a job-owned
+single-node 4-CPU/0-GPU Ray fixture, and enables the real Ray and
+existing-environment Execute tests. Its final cleanup stops only the fixture it
+started. This CI preparation does not change the product contract: normal DRYML
+runtime and tests require caller-supplied existing environments and an existing
+Ray address, and never provision them.
+
+The lightweight Ubuntu/Windows Python 3.10 through 3.14 matrix remains
+framework-reduced, does not install Ray, and supplies common/subprocess/package
+coverage. It is not native Windows Ray or GPU evidence. Workflow configuration
+becomes evidence only after the remote job passes for the pushed child revision.
+
+U8 local evidence before this closeout was 266 passed and 4 skipped deterministic
+tests, plus 16 passed enabled real cases for CPU, Conda direct/`conda run`,
+exact-prefix venv, Ray logical memory, cancellation, and world admission. That
+evidence does not replace the pending remote CI job, Windows/minimum-runtime
+matrix results, or final installed-artifact and maintained-suite closeout.
 
 ## Context Bootstrap
 

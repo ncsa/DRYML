@@ -7,6 +7,8 @@ from pathlib import Path
 from pathlib import PurePosixPath
 import zipfile
 
+from tests.tools.native_lock_audit import native_advisory_lock_offenders
+
 _REQUIRED_MODULES = {
     "dryml/locking.py",
     "dryml/core/state.py",
@@ -64,6 +66,23 @@ _REQUIRED_MODULES = {
     "dryml/managed/model.py",
     "dryml/managed/runtime.py",
     "dryml/managed/storage.py",
+    "dryml/execute/__init__.py",
+    "dryml/execute/_process.py",
+    "dryml/execute/_protocol.py",
+    "dryml/execute/_spooling.py",
+    "dryml/execute/_worker.py",
+    "dryml/execute/accounting.py",
+    "dryml/execute/admission.py",
+    "dryml/execute/backend.py",
+    "dryml/execute/config.py",
+    "dryml/execute/discovery.py",
+    "dryml/execute/errors.py",
+    "dryml/execute/executor.py",
+    "dryml/execute/future.py",
+    "dryml/execute/models.py",
+    "dryml/execute/output.py",
+    "dryml/execute/ray.py",
+    "dryml/execute/subprocess.py",
 }
 
 _RETIRED_CODE_MODULES = {
@@ -74,6 +93,13 @@ _RETIRED_CODE_MODULES = {
     "dryml/code/transformation.py",
     "dryml/code/algorithms/direct_annotations.py",
     "dryml/code/algorithms/method_contracts.py",
+}
+
+_RETIRED_EXECUTE_MODULES = {
+    "dryml/execute/orchestrator.py",
+    "dryml/execute/protocol.py",
+    "dryml/execute/transfer.py",
+    "dryml/execute/worker.py",
 }
 
 _RETAINED_ANNOTATION_MODULES = {
@@ -126,17 +152,20 @@ def test_wheel_contains_port_modules_without_retired_core(
     _, wheel = release_artifacts
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
-        environment_sources = {
-            name: archive.read(name).decode("utf-8")
+        package_sources = {
+            name: archive.read(name)
             for name in names
-            if name.startswith("dryml/environments/") and name.endswith(".py")
+            if name.startswith("dryml/") and name.endswith(".py")
+        }
+        environment_sources = {
+            name: source.decode("utf-8")
+            for name, source in package_sources.items()
+            if name.startswith("dryml/environments/")
         }
         native_lock_sources = {
             name
-            for name in names
-            if name.startswith("dryml/")
-            and name.endswith(".py")
-            and ("import fcntl" in archive.read(name).decode("utf-8") or "import msvcrt" in archive.read(name).decode("utf-8"))
+            for name, source in package_sources.items()
+            if native_advisory_lock_offenders(source, filename=name)
         }
     assert _REQUIRED_MODULES <= names
     code_modules = {
@@ -159,6 +188,7 @@ def test_wheel_contains_port_modules_without_retired_core(
         if any(symbol in source for source in environment_sources.values())
     }
     assert not _RETIRED_CODE_MODULES & names
+    assert not _RETIRED_EXECUTE_MODULES & names
     assert not any(name.startswith("dryml/core2/") for name in names)
     assert "dryml/core/store/locking.py" not in names
     assert "dryml/managed/locking.py" not in names
@@ -182,7 +212,7 @@ def test_sdist_contains_port_modules_without_retired_core(
                 continue
             source = archive.extractfile(member)
             assert source is not None
-            package_sources[name] = source.read().decode("utf-8")
+            package_sources[name] = source.read()
     required = {f"src/{name}" for name in _REQUIRED_MODULES}
     assert required <= names
     code_modules = {
@@ -204,16 +234,17 @@ def test_sdist_contains_port_modules_without_retired_core(
     assert not {
         symbol
         for symbol in _RETIRED_ENVIRONMENT_SYMBOLS
-        if any(symbol in source for source in package_sources.values())
+        if any(symbol in source.decode("utf-8") for source in package_sources.values())
     }
     assert not {f"src/{name}" for name in _RETIRED_CODE_MODULES} & names
+    assert not {f"src/{name}" for name in _RETIRED_EXECUTE_MODULES} & names
     assert not any(name.startswith("src/dryml/core2/") for name in names)
     assert "src/dryml/core/store/locking.py" not in names
     assert "src/dryml/managed/locking.py" not in names
     assert {
         name
         for name, source in package_sources.items()
-        if "import fcntl" in source or "import msvcrt" in source
+        if native_advisory_lock_offenders(source, filename=name)
     } == {"src/dryml/locking.py"}
     assert "src/dryml/core/repo_graph.py" not in names
     assert not any(name.startswith("tutorials/") for name in names)

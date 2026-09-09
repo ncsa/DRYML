@@ -311,6 +311,21 @@ _EXPECTED_ANNOTATION_EXPORTS = {
     "own_annotations",
 }
 
+_EXPECTED_EXECUTE_EXPORTS = {
+    "ActiveAllocation", "AdmissionError", "AdmissionReport", "Backend",
+    "BackendConfig", "BackendUnavailableError", "CleanupError",
+    "DiscoverySnapshot", "EnvironmentCandidate", "ExecutionDeadlineExceeded",
+    "ExecutionError", "ExecutionFuture", "ExecutionIssue", "ExecutionOutput",
+    "ExecutionSnapshot", "ExecutionUncertainError", "Executor", "ExecutorView",
+    "FeasiblePlan", "OutputSnapshot", "RemoteExecutionError", "ResourceAmounts",
+    "ResourceSnapshot", "run", "submit",
+}
+
+_EXPECTED_EXECUTE_SPECIALIZATIONS = {
+    "dryml.execute.subprocess": {"SubProcessBackend", "SubProcessConfig", "SubProcessFuture"},
+    "dryml.execute.ray": {"RayBackend", "RayBackendConfig", "RayFuture"},
+}
+
 
 def test_installed_root_exports_and_version_match_metadata(
     installed_python: Path,
@@ -843,6 +858,92 @@ print(json.dumps(sorted(
 """,
     )
     assert json.loads(result.stdout) == []
+
+
+def test_installed_execute_surface_is_explicit_and_optional_backend_safe(
+    installed_python: Path,
+) -> None:
+    """Require installed Execute exports, signatures, and retired modules to match."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import importlib
+import importlib.util
+import inspect
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+import dryml.execute as execute
+import dryml.execute.ray as ray_execute
+import dryml.execute.subprocess as subprocess_execute
+
+with tempfile.TemporaryDirectory() as directory:
+    executor = execute.Executor(subprocess_execute.SubProcessConfig(
+        spool_directory=Path(directory),
+    ))
+    try:
+        subprocess_result = executor.run(sum, [2, 3, 5])
+    finally:
+        executor.close(cancel=True, timeout=10)
+
+print(json.dumps({
+    "exports": sorted(execute.__all__),
+    "specializations": {
+        "dryml.execute.subprocess": sorted(subprocess_execute.__all__),
+        "dryml.execute.ray": sorted(ray_execute.__all__),
+    },
+    "parameters": {
+        "run": list(inspect.signature(execute.run).parameters),
+        "submit": list(inspect.signature(execute.submit).parameters),
+        "Executor.run": list(inspect.signature(execute.Executor.run).parameters),
+        "Executor.submit": list(inspect.signature(execute.Executor.submit).parameters),
+    },
+    "ray_loaded": "ray" in sys.modules,
+    "subprocess_result": subprocess_result,
+    "optional_loaded": sorted(
+        name for name in ("tensorflow", "torch", "jax", "jaxlib", "ray")
+        if name in sys.modules
+    ),
+    "retired": [
+        name for name in (
+            "dryml.execute.orchestrator", "dryml.execute.protocol",
+            "dryml.execute.transfer", "dryml.execute.worker",
+        ) if importlib.util.find_spec(name) is not None
+    ],
+}))
+""",
+    )
+    data = json.loads(result.stdout)
+    assert set(data["exports"]) == _EXPECTED_EXECUTE_EXPORTS
+    assert {
+        name: set(exports)
+        for name, exports in data["specializations"].items()
+    } == _EXPECTED_EXECUTE_SPECIALIZATIONS
+    assert data["parameters"] == {
+        "run": ["fn", "args", "backend", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output"],
+        "submit": ["fn", "args", "backend", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output"],
+        "Executor.run": ["self", "fn", "args", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output"],
+        "Executor.submit": ["self", "fn", "args", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output"],
+    }
+    assert not data["ray_loaded"]
+    assert data["subprocess_result"] == 10
+    assert data["optional_loaded"] == []
+    assert data["retired"] == []
+
+
+def test_source_execute_surface_matches_installed_manifest() -> None:
+    """Keep source Execute exports aligned with the installed wheel contract."""
+
+    import dryml.execute as execute
+    import dryml.execute.ray as ray_execute
+    import dryml.execute.subprocess as subprocess_execute
+
+    assert set(execute.__all__) == _EXPECTED_EXECUTE_EXPORTS
+    assert set(subprocess_execute.__all__) == _EXPECTED_EXECUTE_SPECIALIZATIONS["dryml.execute.subprocess"]
+    assert set(ray_execute.__all__) == _EXPECTED_EXECUTE_SPECIALIZATIONS["dryml.execute.ray"]
 
 
 def test_installed_sdist_wheel_exercises_current_reference_authority(

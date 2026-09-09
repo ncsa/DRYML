@@ -2,6 +2,22 @@
 
 ## 0.3.0.dev2 (unreleased)
 
+`dryml.execute` now provides generic trusted-callable execution with explicit
+`Executor`/one-off backend configuration, common `ExecutionFuture` and bounded
+output APIs, local subprocess execution, and an optional existing same-host Ray
+2.56.0 backend. Calls use coordinator-owned bounded spools and pre-GO admission;
+they do not use `Repo`, `Store`, managed operations, runtime/session transport,
+or an implicit backend. Existing Conda/venv targets and Ray deployments are
+caller supplied. Ray is never provisioned or stopped by DRYML, borrowed drivers
+survive close, and logical Ray resources do not claim physical isolation or
+cross-coordinator accounting. The focused Linux Python 3.12 CI fixture prepares
+its own ephemeral test server and environments; remote CI evidence remains
+pending until the workflow passes on the pushed revision.
+
+This is the Execute core/backend/managed-runtime/dispatch boundary only. It does
+not claim whole Stage 7 completion, a core transport adapter, or deferred
+runtime/dispatch integration.
+
 Stage 4 adds `dryml.requirements`, the dependency-light shared contract for
 explicit hard requirements. Its public API is `RequirementSource`,
 `RequirementDeclaration`, `RequirementIssue`, `RequirementReport`,

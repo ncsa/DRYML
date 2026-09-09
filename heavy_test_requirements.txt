@@ -1,7 +1,7 @@
 tensorflow
 jax
 jaxlib
-ray
+ray[default]==2.56.0
 scikit-learn
 xgboost
 --extra-index-url https://download.pytorch.org/whl/cpu

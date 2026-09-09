@@ -335,6 +335,16 @@ class Executor:
     ) -> "ExecutorView":
         """Bind immutable execution controls without initializing or reserving work.
 
+        Args:
+            environment: Optional typed environment requirement bound to each view
+                submission.
+            world: Optional typed world requirement bound to each view submission.
+            execution_timeout: ``"inherit"`` for the config default, ``None`` to
+                disable a deadline, or a finite positive seconds override.
+            stream_output: Optional live-output override for view submissions.
+            done_callbacks: Finite callbacks copied for each submitted Future.
+            output: Optional single-use retained output holder bound on submit.
+
         Returns:
             A parent-retaining view whose call keywords are always workload values.
 
@@ -344,7 +354,7 @@ class Executor:
 
         Side Effects:
             Copies callback registrations only; it does not create backend or spool
-            resources.
+            resources. Later view submissions retain the parent lifecycle.
         """
         _, callbacks, effective_timeout, effective_stream, _ = self._validate_controls(
             {}, execution_timeout, stream_output, done_callbacks, output
@@ -361,9 +371,26 @@ class Executor:
     ) -> DiscoverySnapshot:
         """Delegate a bounded discovery query after lazy backend initialization.
 
+        Args:
+            environment: Optional typed environment requirement for candidates and
+                feasibility evidence.
+            world: Optional typed world requirement for feasibility evidence.
+            timeout: Optional positive query bound in seconds; ``None`` uses
+                ``discovery_timeout``.
+
+        Returns:
+            A non-reserving, possibly incomplete backend discovery snapshot.
+
         Raises:
             RuntimeError: If closure has begun.
-            TypeError: If ``timeout`` is invalid.
+            TypeError: If requirements or ``timeout`` have invalid types.
+            ValueError: If ``timeout`` is not finite and positive.
+            TimeoutError: If backend initialization or discovery exceeds the bound.
+            ExecutionError: If the selected backend cannot complete discovery.
+
+        Side Effects:
+            Lazily starts the backend and may perform bounded discovery I/O. It
+            does not create a spool, reserve capacity, or invoke workload code.
         """
         budget = self._config.discovery_timeout if timeout is None else self._positive_duration("timeout", timeout)
         self._validate_requirements(environment, world)
@@ -380,7 +407,27 @@ class Executor:
             self._unregister_query()
 
     def resources(self, *, timeout: float | None = None) -> ResourceSnapshot:
-        """Delegate bounded resource inspection, including during incomplete cleanup."""
+        """Delegate bounded resource inspection, including during incomplete cleanup.
+
+        Args:
+            timeout: Optional positive query bound in seconds; ``None`` uses
+                ``discovery_timeout``.
+
+        Returns:
+            A backend-scoped, possibly incomplete logical resource snapshot.
+
+        Raises:
+            RuntimeError: If the executor is closed or has begun closing without
+                an already-started backend.
+            TypeError: If ``timeout`` has an invalid type.
+            ValueError: If ``timeout`` is not finite and positive.
+            TimeoutError: If initialization or observation exceeds the bound.
+            ExecutionError: If the selected backend cannot observe resources.
+
+        Side Effects:
+            Lazily starts an open backend or uses its retained backend during
+            retryable cleanup; may perform bounded native observation I/O.
+        """
         budget = self._config.discovery_timeout if timeout is None else self._positive_duration("timeout", timeout)
         deadline = time.monotonic() + budget
         with self._condition:
@@ -407,6 +454,10 @@ class Executor:
             timeout: Optional finite cleanup budget. Normal closure without one
                 waits for accepted work; cancellation and unresolved cleanup use
                 ``termination_timeout``.
+
+        Returns:
+            ``None`` after accepted work, spools, backend state, and this
+            executor's quota lease are safely released.
 
         Raises:
             TypeError: If controls have unsupported types.
@@ -911,7 +962,27 @@ class ExecutorView:
     output: ExecutionOutput | None
 
     def submit(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> ExecutionFuture[T]:
-        """Submit one workload with bound controls and unmodified workload keywords."""
+        """Submit one workload with bound controls and unmodified workload keywords.
+
+        Args:
+            fn: Supported callable function root or importable unbound builtin.
+            args: Positional workload arguments.
+            kwargs: Workload keyword arguments; none are interpreted as controls.
+
+        Returns:
+            The parent backend's exact concrete accepted Future.
+
+        Raises:
+            TypeError: If callable transport, arguments, or bound controls are
+                invalid.
+            ValueError: If serialization or a bound timeout is invalid.
+            RuntimeError: If the parent executor is closing or closed.
+            ExecutionError: If preflight, quota, or backend Future validation fails.
+
+        Side Effects:
+            Delegates to the parent, which serializes one callable graph, reserves
+            the shared spool budget, and starts asynchronous backend admission.
+        """
         return self.executor.submit(
             fn,
             *args,
@@ -925,7 +996,26 @@ class ExecutorView:
         )
 
     def run(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
-        """Submit one workload with bound controls and return its ordinary result."""
+        """Submit one workload with bound controls and return its ordinary result.
+
+        Args:
+            fn: Supported callable function root or importable unbound builtin.
+            args: Positional workload arguments.
+            kwargs: Workload keyword arguments; none are interpreted as controls.
+
+        Returns:
+            The submitted workload's ordinary result.
+
+        Raises:
+            TypeError: If submission controls or callable transport are invalid.
+            ValueError: If serialization or a bound timeout is invalid.
+            BaseException: Any synchronous submission error or stable Future
+                outcome, including admission, backend, and remote failures.
+
+        Side Effects:
+            Delegates submission to the parent but does not close the parent or
+            clean up unrelated accepted Futures.
+        """
         return self.submit(fn, *args, **kwargs).result()
 
 

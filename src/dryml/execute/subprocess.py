@@ -96,6 +96,9 @@ class SubProcessFuture(ExecutionFuture[T]):
     worker-confirmed PID and can differ for wrappers such as ``conda run``. Native
     references are cleared during successful cleanup while common results/output
     remain retained.
+
+    Native properties are observations only: accessing them never starts a
+    process, probes a worker, or extends the owned cleanup lifetime.
     """
 
     def __init__(self, submission_id: str, *, output: ExecutionOutput, termination_timeout: float) -> None:
@@ -106,13 +109,29 @@ class SubProcessFuture(ExecutionFuture[T]):
 
     @property
     def process(self) -> subprocess.Popen[bytes] | None:
-        """Return the borrowed launcher object, or ``None`` before launch/after cleanup."""
+        """Return the borrowed launcher object, or ``None`` before launch/after cleanup.
+
+        Returns:
+            The backend-owned launcher while native cleanup retains it, otherwise
+            ``None``. Callers must not close or mutate the borrowed process.
+
+        Side Effects:
+            None. This property does not launch, poll, or reconcile the process.
+        """
         with self._native_lock:
             return self._process
 
     @property
     def pid(self) -> int | None:
-        """Return the worker-confirmed PID without initializing or launching work."""
+        """Return the worker-confirmed PID without initializing or launching work.
+
+        Returns:
+            Positive worker PID after validated HELLO, otherwise ``None``; it is
+            cleared when qualified cleanup releases the native association.
+
+        Side Effects:
+            None. This is a snapshot read, not a liveness or ownership probe.
+        """
         return self.snapshot().pid
 
     def _set_process(self, process: subprocess.Popen[bytes] | None) -> None:
@@ -164,25 +183,69 @@ class SubProcessBackend(Backend):
         self._authority: ResourceAuthority = RESOURCE_AUTHORITIES.get("subprocess", "same-host-local")
 
     def start(self) -> None:
-        """Mark this local backend initialized without probing or launching workers."""
+        """Mark this local backend initialized without probing or launching workers.
+
+        Returns:
+            ``None`` when this backend can accept submissions.
+
+        Raises:
+            ExecutionError: If this backend was closed.
+
+        Side Effects:
+            Sets local lifecycle state only; it does not inspect environments,
+            create a spool, reserve resources, or launch a worker.
+        """
         if self._closed:
             raise ExecutionError("subprocess backend is closed")
         self._started = True
 
     def capabilities(self) -> frozenset[str]:
-        """Report local environment selection, output, and running cancellation support."""
+        """Report local environment selection, output, and running cancellation support.
+
+        Returns:
+            The immutable local capability set, including ``world_admission``.
+
+        Side Effects:
+            None. This query is inert and does not admit a requirement.
+        """
         return frozenset({"environment_selection", "world_admission", "live_output", "running_cancellation"})
 
     def create_future(self, submission_id: str, output: ExecutionOutput) -> SubProcessFuture[Any]:
-        """Create the stable inert concrete Future required before acceptance."""
+        """Create the stable inert concrete Future required before acceptance.
+
+        Args:
+            submission_id: Nonempty executor-generated submission identifier.
+            output: Exact unbound output holder for that submission.
+
+        Returns:
+            An inert :class:`SubProcessFuture` retaining the supplied identity.
+
+        Raises:
+            TypeError: If Future construction controls are invalid.
+            ValueError: If ``submission_id`` is invalid.
+
+        Side Effects:
+            Does not create a process, bind output, or reserve resources.
+        """
         return SubProcessFuture(submission_id, output=output, termination_timeout=self._config.termination_timeout)
 
     def submit(self, call: SubmittedCall[T], *, future: ExecutionFuture[T]) -> None:
         """Schedule exactly the supplied accepted Future and return ``None``.
 
-        A separate coordinator thread performs admission and launch. Any failure is
-        published on this same Future and no alternate candidate is invoked after
-        a worker has received GO.
+        Args:
+            call: Exact accepted spool and admission metadata.
+            future: Exact matching inert :class:`SubProcessFuture`.
+
+        Returns:
+            ``None``; asynchronous admission outcomes publish on ``future``.
+
+        Raises:
+            ExecutionError: If the backend is closed or call/Future identity is
+                mismatched or duplicated.
+
+        Side Effects:
+            Starts one coordinator admission thread. It may later launch one owned
+            process group; no alternate candidate runs after a worker receives GO.
         """
         if not isinstance(future, SubProcessFuture) or future.submission_id != call.submission_id or future.output is not call.output:
             raise ExecutionError("subprocess backend received a mismatched Future or call")
@@ -204,7 +267,24 @@ class SubProcessBackend(Backend):
             raise
 
     def discover(self, *, environment: EnvironmentRequirement | None = None, world: Any = None, timeout: float) -> DiscoverySnapshot:
-        """Return fresh bounded local candidates and resource observations without reservation."""
+        """Return fresh bounded local candidates and resource observations without reservation.
+
+        Args:
+            environment: Optional environment requirement for candidate evidence.
+            world: Optional world requirement for feasibility evidence.
+            timeout: Positive total probe budget in seconds.
+
+        Returns:
+            A non-reserving local discovery snapshot, possibly incomplete.
+
+        Raises:
+            TimeoutError: If bounded discovery exceeds ``timeout``.
+            ExecutionError: If required backend observation cannot complete.
+
+        Side Effects:
+            Runs bounded local inventory/environment probes but never launches a
+            submitted workload or reserves its capacity.
+        """
         deadline = time.monotonic() + timeout
         resources = self._resource_inventory(deadline)
         inventory = resources.inventory
@@ -237,13 +317,45 @@ class SubProcessBackend(Backend):
         return DiscoverySnapshot(datetime.now(timezone.utc), tuple(candidates), resources, tuple(plans), resources.complete and inventory_complete and not issues, tuple(issues))
 
     def resources(self, *, timeout: float) -> ResourceSnapshot:
-        """Observe current local inventory without launching or reserving a worker."""
+        """Observe current local inventory without launching or reserving a worker.
+
+        Args:
+            timeout: Positive total inventory observation budget in seconds.
+
+        Returns:
+            A backend-scoped local resource snapshot, possibly incomplete.
+
+        Raises:
+            TimeoutError: If the supplied budget has already elapsed.
+
+        Side Effects:
+            Runs an owned bounded inventory probe; it does not launch a workload
+            worker or add a resource reservation.
+        """
         if timeout <= 0:
             raise TimeoutError("resource observation timeout elapsed")
         return self._resource_inventory(time.monotonic() + timeout)
 
     def reconcile_cleanup(self, submission_id: str, *, timeout: float) -> None:
-        """Release only a known submission's owned process group and native handle."""
+        """Release only a known submission's owned process group and native handle.
+
+        Args:
+            submission_id: Exact accepted subprocess submission identifier.
+            timeout: Positive maximum owned-group reconciliation time in seconds.
+
+        Returns:
+            ``None`` after qualified process, socket, and charge release.
+
+        Raises:
+            ExecutionError: If the submission is unknown.
+            RuntimeError: If the matching Future is not terminal.
+            CleanupError: If launch ownership or group termination remains
+                unresolved; state remains retryable.
+
+        Side Effects:
+            May terminate only the submission's owned process group, close its
+            socket/job handle, and clear native Future associations.
+        """
         with self._lock:
             run = self._runs.get(submission_id)
             known = submission_id in self._known
@@ -287,7 +399,22 @@ class SubProcessBackend(Backend):
             self._launching.pop(submission_id, None)
 
     def close(self, *, cancel: bool, timeout: float | None) -> None:
-        """Reconcile only backend-owned groups, optionally requesting their cancellation."""
+        """Reconcile only backend-owned groups, optionally requesting their cancellation.
+
+        Args:
+            cancel: Whether to request owned-group cancellation before cleanup.
+            timeout: Optional cleanup budget; ``None`` uses termination policy.
+
+        Returns:
+            ``None`` after terminal owned groups are reconciled.
+
+        Raises:
+            CleanupError: If a terminal owned group cannot be reconciled.
+
+        Side Effects:
+            Stops future submission, may terminate backend-owned groups, and never
+            removes caller-owned directories or services.
+        """
         with self._lock:
             self._closed = True
             runs = tuple(self._runs.values())
