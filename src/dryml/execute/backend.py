@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Generic, Mapping, TypeVar
 
 from .protocol import (
     ExecutionError,
@@ -17,8 +17,59 @@ from .protocol import (
 )
 from .worker import execute_request
 
+if TYPE_CHECKING:
+    from dryml.environments import EnvironmentRequirement
+    from dryml.worlds import WorldRequirement
 
-class ExecutionFuture(abc.ABC):
+    from .models import DiscoverySnapshot, ResourceSnapshot, SubmittedCall
+    from .output import ExecutionOutput
+
+
+T = TypeVar("T")
+
+
+class Backend(abc.ABC):
+    """Define the additive backend contract without launching a workload.
+
+    Concrete U4+ backends own discovery, admission, transfer, native execution,
+    and cleanup for already accepted calls. This interface intentionally coexists
+    with ``BackendBase`` until the U7 public cutover preserves no legacy users.
+    """
+
+    @abc.abstractmethod
+    def start(self) -> None:
+        """Initialize the selected backend when an executor explicitly starts it."""
+
+    @abc.abstractmethod
+    def capabilities(self) -> frozenset[str]:
+        """Return supported control capability names without claiming admission."""
+
+    @abc.abstractmethod
+    def create_future(self, submission_id: str, output: "ExecutionOutput") -> "ExecutionFuture[T]":
+        """Create one inert concrete future without launching or binding output."""
+
+    @abc.abstractmethod
+    def submit(self, call: "SubmittedCall[T]", *, future: "ExecutionFuture[T]") -> None:
+        """Schedule one accepted descriptor-only call on its matching future."""
+
+    @abc.abstractmethod
+    def discover(self, *, environment: "EnvironmentRequirement | None" = None, world: "WorldRequirement | None" = None, timeout: float) -> "DiscoverySnapshot":
+        """Return a bounded discovery snapshot without invoking workload code."""
+
+    @abc.abstractmethod
+    def resources(self, *, timeout: float) -> "ResourceSnapshot":
+        """Return the selected backend's bounded resource observation."""
+
+    @abc.abstractmethod
+    def reconcile_cleanup(self, submission_id: str, *, timeout: float) -> None:
+        """Retry only the named submission's cleanup; unknown IDs are errors."""
+
+    @abc.abstractmethod
+    def close(self, *, cancel: bool, timeout: float | None) -> None:
+        """Close this backend without cancelling unrelated caller-owned resources."""
+
+
+class ExecutionFuture(abc.ABC, Generic[T]):
     @abc.abstractmethod
     def done(self) -> bool:
         raise NotImplementedError
