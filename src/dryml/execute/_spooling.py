@@ -39,6 +39,14 @@ _EXECUTE_RESOURCE_BASES = frozenset({
 })
 
 
+class _SerializedLimitExceeded(ValueError):
+    """Identify only the bounded writer's configured capacity failure."""
+
+
+class _UnsupportedTransportResource(TypeError):
+    """Identify a fixed, preflight-owned live-resource rejection."""
+
+
 @dataclass(frozen=True, slots=True)
 class BudgetSnapshot:
     """Expose immutable process-wide quota counters for inspection and tests."""
@@ -224,13 +232,13 @@ def _reject_live_resource(value: object) -> None:
     """Reject a live or semantic object at the point dill actually visits it."""
     value_type = type(value)
     if any(cls.__module__ == "dryml.core" or cls.__module__.startswith("dryml.core.") for cls in value_type.__mro__):
-        raise TypeError("live resource: core semantic values are unsupported by Execute transport")
+        raise _UnsupportedTransportResource("live resource: core semantic values are unsupported by Execute transport")
     if isinstance(value, (io.IOBase, _LOCK_TYPES, GeneratorType, CoroutineType, socket.socket, threading.Thread, concurrent.futures.Executor, concurrent.futures.Future)):
-        raise TypeError(f"live resource: {value_type.__name__} is unsupported by Execute transport")
+        raise _UnsupportedTransportResource("live resource: streams, locks, sockets, threads, and futures are unsupported by Execute transport")
     if isinstance(value, Connection):
-        raise TypeError("live resource: Connection is unsupported by Execute transport")
+        raise _UnsupportedTransportResource("live resource: Connection is unsupported by Execute transport")
     if any(cls.__module__.startswith("dryml.execute") and cls.__name__ in _EXECUTE_RESOURCE_BASES for cls in value_type.__mro__):
-        raise TypeError(f"live resource: {value_type.__name__} is unsupported by Execute transport")
+        raise _UnsupportedTransportResource("live resource: Execute runtime values are unsupported by Execute transport")
 
 
 class _CheckedPickler(dill.Pickler):
@@ -257,7 +265,7 @@ class _BoundedWriter(io.RawIOBase):
     def write(self, data: bytes) -> int:
         """Append one dill chunk or reject an oversized serialization."""
         if len(self._buffer) + len(data) > self._limit:
-            raise ValueError(f"serialized {self._label} exceeds {self._label} limit")
+            raise _SerializedLimitExceeded(f"serialized {self._label} exceeds {self._label} limit")
         self._buffer.extend(data)
         return len(data)
 
@@ -273,14 +281,12 @@ def _serialize(value: object, *, limit_bytes: int, label: str, checked: bool) ->
     try:
         pickler = _CheckedPickler(writer, protocol=5, byref=False, recurse=True) if checked else dill.Pickler(writer, protocol=5, byref=False, recurse=True)
         pickler.dump(value)
-    except ValueError:
-        raise
-    except TypeError as exc:
-        if str(exc).startswith("live resource:"):
-            raise
-        raise TypeError(f"{label} graph cannot be serialized for Execute transport") from exc
-    except Exception as exc:
-        raise TypeError(f"{label} graph cannot be serialized for Execute transport") from exc
+    except _SerializedLimitExceeded:
+        raise ValueError(f"serialized {label} exceeds {label} limit") from None
+    except _UnsupportedTransportResource:
+        raise TypeError("live resource is unsupported by Execute transport") from None
+    except Exception:
+        raise TypeError(f"{label} graph cannot be serialized for Execute transport") from None
     return writer.bytes()
 
 
@@ -375,6 +381,179 @@ class _OwnedSpool:
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
+def _is_windows() -> bool:
+    """Return whether the active host needs native spool ACL handling."""
+    return os.name == "nt"
+
+
+class _NativeWindowsAclApi:
+    """Apply and inspect a protected current-user DACL through typed Windows APIs."""
+
+    _DACL_SECURITY_INFORMATION = 0x00000004
+    _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+    _SE_DACL_PROTECTED = 0x1000
+    _TOKEN_QUERY = 0x0008
+    _TOKEN_USER = 1
+    _ERROR_INSUFFICIENT_BUFFER = 122
+    _ACCESS_ALLOWED_ACE_TYPE = 0
+    _FILE_ALL_ACCESS = 0x1F01FF
+
+    def __init__(self) -> None:
+        import ctypes
+
+        self._ctypes = ctypes
+        self._advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = ctypes.c_void_p
+        dword = ctypes.c_uint32
+        bool_ = ctypes.c_int
+        self._advapi32.OpenProcessToken.argtypes = (handle, dword, ctypes.POINTER(handle))
+        self._advapi32.OpenProcessToken.restype = bool_
+        self._advapi32.GetTokenInformation.argtypes = (handle, ctypes.c_int, ctypes.c_void_p, dword, ctypes.POINTER(dword))
+        self._advapi32.GetTokenInformation.restype = bool_
+        self._advapi32.ConvertSidToStringSidW.argtypes = (handle, ctypes.POINTER(ctypes.c_wchar_p))
+        self._advapi32.ConvertSidToStringSidW.restype = bool_
+        self._advapi32.ConvertStringSidToSidW.argtypes = (ctypes.c_wchar_p, ctypes.POINTER(handle))
+        self._advapi32.ConvertStringSidToSidW.restype = bool_
+        self._advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (ctypes.c_wchar_p, dword, ctypes.POINTER(handle), ctypes.POINTER(dword))
+        self._advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = bool_
+        self._advapi32.SetFileSecurityW.argtypes = (ctypes.c_wchar_p, dword, handle)
+        self._advapi32.SetFileSecurityW.restype = bool_
+        self._advapi32.GetFileSecurityW.argtypes = (ctypes.c_wchar_p, dword, ctypes.c_void_p, dword, ctypes.POINTER(dword))
+        self._advapi32.GetFileSecurityW.restype = bool_
+        self._advapi32.GetSecurityDescriptorControl.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(dword))
+        self._advapi32.GetSecurityDescriptorControl.restype = bool_
+        self._advapi32.GetSecurityDescriptorDacl.argtypes = (ctypes.c_void_p, ctypes.POINTER(bool_), ctypes.POINTER(handle), ctypes.POINTER(bool_))
+        self._advapi32.GetSecurityDescriptorDacl.restype = bool_
+        self._advapi32.GetAclInformation.argtypes = (handle, ctypes.c_void_p, dword, dword)
+        self._advapi32.GetAclInformation.restype = bool_
+        self._advapi32.GetAce.argtypes = (handle, dword, ctypes.POINTER(handle))
+        self._advapi32.GetAce.restype = bool_
+        self._advapi32.EqualSid.argtypes = (handle, handle)
+        self._advapi32.EqualSid.restype = bool_
+        self._kernel32.GetCurrentProcess.argtypes = ()
+        self._kernel32.GetCurrentProcess.restype = handle
+        self._kernel32.CloseHandle.argtypes = (handle,)
+        self._kernel32.CloseHandle.restype = bool_
+        self._kernel32.LocalFree.argtypes = (handle,)
+        self._kernel32.LocalFree.restype = handle
+
+    def _check(self, result: object, operation: str) -> None:
+        """Raise a native error when a checked security operation fails."""
+        if not result:
+            raise OSError(self._ctypes.get_last_error(), operation)
+
+    def current_user_sid(self) -> str:
+        """Return the current process token's SID as an SDDL principal string."""
+        ctypes = self._ctypes
+        token = ctypes.c_void_p()
+        self._check(self._advapi32.OpenProcessToken(self._kernel32.GetCurrentProcess(), self._TOKEN_QUERY, ctypes.byref(token)), "OpenProcessToken failed")
+        try:
+            size = ctypes.c_uint32()
+            if self._advapi32.GetTokenInformation(token, self._TOKEN_USER, None, 0, ctypes.byref(size)) or ctypes.get_last_error() != self._ERROR_INSUFFICIENT_BUFFER:
+                raise OSError(ctypes.get_last_error(), "GetTokenInformation sizing failed")
+            buffer = ctypes.create_string_buffer(size.value)
+            self._check(self._advapi32.GetTokenInformation(token, self._TOKEN_USER, buffer, size.value, ctypes.byref(size)), "GetTokenInformation failed")
+            sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p)).contents
+            text = ctypes.c_wchar_p()
+            self._check(self._advapi32.ConvertSidToStringSidW(sid, ctypes.byref(text)), "ConvertSidToStringSidW failed")
+            try:
+                return str(text.value)
+            finally:
+                self._check(not self._kernel32.LocalFree(text), "LocalFree failed for SID")
+        finally:
+            self._check(self._kernel32.CloseHandle(token), "CloseHandle failed for token")
+
+    def set_private_dacl(self, path: Path, sid: str) -> None:
+        """Replace a path DACL with protected current-user, SYSTEM, and admin access."""
+        ctypes = self._ctypes
+        descriptor = ctypes.c_void_p()
+        definition = f"D:P(A;;FA;;;{sid})(A;;FA;;;SY)(A;;FA;;;BA)"
+        self._check(self._advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(definition, 1, ctypes.byref(descriptor), None), "ConvertStringSecurityDescriptorToSecurityDescriptorW failed")
+        try:
+            security_information = self._DACL_SECURITY_INFORMATION | self._PROTECTED_DACL_SECURITY_INFORMATION
+            self._check(self._advapi32.SetFileSecurityW(str(path), security_information, descriptor), "SetFileSecurityW failed")
+        finally:
+            self._check(not self._kernel32.LocalFree(descriptor), "LocalFree failed for security descriptor")
+
+    def verify_private_dacl(self, path: Path, sid: str) -> None:
+        """Require the exact protected allow-only DACL established for a spool path."""
+        ctypes = self._ctypes
+        size = ctypes.c_uint32()
+        if self._advapi32.GetFileSecurityW(str(path), self._DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(size)) or ctypes.get_last_error() != self._ERROR_INSUFFICIENT_BUFFER:
+            raise OSError(ctypes.get_last_error(), "GetFileSecurityW sizing failed")
+        descriptor = ctypes.create_string_buffer(size.value)
+        self._check(self._advapi32.GetFileSecurityW(str(path), self._DACL_SECURITY_INFORMATION, descriptor, size.value, ctypes.byref(size)), "GetFileSecurityW failed")
+        control = ctypes.c_uint16()
+        revision = ctypes.c_uint32()
+        self._check(self._advapi32.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)), "GetSecurityDescriptorControl failed")
+        if not control.value & self._SE_DACL_PROTECTED:
+            raise OSError("spool DACL remains inheritable")
+        present = ctypes.c_int()
+        dacl = ctypes.c_void_p()
+        defaulted = ctypes.c_int()
+        self._check(self._advapi32.GetSecurityDescriptorDacl(descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)), "GetSecurityDescriptorDacl failed")
+        if not present.value or not dacl:
+            raise OSError("spool DACL is absent")
+
+        class _AclSizeInformation(ctypes.Structure):
+            _fields_ = [("AceCount", ctypes.c_uint32), ("AclBytesInUse", ctypes.c_uint32), ("AclBytesFree", ctypes.c_uint32)]
+
+        class _AceHeader(ctypes.Structure):
+            _fields_ = [("AceType", ctypes.c_ubyte), ("AceFlags", ctypes.c_ubyte), ("AceSize", ctypes.c_uint16)]
+
+        info = _AclSizeInformation()
+        self._check(self._advapi32.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), 2), "GetAclInformation failed")
+        allowed_text = (sid, "S-1-5-18", "S-1-5-32-544")
+        allowed: list[ctypes.c_void_p] = []
+        try:
+            for text in allowed_text:
+                parsed = ctypes.c_void_p()
+                self._check(self._advapi32.ConvertStringSidToSidW(text, ctypes.byref(parsed)), "ConvertStringSidToSidW failed")
+                allowed.append(parsed)
+            if info.AceCount != len(allowed):
+                raise OSError("spool DACL has an unexpected ACE count")
+            remaining = set(range(len(allowed)))
+            for index in range(info.AceCount):
+                ace = ctypes.c_void_p()
+                self._check(self._advapi32.GetAce(dacl, index, ctypes.byref(ace)), "GetAce failed")
+                header = ctypes.cast(ace, ctypes.POINTER(_AceHeader)).contents
+                mask = ctypes.cast(ctypes.c_void_p(ace.value + ctypes.sizeof(_AceHeader)), ctypes.POINTER(ctypes.c_uint32)).contents.value
+                ace_sid = ctypes.c_void_p(ace.value + ctypes.sizeof(_AceHeader) + ctypes.sizeof(ctypes.c_uint32))
+                matches = [position for position in remaining if self._advapi32.EqualSid(ace_sid, allowed[position])]
+                if header.AceType != self._ACCESS_ALLOWED_ACE_TYPE or header.AceFlags or header.AceSize < 8 or mask != self._FILE_ALL_ACCESS or len(matches) != 1:
+                    raise OSError("spool DACL grants unexpected access")
+                remaining.remove(matches[0])
+            if remaining:
+                raise OSError("spool DACL omits a required private principal")
+        finally:
+            for parsed in allowed:
+                self._check(not self._kernel32.LocalFree(parsed), "LocalFree failed for parsed SID")
+
+
+class _WindowsPrivateAcl:
+    """Apply and verify the private Windows spool ACL without exposing native errors."""
+
+    def __init__(self, api: _NativeWindowsAclApi) -> None:
+        self._api = api
+
+    def protect(self, path: Path) -> None:
+        """Require a private DACL on one newly owned spool directory or file."""
+        sid = self._api.current_user_sid()
+        self._api.set_private_dacl(path, sid)
+        self._api.verify_private_dacl(path, sid)
+
+
+def _secure_windows_spool_path(path: Path) -> None:
+    """Verify Windows private storage before any invocation or result bytes are written."""
+    if not _is_windows():
+        return
+    try:
+        _WindowsPrivateAcl(_NativeWindowsAclApi()).protect(path)
+    except Exception:
+        raise PermissionError("unable to establish private Windows spool permissions") from None
+
+
 class PayloadSpooler:
     """Publish, receive, and reconcile two bounded files inside one owned child."""
 
@@ -405,6 +584,7 @@ class PayloadSpooler:
             # Register the cleanup identity before mkdir so interruption after a
             # successful directory creation cannot orphan its reservation.
             child.mkdir(mode=0o700)
+            _secure_windows_spool_path(child)
             data = serialize_call(fn, args, kwargs, limit_bytes=self._config.invocation_limit_bytes)
             self._write_new(owned.invocation_path, data, "invocation")
             reservation.refund_invocation(len(data))
@@ -494,6 +674,7 @@ class PayloadSpooler:
     def _write_new(self, path: Path, data: bytes, label: str) -> None:
         """Publish one known file completely before exposing its descriptor."""
         with path.open("xb") as stream:
+            _secure_windows_spool_path(path)
             written = stream.write(data)
             if written != len(data):
                 raise OSError(f"short write while publishing {label} spool")
