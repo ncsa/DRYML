@@ -34,9 +34,10 @@ def _loopback_ray_address() -> str:
 
 def _borrowed_ray_addresses() -> tuple[str, ...]:
     """Exercise both Ray's node endpoint and its loopback alias when distinct."""
+    address = _ray_address()
     from ray._private.services import canonicalize_bootstrap_address
 
-    node_address = canonicalize_bootstrap_address(_ray_address())
+    node_address = canonicalize_bootstrap_address(address)
     assert isinstance(node_address, str)
     return tuple(dict.fromkeys((node_address, _loopback_ray_address())))
 

@@ -92,6 +92,90 @@ def test_polling_never_sleeps_past_the_remaining_execution_deadline():
     assert monotonic() - started < 0.2
 
 
+def _closed_pipes_wait_for_release(marker: Path, release: Path) -> str:
+    """Build a child that closes output before a caller-controlled normal exit."""
+    return (
+        "import os\n"
+        "import time\n"
+        f"open({str(marker)!r}, 'w', encoding='ascii').write('pipes-closed')\n"
+        "os.close(1)\n"
+        "os.close(2)\n"
+        f"while not os.path.exists({str(release)!r}):\n"
+        "    time.sleep(0.001)\n"
+    )
+
+
+def test_closed_pipes_do_not_terminate_a_normally_finishing_root(tmp_path: Path):
+    """EOF drains output but waits within the execution bound for the root exit."""
+    marker = tmp_path / "pipes-closed"
+    release = tmp_path / "release"
+
+    def release_child() -> None:
+        while not marker.exists():
+            sleep(0.001)
+        sleep(0.02)
+        release.write_text("release", encoding="ascii")
+
+    thread = Thread(target=release_child, daemon=True)
+    thread.start()
+    try:
+        result = run_bounded(
+            [sys.executable, "-c", _closed_pipes_wait_for_release(marker, release)],
+            timeout=1,
+            termination_timeout=0.05,
+            output_limit=64,
+        )
+    finally:
+        thread.join(1)
+    assert result.returncode == 0
+    assert not result.timed_out
+    assert not result.cancelled
+    assert result.cleanup_complete
+
+
+def test_closed_pipes_still_honor_the_execution_deadline(tmp_path: Path):
+    """A root that closes output but never exits is terminated at its deadline."""
+    marker = tmp_path / "pipes-closed"
+    release = tmp_path / "never-release"
+    result = run_bounded(
+        [sys.executable, "-c", _closed_pipes_wait_for_release(marker, release)],
+        timeout=0.05,
+        termination_timeout=0.05,
+        output_limit=64,
+    )
+    assert marker.exists()
+    assert result.timed_out
+    assert result.cleanup_complete
+
+
+def test_closed_pipes_still_honor_cancellation(tmp_path: Path):
+    """Caller cancellation terminates a root after both output pipes reach EOF."""
+    marker = tmp_path / "pipes-closed"
+    release = tmp_path / "never-release"
+    cancelled = Event()
+
+    def cancel_child() -> None:
+        while not marker.exists():
+            sleep(0.001)
+        cancelled.set()
+
+    thread = Thread(target=cancel_child, daemon=True)
+    thread.start()
+    try:
+        result = run_bounded(
+            [sys.executable, "-c", _closed_pipes_wait_for_release(marker, release)],
+            timeout=1,
+            termination_timeout=0.05,
+            output_limit=64,
+            cancelled=cancelled,
+        )
+    finally:
+        cancelled.set()
+        thread.join(1)
+    assert result.cancelled
+    assert result.cleanup_complete
+
+
 @pytest.mark.skipif(os.name != "posix", reason="process-group escape fixtures require POSIX")
 def test_cancellation_during_post_root_drain_is_bounded(tmp_path: Path):
     """Cancellation remains effective after the root exits but an escape holds output."""

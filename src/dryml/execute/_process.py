@@ -206,7 +206,10 @@ def run_bounded(
             for name, stream in raw_streams.items():
                 selector.register(stream, selectors.EVENT_READ, name)
         timed_out = cancelled_result = terminated = False
-        while raw_streams:
+        # EOF only proves that retained output is complete. The root can still be
+        # finishing normally, particularly when Windows closes its pipe handles
+        # before publishing its final exit status.
+        while raw_streams or (not terminated and process.poll() is None):
             now = time.monotonic()
             if cancelled is not None and cancelled.is_set() and not cancelled_result:
                 cancelled_result = True
@@ -227,7 +230,7 @@ def run_bounded(
             drain_deadline = finish_at if terminated or process.poll() is not None else min(stop_at, finish_at)
             _drain_ready(raw_streams, selector, captured, truncated, complete, output_limit, read_chunk_bytes, poll_interval, drain_deadline)
         if not terminated:
-            # Both pipes closed before the root did; still release the owned tree.
+            # A defensive fallback for an unexpected loop exit retains ownership.
             cleanup_complete = owner.reconcile(deadline=_cleanup_deadline(finish_at, termination_timeout), poll_interval=float(poll_interval))
         _close_pipes(process, raw_streams.values())
         if selector is not None:

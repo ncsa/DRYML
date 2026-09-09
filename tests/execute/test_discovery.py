@@ -114,13 +114,15 @@ def test_malformed_probe_evidence_is_not_launchable_or_compatible(monkeypatch):
     assert candidate.issues[0].code == "probe_malformed"
 
 
-def test_probe_applies_spec_environment_and_rejects_truncated_owner_evidence(tmp_path: Path):
+def test_probe_applies_spec_environment_and_rejects_truncated_owner_evidence(monkeypatch):
     """Probe launch uses owner selector semantics and truncation cannot be success."""
-    executable = tmp_path / "fake-python"
-    executable.write_text("#!/bin/sh\nprintf '%s!' \"$PROBE_SENTINEL\"\n", encoding="utf-8")
-    executable.chmod(0o755)
+    monkeypatch.setattr(
+        PythonExecutableSpec,
+        "probe_command",
+        lambda _spec: [sys.executable, "-c", "import os, sys; sys.stdout.write(os.environ['PROBE_SENTINEL'] * 2)"],
+    )
     candidate = probe_candidate(
-        PythonExecutableSpec(executable=str(executable), env={"PROBE_SENTINEL": "x"}),
+        PythonExecutableSpec(executable=sys.executable, env={"PROBE_SENTINEL": "x"}),
         interpreter=Path(sys.executable),
         timeout=1,
         output_limit=1,
