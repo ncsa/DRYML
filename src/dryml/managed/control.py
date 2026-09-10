@@ -886,7 +886,7 @@ def _publish_new_file(path: str, payload: bytes) -> None:
 def _sync_file(path: str) -> None:
     """Synchronize a regular file through the platform-supported file seam."""
 
-    with open(path, "rb") as source:
+    with open(path, "r+b") as source:
         os.fsync(source.fileno())
 
 

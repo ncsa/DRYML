@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import multiprocessing
 import os
-import hashlib
 from threading import Barrier, Event, Thread
 from uuid import uuid4
 
@@ -211,6 +212,40 @@ def test_pending_fsync_failure_preserves_old_current_with_a_typed_outcome(tmp_pa
         control.transition(initial.operation_id, proposed, expected_generation=1)
     assert caught.value.outcome == "not_committed"
     assert control.inspect(initial.operation_id) == initial
+
+
+def test_initial_reconciliation_syncs_current_with_write_handle_without_changing_bytes(tmp_path, monkeypatch):
+    """Simulate Windows fsync requirements while retaining the exact initial bytes."""
+
+    store = DirStore(tmp_path / "store")
+    control = ManagedControlStore(store, store)
+    initial = _snapshot()
+    current = control._current_path(control._operation_path(initial.operation_id))
+    current_modes = {}
+    synced_current_modes = []
+    original_open = open
+    original_fsync = control_module.os.fsync
+
+    def windows_open(path, mode="r", *args, **kwargs):
+        source = original_open(path, mode, *args, **kwargs)
+        if os.fspath(path) == current:
+            current_modes[source.fileno()] = mode
+        return source
+
+    def windows_fsync(fd):
+        if fd in current_modes and "+" not in current_modes[fd]:
+            raise OSError(errno.EBADF, "Windows fsync requires a write-capable handle")
+        if fd in current_modes:
+            synced_current_modes.append(current_modes.pop(fd))
+        return original_fsync(fd)
+
+    monkeypatch.setattr(control_module, "open", windows_open, raising=False)
+    monkeypatch.setattr(control_module.os, "fsync", windows_fsync)
+    assert control.create_initial(initial) == initial
+    with open(current, "rb") as source:
+        assert source.read() == initial.to_bytes()
+    assert synced_current_modes == ["r+b"]
+    assert control.reconcile(initial.operation_id) == initial
 
 
 def test_replace_failure_after_current_swap_reconciles_exact_new_authority(tmp_path, monkeypatch):
