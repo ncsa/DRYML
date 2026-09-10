@@ -12,12 +12,13 @@ import pytest
 
 from dryml.environments import EnvironmentRequirement
 from dryml.environments.specs import CurrentEnvironmentSpec
+from dryml.execute import _worker as worker_module
 from dryml.execute import subprocess as subprocess_module
 from dryml.execute.errors import AdmissionError
 from dryml.execute.accounting import ResourceAuthority
 from dryml.execute.executor import Executor
 from dryml.execute.subprocess import SubProcessConfig
-from dryml.worlds import CountConstraint, LocalResourceInventory, ResourceRequirement, RoleRequirement, WorldRequirement
+from dryml.worlds import CountConstraint, LocalResourceInventory, ResourceRequirement, RoleRequirement, WorldRequirement, WorldSpec, assign_local_world
 
 
 def _require_cpu_affinity() -> None:
@@ -33,6 +34,18 @@ def _simulated_affinity_os(monkeypatch) -> SimpleNamespace:
     monkeypatch.setattr(platform_os, "sched_setaffinity", lambda _pid, _cpus: None, raising=False)
     monkeypatch.setattr(subprocess_module, "os", platform_os)
     return platform_os
+
+
+def _owner_gpu_allocation():
+    """Return the owner-selected synthetic CPU/GPU allocation used for worker controls."""
+    inventory = LocalResourceInventory((0,), {"gpu": (0,)})
+    world = WorldSpec.from_payload({"roles": {"main": {"process": {"resources": {"cpus": 1, "accelerators": {"gpu": 1}}}}}})
+    expected = assign_local_world(world, inventory=inventory)
+    requirement = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(cpus=CountConstraint(1, 1), accelerators={"gpu": CountConstraint(1, 1)}))})
+    reservation = ResourceAuthority().reserve_local("worker-controls", requirement, inventory, generation="subprocess-v1", attempt="0")
+    assert reservation is not None
+    assert reservation.allocation == expected
+    return reservation.allocation
 
 
 def test_environment_is_checked_against_actual_worker_owner_evidence(tmp_path: Path):
@@ -116,8 +129,8 @@ def test_shared_local_authority_keeps_constrained_executors_disjoint_and_release
 
 def test_injected_gpu_allocation_applies_exact_cuda_visibility(tmp_path: Path, monkeypatch):
     """The accelerator branch verifies a real worker control without hardware claims."""
-    _simulated_affinity_os(monkeypatch)
-    cpu = 0
+    _require_cpu_affinity()
+    cpu = min(os.sched_getaffinity(0))
     world = WorldRequirement({"main": RoleRequirement(resources=ResourceRequirement(accelerators={"gpu": CountConstraint(1, 1)}))})
     executor = Executor(SubProcessConfig(spool_directory=tmp_path))
     executor.start()
@@ -129,6 +142,46 @@ def test_injected_gpu_allocation_applies_exact_cuda_visibility(tmp_path: Path, m
         future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=5)
+
+
+def test_worker_allocation_controls_apply_synthetic_cpu_and_gpu_without_hardware(monkeypatch):
+    """The worker control path is portable while retaining exact control evidence."""
+    allocation = _owner_gpu_allocation()
+    calls: list[tuple[str, int, set[int]]] = []
+    affinity = {7}
+    environment: dict[str, str] = {}
+
+    def set_affinity(pid: int, cpus: set[int]) -> None:
+        calls.append(("set", pid, set(cpus)))
+        affinity.clear()
+        affinity.update(cpus)
+
+    def get_affinity(pid: int) -> set[int]:
+        calls.append(("get", pid, set(affinity)))
+        return set(affinity)
+
+    monkeypatch.setattr(worker_module, "os", SimpleNamespace(environ=environment, sched_setaffinity=set_affinity, sched_getaffinity=get_affinity))
+
+    applied = worker_module._apply_allocation(allocation, environment_id=None)
+
+    assert calls == [("set", 0, {0}), ("get", 0, {0})]
+    assert environment["CUDA_VISIBLE_DEVICES"] == "0"
+    assert applied.backend["execute_controls"] == {"cpus": "applied", "accelerators": "applied"}
+
+
+def test_worker_allocation_controls_reject_contradictory_cuda_visibility(monkeypatch):
+    """A worker refuses an inherited visibility value that differs from its grant."""
+    allocation = _owner_gpu_allocation()
+    environment = {"CUDA_VISIBLE_DEVICES": "1"}
+    monkeypatch.setattr(
+        worker_module,
+        "os",
+        SimpleNamespace(environ=environment, sched_setaffinity=lambda _pid, _cpus: None, sched_getaffinity=lambda _pid: {0}),
+    )
+
+    with pytest.raises(ValueError, match="CUDA visibility conflicts"):
+        worker_module._apply_allocation(allocation, environment_id=None)
+    assert environment["CUDA_VISIBLE_DEVICES"] == "1"
 
 
 def test_contended_local_admission_reprobes_only_after_authority_transition(tmp_path: Path, monkeypatch):
