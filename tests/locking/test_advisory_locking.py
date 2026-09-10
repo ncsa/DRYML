@@ -120,12 +120,12 @@ def test_windows_adapter_does_not_classify_preparation_permission_error_as_conte
         def locking(fd, operation, size):
             raise AssertionError("Windows lock preparation must fail before locking")
 
-    def deny_fstat(fd):
+    def deny_lseek(fd, offset, whence):
         raise OSError(errno.EACCES, "permission denied")
 
     monkeypatch.setattr(locking, "fcntl", None)
     monkeypatch.setattr(locking, "msvcrt", FakeMSVCRT)
-    monkeypatch.setattr(locking.os, "fstat", deny_fstat)
+    monkeypatch.setattr(locking.os, "lseek", deny_lseek)
     fd = os.open(tmp_path / "claim.lock", os.O_CREAT | os.O_RDWR)
     try:
         with pytest.raises(LockError, match="preparation failed"):
@@ -273,8 +273,8 @@ def test_same_thread_exclusive_then_shared_fails_without_waiting(tmp_path):
         exclusive.release()
 
 
-def test_windows_adapter_seam_uses_exclusive_fallback_and_unlocks(tmp_path, monkeypatch):
-    """The Windows seam initializes byte zero and uses its exclusive fallback."""
+def test_windows_adapter_locks_beyond_eof_without_writing(tmp_path, monkeypatch):
+    """Windows locking leaves an empty lock file unchanged while locking byte zero."""
 
     class FakeMSVCRT:
         LK_LOCK = 1
@@ -286,13 +286,29 @@ def test_windows_adapter_seam_uses_exclusive_fallback_and_unlocks(tmp_path, monk
         def locking(cls, fd, operation, size):
             cls.calls.append((fd, operation, size))
 
+    class WindowsOSProxy:
+        SEEK_SET = os.SEEK_SET
+        fstat = staticmethod(os.fstat)
+        lseek = staticmethod(os.lseek)
+
+        @staticmethod
+        def write(fd, data):
+            raise OSError(errno.EACCES, "lock-file writes are forbidden")
+
     monkeypatch.setattr(locking, "fcntl", None)
     monkeypatch.setattr(locking, "msvcrt", FakeMSVCRT)
-    lease = FileLock(tmp_path / "windows.lock", shared=True)
-    assert lease.acquire()
-    lease.release()
+    monkeypatch.setattr(locking, "os", WindowsOSProxy)
+    path = tmp_path / "windows.lock"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR)
+    try:
+        assert try_lock_file(fd)
+        unlock_file(fd)
+        assert os.fstat(fd).st_size == 0
+    finally:
+        os.close(fd)
 
-    assert [call[1] for call in FakeMSVCRT.calls] == [FakeMSVCRT.LK_LOCK, FakeMSVCRT.LK_UNLCK]
+    assert [call[1] for call in FakeMSVCRT.calls] == [FakeMSVCRT.LK_NBLCK, FakeMSVCRT.LK_UNLCK]
+    assert [call[2] for call in FakeMSVCRT.calls] == [1, 1]
 
 
 def test_suitability_check_is_limited_to_a_local_directory_shape(tmp_path):

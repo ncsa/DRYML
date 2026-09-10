@@ -114,9 +114,8 @@ def _lock_file(fd: int, *, shared: bool, blocking: bool) -> bool:
     if msvcrt is None:
         raise LockUnavailableError("No supported advisory-lock primitive is available on this platform.")
     try:
-        if os.fstat(fd).st_size == 0:
-            if os.write(fd, b"\0") != 1:
-                raise OSError("could not initialize the Windows lock byte")
+        # The Windows CRT permits locking byte zero beyond EOF, avoiding a
+        # racy write before acquiring the shared coordination range.
         os.lseek(fd, 0, os.SEEK_SET)
     except OSError as error:
         raise LockError(f"Windows advisory lock preparation failed: {error}") from error

@@ -19,7 +19,9 @@ Instances are non-reentrant, `release()` is idempotent, and context-manager
 exit closes only the instance's descriptor. An instance must be acquired and
 released by the same thread: a cross-thread `release()` raises `LockError` and
 leaves the owning thread's lease intact. Lock files are durable coordination
-names and are never unlinked by this module.
+names and are never unlinked by this module. The Windows adapter locks byte zero
+even when it lies past end-of-file, so acquiring a lock does not initialize or
+otherwise alter an empty lock file.
 
 SQLite-style consumers that already own a descriptor use
 `try_lock_file(fd, shared=False)` and `unlock_file(fd)`. These functions never
