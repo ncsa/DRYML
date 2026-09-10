@@ -72,24 +72,32 @@ def test_short_write_cleans_preflight_and_failed_disposal_retains_its_charge(tmp
     original_open = Path.open
 
     class ShortWriter:
+        def __init__(self, file):
+            self.file = file
+
         def __enter__(self):
+            self.file.__enter__()
             return self
 
-        def __exit__(self, *_args):
-            return False
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
 
         def write(self, data):
+            self.file.write(data[:-1])
             return len(data) - 1
 
         def flush(self):
-            pass
+            return self.file.flush()
 
         def fileno(self):
-            return 0
+            return self.file.fileno()
+
+        def close(self):
+            return self.file.close()
 
     def short_open(path, *args, **kwargs):
         if path.name == "invocation.dill":
-            return ShortWriter()
+            return ShortWriter(original_open(path, *args, **kwargs))
         return original_open(path, *args, **kwargs)
 
     try:
