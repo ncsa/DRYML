@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import inspect
-import time
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 
 import pytest
 
@@ -38,21 +37,43 @@ def test_close_waits_for_work_and_cancel_close_requests_prestart_cancellation(tm
     assert executor.state == "closed"
 
 
-def test_normal_close_waits_past_termination_timeout_for_accepted_work(tmp_path):
-    """Normal closure preserves its unbounded work wait despite a tiny cleanup bound."""
+def test_normal_close_waits_past_termination_timeout_for_accepted_work(tmp_path, monkeypatch):
+    """Normal closure preserves its unbounded work wait despite a finite cleanup bound."""
     from dryml.execute.executor import Executor
 
     backend = FakeBackend()
     gate = Event()
     backend.run_gate = gate
-    executor = Executor(config(tmp_path, backend, termination_timeout=0.01))
-    executor.submit(lambda: 2)
-    closer = Thread(target=executor.close)
-    closer.start()
-    time.sleep(0.05)
-    assert closer.is_alive()
-    gate.set()
-    closer.join(1)
+    executor = Executor(config(tmp_path, backend, termination_timeout=1))
+    future = executor.submit(lambda: 2)
+    close_waiting = Event()
+    finished = Event()
+    failures: list[BaseException] = []
+
+    def close() -> None:
+        _capture(failures, executor.close)
+        finished.set()
+
+    closer = Thread(target=close)
+    original_wait = executor._condition.wait
+
+    def observe_close_wait(timeout=None):
+        if current_thread() is closer:
+            close_waiting.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(executor._condition, "wait", observe_close_wait)
+    try:
+        closer.start()
+        assert close_waiting.wait(1)
+        assert not finished.wait(1.1)
+    finally:
+        gate.set()
+        closer.join(2)
+
+    assert not closer.is_alive()
+    assert not failures
+    assert future.result() == 2
     assert executor.state == "closed"
 
 
@@ -79,21 +100,39 @@ def test_cancel_close_requests_running_cancellation_before_waiting_for_dispatch(
     assert executor.state == "closed"
 
 
-def test_normal_close_starts_an_immediately_accepted_pending_call(tmp_path):
+def test_normal_close_starts_an_immediately_accepted_pending_call(tmp_path, monkeypatch):
     """Close waits for accepted initialization instead of rejecting that call as closing."""
     from dryml.execute.executor import Executor
 
     backend = FakeBackend()
     backend.start_gate = Event()
-    executor = Executor(config(tmp_path, backend, termination_timeout=0.01))
+    executor = Executor(config(tmp_path, backend, termination_timeout=1))
     future = executor.submit(lambda: 4)
     assert backend.start_entered.wait(1)
-    closer = Thread(target=executor.close)
-    closer.start()
-    time.sleep(0.05)
-    assert closer.is_alive()
-    backend.start_gate.set()
-    closer.join(1)
+    close_waiting = Event()
+    failures: list[BaseException] = []
+
+    def close() -> None:
+        _capture(failures, executor.close)
+
+    closer = Thread(target=close)
+    original_wait = executor._condition.wait
+
+    def observe_close_wait(timeout=None):
+        if current_thread() is closer:
+            close_waiting.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(executor._condition, "wait", observe_close_wait)
+    try:
+        closer.start()
+        assert close_waiting.wait(1)
+    finally:
+        backend.start_gate.set()
+        closer.join(2)
+
+    assert not closer.is_alive()
+    assert not failures
     assert future.result() == 4
     assert executor.state == "closed"
 
