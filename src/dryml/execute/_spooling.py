@@ -11,7 +11,7 @@ import hashlib
 import hmac
 import inspect
 import io
-from multiprocessing.connection import Connection
+from multiprocessing.connection import _ConnectionBase
 import os
 import platform
 import socket
@@ -235,7 +235,7 @@ def _reject_live_resource(value: object) -> None:
         raise _UnsupportedTransportResource("live resource: core semantic values are unsupported by Execute transport")
     if isinstance(value, (io.IOBase, _LOCK_TYPES, GeneratorType, CoroutineType, socket.socket, threading.Thread, concurrent.futures.Executor, concurrent.futures.Future)):
         raise _UnsupportedTransportResource("live resource: streams, locks, sockets, threads, and futures are unsupported by Execute transport")
-    if isinstance(value, Connection):
+    if isinstance(value, _ConnectionBase):
         raise _UnsupportedTransportResource("live resource: Connection is unsupported by Execute transport")
     if any(cls.__module__.startswith("dryml.execute") and cls.__name__ in _EXECUTE_RESOURCE_BASES for cls in value_type.__mro__):
         raise _UnsupportedTransportResource("live resource: Execute runtime values are unsupported by Execute transport")

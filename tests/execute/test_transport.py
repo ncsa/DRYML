@@ -365,7 +365,7 @@ def test_concurrent_disposal_releases_one_reservation(tmp_path, monkeypatch):
 
 
 def test_serializer_rejects_execute_and_connection_subclasses_and_bound_builtins():
-    """Known live-resource inheritance cannot bypass preflight root checks."""
+    """Known live resources, including every multiprocessing connection base, are rejected."""
     class FutureSubclass(ExecutionFuture):
         def done(self):
             return False
@@ -388,14 +388,28 @@ def test_serializer_rejects_execute_and_connection_subclasses_and_bound_builtins
     with pytest.raises(TypeError, match="bound builtin"):
         serialize_call([].append, (), {}, limit_bytes=1_000_000)
     parent, child = Pipe()
-    connection = ConnectionSubclass(os.dup(parent.fileno()))
+    try:
+        for connection in (parent, child):
+            with pytest.raises(TypeError, match="live resource"):
+                serialize_call(lambda value: value, (connection,), {}, limit_bytes=1_000_000)
+    finally:
+        parent.close()
+        child.close()
+
+    socket_connection, peer = socket.socketpair()
+    handle = socket_connection.detach()
+    try:
+        connection = ConnectionSubclass(handle)
+    except BaseException:
+        socket.close(handle)
+        peer.close()
+        raise
     try:
         with pytest.raises(TypeError, match="live resource"):
             serialize_call(lambda value: value, (connection,), {}, limit_bytes=1_000_000)
     finally:
         connection.close()
-        parent.close()
-        child.close()
+        peer.close()
     fn, args, kwargs = deserialize_call(serialize_call(len, ([1, 2],), {}, limit_bytes=1_000_000), limit_bytes=1_000_000)
     assert fn(*args, **kwargs) == 2
 
