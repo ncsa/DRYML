@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core import Definition, Repo, Serializable
+from dryml.core import Definition, Repo, SaveRouting, Selector, Serializable
 from dryml.core.repo import RepoLoadError, RepoSaveError
 from dryml.core.store.dir import DirStore
 
@@ -45,6 +45,17 @@ class CountingPendingParent(PendingParent):
 class FailingPendingValue(PendingValue):
     def save_state_to_dir_imp(self, dest_dir, *, codec):
         raise RuntimeError("child save failed")
+
+
+class FailSecondStateRefStore(DirStore):
+    """Inject one replica failure after another Store has completed a claim."""
+
+    fail = False
+
+    def write_state_ref_record(self, record):
+        if self.fail:
+            raise RuntimeError("second replica failed")
+        return super().write_state_ref_record(record)
 
 
 def test_pending_declaration_save_completes_its_claim_and_captures_once(tmp_path):
@@ -187,3 +198,46 @@ def test_derived_index_failure_clears_completed_live_claim(tmp_path, monkeypatch
     assert live._claim_lease is None
     assert live._claim_leases == ()
     assert live._pending_claim_dependencies == ()
+
+
+def test_routing_rejects_an_excluded_pending_declaration_before_capture(tmp_path):
+    """Every pending declaration Store must be selected before user hooks run."""
+    declaration_store = DirStore(tmp_path / "declaration")
+    routed_store = DirStore(tmp_path / "routed")
+    repo = Repo(
+        [declaration_store, routed_store],
+        save_routing=SaveRouting(((Selector(PendingValue), routed_store),)),
+    )
+    reference = repo.declare_object(PendingValue(1).definition, store=declaration_store)
+    live = repo.build_object_ref(reference, store=declaration_store)
+    PendingValue.captures = 0
+
+    with pytest.raises(RepoSaveError, match="declaration Store"):
+        repo.save_object(live, deep_capture=True)
+
+    assert PendingValue.captures == 0
+    assert declaration_store.read_claim_record(reference.digest()).status == "available"
+
+
+def test_completed_claim_survives_a_later_routed_replica_failure(tmp_path):
+    """A later replica error cannot abandon an already completed claim generation."""
+    declaration_store = DirStore(tmp_path / "declaration")
+    failing_store = FailSecondStateRefStore(tmp_path / "failing")
+    repo = Repo(
+        [declaration_store, failing_store],
+        save_routing=SaveRouting(
+            ((Selector(PendingValue), declaration_store), (Selector(PendingValue), failing_store)),
+            match_mode="all",
+        ),
+    )
+    reference = repo.declare_object(PendingValue(1).definition, store=declaration_store)
+    live = repo.build_object_ref(reference, store=declaration_store)
+    failing_store.fail = True
+
+    with pytest.raises(RuntimeError, match="second replica failed"):
+        repo.save_object(live, deep_capture=True)
+
+    claim = declaration_store.read_claim_record(reference.digest())
+    assert claim.status == "completed"
+    assert declaration_store.read_state_ref_record(claim.state_ref_digest) is not None
+    assert live._claim_lease is None

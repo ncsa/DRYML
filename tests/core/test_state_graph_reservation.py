@@ -25,6 +25,14 @@ class StatelessRoot(Object):
         self.child = child
 
 
+class CountingReservedState(ReservedState):
+    captures = 0
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        type(self).captures += 1
+        super().save_state_to_dir_imp(dest_dir, codec=codec)
+
+
 def test_graph_reservation_covers_stateful_descendants_and_rejects_nested_owner(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     child = ReservedState(1, repo=repo)
@@ -53,6 +61,54 @@ def test_graph_reservation_allows_its_exact_save_reuse(tmp_path):
         state = repo.save_object(obj, reservation=reservation)
 
     assert state.object == obj.object_ref
+
+
+def test_failed_save_on_closed_repo_releases_owned_graph_reservation(tmp_path):
+    """A failed context admission does not retain the save's graph reservation."""
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    obj = ReservedState(3, repo=repo)
+    repo.close(flush=False)
+
+    with pytest.raises(RuntimeError, match="Cannot retain a save context"):
+        repo.save_object(obj)
+
+    with Repo(store).reserve_state_graph(obj):
+        pass
+
+
+def test_graph_reservation_reuses_its_route_neutral_evidence_for_save(tmp_path, monkeypatch):
+    """An admitted save does not rebuild graph bindings after reservation."""
+    repo = Repo(DirStore(tmp_path / "store"))
+    obj = ReservedState(3, repo=repo)
+    calls = 0
+    original = repo._state_graph_evidence
+
+    def count_evidence(value):
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(repo, "_state_graph_evidence", count_evidence)
+    with repo.reserve_state_graph(obj) as reservation:
+        repo.save_object(obj, reservation=reservation)
+
+    assert calls == 1
+
+
+def test_graph_reservation_revalidates_invalidated_retained_nodes_before_save_hooks(tmp_path):
+    """Reservation reuse cannot authorize a graph invalidated after admission."""
+    repo = Repo(DirStore(tmp_path / "store"))
+    child = CountingReservedState(3, repo=repo)
+    root = StatelessRoot(child, repo=repo)
+    CountingReservedState.captures = 0
+
+    with repo.reserve_state_graph(root) as reservation:
+        root._restore_failed = True
+        with pytest.raises(RepoSaveError, match="invalidated"):
+            repo.save_object(root, reservation=reservation, deep_capture=True)
+
+    assert CountingReservedState.captures == 0
 
 
 def test_graph_reservation_rejects_a_token_for_a_different_live_graph(tmp_path):

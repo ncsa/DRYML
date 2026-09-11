@@ -286,13 +286,42 @@ class SaveAction:
     source_store: Any = None
 
 
+@dataclass(frozen=True, slots=True)
+class SnapshotAction:
+    """One exact materializing subtree selected for StateRef projection."""
+
+    path: GraphPath
+    definition: ConcreteDefinition
+    obj: Object | None
+
+
 @dataclass(slots=True)
 class SavePlan:
-    """Preflighted live graph evidence used to publish one exact StateRef."""
+    """Preflighted capture and exact projection evidence for one StateRef."""
 
     graph: ConcreteDefinitionGraph
     binding: RuntimeGraphBinding
     actions: tuple[SaveAction, ...]
+    snapshots: tuple[SnapshotAction, ...]
+    nodes: tuple[Object, ...]
+    object_ref: object
+    object_ids: tuple[object, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RoutedSavePlan:
+    """Retained routing enrichment for one route-neutral :class:`SavePlan`.
+
+    ``SavePlan`` remains the sole source of graph bindings, object identity, and
+    capture actions.  This value attaches only one retained context's immutable
+    destination choices, so a configuration change cannot alter an active save.
+    """
+
+    plan: SavePlan
+    context: SaveRoutingContext
+    root_destinations: tuple[Store, ...]
+    destinations: MappingProxyType
+    graph_mode: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -784,7 +813,232 @@ def build_save_plan(
             actions.append(SaveAction(path, definition, value, state_hash=state_hash))
             continue
         raise RepoSaveError(f"No retained Serializable binding or exact seed state at {path!s}.")
-    return SavePlan(graph=binding.graph, binding=binding, actions=tuple(actions))
+    snapshots: list[SnapshotAction] = []
+    nodes: list[Object] = []
+    seen_nodes: set[int] = set()
+    seen_snapshot_nodes: set[int] = set()
+    seen_paths: set[GraphPath] = set()
+
+    def add_snapshot(path: GraphPath, definition: ConcreteDefinition, obj: Object | None) -> None:
+        if path in seen_paths or (obj is not None and id(obj) in seen_snapshot_nodes):
+            return
+        seen_paths.add(path)
+        snapshots.append(SnapshotAction(path, definition, obj))
+        if obj is not None:
+            seen_snapshot_nodes.add(id(obj))
+            if id(obj) not in seen_nodes:
+                seen_nodes.add(id(obj))
+                nodes.append(obj)
+
+    projections = getattr(value, "_runtime_projection", {})
+    for path in sorted(projections, key=graph_path_sort_key):
+        candidate = projections[path]
+        if isinstance(candidate, Object):
+            add_snapshot(path, candidate.definition, candidate)
+    add_snapshot(GraphPath(), value.definition, value)
+    for action in actions:
+        # An exact imported seed may have no live payload binding, but its
+        # materializing subtree still needs its selected StateRef projection.
+        add_snapshot(action.path, action.definition, None)
+    return SavePlan(
+        graph=binding.graph,
+        binding=binding,
+        actions=tuple(actions),
+        snapshots=tuple(snapshots),
+        nodes=tuple(nodes),
+        object_ref=reference,
+        object_ids=tuple(reference.objects.values()),
+    )
+
+
+def validate_retained_save_plan(plan: SavePlan, value: Object) -> None:
+    """Verify admitted save evidence still names the same usable live graph.
+
+    This is intentionally a read-through validation of the already captured
+    paths. It neither traverses a new graph nor selects routes, so a reservation
+    cannot become authorization for changed or invalidated bindings.
+    """
+
+    from .repo import RepoSaveError
+
+    if plan.binding.roots[0].obj is not value or value.object_ref != plan.object_ref:
+        raise RepoSaveError("State graph reservation does not cover this exact live graph.")
+    if any(getattr(node, "_restore_failed", False) for node in plan.nodes):
+        raise RepoSaveError("State graph contains an invalidated restore target.")
+    for snapshot in plan.snapshots:
+        if snapshot.obj is None:
+            continue
+        try:
+            current = value.graph_at(snapshot.path)
+        except Exception as error:
+            raise RepoSaveError("State graph has lost a retained runtime binding.") from error
+        if current is not snapshot.obj:
+            raise RepoSaveError("State graph has changed a retained runtime binding.")
+
+
+def build_routed_save_plan(repo, plan: SavePlan, context, *, store=None) -> RoutedSavePlan:
+    """Attach retained destinations to route-neutral live graph evidence.
+
+    Args:
+        repo: Repo that owns ``plan`` and the retained ``context``.
+        plan: Previously built graph/binding/ObjectId evidence.
+        context: Active immutable SaveRoutingContext for this save.
+        store: Explicit whole-graph destination, if one was supplied.
+
+    Returns:
+        An immutable per-snapshot destination map. It never captures state or
+        writes records. Selector matching can invoke trusted user predicates.
+
+    Raises:
+        RepoSaveError: If no effective destination can be selected.
+    """
+    if not isinstance(plan, SavePlan):
+        raise TypeError("Routed save planning requires a SavePlan.")
+    if not isinstance(context, SaveRoutingContext):
+        raise TypeError("Routed save planning requires a SaveRoutingContext.")
+    root = plan.binding.roots[0].obj
+    if store is not None:
+        root_destinations = (store,)
+        graph_mode = "closure"
+    else:
+        root_destinations = repo._select_save_destinations(context, root)
+        graph_mode = "closure" if context.routing is None else context.routing.graph_mode
+    destinations = {}
+    for action in plan.snapshots:
+        if graph_mode == "closure":
+            selected = root_destinations
+        else:
+            selected = repo._select_save_destinations(context, action.definition)
+        destinations[action.path] = tuple(selected)
+    return RoutedSavePlan(
+        plan, context, tuple(root_destinations), MappingProxyType(destinations), graph_mode,
+    )
+
+
+def execute_routed_save_plan(
+        repo,
+        routed: RoutedSavePlan,
+        *,
+        deep_capture: bool = False,
+        report_stores: bool = False):
+    """Publish a routed graph from one capture and projected exact StateRefs.
+
+    Every Serializable payload is captured once into its first effective
+    destination (preferring its declaration Store) and copied byte-for-byte to
+    replicas.  Per-object placement publishes ``StateRef.at(path)`` records for
+    child actions; closure placement publishes a complete root closure instead.
+    Pending declaration claims are admitted before hooks and completed in their
+    declaration Store before any later replicas or enclosing claim.
+    """
+    from .reference_values import StateRef
+    from .store.records import DefinitionRecord, StateRefRecord
+
+    if not isinstance(routed, RoutedSavePlan):
+        raise TypeError("Routed save execution requires a RoutedSavePlan.")
+    plan = routed.plan
+    context = routed.context
+
+    _validate_codecs(plan.actions)
+    claims = repo._preflight_routed_claims(plan, routed)
+    all_destinations = _unique_stores(
+        (*routed.root_destinations, *(store for stores in routed.destinations.values() for store in stores))
+    )
+    for destination in all_destinations:
+        destination.preflight_publication("routed save graph", local_state=True)
+
+    embedded = _resolve_embedded_state_refs_from_context(context, plan.binding.roots[0].definition)
+    for _, record, state_sources in embedded:
+        if record is None:
+            raise _save_error(GraphPath(), "embedded StateRef has no authority record in retained Stores")
+        if any(source is None for _, _, source in state_sources):
+            raise _save_error(GraphPath(), "embedded StateRef local state is not available in retained Stores")
+
+    # Definition authority is cheap immutable closure metadata, unlike local
+    # payloads.  Keeping it with each snapshot permits closure roots to load
+    # alone while per-object payload ownership remains destination-specific.
+    for destination in all_destinations:
+        for node in plan.graph.nodes():
+            destination.write_definition_record(DefinitionRecord(node.definition), stored_root=False)
+        for action in plan.snapshots:
+            destination.write_definition_record(DefinitionRecord(action.definition), stored_root=False)
+
+    claims_by_action = {id(action.obj): lease for lease, action in claims}
+    states: dict[GraphPath, str] = {}
+    sources: dict[GraphPath, Store] = {}
+    for action in plan.actions:
+        destinations = routed.destinations[action.path]
+        if action.state_hash is not None:
+            source = context.find_local_state(action.definition, action.state_hash)
+            if source is None:
+                raise _save_error(action.path, "exact seed local state is not available in retained Stores")
+            state_hash = action.state_hash
+        else:
+            state_hash = getattr(action.obj, "_last_state_hash", None)
+            source = None if deep_capture or state_hash is None else context.find_local_state(action.definition, state_hash)
+            if source is None:
+                capture_store = claims_by_action.get(id(action.obj), None)
+                capture_store = capture_store.store if capture_store is not None else destinations[0]
+                state_hash = _publish_local_state(
+                    action.obj, action.definition, capture_store, action.path,
+                )
+                source = capture_store
+        states[action.path] = state_hash
+        sources[action.path] = source
+        for destination in destinations:
+            if destination is not source:
+                destination.copy_local_state_from(source, action.definition, state_hash)
+
+    if routed.graph_mode == "closure":
+        for destination in routed.root_destinations:
+            for _, record, state_sources in embedded:
+                for definition, state_hash, source in state_sources:
+                    if source is not destination:
+                        destination.copy_local_state_from(source, definition, state_hash)
+                destination.write_state_ref_record(record)
+
+    state_ref = StateRef(plan.binding.roots[0].obj.object_ref, states)
+    published: set[tuple[GraphPath, int]] = set()
+
+    def publish(action, destination, lease=None):
+        path = GraphPath() if action is None else action.path
+        if (path, id(destination)) in published:
+            return
+        projection = state_ref if not path else state_ref.at(path)
+        with destination.writer_lock():
+            repo._complete_initial_state_ref(projection, destination, lease)
+            destination.write_state_ref_record(StateRefRecord(projection))
+            destination.write_definition_record(
+                DefinitionRecord(projection.definition), stored_root=True,
+            )
+            repo._mark_initial_state_ref_complete(projection, destination, lease)
+        published.add((path, id(destination)))
+        if lease is not None:
+            repo._clear_completed_routed_claim(plan, lease)
+
+    # Claim completion must be dependency-first even though the user payloads
+    # above were captured once for the complete immutable graph.
+    for lease, action in claims:
+        publish(action, lease.store, lease)
+
+    independent = plan.snapshots if routed.graph_mode == "per-object" else tuple(
+        action for _, action in claims if action.path
+    )
+    for action in independent:
+        if not action.path:
+            continue
+        for destination in routed.destinations[action.path]:
+            publish(action, destination)
+        if action.obj is not None:
+            action.obj._last_state_ref = state_ref.at(action.path)
+
+    root_action = next(action for action in plan.snapshots if not action.path)
+    for destination in routed.root_destinations:
+        publish(root_action, destination)
+    plan.binding.roots[0].obj._last_state_ref = state_ref
+    repo._num_saves += 1
+    selected = {path: sources[path] for path in states}
+    report = StoreReport(routed.root_destinations[0], selected, (routed.root_destinations[0], *sources.values()))
+    return (state_ref, report) if report_stores else state_ref
 
 
 def execute_save_plan(
@@ -1089,6 +1343,33 @@ def _resolve_embedded_state_refs(repo, definition: ConcreteDefinition):
             source = _find_local_state(repo, reference.object.at(path).definition, state_hash)
             state_sources.append((reference.object.at(path).definition, state_hash, source))
         resolved.append((record_store, None if record_store is None else record_store.read_state_ref_record(reference.digest()), tuple(state_sources)))
+    return tuple(resolved)
+
+
+def _resolve_embedded_state_refs_from_context(context: SaveRoutingContext, definition: ConcreteDefinition):
+    """Resolve embedded materializing references against one retained source view."""
+    resolved = []
+    for _, reference in _embedded_state_refs(definition):
+        record_store = None
+        record = None
+        for candidate in context.stores:
+            try:
+                candidate_record = candidate.read_state_ref_record(reference.digest())
+            except Exception:
+                continue
+            if candidate_record is not None and candidate_record.state_ref == reference:
+                record_store = candidate
+                record = candidate_record
+                break
+        state_sources = tuple(
+            (
+                reference.object.at(path).definition,
+                state_hash,
+                context.find_local_state(reference.object.at(path).definition, state_hash),
+            )
+            for path, state_hash in reference.states.items()
+        )
+        resolved.append((record_store, record, state_sources))
     return tuple(resolved)
 
 

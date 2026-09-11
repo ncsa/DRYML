@@ -3,10 +3,12 @@
 import sys
 import threading
 import subprocess
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
-from dryml.core import Object, Repo, SaveRouting, Selector
+from dryml.core import Object, Ref, Repo, SaveRouting, Selector, Serializable
 from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
 
@@ -17,6 +19,56 @@ class Routed(Object):
 
 class Unrouted(Object):
     """Object type that does not match the routing rules in these tests."""
+
+
+class RoutedLeaf(Serializable):
+    """Stateful child whose hook count proves routed saves capture once."""
+
+    captures = 0
+
+    def __init__(self, value):
+        self.value = value
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        type(self).captures += 1
+        Path(dest_dir, "value").write_text(str(self.value), encoding="ascii")
+
+
+class RoutedRoot(Object):
+    """Stateless routed root retaining one materializing child."""
+
+    def __init__(self, child):
+        self.child = child
+
+
+class RoutedPair(Object):
+    """Stateless root used to distinguish shared from equal child identities."""
+
+    def __init__(self, left, right):
+        self.left = left
+        self.right = right
+
+
+class RoutedBranch(Object):
+    """Stateless nested branch which still needs its own StateRef projection."""
+
+    def __init__(self, child):
+        self.child = child
+
+
+class RoutedTree(Object):
+    """Stateless root containing independently routed stateless branches."""
+
+    def __init__(self, left, right=None):
+        self.left = left
+        self.right = right
+
+
+class SeedRoot(Serializable):
+    """Stateful root used to distinguish seed definition routing from its root."""
+
+    def __init__(self, child):
+        self.child = child
 
 
 def test_save_routing_normalizes_rules_and_placement_shorthands(tmp_path):
@@ -185,3 +237,239 @@ def test_empty_routing_does_not_create_a_store_during_selection():
         with pytest.raises(RepoSaveError, match="No Store"):
             repo._select_save_destinations(context, Unrouted())
     assert repo.stores == []
+
+
+def test_per_object_routing_projects_a_child_state_ref_without_copying_its_payload(tmp_path):
+    """Routed descendants retain one external payload and an exact child projection."""
+    parent_store = DirStore(tmp_path / "parent")
+    child_store = DirStore(tmp_path / "child")
+    repo = Repo(
+        [parent_store, child_store],
+        save_routing=SaveRouting(
+            ((Selector(RoutedRoot), parent_store), (Selector(RoutedLeaf), child_store)),
+        ),
+    )
+    root = RoutedRoot(RoutedLeaf(3, repo=repo), repo=repo)
+
+    state = repo.save_object(root, deep_capture=True)
+    child_path = next(iter(root.object_ref.objects))
+    child_state = state.at(child_path)
+
+    assert child_store.validate_local_state(
+        child_state.definition, child_state.states[next(iter(child_state.states))]
+    )
+    assert parent_store.read_state_ref_record(state.digest()).state_ref == state
+    assert child_store.read_state_ref_record(child_state.digest()).state_ref == child_state
+    with pytest.raises(Exception):
+        parent_store.validate_local_state(
+            child_state.definition, child_state.states[next(iter(child_state.states))]
+        )
+    assert Repo([parent_store, child_store]).load_state_ref(child_state, reuse_live="never").value == 3
+
+
+def test_all_matching_routing_captures_once_and_replicates_exact_projections(tmp_path):
+    """Every replica receives one captured hash rather than independently sampled state."""
+    parents = [DirStore(tmp_path / name) for name in ("parent-a", "parent-b")]
+    children = [DirStore(tmp_path / name) for name in ("child-a", "child-b")]
+    repo = Repo(
+        [*parents, *children],
+        save_routing=SaveRouting(
+            (
+                (Selector(RoutedRoot), parents[0]),
+                (Selector(RoutedRoot), parents[1]),
+                (Selector(RoutedLeaf), children[0]),
+                (Selector(RoutedLeaf), children[1]),
+            ),
+            match_mode="all",
+        ),
+    )
+    RoutedLeaf.captures = 0
+    root = RoutedRoot(RoutedLeaf(4, repo=repo), repo=repo)
+
+    state = repo.save_object(root, deep_capture=True)
+    child_path = next(iter(root.object_ref.objects))
+    child_state = state.at(child_path)
+
+    assert RoutedLeaf.captures == 1
+    assert all(store.read_state_ref_record(state.digest()).state_ref == state for store in parents)
+    assert all(store.read_state_ref_record(child_state.digest()).state_ref == child_state for store in children)
+    assert root.child.last_state_ref == child_state
+
+
+def test_routing_keeps_shared_and_structurally_equal_children_distinct(tmp_path):
+    """Capture follows live node identity, not structural equality, below stateless roots."""
+    root_store = DirStore(tmp_path / "root")
+    child_store = DirStore(tmp_path / "child")
+    repo = Repo(
+        [root_store, child_store],
+        save_routing=SaveRouting(
+            ((Selector(RoutedPair), root_store), (Selector(RoutedLeaf), child_store)),
+        ),
+    )
+    shared_child = RoutedLeaf(6, repo=repo)
+    shared = RoutedPair(shared_child, shared_child, repo=repo)
+    independent = RoutedPair(RoutedLeaf(6, repo=repo), RoutedLeaf(6, repo=repo), repo=repo)
+    RoutedLeaf.captures = 0
+
+    shared_state = repo.save_object(shared, deep_capture=True)
+    independent_state = repo.save_object(independent, deep_capture=True)
+
+    assert len(shared_state.object.objects) == 1
+    assert len(independent_state.object.objects) == 2
+    assert len(set(independent_state.object.objects.values())) == 2
+    assert RoutedLeaf.captures == 3
+
+
+def test_closure_and_explicit_store_route_the_complete_root_closure(tmp_path):
+    """Closure routing and an explicit Store suppress descendant placement rules."""
+    parent_store = DirStore(tmp_path / "parent")
+    child_store = DirStore(tmp_path / "child")
+    explicit_store = DirStore(tmp_path / "explicit")
+    repo = Repo(
+        [parent_store, child_store, explicit_store],
+        save_routing=SaveRouting(
+            ((Selector(RoutedRoot), parent_store), (Selector(RoutedLeaf), child_store)),
+            graph_mode="closure",
+        ),
+    )
+    root = RoutedRoot(RoutedLeaf(5, repo=repo), repo=repo)
+
+    state = repo.save_object(root, deep_capture=True)
+    assert Repo(parent_store).load_state_ref(state, reuse_live="never").child.value == 5
+
+    explicit = repo.save_object(root, store=explicit_store, deep_capture=True)
+    assert Repo(explicit_store).load_state_ref(explicit, reuse_live="never").child.value == 5
+
+
+def test_per_object_routing_projects_distinct_stateless_children_by_live_identity(tmp_path):
+    """Stateless branches publish their own projections without becoming payloads."""
+    root_store = DirStore(tmp_path / "root")
+    branch_store = DirStore(tmp_path / "branch")
+    leaf_store = DirStore(tmp_path / "leaf")
+    repo = Repo(
+        [root_store, branch_store, leaf_store],
+        save_routing=SaveRouting(
+            (
+                (Selector(RoutedTree), root_store),
+                (Selector(RoutedBranch), branch_store),
+                (Selector(RoutedLeaf), leaf_store),
+            ),
+        ),
+    )
+    root = RoutedTree(
+        RoutedBranch(RoutedLeaf(1, repo=repo), repo=repo),
+        RoutedBranch(RoutedLeaf(1, repo=repo), repo=repo),
+        repo=repo,
+    )
+
+    state = repo.save_object(root, deep_capture=True)
+    branch_paths = tuple(
+        path for path, value in root._runtime_projection.items()
+        if isinstance(value, RoutedBranch)
+    )
+
+    assert len(branch_paths) == 2
+    branch_states = tuple(state.at(path) for path in branch_paths)
+    assert len({branch_state.digest() for branch_state in branch_states}) == 2
+    assert all(
+        branch_store.read_state_ref_record(branch_state.digest()).state_ref == branch_state
+        for branch_state in branch_states
+    )
+    assert all(
+        leaf_store.validate_local_state(
+            branch_state.object.at(next(iter(branch_state.states))).definition,
+            branch_state.states[next(iter(branch_state.states))],
+        )
+        for branch_state in branch_states
+    )
+
+
+def test_save_uses_the_disabled_routing_context_retained_for_its_work(tmp_path, monkeypatch):
+    """A save cannot mix a prior routing branch with a disabled retained context."""
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    repo = Repo(
+        [first, second],
+        save_routing=SaveRouting(((Selector(RoutedLeaf), second),)),
+    )
+    obj = RoutedLeaf(9, repo=repo)
+    original = repo._retain_save_context
+
+    @contextmanager
+    def disable_before_retention():
+        repo.set_save_routing(None)
+        with original() as context:
+            yield context
+
+    monkeypatch.setattr(repo, "_retain_save_context", disable_before_retention)
+
+    state = repo.save_object(obj, deep_capture=True)
+
+    assert state.object == obj.object_ref
+    assert first.read_state_ref_record(state.digest()).state_ref == state
+    assert repo.save_routing is None
+
+
+def test_save_context_lease_covers_derived_index_registration(tmp_path, monkeypatch):
+    """Repo close remains blocked until post-publication index work has finished."""
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store, save_routing="per-object")
+    original = repo._query_index.register_saved_graph
+
+    def assert_active_lease(*args, **kwargs):
+        with pytest.raises(RuntimeError, match="active save context"):
+            repo.close(flush=False)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repo._query_index, "register_saved_graph", assert_active_lease)
+
+    repo.save_object(RoutedLeaf(10, repo=repo), deep_capture=True)
+
+
+def test_seed_payload_routes_by_its_definition_not_the_stateful_root(tmp_path):
+    """An imported StateRef seed uses its leaf selector even when the root is Serializable."""
+    source = DirStore(tmp_path / "source")
+    source_repo = Repo(source)
+    imported = source_repo.save_object(RoutedLeaf(11, repo=source_repo), deep_capture=True)
+    root_store = DirStore(tmp_path / "root")
+    leaf_store = DirStore(tmp_path / "leaf")
+    repo = Repo(
+        [root_store, leaf_store, source],
+        save_routing=SaveRouting(
+            ((Selector(SeedRoot), root_store), (Selector(RoutedLeaf), leaf_store)),
+        ),
+    )
+    root = SeedRoot(imported, repo=repo)
+
+    state = repo.save_object(root, deep_capture=True)
+    seed_path = next(path for path in state.object.objects if path)
+    seed_definition = state.object.at(seed_path).definition
+    seed_hash = state.states[seed_path]
+
+    leaf_store.validate_local_state(seed_definition, seed_hash)
+    with pytest.raises(Exception):
+        root_store.validate_local_state(seed_definition, seed_hash)
+
+
+def test_ref_only_import_does_not_create_a_routed_seed_payload(tmp_path):
+    """A Ref-only exact reference remains a value and is not independently routed."""
+    source = DirStore(tmp_path / "source")
+    source_repo = Repo(source)
+    imported = source_repo.save_object(RoutedLeaf(12, repo=source_repo), deep_capture=True)
+    root_store = DirStore(tmp_path / "root")
+    leaf_store = DirStore(tmp_path / "leaf")
+    repo = Repo(
+        [root_store, leaf_store, source],
+        save_routing=SaveRouting(
+            ((Selector(SeedRoot), root_store), (Selector(RoutedLeaf), leaf_store)),
+        ),
+    )
+    root = SeedRoot(Ref(imported), repo=repo)
+
+    state = repo.save_object(root, deep_capture=True)
+
+    assert len(state.object.objects) == 1
+    with pytest.raises(Exception):
+        leaf_store.validate_local_state(
+            imported.definition, next(iter(imported.states.values()))
+        )

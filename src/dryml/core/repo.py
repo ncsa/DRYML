@@ -4,7 +4,7 @@ import os
 import glob
 from dataclasses import dataclass
 from typing import Any, Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from io import IOBase
 from pathlib import Path
 import weakref
@@ -324,12 +324,11 @@ RevisionType = dict[ConcreteDefinition, str]
 
 
 class Repo:
-    """Coordinate live Objects, connected Stores, and inert save-routing policy.
+    """Coordinate live Objects, connected Stores, and save-routing policy.
 
     Repo owns live-object and query bindings while supplied Store handles remain
-    borrowed.  ``save_routing`` configures only internal destination selection
-    in this stage; ordinary public saves retain their existing default-Store
-    closure behavior until routed publication is introduced separately.
+    borrowed.  A configured ``save_routing`` publishes retained per-object or
+    closure placements; an unconfigured Repo retains default-Store behavior.
     """
     # Trackers
     _num_saves: int
@@ -809,19 +808,9 @@ class Repo:
         if not isinstance(obj, Object):
             raise TypeError("State graph operations require a live Object root.")
         plan = build_save_plan(self, obj)
-        nodes = [obj]
-        node_ids = {id(obj)}
-        for candidate in getattr(obj, "_runtime_projection", {}).values():
-            if isinstance(candidate, Object) and id(candidate) not in node_ids:
-                nodes.append(candidate)
-                node_ids.add(id(candidate))
-        for action in plan.actions:
-            if isinstance(action.obj, Object) and id(action.obj) not in node_ids:
-                nodes.append(action.obj)
-                node_ids.add(id(action.obj))
-        if any(getattr(node, "_restore_failed", False) for node in nodes):
+        if any(getattr(node, "_restore_failed", False) for node in plan.nodes):
             raise RepoSaveError("State graph contains an invalidated restore target.")
-        return plan, tuple(nodes), tuple(obj.object_ref.objects.values())
+        return plan, plan.nodes, plan.object_ids
 
     def reserve_state_graph(self, obj: Object):
         """Reserve one exact live state graph for this process and thread.
@@ -844,8 +833,13 @@ class Repo:
 
         from .state import reserve
 
-        _, nodes, object_ids = self._state_graph_evidence(obj)
-        return reserve(obj.object_ref, nodes, object_ids)
+        plan, nodes, object_ids = self._state_graph_evidence(obj)
+        reservation = reserve(obj.object_ref, nodes, object_ids)
+        # The reservation is the exact route-neutral evidence boundary.  A
+        # later save using this token must not rebuild bindings against a
+        # potentially changed routing configuration.
+        reservation._save_plan = plan
+        return reservation
 
     @classmethod
     def _for_state_io(cls, stores):
@@ -1737,6 +1731,70 @@ class Repo:
             raise RepoSaveError("Initial StateRef was published but its claim fence changed.")
         store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "completed", state_ref_digest=state_ref.digest()))
 
+    def _preflight_routed_claims(self, plan, routed):
+        """Validate and renew every pending claim before routed save hooks run.
+
+        Claims retain declaration-Store authority.  A route that excludes that
+        Store is rejected rather than silently adding a destination, and nested
+        claims retain their construction dependency order.
+        """
+        root = plan.binding.roots[0].obj
+        candidates = [root]
+        candidates.extend(action.obj for action in plan.actions if isinstance(action.obj, Object))
+        action_for_object = {id(action.obj): action for action in plan.actions}
+        leases = []
+        seen = set()
+
+        def add(lease, obj=None):
+            if not isinstance(lease, _ClaimLease) or id(lease) in seen:
+                return
+            action = action_for_object.get(id(obj)) if obj is not None else None
+            if action is None:
+                action = next(
+                    (
+                        item for item in plan.actions
+                        if getattr(item.obj, "object_ref", None) == lease.object_ref
+                    ),
+                    None,
+                )
+            if action is None:
+                raise RepoSaveError("Pending declaration has no retained routed save action.")
+            if not any(destination is lease.store for destination in routed.destinations[action.path]):
+                raise RepoSaveError("Pending declaration Store is excluded by the effective save destinations.")
+            seen.add(id(lease))
+            leases.append((lease, action))
+
+        # build_object_ref records nested leases first, then the enclosing lease.
+        for lease in getattr(root, "_claim_leases", ()):
+            add(lease)
+        for candidate in candidates:
+            add(getattr(candidate, "_claim_lease", None), candidate)
+            for lease, dependency in getattr(candidate, "_pending_claim_dependencies", ()):
+                add(lease, dependency)
+        for lease, _ in leases:
+            self._renew_claim(lease)
+        return tuple(leases)
+
+    def _clear_completed_routed_claim(self, plan, lease) -> None:
+        """Drop only one confirmed completed routed claim from live metadata."""
+        candidates = [plan.binding.roots[0].obj]
+        candidates.extend(action.obj for action in plan.actions if isinstance(action.obj, Object))
+        seen = set()
+        for candidate in candidates:
+            if id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            if getattr(candidate, "_claim_lease", None) is lease:
+                candidate._claim_lease = None
+            candidate._claim_leases = tuple(
+                item for item in getattr(candidate, "_claim_leases", ()) if item is not lease
+            )
+            candidate._pending_claim_dependencies = tuple(
+                (item, dependency)
+                for item, dependency in getattr(candidate, "_pending_claim_dependencies", ())
+                if item is not lease
+            )
+
     def fork_object_ref(self, reference, *, store=None, namespace=None):
         """Rekey a non-empty ObjectRef and register a state-free declaration.
 
@@ -1991,10 +2049,12 @@ class Repo:
         Args:
             obj: Root object whose graph is saved.
             main: Whether its concrete definition becomes the main reference.
-            store: Optional target Store.
+            store: Optional whole-graph closure target Store.  It overrides a
+                configured routing policy for this save.
             alias: Optional object alias written after StateRef publication.
             deep_capture: Whether every owned Serializable node is serialized.
-            federated: Whether reusable dependencies may remain external.
+            federated: Whether reusable dependencies may remain external for an
+                unconfigured legacy save.  Configured routing selects placement.
             report_stores: Whether to return an ephemeral StoreReport.
             reservation: Optional active exact graph reservation reused by an
                 enclosing state operation; callers normally omit this.
@@ -2009,7 +2069,9 @@ class Repo:
 
         Side Effects:
             Publishes every local state and the enclosing StateRef before main or
-            object-alias references can change. A completed StateRef and claim
+            object-alias references can change. Configured per-object saves also
+            publish exact child StateRef projections at their selected Stores.
+            A completed StateRef and claim
             remain authoritative if later derived-index or mutable-reference
             registration fails; completed live claim metadata is still cleared.
             Once that authority is complete, installs the StateRef as ``obj``'s
@@ -2022,81 +2084,104 @@ class Repo:
         with materialization_admission(operation="repo_save_object"):
             if alias is not None:
                 self._validate_alias(alias)
+            selected_store = self._ensure_store(store)
             owns_reservation = reservation is None
             if owns_reservation:
-                reservation = self.reserve_state_graph(obj)
+                plan, nodes, object_ids = self._state_graph_evidence(obj)
+                from .state import reserve
+
+                reservation = reserve(obj.object_ref, nodes, object_ids)
+                reservation._save_plan = plan
             else:
-                _, nodes, object_ids = self._state_graph_evidence(obj)
+                plan = getattr(reservation, "_save_plan", None)
+                if plan is None or plan.binding.roots[0].obj is not obj:
+                    plan, nodes, object_ids = self._state_graph_evidence(obj)
+                else:
+                    from .repo_plan import validate_retained_save_plan
+
+                    validate_retained_save_plan(plan, obj)
+                    if reservation.object_ref != plan.object_ref:
+                        raise RepoSaveError("State graph reservation does not cover this exact ObjectRef.")
+                    nodes, object_ids = plan.nodes, plan.object_ids
                 reservation._covers(nodes, object_ids)
-            lease = None
-            try:
-                store = self._ensure_store(store) or self.default_store
-                if store is None:
-                    raise RepoSaveError("No Store available to save object.")
-                lease = getattr(obj, "_claim_lease", None)
+            with (reservation if owns_reservation else nullcontext()), self._retain_save_context() as context:
+                lease = None
+                try:
+                    lease = getattr(obj, "_claim_lease", None)
+                    if context.routing is not None:
+                        from .repo_plan import build_routed_save_plan, execute_routed_save_plan
+
+                        routed = build_routed_save_plan(
+                            self, plan, context, store=selected_store,
+                        )
+                        result = execute_routed_save_plan(
+                            self, routed, deep_capture=deep_capture,
+                            report_stores=report_stores,
+                        )
+                        store = routed.root_destinations[0]
+                    else:
+                        store = selected_store or context.default_store
+                        if store is None:
+                            raise RepoSaveError("No Store available to save object.")
+                        if isinstance(lease, _ClaimLease):
+                            if store is not lease.store:
+                                raise RepoSaveError("The initial StateRef must be published in the declaration Store.")
+                            self._renew_claim(lease)
+                        capture_memo = set() if _capture_memo is None else _capture_memo
+                        # Complete nested declarations before publishing an enclosing graph.
+                        # The nested immutable StateRef then supplies reusable state for
+                        # adoption, so deep capture does not serialize it a second time.
+                        for dependency_lease, dependency_obj in getattr(
+                                obj, "_pending_claim_dependencies", ()):
+                            if dependency_lease is lease:
+                                continue
+                            self.save_object(
+                                dependency_obj,
+                                store=dependency_lease.store,
+                                deep_capture=deep_capture,
+                                federated=federated,
+                                _capture_memo=capture_memo,
+                                reservation=reservation,
+                            )
+                            from .repo_plan import build_save_plan
+
+                            capture_memo.update(
+                                action.obj.object_id
+                                for action in build_save_plan(self, dependency_obj).actions
+                                if isinstance(action.obj, Serializable)
+                            )
+                        self.add_objects(obj, store=store)
+                        from .repo_plan import execute_save_plan
+
+                        result = execute_save_plan(
+                            self, plan, store=store, deep_capture=deep_capture,
+                            federated=federated, report_stores=report_stores,
+                            capture_memo=capture_memo, claim_lease=lease,
+                        )
+                except BaseException:
+                    for pending_lease in reversed(
+                            getattr(obj, "_claim_leases", (lease,) if lease else ())):
+                        self._abandon_claim(pending_lease)
+                    raise
+                state_ref = result[0] if report_stores else result
                 if isinstance(lease, _ClaimLease):
-                    if store is not lease.store:
-                        raise RepoSaveError("The initial StateRef must be published in the declaration Store.")
-                    self._renew_claim(lease)
-                capture_memo = set() if _capture_memo is None else _capture_memo
-                # Complete nested declarations before publishing an enclosing graph.
-                # The nested immutable StateRef then supplies reusable state for
-                # adoption, so deep capture does not serialize it a second time.
-                for dependency_lease, dependency_obj in getattr(
-                        obj, "_pending_claim_dependencies", ()):
-                    if dependency_lease is lease:
-                        continue
-                    self.save_object(
-                        dependency_obj,
-                        store=dependency_lease.store,
-                        deep_capture=deep_capture,
-                        federated=federated,
-                        _capture_memo=capture_memo,
-                        reservation=reservation,
-                    )
-                    from .repo_plan import build_save_plan
-
-                    capture_memo.update(
-                        action.obj.object_id
-                        for action in build_save_plan(self, dependency_obj).actions
-                        if isinstance(action.obj, Serializable)
-                    )
-                self.add_objects(obj, store=store)
-                from .repo_plan import build_save_plan, execute_save_plan
-
-                plan = build_save_plan(self, obj)
-                result = execute_save_plan(
-                    self, plan, store=store, deep_capture=deep_capture,
-                    federated=federated, report_stores=report_stores,
-                    capture_memo=capture_memo, claim_lease=lease,
+                    obj._claim_lease = None
+                obj._pending_claim_dependencies = ()
+                obj._claim_leases = ()
+                # StateRef publication is authoritative; only then may the derived
+                # query index expose this root. A registration failure leaves the
+                # Store authority intact and the sidecar explicitly dirty.
+                self._query_index.register_saved_graph(
+                    plan.graph,
+                    {store: (obj.definition,)},
+                    {store: (state_ref,)},
                 )
-            except BaseException:
-                for pending_lease in reversed(
-                        getattr(obj, "_claim_leases", (lease,) if lease else ())):
-                    self._abandon_claim(pending_lease)
-                raise
-            finally:
-                if owns_reservation:
-                    reservation.release()
-            state_ref = result[0] if report_stores else result
-            if isinstance(lease, _ClaimLease):
-                obj._claim_lease = None
-            obj._pending_claim_dependencies = ()
-            obj._claim_leases = ()
-            # StateRef publication is authoritative; only then may the derived
-            # query index expose this root. A registration failure leaves the
-            # Store authority intact and the sidecar explicitly dirty.
-            self._query_index.register_saved_graph(
-                plan.graph,
-                {store: (obj.definition,)},
-                {store: (state_ref,)},
-            )
-            if main:
-                store.write_main_ref(MainRefRecord(DefinitionRecord(obj.definition).digest))
-                self.main_def = obj.definition
-            if alias is not None:
-                self.set_alias(alias, state_ref.object, store=store, save_live=False)
-            return result
+                if main:
+                    store.write_main_ref(MainRefRecord(DefinitionRecord(obj.definition).digest))
+                    self.main_def = obj.definition
+                if alias is not None:
+                    self.set_alias(alias, state_ref.object, store=store, save_live=False)
+                return result
 
     def save(
             self,
@@ -2113,11 +2198,12 @@ class Repo:
         Args:
             obj: Live Object root whose retained runtime graph will be saved.
             main: Whether to update the target Store's main-definition reference.
-            store: Explicit target Store or Store specification.
+            store: Explicit whole-graph closure Store or Store specification.
             alias: Optional Store-local ObjectRef alias to update after publication.
             deep_capture: Whether to serialize every owned live Serializable node.
             federated: Whether verified dependency state may remain in connected
-                Stores instead of being copied into the target.
+                Stores instead of being copied into the target for an
+                unconfigured legacy save.
             report_stores: Whether to pair the StateRef with a StoreReport.
 
         Returns:

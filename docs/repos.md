@@ -7,9 +7,11 @@
 `SaveRouting` is an immutable ordered `Selector` to connected-`Store` policy.
 `Repo(..., save_routing=...)` and `set_save_routing()` accept it, `None`, or the
 `"per-object"`/`"closure"` placement shorthands. A configured empty policy falls
-back to the Repo default Store; `None` retains legacy closure behavior. The
-current routing stage exposes retained internal selection only: public saves do
-not apply routing until routed publication is introduced. Installing routing
+back to the Repo default Store; `None` retains legacy closure behavior. A
+configured per-object save captures each local state once, assigns payload only
+to that Object's selected Stores, and publishes exact child `StateRef.at(path)`
+projections. Closure mode makes every selected root Store self-contained; an
+explicit `store=` always selects one complete closure. Installing routing
 rejects distinct built-in Store handles for one physical destination, while
 repeated use of the same handle deduplicates. A retained internal save context
 snapshots the policy, Store order, and default together; later configuration
