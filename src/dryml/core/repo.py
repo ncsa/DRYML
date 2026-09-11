@@ -310,7 +310,7 @@ def _record_late_publication(
         complete_on_error: bool = False):
     """Run one post-authority boundary and return an updated immutable report."""
 
-    from .repo_plan import SavePublication, StoreReport
+    from .repo_plan import SavePublication
 
     publication = SavePublication(store, None, None, state_ref, phase, "unattempted")
 
@@ -324,20 +324,19 @@ def _record_late_publication(
                 break
         else:
             publications.append(replace(publication, status=status))
-        return StoreReport(
-            report.target_stores, report.state_stores, report.required_stores,
-            report.snapshots, publications,
-        )
+        return replace(report, publications=publications)
 
     try:
         operation()
     except BaseException as error:
         try:
             observed = checker()
-            status = (
-                "completed" if complete_on_error and observed is True
-                else "failed" if observed is not None else "uncertain"
-            )
+            if complete_on_error and observed is True:
+                status = "completed"
+            elif observed is not None:
+                status = "failed"
+            else:
+                status = "uncertain"
         except Exception:
             status = "uncertain"
         failure = updated(status)
@@ -570,17 +569,7 @@ class Repo:
                 name one physical Store.
         """
 
-        if not isinstance(store, Store):
-            store = make_store(store)
-        with self._configuration_lock:
-            existing = next((item for item in self.stores if item is store), None)
-            candidate = [item for item in self.stores if item is not store]
-            candidate.insert(0, store if existing is None else existing)
-            self.stores = list(self._normalize_store_handles(
-                candidate, reject_physical=self._save_routing is not None,
-            ))
-            self._configuration_version += 1
-        self._query_index.refresh_bindings()
+        self.add_store(store, make_default=True)
 
     def add_store(self, store: "Store", make_default=False):
         """Register one Store for later Repo operations without duplicating handles.
@@ -625,7 +614,7 @@ class Repo:
         Direct Stores identify their canonical root with filesystem evidence.
         Path-backed ZipStores identify their retained persistent archive path,
         never their temporary extraction directory or archive inode.  File-like
-        ZipStores and custom Stores deliberately remain opaque in this U1
+        ZipStores and custom Stores deliberately remain opaque in this
         registration boundary.
         """
 
@@ -1850,13 +1839,12 @@ class Repo:
 
     def _clear_completed_routed_claim(self, plan, lease) -> None:
         """Drop only one confirmed completed routed claim from live metadata."""
-        candidates = [plan.binding.roots[0].obj]
-        candidates.extend(action.obj for action in plan.actions if isinstance(action.obj, Object))
-        seen = set()
+        candidates = _unique_objects(
+            (plan.binding.roots[0].obj, *(
+                action.obj for action in plan.actions if isinstance(action.obj, Object)
+            ))
+        )
         for candidate in candidates:
-            if id(candidate) in seen:
-                continue
-            seen.add(id(candidate))
             if getattr(candidate, "_claim_lease", None) is lease:
                 candidate._claim_lease = None
             candidate._claim_leases = tuple(
@@ -2305,8 +2293,8 @@ class Repo:
                         )(),
                     )
                 if main:
+                    main_record = MainRefRecord(DefinitionRecord(obj.definition).digest)
                     for root_store in report.target_stores:
-                        main_record = MainRefRecord(DefinitionRecord(obj.definition).digest)
                         report = _record_late_publication(
                             report, store=root_store, phase="main", state_ref=state_ref,
                             operation=lambda root_store=root_store, main_record=main_record: root_store.write_main_ref(main_record),
@@ -2317,8 +2305,8 @@ class Repo:
                 if alias is not None:
                     from .store.records import ObjectAliasRecord
 
+                    alias_record = ObjectAliasRecord(alias, state_ref.object)
                     for root_store in report.target_stores:
-                        alias_record = ObjectAliasRecord(alias, state_ref.object)
                         report = _record_late_publication(
                             report, store=root_store, phase="alias", state_ref=state_ref,
                             operation=lambda root_store=root_store, alias_record=alias_record: root_store.write_object_alias(alias_record),
@@ -2371,7 +2359,7 @@ class Repo:
             the exact claim lease carried by this save.
         """
         from dryml.runtime import materialization_admission
-        from .repo_plan import SavePublication, StoreReport
+        from .repo_plan import SavePublication
 
         with materialization_admission(operation="repo_save"):
             with self._retain_save_context() as context:
@@ -2384,12 +2372,9 @@ class Repo:
                 state_ref, report = result
                 if context.routing is None:
                     for commit_store in context.stores:
-                        report = StoreReport(
-                            report.target_stores,
-                            report.state_stores,
-                            report.required_stores,
-                            report.snapshots,
-                            (*report.publications, SavePublication(
+                        report = replace(
+                            report,
+                            publications=(*report.publications, SavePublication(
                                 commit_store, None, None, state_ref, "commit", "unattempted",
                             )),
                         )
@@ -3373,7 +3358,7 @@ def manage_repo(repo=None):
             if close_repo:
                 try:
                     repo_obj.close(flush=not getattr(repo_obj, "_skip_cleanup_flush", False))
-                except BaseException as cleanup_error:
+                except BaseException:
                     if failure is None:
                         raise
                     if hasattr(failure, "add_note"):

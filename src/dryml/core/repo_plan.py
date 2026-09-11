@@ -119,13 +119,7 @@ class SaveRoutingContext:
             reconfigures a Store.
         """
 
-        for candidate in self.stores:
-            try:
-                candidate.validate_local_state(definition, state_hash)
-            except Exception:
-                continue
-            return candidate
-        return None
+        return _find_local_state(self, definition, state_hash)
 
 
 @dataclass(frozen=True, slots=True)
@@ -867,7 +861,7 @@ def add_objects(repo, values: Iterable[Any], *, store=None) -> None:
 def build_save_plan(
         repo,
         value: Object) -> SavePlan:
-    """Build complete owned-state save evidence from retained U3 bindings.
+    """Build complete owned-state save evidence from retained bindings.
 
     Args:
         repo: Repository owning live bindings.
@@ -1171,7 +1165,7 @@ def execute_routed_save_plan(
                     index = state_work[(action.path, id(source))]
                     ledger.failed(
                         index,
-                        lambda: _has_local_state(
+                        lambda error=error: _has_local_state(
                             source,
                             action.definition,
                             getattr(error, "_attempted_state_hash", None),
