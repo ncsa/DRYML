@@ -124,11 +124,10 @@ def test_shared_nodes_save_once_and_equal_independent_nodes_stay_distinct(tmp_pa
     assert len(independent_state.states) == 2
 
 
-def test_save_copies_reusable_state_by_default_and_can_federate_it(tmp_path):
+def test_explicit_store_save_copies_reusable_state_into_its_closure(tmp_path):
     source = DirStore(tmp_path / "source")
     copied = DirStore(tmp_path / "copied")
-    federated = DirStore(tmp_path / "federated")
-    repo = Repo([source, copied, federated])
+    repo = Repo([source, copied])
     child = SaveLoadValue("child", repo=repo)
     child_state = repo.save_object(child, store=source)
     root = SaveLoadNode(child, repo=repo)
@@ -137,15 +136,6 @@ def test_save_copies_reusable_state_by_default_and_can_federate_it(tmp_path):
     copied_path = next(path for path, object_id in copied_state.object.objects.items() if object_id == child.object_id)
     assert copied_report.required_stores == (copied,)
     assert copied.validate_local_state(child.definition, copied_state.states[copied_path])
-
-    federated_state, federated_report = repo.save_object(
-        root, store=federated, federated=True, report_stores=True
-    )
-    federated_path = next(path for path, object_id in federated_state.object.objects.items() if object_id == child.object_id)
-    assert federated_state.states[federated_path] == child_state.states[next(iter(child_state.states))]
-    assert federated_report.state_stores[federated_path] == (source,)
-    assert federated_report.required_stores == (federated, source)
-
 
 def test_failed_local_state_save_never_publishes_a_state_ref(tmp_path):
     store = DirStore(tmp_path / "store")

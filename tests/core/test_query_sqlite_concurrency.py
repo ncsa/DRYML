@@ -17,7 +17,6 @@ from dryml.core.query.model import QueryIndexBusy, QueryIndexError
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core.query.sqlite.index as sqlite_index_module
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core.repo_plan import SaveAction, SavePlan, execute_save_plan
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord
 from dryml.core.symbol import ImportRef

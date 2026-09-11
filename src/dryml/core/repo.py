@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from .definition import Definition, ConcreteDefinition
 from .cdef_graph import ConcreteDefinitionGraph
-from .object import Object, Serializable
+from .object import Object
 from .store.store import Store
 from .policies import CachePolicy, LiveReusePolicy, RepoGraphOptions
 from .canonical import from_canonical
@@ -796,6 +796,65 @@ class Repo:
         if not selected:
             raise RepoSaveError("No Store available for save destination selection.")
         return tuple(selected)
+
+    @staticmethod
+    def _validate_save_mode(mode, *, name, choices) -> None:
+        """Reject an invalid per-save routing override before Store selection.
+
+        Args:
+            mode: Optional caller-supplied override.
+            name: Public keyword name used in the validation error.
+            choices: Closed supported string values for that keyword.
+
+        Raises:
+            TypeError: If a non-``None`` override is not a string.
+            ValueError: If the string is not one of ``choices``.
+        """
+
+        if mode is None:
+            return
+        if not isinstance(mode, str):
+            raise TypeError(f"{name} must be a string or None.")
+        if mode not in choices:
+            values = " or ".join(repr(choice) for choice in choices)
+            raise ValueError(f"{name} must be {values}.")
+
+    def _save_context_with_overrides(self, context, *, match_mode, graph_mode):
+        """Return a save-local effective routing context without mutating Repo policy.
+
+        An unconfigured Repo retains its historical default-Store closure by
+        materializing an empty, closure-mode policy only in this retained view.
+
+        Args:
+            context: Active immutable Repo configuration snapshot.
+            match_mode: Optional ``"first"`` or ``"all"`` override.
+            graph_mode: Optional ``"per-object"`` or ``"closure"`` override.
+
+        Returns:
+            A context whose routing policy contains the effective save-local modes.
+
+        Raises:
+            TypeError: If either supplied mode has the wrong type.
+            ValueError: If either supplied mode is unsupported.
+        """
+
+        from .repo_plan import SaveRouting, SaveRoutingContext
+
+        if not isinstance(context, SaveRoutingContext):
+            raise TypeError("Save mode overrides require a SaveRoutingContext.")
+        self._validate_save_mode(match_mode, name="match_mode", choices=("first", "all"))
+        self._validate_save_mode(
+            graph_mode, name="graph_mode", choices=("per-object", "closure"),
+        )
+        installed = context.routing
+        routing = SaveRouting(
+            () if installed is None else installed.routes,
+            ("first" if installed is None else installed.match_mode)
+            if match_mode is None else match_mode,
+            ("closure" if installed is None else installed.graph_mode)
+            if graph_mode is None else graph_mode,
+        )
+        return replace(context, routing=routing)
 
     def _ensure_store(self, store):
         if store is None:
@@ -2101,7 +2160,8 @@ class Repo:
             store=None,
             alias: str | None = None,
             deep_capture: bool = False,
-            federated: bool = False,
+            match_mode: str | None = None,
+            graph_mode: str | None = None,
             report_stores: bool = False,
             _capture_memo: set[object] | None = None,
             reservation=None,
@@ -2112,13 +2172,16 @@ class Repo:
         Args:
             obj: Root object whose graph is saved.
             main: Whether its concrete definition becomes the main reference.
-            store: Optional whole-graph closure target Store.  It overrides a
-                configured routing policy for this save.
+            store: Optional whole-graph closure target Store. It bypasses routing
+                and replication for this save.
             alias: Optional object alias written after StateRef publication.
             deep_capture: Whether every owned Serializable node is serialized.
-            federated: Whether reusable dependencies may remain external for an
-                unconfigured legacy save.  Configured routing selects placement.
+            match_mode: Optional ``"first"`` or ``"all"`` routing override.
+            graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
+                override. Both overrides are local to this save.
             report_stores: Whether to return an ephemeral StoreReport.
+            _capture_memo: Private retained capture memo. It is accepted for
+                internal state-operation compatibility and does not alter routing.
             reservation: Optional active exact graph reservation reused by an
                 enclosing state operation; callers normally omit this.
 
@@ -2126,8 +2189,9 @@ class Repo:
             The complete StateRef, or it with the requested StoreReport.
 
         Raises:
-            TypeError: If ``alias`` is not a string.
-            ValueError: If ``alias`` is empty.
+            TypeError: If ``alias`` or a supplied mode has the wrong type.
+            ValueError: If ``alias`` is empty or a supplied mode is unsupported.
+            RepoSaveError: If routing, claims, capture, or publication fails.
             StoreAuthorityError: If Store publication rejects authoritative data.
 
         Side Effects:
@@ -2147,6 +2211,10 @@ class Repo:
         with materialization_admission(operation="repo_save_object"):
             if alias is not None:
                 self._validate_alias(alias)
+            self._validate_save_mode(match_mode, name="match_mode", choices=("first", "all"))
+            self._validate_save_mode(
+                graph_mode, name="graph_mode", choices=("per-object", "closure"),
+            )
             selected_store = self._ensure_store(store)
             owns_reservation = reservation is None
             if owns_reservation:
@@ -2172,89 +2240,38 @@ class Repo:
                 if _save_context is not None else self._retain_save_context()
             )
             with (reservation if owns_reservation else nullcontext()), context_scope as context:
+                context = self._save_context_with_overrides(
+                    context, match_mode=match_mode, graph_mode=graph_mode,
+                )
                 lease = None
-                routed_save = False
                 try:
                     lease = getattr(obj, "_claim_lease", None)
-                    if context.routing is not None:
-                        from .repo_plan import build_routed_save_plan, execute_routed_save_plan
+                    from .repo_plan import build_routed_save_plan, execute_routed_save_plan
 
-                        routed = build_routed_save_plan(
-                            self, plan, context, store=selected_store,
-                        )
-                        index_destinations = []
-                        for destinations in routed.destinations.values():
-                            for destination in destinations:
-                                if not any(destination is known for known in index_destinations):
-                                    index_destinations.append(destination)
-                        late_publications = [("index", tuple(index_destinations))]
-                        if main:
-                            late_publications.append(("main", routed.root_destinations))
-                        if alias is not None:
-                            late_publications.append(("alias", routed.root_destinations))
-                        if _commit_stores:
-                            late_publications.append(("commit", tuple(_commit_stores)))
-                        result = execute_routed_save_plan(
-                            self,
-                            routed,
-                            deep_capture=deep_capture,
-                            report_stores=True,
-                            late_publications=tuple(late_publications),
-                        )
-                        store = routed.root_destinations[0]
-                        routed_save = True
-                    else:
-                        store = selected_store or context.default_store
-                        if store is None:
-                            raise RepoSaveError("No Store available to save object.")
-                        if isinstance(lease, _ClaimLease):
-                            if store is not lease.store:
-                                raise RepoSaveError("The initial StateRef must be published in the declaration Store.")
-                            self._renew_claim(lease)
-                        capture_memo = set() if _capture_memo is None else _capture_memo
-                        # Complete nested declarations before publishing an enclosing graph.
-                        # The nested immutable StateRef then supplies reusable state for
-                        # adoption, so deep capture does not serialize it a second time.
-                        for dependency_lease, dependency_obj in getattr(
-                                obj, "_pending_claim_dependencies", ()):
-                            if dependency_lease is lease:
-                                continue
-                            self.save_object(
-                                dependency_obj,
-                                store=dependency_lease.store,
-                                deep_capture=deep_capture,
-                                federated=federated,
-                                _capture_memo=capture_memo,
-                                reservation=reservation,
-                            )
-                            from .repo_plan import build_save_plan
-
-                            capture_memo.update(
-                                action.obj.object_id
-                                for action in build_save_plan(self, dependency_obj).actions
-                                if isinstance(action.obj, Serializable)
-                            )
-                        self.add_objects(obj, store=store)
-                        from .repo_plan import execute_save_plan
-
-                        try:
-                            result = execute_save_plan(
-                                self, plan, store=store, deep_capture=deep_capture,
-                                federated=federated, report_stores=True,
-                                capture_memo=capture_memo, claim_lease=lease,
-                            )
-                        except BaseException as error:
-                            from .repo_plan import StoreReport
-
-                            report = StoreReport((store,), {}, (store,))
-                            if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                                error.report = report
-                                raise
-                            if isinstance(error, RepoSaveError):
-                                if error.report is None:
-                                    error.report = report
-                                raise
-                            raise RepoSaveError("Save publication failed.", report=report) from error
+                    routed = build_routed_save_plan(
+                        self, plan, context, store=selected_store,
+                    )
+                    index_destinations = []
+                    for destinations in routed.destinations.values():
+                        for destination in destinations:
+                            if not any(destination is known for known in index_destinations):
+                                index_destinations.append(destination)
+                    late_publications = []
+                    if not self._state_io:
+                        late_publications.append(("index", tuple(index_destinations)))
+                    if main:
+                        late_publications.append(("main", routed.root_destinations))
+                    if alias is not None:
+                        late_publications.append(("alias", routed.root_destinations))
+                    if _commit_stores:
+                        late_publications.append(("commit", tuple(_commit_stores)))
+                    result = execute_routed_save_plan(
+                        self,
+                        routed,
+                        deep_capture=deep_capture,
+                        report_stores=True,
+                        late_publications=tuple(late_publications),
+                    )
                 except BaseException:
                     for pending_lease in reversed(
                             getattr(obj, "_claim_leases", (lease,) if lease else ())):
@@ -2268,30 +2285,25 @@ class Repo:
                 # StateRef publication is authoritative; only then may the derived
                 # query index expose this root. A registration failure leaves the
                 # Store authority intact and the sidecar explicitly dirty.
-                if routed_save:
+                if not self._state_io:
                     roots_by_store = defaultdict(list)
                     state_refs_by_store = defaultdict(list)
                     for snapshot in report.snapshots:
                         for destination in snapshot.stores:
                             roots_by_store[destination].append(snapshot.state_ref.definition)
                             state_refs_by_store[destination].append(snapshot.state_ref)
-                    index_stores = tuple(roots_by_store)
-                else:
-                    roots_by_store = {store: (obj.definition,)}
-                    state_refs_by_store = {store: (state_ref,)}
-                    index_stores = (store,)
-                for index_store in index_stores:
-                    report = _record_late_publication(
-                        report, store=index_store, phase="index", state_ref=state_ref,
-                        operation=lambda index_store=index_store: self._query_index.register_saved_graph(
-                            plan.graph,
-                            {index_store: tuple(roots_by_store[index_store])},
-                            {index_store: tuple(state_refs_by_store[index_store])},
-                        ),
-                        checker=lambda index_store=index_store: not getattr(
-                            index_store, "query_index_is_dirty", lambda: False
-                        )(),
-                    )
+                    for index_store in roots_by_store:
+                        report = _record_late_publication(
+                            report, store=index_store, phase="index", state_ref=state_ref,
+                            operation=lambda index_store=index_store: self._query_index.register_saved_graph(
+                                plan.graph,
+                                {index_store: tuple(roots_by_store[index_store])},
+                                {index_store: tuple(state_refs_by_store[index_store])},
+                            ),
+                            checker=lambda index_store=index_store: not getattr(
+                                index_store, "query_index_is_dirty", lambda: False
+                            )(),
+                        )
                 if main:
                     main_record = MainRefRecord(DefinitionRecord(obj.definition).digest)
                     for root_store in report.target_stores:
@@ -2323,7 +2335,8 @@ class Repo:
             store=None,
             alias: str | None = None,
             deep_capture: bool = False,
-            federated: bool = False,
+            match_mode: str | None = None,
+            graph_mode: str | None = None,
             report_stores: bool = False):
         """Publish one object graph and flush its Repo.
 
@@ -2333,9 +2346,9 @@ class Repo:
             store: Explicit whole-graph closure Store or Store specification.
             alias: Optional Store-local ObjectRef alias to update after publication.
             deep_capture: Whether to serialize every owned live Serializable node.
-            federated: Whether verified dependency state may remain in connected
-                Stores instead of being copied into the target for an
-                unconfigured legacy save.
+            match_mode: Optional ``"first"`` or ``"all"`` routing override.
+            graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
+                override local to this save.
             report_stores: Whether to pair the StateRef with a StoreReport.
 
         Returns:
@@ -2345,7 +2358,8 @@ class Repo:
         Raises:
             RepoSaveError: If graph bindings, claims, codecs, or hooks fail.
             StoreAuthorityError: If Store preflight or publication fails.
-            ValueError: If no writable target Store can be selected.
+            TypeError: If a supplied mode has the wrong type.
+            ValueError: If no writable target Store can be selected or a mode is unsupported.
 
         Side Effects:
             Publishes immutable definition, local-state, root-membership, and
@@ -2359,25 +2373,17 @@ class Repo:
             the exact claim lease carried by this save.
         """
         from dryml.runtime import materialization_admission
-        from .repo_plan import SavePublication
 
         with materialization_admission(operation="repo_save"):
             with self._retain_save_context() as context:
                 result = self.save_object(
                     obj, main=main, store=store, alias=alias,
-                    deep_capture=deep_capture, federated=federated,
+                    deep_capture=deep_capture, match_mode=match_mode,
+                    graph_mode=graph_mode,
                     report_stores=True, _save_context=context,
                     _commit_stores=context.stores,
                 )
                 state_ref, report = result
-                if context.routing is None:
-                    for commit_store in context.stores:
-                        report = replace(
-                            report,
-                            publications=(*report.publications, SavePublication(
-                                commit_store, None, None, state_ref, "commit", "unattempted",
-                            )),
-                        )
                 report = _commit_save_report(self, state_ref, report, stores=context.stores)
             return (state_ref, report) if report_stores else state_ref
 
@@ -3376,7 +3382,8 @@ def save_object(
         store=None,
         alias: str | None = None,
         deep_capture: bool = False,
-        federated: bool = False,
+        match_mode: str | None = None,
+        graph_mode: str | None = None,
         report_stores: bool = False):
     """Publish one Object graph through its current immutable StateRef boundary.
 
@@ -3385,11 +3392,12 @@ def save_object(
         repo: Optional Repo or Store authority used for publication.
         main: Whether to update the target Store's main definition after StateRef
             authority is complete.
-        store: Optional explicit target Store.
+        store: Optional explicit whole-graph target Store.
         alias: Optional object alias written after StateRef publication.
         deep_capture: Whether to serialize every owned Serializable node.
-        federated: Whether validated immutable dependency state may remain in
-            connected Stores.
+        match_mode: Optional ``"first"`` or ``"all"`` routing override.
+        graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
+            override local to this save.
         report_stores: Whether to return a StoreReport with the StateRef.
 
     Returns:
@@ -3399,6 +3407,8 @@ def save_object(
         RepoSaveError: If bindings, claims, local state, or StateRef publication
             cannot complete.
         StoreAuthorityError: If the selected Store rejects authoritative writes.
+        TypeError: If a supplied mode has the wrong type.
+        ValueError: If a supplied mode is unsupported.
 
     Side Effects:
         Publishes immutable graph state and installs the completed StateRef as
@@ -3420,7 +3430,8 @@ def save_object(
             with sub_repo._retain_save_context() as context:
                 result = sub_repo.save_object(
                     obj, main=main, store=store, alias=alias,
-                    deep_capture=deep_capture, federated=federated,
+                    deep_capture=deep_capture, match_mode=match_mode,
+                    graph_mode=graph_mode,
                     report_stores=True, _save_context=context,
                     _commit_stores=context.stores if temporary_repo else (),
                 )

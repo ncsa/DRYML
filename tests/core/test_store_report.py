@@ -42,6 +42,22 @@ def test_store_report_is_ephemeral_complete_and_not_state_identity(tmp_path):
     assert "StoreReport" not in repr(state)
 
 
+def test_unconfigured_repo_save_commits_each_store_once_with_completed_report(tmp_path):
+    """The unified save ledger owns one completed flush entry per connected Store."""
+
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    repo = Repo([first, second])
+
+    _, report = repo.save(ReportState(repo=repo), report_stores=True)
+
+    commits = [item for item in report.publications if item.phase == "commit"]
+    assert [(item.store, item.status) for item in commits] == [
+        (first, "completed"),
+        (second, "completed"),
+    ]
+
+
 def test_replica_failure_keeps_the_old_root_receipt_and_exposes_route_order(tmp_path, monkeypatch):
     first = DirStore(tmp_path / "first")
     second = DirStore(tmp_path / "second")

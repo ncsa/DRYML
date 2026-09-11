@@ -2,12 +2,12 @@
 
 `Repo` coordinates live realizations and one or more Stores. `manage_repo(None)` uses an explicitly active Repo or creates a temporary Repo for the operation; no process-global fallback exists.
 
-`Repo.save_object()` and `Object.save()` publish a graph `StateRef`. Direct save keywords are `main`, `store`, `alias`, `deep_capture`, `federated`, and `report_stores`; no options object, revision, or traversal-depth control exists. Default non-federated saves copy verified immutable dependency state to the selected Store. Federated saves may retain dependencies in connected Stores. With `report_stores=True`, `StoreReport` exposes ordered root targets, confirmed local-state Stores, a deterministic sufficient recovery set, independently confirmed snapshots, and immutable per-boundary publication outcomes. `RepoSaveError.report` preserves the same partial evidence after planned capture/publication, index, name, or commit failure; interruption exceptions retain their original type and carry available report evidence.
+`Repo.save_object()`, `Repo.save()`, `Object.save()`, and module-level `save_object()` publish a graph `StateRef`. Direct save keywords are `main`, `store`, `alias`, `deep_capture`, `match_mode`, `graph_mode`, and `report_stores`; the removed ordinary-save `federated` keyword raises `TypeError`. `match_mode` accepts `"first"` or `"all"`, and `graph_mode` accepts `"per-object"` or `"closure"`. `None` inherits the retained Repo policy; an unconfigured Repo defaults to first-match closure. Overrides apply only to that save. An explicit `store=` always receives one complete closure and bypasses route selection and replication, though supplied modes are still validated. With `report_stores=True`, `StoreReport` exposes ordered root targets, confirmed local-state Stores, a deterministic sufficient recovery set, independently confirmed snapshots, and immutable per-boundary publication outcomes. `RepoSaveError.report` preserves the same partial evidence after planned capture/publication, index, name, or commit failure; interruption exceptions retain their original type and carry available report evidence.
 
 `SaveRouting` is an immutable ordered `Selector` to connected-`Store` policy.
 `Repo(..., save_routing=...)` and `set_save_routing()` accept it, `None`, or the
 `"per-object"`/`"closure"` placement shorthands. A configured empty policy falls
-back to the Repo default Store; `None` retains legacy closure behavior. A
+back to the Repo default Store; `None` retains default-Store closure behavior. A
 configured per-object save captures each local state once, assigns payload only
 to that Object's selected Stores, and publishes exact child `StateRef.at(path)`
 projections. Closure mode makes every selected root Store self-contained; an

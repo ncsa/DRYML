@@ -361,7 +361,8 @@ class Object(metaclass=Dryml):
             store=None,
             alias: str | None = None,
             deep_capture: bool = False,
-            federated: bool = False,
+            match_mode: str | None = None,
+            graph_mode: str | None = None,
             report_stores: bool = False):
         """Publish this graph as an immutable exact StateRef.
 
@@ -372,15 +373,21 @@ class Object(metaclass=Dryml):
             store: Optional selected target Store.
             alias: Optional object alias to update after StateRef publication.
             deep_capture: Whether to serialize every owned Serializable node.
-            federated: Whether validated dependency states may remain external.
+            match_mode: Optional ``"first"`` or ``"all"`` routing override.
+            graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
+                override local to this save.
             report_stores: Whether to also return the selected Store report.
 
         Returns:
             The published ``StateRef``, or it paired with a ``StoreReport``.
 
         Raises:
-            StoreAuthorityError: If checkpoint or graph publication cannot be
-                completed atomically.
+            RepoSaveError: If routing, immutable publication, or a later
+                derived update fails. Its report records completed, failed, and
+                unattempted Store work; completed Store work is not rolled back
+                because cross-Store saves are not transactional.
+            TypeError: If a supplied mode has the wrong type.
+            ValueError: If a supplied mode is unsupported.
 
         Side Effects:
             Publishes immutable StateRef authority and installs that StateRef as
@@ -394,7 +401,8 @@ class Object(metaclass=Dryml):
         with materialization_admission(operation="object_save"):
             return save_object(
                 self, repo=repo, main=main, store=store, alias=alias,
-                deep_capture=deep_capture, federated=federated,
+                deep_capture=deep_capture, match_mode=match_mode,
+                graph_mode=graph_mode,
                 report_stores=report_stores,
             )
 

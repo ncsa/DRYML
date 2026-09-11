@@ -77,7 +77,12 @@ def test_pending_declaration_save_completes_its_claim_and_captures_once(tmp_path
 def test_nested_pending_declaration_completes_before_parent_and_is_adopted_once(tmp_path):
     child_store = DirStore(tmp_path / "child")
     parent_store = DirStore(tmp_path / "parent")
-    repo = Repo([child_store, parent_store])
+    repo = Repo(
+        [child_store, parent_store],
+        save_routing=SaveRouting(
+            ((Selector(PendingValue), child_store), (Selector(PendingParent), parent_store)),
+        ),
+    )
     child_reference = repo.declare_object(PendingValue(1).definition, store=child_store)
     parent_reference = repo.declare_object(
         Definition(PendingParent, child_reference).concretize(repo=repo),
@@ -87,14 +92,14 @@ def test_nested_pending_declaration_completes_before_parent_and_is_adopted_once(
     PendingParent.captures = 0
 
     parent = repo.build_object_ref(parent_reference, store=parent_store)
-    state = repo.save_object(parent, store=parent_store, deep_capture=True)
+    state = repo.save_object(parent, deep_capture=True)
 
     assert child_store.read_claim_record(child_reference.digest()).status == "completed"
     assert parent_store.read_claim_record(parent_reference.digest()).status == "completed"
     assert PendingValue.captures == 1
     assert PendingParent.captures == 1
     child_path = next(path for path, object_id in state.object.objects.items() if object_id == child_reference.object_id)
-    assert parent_store.validate_local_state(
+    assert child_store.validate_local_state(
         state.object.at(child_path).definition, state.states[child_path]
     )
 
@@ -124,7 +129,7 @@ def test_nested_constructor_failure_releases_only_acquired_claims_in_reverse_ord
     assert parent_store.read_claim_record(parent.digest()).status == "available"
 
 
-def test_federated_pending_adoption_reports_child_declaration_store(tmp_path):
+def test_explicit_store_rejects_excluded_pending_declaration_before_capture(tmp_path):
     child_store = DirStore(tmp_path / "child")
     parent_store = DirStore(tmp_path / "parent")
     repo = Repo([child_store, parent_store])
@@ -134,14 +139,16 @@ def test_federated_pending_adoption_reports_child_declaration_store(tmp_path):
     )
 
     live = repo.build_object_ref(parent, store=parent_store)
-    state, report = repo.save_object(
-        live, store=parent_store, deep_capture=True, federated=True, report_stores=True
-    )
+    PendingValue.captures = 0
+    PendingParent.captures = 0
 
-    child_path = next(path for path, object_id in state.object.objects.items() if object_id == child.object_id)
-    assert report.state_stores[child_path] == (child_store,)
-    assert child_store in report.required_stores
-    assert parent_store in report.required_stores
+    with pytest.raises(RepoSaveError, match="declaration Store"):
+        repo.save_object(live, store=parent_store, deep_capture=True)
+
+    assert PendingValue.captures == 0
+    assert PendingParent.captures == 0
+    assert child_store.read_claim_record(child.digest()).status == "available"
+    assert parent_store.read_claim_record(parent.digest()).status == "available"
 
 
 def test_active_nested_claim_rejects_parent_before_any_constructor_runs(tmp_path):

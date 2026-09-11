@@ -136,7 +136,7 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
             try:
                 final_state = state_repo.save_object(
                     instance, store=stores.state_store, main=False, alias=None,
-                    deep_capture=True, federated=False, reservation=ownership.reservation,
+                    deep_capture=True, reservation=ownership.reservation,
                 )
                 validate_state_ref(stores.state_store, final_state)
                 _completion_boundary("final_state_published")

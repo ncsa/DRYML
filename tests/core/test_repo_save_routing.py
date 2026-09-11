@@ -1,5 +1,6 @@
 """Focused contracts for inert Repo save-routing configuration."""
 
+import inspect
 import sys
 import threading
 import subprocess
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core import Object, Ref, Repo, SaveRouting, Selector, Serializable
+from dryml.core import Object, Ref, Repo, SaveRouting, Selector, Serializable, save_object
 from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
 
@@ -269,6 +270,7 @@ def test_per_object_routing_projects_a_child_state_ref_without_copying_its_paylo
     assert Repo(list(child_snapshot.required_stores)).load_state_ref(
         child_snapshot.state_ref, reuse_live="never",
     ).value == 3
+    assert list(Repo(child_store).query(child_state.definition).stored().defs()) == [child_state.definition]
 
 
 def test_all_matching_routing_captures_once_and_replicates_exact_projections(tmp_path):
@@ -343,6 +345,93 @@ def test_closure_and_explicit_store_route_the_complete_root_closure(tmp_path):
 
     explicit = repo.save_object(root, store=explicit_store, deep_capture=True)
     assert Repo(explicit_store).load_state_ref(explicit, reuse_live="never").child.value == 5
+
+
+def test_ordinary_save_entry_points_remove_federated_and_expose_modes(tmp_path):
+    """All ordinary save APIs reject the retired control without a compatibility shim."""
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    obj = RoutedLeaf(13, repo=repo)
+    entry_points = (
+        (repo.save_object, (obj,)),
+        (repo.save, (obj,)),
+        (obj.save, (repo,)),
+        (save_object, (obj, repo)),
+    )
+
+    for entry_point, args in entry_points:
+        parameters = inspect.signature(entry_point).parameters
+        assert "federated" not in parameters
+        assert {"match_mode", "graph_mode"} <= set(parameters)
+        with pytest.raises(TypeError):
+            entry_point(*args, federated=True)
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value", "error"),
+    (
+        ("match_mode", 1, TypeError),
+        ("match_mode", "replicate", ValueError),
+        ("graph_mode", 1, TypeError),
+        ("graph_mode", "everywhere", ValueError),
+    ),
+)
+def test_save_mode_overrides_validate_before_explicit_store_routing(tmp_path, keyword, value, error):
+    """Mode validation is strict even when an explicit Store bypasses routing."""
+
+    store = DirStore(tmp_path / "store")
+    explicit = DirStore(tmp_path / "explicit")
+    repo = Repo(store)
+
+    with pytest.raises(error):
+        repo.save_object(RoutedLeaf(14, repo=repo), store=explicit, **{keyword: value})
+
+    assert not (Path(explicit.base_dir) / "state-refs").exists()
+
+
+def test_per_save_modes_do_not_mutate_policy_and_explicit_store_bypasses_routes(tmp_path):
+    """Overrides are save-local, while explicit destinations always receive one closure."""
+
+    parent_store = DirStore(tmp_path / "parent")
+    child_store = DirStore(tmp_path / "child")
+    explicit_store = DirStore(tmp_path / "explicit")
+    repo = Repo(
+        [parent_store, child_store, explicit_store],
+        save_routing=SaveRouting(
+            ((Selector(RoutedRoot), parent_store), (Selector(RoutedLeaf), child_store)),
+        ),
+    )
+    original = repo.save_routing
+    root = RoutedRoot(RoutedLeaf(15, repo=repo), repo=repo)
+
+    closure = repo.save_object(root, graph_mode="closure", deep_capture=True)
+    assert Repo(parent_store).load_state_ref(closure, reuse_live="never").child.value == 15
+    assert repo.save_routing == original
+
+    explicit = repo.save_object(
+        root, store=explicit_store, match_mode="all", graph_mode="per-object", deep_capture=True,
+    )
+    assert Repo(explicit_store).load_state_ref(explicit, reuse_live="never").child.value == 15
+    assert repo.save_routing == original
+    assert child_store.read_state_ref_record(explicit.digest()) is None
+
+
+def test_unconfigured_save_uses_closure_ledger_and_reports_complete_work(tmp_path):
+    """Unconfigured ordinary saves retain default-Store closure and U3 report evidence."""
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    root = RoutedRoot(RoutedLeaf(16, repo=repo), repo=repo)
+
+    state, report = repo.save_object(root, deep_capture=True, report_stores=True)
+
+    assert report.target_stores == (store,)
+    assert report.required_stores == (store,)
+    assert len(report.snapshots) == 1
+    assert report.snapshots[0].state_ref == state
+    assert all(publication.status == "completed" for publication in report.publications)
+    assert Repo(store).load_state_ref(state, reuse_live="never").child.value == 16
 
 
 def test_per_object_routing_projects_distinct_stateless_children_by_live_identity(tmp_path):

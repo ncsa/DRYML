@@ -146,7 +146,7 @@ class ManagedContext:
                 self._ownership.require_owner()
                 state_ref = self._state_repo.save_object(
                     self._obj, store=self._state_store, main=False, alias=None,
-                    deep_capture=True, federated=False, reservation=self._ownership.reservation,
+                    deep_capture=True, reservation=self._ownership.reservation,
                 )
                 validate_state_ref = _validate_state_ref()
                 validate_state_ref(self._state_store, state_ref)
