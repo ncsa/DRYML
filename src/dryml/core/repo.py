@@ -13,6 +13,8 @@ from collections.abc import Iterable, Mapping
 from collections import defaultdict
 import atexit
 import time
+import stat
+from threading import RLock
 from uuid import uuid4
 
 from .definition import Definition, ConcreteDefinition
@@ -322,6 +324,13 @@ RevisionType = dict[ConcreteDefinition, str]
 
 
 class Repo:
+    """Coordinate live Objects, connected Stores, and inert save-routing policy.
+
+    Repo owns live-object and query bindings while supplied Store handles remain
+    borrowed.  ``save_routing`` configures only internal destination selection
+    in this stage; ordinary public saves retain their existing default-Store
+    closure behavior until routed publication is introduced separately.
+    """
     # Trackers
     _num_saves: int
     _num_constructions: int
@@ -363,7 +372,32 @@ class Repo:
             *, clock: Callable[[], float] | None = None,
             lease_duration: float = 30.0,
             owner_token_factory: Callable[[], str] | None = None,
+            save_routing=None,
             _state_io: bool = False):
+        """Create a Repo over supplied Store handles and optional routing policy.
+
+        Args:
+            stores: One Store, Store specification, or ordered collection of
+                them.  Configured routing requires one handle per physical
+                built-in destination; repeated occurrences of one handle dedupe.
+            config: Initial runtime-only configuration values.
+            clock: Optional claim-clock function.
+            lease_duration: Bounded claim duration in seconds.
+            owner_token_factory: Optional claim-owner token factory.
+            save_routing: ``None``, a detached SaveRouting, or a placement
+                shorthand.  Shorthands configure empty first-match rules.
+            _state_io: Internal authority-only view mode.
+
+        Raises:
+            TypeError: If routing input is not a supported policy or shorthand.
+            ValueError: If a routing policy is invalid, disconnected, or names
+                ambiguous built-in physical Store handles.
+
+        Side Effects:
+            Store specifications may open or initialize their backend.  Supplied
+            Store handles are borrowed.  No routing validation publishes data or
+            creates an implicit destination Store.
+        """
         # Initialize caches
         self.weak_obj_cache = _CandidateCache(weak=True)
         self.strong_obj_cache = _CandidateCache()
@@ -378,6 +412,12 @@ class Repo:
         self._lease_duration = float(lease_duration)
         self._owner_token_factory = owner_token_factory or (lambda: uuid4().hex)
         self._state_io = _state_io
+        self._configuration_lock = RLock()
+        self._configuration_version = 0
+        self._save_context_leases = 0
+        self._save_routing = None
+        self._closing = False
+        self._closed = False
         self.alias_index = {}
         self._aliases_dirty = False
         # Compatibility facade and live cache overlay. Store-owned indexes handle
@@ -393,17 +433,22 @@ class Repo:
         self.main_def = None
 
         # Multiple stores, optional
-        self.stores = []
+        candidate_stores = []
         if stores is not None:
             if not isinstance(stores, (tuple, list)):
                 stores = [stores]
 
             for store in stores:
                 if not isinstance(store, Store):
-                    self.stores.append(make_store(store))
+                    candidate_stores.append(make_store(store))
                 else:
-                    self.stores.append(store)
+                    candidate_stores.append(store)
+        # Legacy unconfigured federation can retain separate Store handles.
+        # Routing installation validates that topology before it becomes a save
+        # destination policy.
+        self.stores = list(self._normalize_store_handles(candidate_stores, reject_physical=False))
         self._query_index = RepoQueryIndex(self, authority_only=_state_io)
+        self.set_save_routing(save_routing)
 
         # Main remains a structural reference in current Store authority.
         if len(self.stores) > 0:
@@ -421,27 +466,275 @@ class Repo:
 
     @property
     def default_store(self):
-        return self.stores[0] if len(self.stores) > 0 else None
+        """Return the first connected Store, or ``None`` when no Store exists."""
+
+        with self._configuration_lock:
+            return self.stores[0] if self.stores else None
+
+    @property
+    def save_routing(self):
+        """Return the normalized routing policy, or ``None`` for legacy closure.
+
+        The returned immutable value is safe to retain.  It configures internal
+        selection only and does not itself save Objects or create Stores.
+        """
+
+        with self._configuration_lock:
+            return self._save_routing
 
     def set_default_store(self, store: "Store"):
+        """Make one connected Store the default in one configuration update.
+
+        Args:
+            store: Existing Store handle or an accepted Store specification.
+
+        Side Effects:
+            May open a supplied Store specification, publishes a new source and
+            default ordering for later retained contexts, and refreshes query
+            bindings.  It never changes a context already retained by a save.
+
+        Raises:
+            ValueError: If routing is configured and distinct built-in handles
+                name one physical Store.
+        """
+
         if not isinstance(store, Store):
             store = make_store(store)
-        if store not in self.stores:
-            self.stores.insert(0, store)
-        else:
-            # Find and move to front
-            store_idx = self.stores.index(store)
-            self.stores.insert(0, self.stores.pop(store_idx))
+        with self._configuration_lock:
+            existing = next((item for item in self.stores if item is store), None)
+            candidate = [item for item in self.stores if item is not store]
+            candidate.insert(0, store if existing is None else existing)
+            self.stores = list(self._normalize_store_handles(
+                candidate, reject_physical=self._save_routing is not None,
+            ))
+            self._configuration_version += 1
         self._query_index.refresh_bindings()
 
     def add_store(self, store: "Store", make_default=False):
+        """Register one Store for later Repo operations without duplicating handles.
+
+        Args:
+            store: Existing Store handle or an accepted Store specification.
+            make_default: Whether the Store becomes the first/default handle.
+
+        Side Effects:
+            May open a supplied Store specification and publishes a new source
+            ordering for future retained contexts.  The same handle is retained
+            once; no data is saved or copied.
+
+        Raises:
+            ValueError: If routing is configured and distinct built-in handles
+                name one physical Store.
+        """
+
         if not isinstance(store, Store):
             store = make_store(store)
-        if make_default or self.default_store is None:
-            self.stores.insert(0, store)
-        else:
-            self.stores.append(store)
+        with self._configuration_lock:
+            existing = next((item for item in self.stores if item is store), None)
+            if existing is not None and not make_default:
+                return
+            candidate = [item for item in self.stores if item is not store]
+            if make_default or not candidate:
+                candidate.insert(0, store if existing is None else existing)
+            elif existing is None:
+                candidate.append(store)
+            else:
+                candidate.append(existing)
+            self.stores = list(self._normalize_store_handles(
+                candidate, reject_physical=self._save_routing is not None,
+            ))
+            self._configuration_version += 1
         self._query_index.refresh_bindings()
+
+    @staticmethod
+    def _physical_store_key(store: Store):
+        """Return stable identity for built-in persistent Store handles.
+
+        Direct Stores identify their canonical root with filesystem evidence.
+        Path-backed ZipStores identify their retained persistent archive path,
+        never their temporary extraction directory or archive inode.  File-like
+        ZipStores and custom Stores deliberately remain opaque in this U1
+        registration boundary.
+        """
+
+        from .store.dir import DirStore
+        from .store.zip import ZipStore
+
+        if type(store) is ZipStore:
+            archive_path = store.archive_path
+            if archive_path is None:
+                return None
+            path = os.path.normcase(os.path.realpath(archive_path))
+            parent = os.path.dirname(path) or "."
+            try:
+                evidence = os.stat(parent)
+            except OSError as error:
+                raise ValueError("ZipStore archive parent cannot be inspected.") from error
+            if not stat.S_ISDIR(evidence.st_mode):
+                raise ValueError("ZipStore archive parent is not a directory.")
+            return ("zip", path)
+        if type(store) is DirStore:
+            path = os.path.normcase(os.path.realpath(store.base_dir))
+            try:
+                evidence = os.stat(path)
+            except OSError as error:
+                raise ValueError("DirStore root cannot be inspected.") from error
+            if not stat.S_ISDIR(evidence.st_mode):
+                raise ValueError("DirStore root is not a directory.")
+            return ("dir", path, evidence.st_dev, evidence.st_ino)
+        return None
+
+    @classmethod
+    def _normalize_store_handles(cls, stores, *, reject_physical: bool = True):
+        """Deduplicate handles and optionally reject physical built-in aliases."""
+
+        selected = []
+        handles = set()
+        physical = {}
+        for store in stores:
+            if not isinstance(store, Store):
+                raise TypeError("Repo Store registrations must be Store instances.")
+            handle = id(store)
+            if handle in handles:
+                continue
+            handles.add(handle)
+            key = cls._physical_store_key(store)
+            existing = physical.get(key) if key is not None else None
+            if existing is not None and existing is not store:
+                if reject_physical:
+                    raise ValueError("Distinct Store handles cannot name one physical destination.")
+            if key is not None:
+                physical[key] = store
+            selected.append(store)
+        return tuple(selected)
+
+    def set_save_routing(self, routing) -> None:
+        """Atomically replace or adjust the internal immutable save-routing policy.
+
+        Args:
+            routing: ``None`` to retain legacy closure behavior, a SaveRouting
+                whose route Store handles are already connected, or
+                ``"per-object"``/``"closure"`` to change only graph placement.
+
+        Raises:
+            TypeError: If ``routing`` is neither a supported policy nor string.
+            ValueError: If a mode is unknown or a route destination is not an
+                exact connected Store handle.
+
+        Side Effects:
+            Publishes one replacement policy for later retained contexts.  It
+            never opens, creates, publishes to, moves, or deletes a Store.
+        """
+
+        from .repo_plan import SaveRouting
+
+        with self._configuration_lock:
+            if routing is None:
+                normalized = None
+            elif isinstance(routing, SaveRouting):
+                normalized = routing
+            elif isinstance(routing, str):
+                if routing not in {"per-object", "closure"}:
+                    raise ValueError("Save routing graph mode must be 'per-object' or 'closure'.")
+                previous = self._save_routing or SaveRouting()
+                normalized = SaveRouting(previous.routes, previous.match_mode, routing)
+            else:
+                raise TypeError("Save routing must be SaveRouting, a graph-mode string, or None.")
+            if normalized is not None:
+                stores = self._normalize_store_handles(self.stores)
+                connected = {id(store) for store in stores}
+                if any(id(store) not in connected for _, store in normalized.routes):
+                    raise ValueError("Save routing destinations must be connected Store handles.")
+            self._save_routing = normalized
+            self._configuration_version += 1
+
+    @contextmanager
+    def _retain_save_context(self):
+        """Retain one immutable source/default/routing view until the caller exits.
+
+        Yields:
+            SaveRoutingContext containing ordered source Stores, physical
+            representatives, default Store, and routing policy captured together.
+
+        Raises:
+            RepoSaveError: If direct unsupported Store-list mutation disconnects
+                an installed routing destination.
+
+        Side Effects:
+            Acquires a lightweight Repo resource lease.  ``close()`` rejects
+            while any such context remains active; no Store is opened, created,
+            or published during retention.
+        """
+
+        from .repo_plan import SaveRoutingContext
+
+        with self._configuration_lock:
+            if self._closing or self._closed:
+                raise RuntimeError("Cannot retain a save context after Repo close begins.")
+            stores = self._normalize_store_handles(
+                self.stores, reject_physical=self._save_routing is not None,
+            )
+            routing = self._save_routing
+            if routing is not None:
+                connected = {id(store) for store in stores}
+                if any(id(store) not in connected for _, store in routing.routes):
+                    raise RepoSaveError("Save routing contains a disconnected destination.")
+            context = SaveRoutingContext(
+                stores, stores[0] if stores else None, routing,
+                self._configuration_version,
+            )
+            self._save_context_leases += 1
+        try:
+            yield context
+        finally:
+            with self._configuration_lock:
+                self._save_context_leases -= 1
+
+    def _select_save_destinations(self, context, value) -> tuple[Store, ...]:
+        """Select retained routing destinations for one Object without publishing.
+
+        Args:
+            context: Active SaveRoutingContext retained from this Repo.
+            value: Object or ConcreteDefinition to match with existing Selector
+                semantics.
+
+        Returns:
+            Ordered, handle-deduplicated destination Stores.  An unconfigured
+            policy and an empty configured policy both select the retained default.
+
+        Raises:
+            TypeError: If ``context`` or ``value`` has an unsupported type.
+            RepoSaveError: If no matching or default destination exists.
+
+        Side Effects:
+            Invokes trusted Selector matching only.  It never opens, creates,
+            validates publication capability, or publishes to a Store.
+        """
+
+        from .repo_plan import SaveRoutingContext
+
+        if not isinstance(context, SaveRoutingContext):
+            raise TypeError("Save destination selection requires a SaveRoutingContext.")
+        if isinstance(value, Object):
+            target = value.definition
+        elif isinstance(value, ConcreteDefinition):
+            target = value
+        else:
+            raise TypeError("Save destination selection requires an Object or ConcreteDefinition.")
+        routing = context.routing
+        selected = []
+        if routing is not None:
+            for selector, store in routing.routes:
+                if selector.matches(target):
+                    if not any(candidate is store for candidate in selected):
+                        selected.append(store)
+                    if routing.match_mode == "first":
+                        break
+        if not selected and context.default_store is not None:
+            selected.append(context.default_store)
+        if not selected:
+            raise RepoSaveError("No Store available for save destination selection.")
+        return tuple(selected)
 
     def _ensure_store(self, store):
         if store is None:
@@ -2607,11 +2900,39 @@ class Repo:
         self._aliases_dirty = False
 
     def close(self, flush=True):
-        if flush and not self._state_io:
-            self.flush()
-        self._query_index.close()
-        if self._state_io:
-            self.clear_cache(strong=True, weak=True)
+        """Flush and detach Repo query bindings unless an active save retains them.
+
+        Args:
+            flush: Whether to commit configured Stores before detaching bindings.
+
+        Raises:
+            RuntimeError: If an active retained save context still depends on this
+                Repo's resources.
+
+        Side Effects:
+            Optionally commits Stores and closes only Repo-owned query bindings;
+            supplied Store handles remain borrowed and are not closed.
+        """
+
+        with self._configuration_lock:
+            if self._save_context_leases:
+                raise RuntimeError("Cannot close Repo while an active save context retains resources.")
+            if self._closed:
+                return
+            self._closing = True
+        try:
+            if flush and not self._state_io:
+                self.flush()
+            self._query_index.close()
+            if self._state_io:
+                self.clear_cache(strong=True, weak=True)
+        except BaseException:
+            with self._configuration_lock:
+                self._closing = False
+            raise
+        with self._configuration_lock:
+            self._closing = False
+            self._closed = True
 
     def __del__(self):
         if self.save_objs_on_deletion:

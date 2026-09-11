@@ -33,6 +33,9 @@ class ZipStore(DirStore):
 
     def __init__(self, zip_dest: str | Path | IOBase):
         self.zip_dest = zip_dest
+        self._archive_path_value = (
+            None if _is_file_like(zip_dest) else os.path.abspath(os.fspath(zip_dest))
+        )
         self._tmp = tempfile.TemporaryDirectory()
         self._archive_dirty = False
         self._initializing = True
@@ -55,7 +58,22 @@ class ZipStore(DirStore):
 
     @property
     def _archive_path(self) -> str:
-        return os.path.abspath(os.fspath(self.zip_dest))
+        return self._archive_path_value
+
+    @property
+    def archive_path(self) -> str | None:
+        """Return the immutable absolute path of a path-backed archive.
+
+        Returns:
+            The construction-time absolute archive path, or ``None`` for a
+            file-like read-only Store.
+
+        Side Effects:
+            None.  In particular, this value is unaffected by later working
+            directory changes and is the persistent identity/commit target.
+        """
+
+        return self._archive_path_value
 
     @property
     def _archive_lock_path(self) -> str:

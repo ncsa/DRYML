@@ -4,6 +4,17 @@
 
 `Repo.save_object()` and `Object.save()` publish a graph `StateRef`. Direct save keywords are `main`, `store`, `alias`, `deep_capture`, `federated`, and `report_stores`; no options object, revision, or traversal-depth control exists. Default non-federated saves copy verified immutable dependency state to the selected Store. Federated saves may retain dependencies in connected Stores. The returned optional `StoreReport` is diagnostic only.
 
+`SaveRouting` is an immutable ordered `Selector` to connected-`Store` policy.
+`Repo(..., save_routing=...)` and `set_save_routing()` accept it, `None`, or the
+`"per-object"`/`"closure"` placement shorthands. A configured empty policy falls
+back to the Repo default Store; `None` retains legacy closure behavior. The
+current routing stage exposes retained internal selection only: public saves do
+not apply routing until routed publication is introduced. Installing routing
+rejects distinct built-in Store handles for one physical destination, while
+repeated use of the same handle deduplicates. A retained internal save context
+snapshots the policy, Store order, and default together; later configuration
+changes do not alter it and `Repo.close()` rejects while it is active.
+
 `Repo.load(cdef)` and `load_object(cdef)` are structural operations and do not infer state. `Repo.load_or_build(x)` may create missing structure. `Repo.load_state_ref(state_ref, reuse_live="matching")` is the only exact snapshot load. `matching`, `greedy`, and `never` are exact live-reuse policies; no structural cache match can substitute for an ObjectId and binding match.
 
 `Repo.reserve_state_graph(obj)` returns an active `StateGraphReservation` for the exact live graph's stateful ObjectIds and identities. It is process/thread local, Store-neutral, nonblocking, and all-or-nothing; use it as a context manager and pass it only to `Repo.save_object(..., reservation=...)` or `Repo.restore_state_ref_into(..., reservation=...)`. `restore_state_ref_into()` preflights complete authority and retained bindings, restores the supplied instances dependency-first without candidate search, and updates only the supplied root's `last_state_ref` on success. A restore-hook failure invalidates that live graph for later framework state IO; recover with a fresh `load_state_ref(..., reuse_live="never")`.

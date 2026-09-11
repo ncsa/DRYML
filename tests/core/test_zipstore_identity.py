@@ -127,6 +127,26 @@ def test_path_backed_zip_buffers_direct_record_mutation_until_commit(tmp_path):
         reopened.close()
 
 
+def test_relative_zip_path_retains_original_archive_destination_after_cwd_change(tmp_path, monkeypatch):
+    """A path-backed archive retains its construction location, not the current cwd."""
+
+    original = tmp_path / "original"
+    later = tmp_path / "later"
+    original.mkdir()
+    later.mkdir()
+    monkeypatch.chdir(original)
+    store = ZipStore("store.zip")
+    try:
+        store.write_definition_record(_record("stable-path"))
+        monkeypatch.chdir(later)
+        store.commit()
+    finally:
+        store.close()
+
+    assert (original / "store.zip").is_file()
+    assert not (later / "store.zip").exists()
+
+
 def test_no_op_zip_commit_hydrates_without_rewriting_archive_bytes(tmp_path):
     path = tmp_path / "store.zip"
     writer = ZipStore(path)
@@ -466,6 +486,19 @@ def test_file_like_zip_is_explicitly_read_only_for_current_authority():
         with pytest.raises(StoreCapabilityError, match="writable"):
             store.preflight_publication("write definition")
     finally:
+        store.close()
+
+
+def test_unconfigured_repo_accepts_file_like_zip_store():
+    """Opaque read-only archives remain valid unconfigured Repo sources."""
+
+    store = ZipStore(BytesIO())
+    repo = Repo(store)
+    try:
+        assert repo.stores == [store]
+        assert repo.default_store is store
+    finally:
+        repo.close(flush=False)
         store.close()
 
 

@@ -18,6 +18,8 @@ from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from .definition import ConcreteDefinition
 from .object import Object, Serializable
 from .policies import RepoGraphOptions
+from .selector import Selector
+from .store.store import Store
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 from .utils.graph.path import Parameter
@@ -25,6 +27,102 @@ from .cdef_identity import cdef_node_key
 
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class SaveRouting:
+    """Detached, immutable ordered destination policy for future Repo saves.
+
+    Args:
+        routes: Ordered ``(Selector, Store)`` bindings.  Store handles are
+            retained, never opened or created, and must be connected to a Repo
+            before that Repo installs this policy.
+        match_mode: ``"first"`` selects the first matching binding and
+            ``"all"`` selects every distinct matching destination.
+        graph_mode: ``"per-object"`` or ``"closure"`` placement mode.
+
+    Raises:
+        TypeError: If fields have unsupported types or route entries are not
+            Selector/Store pairs.
+        ValueError: If a mode is not one of the supported closed values.
+
+    Side Effects:
+        Normalizes routes to an immutable tuple.  Constructing this detached
+        policy never opens, creates, validates, or publishes to a Store.
+    """
+
+    routes: tuple[tuple[Selector, Store], ...] = ()
+    match_mode: str = "first"
+    graph_mode: str = "per-object"
+
+    def __post_init__(self) -> None:
+        """Normalize route pairs and validate closed routing modes."""
+
+        if not isinstance(self.routes, (tuple, list)):
+            raise TypeError("SaveRouting routes must be an ordered sequence of pairs.")
+        routes = []
+        for route in self.routes:
+            if not isinstance(route, (tuple, list)) or len(route) != 2:
+                raise TypeError("SaveRouting routes must contain (Selector, Store) pairs.")
+            selector, store = route
+            if not isinstance(selector, Selector):
+                raise TypeError("SaveRouting route selectors must be Selectors.")
+            if not isinstance(store, Store):
+                raise TypeError("SaveRouting route destinations must be Stores.")
+            routes.append((selector, store))
+        if not isinstance(self.match_mode, str):
+            raise TypeError("SaveRouting match_mode must be a string.")
+        if self.match_mode not in {"first", "all"}:
+            raise ValueError("SaveRouting match_mode must be 'first' or 'all'.")
+        if not isinstance(self.graph_mode, str):
+            raise TypeError("SaveRouting graph_mode must be a string.")
+        if self.graph_mode not in {"per-object", "closure"}:
+            raise ValueError("SaveRouting graph_mode must be 'per-object' or 'closure'.")
+        object.__setattr__(self, "routes", tuple(routes))
+
+
+@dataclass(frozen=True, slots=True)
+class SaveRoutingContext:
+    """One retained immutable Repo source and routing view for an active save.
+
+    This internal value isolates source lookup and destination selection from
+    subsequent Repo configuration changes.  The Repo owns its lifetime lease.
+
+    Args:
+        stores: Ordered, deduplicated connected Store handles.
+        default_store: Store used when no route matches, or ``None``.
+        routing: Normalized installed policy, or ``None`` for legacy closure.
+        version: Monotonic Repo configuration version captured with the view.
+    """
+
+    stores: tuple[Store, ...]
+    default_store: Store | None
+    routing: SaveRouting | None
+    version: int
+
+    def find_local_state(self, definition: ConcreteDefinition, state_hash: str):
+        """Return the first retained Store with verified local-state authority.
+
+        Args:
+            definition: Exact definition associated with the requested state.
+            state_hash: Codec-qualified immutable local-state digest.
+
+        Returns:
+            The first retained Store that validates the requested local state, or
+            ``None`` when none has authority.
+
+        Side Effects:
+            May read Store authority but never opens, creates, publishes, or
+            reconfigures a Store.
+        """
+
+        for candidate in self.stores:
+            try:
+                candidate.validate_local_state(definition, state_hash)
+            except Exception:
+                continue
+            return candidate
+        return None
 
 
 @dataclass(frozen=True, slots=True)
