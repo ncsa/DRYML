@@ -13,6 +13,7 @@ jobs:
   lightweight:
     name: Lightweight (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -45,7 +46,7 @@ jobs:
 
       - name: Run lightweight and package tests
         run: |
-          ./tests.sh medium --ignore tests/old --ignore tests/dev -x
+          ./tests.sh medium --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread
 
   local-filesystem-publication:
     name: Local filesystem publication (${{ matrix.os }})

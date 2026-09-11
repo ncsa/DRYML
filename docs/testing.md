@@ -155,6 +155,12 @@ The lightweight matrix installs only package and test dependencies on Ubuntu
 and Windows for Python 3.10 through 3.14, then runs smoke/medium and installed
 artifact checks. Python 3.14 is explicitly framework-reduced.
 
+Lightweight CI jobs print individual test names and use `pytest-timeout`'s
+thread watchdog with a 180-second per-test limit (including fixture work).
+A stalled test dumps thread stacks and fails the process instead of hanging
+indefinitely. The job also has a 20-minute limit. Local commands have no
+per-test timeout unless the caller supplies one explicitly.
+
 The heavy matrix runs on Ubuntu for Python 3.10 through 3.13. It installs and
 preflights TensorFlow, Torch, JAX/JAXlib, and pinned `ray[default]==2.56.0` before heavy tests so missing
 or broken frameworks fail rather than skip. Each job prints the resolved Python,
