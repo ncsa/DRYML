@@ -479,6 +479,8 @@ class Repo:
         self.config = dict(config or {})
         if not isinstance(lease_duration, (int, float)) or not 0 < lease_duration <= 3600:
             raise ValueError("lease_duration must be a positive bounded number of seconds.")
+        self._clock_explicit = clock is not None
+        self._owner_token_factory_explicit = owner_token_factory is not None
         self._clock = clock or time.time
         self._lease_duration = float(lease_duration)
         self._owner_token_factory = owner_token_factory or (lambda: uuid4().hex)
@@ -2061,15 +2063,77 @@ class Repo:
         return fork
 
     def set_config(self, key: str, value: Any) -> None:
+        """Set one runtime configuration value in the next export/save snapshot.
+
+        Args:
+            key: Non-empty string configuration name.
+            value: Caller-owned runtime value.  Portable definition export later
+                rejects values outside its bounded JSON configuration codec.
+
+        Raises:
+            TypeError: If ``key`` is not a string.
+            ValueError: If ``key`` is empty.
+
+        Side Effects:
+            Atomically replaces this key and publishes a new configuration
+            version.  Existing retained save/export snapshots are unchanged.
+        """
+
         if not isinstance(key, str):
             raise TypeError("Config keys must be strings.")
         if key == "":
             raise ValueError("Config keys cannot be empty.")
-        self.config[key] = value
+        with self._configuration_lock:
+            self.config[key] = value
+            self._configuration_version += 1
 
     def update_config(self, values: Mapping[str, Any]) -> None:
-        for key, value in values.items():
-            self.set_config(key, value)
+        """Atomically apply a complete mapping of runtime configuration updates.
+
+        Args:
+            values: Mapping with non-empty string keys and caller-owned values.
+
+        Raises:
+            TypeError: If ``values`` is not a mapping or any key is not a string.
+            ValueError: If any key is empty.
+
+        Side Effects:
+            Validates all keys before changing configuration, then publishes one
+            new version for later retained save/export snapshots.  It does not
+            validate portability or alter an active snapshot.
+        """
+
+        if not isinstance(values, Mapping):
+            raise TypeError("Config updates must be a mapping.")
+        with self._configuration_lock:
+            for key, value in values.items():
+                if not isinstance(key, str):
+                    raise TypeError("Config keys must be strings.")
+                if key == "":
+                    raise ValueError("Config keys cannot be empty.")
+            self.config.update(values)
+            self._configuration_version += 1
+
+    def to_definition(self) -> "RepoDefinition":
+        """Return a detached, inert portable configuration snapshot.
+
+        The snapshot includes only supported Store descriptors, routing, and
+        declarative settings.  It never traverses Store/cache data, commits an
+        archive, resolves symbols, or reconstructs live resources.
+
+        Returns:
+            A detached :class:`RepoDefinition` containing only portable
+            configuration descriptors.
+
+        Raises:
+            RepoDefinitionError: If configuration contains a nonportable Store,
+                selector value, explicit runtime factory, dirty archive, or the
+                Repo is closing/closed.
+        """
+
+        from .repo_definition import definition_from_repo
+
+        return definition_from_repo(self)
 
     def get_config(self, key: str, default=CONFIG_MISSING) -> Any:
         if not isinstance(key, str):
