@@ -21,9 +21,9 @@ class ManagedContext:
     """
 
     def __init__(self, token, *, control_store, operation_id: str,
-                  attempt_id: str, owner_id: str, is_resuming: bool,
-                  checkpoint_state_ref: StateRef | None, obj, state_repo,
-                  ownership, control, callbacks) -> None:
+                 attempt_id: str, owner_id: str, is_resuming: bool,
+                 checkpoint_state_ref: StateRef | None, obj, state_repo,
+                 ownership, control, callbacks) -> None:
         """Initialize private runtime authority; callers receive no construction API."""
 
         if token is not _CONTEXT_TOKEN:
@@ -59,7 +59,12 @@ class ManagedContext:
 
     @property
     def state_repo(self):
-        """Return the retained state Repo without changing its configuration."""
+        """Return this invocation's resolved, borrowed state ``Repo``.
+
+        The Repo retains supplied routing and connected Store handles.  A supplied
+        Store is represented by a non-owning one-Store Repo wrapper, which is
+        released after the managed invocation without closing that Store.
+        """
 
         return self._state_repo
 
@@ -140,12 +145,13 @@ class ManagedContext:
         if self._safe_point_error is not None:
             raise self._safe_point_error
         self._checkpointing = True
+        report = None
         try:
             try:
                 self._ownership.require_owner()
-                state_ref = self._state_repo.save_object(
-                    self._obj, main=False, alias=None, deep_capture=True,
-                    reservation=self._ownership.reservation,
+                publish_managed_state = _publish_managed_state()
+                state_ref, report = publish_managed_state(
+                    self._state_repo, self._obj, reservation=self._ownership.reservation,
                 )
                 validate_state_ref = _validate_state_ref()
                 validate_state_ref(self._state_repo, state_ref)
@@ -160,6 +166,8 @@ class ManagedContext:
                 self._checkpoint_state_ref = state_ref
                 _checkpoint_boundary("checkpoint_associated")
             except BaseException as error:
+                if report is not None and getattr(error, "report", None) is None:
+                    error.report = report
                 self._latch_safe_point_error("publication_error", error)
                 raise
             try:
@@ -245,6 +253,14 @@ def _validate_state_ref():
     from .storage import validate_state_ref
 
     return validate_state_ref
+
+
+def _publish_managed_state():
+    """Load the shared managed state publisher without widening import scope."""
+
+    from .storage import publish_managed_state
+
+    return publish_managed_state
 
 
 def _interrupted_snapshot(current):

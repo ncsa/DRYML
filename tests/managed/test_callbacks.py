@@ -105,10 +105,10 @@ def test_callbacks_receive_exact_committed_receipt_in_list_order(tmp_path):
 
     checkpoint = value.run(managed=ManagedConfig(state_repo=store, callbacks=[first, second]))
 
-    assert observed == [
-        ("first", True, checkpoint, store),
-        ("second", 4, checkpoint),
-    ]
+    assert observed[0][:3] == ("first", True, checkpoint)
+    assert isinstance(observed[0][3], Repo)
+    assert tuple(observed[0][3].stores) == (store,)
+    assert observed[1] == ("second", 4, checkpoint)
 
 
 def test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails(tmp_path):

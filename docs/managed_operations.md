@@ -60,6 +60,8 @@ does not promise that another checkpoint will occur.
 
 The invocation-only context exposes read-only `state_repo`, `control_store`,
 `operation_id`, `attempt_id`, `is_resuming`, and `checkpoint_state_ref`.
+`state_repo` is always the resolved borrowed `Repo`; a supplied `Store` is
+therefore exposed through its temporary one-Store Repo wrapper, never directly.
 `checkpoint()` publishes/associates a complete StateRef, while
 `interrupt(cause=None)` performs that safe point then raises `ManagedInterrupted`
 and chains an optional cause. Contexts cannot be caller-constructed, reused after
@@ -124,6 +126,21 @@ pending until exact reconciliation. A method error is recorded best-effort and
 re-raised unchanged; an escaping `KeyboardInterrupt` becomes `ManagedInterrupted`
 without an unsafe save.
 
+Every checkpoint and final state uses the same core `Repo.save_object` engine
+with the selected Repo's routing policy, deep capture, exact reservation, and
+Store report enabled. Managed does not override routes with an explicit Store,
+main reference, or closure mode. Before control association, it commits only
+dirty buffered Stores required by all selected independent replica destinations
+and the report's deterministic sufficient exact-recovery closure; unrelated
+configured dirty Stores are not flushed. A required buffered source can include
+reused local state or an embedded StateRef even when this save writes no new
+payload there. Path-backed ZipStore authority is reopened and the exact complete
+root/descendant closure and every selected replica record are verified before
+association. A commit failure leaves core `StoreReport` evidence on a
+`RepoSaveError` whose cause chain includes `ManagedPublicationError`; no
+checkpoint/final association is published. Buffered ZipStore commits can include
+earlier buffered work already present in that required Store.
+
 `operation.status(...)` projects only the caller-selected authority, never runs
 hooks or activates context. It reads immutable `ObjectRef` lock identities, so
 metadata inspection remains available after a failed restore invalidates the live
@@ -142,6 +159,11 @@ creates a new attempt from the current valid live Object state and does not rese
 it.  Changed method code has no revision gate: restoration and workload errors
 propagate normally.  A target invalidated by failed exact restoration cannot be
 entered again; load fresh state from the retained checkpoint first.
+
+Recovery, status, interruption requests, and resume resolve retained StateRef
+digests across the caller-supplied Repo rather than current route selection.
+They require one non-conflicting sufficient exact closure, not every historical
+replica, and reject missing or conflicting retained authority.
 
 Methods receive a private active `ManagedContext` with read-only selected Stores,
 operation/attempt IDs, resume flag, and associated checkpoint reference.

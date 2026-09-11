@@ -177,7 +177,7 @@ def test_checkpoint_save_failure_runs_no_callbacks_and_records_failure(tmp_path,
     original = Repo.save_object
 
     def fail_checkpoint_save(self, *args, **kwargs):
-        if kwargs.get("main") is False:
+        if kwargs.get("report_stores") is True:
             raise OSError("checkpoint state write failed")
         return original(self, *args, **kwargs)
 

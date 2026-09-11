@@ -6,6 +6,7 @@ from dryml.core import (
 )
 from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
+from dryml.core.store.zip import ZipStore
 
 
 class ReportState(Serializable):
@@ -56,6 +57,32 @@ def test_unconfigured_repo_save_commits_each_store_once_with_completed_report(tm
         (first, "completed"),
         (second, "completed"),
     ]
+
+
+def test_bounded_dirty_commits_preplan_later_required_work(tmp_path, monkeypatch):
+    """A first bounded archive commit failure retains later required work as unattempted."""
+
+    first = ZipStore(tmp_path / "first.zip")
+    second = ZipStore(tmp_path / "second.zip")
+    repo = Repo([first, second])
+    obj = ReportState(repo=repo)
+    _, report = repo.save_object(obj, deep_capture=True, report_stores=True)
+    first._archive_dirty = second._archive_dirty = True
+    repo._aliases_dirty = True
+    monkeypatch.setattr(
+        first, "commit", lambda: (_ for _ in ()).throw(OSError("first commit failed")),
+    )
+
+    from dryml.core.repo import _commit_save_report
+
+    with pytest.raises(RepoSaveError) as caught:
+        _commit_save_report(repo, obj.last_state_ref, report, stores=(first, second), dirty_only=True)
+
+    commits = [item for item in caught.value.report.publications if item.phase == "commit"]
+    assert [(item.store, item.status) for item in commits] == [
+        (first, "failed"), (second, "unattempted"),
+    ]
+    assert repo._aliases_dirty is True
 
 
 def test_replica_failure_keeps_the_old_root_receipt_and_exposes_route_order(tmp_path, monkeypatch):

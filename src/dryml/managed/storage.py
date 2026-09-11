@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from threading import get_ident
 
 from dryml.core.reference_values import ObjectId, StateRef
-from dryml.core.repo import Repo, RepoSaveError
+from dryml.core.repo import Repo, RepoSaveError, _commit_save_report
 from dryml.core.session import current_repo
 from dryml.core.store.dir import DirStore
 from dryml.core.store.store import Store
@@ -19,7 +19,12 @@ from dryml.core.store.zip import ZipStore
 from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_json_load_bytes
 from dryml.locking import FileLock, LockError
 
-from .errors import ManagedConflictError, ManagedRecoveryError, ManagedStoreError
+from .errors import (
+    ManagedConflictError,
+    ManagedPublicationError,
+    ManagedRecoveryError,
+    ManagedStoreError,
+)
 
 _MAX_STORES = 256
 _MAX_OBJECTS = 4096
@@ -240,6 +245,134 @@ def validate_state_ref(state_repo: Repo, state_ref: StateRef) -> StateRef:
     except BaseException as error:
         raise ManagedRecoveryError("missing_state_reference", "state Repo lacks the exact StateRef closure") from error
     return state_ref
+
+
+def publish_managed_state(state_repo: Repo, obj: object, *, reservation):
+    """Deep-publish and durably verify one managed state boundary.
+
+    The normal Repo save engine remains the only router and publication ledger.
+    This wrapper commits only the exact replica and recovery Stores named by its
+    report, then proves the complete root/descendant closure from freshly reopened
+    buffered archives before lifecycle control may associate the receipt.
+
+    Args:
+        state_repo: Borrowed selected Repo whose current routing policy applies.
+        obj: Managed live graph root covered by ``reservation``.
+        reservation: Active exact graph reservation retained for the invocation.
+
+    Returns:
+        ``(StateRef, StoreReport)`` after required buffered Stores are durable.
+
+    Raises:
+        RepoSaveError: If core publication, bounded commit, or durable exact
+            validation fails. Its cause chain includes ManagedPublicationError.
+
+    Side Effects:
+        Captures state through current routing and commits only dirty required
+        buffered Stores. Borrowed Repos and Stores remain open.
+    """
+
+    report = None
+    try:
+        state_ref, report = state_repo.save_object(
+            obj, deep_capture=True, reservation=reservation, report_stores=True,
+        )
+        required = _required_managed_publication_stores(report)
+        report = _commit_save_report(
+            state_repo, state_ref, report, stores=required, dirty_only=True,
+        )
+        _validate_managed_publication(state_repo, state_ref, report, required)
+        return state_ref, report
+    except RepoSaveError as error:
+        _raise_managed_publication_error(error, error.report or report)
+    except BaseException as error:
+        report = getattr(error, "report", None) or report
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            if report is not None:
+                error.report = report
+            raise
+        if report is None:
+            raise
+        _raise_managed_publication_error(error, report)
+
+
+def _required_managed_publication_stores(report) -> tuple[Store, ...]:
+    """Return ordered replica and sufficient-recovery Stores from one core report."""
+
+    stores = []
+    for snapshot in report.snapshots:
+        stores.extend(snapshot.stores)
+        stores.extend(snapshot.required_stores)
+    stores.extend(report.required_stores)
+    return tuple(store for index, store in enumerate(stores) if all(
+        store is not earlier for earlier in stores[:index]
+    ))
+
+
+def _validate_managed_publication(state_repo: Repo, state_ref: StateRef, report, required) -> None:
+    """Require complete matching snapshots and durable exact recovery authority."""
+
+    if any(
+            publication.status != "completed"
+            for publication in report.publications
+            if publication.phase in {"definition", "state", "snapshot", "membership", "claim", "commit"}
+    ):
+        raise ManagedRecoveryError("incomplete_state_publication", "managed state report has incomplete authority")
+    for snapshot in report.snapshots:
+        if state_ref_for_digest(state_repo, snapshot.state_ref.digest()) != snapshot.state_ref:
+            raise ManagedRecoveryError("conflicting_state_reference", "managed replica StateRef authority conflicts")
+        for store in snapshot.stores:
+            record = store.read_state_ref_record(snapshot.state_ref.digest())
+            if record is None or record.state_ref != snapshot.state_ref:
+                raise ManagedRecoveryError("missing_state_reference", "managed replica StateRef authority is incomplete")
+    validate_state_ref(state_repo, state_ref)
+    _validate_reopened_managed_state(state_repo, state_ref, report, required)
+
+
+def _validate_reopened_managed_state(state_repo: Repo, state_ref: StateRef, report, required) -> None:
+    """Prove the bounded required authority survives fresh buffered archive views.
+
+    Only Stores selected by the save report participate.  This prevents unrelated
+    live authority from satisfying a required archive replica or dependency.
+    """
+
+    reopened = {}
+    try:
+        for store in required:
+            if type(store) is ZipStore:
+                reopened[id(store)] = ZipStore.open_existing(store.archive_path)
+        durable = Repo._for_state_io(tuple(
+            reopened.get(id(store), store) for store in required
+        ))
+        try:
+            for snapshot in report.snapshots:
+                for store in snapshot.stores:
+                    durable_store = reopened.get(id(store), store)
+                    record = durable_store.read_state_ref_record(snapshot.state_ref.digest())
+                    if record is None or record.state_ref != snapshot.state_ref:
+                        raise ManagedRecoveryError(
+                            "missing_state_reference",
+                            "reopened managed replica authority is incomplete",
+                        )
+                validate_state_ref(durable, snapshot.state_ref)
+            validate_state_ref(durable, state_ref)
+        finally:
+            durable.close(flush=False)
+    finally:
+        for store in reversed(tuple(reopened.values())):
+            store.close()
+
+
+def _raise_managed_publication_error(error: BaseException, report) -> None:
+    """Expose core report evidence through a classified managed publication cause."""
+
+    outcome = "indeterminate" if report is not None and any(
+        publication.phase == "commit" and publication.status == "uncertain"
+        for publication in report.publications
+    ) else "not_committed"
+    managed = ManagedPublicationError(outcome, "managed state publication was not durable")
+    managed.__cause__ = error
+    raise RepoSaveError("managed state publication failed", report=report) from managed
 
 
 def state_ref_for_digest(state_repo: Repo, digest: str) -> StateRef:
@@ -707,4 +840,4 @@ def _require_publication(store: Store, operation: str, *, local_state: bool) -> 
         raise ManagedStoreError("store_capability_unavailable", f"{operation} is unavailable") from error
 
 
-__all__ = ["ResolvedStores", "ownership_evidence", "resolve_stores", "state_ref_for_digest", "validate_state_ref"]
+__all__ = ["ResolvedStores", "ownership_evidence", "publish_managed_state", "resolve_stores", "state_ref_for_digest", "validate_state_ref"]

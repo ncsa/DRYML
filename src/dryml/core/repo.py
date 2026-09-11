@@ -361,10 +361,52 @@ def _record_late_publication(
     return updated("completed")
 
 
-def _commit_save_report(repo, state_ref, report, *, stores=None):
-    """Commit configured Stores and append each observed commit boundary."""
+def _commit_save_report(repo, state_ref, report, *, stores=None, dirty_only: bool = False):
+    """Commit selected Stores and append each observed commit boundary.
 
-    for commit_store in tuple(repo.stores if stores is None else stores):
+    Args:
+        repo: Repo whose alias-dirty marker is finalized after a successful commit.
+        state_ref: Exact receipt associated with this bounded publication work.
+        report: Immutable report to extend with observed commit boundaries.
+        stores: Optional bounded Store sequence; omitted retains the Repo-wide
+            historical flush behavior.
+        dirty_only: Commit only Stores exposing a true buffered dirty marker.
+
+    Returns:
+        The report extended with each attempted commit boundary.
+
+    Raises:
+        RepoSaveError: If a selected commit fails or cannot survive read-back.
+
+    Side Effects:
+        Commits only the selected Stores. ``dirty_only`` avoids flushing unrelated
+        buffered Store work.
+    """
+
+    selected = tuple(repo.stores if stores is None else stores)
+    if dirty_only:
+        selected = tuple(
+            store for store in selected if getattr(store, "_archive_dirty", False)
+        )
+    # Freeze every required boundary before starting work so a first failure
+    # leaves a complete ledger, including later commits that were not attempted.
+    if selected:
+        from .repo_plan import SavePublication
+
+        planned_stores = {
+            publication.store
+            for publication in report.publications
+            if publication.phase == "commit" and publication.status == "unattempted"
+        }
+        report = replace(
+            report,
+            publications=(*report.publications, *(
+                SavePublication(store, None, None, state_ref, "commit", "unattempted")
+                for store in selected
+                if store not in planned_stores
+            )),
+        )
+    for commit_store in selected:
         report = _record_late_publication(
             report, store=commit_store, phase="commit", state_ref=state_ref,
             operation=commit_store.commit,
@@ -372,7 +414,8 @@ def _commit_save_report(repo, state_ref, report, *, stores=None):
                 commit_store, "_archive_dirty", False
             ),
         )
-    repo._aliases_dirty = False
+    if not dirty_only:
+        repo._aliases_dirty = False
     return report
 
 

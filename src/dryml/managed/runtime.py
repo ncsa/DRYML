@@ -21,7 +21,13 @@ from .errors import (
 )
 from .identity import argument_digest, operation_digest
 from .model import InterruptRequestResult, ManagedStatus
-from .storage import _acquire_state_ownership, resolve_stores, state_ref_for_digest, validate_state_ref
+from .storage import (
+    _acquire_state_ownership,
+    publish_managed_state,
+    resolve_stores,
+    state_ref_for_digest,
+    validate_state_ref,
+)
 
 
 def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwargs: dict[str, object]) -> object:
@@ -122,6 +128,11 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
                 _record_failure(control, running, context._failure_code or "method_error", error)
                 raise
             except KeyboardInterrupt as error:
+                if context._safe_point_error is error:
+                    # Save-boundary control flow has its own immutable core
+                    # report; it must not be recast as a workload interruption.
+                    _record_base_exception_failure(control, running, error)
+                    raise
                 _record_interruption(control, running, error)
                 raise ManagedInterrupted("interrupted", "managed method received KeyboardInterrupt") from error
             except BaseException as error:
@@ -134,8 +145,11 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
                 else:
                     _record_failure(control, running, context._failure_code or "method_error", error)
                 raise
+            report = None
             try:
-                final_state = state_repo.save_object(instance, main=False, alias=None, deep_capture=True, reservation=ownership.reservation)
+                final_state, report = publish_managed_state(
+                    state_repo, instance, reservation=ownership.reservation,
+                )
                 validate_state_ref(state_repo, final_state)
                 _completion_boundary("final_state_published")
                 control.transition_running_owner(
@@ -148,6 +162,8 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
                 )
                 _completion_boundary("final_associated")
             except BaseException as error:
+                if report is not None and getattr(error, "report", None) is None:
+                    error.report = report
                 if not isinstance(error, ManagedPublicationError) or error.outcome == "not_committed":
                     _record_failure(control, running, "publication_error", error)
                 raise
