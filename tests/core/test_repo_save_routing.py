@@ -251,7 +251,7 @@ def test_per_object_routing_projects_a_child_state_ref_without_copying_its_paylo
     )
     root = RoutedRoot(RoutedLeaf(3, repo=repo), repo=repo)
 
-    state = repo.save_object(root, deep_capture=True)
+    state, report = repo.save_object(root, deep_capture=True, report_stores=True)
     child_path = next(iter(root.object_ref.objects))
     child_state = state.at(child_path)
 
@@ -265,6 +265,10 @@ def test_per_object_routing_projects_a_child_state_ref_without_copying_its_paylo
             child_state.definition, child_state.states[next(iter(child_state.states))]
         )
     assert Repo([parent_store, child_store]).load_state_ref(child_state, reuse_live="never").value == 3
+    child_snapshot = next(snapshot for snapshot in report.snapshots if snapshot.state_ref == child_state)
+    assert Repo(list(child_snapshot.required_stores)).load_state_ref(
+        child_snapshot.state_ref, reuse_live="never",
+    ).value == 3
 
 
 def test_all_matching_routing_captures_once_and_replicates_exact_projections(tmp_path):

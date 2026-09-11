@@ -33,5 +33,5 @@ def test_default_save_copies_reused_dependencies_but_federated_retains_them(tmp_
 
     federated_state, report = root.save(repo=repo, store=federated, federated=True, report_stores=True)
     child_path = next(path for path, obj_id in federated_state.object.objects.items() if obj_id == child.object_id)
-    assert report.state_stores[child_path] is source
+    assert report.state_stores[child_path] == (source,)
     assert report.required_stores == (federated, source)

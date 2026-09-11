@@ -2,7 +2,7 @@
 
 `Repo` coordinates live realizations and one or more Stores. `manage_repo(None)` uses an explicitly active Repo or creates a temporary Repo for the operation; no process-global fallback exists.
 
-`Repo.save_object()` and `Object.save()` publish a graph `StateRef`. Direct save keywords are `main`, `store`, `alias`, `deep_capture`, `federated`, and `report_stores`; no options object, revision, or traversal-depth control exists. Default non-federated saves copy verified immutable dependency state to the selected Store. Federated saves may retain dependencies in connected Stores. The returned optional `StoreReport` is diagnostic only.
+`Repo.save_object()` and `Object.save()` publish a graph `StateRef`. Direct save keywords are `main`, `store`, `alias`, `deep_capture`, `federated`, and `report_stores`; no options object, revision, or traversal-depth control exists. Default non-federated saves copy verified immutable dependency state to the selected Store. Federated saves may retain dependencies in connected Stores. With `report_stores=True`, `StoreReport` exposes ordered root targets, confirmed local-state Stores, a deterministic sufficient recovery set, independently confirmed snapshots, and immutable per-boundary publication outcomes. `RepoSaveError.report` preserves the same partial evidence after planned capture/publication, index, name, or commit failure; interruption exceptions retain their original type and carry available report evidence.
 
 `SaveRouting` is an immutable ordered `Selector` to connected-`Store` policy.
 `Repo(..., save_routing=...)` and `set_save_routing()` accept it, `None`, or the
@@ -16,6 +16,8 @@ rejects distinct built-in Store handles for one physical destination, while
 repeated use of the same handle deduplicates. A retained internal save context
 snapshots the policy, Store order, and default together; later configuration
 changes do not alter it and `Repo.close()` rejects while it is active.
+
+Snapshots, stored-root membership, and initial claim completion are read back before a live `last_state_ref` receipt advances. A failed replica therefore leaves a prior root receipt intact, while an index, alias, main-reference, or later archive-commit failure leaves an already confirmed receipt inspectable. Root names are applied only after every selected root snapshot is confirmed and never propagate to independently published children. `Repo.save_object()` can leave a path-backed `ZipStore` buffered; `Repo.save()` and temporary convenience Repos report their required commit boundaries before returning.
 
 `Repo.load(cdef)` and `load_object(cdef)` are structural operations and do not infer state. `Repo.load_or_build(x)` may create missing structure. `Repo.load_state_ref(state_ref, reuse_live="matching")` is the only exact snapshot load. `matching`, `greedy`, and `never` are exact live-reuse policies; no structural cache match can substitute for an ObjectId and binding match.
 

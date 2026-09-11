@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import glob
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 from contextlib import contextmanager, nullcontext
 from io import IOBase
@@ -298,7 +298,80 @@ class _CandidateCache:
 
 
 class RepoSaveError(Exception):
-    pass
+    """Save failure carrying immutable partial publication evidence when available."""
+
+    def __init__(self, message: str, *, report=None) -> None:
+        super().__init__(message)
+        self.report = report
+
+
+def _record_late_publication(
+        report, *, store, phase, state_ref, operation, checker,
+        complete_on_error: bool = False):
+    """Run one post-authority boundary and return an updated immutable report."""
+
+    from .repo_plan import SavePublication, StoreReport
+
+    publication = SavePublication(store, None, None, state_ref, phase, "unattempted")
+
+    def updated(status):
+        publications = list(report.publications)
+        for index, existing in enumerate(publications):
+            if (
+                    existing.store is store and existing.phase == phase
+                    and existing.path is None and existing.status == "unattempted"):
+                publications[index] = replace(existing, state_ref=state_ref, status=status)
+                break
+        else:
+            publications.append(replace(publication, status=status))
+        return StoreReport(
+            report.target_stores, report.state_stores, report.required_stores,
+            report.snapshots, publications,
+        )
+
+    try:
+        operation()
+    except BaseException as error:
+        try:
+            observed = checker()
+            status = (
+                "completed" if complete_on_error and observed is True
+                else "failed" if observed is not None else "uncertain"
+            )
+        except Exception:
+            status = "uncertain"
+        failure = updated(status)
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            error.report = failure
+            raise
+        if isinstance(error, RepoSaveError):
+            if error.report is None:
+                error.report = failure
+            raise
+        raise RepoSaveError("Save publication failed.", report=failure) from error
+    try:
+        completed = checker()
+    except Exception:
+        completed = None
+    if completed is not True:
+        status = "failed" if completed is False else "uncertain"
+        raise RepoSaveError("Save publication did not survive its read-back boundary.", report=updated(status))
+    return updated("completed")
+
+
+def _commit_save_report(repo, state_ref, report, *, stores=None):
+    """Commit configured Stores and append each observed commit boundary."""
+
+    for commit_store in tuple(repo.stores if stores is None else stores):
+        report = _record_late_publication(
+            report, store=commit_store, phase="commit", state_ref=state_ref,
+            operation=commit_store.commit,
+            checker=lambda commit_store=commit_store: not getattr(
+                commit_store, "_archive_dirty", False
+            ),
+        )
+    repo._aliases_dirty = False
+    return report
 
 
 class RepoLoadError(Exception):
@@ -2043,7 +2116,9 @@ class Repo:
             federated: bool = False,
             report_stores: bool = False,
             _capture_memo: set[object] | None = None,
-            reservation=None):
+            reservation=None,
+            _save_context=None,
+            _commit_stores=()):
         """Publish one live graph as immutable local states and a StateRef.
 
         Args:
@@ -2104,8 +2179,13 @@ class Repo:
                         raise RepoSaveError("State graph reservation does not cover this exact ObjectRef.")
                     nodes, object_ids = plan.nodes, plan.object_ids
                 reservation._covers(nodes, object_ids)
-            with (reservation if owns_reservation else nullcontext()), self._retain_save_context() as context:
+            context_scope = (
+                nullcontext(_save_context)
+                if _save_context is not None else self._retain_save_context()
+            )
+            with (reservation if owns_reservation else nullcontext()), context_scope as context:
                 lease = None
+                routed_save = False
                 try:
                     lease = getattr(obj, "_claim_lease", None)
                     if context.routing is not None:
@@ -2114,11 +2194,27 @@ class Repo:
                         routed = build_routed_save_plan(
                             self, plan, context, store=selected_store,
                         )
+                        index_destinations = []
+                        for destinations in routed.destinations.values():
+                            for destination in destinations:
+                                if not any(destination is known for known in index_destinations):
+                                    index_destinations.append(destination)
+                        late_publications = [("index", tuple(index_destinations))]
+                        if main:
+                            late_publications.append(("main", routed.root_destinations))
+                        if alias is not None:
+                            late_publications.append(("alias", routed.root_destinations))
+                        if _commit_stores:
+                            late_publications.append(("commit", tuple(_commit_stores)))
                         result = execute_routed_save_plan(
-                            self, routed, deep_capture=deep_capture,
-                            report_stores=report_stores,
+                            self,
+                            routed,
+                            deep_capture=deep_capture,
+                            report_stores=True,
+                            late_publications=tuple(late_publications),
                         )
                         store = routed.root_destinations[0]
+                        routed_save = True
                     else:
                         store = selected_store or context.default_store
                         if store is None:
@@ -2153,17 +2249,30 @@ class Repo:
                         self.add_objects(obj, store=store)
                         from .repo_plan import execute_save_plan
 
-                        result = execute_save_plan(
-                            self, plan, store=store, deep_capture=deep_capture,
-                            federated=federated, report_stores=report_stores,
-                            capture_memo=capture_memo, claim_lease=lease,
-                        )
+                        try:
+                            result = execute_save_plan(
+                                self, plan, store=store, deep_capture=deep_capture,
+                                federated=federated, report_stores=True,
+                                capture_memo=capture_memo, claim_lease=lease,
+                            )
+                        except BaseException as error:
+                            from .repo_plan import StoreReport
+
+                            report = StoreReport((store,), {}, (store,))
+                            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                                error.report = report
+                                raise
+                            if isinstance(error, RepoSaveError):
+                                if error.report is None:
+                                    error.report = report
+                                raise
+                            raise RepoSaveError("Save publication failed.", report=report) from error
                 except BaseException:
                     for pending_lease in reversed(
                             getattr(obj, "_claim_leases", (lease,) if lease else ())):
                         self._abandon_claim(pending_lease)
                     raise
-                state_ref = result[0] if report_stores else result
+                state_ref, report = result
                 if isinstance(lease, _ClaimLease):
                     obj._claim_lease = None
                 obj._pending_claim_dependencies = ()
@@ -2171,17 +2280,52 @@ class Repo:
                 # StateRef publication is authoritative; only then may the derived
                 # query index expose this root. A registration failure leaves the
                 # Store authority intact and the sidecar explicitly dirty.
-                self._query_index.register_saved_graph(
-                    plan.graph,
-                    {store: (obj.definition,)},
-                    {store: (state_ref,)},
-                )
+                if routed_save:
+                    roots_by_store = defaultdict(list)
+                    state_refs_by_store = defaultdict(list)
+                    for snapshot in report.snapshots:
+                        for destination in snapshot.stores:
+                            roots_by_store[destination].append(snapshot.state_ref.definition)
+                            state_refs_by_store[destination].append(snapshot.state_ref)
+                    index_stores = tuple(roots_by_store)
+                else:
+                    roots_by_store = {store: (obj.definition,)}
+                    state_refs_by_store = {store: (state_ref,)}
+                    index_stores = (store,)
+                for index_store in index_stores:
+                    report = _record_late_publication(
+                        report, store=index_store, phase="index", state_ref=state_ref,
+                        operation=lambda index_store=index_store: self._query_index.register_saved_graph(
+                            plan.graph,
+                            {index_store: tuple(roots_by_store[index_store])},
+                            {index_store: tuple(state_refs_by_store[index_store])},
+                        ),
+                        checker=lambda index_store=index_store: not getattr(
+                            index_store, "query_index_is_dirty", lambda: False
+                        )(),
+                    )
                 if main:
-                    store.write_main_ref(MainRefRecord(DefinitionRecord(obj.definition).digest))
+                    for root_store in report.target_stores:
+                        main_record = MainRefRecord(DefinitionRecord(obj.definition).digest)
+                        report = _record_late_publication(
+                            report, store=root_store, phase="main", state_ref=state_ref,
+                            operation=lambda root_store=root_store, main_record=main_record: root_store.write_main_ref(main_record),
+                            checker=lambda root_store=root_store, main_record=main_record: root_store.read_main_ref() == main_record,
+                            complete_on_error=True,
+                        )
                     self.main_def = obj.definition
                 if alias is not None:
-                    self.set_alias(alias, state_ref.object, store=store, save_live=False)
-                return result
+                    from .store.records import ObjectAliasRecord
+
+                    for root_store in report.target_stores:
+                        alias_record = ObjectAliasRecord(alias, state_ref.object)
+                        report = _record_late_publication(
+                            report, store=root_store, phase="alias", state_ref=state_ref,
+                            operation=lambda root_store=root_store, alias_record=alias_record: root_store.write_object_alias(alias_record),
+                            checker=lambda root_store=root_store, alias_record=alias_record: root_store.read_object_alias(alias) == alias_record,
+                            complete_on_error=True,
+                        )
+                return (state_ref, report) if report_stores else state_ref
 
     def save(
             self,
@@ -2227,15 +2371,30 @@ class Repo:
             the exact claim lease carried by this save.
         """
         from dryml.runtime import materialization_admission
+        from .repo_plan import SavePublication, StoreReport
 
         with materialization_admission(operation="repo_save"):
-            result = self.save_object(
-                obj, main=main, store=store, alias=alias,
-                deep_capture=deep_capture, federated=federated,
-                report_stores=report_stores,
-            )
-            self.flush()
-            return result
+            with self._retain_save_context() as context:
+                result = self.save_object(
+                    obj, main=main, store=store, alias=alias,
+                    deep_capture=deep_capture, federated=federated,
+                    report_stores=True, _save_context=context,
+                    _commit_stores=context.stores,
+                )
+                state_ref, report = result
+                if context.routing is None:
+                    for commit_store in context.stores:
+                        report = StoreReport(
+                            report.target_stores,
+                            report.state_stores,
+                            report.required_stores,
+                            report.snapshots,
+                            (*report.publications, SavePublication(
+                                commit_store, None, None, state_ref, "commit", "unattempted",
+                            )),
+                        )
+                report = _commit_save_report(self, state_ref, report, stores=context.stores)
+            return (state_ref, report) if report_stores else state_ref
 
     def _first_store_with(self, cdef):
         from .store.records import DefinitionRecord
@@ -3204,11 +3363,23 @@ def manage_repo(repo=None):
         close_repo = True
 
     with default_repo(repo_obj):
+        failure = None
         try:
             yield repo_obj
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             if close_repo:
-                repo_obj.close()
+                try:
+                    repo_obj.close(flush=not getattr(repo_obj, "_skip_cleanup_flush", False))
+                except BaseException as cleanup_error:
+                    if failure is None:
+                        raise
+                    if hasattr(failure, "add_note"):
+                        failure.add_note(
+                            "Temporary Repo cleanup failed after a save failure."
+                        )
 
 
 # Saving and Loading
@@ -3252,13 +3423,28 @@ def save_object(
     from dryml.runtime import materialization_admission
 
     with materialization_admission(operation="global_save_object"):
+        temporary_repo = not isinstance(repo, Repo) and (
+            repo is not None or get_default_repo() is None
+        )
         with manage_repo(repo=repo) as sub_repo:
+            if temporary_repo:
+                # This entry point owns the only flush.  Cleanup discards a
+                # failed buffered save instead of retrying and masking it.
+                sub_repo._skip_cleanup_flush = True
             main = main or ((repo is not sub_repo) and isinstance(obj, Object))
-            return sub_repo.save_object(
-                obj, main=main, store=store, alias=alias,
-                deep_capture=deep_capture, federated=federated,
-                report_stores=report_stores,
-            )
+            with sub_repo._retain_save_context() as context:
+                result = sub_repo.save_object(
+                    obj, main=main, store=store, alias=alias,
+                    deep_capture=deep_capture, federated=federated,
+                    report_stores=True, _save_context=context,
+                    _commit_stores=context.stores if temporary_repo else (),
+                )
+                state_ref, report = result
+                if temporary_repo:
+                    report = _commit_save_report(
+                        sub_repo, state_ref, report, stores=context.stores,
+                    )
+            return (state_ref, report) if report_stores else state_ref
 
 
 def load_object(

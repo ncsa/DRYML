@@ -16,12 +16,13 @@ import multiprocessing
 import os
 from pathlib import Path
 import zipfile
+import threading
 
 import pytest
 
 import dryml.core.store as store_exports
 import dryml.core.store.zip as zip_module
-from dryml.core import Object, Repo, Serializable, StateRef
+from dryml.core import Object, Repo, SaveRouting, Serializable, StateRef
 from dryml.core.store.records import (
     DeclarationRecord, DefinitionRecord, LocalStateManifest, MainRefRecord,
     ObjectAliasRecord, StateAliasRecord, StateRefRecord,
@@ -125,6 +126,85 @@ def test_path_backed_zip_buffers_direct_record_mutation_until_commit(tmp_path):
         assert reopened.read_definition_record(record.digest) == record
     finally:
         reopened.close()
+
+
+def test_repo_save_reports_and_commits_a_buffered_zip_publication(tmp_path):
+    path = tmp_path / "repo-save.zip"
+    store = ZipStore(path)
+    repo = Repo(store)
+    try:
+        state, report = repo.save(ZipPayloadObject(repo=repo), report_stores=True)
+
+        assert path.is_file()
+        assert not store._archive_dirty
+        assert [(item.store, item.status) for item in report.publications if item.phase == "commit"] == [
+            (store, "completed"),
+        ]
+        reopened = ZipStore(path)
+        try:
+            assert reopened.read_state_ref_record(state.digest()).state_ref == state
+        finally:
+            reopened.close()
+    finally:
+        store.close()
+
+
+def test_repo_save_reports_an_unrelated_configured_commit_failure(tmp_path, monkeypatch):
+    target = ZipStore(tmp_path / "target.zip")
+    unrelated = ZipStore(tmp_path / "unrelated.zip")
+    repo = Repo([target, unrelated])
+    try:
+        monkeypatch.setattr(
+            unrelated,
+            "commit",
+            lambda: (_ for _ in ()).throw(OSError("unrelated commit failed")),
+        )
+        with pytest.raises(Exception) as raised:
+            repo.save(ZipPayloadObject(repo=repo), report_stores=True)
+
+        report = raised.value.report
+        assert [(item.store, item.status) for item in report.publications if item.phase == "commit"] == [
+            (target, "completed"), (unrelated, "failed"),
+        ]
+        reopened = ZipStore(target.archive_path)
+        try:
+            assert reopened.read_state_ref_record(report.snapshots[0].state_ref.digest()) is not None
+        finally:
+            reopened.close()
+    finally:
+        target.close()
+        unrelated.close()
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("after", [False, True], ids=["before", "after"])
+def test_routed_zip_commit_control_flow_retains_identity_and_report(
+        tmp_path, monkeypatch, error_type, after):
+    """A buffered routed commit interruption is never converted to RepoSaveError."""
+
+    path = tmp_path / "interrupted.zip"
+    store = ZipStore(path)
+    repo = Repo(store, save_routing=SaveRouting())
+    original = store.commit
+
+    def commit_then_interrupt():
+        if not after:
+            raise error_type("commit interruption")
+        original()
+        raise error_type("commit interruption")
+
+    monkeypatch.setattr(store, "commit", commit_then_interrupt)
+    try:
+        with pytest.raises(error_type, match="commit interruption") as raised:
+            repo.save(ZipPayloadObject("changed", repo=repo), report_stores=True)
+
+        report = raised.value.report
+        assert [(item.store, item.status) for item in report.publications if item.phase == "commit"] == [
+            (store, "failed"),
+        ]
+        assert path.exists() is after
+    finally:
+        store.close()
 
 
 def test_relative_zip_path_retains_original_archive_destination_after_cwd_change(tmp_path, monkeypatch):
@@ -543,4 +623,45 @@ def test_stale_zip_save_cannot_replace_a_newer_exact_state_ref(tmp_path):
     finally:
         first.close()
         stale.close()
+        reopened.close()
+
+
+def test_same_handle_commit_does_not_clear_a_concurrent_mutation(tmp_path, monkeypatch):
+    """A mutation blocked behind commit remains dirty and survives its next commit."""
+    path = tmp_path / "fenced.zip"
+    store = ZipStore(path)
+    first = _record("first")
+    second = _record("second")
+    entered = threading.Event()
+    release = threading.Event()
+    original_identity = store._archive_identity
+
+    def pause_after_snapshot(candidate=None):
+        result = original_identity(candidate)
+        if candidate is not None and not entered.is_set():
+            entered.set()
+            assert release.wait(timeout=10)
+        return result
+
+    monkeypatch.setattr(store, "_archive_identity", pause_after_snapshot)
+    store.write_definition_record(first)
+    commit = threading.Thread(target=store.commit)
+    commit.start()
+    assert entered.wait(timeout=10)
+    mutation = threading.Thread(target=lambda: store.write_definition_record(second))
+    mutation.start()
+    release.set()
+    commit.join(timeout=10)
+    mutation.join(timeout=10)
+
+    assert not commit.is_alive()
+    assert not mutation.is_alive()
+    assert store._archive_dirty
+    store.commit()
+    store.close()
+
+    reopened = ZipStore(path)
+    try:
+        assert set(reopened.iter_definition_records()) == {first, second}
+    finally:
         reopened.close()

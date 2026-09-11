@@ -143,7 +143,7 @@ def test_save_copies_reusable_state_by_default_and_can_federate_it(tmp_path):
     )
     federated_path = next(path for path, object_id in federated_state.object.objects.items() if object_id == child.object_id)
     assert federated_state.states[federated_path] == child_state.states[next(iter(child_state.states))]
-    assert federated_report.state_stores[federated_path] is source
+    assert federated_report.state_stores[federated_path] == (source,)
     assert federated_report.required_stores == (federated, source)
 
 

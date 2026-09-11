@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from dryml.core import Repo, Serializable
+from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
 
 
@@ -54,8 +55,11 @@ def test_alias_replacement_failure_preserves_completed_state_ref(tmp_path, monke
 
     monkeypatch.setattr(store, "write_object_alias", fail_alias)
     obj.value = 2
-    with pytest.raises(OSError, match="alias replacement"):
+    with pytest.raises(RepoSaveError, match="publication") as raised:
         obj.save(repo=repo, alias="latest", deep_capture=True)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "alias replacement" in str(raised.value.__cause__)
+    assert raised.value.report is not None
 
     assert store.read_state_ref_record(first.digest()).state_ref == first
     assert obj.last_state_ref != first
@@ -74,8 +78,11 @@ def test_state_ref_record_install_failure_preserves_the_prior_receipt(tmp_path, 
         "write_state_ref_record",
         lambda record: (_ for _ in ()).throw(OSError("state ref install failed")),
     )
-    with pytest.raises(OSError, match="state ref install failed"):
+    with pytest.raises(RepoSaveError, match="publication") as raised:
         obj.save(repo=repo, deep_capture=True)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "state ref install failed" in str(raised.value.__cause__)
+    assert raised.value.report is not None
 
     assert obj.last_state_ref == first
 
@@ -90,8 +97,11 @@ def test_derived_index_failure_propagates_after_installing_the_receipt(tmp_path,
         "register_saved_graph",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("index registration failed")),
     )
-    with pytest.raises(RuntimeError, match="index registration failed"):
+    with pytest.raises(RepoSaveError, match="publication") as raised:
         obj.save(repo=repo)
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert "index registration failed" in str(raised.value.__cause__)
+    assert raised.value.report is not None
 
     assert store.read_state_ref_record(obj.last_state_ref.digest()).state_ref == obj.last_state_ref
 

@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 from dryml.core import Object, Repo, Serializable
+from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import (
     DefinitionRecord, LocalStateManifest, MainRefRecord, ObjectAliasRecord,
@@ -394,8 +395,11 @@ def test_state_ref_failure_leaves_only_verified_unreferenced_local_state(tmp_pat
     obj = AtomicPayloadObject(repo=repo)
 
     monkeypatch.setattr(store, "write_state_ref_record", lambda record: (_ for _ in ()).throw(OSError("state ref failure")))
-    with pytest.raises(OSError, match="state ref failure"):
+    with pytest.raises(RepoSaveError, match="publication") as raised:
         obj.save(repo=repo)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "state ref failure" in str(raised.value.__cause__)
+    assert raised.value.report is not None
 
     assert not (Path(store.base_dir) / "state-refs").exists()
     assert obj._last_state_hash is not None

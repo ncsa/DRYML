@@ -7,7 +7,9 @@ import os
 from io import IOBase
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
+from threading import RLock
 import zipfile
+from contextlib import contextmanager
 
 from .dir import DirStore
 from ...locking import interprocess_lock
@@ -38,6 +40,10 @@ class ZipStore(DirStore):
         )
         self._tmp = tempfile.TemporaryDirectory()
         self._archive_dirty = False
+        # One handle owns one extracted transaction.  This lock is acquired
+        # before the inherited Store writer/archive locks so commit cannot clear
+        # dirty state while another same-handle mutation is still publishing.
+        self._transaction_lock = RLock()
         self._initializing = True
         self._file_like = _is_file_like(zip_dest)
         try:
@@ -106,15 +112,69 @@ class ZipStore(DirStore):
             raise StoreAuthorityError("ZipStore archive is malformed.") from error
 
     def _atomic_write(self, path: str, payload: bytes) -> None:
-        super()._atomic_write(path, payload)
-        if not self._initializing:
-            self._archive_dirty = True
+        with self.transaction_fence():
+            super()._atomic_write(path, payload)
+            if not self._initializing:
+                self._archive_dirty = True
+
+    def mark_query_index_dirty(self, cdef=None) -> str | None:
+        """Fence derived dirty-marker publication with this archive transaction."""
+
+        with self.transaction_fence():
+            return super().mark_query_index_dirty(cdef)
+
+    def clear_query_index_dirty(self) -> None:
+        """Persist derived-marker removal rather than losing it after a commit."""
+
+        with self.transaction_fence():
+            had_markers = self.query_index_is_dirty()
+            super().clear_query_index_dirty()
+            if had_markers and not self._initializing:
+                self._archive_dirty = True
+
+    @contextmanager
+    def transaction_fence(self):
+        """Serialize same-handle buffered mutations and archive commits.
+
+        The fence is reentrant so inherited record methods may retain their
+        writer lock while a graph save spans staging, installation, and commit.
+        Separate handles still use the archive baseline conflict check.
+        """
+
+        with self._transaction_lock:
+            yield
+
+    def writer_lock(self):
+        """Acquire the transaction fence before the inherited Store writer lock."""
+
+        @contextmanager
+        def locked():
+            with self.transaction_fence():
+                with super(ZipStore, self).writer_lock():
+                    yield
+
+        return locked()
 
     def install_local_state(self, source_dir: object, manifest):
         """Install local-state authority into this archive's buffered transaction."""
-        result = super().install_local_state(source_dir, manifest)
-        self._archive_dirty = True
-        return result
+        with self.transaction_fence():
+            result = super().install_local_state(source_dir, manifest)
+            self._archive_dirty = True
+            return result
+
+    def copy_local_state_from(self, source, definition, state_hash: str):
+        """Copy immutable payload authority under the same archive transaction fence."""
+
+        with self.transaction_fence():
+            return super().copy_local_state_from(source, definition, state_hash)
+
+    def rebind_local_state_from(self, source, source_definition, target_definition, state_hash: str):
+        """Rebind copied payload authority without racing this handle's commit."""
+
+        with self.transaction_fence():
+            return super().rebind_local_state_from(
+                source, source_definition, target_definition, state_hash,
+            )
 
     def _archive_identity(self, path: str | None = None) -> str | None:
         target = self._archive_path if path is None else path
@@ -129,38 +189,39 @@ class ZipStore(DirStore):
 
     def commit(self) -> None:
         """Atomically publish the complete buffered archive or reject stale bytes."""
-        if not self._archive_dirty:
-            return
-        self.preflight_publication("commit ZipStore")
-        destination = self._archive_path
-        directory = os.path.dirname(destination) or "."
-        fd, temporary = tempfile.mkstemp(prefix=".dryml-store-", suffix=".zip", dir=directory)
-        os.close(fd)
-        try:
-            with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
-                for root, dirs, files in os.walk(self.base_dir):
-                    dirs[:] = sorted(dirs)
-                    for name in sorted(files):
-                        path = os.path.join(root, name)
-                        if path == self._writer_lock_path:
-                            continue
-                        archive.write(path, os.path.relpath(path, self.base_dir))
-            with zipfile.ZipFile(temporary, "r") as archive:
-                if archive.testzip() is not None:
-                    raise StoreAuthorityError("Buffered ZipStore archive validation failed.")
-            staged = self._archive_identity(temporary)
-            with interprocess_lock(self._archive_lock_path):
-                if self._archive_identity() != self._archive_baseline:
-                    raise ZipStoreConflictError("ZipStore archive changed since open; reopen and reapply the mutation.")
-                os.replace(temporary, destination)
-                self._archive_baseline = staged
-                self._archive_dirty = False
-        except BaseException:
+        with self.transaction_fence():
+            if not self._archive_dirty:
+                return
+            self.preflight_publication("commit ZipStore")
+            destination = self._archive_path
+            directory = os.path.dirname(destination) or "."
+            fd, temporary = tempfile.mkstemp(prefix=".dryml-store-", suffix=".zip", dir=directory)
+            os.close(fd)
             try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-            raise
+                with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+                    for root, dirs, files in os.walk(self.base_dir):
+                        dirs[:] = sorted(dirs)
+                        for name in sorted(files):
+                            path = os.path.join(root, name)
+                            if path == self._writer_lock_path:
+                                continue
+                            archive.write(path, os.path.relpath(path, self.base_dir))
+                with zipfile.ZipFile(temporary, "r") as archive:
+                    if archive.testzip() is not None:
+                        raise StoreAuthorityError("Buffered ZipStore archive validation failed.")
+                staged = self._archive_identity(temporary)
+                with interprocess_lock(self._archive_lock_path):
+                    if self._archive_identity() != self._archive_baseline:
+                        raise ZipStoreConflictError("ZipStore archive changed since open; reopen and reapply the mutation.")
+                    os.replace(temporary, destination)
+                    self._archive_baseline = staged
+                    self._archive_dirty = False
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+                raise
 
     def catalog_key(self) -> str:
         """Return a stable archive identity without leaking extraction paths."""
