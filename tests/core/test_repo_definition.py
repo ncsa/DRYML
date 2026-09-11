@@ -240,7 +240,7 @@ def test_definition_decoding_is_inert(monkeypatch, tmp_path):
     ("integer", 1 << 4096),
     ("entries", list(range(4097))),
     ("nonfinite", float("inf")),
-])
+], ids=("string", "integer", "entries", "nonfinite"))
 def test_definition_enforces_closed_json_value_bounds(tmp_path, field, value):
     """Settings use the same bounded JSON validation as the complete envelope."""
     store = DirStore(tmp_path / "store", query_index="none")
