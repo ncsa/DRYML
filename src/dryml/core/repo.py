@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import glob
 from dataclasses import dataclass, replace
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from contextlib import contextmanager, nullcontext
 from io import IOBase
 from pathlib import Path
@@ -27,6 +27,9 @@ from .config import CONFIG_MISSING, ConfigError, ConfigRef
 from .query.federation import RepoQueryIndex
 from .query.memory import AggregateMemoryQueryIndex
 from .query.result import ObjectResultSet
+
+if TYPE_CHECKING:
+    from .repo_definition import RepoDefinition
 
 
 _active_object_ref_builds: ContextVar[frozenset[tuple[int, str]]] = ContextVar(
@@ -465,9 +468,10 @@ class Repo:
                 ambiguous built-in physical Store handles.
 
         Side Effects:
-            Store specifications may open or initialize their backend.  Supplied
-            Store handles are borrowed.  No routing validation publishes data or
-            creates an implicit destination Store.
+            Store specifications may open or initialize their backend and become
+            Repo-owned handles; supplied Store instances remain borrowed. No
+            routing validation publishes data or creates an implicit destination
+            Store.
         """
         # Initialize caches
         self.weak_obj_cache = _CandidateCache(weak=True)
@@ -491,6 +495,9 @@ class Repo:
         self._save_routing = None
         self._closing = False
         self._closed = False
+        # Handles supplied by callers remain borrowed.  Paths and file-like
+        # specifications opened by this Repo are released on successful close.
+        self._owned_stores: list[Store] = []
         self.alias_index = {}
         self._aliases_dirty = False
         # Compatibility facade and live cache overlay. Store-owned indexes handle
@@ -507,33 +514,46 @@ class Repo:
 
         # Multiple stores, optional
         candidate_stores = []
-        if stores is not None:
-            if not isinstance(stores, (tuple, list)):
-                stores = [stores]
+        try:
+            if stores is not None:
+                if not isinstance(stores, (tuple, list)):
+                    stores = [stores]
 
-            for store in stores:
-                if not isinstance(store, Store):
-                    candidate_stores.append(make_store(store))
-                else:
+                for store in stores:
+                    if not isinstance(store, Store):
+                        store = make_store(store)
+                        self._adopt_owned_stores((store,))
                     candidate_stores.append(store)
+        except BaseException:
+            self._close_owned_stores(suppress_errors=True)
+            raise
         # Legacy unconfigured federation can retain separate Store handles.
         # Routing installation validates that topology before it becomes a save
         # destination policy.
-        self.stores = list(self._normalize_store_handles(candidate_stores, reject_physical=False))
-        self._query_index = RepoQueryIndex(self, authority_only=_state_io)
-        self.set_save_routing(save_routing)
+        try:
+            self.stores = list(self._normalize_store_handles(candidate_stores, reject_physical=False))
+            self._query_index = RepoQueryIndex(self, authority_only=_state_io)
+            self.set_save_routing(save_routing)
 
-        # Main remains a structural reference in current Store authority.
-        if len(self.stores) > 0:
-            for store in self.stores:
-                main = store.read_main_ref()
-                if main is None:
-                    continue
-                definition = store.read_definition_record(main.definition_digest)
-                if definition is None:
-                    raise RepoLoadError("Main reference points to a missing DefinitionRecord.")
-                self.main_def = definition.definition
-                break
+            # Main remains a structural reference in current Store authority.
+            if len(self.stores) > 0:
+                for store in self.stores:
+                    main = store.read_main_ref()
+                    if main is None:
+                        continue
+                    definition = store.read_definition_record(main.definition_digest)
+                    if definition is None:
+                        raise RepoLoadError("Main reference points to a missing DefinitionRecord.")
+                    self.main_def = definition.definition
+                    break
+        except BaseException:
+            if hasattr(self, "_query_index"):
+                try:
+                    self._query_index.close()
+                except BaseException:
+                    pass
+            self._close_owned_stores(suppress_errors=True)
+            raise
 
     # Store Methods
 
@@ -569,6 +589,9 @@ class Repo:
         Raises:
             ValueError: If routing is configured and distinct built-in handles
                 name one physical Store.
+
+        Returns:
+            ``None``.
         """
 
         self.add_store(store, make_default=True)
@@ -588,26 +611,63 @@ class Repo:
         Raises:
             ValueError: If routing is configured and distinct built-in handles
                 name one physical Store.
+
+        Returns:
+            ``None``.
         """
 
+        self._register_store(store, make_default=make_default)
+
+    def _register_store(self, store: "Store", *, make_default: bool = False) -> Store:
+        """Connect ``store`` and return its normalized handle for internal use.
+
+        Public registration methods intentionally return ``None``. Internal
+        Store-selection paths use this helper to retain the normalized handle
+        without widening that public API.
+        """
+
+        with self._configuration_lock:
+            if self._closing or self._closed:
+                raise RuntimeError("Cannot change Store configuration after Repo close begins.")
+        opened = False
         if not isinstance(store, Store):
             store = make_store(store)
-        with self._configuration_lock:
-            existing = next((item for item in self.stores if item is store), None)
-            if existing is not None and not make_default:
-                return
-            candidate = [item for item in self.stores if item is not store]
-            if make_default or not candidate:
-                candidate.insert(0, store if existing is None else existing)
-            elif existing is None:
-                candidate.append(store)
-            else:
-                candidate.append(existing)
-            self.stores = list(self._normalize_store_handles(
-                candidate, reject_physical=self._save_routing is not None,
-            ))
-            self._configuration_version += 1
-        self._query_index.refresh_bindings()
+            opened = True
+        try:
+            with self._configuration_lock:
+                if self._closing or self._closed:
+                    raise RuntimeError("Cannot change Store configuration after Repo close begins.")
+                existing = next((item for item in self.stores if item is store), None)
+                if existing is not None and not make_default:
+                    return store
+                candidate = [item for item in self.stores if item is not store]
+                if make_default or not candidate:
+                    candidate.insert(0, store if existing is None else existing)
+                elif existing is None:
+                    candidate.append(store)
+                else:
+                    candidate.append(existing)
+                candidate = list(self._normalize_store_handles(
+                    candidate, reject_physical=self._save_routing is not None,
+                ))
+                previous_stores = self.stores
+                previous_version = self._configuration_version
+                self.stores = candidate
+                self._configuration_version += 1
+                try:
+                    self._query_index.refresh_bindings()
+                except BaseException:
+                    self.stores = previous_stores
+                    self._configuration_version = previous_version
+                    raise
+        except BaseException:
+            if opened:
+                self._adopt_owned_stores((store,))
+                self._close_one_owned_store(store, suppress_errors=True)
+            raise
+        if opened:
+            self._adopt_owned_stores((store,))
+        return store
 
     @staticmethod
     def _physical_store_key(store: Store):
@@ -671,6 +731,48 @@ class Repo:
             selected.append(store)
         return tuple(selected)
 
+    def _adopt_owned_stores(self, stores) -> None:
+        """Record newly opened handles exactly once for Repo lifetime cleanup."""
+
+        for store in stores:
+            if not any(existing is store for existing in self._owned_stores):
+                self._owned_stores.append(store)
+
+    def _close_one_owned_store(self, store: Store, *, suppress_errors: bool) -> None:
+        """Close one owned handle, retaining it when cleanup cannot finish."""
+
+        try:
+            store.close()
+        except BaseException:
+            if not suppress_errors:
+                raise
+        else:
+            self._owned_stores[:] = [
+                existing for existing in self._owned_stores if existing is not store
+            ]
+
+    def _close_owned_stores(self, *, suppress_errors: bool = False) -> None:
+        """Release owned handles, retaining failed cleanup handles for retry.
+
+        Args:
+            suppress_errors: Preserve an earlier setup/reconstruction failure by
+                ignoring cleanup errors. Ordinary ``close()`` calls leave this
+                false and propagate the first cleanup failure.
+        """
+
+        errors = []
+        for store in reversed(tuple(self._owned_stores)):
+            try:
+                store.close()
+            except BaseException as error:
+                errors.append(error)
+            else:
+                self._owned_stores[:] = [
+                    existing for existing in self._owned_stores if existing is not store
+                ]
+        if errors and not suppress_errors:
+            raise errors[0]
+
     def set_save_routing(self, routing) -> None:
         """Atomically replace or adjust the internal immutable save-routing policy.
 
@@ -692,6 +794,8 @@ class Repo:
         from .repo_plan import SaveRouting
 
         with self._configuration_lock:
+            if self._closing or self._closed:
+                raise RuntimeError("Cannot change save routing after Repo close begins.")
             if routing is None:
                 normalized = None
             elif isinstance(routing, SaveRouting):
@@ -735,7 +839,7 @@ class Repo:
             if self._closing or self._closed:
                 raise RuntimeError("Cannot retain a save context after Repo close begins.")
             stores = self._normalize_store_handles(
-                self.stores, reject_physical=self._save_routing is not None,
+                self.stores, reject_physical=True,
             )
             routing = self._save_routing
             if routing is not None:
@@ -861,10 +965,7 @@ class Repo:
     def _ensure_store(self, store):
         if store is None:
             return None
-        store = make_store(store)
-        if store not in self.stores:
-            self.add_store(store)
-        return store
+        return self._register_store(store)
 
     def cache_strong(self, obj: Object) -> None:
         from dryml.runtime import materialization_admission
@@ -2084,6 +2185,8 @@ class Repo:
         if key == "":
             raise ValueError("Config keys cannot be empty.")
         with self._configuration_lock:
+            if self._closing or self._closed:
+                raise RuntimeError("Cannot change configuration after Repo close begins.")
             self.config[key] = value
             self._configuration_version += 1
 
@@ -2106,6 +2209,8 @@ class Repo:
         if not isinstance(values, Mapping):
             raise TypeError("Config updates must be a mapping.")
         with self._configuration_lock:
+            if self._closing or self._closed:
+                raise RuntimeError("Cannot change configuration after Repo close begins.")
             for key, value in values.items():
                 if not isinstance(key, str):
                     raise TypeError("Config keys must be strings.")
@@ -2134,6 +2239,30 @@ class Repo:
         from .repo_definition import definition_from_repo
 
         return definition_from_repo(self)
+
+    @classmethod
+    def from_definition(cls, definition: "RepoDefinition") -> "Repo":
+        """Reconnect a detached configuration using fresh existing Store handles.
+
+        Args:
+            definition: Fully validated inert portable Repo configuration.
+
+        Returns:
+            A new Repo that owns the Store handles opened for reconstruction.
+
+        Raises:
+            TypeError: If ``definition`` is not a RepoDefinition.
+            RepoDefinitionError: If descriptors, selectors, or existing Store
+                authority cannot be reconstructed.  Storage failures are chained.
+
+        Side Effects:
+            Opens only existing supported Store authority.  It neither installs a
+            session Repo nor creates missing storage; close releases its handles.
+        """
+
+        from .repo_definition import repo_from_definition
+
+        return repo_from_definition(definition)
 
     def get_config(self, key: str, default=CONFIG_MISSING) -> Any:
         if not isinstance(key, str):
@@ -2199,18 +2328,18 @@ class Repo:
 
     def index_status(self, store=None):
         if store is not None:
-            store = make_store(store)
+            store = self._ensure_store(store)
         return self._query_index.index_status(store=store)
 
     def rebuild_index(self, store=None):
         if store is not None:
-            store = make_store(store)
+            store = self._ensure_store(store)
         self._query_index.rebuild(store=store)
         return self
 
     def validate_index(self, store=None, *, thorough: bool = False):
         if store is not None:
-            store = make_store(store)
+            store = self._ensure_store(store)
         return self._query_index.validate(store=store, thorough=thorough)
 
     def __len__(self):
@@ -3224,6 +3353,7 @@ class Repo:
             if flush and not self._state_io:
                 self.flush()
             self._query_index.close()
+            self._close_owned_stores()
             if self._state_io:
                 self.clear_cache(strong=True, weak=True)
         except BaseException:
@@ -3407,13 +3537,12 @@ def manage_repo(repo=None):
             for el in repo:
                 if el is None or isinstance(el, Repo):
                     raise ValueError("Store list can't contain a None or Repo object.")
-            stores = [
-                make_store(store)
-                for store in repo
-            ]
+            stores = repo
         else:
-            stores = [ make_store(repo) ]
-            
+            stores = [repo]
+
+        # Let Repo perform coercion so the temporary wrapper owns every handle
+        # it opens while preserving caller-supplied Store handles as borrowed.
         repo_obj = Repo(stores=stores)
         close_repo = True
 

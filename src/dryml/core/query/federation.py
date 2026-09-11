@@ -1215,13 +1215,13 @@ class RepoQueryIndex:
                 raise
 
     def close(self) -> None:
-        for index in tuple(self._opened_indexes.values()):
-            close = getattr(index, "close", None)
-            if close is not None:
-                close()
+        """Detach this Repo's views without closing Store-owned indexes."""
+
+        # DirStore caches each persistent index.  A second Repo can legitimately
+        # borrow the same Store, so only Store.close() owns its connections.
         self._opened_indexes.clear()
         self._memory_indexes.clear()
-        self.refresh_bindings()
+        self._bindings = ()
 
     def _executable_bindings(self, domain: str) -> tuple[StoreIndexBinding, ...]:
         if not self.can_execute_query_domain(domain):

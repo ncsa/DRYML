@@ -370,6 +370,23 @@ def test_store_writer_lock_serializes_processes_at_the_reference_boundary(tmp_pa
     assert store.read_main_ref() == MainRefRecord("2" * 64)
 
 
+def test_closing_one_repo_does_not_close_a_shared_store_query_index(tmp_path):
+    """Store-owned query indexes remain usable through another borrowing Repo."""
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    first = Repo(store)
+    second = Repo(store)
+    first_index = first._query_index.open_store_index(first._query_index.store_bindings[0])
+    if first_index is None:
+        pytest.skip("SQLite query indexes are unavailable")
+    first.close(flush=False)
+
+    second_index = second._query_index.open_store_index(second._query_index.store_bindings[0])
+    assert second_index is first_index
+    second.close(flush=False)
+    store.close()
+
+
 def test_definition_publication_interruption_keeps_authority_and_notifies_query_rebuild(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index="sqlite")
     record = DefinitionRecord(AtomicRecordObject().definition)

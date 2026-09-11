@@ -158,6 +158,9 @@ def test_invalid_routing_and_physical_handles_fail_without_mutating_configuratio
     unconfigured = Repo(connected)
     unconfigured.add_store(duplicate)
     with pytest.raises(ValueError, match="physical"):
+        with unconfigured._retain_save_context():
+            pass
+    with pytest.raises(ValueError, match="physical"):
         unconfigured.set_save_routing(SaveRouting())
     assert unconfigured.save_routing is None
     assert tuple(unconfigured.stores) == (connected, duplicate)

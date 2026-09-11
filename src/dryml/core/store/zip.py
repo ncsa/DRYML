@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from io import IOBase
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
@@ -12,6 +13,7 @@ import zipfile
 from contextlib import contextmanager
 
 from .dir import DirStore
+from .records import StoreFormatRecord, StoreRecordError
 from ...locking import interprocess_lock
 from .store import StoreAuthorityError, StoreCapabilityError, StorePublicationCapabilities
 
@@ -33,7 +35,7 @@ class ZipStore(DirStore):
     make the required replacement guarantee.
     """
 
-    def __init__(self, zip_dest: str | Path | IOBase):
+    def __init__(self, zip_dest: str | Path | IOBase, *, _existing_only: bool = False):
         self.zip_dest = zip_dest
         self._archive_path_value = (
             None if _is_file_like(zip_dest) else os.path.abspath(os.fspath(zip_dest))
@@ -46,14 +48,38 @@ class ZipStore(DirStore):
         self._transaction_lock = RLock()
         self._initializing = True
         self._file_like = _is_file_like(zip_dest)
+        self._existing_only = _existing_only
         try:
+            if _existing_only:
+                if self._file_like:
+                    raise StoreAuthorityError("Existing-only ZipStore opening requires a path-backed archive.")
+                self._validate_existing_archive(self._archive_path)
             self._extract_if_present()
-            super().__init__(self._tmp.name, query_index="memory")
+            super().__init__(self._tmp.name, query_index="memory", _existing_only=_existing_only)
         except BaseException:
             self._tmp.cleanup()
             raise
         self._initializing = False
         self._archive_baseline = None if self._file_like else self._archive_identity()
+
+    @classmethod
+    def open_existing(cls, zip_dest: str | Path) -> "ZipStore":
+        """Open a committed current-format archive without creating an archive.
+
+        Args:
+            zip_dest: Existing path-backed archive location.
+
+        Returns:
+            A fresh buffered handle over the archive's committed authority.
+
+        Raises:
+            StoreAuthorityError: If the archive is missing, malformed, or lacks
+                current Store authority.
+        """
+
+        path = os.path.abspath(os.fspath(zip_dest))
+        cls._validate_existing_archive(path)
+        return cls(path, _existing_only=True)
 
     @property
     def publication_capabilities(self) -> StorePublicationCapabilities:
@@ -85,6 +111,45 @@ class ZipStore(DirStore):
     def _archive_lock_path(self) -> str:
         return f"{self._archive_path}.dryml.lock"
 
+    @staticmethod
+    def _validate_archive_members(archive: zipfile.ZipFile) -> None:
+        """Reject archive entries that cannot represent one Store root."""
+
+        for info in archive.infolist():
+            name = info.filename
+            posix_path = PurePosixPath(name)
+            windows_path = PureWindowsPath(name)
+            if (
+                    not name or "\\" in name or posix_path.is_absolute()
+                    or windows_path.is_absolute() or ".." in posix_path.parts
+                    or (posix_path.parts and ":" in posix_path.parts[0])):
+                raise StoreAuthorityError(f"ZipStore archive member escapes its root: {name!r}.")
+
+    @classmethod
+    def _validate_existing_archive(cls, path: str) -> None:
+        """Validate committed archive and its format gate before extraction."""
+
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError as error:
+            raise StoreAuthorityError("ZipStore archive is missing or inaccessible.") from error
+        if not os.path.isfile(path) or not stat.S_ISREG(mode) or os.path.getsize(path) == 0:
+            raise StoreAuthorityError("ZipStore archive is not a nonempty regular file.")
+        try:
+            with zipfile.ZipFile(path, "r") as archive:
+                cls._validate_archive_members(archive)
+                if archive.testzip() is not None:
+                    raise StoreAuthorityError("ZipStore archive is malformed.")
+                try:
+                    format_bytes = archive.read("store-format.record")
+                except KeyError as error:
+                    raise StoreAuthorityError("ZipStore archive lacks current Store authority.") from error
+                StoreFormatRecord.from_bytes(format_bytes)
+        except StoreAuthorityError:
+            raise
+        except (OSError, zipfile.BadZipFile, StoreRecordError) as error:
+            raise StoreAuthorityError("ZipStore archive is malformed or incompatible.") from error
+
     def _extract_if_present(self) -> None:
         if self._file_like:
             self.zip_dest.seek(0)
@@ -98,15 +163,7 @@ class ZipStore(DirStore):
             return
         try:
             with zipfile.ZipFile(source, "r") as archive:
-                for info in archive.infolist():
-                    name = info.filename
-                    posix_path = PurePosixPath(name)
-                    windows_path = PureWindowsPath(name)
-                    if (
-                            not name or "\\" in name or posix_path.is_absolute()
-                            or windows_path.is_absolute() or ".." in posix_path.parts
-                            or (posix_path.parts and ":" in posix_path.parts[0])):
-                        raise StoreAuthorityError(f"ZipStore archive member escapes its root: {name!r}.")
+                self._validate_archive_members(archive)
                 archive.extractall(self._tmp.name)
         except zipfile.BadZipFile as error:
             raise StoreAuthorityError("ZipStore archive is malformed.") from error
@@ -231,4 +288,5 @@ class ZipStore(DirStore):
 
     def close(self) -> None:
         """Discard the buffered transaction without publishing it."""
+        super().close()
         self._tmp.cleanup()

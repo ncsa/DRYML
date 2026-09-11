@@ -43,7 +43,8 @@ class DirStore(Store):
             self,
             base_dir: str | os.PathLike[str],
             *,
-            query_index: QueryIndexPolicy | SQLiteQueryIndexConfig = "auto"):
+            query_index: QueryIndexPolicy | SQLiteQueryIndexConfig = "auto",
+            _existing_only: bool = False):
         self._base_dir = os.path.abspath(os.fspath(base_dir))
         if isinstance(query_index, str):
             if query_index not in {"auto", "sqlite", "memory", "none"}:
@@ -57,7 +58,30 @@ class DirStore(Store):
             raise ValueError("DirStore query_index must be 'auto', 'sqlite', 'memory', 'none', or SQLiteQueryIndexConfig.")
         self.query_index = query_index
         self._query_index_instance: SQLiteStoreQueryIndex | None = None
-        self._initialize_format()
+        self._initialize_format(existing_only=_existing_only)
+
+    @classmethod
+    def open_existing(
+            cls,
+            base_dir: str | os.PathLike[str],
+            *,
+            query_index: QueryIndexPolicy | SQLiteQueryIndexConfig = "auto") -> "DirStore":
+        """Open validated current authority without creating or repairing it.
+
+        Args:
+            base_dir: Existing direct Store root.
+            query_index: Derived-index policy for the fresh handle.
+
+        Returns:
+            A new Store handle over the existing current-format authority.
+
+        Raises:
+            StoreAuthorityError: If the root or required format record is absent,
+                malformed, or not the required filesystem type.
+        """
+
+        cls._validate_existing_root(os.path.abspath(os.fspath(base_dir)))
+        return cls(base_dir, query_index=query_index, _existing_only=True)
 
     @property
     def base_dir(self) -> str:
@@ -250,8 +274,34 @@ class DirStore(Store):
         identity = hashlib.sha256(os.fsencode(root)).hexdigest()
         return os.path.join(os.path.dirname(root), f".dryml-bootstrap-{identity}.lock")
 
-    def _initialize_format(self) -> None:
+    @classmethod
+    def _validate_existing_root(cls, base_dir: str) -> None:
+        """Validate existing root/type evidence without creating Store state."""
+
+        try:
+            root_mode = os.lstat(base_dir).st_mode
+        except OSError as error:
+            raise StoreAuthorityError("DirStore root is missing or inaccessible.") from error
+        if not stat.S_ISDIR(root_mode):
+            raise StoreAuthorityError("DirStore root is not a directory.")
+        format_path = os.path.join(base_dir, "store-format.record")
+        try:
+            format_mode = os.lstat(format_path).st_mode
+        except OSError as error:
+            raise StoreAuthorityError("DirStore lacks current store-format.record.") from error
+        if not stat.S_ISREG(format_mode):
+            raise StoreAuthorityError("DirStore format record is not a regular file.")
+        try:
+            with open(format_path, "rb") as source:
+                StoreFormatRecord.from_bytes(source.read())
+        except (OSError, StoreRecordError) as error:
+            raise StoreAuthorityError("DirStore format record is malformed or inaccessible.") from error
+
+    def _initialize_format(self, *, existing_only: bool = False) -> None:
         root = Path(self.base_dir)
+        if existing_only:
+            self._validate_existing_root(self.base_dir)
+            return
         if root.exists() and not root.is_dir():
             raise StoreAuthorityError(f"DirStore root is not a directory: {self.base_dir!r}.")
         if os.path.lexists(self.store_format_path):
@@ -783,6 +833,7 @@ class DirStore(Store):
         """Release this handle's SQLite connections without touching authority."""
         if self._query_index_instance is not None:
             self._query_index_instance.close()
+            self._query_index_instance = None
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.base_dir!r})"

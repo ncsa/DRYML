@@ -128,6 +128,22 @@ def test_path_backed_zip_buffers_direct_record_mutation_until_commit(tmp_path):
         reopened.close()
 
 
+@pytest.mark.parametrize("kind", ["missing", "empty", "malformed"], ids=str)
+def test_existing_only_zip_open_rejects_uncommitted_or_invalid_archive(tmp_path, kind):
+    """Existing-only archive opening never creates or extracts invalid authority."""
+
+    path = tmp_path / f"{kind}.zip"
+    if kind == "empty":
+        path.touch()
+    elif kind == "malformed":
+        path.write_bytes(b"not a zip archive")
+
+    with pytest.raises(StoreAuthorityError):
+        ZipStore.open_existing(path)
+
+    assert not path.exists() if kind == "missing" else path.is_file()
+
+
 def test_repo_save_reports_and_commits_a_buffered_zip_publication(tmp_path):
     path = tmp_path / "repo-save.zip"
     store = ZipStore(path)

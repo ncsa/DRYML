@@ -11,11 +11,15 @@ back to the Repo default Store; `None` retains default-Store closure behavior. A
 configured per-object save captures each local state once, assigns payload only
 to that Object's selected Stores, and publishes exact child `StateRef.at(path)`
 projections. Closure mode makes every selected root Store self-contained; an
-explicit `store=` always selects one complete closure. Installing routing
-rejects distinct built-in Store handles for one physical destination, while
-repeated use of the same handle deduplicates. A retained internal save context
-snapshots the policy, Store order, and default together; later configuration
-changes do not alter it and `Repo.close()` rejects while it is active.
+explicit `store=` always selects one complete closure. `add_store()` and
+`set_default_store()` return `None`; Store specifications they open are owned
+by the Repo, while supplied Store handles remain borrowed. Legacy read-only
+query federation can connect distinct built-in handles for one physical
+location, but retained save contexts reject that ambiguous topology before any
+publication. Repeated use of the same handle deduplicates. A retained internal
+save context snapshots the policy, Store order, and default together; later
+configuration changes do not alter it and `Repo.close()` rejects while it is
+active.
 
 Snapshots, stored-root membership, and initial claim completion are read back before a live `last_state_ref` receipt advances. A failed replica therefore leaves a prior root receipt intact, while an index, alias, main-reference, or later archive-commit failure leaves an already confirmed receipt inspectable. Root names are applied only after every selected root snapshot is confirmed and never propagate to independently published children. `Repo.save_object()` can leave a path-backed `ZipStore` buffered; `Repo.save()` and temporary convenience Repos report their required commit boundaries before returning.
 
@@ -25,7 +29,9 @@ Snapshots, stored-root membership, and initial claim completion are read back be
 
 `Repo._for_state_io(stores)` is a private non-owning authority-only view for callers that select exact state Stores. It has an independent memory overlay but never opens or registers a persistent query index, commits, closes, or otherwise takes ownership of the caller's Stores.
 
-`Repo.to_definition()` produces a detached `RepoDefinition` v1 configuration snapshot. It contains ordered supported Store descriptors, normalized routing selectors, `config`, lease duration, and deletion-save setting, but never Store contents, caches, aliases, main definitions, live Object affinity, sessions, symbols resolved to runtime values, or archive commits. The definition mapping/JSON codecs validate bounded inert data and do not open Stores, resolve symbols, activate a session, or materialize references. Export snapshots configuration under a short coordination lease before Store/archive inspection, so concurrent supported configuration updates affect later exports. It rejects closing Repos, dirty or uncommitted ZipStores, unsupported Store settings, duplicate built-in physical Store handles, custom clocks/factories, and nonportable selector/configuration values. Connected reconstruction from a definition is not provided yet; it is deferred to the later U6 resource-ownership work.
+`Repo.to_definition()` produces a detached `RepoDefinition` v1 configuration snapshot. It contains ordered supported Store descriptors, normalized routing selectors, `config`, lease duration, and deletion-save setting, but never Store contents, caches, aliases, main definitions, live Object affinity, sessions, symbols resolved to runtime values, or archive commits. The definition mapping/JSON codecs validate bounded inert data and do not open Stores, resolve symbols, activate a session, or materialize references. Export snapshots configuration under a short coordination lease before Store/archive inspection, so concurrent supported configuration updates affect later exports. It rejects closing Repos, dirty or uncommitted ZipStores, unsupported Store settings, duplicate built-in physical Store handles, custom clocks/factories, and nonportable selector/configuration values.
+
+`Repo.from_definition(definition)` is the separate explicit reconstruction boundary. It validates the complete inert envelope and every required existing persistent location before opening fresh DirStore or path-backed ZipStore handles, then reconstructs live selector operands while retaining originally symbolic operands as symbols. Missing, malformed, inaccessible, wrong-type, or incompatible Store authority raises `RepoDefinitionError` with the storage failure chained; reconstruction never initializes replacement storage or installs a session Repo. Reconstructed Store handles are owned by the returned Repo and are closed once by `Repo.close()`; directly supplied Store handles are borrowed and are not closed. `close(flush=False)` releases owned buffered resources without committing, while a failed `flush=True` commit leaves the Repo and its buffers open for inspection or retry. A non-commit owned-handle cleanup failure also propagates and retains that handle for retry. Direct caller closure of a borrowed Store during Repo use is unsupported.
 
 Object aliases resolve with `get_alias()` to complete `ObjectRef` authority. State aliases resolve through `resolve_state_selector()` from an `ObjectRef`-scoped `StateSelectorRef` to a `StateRef`. There is no generic object-returning alias load because an ObjectRef does not select a snapshot. Declarations and claims reserve first construction; `build_object_ref()` requires a registered declaration and a valid claim. `fork_object_ref()` and `fork_state_ref()` are Repo-owned rekey operations.
 

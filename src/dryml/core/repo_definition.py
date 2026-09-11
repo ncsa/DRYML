@@ -142,11 +142,22 @@ class _SelectorEncoder:
         from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
         from .links import DefLink
         from .params import Par
+        from .quoted import QuotedDef, SelectorSpec
         from .reference_values import ObjectRef, StateRef
+        from .selector import Selector
         from .symbol import ImportRef, SourceSpec
 
         if isinstance(value, (Definition, ConcreteDefinition)):
             return self.definition(value, path)
+        if isinstance(value, QuotedDef):
+            return {"kind": "quoted-definition", "value": self.value(value.value, path + ".value")}
+        if isinstance(value, SelectorSpec):
+            return {
+                "kind": "selector-spec",
+                "selector": _SelectorEncoder().selector(value.selector, path + ".selector"),
+            }
+        if isinstance(value, Selector):
+            raise _error(path, "unquoted selector is not portable")
         if isinstance(value, (ImportRef, SourceSpec)):
             return _symbol_data(value, representation="symbolic", path=path)
         if isinstance(value, DefLink):
@@ -295,6 +306,8 @@ def _validate_par(value: Mapping[str, Any], path: str, validate_value: Any) -> N
     elif matcher_kind == "subclass":
         _exact_keys(matcher, {"kind", "cls"}, path + ".matcher")
         _validate_symbol(matcher["cls"], path + ".matcher.cls")
+        if matcher["cls"].get("representation") != "live":
+            raise _error(path, "subclass matcher requires a live type")
     else:
         raise _error(path, "matcher is invalid")
 
@@ -336,6 +349,12 @@ def _validate_selector(value: Any, path: str) -> None:
             _exact_keys(node, {"label", "node_kind", "cls", "args", "kwargs"}, node_path)
             if node["args"] is not None and not isinstance(node["args"], list):
                 raise _error(node_path, "definition args are invalid")
+            if (
+                    isinstance(node["cls"], Mapping)
+                    and node["cls"].get("kind") == "none"
+                    and node["args"]
+            ):
+                raise _error(node_path, "classless definitions cannot have positional args")
             pairs = node["kwargs"]
         elif node.get("node_kind") == "cdef":
             _exact_keys(node, {"label", "node_kind", "cls", "parameters", "stateful_role"}, node_path)
@@ -507,6 +526,14 @@ def _validate_selector(value: Any, path: str) -> None:
             return
         if kind == "definition-ref":
             definition_ref(current, item_path)
+            return
+        if kind == "quoted-definition":
+            _exact_keys(current, {"kind", "value"}, item_path)
+            item(current["value"], item_path + ".value")
+            return
+        if kind == "selector-spec":
+            _exact_keys(current, {"kind", "selector"}, item_path)
+            _validate_selector(current["selector"], item_path + ".selector")
             return
         if kind in {"list", "tuple"}:
             _exact_keys(current, {"kind", "items"}, item_path)
@@ -741,6 +768,245 @@ class RepoDefinition:
         except (ValueError, TypeError, RecursionError, UnicodeError):
             raise RepoDefinitionError("Repo definition JSON is malformed.") from None
         return cls.from_data(decoded)
+
+
+def _symbol_from_data(value: Mapping[str, Any], *, require_live: bool = False) -> Any:
+    """Rebuild one validated symbol while preserving its representation tag."""
+
+    from .symbol import ImportRef, SourceSpec
+
+    if value["kind"] == "none":
+        if require_live:
+            raise _error("$.routing", "a live type is required")
+        return None
+    symbol = value["symbol"]
+    if symbol["kind"] == "import":
+        result = ImportRef(symbol["module"], symbol["qualname"])
+    else:
+        result = SourceSpec(
+            symbol["source_kind"], symbol["source"], symbol["name"],
+            {
+                name: ImportRef(item["module"], item["qualname"])
+                for name, item in symbol["imports"].items()
+            },
+        )
+    if value["representation"] == "symbolic" and not require_live:
+        return result
+    try:
+        result = result.resolve()
+    except Exception as error:
+        raise RepoDefinitionError("Repo definition could not resolve a live selector symbol.") from error
+    if require_live and not isinstance(result, type):
+        raise RepoDefinitionError("Repo definition subclass matcher did not resolve to a type.")
+    return result
+
+
+def _selector_from_data(value: Mapping[str, Any]):
+    """Construct one validated Selector graph at the explicit live boundary."""
+
+    from .bound_args import BoundArguments
+    from .cdef_graph import EdgeKind
+    from .definition import ConcreteDefinition, Definition, SKIP_ARGS
+    from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+    from .links import DefLink
+    from .params import (
+        AnyMatcher, ChoiceMatcher, ExactMatcher, IntRangeMatcher, MissingMatcher,
+        Par, PresentMatcher, SubclassMatcher, UniformFromSetGenerator,
+        UniformIntRangeGenerator,
+    )
+    from .quoted import QuotedDef, SelectorSpec
+    from .reference_values import ObjectId, ObjectRef, StateRef
+    from .selector import Selector
+    from .utils.graph.path import GraphPath
+
+    nodes = {node["label"]: node for node in value["nodes"]}
+    definitions: dict[str, Any] = {}
+
+    def item(current: Mapping[str, Any]) -> Any:
+        kind = current["kind"]
+        if kind == "atom":
+            return current["value"]
+        if kind == "symbol":
+            return _symbol_from_data(current)
+        if kind == "definition-ref":
+            return definition(current["label"])
+        if kind == "quoted-definition":
+            return QuotedDef(item(current["value"]))
+        if kind == "selector-spec":
+            return SelectorSpec(_selector_from_data(current["selector"]))
+        if kind == "list":
+            return FrozenList(item(child) for child in current["items"])
+        if kind == "tuple":
+            return FrozenTuple(item(child) for child in current["items"])
+        if kind == "set":
+            return FrozenSet(item(member["value"]) for member in current["items"])
+        if kind == "map":
+            return FrozenDict((name, item(child)) for name, child in current["items"])
+        if kind == "link":
+            return DefLink(EdgeKind(current["edge"]), item(current["target"]))
+        if kind == "par":
+            matcher_data = current["matcher"]
+            matcher_kind = matcher_data["kind"]
+            if matcher_kind == "present":
+                matcher = PresentMatcher()
+            elif matcher_kind == "missing":
+                matcher = MissingMatcher()
+            elif matcher_kind == "any":
+                matcher = AnyMatcher()
+            elif matcher_kind == "exact":
+                matcher = ExactMatcher(item(matcher_data["value"]))
+            elif matcher_kind == "choice":
+                matcher = ChoiceMatcher(item(child) for child in matcher_data["values"])
+            elif matcher_kind == "int-range":
+                matcher = IntRangeMatcher(matcher_data["lo"], matcher_data["hi"])
+            else:
+                matcher = SubclassMatcher(_symbol_from_data(matcher_data["cls"], require_live=True))
+            generator_data = current["generator"]
+            if generator_data is None:
+                generator = None
+            elif generator_data["kind"] == "uniform-int-range":
+                generator = UniformIntRangeGenerator(generator_data["lo"], generator_data["hi"])
+            else:
+                generator = UniformFromSetGenerator(
+                    item(child) for child in generator_data["values"]
+                )
+            return Par(current["name"], matcher, generator)
+        if kind == "object-ref":
+            objects = {
+                GraphPath.from_data(entry["path"]): ObjectId.from_data(entry["object_id"])
+                for entry in current["objects"]
+            }
+            return ObjectRef(item(current["definition"]), objects)
+        if kind == "state-ref":
+            states = {
+                GraphPath.from_data(entry["path"]): entry["state"]
+                for entry in current["states"]
+            }
+            return StateRef(item(current["object"]), states)
+        raise AssertionError(f"validated selector value has unknown kind {kind!r}")
+
+    def definition(label: str) -> Any:
+        existing = definitions.get(label)
+        if existing is not None:
+            return existing
+        node = nodes[label]
+        cls = _symbol_from_data(node["cls"])
+        if node["node_kind"] == "cdef":
+            result = ConcreteDefinition._from_bound_record(
+                cls,
+                BoundArguments(tuple((name, item(child)) for name, child in node["parameters"])),
+                stateful_role=node["stateful_role"],
+            )
+        else:
+            args = node["args"]
+            kwargs = {name: item(child) for name, child in node["kwargs"]}
+            if cls is None:
+                result = Definition(SKIP_ARGS, **kwargs) if args is None else Definition(**kwargs)
+            elif args is None:
+                result = Definition(cls, SKIP_ARGS, **kwargs)
+            else:
+                result = Definition(cls, *(item(child) for child in args), **kwargs)
+        definitions[label] = result
+        return result
+
+    root = item(value["root"])
+    return Selector(root, strict=value["strict"], cls_policy=value["cls_policy"])
+
+
+def repo_from_definition(definition: RepoDefinition):
+    """Reconnect a fully validated definition using only existing Store authority.
+
+    Reconstruction deliberately resolves live selector operands and opens Stores
+    only after all inert grammar and persistent path/type checks have succeeded.
+    The returned Repo owns the fresh Store handles; any failure closes only the
+    handles opened by this call without committing their buffered state.
+    """
+
+    if not isinstance(definition, RepoDefinition):
+        raise TypeError("Repo.from_definition requires a RepoDefinition.")
+    # Revalidate a detached copy so live reconstruction never trusts a retained
+    # implementation detail or a future subclass's mutable backing object.
+    data = RepoDefinition.from_data(definition.to_data()).to_data()
+    routing_data = data["routing"]
+    try:
+        routing_parts = None if routing_data is None else _reconstruct_routing(routing_data)
+        _preflight_store_descriptors(data["stores"])
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as error:
+        raise RepoDefinitionError("Repo definition reconstruction preflight failed.") from error
+
+    from .repo import Repo
+    from .store.dir import DirStore
+    from .store.zip import ZipStore
+
+    opened = []
+    repo = None
+    try:
+        for descriptor in data["stores"]:
+            if descriptor["kind"] == "dir":
+                opened.append(DirStore.open_existing(
+                    descriptor["path"], query_index=descriptor["query_index"],
+                ))
+            else:
+                opened.append(ZipStore.open_existing(descriptor["path"]))
+        if routing_parts is None:
+            routing = None
+        else:
+            selectors, store_indexes, routing_data = routing_parts
+            from .repo_plan import SaveRouting
+            routing = SaveRouting(
+                tuple((selector, opened[index]) for selector, index in zip(selectors, store_indexes)),
+                routing_data["match_mode"], routing_data["graph_mode"],
+            )
+        repo = Repo(
+            opened,
+            config=data["settings"]["config"],
+            lease_duration=data["settings"]["lease_duration"],
+            save_routing=routing,
+        )
+        repo.save_objs_on_deletion = data["settings"]["save_objs_on_deletion"]
+        repo._adopt_owned_stores(opened)
+        return repo
+    except BaseException as error:
+        if repo is not None:
+            repo._adopt_owned_stores(opened)
+            try:
+                repo.close(flush=False)
+            except BaseException:
+                pass
+        else:
+            for store in reversed(opened):
+                try:
+                    store.close()
+                except BaseException:
+                    pass
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        if isinstance(error, RepoDefinitionError):
+            raise
+        raise RepoDefinitionError("Repo definition could not open required Store authority.") from error
+
+
+def _reconstruct_routing(data: Mapping[str, Any]):
+    """Construct validated live selectors and bind their table destinations."""
+
+    # Store indexes remain inert until the caller binds them to fresh handles.
+    selectors = tuple(_selector_from_data(route["selector"]) for route in data["routes"])
+    return (selectors, tuple(route["store"] for route in data["routes"]), data)
+
+
+def _preflight_store_descriptors(stores: list[Mapping[str, Any]]) -> None:
+    """Validate every required persistent path/type before opening any Store."""
+
+    from .store.dir import DirStore
+    from .store.zip import ZipStore
+
+    for descriptor in stores:
+        if descriptor["kind"] == "dir":
+            DirStore._validate_existing_root(descriptor["path"])
+        else:
+            ZipStore._validate_existing_archive(descriptor["path"])
 
 
 def _duplicate_free_mapping(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
