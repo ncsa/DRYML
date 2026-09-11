@@ -980,11 +980,13 @@ with tempfile.TemporaryDirectory() as directory:
     )
     sys.path.insert(0, str(root))
     from probe_value import Value
-    repo = dryml.Repo(DirStore(root / "store"))
+    store = DirStore(root / "store")
+    repo = dryml.Repo(store)
     value = Value(7, repo=repo)
     state = value.save(repo=repo)
     definition = pickle.loads(pickle.dumps(value.definition))
-    load_repo = dryml.Repo(DirStore(root / "store"))
+    load_store = DirStore(root / "store")
+    load_repo = dryml.Repo(load_store)
     loaded = dryml.load_state_ref(state, repo=load_repo, reuse_live="never")
     old = root / "old"
     (old / "objects" / "legacy").mkdir(parents=True)
@@ -997,6 +999,10 @@ with tempfile.TemporaryDirectory() as directory:
         old_authority_rejected = False
     load_repo.close(flush=False)
     repo.close(flush=False)
+    load_store.close()
+    store.close()
+    assert store._query_index_instance is None
+    assert load_store._query_index_instance is None
     print(json.dumps({
         "graph_round_trip": definition.graph_equal(value.definition),
         "object_paths": len(state.object.objects),

@@ -413,6 +413,8 @@ with tempfile.TemporaryDirectory() as tmp:
     assert occurrences[0].owner == root
     assert occurrences[0].definition == child
     repo.close(flush=False)
+    store.close()
+    assert store._query_index_instance is None
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -459,6 +461,8 @@ with tempfile.TemporaryDirectory() as tmp:
     nested_selector = Definition(root_cls, child=selector)
     assert list(repo.query(nested_selector).stored().defs()) == [root]
     repo.close(flush=False)
+    store.close()
+    assert store._query_index_instance is None
 
 assert "tensorflow" not in sys.modules
         """
@@ -629,6 +633,8 @@ with tempfile.TemporaryDirectory() as tmp:
     assert occurrences[0].owner == root
     assert occurrences[0].definition == child
     repo.close(flush=False)
+    store.close()
+    assert store._query_index_instance is None
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
