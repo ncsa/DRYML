@@ -12,7 +12,7 @@ import pytest
 from dryml.core import Object, Ref, Repo, SaveRouting, Selector, Serializable, save_object
 from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
+from dryml.core.store.records import DefinitionRecord, StoredRootRecord
 
 
 class Routed(Object):
@@ -82,7 +82,7 @@ class MembershipCountingStore(DirStore):
         self.stored_root_paths = []
 
     def _read_file(self, path, record_type):
-        if "/stored-roots/" in path:
+        if record_type is StoredRootRecord:
             self.stored_root_paths.append(path)
         return super()._read_file(path, record_type)
 
