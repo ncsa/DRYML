@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from io import BytesIO
+import json
 import os
 import shutil
 import subprocess
@@ -29,6 +30,7 @@ from dryml.core.arg_roles import RefCDefArg
 import dryml.core.session as session
 from dryml.core.utils.graph.path import GraphPath, Parameter
 from dryml.core.utils.graph.value import iter_set_members
+from dryml.core.utils.stable_hash import stable_hash_function
 
 
 class DefinitionTarget:
@@ -71,6 +73,12 @@ class ReferenceWrapper(Object):
     def __init__(self, child, child_alias=None):
         self.child = child
         self.child_alias = child_alias
+
+
+class SemanticChainNode(Object):
+    def __init__(self, child=None):
+        super().__init__()
+        self.child = child
 
 
 def _state_hash(char="a"):
@@ -367,8 +375,75 @@ def test_definition_validates_materializing_reference_paths_inside_sets(tmp_path
     encoded_set = set_descriptor(data["routing"]["routes"][0]["selector"])
     assert encoded_set is not None
     encoded_set["items"][0]["fingerprint"] = "0" * 64
-    with pytest.raises(RepoDefinitionError, match="CDef topology"):
+    with pytest.raises(RepoDefinitionError, match="set fingerprint"):
         RepoDefinition.from_data(data)
+
+
+def test_definition_rejects_forged_set_fingerprints_with_matching_reference_paths(tmp_path):
+    """Inert decode derives set identity instead of trusting matching path data."""
+
+    leaf = Definition(ReferenceLeaf).concretize()
+    segment = iter_set_members({leaf})[0][0]
+    root = Definition(ReferenceWrapper, {leaf}).concretize()
+    path = GraphPath((Parameter("child"), segment))
+    reference = ObjectRef(root, {path: ObjectId(("setchild",))})
+    state = StateRef(reference, {path: _state_hash("d")})
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(
+        store,
+        save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, state)), store),)),
+    ).to_definition().to_data()
+
+    def first_set(value):
+        if isinstance(value, dict):
+            if value.get("kind") == "set":
+                return value
+            for child in value.values():
+                found = first_set(child)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = first_set(child)
+                if found is not None:
+                    return found
+        return None
+
+    encoded_set = first_set(data["routing"]["routes"][0]["selector"])
+    assert encoded_set is not None
+    original = encoded_set["items"][0]["fingerprint"]
+    forged = "0" * 64 if original != "0" * 64 else "1" * 64
+
+    def replace_fingerprint(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "fingerprint" and child == original:
+                    value[key] = forged
+                else:
+                    replace_fingerprint(child)
+        elif isinstance(value, list):
+            for child in value:
+                replace_fingerprint(child)
+
+    replace_fingerprint(data)
+    for decode in (RepoDefinition.from_data, lambda value: RepoDefinition.from_json(json.dumps(value))):
+        with pytest.raises(RepoDefinitionError, match="set fingerprint"):
+            decode(deepcopy(data))
+
+
+def test_definition_accepts_set_members_with_exact_reference_semantics(tmp_path):
+    """Descriptor fingerprints preserve ObjectRef and StateRef set members inertly."""
+
+    leaf = Definition(ReferenceLeaf).concretize()
+    reference = ObjectRef(leaf, {GraphPath(): ObjectId(("setref",))})
+    state = StateRef(reference, {GraphPath(): _state_hash("f")})
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(
+        store,
+        save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, values={reference, state})), store),)),
+    ).to_definition().to_data()
+
+    assert RepoDefinition.from_data(data).to_data() == data
 
 
 @pytest.mark.parametrize(
@@ -411,10 +486,113 @@ def test_definition_rejects_bad_reference_descriptor_kinds_and_duplicate_sets(tm
     data = _route_data(tmp_path)
     selector = data["routing"]["routes"][0]["selector"]
     selector["nodes"][0]["args"] = [
-        {"kind": "set", "items": [{"kind": "atom", "value": 1}, {"kind": "atom", "value": 1}]}
+        {
+            "kind": "set",
+            "items": [
+                {"fingerprint": stable_hash_function(1), "value": {"kind": "atom", "value": 1}},
+                {"fingerprint": stable_hash_function(1), "value": {"kind": "atom", "value": 1}},
+            ],
+        }
     ]
-    with pytest.raises(RepoDefinitionError):
+    with pytest.raises(RepoDefinitionError, match="duplicate canonical values"):
         RepoDefinition.from_data(data)
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        lambda secret: Selector(Definition(DefinitionTarget, value={secret: "\ud800"})),
+        lambda secret: Selector(Definition(DefinitionTarget, **{secret: "\ud800"})),
+    ],
+    ids=("map-key", "definition-field"),
+)
+def test_definition_encoder_errors_do_not_render_user_keys(tmp_path, selector):
+    """Encoder diagnostics use schema paths rather than caller-controlled names."""
+
+    secret = "SECRET-KEY\nMUST-NOT-RENDER"
+    store = DirStore(tmp_path / "store", query_index="none")
+
+    with pytest.raises(RepoDefinitionError) as raised:
+        Repo(store, save_routing=SaveRouting(((selector(secret), store),))).to_definition()
+
+    assert secret not in str(raised.value)
+    assert "\n" not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+@pytest.mark.parametrize("case", ("missing", "malformed", "wrong-type"))
+def test_reconstruction_preflights_bad_store_before_resolving_selector_symbols(
+        tmp_path, monkeypatch, case):
+    """Persistent Store admission precedes every selector symbol resolution."""
+
+    source = DirStore(tmp_path / "source", query_index="none")
+    data = _route_data(tmp_path)
+    target = tmp_path / case
+    data["stores"][0]["path"] = str(target)
+    if case == "malformed":
+        target.mkdir()
+        (target / "store-format.record").write_bytes(b"malformed")
+    elif case == "wrong-type":
+        target.write_text("not a Store")
+
+    resolved = []
+    monkeypatch.setattr(ImportRef, "resolve", lambda self: resolved.append(self))
+
+    with pytest.raises(RepoDefinitionError):
+        Repo.from_definition(RepoDefinition.from_data(data))
+
+    assert resolved == []
+    assert source.read_main_ref() is None
+
+
+def _compact_binary_cdef_dag_data(tmp_path, depth):
+    """Return a compact descriptor whose reference topology branches twice per level."""
+
+    data = _route_data(tmp_path)
+    selector = data["routing"]["routes"][0]["selector"]
+    root = selector["nodes"][0]
+    root["args"] = [{
+        "kind": "object-ref",
+        "definition": {"kind": "definition-ref", "label": "n1"},
+        "objects": [],
+    }]
+    for index in range(1, depth + 1):
+        parameters = [] if index == depth else [
+            ["left", {"kind": "definition-ref", "label": f"n{index + 1}"}],
+            ["right", {"kind": "definition-ref", "label": f"n{index + 1}"}],
+        ]
+        selector["nodes"].append({
+            "label": f"n{index}",
+            "node_kind": "cdef",
+            "cls": deepcopy(root["cls"]),
+            "parameters": parameters,
+            "stateful_role": False,
+        })
+    return data
+
+
+def test_definition_rejects_compact_semantic_dag_above_visit_budget(tmp_path):
+    """Compact shared CDef DAGs cannot expand topology work exponentially."""
+
+    data = _compact_binary_cdef_dag_data(tmp_path, 17)
+    assert len(json.dumps(data)) < 100_000
+
+    with pytest.raises(RepoDefinitionError, match="semantic"):
+        RepoDefinition.from_data(data)
+
+
+def test_definition_export_rejects_deep_semantic_chain_before_recursion(tmp_path):
+    """Deep live selector graphs fail at the semantic depth bound, not recursion."""
+
+    child = Definition(SemanticChainNode).concretize()
+    for _ in range(33):
+        child = Definition(SemanticChainNode, child).concretize()
+    store = DirStore(tmp_path / "store", query_index="none")
+
+    with pytest.raises(RepoDefinitionError, match="semantic") as raised:
+        Repo(store, save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, child)), store),))).to_definition()
+
+    assert raised.value.__cause__ is None
 
 
 class _CustomExact(ExactMatcher):

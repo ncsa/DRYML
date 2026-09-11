@@ -131,7 +131,7 @@ class ManagedOperation:
 
 
 class _BoundOperation:
-    """Short-lived callable view that validates U3 calls without executing them."""
+    """Short-lived callable view that validates managed calls before execution."""
 
     def __init__(self, descriptor: ManagedOperation, instance: object):
         """Bind the declaration and advertise the caller-facing signature."""
@@ -149,7 +149,8 @@ class _BoundOperation:
 
         Args:
             *args: Ordinary positional method arguments.
-            managed: Optional caller-owned U3 configuration.
+            managed: Optional caller-owned ManagedConfig selecting state/control
+                authority, rerun policy, and checkpoint callbacks.
             **kwargs: Ordinary keyword method arguments.
 
         Raises:
@@ -160,6 +161,10 @@ class _BoundOperation:
         Side Effects:
             Acquires retained state ownership, then invokes the raw method only
             after a running control snapshot is committed.
+
+        Returns:
+            The wrapped method's ordinary return value after final publication
+            and control completion association succeed.
         """
 
         if managed is not None and type(managed) is not ManagedConfig:
@@ -177,6 +182,14 @@ class _BoundOperation:
 
         Raises:
             ManagedError: If selected authority or its retained state is invalid.
+
+        Returns:
+            The immutable ManagedStatus projected from the selected control and
+            exact state authority.
+
+        Side Effects:
+            Reads selected Stores only; it does not invoke hooks, bootstrap
+            control state, change routing, or acquire workload ownership.
         """
 
         from .runtime import status
@@ -193,6 +206,13 @@ class _BoundOperation:
 
         Raises:
             ManagedError: If selected authority cannot safely accept a request.
+
+        Returns:
+            An immutable InterruptRequestResult describing request admission.
+
+        Side Effects:
+            May publish only an interruption request under the short control
+            lock. It never runs workload code or guarantees another checkpoint.
         """
 
         from .runtime import request_interrupt

@@ -6,7 +6,6 @@ from dataclasses import replace
 from uuid import UUID, uuid4
 
 from dryml.core import Object
-from dryml.core.reference_values import StateRef
 
 from .context import _create_context
 from .control import ControlSnapshot, ManagedControlStore
@@ -171,7 +170,6 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
     finally:
         if context is not None:
             context._deactivate()
-        pass
 
 
 def status(descriptor, instance: object, *, state_repo=None, control_store=None) -> ManagedStatus:

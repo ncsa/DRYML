@@ -16,6 +16,7 @@ from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileRepo
 from .records import (
     ClaimRecord, DeclarationRecord, DefinitionRecord, LocalStateManifest,
     MainRefRecord, ObjectAliasRecord, StateAliasRecord, StateRefRecord,
+    StoredRootRecord,
 )
 
 
@@ -99,6 +100,43 @@ class Store(ABC):
     @abstractmethod
     def iter_stored_root_records(self):
         """Yield authoritative stored-root membership records."""
+
+    def read_stored_root_record(self, digest: str) -> StoredRootRecord | None:
+        """Read and validate one stored-root membership by DefinitionRecord digest.
+
+        Args:
+            digest: Derived digest naming both the requested StoredRootRecord and
+                its referenced DefinitionRecord.
+
+        Returns:
+            The matching authoritative StoredRootRecord, or ``None`` when no
+            membership exists for ``digest``.
+
+        Raises:
+            StoreAuthorityError: If the requested membership is malformed, does
+                not name ``digest``, or references missing DefinitionRecord
+                authority.
+
+        Side Effects:
+            None. Existing Store implementations inherit this compatibility
+            fallback, which validates through their complete stored-root iterator.
+            Backends should override it with a digest-addressed authority read.
+        """
+        try:
+            expected = StoredRootRecord(digest)
+        except Exception as error:
+            raise StoreAuthorityError("Stored-root digest is malformed.") from error
+        for record in self.iter_stored_root_records():
+            if record.definition_digest != digest:
+                continue
+            if record != expected:
+                raise StoreAuthorityError("Stored-root membership does not match its requested digest.")
+            if self.read_definition_record(digest) is None:
+                raise StoreAuthorityError(
+                    "Stored-root membership targets a missing DefinitionRecord."
+                )
+            return record
+        return None
 
     @abstractmethod
     def create_local_state_staging(self) -> object:

@@ -8,9 +8,11 @@ connected reconstruction is a separate boundary.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
+import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -31,8 +33,11 @@ _CLASS_POLICIES = frozenset(("selector", "exact"))
 class RepoDefinitionError(ValueError):
     """Raised when a portable Repo definition is invalid or unsupported.
 
-    Error text identifies a configuration field but intentionally never includes
-    user-provided values, which can contain sensitive configuration.
+    The error covers malformed closed-grammar data, unsupported portable values,
+    and existing-authority reconstruction failures. Error text identifies a
+    configuration field but intentionally never includes user-provided values,
+    which can contain sensitive configuration. It has no side effects and does
+    not imply that a partially reconstructed Repo is usable.
     """
 
 
@@ -64,6 +69,327 @@ def _json_value(value: Any, path: str) -> None:
     _bounded_json_bytes(value, path)
 
 
+class _SemanticBudget:
+    """Bound descriptor walks independently of their compact JSON representation."""
+
+    def __init__(self) -> None:
+        self.visits = 0
+
+    def visit(self, path: str, depth: int) -> None:
+        if depth > _BOUNDS["max_depth"]:
+            raise _error(path, "semantic depth bound exceeded")
+        self.visits += 1
+        if self.visits > _BOUNDS["max_nodes"]:
+            raise _error(path, "semantic visit bound exceeded")
+
+
+def _stable_leaf_hash(value: Any) -> str:
+    """Return the stable-hash leaf digest for a closed JSON primitive."""
+
+    if value is None:
+        payload = b"N"
+    elif type(value) is bool:
+        payload = b"B1" if value else b"B0"
+    elif type(value) is int:
+        payload = b"I" + str(value).encode("ascii")
+    elif type(value) is float:
+        payload = b"F" + struct.pack(">d", value)
+    elif type(value) is str:
+        payload = b"S" + value.encode("utf-8")
+    else:
+        raise AssertionError("validated descriptor atom has unsupported type")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _stable_sequence_hash(type_marker: str, values: list[str]) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(b"T" + type_marker.encode("utf-8"))
+    hasher.update(b"|" + str(len(values)).encode("ascii"))
+    for index, value in enumerate(values):
+        hasher.update(b"I" + str(index).encode("ascii"))
+        hasher.update(b"V" + value.encode("ascii"))
+    return hasher.hexdigest()
+
+
+def _stable_mapping_hash(type_marker: str, values: list[tuple[Any, str]]) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(b"T" + type_marker.encode("utf-8"))
+    hasher.update(b"|" + str(len(values)).encode("ascii"))
+    items = sorted((_stable_leaf_hash(key), value) for key, value in values)
+    for key, value in items:
+        hasher.update(b"K" + key.encode("ascii"))
+        hasher.update(b"V" + value.encode("ascii"))
+    return hasher.hexdigest()
+
+
+def _stable_set_hash(values: list[str]) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(b"Tbuiltins.set")
+    hasher.update(b"|" + str(len(values)).encode("ascii"))
+    for value in sorted(values):
+        hasher.update(b"V" + value.encode("ascii"))
+    return hasher.hexdigest()
+
+
+def _descriptor_set_fingerprint(
+        value: Mapping[str, Any], labels: Mapping[str, Mapping[str, Any]],
+        budget: _SemanticBudget, path: str) -> str:
+    """Derive a stable set-member hash from closed data without reconstruction."""
+
+    definitions: dict[str, str] = {}
+    active: set[str] = set()
+
+    def symbol(current: Mapping[str, Any]) -> str:
+        record = current["symbol"]
+        if current["representation"] == "live":
+            if record["kind"] == "import":
+                module, qualname = record["module"], record["qualname"]
+            elif "live_class" in record:
+                module, qualname = record["live_class"]["module"], record["live_class"]["qualname"]
+            else:
+                raise _error(path, "live source symbols cannot identify set members")
+            return hashlib.sha256(
+                f"class:{module}.{qualname}".encode("utf-8")
+            ).hexdigest()
+        if record["kind"] == "import":
+            payload = json.dumps(
+                {"kind": "import", "module": record["module"], "qualname": record["qualname"]},
+                sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")
+        else:
+            payload = json.dumps(
+                {
+                    "kind": record["source_kind"], "source": record["source"],
+                    "name": record["name"],
+                    "imports": {
+                        name: f"{item['module']}:{item['qualname']}" if item["qualname"] is not None else item["module"]
+                        for name, item in sorted(record["imports"].items())
+                    },
+                },
+                sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def definition(label: str, depth: int) -> str:
+        budget.visit(path, depth)
+        existing = definitions.get(label)
+        if existing is not None:
+            return existing
+        if label in active:
+            raise _error(path, "definition cycle is unsupported")
+        active.add(label)
+        try:
+            node = labels[label]
+            cls = _stable_leaf_hash(None) if node["cls"]["kind"] == "none" else symbol(node["cls"])
+            if node["node_kind"] == "cdef":
+                params = _stable_mapping_hash(
+                    "builtins.dict",
+                    [(name, item(child, depth + 1)) for name, child in node["parameters"]],
+                )
+                result = _stable_mapping_hash(
+                    "dryml.core.definition.ConcreteDefinition:identity-v2",
+                    [("cls", cls), ("parameters", params)],
+                )
+            else:
+                entries = [("cls", cls)]
+                if node["args"] is not None:
+                    entries.append(("args", _stable_sequence_hash(
+                        "builtins.tuple", [item(child, depth + 1) for child in node["args"]],
+                    )))
+                entries.append(("kwargs", _stable_mapping_hash(
+                    "builtins.dict",
+                    [(name, item(child, depth + 1)) for name, child in node["kwargs"]],
+                )))
+                result = _stable_mapping_hash("dryml.core.definition.Definition", entries)
+            definitions[label] = result
+            return result
+        finally:
+            active.remove(label)
+
+    def par(current: Mapping[str, Any], depth: int) -> str:
+        matcher = current["matcher"]
+        kind = matcher["kind"]
+        if kind in {"present", "missing", "any"}:
+            matcher_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(kind)])
+        elif kind == "exact":
+            matcher_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(kind), item(matcher["value"], depth + 1)])
+        elif kind == "choice":
+            matcher_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(kind), _stable_sequence_hash("builtins.tuple", [item(child, depth + 1) for child in matcher["values"]])])
+        elif kind == "int-range":
+            matcher_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(kind), _stable_leaf_hash(matcher["lo"]), _stable_leaf_hash(matcher["hi"])])
+        else:
+            matcher_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(kind), symbol(matcher["cls"])])
+        generator = current["generator"]
+        if generator is None:
+            generator_key = _stable_leaf_hash(None)
+        elif generator["kind"] == "uniform-int-range":
+            generator_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(generator["kind"]), _stable_leaf_hash(generator["lo"]), _stable_leaf_hash(generator["hi"])])
+        else:
+            generator_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(generator["kind"]), _stable_sequence_hash("builtins.tuple", [item(child, depth + 1) for child in generator["values"]])])
+        stable_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash("par"), _stable_leaf_hash(current["name"]), matcher_key, generator_key])
+        return _stable_mapping_hash("dryml.core.params.Par", [("stable_key", stable_key)])
+
+    def cdef_graph_hash(root: str) -> str:
+        """Recreate the token-free CDef graph digest from descriptor edges."""
+
+        from .utils.graph.path import GraphPath, Index, Key, Parameter, SetMember, graph_path_sort_key
+
+        edges: dict[str, list[tuple[GraphPath, str, str]]] = {}
+        reached: set[str] = set()
+
+        def direct(current: Mapping[str, Any], graph_path: GraphPath):
+            kind = current["kind"]
+            if kind == "definition-ref":
+                yield graph_path, current["label"], "materialize"
+            elif kind == "link":
+                target = current["target"]
+                if target["kind"] == "definition-ref":
+                    yield graph_path, target["label"], current["edge"]
+            elif kind in {"list", "tuple"}:
+                for index, child in enumerate(current["items"]):
+                    yield from direct(child, graph_path.child(Index(index)))
+            elif kind == "map":
+                for name, child in current["items"]:
+                    yield from direct(child, graph_path.child(Key(name)))
+            elif kind == "set":
+                for member in current["items"]:
+                    yield from direct(member["value"], graph_path.child(SetMember(member["fingerprint"])))
+
+        def visit(label: str) -> None:
+            if label in reached:
+                return
+            reached.add(label)
+            node = labels[label]
+            node_edges = []
+            for name, child in node["parameters"]:
+                node_edges.extend(direct(child, GraphPath((Parameter(name),))))
+            edges[label] = node_edges
+            for _, child, _ in node_edges:
+                visit(child)
+
+        visit(root)
+        stable_hashes = {label: definition(label, 0) for label in reached}
+        minimum_paths = {root: GraphPath()}
+        pending = [(root, GraphPath())]
+        while pending:
+            parent, parent_path = pending.pop()
+            for edge_path, child, _ in edges[parent]:
+                candidate = parent_path.join(edge_path)
+                previous = minimum_paths.get(child)
+                if previous is None or graph_path_sort_key(candidate) < graph_path_sort_key(previous):
+                    minimum_paths[child] = candidate
+                    pending.append((child, candidate))
+        ordered = sorted(reached, key=lambda label: (graph_path_sort_key(minimum_paths[label]), stable_hashes[label]))
+        graph_labels = {label: f"n{index}" for index, label in enumerate(ordered)}
+        node_order: list[str] = []
+        seen: set[str] = set()
+
+        def order(label: str) -> None:
+            if label in seen:
+                return
+            seen.add(label)
+            node_order.append(label)
+            for _, child, _ in sorted(edges[label], key=lambda edge: (graph_path_sort_key(edge[0]), stable_hashes[edge[1]], edge[2])):
+                order(child)
+
+        order(root)
+        projection = {
+            "root": graph_labels[root],
+            "nodes": [
+                {
+                    "label": graph_labels[label],
+                    "stable_hash": stable_hashes[label],
+                    "edges": [
+                        (kind, edge_path.to_bytes().hex(), graph_labels[child])
+                        for edge_path, child, kind in sorted(
+                            edges[label],
+                            key=lambda edge: (graph_path_sort_key(edge[0]), graph_labels[edge[1]], edge[2]),
+                        )
+                    ],
+                }
+                for label in node_order
+            ],
+        }
+        payload = json.dumps(projection, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(b"dryml-cdef-graph-v1\x00" + payload).hexdigest()
+
+    def object_ref(current: Mapping[str, Any]) -> str:
+        graph_hash = cdef_graph_hash(current["definition"]["label"])
+        from .utils.graph.path import GraphPath, graph_path_sort_key
+
+        entries = sorted(
+            current["objects"],
+            key=lambda entry: graph_path_sort_key(GraphPath.from_data(entry["path"])),
+        )
+        payload = {
+            "definition_graph": graph_hash,
+            "objects": [[entry["path"], entry["object_id"]] for entry in entries],
+        }
+        digest = hashlib.sha256(
+            b"dryml-object-ref-v1\x00" + json.dumps(
+                payload, separators=(",", ":"), ensure_ascii=True,
+            ).encode("ascii")
+        ).hexdigest()
+        return hashlib.sha256(b"dryml-object-ref-v1\x00" + digest.encode("ascii")).hexdigest()
+
+    def item(current: Mapping[str, Any], depth: int) -> str:
+        budget.visit(path, depth)
+        kind = current["kind"]
+        if kind == "atom":
+            return _stable_leaf_hash(current["value"])
+        if kind == "symbol":
+            return symbol(current)
+        if kind == "definition-ref":
+            return definition(current["label"], depth + 1)
+        if kind in {"list", "tuple"}:
+            return _stable_sequence_hash(
+                f"builtins.{kind}", [item(child, depth + 1) for child in current["items"]],
+            )
+        if kind == "set":
+            return _stable_set_hash([item(member["value"], depth + 1) for member in current["items"]])
+        if kind == "map":
+            return _stable_mapping_hash("builtins.dict", [(name, item(child, depth + 1)) for name, child in current["items"]])
+        if kind == "link":
+            return _stable_mapping_hash("dryml.core.links.DefLink", [("kind", _stable_leaf_hash(current["edge"])), ("target", item(current["target"], depth + 1))])
+        if kind == "quoted-definition":
+            return _stable_mapping_hash("dryml.core.quoted.QuotedDef", [("value", item(current["value"], depth + 1))])
+        if kind == "par":
+            return par(current, depth + 1)
+        if kind == "object-ref":
+            return object_ref(current)
+        if kind == "state-ref":
+            graph_hash = cdef_graph_hash(current["object"]["definition"]["label"])
+            from .utils.graph.path import GraphPath, graph_path_sort_key
+
+            objects = sorted(
+                current["object"]["objects"],
+                key=lambda entry: graph_path_sort_key(GraphPath.from_data(entry["path"])),
+            )
+            object_identity = {
+                "definition_graph": graph_hash,
+                "objects": [[entry["path"], entry["object_id"]] for entry in objects],
+            }
+            object_digest = hashlib.sha256(
+                b"dryml-object-ref-v1\x00" + json.dumps(
+                    object_identity, separators=(",", ":"), ensure_ascii=True,
+                ).encode("ascii")
+            ).hexdigest()
+            states = sorted(
+                current["states"],
+                key=lambda entry: graph_path_sort_key(GraphPath.from_data(entry["path"])),
+            )
+            state_digest = hashlib.sha256(
+                b"dryml-state-ref-v1\x00" + json.dumps(
+                    {"object": object_digest, "states": [[entry["path"], entry["state"]] for entry in states]},
+                    separators=(",", ":"), ensure_ascii=True,
+                ).encode("ascii")
+            ).hexdigest()
+            return hashlib.sha256(b"dryml-state-ref-v1\x00" + state_digest.encode("ascii")).hexdigest()
+        raise _error(path, "set member has unsupported stable semantics")
+
+    return item(value, 0)
+
+
 def _symbol_data(value: Any, *, representation: str, path: str) -> dict[str, Any]:
     """Encode a symbol without resolving it or retaining a live callable."""
 
@@ -87,6 +413,10 @@ def _symbol_data(value: Any, *, representation: str, path: str) -> dict[str, Any
                 for name, item in (ref.imports or {}).items()
             },
         }
+        if representation == "live" and isinstance(value, type):
+            symbol["live_class"] = {
+                "module": value.__module__, "qualname": value.__qualname__,
+            }
     return {"kind": "symbol", "representation": representation, "symbol": symbol}
 
 
@@ -108,13 +438,22 @@ def _validate_symbol(value: Any, path: str) -> None:
         return
     if symbol["kind"] != "source":
         raise _error(path, "symbol kind is unsupported")
-    _exact_keys(symbol, {"kind", "source_kind", "source", "name", "imports"}, path)
+    source_keys = {"kind", "source_kind", "source", "name", "imports"}
+    if "live_class" in symbol:
+        source_keys.add("live_class")
+    _exact_keys(symbol, source_keys, path)
     if symbol["source_kind"] not in {"function", "class"} or not isinstance(symbol["source"], str) or not symbol["source"]:
         raise _error(path, "source symbol is invalid")
     if symbol["name"] is not None and not isinstance(symbol["name"], str):
         raise _error(path, "source name is invalid")
     if symbol["source_kind"] == "class" and not symbol["name"]:
         raise _error(path, "source class name is invalid")
+    if "live_class" in symbol:
+        if value["representation"] != "live" or not isinstance(symbol["live_class"], Mapping):
+            raise _error(path, "source live class identity is invalid")
+        _exact_keys(symbol["live_class"], {"module", "qualname"}, path)
+        if not all(isinstance(symbol["live_class"][field], str) and symbol["live_class"][field] for field in ("module", "qualname")):
+            raise _error(path, "source live class identity is invalid")
     if not isinstance(symbol["imports"], Mapping):
         raise _error(path, "source imports are invalid")
     for name, item in symbol["imports"].items():
@@ -132,12 +471,13 @@ def _validate_symbol(value: Any, path: str) -> None:
 class _SelectorEncoder:
     """Encode one selector graph while retaining object-identity topology."""
 
-    def __init__(self) -> None:
+    def __init__(self, budget: _SemanticBudget | None = None) -> None:
         self.nodes: list[dict[str, Any]] = []
         self.labels: dict[int, str] = {}
         self.active: set[int] = set()
+        self.budget = _SemanticBudget() if budget is None else budget
 
-    def value(self, value: Any, path: str) -> dict[str, Any]:
+    def value(self, value: Any, path: str, depth: int = 0) -> dict[str, Any]:
         from .definition import ConcreteDefinition, Definition
         from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
         from .links import DefLink
@@ -147,35 +487,36 @@ class _SelectorEncoder:
         from .selector import Selector
         from .symbol import ImportRef, SourceSpec
 
+        self.budget.visit(path, depth)
         if isinstance(value, (Definition, ConcreteDefinition)):
-            return self.definition(value, path)
+            return self.definition(value, path, depth + 1)
         if isinstance(value, QuotedDef):
-            return {"kind": "quoted-definition", "value": self.value(value.value, path + ".value")}
+            return {"kind": "quoted-definition", "value": self.value(value.value, path + ".value", depth + 1)}
         if isinstance(value, SelectorSpec):
             return {
                 "kind": "selector-spec",
-                "selector": _SelectorEncoder().selector(value.selector, path + ".selector"),
+                "selector": _SelectorEncoder(self.budget).selector(value.selector, path + ".selector", depth + 1),
             }
         if isinstance(value, Selector):
             raise _error(path, "unquoted selector is not portable")
         if isinstance(value, (ImportRef, SourceSpec)):
             return _symbol_data(value, representation="symbolic", path=path)
         if isinstance(value, DefLink):
-            return {"kind": "link", "edge": value.kind.value, "target": self.value(value.target, path + ".target")}
+            return {"kind": "link", "edge": value.kind.value, "target": self.value(value.target, path + ".target", depth + 1)}
         if isinstance(value, ObjectRef):
-            return {"kind": "object-ref", "definition": self.definition(value.definition, path + ".definition"), "objects": value.to_data()["objects"]}
+            return {"kind": "object-ref", "definition": self.definition(value.definition, path + ".definition", depth + 1), "objects": value.to_data()["objects"]}
         if isinstance(value, StateRef):
-            return {"kind": "state-ref", "object": self.value(value.object, path + ".object"), "states": value.to_data()["states"]}
+            return {"kind": "state-ref", "object": self.value(value.object, path + ".object", depth + 1), "states": value.to_data()["states"]}
         if isinstance(value, Par):
-            return self.par(value, path)
+            return self.par(value, path, depth + 1)
         if isinstance(value, (FrozenDict, dict)):
             if any(not isinstance(key, str) for key in value):
                 raise _error(path, "map keys must be strings")
-            return {"kind": "map", "items": [[key, self.value(item, f"{path}.{key}")] for key, item in sorted(value.items())]}
+            return {"kind": "map", "items": [[key, self.value(item, f"{path}.items[{index}]", depth + 1)] for index, (key, item) in enumerate(sorted(value.items()))]}
         if isinstance(value, (FrozenList, list)):
-            return {"kind": "list", "items": [self.value(item, f"{path}[{index}]") for index, item in enumerate(value)]}
+            return {"kind": "list", "items": [self.value(item, f"{path}.items[{index}]", depth + 1) for index, item in enumerate(value)]}
         if isinstance(value, (FrozenTuple, tuple)):
-            return {"kind": "tuple", "items": [self.value(item, f"{path}[{index}]") for index, item in enumerate(value)]}
+            return {"kind": "tuple", "items": [self.value(item, f"{path}.items[{index}]", depth + 1) for index, item in enumerate(value)]}
         if isinstance(value, (FrozenSet, set, frozenset)):
             from .utils.stable_hash import stable_hash_function
 
@@ -186,14 +527,14 @@ class _SelectorEncoder:
                 ordered = sorted(
                     value,
                     key=lambda item: canonical_json_dumps(
-                        _SelectorEncoder().value(item, path + ".set"), **_BOUNDS
+                        _SelectorEncoder(self.budget).value(item, path + ".set", depth + 1), **_BOUNDS
                     ),
                 )
             except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError):
                 raise _error(path, "set member is not portable") from None
             members = []
             for item in ordered:
-                encoded = self.value(item, path + ".set")
+                encoded = self.value(item, path + ".set", depth + 1)
                 try:
                     fingerprint = stable_hash_function(item)
                 except (RecursionError, TypeError, ValueError, OverflowError):
@@ -210,8 +551,9 @@ class _SelectorEncoder:
             return {"kind": "atom", "value": value}
         raise _error(path, "value type is not portable")
 
-    def definition(self, value: Any, path: str) -> dict[str, Any]:
+    def definition(self, value: Any, path: str, depth: int = 0) -> dict[str, Any]:
         from .definition import ConcreteDefinition
+        self.budget.visit(path, depth)
         key = id(value)
         if key in self.active:
             raise _error(path, "definition cycle is unsupported")
@@ -230,17 +572,17 @@ class _SelectorEncoder:
             )
             node: dict[str, Any] = {"label": label, "node_kind": "cdef" if isinstance(value, ConcreteDefinition) else "definition", "cls": _symbol_data(value.cls, representation=representation, path=path + ".cls")}
             if isinstance(value, ConcreteDefinition):
-                node["parameters"] = [[name, self.value(item, f"{path}.{name}")] for name, item in value.parameters.items()]
+                node["parameters"] = [[name, self.value(item, f"{path}.parameters[{index}]", depth + 1)] for index, (name, item) in enumerate(value.parameters.items())]
                 node["stateful_role"] = value._stateful_role
             else:
-                node["args"] = None if value.args is None else [self.value(item, f"{path}.args[{index}]") for index, item in enumerate(value.args)]
-                node["kwargs"] = [[name, self.value(item, f"{path}.{name}")] for name, item in value.kwargs.items()]
+                node["args"] = None if value.args is None else [self.value(item, f"{path}.args[{index}]", depth + 1) for index, item in enumerate(value.args)]
+                node["kwargs"] = [[name, self.value(item, f"{path}.kwargs[{index}]", depth + 1)] for index, (name, item) in enumerate(value.kwargs.items())]
             self.nodes.append(node)
             return {"kind": "definition-ref", "label": label}
         finally:
             self.active.remove(key)
 
-    def par(self, value: Any, path: str) -> dict[str, Any]:
+    def par(self, value: Any, path: str, depth: int = 0) -> dict[str, Any]:
         from .params import (
             AnyMatcher, ChoiceMatcher, ExactMatcher, IntRangeMatcher,
             MissingMatcher, PresentMatcher, SubclassMatcher,
@@ -254,9 +596,9 @@ class _SelectorEncoder:
         elif type(matcher) is AnyMatcher:
             match = {"kind": "any"}
         elif type(matcher) is ExactMatcher:
-            match = {"kind": "exact", "value": self.value(matcher.value, path + ".exact")}
+            match = {"kind": "exact", "value": self.value(matcher.value, path + ".exact", depth + 1)}
         elif type(matcher) is ChoiceMatcher:
-            match = {"kind": "choice", "values": [self.value(item, path + ".choice") for item in matcher.values]}
+            match = {"kind": "choice", "values": [self.value(item, f"{path}.choice[{index}]", depth + 1) for index, item in enumerate(matcher.values)]}
         elif type(matcher) is IntRangeMatcher:
             match = {"kind": "int-range", "lo": matcher.lo, "hi": matcher.hi}
         elif type(matcher) is SubclassMatcher:
@@ -269,13 +611,13 @@ class _SelectorEncoder:
         elif type(generator) is UniformIntRangeGenerator:
             gen = {"kind": "uniform-int-range", "lo": generator.lo, "hi": generator.hi}
         elif type(generator) is UniformFromSetGenerator:
-            gen = {"kind": "uniform-from-set", "values": [self.value(item, path + ".generator") for item in generator.values]}
+            gen = {"kind": "uniform-from-set", "values": [self.value(item, f"{path}.generator[{index}]", depth + 1) for index, item in enumerate(generator.values)]}
         else:
             raise _error(path, "generator is not portable")
         return {"kind": "par", "name": value.name, "matcher": match, "generator": gen}
 
-    def selector(self, selector: Any, path: str) -> dict[str, Any]:
-        return {"root": self.definition(selector.root, path + ".root"), "strict": selector.strict, "cls_policy": selector.cls_policy, "nodes": self.nodes}
+    def selector(self, selector: Any, path: str, depth: int = 0) -> dict[str, Any]:
+        return {"root": self.definition(selector.root, path + ".root", depth + 1), "strict": selector.strict, "cls_policy": selector.cls_policy, "nodes": self.nodes}
 
 
 def _validate_par(value: Mapping[str, Any], path: str, validate_value: Any) -> None:
@@ -339,6 +681,7 @@ def _validate_selector(value: Any, path: str) -> None:
         raise _error(path, "selector nodes are invalid")
 
     labels: dict[str, Mapping[str, Any]] = {}
+    budget = _SemanticBudget()
     for index, node in enumerate(record["nodes"]):
         node_path = f"{path}.nodes[{index}]"
         if not isinstance(node, Mapping) or not isinstance(node.get("label"), str):
@@ -378,7 +721,10 @@ def _validate_selector(value: Any, path: str) -> None:
     seen: set[str] = set()
     active: set[str] = set()
 
-    def definition_ref(current: Any, item_path: str, *, cdef: bool | None = None) -> str:
+    def definition_ref(
+            current: Any, item_path: str, depth: int = 0,
+            *, cdef: bool | None = None) -> str:
+        budget.visit(item_path, depth)
         _exact_keys(current, {"kind", "label"}, item_path)
         if current["kind"] != "definition-ref" or not isinstance(current["label"], str):
             raise _error(item_path, "definition reference is invalid")
@@ -395,7 +741,7 @@ def _validate_selector(value: Any, path: str) -> None:
             values = [] if node.get("args") is None else node.get("args", [])
             values = [*values, *(pair[1] for pair in node.get("kwargs", node.get("parameters", [])))]
             for child in values:
-                item(child, item_path)
+                item(child, item_path, depth + 1)
             active.remove(label)
             seen.add(label)
         return label
@@ -440,6 +786,8 @@ def _validate_selector(value: Any, path: str) -> None:
         objects = reference_entries(current["objects"], item_path + ".objects", state=False)
         expected: dict[tuple[Any, ...], tuple[GraphPath, Any | None]] = {}
         def add(key: tuple[Any, ...], graph_path: GraphPath, object_id: Any | None) -> None:
+            if len(expected) >= _BOUNDS["max_entries"] and key not in expected:
+                raise _error(item_path, "reference topology entry bound exceeded")
             previous = expected.get(key)
             if previous is None or graph_path_sort_key(graph_path) < graph_path_sort_key(previous[0]):
                 expected[key] = (graph_path, object_id)
@@ -452,28 +800,29 @@ def _validate_selector(value: Any, path: str) -> None:
             for child_path, object_id in embedded.items():
                 add(("object-id", object_id), graph_path.join(child_path), object_id)
 
-        def visit_value(value: Mapping[str, Any], graph_path: GraphPath, value_path: str, active_labels: set[str]) -> None:
+        def visit_value(value: Mapping[str, Any], graph_path: GraphPath, value_path: str, active_labels: set[str], depth: int) -> None:
+            budget.visit(value_path, depth)
             kind = value["kind"]
             if kind == "definition-ref":
                 label = value["label"]
                 if labels[label]["node_kind"] != "cdef":
                     raise _error(value_path, "CDef graph contains a partial Definition")
-                visit_cdef(label, graph_path, value_path, active_labels)
+                visit_cdef(label, graph_path, value_path, active_labels, depth + 1)
                 return
             if kind in {"object-ref", "state-ref"}:
                 visit_reference(value, graph_path, value_path)
                 return
             if kind == "link":
                 if value["edge"] == "materialize":
-                    visit_value(value["target"], graph_path, value_path + ".target", active_labels)
+                    visit_value(value["target"], graph_path, value_path + ".target", active_labels, depth + 1)
                 return
             if kind in {"list", "tuple"}:
                 for index, child in enumerate(value["items"]):
-                    visit_value(child, graph_path.child(Index(index)), f"{value_path}[{index}]", active_labels)
+                    visit_value(child, graph_path.child(Index(index)), f"{value_path}[{index}]", active_labels, depth + 1)
                 return
             if kind == "map":
                 for index, pair in enumerate(value["items"]):
-                    visit_value(pair[1], graph_path.child(Key(pair[0])), f"{value_path}[{index}]", active_labels)
+                    visit_value(pair[1], graph_path.child(Key(pair[0])), f"{value_path}[{index}]", active_labels, depth + 1)
                 return
             if kind == "set":
                 for member in value["items"]:
@@ -481,13 +830,14 @@ def _validate_selector(value: Any, path: str) -> None:
                         member["value"],
                         graph_path.child(SetMember(member["fingerprint"])),
                         value_path + ".set",
-                        active_labels,
+                        active_labels, depth + 1,
                     )
                 return
             if kind == "par":
                 raise _error(value_path, "CDef graph contains a parameter placeholder")
 
-        def visit_cdef(label: str, graph_path: GraphPath, value_path: str, active_labels: set[str]) -> None:
+        def visit_cdef(label: str, graph_path: GraphPath, value_path: str, active_labels: set[str], depth: int) -> None:
+            budget.visit(value_path, depth)
             if label in active_labels:
                 raise _error(value_path, "definition cycle is unsupported")
             node = labels[label]
@@ -499,11 +849,11 @@ def _validate_selector(value: Any, path: str) -> None:
                     child,
                     graph_path.child(Parameter(name)),
                     f"{value_path}.parameters",
-                    active_labels,
+                    active_labels, depth + 1,
                 )
             active_labels.remove(label)
 
-        visit_cdef(root_label, GraphPath(), item_path + ".definition", set())
+        visit_cdef(root_label, GraphPath(), item_path + ".definition", set(), 0)
         expected_paths = {path for path, _ in expected.values()}
         if set(objects) != expected_paths:
             raise _error(item_path, "reference paths do not match CDef topology")
@@ -511,7 +861,8 @@ def _validate_selector(value: Any, path: str) -> None:
             if object_id is not None and objects[graph_path] != object_id:
                 raise _error(item_path, "reference identity does not match imported topology")
 
-    def item(current: Any, item_path: str) -> None:
+    def item(current: Any, item_path: str, depth: int = 0) -> None:
+        budget.visit(item_path, depth)
         if not isinstance(current, Mapping) or not isinstance(current.get("kind"), str):
             raise _error(item_path, "value descriptor is invalid")
         kind = current["kind"]
@@ -525,11 +876,11 @@ def _validate_selector(value: Any, path: str) -> None:
             _validate_symbol(current, item_path)
             return
         if kind == "definition-ref":
-            definition_ref(current, item_path)
+            definition_ref(current, item_path, depth + 1)
             return
         if kind == "quoted-definition":
             _exact_keys(current, {"kind", "value"}, item_path)
-            item(current["value"], item_path + ".value")
+            item(current["value"], item_path + ".value", depth + 1)
             return
         if kind == "selector-spec":
             _exact_keys(current, {"kind", "selector"}, item_path)
@@ -540,7 +891,7 @@ def _validate_selector(value: Any, path: str) -> None:
             if not isinstance(current["items"], list) or len(current["items"]) > 4096:
                 raise _error(item_path, "container is invalid")
             for index, child in enumerate(current["items"]):
-                item(child, f"{item_path}[{index}]")
+                item(child, f"{item_path}[{index}]", depth + 1)
             return
         if kind == "set":
             _exact_keys(current, {"kind", "items"}, item_path)
@@ -553,14 +904,19 @@ def _validate_selector(value: Any, path: str) -> None:
                 _exact_keys(member, {"fingerprint", "value"}, member_path)
                 if not isinstance(member["fingerprint"], str) or not re.fullmatch(r"[0-9a-f]{64}", member["fingerprint"]):
                     raise _error(member_path, "set fingerprint is invalid")
-                if member["fingerprint"] in fingerprints:
-                    raise _error(item_path, "set contains ambiguous stable members")
-                fingerprints.add(member["fingerprint"])
-                item(member["value"], member_path + ".value")
+                item(member["value"], member_path + ".value", depth + 1)
                 encoded = _bounded_json_bytes(member["value"], member_path + ".value")
                 if encoded in canonical_members:
                     raise _error(item_path, "set contains duplicate canonical values")
                 canonical_members.add(encoded)
+                actual = _descriptor_set_fingerprint(
+                    member["value"], labels, budget, member_path + ".value",
+                )
+                if member["fingerprint"] != actual:
+                    raise _error(member_path, "set fingerprint does not match member semantics")
+                if member["fingerprint"] in fingerprints:
+                    raise _error(item_path, "set contains ambiguous stable members")
+                fingerprints.add(member["fingerprint"])
             return
         if kind == "map":
             _exact_keys(current, {"kind", "items"}, item_path)
@@ -574,20 +930,20 @@ def _validate_selector(value: Any, path: str) -> None:
                 if pair[0] in names:
                     raise _error(pair_path, "map key is duplicated")
                 names.add(pair[0])
-                item(pair[1], pair_path)
+                item(pair[1], pair_path, depth + 1)
             return
         if kind == "link":
             _exact_keys(current, {"kind", "edge", "target"}, item_path)
             if current["edge"] not in {"ref", "materialize"}:
                 raise _error(item_path, "link edge is invalid")
-            item(current["target"], item_path + ".target")
+            item(current["target"], item_path + ".target", depth + 1)
             return
         if kind == "par":
-            _validate_par(current, item_path, item)
+            _validate_par(current, item_path, lambda child, child_path: item(child, child_path, depth + 1))
             return
         if kind == "object-ref":
             _exact_keys(current, {"kind", "definition", "objects"}, item_path)
-            definition_ref(current["definition"], item_path + ".definition", cdef=True)
+            definition_ref(current["definition"], item_path + ".definition", depth + 1, cdef=True)
             reference_entries(current["objects"], item_path + ".objects", state=False)
             validate_object_topology(current, item_path)
             return
@@ -595,7 +951,7 @@ def _validate_selector(value: Any, path: str) -> None:
             _exact_keys(current, {"kind", "object", "states"}, item_path)
             if not isinstance(current["object"], Mapping) or current["object"].get("kind") != "object-ref":
                 raise _error(item_path, "state reference object is invalid")
-            item(current["object"], item_path + ".object")
+            item(current["object"], item_path + ".object", depth + 1)
             objects = reference_entries(current["object"]["objects"], item_path + ".object.objects", state=False)
             states = reference_entries(current["states"], item_path + ".states", state=True)
             if set(objects) != set(states):
@@ -665,8 +1021,15 @@ def _validate_data(data: Any) -> dict[str, Any]:
 class RepoDefinition:
     """An immutable, inert v1 Repo configuration snapshot.
 
-    ``to_data`` and ``from_data`` only inspect detached descriptors.  They never
-    open persistent resources, resolve symbols, or construct a live Repo.
+    Args:
+        data: Complete JSON-compatible v1 envelope containing supported Store,
+            routing, and declarative-setting descriptors.
+
+    ``to_data`` and ``from_data`` only inspect detached descriptors. They never
+    open persistent resources, resolve symbols, activate a session, materialize
+    Objects, or construct a live Repo. Use :meth:`Repo.from_definition` for the
+    explicit existing-Store reconstruction boundary. Retained data is detached
+    and bounded; callers still own transport and any sensitive configuration.
     """
 
     _data: dict[str, Any]
@@ -926,11 +1289,11 @@ def repo_from_definition(definition: RepoDefinition):
         raise TypeError("Repo.from_definition requires a RepoDefinition.")
     # Revalidate a detached copy so live reconstruction never trusts a retained
     # implementation detail or a future subclass's mutable backing object.
-    data = RepoDefinition.from_data(definition.to_data()).to_data()
+    data = _validate_data(definition.to_data())
     routing_data = data["routing"]
     try:
-        routing_parts = None if routing_data is None else _reconstruct_routing(routing_data)
         _preflight_store_descriptors(data["stores"])
+        routing_parts = None if routing_data is None else _reconstruct_routing(routing_data)
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as error:

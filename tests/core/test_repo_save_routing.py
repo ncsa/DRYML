@@ -12,6 +12,7 @@ import pytest
 from dryml.core import Object, Ref, Repo, SaveRouting, Selector, Serializable, save_object
 from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DefinitionRecord
 
 
 class Routed(Object):
@@ -70,6 +71,27 @@ class SeedRoot(Serializable):
 
     def __init__(self, child):
         self.child = child
+
+
+class MembershipCountingStore(DirStore):
+    """DirStore probe that records routed membership reads without allowing scans."""
+
+    def __init__(self, base_dir):
+        super().__init__(base_dir, query_index="memory")
+        self.membership_reads = 0
+        self.stored_root_paths = []
+
+    def _read_file(self, path, record_type):
+        if "/stored-roots/" in path:
+            self.stored_root_paths.append(path)
+        return super()._read_file(path, record_type)
+
+    def read_stored_root_record(self, digest):
+        self.membership_reads += 1
+        return super().read_stored_root_record(digest)
+
+    def iter_stored_root_records(self):
+        raise AssertionError("routed membership readback must not scan stored roots")
 
 
 def test_save_routing_normalizes_rules_and_placement_shorthands(tmp_path):
@@ -274,6 +296,22 @@ def test_per_object_routing_projects_a_child_state_ref_without_copying_its_paylo
         child_snapshot.state_ref, reuse_live="never",
     ).value == 3
     assert list(Repo(child_store).query(child_state.definition).stored().defs()) == [child_state.definition]
+
+
+def test_routed_membership_readback_targets_one_root_in_a_growing_catalogue(tmp_path):
+    """One routed membership receipt reads only its own marker and definition authority."""
+    seed = DirStore(tmp_path / "store", query_index="memory")
+    for value in range(64):
+        seed.write_definition_record(DefinitionRecord(RoutedLeaf(value).definition))
+    store = MembershipCountingStore(seed.base_dir)
+    repo = Repo(store, save_routing=SaveRouting())
+
+    state = repo.save_object(RoutedLeaf("new", repo=repo), deep_capture=True)
+    expected_path = store._stored_root_path(DefinitionRecord(state.definition).digest)
+
+    assert store.membership_reads == 1
+    assert store.stored_root_paths
+    assert set(store.stored_root_paths) == {expected_path}
 
 
 def test_all_matching_routing_captures_once_and_replicates_exact_projections(tmp_path):

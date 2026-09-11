@@ -1115,7 +1115,6 @@
     "tests/core/test_graph_at.py": "smoke",
     "tests/core/test_graph_path_codec.py": "smoke",
     "tests/core/test_graph_save_failure.py": "medium",
-    "tests/core/test_graph_save_federation.py": "medium",
     "tests/core/test_live_reuse.py": "medium",
     "tests/core/test_live_reuse_concurrency.py": "medium",
     "tests/core/test_local_state_manifest.py": "medium",

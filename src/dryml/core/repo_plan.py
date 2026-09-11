@@ -321,10 +321,17 @@ class RoutedSavePlan:
     graph_mode: str
 
 
+# Publication boundary labels for SavePublication: definition/state/snapshot
+# identify immutable authority, membership promotes a stored root, claim records
+# construction completion, alias/main update mutable names, index updates derived
+# query state, and commit flushes a buffered backend transaction.
 PublicationPhase: TypeAlias = Literal[
     "definition", "state", "snapshot", "membership", "claim",
     "alias", "main", "index", "commit",
 ]
+# Publication outcome labels for SavePublication: completed is read-back proof,
+# failed is a negative read-back, unattempted has no attempted boundary, and
+# uncertain means the checker could not establish authoritative outcome.
 PublicationStatus: TypeAlias = Literal[
     "completed", "failed", "unattempted", "uncertain",
 ]
@@ -332,10 +339,27 @@ PublicationStatus: TypeAlias = Literal[
 
 @dataclass(frozen=True, slots=True)
 class SavePublication:
-    """One observed Store publication boundary from a save work ledger.
+    """One immutable observed boundary in a routed save work ledger.
 
-    ``completed`` is confirmed by reading the named boundary back.  The record
-    intentionally contains no exception object or serialized payload.
+    Args:
+        store: Connected Store at the observed publication boundary.
+        path: Canonical requested-root graph path, or ``None`` for Store-wide
+            work such as commit.
+        object_id: Exact ObjectId for stateful path work, or ``None`` when no
+            ObjectId applies.
+        state_ref: Exact snapshot identity when it is available, or ``None``.
+        phase: Closed publication phase, including separate membership and claim
+            boundaries.
+        status: ``completed``, ``failed``, ``unattempted``, or ``uncertain``.
+
+    ``completed`` means the named Store boundary has authoritative read-back
+    evidence, even if its enclosing call later raises. ``failed`` has definitive
+    negative evidence, ``unattempted`` was planned but never called, and
+    ``uncertain`` lacks sufficient evidence either way. A completed boundary does
+    not turn an interrupted or failed save call into success, nor imply a
+    cross-Store transaction. This value carries no exception, payload,
+    credential, or mutable Store state and remains useful after a partial save
+    failure.
     """
 
     store: Store
@@ -348,7 +372,19 @@ class SavePublication:
 
 @dataclass(frozen=True, slots=True)
 class SavedSnapshot:
-    """One independently confirmed exact snapshot and its recovery Stores."""
+    """One immutable independently confirmed exact snapshot.
+
+    Args:
+        state_ref: Confirmed exact root or child StateRef.
+        stores: Ordered snapshot-record destinations that confirmed this StateRef.
+        required_stores: Ordered sufficient connected Store dependencies for
+            exact recovery.
+
+    Per-object snapshots can require external connected Stores. A closure-mode
+    root destination instead contains a self-contained complete root closure.
+    This live inspection record is neither portable configuration nor persistent
+    authority.
+    """
 
     state_ref: StateRef
     stores: tuple[Store, ...]
@@ -365,6 +401,12 @@ class StoreReport:
         required_stores: One deterministic sufficient connected recovery set.
         snapshots: Fully confirmed independently published root/child snapshots.
         publications: Every planned publication unit and its observed status.
+
+    Constructor inputs are detached into tuples and an immutable mapping. A
+    partial report is failure evidence, not a certificate that every listed
+    snapshot remains recoverable; callers must inspect publication status and
+    exact authority. Reports retain Store handles only for the lifetime chosen by
+    their caller and never alter routing, Store ownership, or publication state.
     """
 
     target_stores: tuple[Store, ...]
@@ -970,6 +1012,23 @@ def validate_retained_save_plan(plan: SavePlan, value: Object) -> None:
             raise RepoSaveError("State graph has changed a retained runtime binding.")
 
 
+def _register_retained_save_plan(repo, plan: SavePlan) -> None:
+    """Register every retained live save node without recapturing its graph.
+
+    The pre-routing registration preserves the ordinary ``add_objects()`` cache
+    and default-affinity behavior for successful or partially published saves.
+    It deliberately uses no routed destination: route selection remains owned by
+    the later routed save plan, while the retained graph records cached query
+    structure exactly once.
+    """
+
+    if not isinstance(plan, SavePlan):
+        raise TypeError("Retained save registration requires a SavePlan.")
+    for node in plan.nodes:
+        _add_object_single(repo, node)
+    repo._query_catalog.register_graph(plan.graph)
+
+
 def build_routed_save_plan(repo, plan: SavePlan, context, *, store=None) -> RoutedSavePlan:
     """Attach retained destinations to route-neutral live graph evidence.
 
@@ -1274,7 +1333,7 @@ def execute_routed_save_plan(
             membership_error = run(
                 membership_work[key],
                 lambda: destination.write_definition_record(definition_record, stored_root=True),
-                lambda: any(record.definition_digest == definition_record.digest for record in destination.iter_stored_root_records()),
+                lambda: destination.read_stored_root_record(definition_record.digest) is not None,
                 defer_error=True,
             )
             if membership_error is not None:

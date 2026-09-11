@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from .dir import DirStore
 from .records import StoreFormatRecord, StoreRecordError
 from ...locking import interprocess_lock
-from .store import StoreAuthorityError, StoreCapabilityError, StorePublicationCapabilities
+from .store import StoreAuthorityError, StorePublicationCapabilities
 
 
 def _is_file_like(value) -> bool:
@@ -48,7 +48,6 @@ class ZipStore(DirStore):
         self._transaction_lock = RLock()
         self._initializing = True
         self._file_like = _is_file_like(zip_dest)
-        self._existing_only = _existing_only
         try:
             if _existing_only:
                 if self._file_like:
@@ -78,7 +77,6 @@ class ZipStore(DirStore):
         """
 
         path = os.path.abspath(os.fspath(zip_dest))
-        cls._validate_existing_archive(path)
         return cls(path, _existing_only=True)
 
     @property

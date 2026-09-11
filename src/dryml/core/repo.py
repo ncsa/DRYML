@@ -301,7 +301,18 @@ class _CandidateCache:
 
 
 class RepoSaveError(Exception):
-    """Save failure carrying immutable partial publication evidence when available."""
+    """Save failure carrying immutable partial publication evidence when available.
+
+    Args:
+        message: Human-readable save failure summary.
+        report: Optional immutable :class:`StoreReport` for work planned before
+            capture or publication failed.
+
+    ``report`` distinguishes completed, failed, unattempted, and uncertain Store
+    boundaries. Completed immutable authority is deliberately preserved rather
+    than rolled back across Stores. Failures before planning have ``report=None``;
+    callers inspect the original chained cause for backend details.
+    """
 
     def __init__(self, message: str, *, report=None) -> None:
         super().__init__(message)
@@ -309,8 +320,7 @@ class RepoSaveError(Exception):
 
 
 def _record_late_publication(
-        report, *, store, phase, state_ref, operation, checker,
-        complete_on_error: bool = False):
+        report, *, store, phase, state_ref, operation, checker, error_checker=None):
     """Run one post-authority boundary and return an updated immutable report."""
 
     from .repo_plan import SavePublication
@@ -333,10 +343,10 @@ def _record_late_publication(
         operation()
     except BaseException as error:
         try:
-            observed = checker()
-            if complete_on_error and observed is True:
+            observed = (checker if error_checker is None else error_checker)()
+            if observed is True:
                 status = "completed"
-            elif observed is not None:
+            elif observed is False:
                 status = "failed"
             else:
                 status = "uncertain"
@@ -359,6 +369,39 @@ def _record_late_publication(
         status = "failed" if completed is False else "uncertain"
         raise RepoSaveError("Save publication did not survive its read-back boundary.", report=updated(status))
     return updated("completed")
+
+
+def _commit_publication_checker(store):
+    """Return one post-commit proof checker for the supported Zip backend.
+
+    A buffered Zip receipt is authoritative only when a dirty transaction began
+    from its recorded archive baseline, then leaves a clean handle whose baseline
+    equals the current destination identity. Other Store implementations expose no
+    portable commit receipt, so an exception at their commit boundary is uncertain.
+    """
+
+    from .store.zip import ZipStore
+
+    if type(store) is not ZipStore:
+        return None
+    was_dirty = store._archive_dirty
+    baseline = store._archive_baseline
+    try:
+        destination = store._archive_identity()
+    except Exception:
+        return None
+
+    def checker():
+        if not was_dirty or destination != baseline:
+            return None
+        current = store._archive_identity()
+        if not store._archive_dirty and current == store._archive_baseline:
+            return True
+        if store._archive_dirty and current == destination:
+            return False
+        return None
+
+    return checker
 
 
 def _commit_save_report(repo, state_ref, report, *, stores=None, dirty_only: bool = False):
@@ -407,12 +450,12 @@ def _commit_save_report(repo, state_ref, report, *, stores=None, dirty_only: boo
             )),
         )
     for commit_store in selected:
+        error_checker = _commit_publication_checker(commit_store)
         report = _record_late_publication(
             report, store=commit_store, phase="commit", state_ref=state_ref,
             operation=commit_store.commit,
-            checker=lambda commit_store=commit_store: not getattr(
-                commit_store, "_archive_dirty", False
-            ),
+            checker=error_checker or (lambda: True),
+            error_checker=error_checker or (lambda: None),
         )
     if not dirty_only:
         repo._aliases_dirty = False
@@ -444,9 +487,12 @@ RevisionType = dict[ConcreteDefinition, str]
 class Repo:
     """Coordinate live Objects, connected Stores, and save-routing policy.
 
-    Repo owns live-object and query bindings while supplied Store handles remain
-    borrowed.  A configured ``save_routing`` publishes retained per-object or
-    closure placements; an unconfigured Repo retains default-Store behavior.
+    Repo owns live-object/query bindings and handles it opens from Store
+    specifications, while supplied Store handles remain borrowed. A configured
+    ``save_routing`` publishes retained per-object or closure placements; an
+    unconfigured Repo retains default-Store closure behavior. Save/export context
+    snapshots make configuration changes apply to later operations, and close
+    rejects while a retained save or managed topology lease needs resources.
     """
     # Trackers
     _num_saves: int
@@ -515,6 +561,11 @@ class Repo:
             Repo-owned handles; supplied Store instances remain borrowed. No
             routing validation publishes data or creates an implicit destination
             Store.
+
+        Concurrency:
+            Construction installs one initial Store/routing view. Later supported
+            configuration changes are synchronized; direct mutation of ``stores``
+            is not a concurrent configuration interface.
         """
         # Initialize caches
         self.weak_obj_cache = _CandidateCache(weak=True)
@@ -612,8 +663,12 @@ class Repo:
     def save_routing(self):
         """Return the normalized routing policy, or ``None`` for legacy closure.
 
-        The returned immutable value is safe to retain.  It configures internal
-        selection only and does not itself save Objects or create Stores.
+        Returns:
+            A normalized immutable SaveRouting policy, or ``None`` for the
+            default-Store closure policy.
+
+        The returned value is safe to retain. It configures future selection only
+        and does not save Objects, create Stores, or alter an active save.
         """
 
         with self._configuration_lock:
@@ -629,6 +684,11 @@ class Repo:
             May open a supplied Store specification, publishes a new source and
             default ordering for later retained contexts, and refreshes query
             bindings.  It never changes a context already retained by a save.
+
+        Concurrency:
+            The replacement is synchronized with retained save/export contexts;
+            active managed topology leases reject changes to the physical Store
+            set.
 
         Raises:
             ValueError: If routing is configured and distinct built-in handles
@@ -651,6 +711,11 @@ class Repo:
             May open a supplied Store specification and publishes a new source
             ordering for future retained contexts.  The same handle is retained
             once; no data is saved or copied.
+
+        Concurrency:
+            The registration is synchronized with retained save/export contexts;
+            active managed topology leases reject changes to the physical Store
+            set.
 
         Raises:
             ValueError: If routing is configured and distinct built-in handles
@@ -835,9 +900,10 @@ class Repo:
         """Atomically replace or adjust the internal immutable save-routing policy.
 
         Args:
-            routing: ``None`` to retain legacy closure behavior, a SaveRouting
+            routing: ``None`` for default-Store closure behavior, a SaveRouting
                 whose route Store handles are already connected, or
-                ``"per-object"``/``"closure"`` to change only graph placement.
+                ``"per-object"``/``"closure"`` to change only graph placement
+                while preserving current rules and match mode.
 
         Raises:
             TypeError: If ``routing`` is neither a supported policy nor string.
@@ -847,6 +913,14 @@ class Repo:
         Side Effects:
             Publishes one replacement policy for later retained contexts.  It
             never opens, creates, publishes to, moves, or deletes a Store.
+
+        Returns:
+            ``None``.
+
+        Concurrency:
+            The complete replacement is atomic with respect to retained save and
+            export contexts. Direct concurrent mutation of ``stores`` is not a
+            supported configuration API.
         """
 
         from .repo_plan import SaveRouting
@@ -1423,7 +1497,7 @@ class Repo:
     def delete_alias(self, alias: str, *, store=None):
         """Retire unsupported legacy CDef alias deletion.
 
-        Mutable reference deletion was not part of U6's authority protocol; it
+        Mutable reference deletion is outside the current authority protocol; it
         is rejected rather than silently updating retired alias state.
         """
         raise NotImplementedError("Deleting reference aliases is not implemented by the current Store protocol.")
@@ -1968,7 +2042,7 @@ class Repo:
                 acquired.append(dependency_lease)
             lease = self._acquire_claim(reference, selected)
             if lease is None:
-                raise RepoLoadError("Declared ObjectRef is complete; load its exact StateRef in U7.")
+                raise RepoLoadError("Declared ObjectRef is complete; load its exact StateRef.")
             acquired.append(lease)
             active = _active_object_ref_builds.get()
             token = _active_object_ref_builds.set(
@@ -2318,8 +2392,10 @@ class Repo:
         """Return a detached, inert portable configuration snapshot.
 
         The snapshot includes only supported Store descriptors, routing, and
-        declarative settings.  It never traverses Store/cache data, commits an
-        archive, resolves symbols, or reconstructs live resources.
+        declarative settings. It never traverses Store/cache data, commits an
+        archive, resolves symbols, activates a session, or reconstructs live
+        resources. Exported ``config`` values are caller-owned and may be
+        sensitive; errors avoid rendering arbitrary supplied values.
 
         Returns:
             A detached :class:`RepoDefinition` containing only portable
@@ -2351,8 +2427,10 @@ class Repo:
                 authority cannot be reconstructed.  Storage failures are chained.
 
         Side Effects:
-            Opens only existing supported Store authority.  It neither installs a
-            session Repo nor creates missing storage; close releases its handles.
+            Opens only existing supported Store authority. It neither installs a
+            session Repo nor creates missing storage. The returned Repo owns its
+            newly opened handles; ``close(flush=False)`` releases them without a
+            commit, including after caller-managed failed work.
         """
 
         from .repo_definition import repo_from_definition
@@ -2474,7 +2552,7 @@ class Repo:
                 enclosing state operation; callers normally omit this.
 
         Returns:
-            The complete StateRef, or it with the requested StoreReport.
+            The complete StateRef, or ``(StateRef, StoreReport)`` when requested.
 
         Raises:
             TypeError: If ``alias`` or a supplied mode has the wrong type.
@@ -2492,6 +2570,12 @@ class Repo:
             Once that authority is complete, installs the StateRef as ``obj``'s
             read-only last-state receipt before any derived index, main, or alias
             update that may later raise.
+
+        Concurrency:
+            Retains one routing/default/Store-order view, preserves declaration
+            claim fencing, and reports partial cross-Store work rather than
+            claiming transactional rollback. ``store=`` selects one complete
+            closure even when routed modes were supplied.
         """
         from dryml.runtime import materialization_admission
         from .store.records import DefinitionRecord, MainRefRecord
@@ -2534,19 +2618,25 @@ class Repo:
                 lease = None
                 try:
                     lease = getattr(obj, "_claim_lease", None)
-                    from .repo_plan import build_routed_save_plan, execute_routed_save_plan
+                    from .repo_plan import (
+                        _unique_stores,
+                        build_routed_save_plan,
+                        execute_routed_save_plan,
+                        _register_retained_save_plan,
+                    )
 
+                    _register_retained_save_plan(self, plan)
                     routed = build_routed_save_plan(
                         self, plan, context, store=selected_store,
                     )
-                    index_destinations = []
-                    for destinations in routed.destinations.values():
-                        for destination in destinations:
-                            if not any(destination is known for known in index_destinations):
-                                index_destinations.append(destination)
+                    index_destinations = _unique_stores(
+                        destination
+                        for destinations in routed.destinations.values()
+                        for destination in destinations
+                    )
                     late_publications = []
                     if not self._state_io:
-                        late_publications.append(("index", tuple(index_destinations)))
+                        late_publications.append(("index", index_destinations))
                     if main:
                         late_publications.append(("main", routed.root_destinations))
                     if alias is not None:
@@ -2599,7 +2689,6 @@ class Repo:
                             report, store=root_store, phase="main", state_ref=state_ref,
                             operation=lambda root_store=root_store, main_record=main_record: root_store.write_main_ref(main_record),
                             checker=lambda root_store=root_store, main_record=main_record: root_store.read_main_ref() == main_record,
-                            complete_on_error=True,
                         )
                     self.main_def = obj.definition
                 if alias is not None:
@@ -2611,7 +2700,6 @@ class Repo:
                             report, store=root_store, phase="alias", state_ref=state_ref,
                             operation=lambda root_store=root_store, alias_record=alias_record: root_store.write_object_alias(alias_record),
                             checker=lambda root_store=root_store, alias_record=alias_record: root_store.read_object_alias(alias) == alias_record,
-                            complete_on_error=True,
                         )
                 return (state_ref, report) if report_stores else state_ref
 
@@ -3434,8 +3522,11 @@ class Repo:
                 Repo's resources.
 
         Side Effects:
-            Optionally commits Stores and closes only Repo-owned query bindings;
-            supplied Store handles remain borrowed and are not closed.
+            Optionally commits configured Stores, closes Repo-owned query
+            bindings, and closes each Store handle opened by this Repo exactly
+            once. Supplied Store handles remain borrowed and are not closed.
+            A failed commit or owned-handle cleanup leaves the Repo open for
+            inspection/retry; ``flush=False`` skips commits.
         """
 
         with self._configuration_lock:
@@ -3704,6 +3795,12 @@ def save_object(
         Publishes immutable graph state and installs the completed StateRef as
         ``obj.last_state_ref`` before derived index, main, or alias work. Later
         failures propagate without clearing that valid receipt.
+
+    Lifetime and Concurrency:
+        A supplied Repo/Store remains borrowed. When this convenience creates a
+        temporary Repo, it commits that Repo's configured Stores before return and
+        closes only handles it opened. The delegated save retains one routing and
+        Store-order view and preserves partial cross-Store evidence on failure.
     """
     from dryml.runtime import materialization_admission
 

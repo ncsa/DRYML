@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 
 from dryml.core import (
     Repo, SavePublication, SaveRouting, SavedSnapshot, Selector, Serializable,
@@ -83,6 +84,31 @@ def test_bounded_dirty_commits_preplan_later_required_work(tmp_path, monkeypatch
         (first, "failed"), (second, "unattempted"),
     ]
     assert repo._aliases_dirty is True
+
+
+@pytest.mark.parametrize("operation_fails", [False, True], ids=["after_success", "after_failure"])
+def test_late_publication_checker_error_is_uncertain(tmp_path, operation_fails):
+    """A failed read-back never claims a late boundary either completed or failed."""
+
+    from dryml.core.repo import _record_late_publication
+
+    store = DirStore(tmp_path / "store")
+    report = StoreReport((), {}, ())
+
+    def operation():
+        if operation_fails:
+            raise OSError("publication operation failed")
+
+    def checker():
+        raise OSError("publication checker failed")
+
+    with pytest.raises(RepoSaveError) as caught:
+        _record_late_publication(
+            report, store=store, phase="commit", state_ref=None,
+            operation=operation, checker=checker,
+        )
+
+    assert caught.value.report.publications[-1].status == "uncertain"
 
 
 def test_replica_failure_keeps_the_old_root_receipt_and_exposes_route_order(tmp_path, monkeypatch):
@@ -231,6 +257,43 @@ def test_post_membership_error_retains_completed_snapshot_and_new_receipt(tmp_pa
     assert Repo(store).load_state_ref(obj.last_state_ref, reuse_live="never").value == 2
 
 
+@pytest.mark.parametrize(
+    ("damage", "expected_status"),
+    (("missing", "failed"), ("corrupt", "uncertain")),
+)
+def test_membership_readback_failure_retains_dirty_authority_and_late_ledger(
+        tmp_path, monkeypatch, damage, expected_status):
+    """Missing or corrupt membership authority blocks late work without clearing its dirty marker."""
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store, save_routing=SaveRouting())
+    obj = ReportState(1, repo=repo)
+    original = store.write_definition_record
+
+    def write_then_damage(record, *, stored_root=True):
+        result = original(record, stored_root=stored_root)
+        if stored_root:
+            root_path = Path(store._stored_root_path(record.digest))
+            if damage == "missing":
+                root_path.unlink()
+            else:
+                root_path.write_bytes(b"malformed stored-root authority")
+        return result
+
+    monkeypatch.setattr(store, "write_definition_record", write_then_damage)
+    with pytest.raises(RepoSaveError) as raised:
+        repo.save_object(obj, deep_capture=True, main=True)
+
+    report = raised.value.report
+    membership = next(item for item in report.publications if item.phase == "membership")
+    assert membership.status == expected_status
+    assert store.query_index_is_dirty()
+    assert all(
+        item.status == "unattempted"
+        for item in report.publications
+        if item.phase in {"index", "main"}
+    )
+
+
 def test_index_failure_delays_all_requested_names(tmp_path, monkeypatch):
     """Names remain unattempted when derived registration fails after authority."""
 
@@ -264,7 +327,7 @@ def test_index_failure_delays_all_requested_names(tmp_path, monkeypatch):
         ("definition", {}, "completed"),
         ("state", {}, "completed"),
         ("membership", {}, "completed"),
-        ("index", {}, "failed"),
+        ("index", {}, "completed"),
         ("main", {"main": True}, "completed"),
         ("alias", {"alias": "latest"}, "completed"),
     ],

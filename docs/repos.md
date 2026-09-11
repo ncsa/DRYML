@@ -1,47 +1,166 @@
 # Repos and Stores
 
-`Repo` coordinates live realizations and one or more Stores. `manage_repo(None)` uses an explicitly active Repo or creates a temporary Repo for the operation; no process-global fallback exists.
+`Repo` coordinates live Object realizations, exact StateRef persistence, and one
+or more connected Stores. A Repo is local process authority, not a transport or
+security boundary. Store data, definitions, symbols, and serialized payloads are
+trusted DRYML inputs; supported shared use is same-host use on a local filesystem
+with the documented locking, atomic-replace, and SQLite semantics. Distributed
+filesystems and cross-host coordination are unsupported.
 
-`Repo.save_object()`, `Repo.save()`, `Object.save()`, and module-level `save_object()` publish a graph `StateRef`. Direct save keywords are `main`, `store`, `alias`, `deep_capture`, `match_mode`, `graph_mode`, and `report_stores`; the removed ordinary-save `federated` keyword raises `TypeError`. `match_mode` accepts `"first"` or `"all"`, and `graph_mode` accepts `"per-object"` or `"closure"`. `None` inherits the retained Repo policy; an unconfigured Repo defaults to first-match closure. Overrides apply only to that save. An explicit `store=` always receives one complete closure and bypasses route selection and replication, though supplied modes are still validated. With `report_stores=True`, `StoreReport` exposes ordered root targets, confirmed local-state Stores, a deterministic sufficient recovery set, independently confirmed snapshots, and immutable per-boundary publication outcomes. `RepoSaveError.report` preserves the same partial evidence after planned capture/publication, index, name, or commit failure; interruption exceptions retain their original type and carry available report evidence.
+## Saving With Routing
 
-`SaveRouting` is an immutable ordered `Selector` to connected-`Store` policy.
-`Repo(..., save_routing=...)` and `set_save_routing()` accept it, `None`, or the
-`"per-object"`/`"closure"` placement shorthands. A configured empty policy falls
-back to the Repo default Store; `None` retains default-Store closure behavior. A
-configured per-object save captures each local state once, assigns payload only
-to that Object's selected Stores, and publishes exact child `StateRef.at(path)`
-projections. Closure mode makes every selected root Store self-contained; an
-explicit `store=` always selects one complete closure. `add_store()` and
-`set_default_store()` return `None`; Store specifications they open are owned
-by the Repo, while supplied Store handles remain borrowed. Legacy read-only
-query federation can connect distinct built-in handles for one physical
-location, but retained save contexts reject that ambiguous topology before any
-publication. Repeated use of the same handle deduplicates. A retained internal
-save context snapshots the policy, Store order, and default together; later
-configuration changes do not alter it and `Repo.close()` rejects while it is
-active.
+`Repo.save_object()`, `Repo.save()`, `Object.save()`, and module-level
+`save_object()` publish one immutable root `StateRef`. Their shared keywords are
+`main`, `store`, `alias`, `deep_capture`, `match_mode`, `graph_mode`, and
+`report_stores`. The removed ordinary-save `federated` keyword is not accepted.
+Fork and query federation are separate APIs and retain their own behavior.
 
-Snapshots, stored-root membership, and initial claim completion are read back before a live `last_state_ref` receipt advances. A failed replica therefore leaves a prior root receipt intact, while an index, alias, main-reference, or later archive-commit failure leaves an already confirmed receipt inspectable. Root names are applied only after every selected root snapshot is confirmed and never propagate to independently published children. `Repo.save_object()` can leave a path-backed `ZipStore` buffered; `Repo.save()` and temporary convenience Repos report their required commit boundaries before returning.
+`SaveRouting` is an immutable ordered sequence of `(Selector, Store)` bindings.
+Rules only refer to already connected Store handles; configuration neither opens
+nor creates a Store. `match_mode="first"` selects the first matching rule, while
+`match_mode="all"` selects every distinct matching Store as required replicas.
+An unmatched Object uses `Repo.default_store`; a selected unavailable or unusable
+Store fails the save rather than falling through or being created implicitly.
 
-`Repo.load(cdef)` and `load_object(cdef)` are structural operations and do not infer state. `Repo.load_or_build(x)` may create missing structure. `Repo.load_state_ref(state_ref, reuse_live="matching")` is the only exact snapshot load. `matching`, `greedy`, and `never` are exact live-reuse policies; no structural cache match can substitute for an ObjectId and binding match.
+```python
+from dryml.core import Repo, SaveRouting, Selector
+from dryml.core.store.dir import DirStore
 
-`Repo.reserve_state_graph(obj)` returns an active `StateGraphReservation` for the exact live graph's stateful ObjectIds and identities. It is process/thread local, Store-neutral, nonblocking, and all-or-nothing; use it as a context manager and pass it only to `Repo.save_object(..., reservation=...)` or `Repo.restore_state_ref_into(..., reservation=...)`. `restore_state_ref_into()` preflights complete authority and retained bindings, restores the supplied instances dependency-first without candidate search, and updates only the supplied root's `last_state_ref` on success. A restore-hook failure invalidates that live graph for later framework state IO; recover with a fresh `load_state_ref(..., reuse_live="never")`.
+experiments = DirStore("./experiments")
+models = DirStore("./models")
+repo = Repo(
+    [experiments, models],
+    save_routing=SaveRouting(
+        ((Selector(Experiment), experiments), (Selector(Model), models)),
+        match_mode="first",
+        graph_mode="per-object",
+    ),
+)
 
-`Repo._for_state_io(stores)` is a private non-owning authority-only view for callers that select exact state Stores. It has an independent memory overlay but never opens or registers a persistent query index, commits, closes, or otherwise takes ownership of the caller's Stores.
+state_ref, report = repo.save_object(experiment, report_stores=True)
+```
 
-`Repo.to_definition()` produces a detached `RepoDefinition` v1 configuration snapshot. It contains ordered supported Store descriptors, normalized routing selectors, `config`, lease duration, and deletion-save setting, but never Store contents, caches, aliases, main definitions, live Object affinity, sessions, symbols resolved to runtime values, or archive commits. The definition mapping/JSON codecs validate bounded inert data and do not open Stores, resolve symbols, activate a session, or materialize references. Export snapshots configuration under a short coordination lease before Store/archive inspection, so concurrent supported configuration updates affect later exports. It rejects closing Repos, dirty or uncommitted ZipStores, unsupported Store settings, duplicate built-in physical Store handles, custom clocks/factories, and nonportable selector/configuration values.
+With configured `graph_mode="per-object"`, each Object's local state is saved to
+its own selected destination set. The requested root and routed children have
+independent discoverable StateRefs. A child snapshot can require other connected
+Stores for exact recovery, so its Store alone is not necessarily self-contained.
+Each Object is captured once per save; replication publishes the same captured
+state and exact identity rather than recapturing a replica.
 
-`Repo.from_definition(definition)` is the separate explicit reconstruction boundary. It validates the complete inert envelope and every required existing persistent location before opening fresh DirStore or path-backed ZipStore handles, then reconstructs live selector operands while retaining originally symbolic operands as symbols. Missing, malformed, inaccessible, wrong-type, or incompatible Store authority raises `RepoDefinitionError` with the storage failure chained; reconstruction never initializes replacement storage or installs a session Repo. Reconstructed Store handles are owned by the returned Repo and are closed once by `Repo.close()`; directly supplied Store handles are borrowed and are not closed. `close(flush=False)` releases owned buffered resources without committing, while a failed `flush=True` commit leaves the Repo and its buffers open for inspection or retry. A non-commit owned-handle cleanup failure also propagates and retains that handle for retry. Direct caller closure of a borrowed Store during Repo use is unsupported.
+With `graph_mode="closure"`, the root's selected destination set receives a
+complete, independently recoverable closure. Routing of descendants does not add
+external dependencies to those root replicas. An explicit `store=` always wins:
+it selects one whole-graph closure destination and bypasses rule selection,
+placement, and replication. Supplied mode values are still validated.
 
-Object aliases resolve with `get_alias()` to complete `ObjectRef` authority. State aliases resolve through `resolve_state_selector()` from an `ObjectRef`-scoped `StateSelectorRef` to a `StateRef`. There is no generic object-returning alias load because an ObjectRef does not select a snapshot. Declarations and claims reserve first construction; `build_object_ref()` requires a registered declaration and a valid claim. `fork_object_ref()` and `fork_state_ref()` are Repo-owned rekey operations.
+`None` mode overrides inherit the retained Repo policy. A Repo without a policy
+uses first-match/default-Store closure behavior. `SaveRouting()` is instead an
+enabled empty policy: unmatched Objects use the default Store with per-object
+placement. `Repo(..., save_routing="per-object")` and `"closure"` create an empty
+first-match policy. On an existing Repo, `set_save_routing("per-object")` or
+`set_save_routing("closure")` changes only placement and preserves ordered rules
+and `"all"` replication; use a complete `SaveRouting` value to change matching.
+Changing a policy never moves, deletes, or synchronizes stored state.
 
-`DirStore` is the supported directory checkpoint backend. It publishes immutable definition, local-state, declaration, and StateRef records, plus mutable aliases and claims. SQLite indexes and dirty markers are derived state. Rebuild is visible and may take time; it never replaces authoritative records. Supported concurrency relies on local filesystem atomic replacement, locks, and SQLite behavior. Distributed filesystems and cross-host coordination are unsupported.
+A save retains one coherent snapshot of routing, connected Store order, and the
+default Store. Later routing or Store configuration changes affect later saves,
+not the active graph. Direct concurrent mutation of `repo.stores` is unsupported;
+`Repo.close()` rejects while a save or managed topology lease is active.
 
-Managed operations select a `DirStore` for immutable Object state and independently
-select one for mutable lifecycle control. Their authority-only Repo view does not
-open a query index or change session configuration. Callers own Store lifecycle
-and must retain explicitly selected control-store locations for inspection:
-managed has no locator or control journal. See [Managed Operations](managed_operations.md)
-for reconciliation, interruption, callback, and invalid-target recovery rules.
+## Publication Evidence
 
-Old Store layouts, format generations, and mutable current-state records reject before catalog registration, row decoding, restore, or index-ready activation. There is no migration or fallback reader.
+`report_stores=True` returns `(StateRef, StoreReport)`. `StoreReport.target_stores`
+lists ordered root destinations, `state_stores` records confirmed local-state
+destinations by graph path, and `required_stores` is one ordered sufficient set
+of connected Stores for exact recovery. `snapshots` lists independently confirmed
+root or child StateRefs with their selected snapshot and recovery Stores.
+`publications` is the per-boundary ledger: definition, state, snapshot,
+membership, claim, alias, main, index, and commit work is marked `completed`,
+`failed`, `unattempted`, or `uncertain`.
+
+There is no cross-Store transaction. A partial publication raises `RepoSaveError`
+with its immutable partial report after a plan exists. Completed immutable records
+remain available for inspection and recovery; they are not deleted to simulate a
+rollback. Initial declaration claims remain fenced and are reported separately
+from StateRef and membership authority. Root aliases and main references are
+written only after every selected root snapshot is complete, in every selected
+root Store; independently published children never inherit root names. Derived
+query-index failure remains visible and does not erase authoritative records.
+
+`Repo.save_object()` may leave a path-backed ZipStore buffered. `Repo.save()` and
+temporary convenience Repos commit their configured Stores before returning and
+record those commit boundaries. A successful buffered save is not an archive
+commit. A completed root `last_state_ref` receipt can remain inspectable when a
+later index, name, or commit boundary fails.
+
+## Loading And References
+
+`Repo.load(cdef)` and `load_object(cdef)` construct structural Objects and do not
+infer state. `Repo.load_or_build()` may create missing structure.
+`Repo.load_state_ref(state_ref, reuse_live="matching")` is the exact-state load
+operation. It follows records across the connected Stores, not the current route
+map. `matching`, `greedy`, and `never` are live-reuse policies; structural
+similarity cannot substitute for the exact ObjectId and binding requirements.
+
+`Repo.reserve_state_graph(obj)` returns a process/thread-local, Store-neutral,
+nonblocking reservation for the exact live graph. Use it as a context manager and
+pass it only to `save_object(..., reservation=...)` or
+`restore_state_ref_into(..., reservation=...)`. Restore preflights authority and
+retained bindings, restores supplied instances dependency-first without candidate
+search, and invalidates that graph for later framework state IO when a restore
+hook fails. Recover by loading a fresh graph with `reuse_live="never"`.
+
+Object aliases resolve through `get_alias()` to complete `ObjectRef` authority.
+State aliases resolve with `resolve_state_selector()` to `StateRef` authority.
+`fork_object_ref()` and `fork_state_ref()` are explicit Repo rekey operations;
+the latter's `federated` option controls its dependency-copy behavior and is not a
+save-routing compatibility spelling. Read-only query federation is also separate
+from routed saving.
+
+## Portable Repo Definitions
+
+`Repo.to_definition()` exports a detached `RepoDefinition` v1 configuration
+snapshot. It contains supported Store descriptors and their order/default,
+normalized routing rules, `config`, lease duration, and deletion-save setting.
+It excludes Store contents, aliases, claims, main definitions, live Object
+affinity, caches, sessions, archive buffers, and runtime resources. It does not
+commit archives, save Objects, resolve symbols, or activate a session.
+
+`RepoDefinition.to_data()` and `to_json()` expose detached data for caller-owned
+inspection or transport. `from_data()` and `from_json()` only validate and decode
+the closed bounded grammar. They do not open Stores, resolve executable symbols,
+construct a Repo, materialize Objects, or activate a session. The configuration
+can include user-supplied `config` values; callers must treat exported data as
+sensitive when those values are sensitive. Validation errors identify a field but
+do not embed arbitrary supplied values.
+
+`Repo.from_definition(definition)` is the separate live boundary. It validates
+all descriptors, then opens fresh handles only for required existing DirStore or
+path-backed ZipStore authority. Missing, inaccessible, malformed, wrong-type, or
+incompatible storage raises `RepoDefinitionError`; reconstruction never creates
+or repairs replacement storage and never installs a session Repo. The returned
+Repo owns its freshly opened handles. `close(flush=True)` retains normal commit
+behavior, while `close(flush=False)` releases those owned resources without a
+commit. Reconstructed cleanup never closes caller-supplied borrowed handles.
+
+Definition export rejects dirty, missing, or zero-length ZipStore archives,
+file-like archives, unsupported Store types/settings, nonportable configuration,
+ambiguous built-in physical destinations, and explicit custom clocks or owner
+token factories. A definition describes configuration, not a frozen data snapshot:
+use StateRefs to request exact saved Object state.
+
+## Store Authority And Lifetime
+
+`DirStore` is the supported directory checkpoint backend. Its immutable
+definitions, local states, StateRefs, declarations, claims, aliases, and main
+references are authoritative. SQLite query indexes, record-reference indexes,
+caches, and dirty markers are derived state and can be rebuilt without replacing
+Store records. New and old incompatible Store formats fail before hydration or
+index activation; there is no fallback reader.
+
+Repo borrows supplied Store instances. It owns and closes Store handles it opens
+from paths or file-like inputs, including reconstruction handles. `add_store()`
+and `set_default_store()` may open a specification but do not move stored state.
+Closing a borrowed Store while its Repo uses it is unsupported. See
+[Formats](formats.md) for durable record layouts and [Managed Operations](managed_operations.md)
+for lifecycle control and Store/ObjectId ownership.

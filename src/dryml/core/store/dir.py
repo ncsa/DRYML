@@ -490,6 +490,44 @@ class DirStore(Store):
             records.append(record)
         return tuple(records)
 
+    def read_stored_root_record(self, digest: str) -> StoredRootRecord | None:
+        """Read one validated digest-addressed stored-root membership record.
+
+        Args:
+            digest: Derived DefinitionRecord digest named by the requested
+                StoredRootRecord path.
+
+        Returns:
+            The matching StoredRootRecord, or ``None`` when its direct marker
+            path is absent.
+
+        Raises:
+            StoreAuthorityError: If ``digest`` is malformed, the direct marker is
+                malformed or stored at the wrong digest, or its DefinitionRecord
+                target is missing or malformed.
+
+        Side Effects:
+            None. This reads only the requested membership marker and referenced
+            DefinitionRecord; it does not consult the derived query index or
+            validate unrelated stored-root authority.
+        """
+        try:
+            expected = StoredRootRecord(digest)
+        except Exception as error:
+            raise StoreAuthorityError("Stored-root digest is malformed.") from error
+        record = self._read_file(self._stored_root_path(digest), StoredRootRecord)
+        if record is None:
+            return None
+        if record != expected:
+            raise StoreAuthorityError(
+                "StoredRootRecord digest does not match its direct path."
+            )
+        if self.read_definition_record(digest) is None:
+            raise StoreAuthorityError(
+                "Stored-root membership targets a missing DefinitionRecord."
+            )
+        return record
+
     def read_definition(self, cdef):
         """Return the direct DefinitionRecord definition matching ``cdef``, if present.
 

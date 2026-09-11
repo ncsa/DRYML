@@ -10,7 +10,7 @@ from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import (
     DefinitionRecord, LocalStateManifest, MainRefRecord, ObjectAliasRecord,
-    StateAliasRecord,
+    StateAliasRecord, StoredRootRecord,
 )
 from dryml.core.store.store import StoreAuthorityError
 
@@ -68,6 +68,25 @@ def test_immutable_definition_collision_is_idempotent_only_after_full_validation
 
     with pytest.raises(Exception, match="Malformed Store record"):
         store.write_definition_record(record)
+
+
+def test_direct_stored_root_read_validates_only_the_requested_authority(tmp_path):
+    store = DirStore(tmp_path / "store")
+    record = DefinitionRecord(AtomicRecordObject().definition)
+    store.write_definition_record(record)
+
+    assert store.read_stored_root_record(record.digest) == StoredRootRecord(record.digest)
+    assert store.read_stored_root_record("0" * 64) is None
+
+    Path(store._definition_path(record.digest)).unlink()
+    with pytest.raises(StoreAuthorityError, match="missing DefinitionRecord"):
+        store.read_stored_root_record(record.digest)
+
+    corrupt = DirStore(tmp_path / "corrupt")
+    corrupt.write_definition_record(record)
+    Path(corrupt._stored_root_path(record.digest)).write_bytes(b"not a record")
+    with pytest.raises(StoreAuthorityError, match="Malformed Store record"):
+        corrupt.read_stored_root_record(record.digest)
 
 
 def test_short_definition_write_never_publishes_truncated_authority(tmp_path, monkeypatch):

@@ -10,11 +10,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import stat
 import tempfile
 from dataclasses import dataclass, replace
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Callable
 from uuid import UUID
 from types import MappingProxyType
@@ -24,7 +24,16 @@ from dryml.locking import LockError, interprocess_lock
 
 from .errors import ManagedConflictError, ManagedControlError, ManagedPublicationError, ManagedRecoveryError
 from .identity import _operation_digest_from_object_ref_digest
-from .storage import _probe_state_ownership, state_ref_for_digest, validate_state_ref
+from .storage import (
+    _MAX_OBJECTS,
+    _MAX_PAIRS,
+    _MAX_STORES,
+    _bootstrap_managed_namespace,
+    _prepare_state_lock_namespace,
+    _probe_state_ownership,
+    state_ref_for_digest,
+    validate_state_ref,
+)
 
 _MAX_SNAPSHOT_BYTES = 1024 * 1024
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -222,12 +231,32 @@ class ManagedControlStore:
             ``managed/`` namespace.
         state_repo: Borrowed Repo used solely to validate retained exact StateRefs.
 
-    Reads never bootstrap the namespace.  Mutating methods must be called only
+    Raises:
+        ManagedControlError: If arguments are not an exact DirStore and Repo, or
+            later control authority is malformed or cannot be reconciled.
+        ManagedRecoveryError: If a retained associated StateRef is incomplete.
+
+    Reads never bootstrap the namespace. Mutating methods must be called only
     after managed lifecycle code has separately obtained its graph ownership.
+    The adapter borrows both resources, creates no Store router, and never
+    serializes either handle into control records. Its short control locks are
+    same-host coordination boundaries, not a security sandbox.
     """
 
     def __init__(self, control_store, state_repo) -> None:
-        """Bind control Store and state Repo without changing either resource."""
+        """Bind borrowed control/state authority without changing either resource.
+
+        Args:
+            control_store: Exact DirStore for lifecycle control records.
+            state_repo: Connected Repo used to validate retained StateRefs.
+
+        Raises:
+            ManagedControlError: If either input has an unsupported type.
+
+        Side Effects:
+            None. Construction neither creates the control namespace nor opens,
+            commits, closes, or installs the supplied resources.
+        """
 
         from dryml.core.store.dir import DirStore
 
@@ -274,20 +303,11 @@ class ManagedControlStore:
 
         try:
             self.control_store.preflight_publication("managed namespace bootstrap")
-            with self.control_store.writer_lock():
-                if self._path_present(self.root, "managed namespace"):
-                    self._validate_namespace()
-                    return
-                parent = self.control_store.base_dir
-                staging = tempfile.mkdtemp(prefix=".managed-staging-", dir=parent)
-                try:
-                    self._write_new(os.path.join(staging, "format.json"), _format_bytes())
-                    _sync_directory(staging)
-                    os.rename(staging, self.root)
-                    _sync_directory(parent)
-                except BaseException:
-                    _remove_tree_if_present(staging)
-                    raise
+            _bootstrap_managed_namespace(
+                self.control_store,
+                prepare=_prepare_state_lock_namespace,
+                sync_directory=_sync_directory,
+            )
         except ManagedControlError:
             raise
         except (LockError, OSError) as error:
@@ -814,7 +834,7 @@ def _ownership(value: object) -> MappingProxyType:
     stores, objects = value["store_keys"], value["object_keys"]
     if type(stores) not in (list, tuple) or type(objects) not in (list, tuple):
         raise ManagedControlError("invalid_current", "ownership keys must be lists")
-    if not stores or not objects or len(stores) > 256 or len(objects) > 4096 or len(stores) * len(objects) > 65536:
+    if not stores or not objects or len(stores) > _MAX_STORES or len(objects) > _MAX_OBJECTS or len(stores) * len(objects) > _MAX_PAIRS:
         raise ManagedControlError("invalid_current", "ownership topology is outside supported bounds")
     for key in (*stores, *objects):
         _digest(key, "ownership key")
@@ -840,10 +860,6 @@ def _uuid(value: object, name: str) -> None:
 
 def _payload_digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
-
-
-def _format_bytes() -> bytes:
-    return canonical_json_bytes({"schema": "dryml-managed", "version": 1}, max_depth=1, max_nodes=4, max_entries=2, max_string=64, max_int_bits=8)
 
 
 def _read_format(payload: bytes) -> bool:
@@ -942,9 +958,8 @@ def _remove_tree_if_present(path: str) -> None:
     """Remove only this call's unpublished staging directory when safe."""
 
     try:
-        Path(path).rmdir()
+        shutil.rmtree(path)
     except OSError:
-        # Staging is non-authoritative diagnostic evidence after a partial failure.
         pass
 
 

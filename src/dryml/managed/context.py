@@ -16,8 +16,9 @@ class ManagedContext:
     """Read-only authority for one active managed invocation.
 
     Instances are created only by the managed runtime after state ownership and
-    the running control snapshot are established.  They become inactive when the
-    method exits and cannot transfer across a thread or process.
+    the running control snapshot are established. They become inactive when the
+    method exits and cannot transfer across a thread or process. The context
+    borrows its resolved Repo/control Store and owns no caller resource lifetime.
     """
 
     def __init__(self, token, *, control_store, operation_id: str,
@@ -111,8 +112,10 @@ class ManagedContext:
                 safe-point decision.
 
         Side Effects:
-            Saves the managed graph, commits its control association, invokes
-            callbacks in configured order, and may commit terminal interruption.
+            Saves through the resolved Repo routing policy, commits only required
+            dirty buffered state Stores, verifies exact recovery, commits control
+            association, invokes callbacks in configured order, and may commit
+            terminal interruption. Incomplete state never receives association.
         """
 
         return self._checkpoint(cause=None, force_interrupt=False)
@@ -128,6 +131,11 @@ class ManagedContext:
             ManagedContextError: If the context is inactive, recursive, or
                 ``cause`` is not a BaseException.
             ManagedInterrupted: Always after the interruption transition commits.
+
+        Side Effects:
+            Uses the same routed durable checkpoint and callback boundary as
+            :meth:`checkpoint`, then marks this context terminal. Catching the
+            resulting exception cannot make the managed invocation complete.
         """
 
         self._require_active()

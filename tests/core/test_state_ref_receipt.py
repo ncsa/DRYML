@@ -4,6 +4,7 @@ import pytest
 
 from dryml.core import Definition, Object, Repo, Serializable
 from dryml.core.object import Pickleable
+from dryml.core.repo import RepoSaveError
 from dryml.core.utils.general import pickle_load
 from dryml.core.store.dir import DirStore
 
@@ -116,8 +117,10 @@ def test_recursive_child_receipt_survives_an_enclosing_root_failure(tmp_path, mo
         return original(record)
 
     monkeypatch.setattr(store, "write_state_ref_record", fail_parent_record)
-    with pytest.raises(OSError, match="parent record install failed"):
+    with pytest.raises(RepoSaveError) as raised:
         repo.save_object(parent, deep_capture=True)
 
+    assert isinstance(raised.value.__cause__, OSError)
+    assert str(raised.value.__cause__) == "parent record install failed"
     assert parent.last_state_ref is None
     assert parent.child.last_state_ref == installed[0]

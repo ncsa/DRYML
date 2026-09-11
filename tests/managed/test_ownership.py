@@ -10,6 +10,7 @@ from threading import Thread
 import pytest
 
 from dryml.core import Object, Repo, Serializable
+from dryml.core.reference_values import ObjectId
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
 from dryml.locking import FileLock, LockError
@@ -52,6 +53,20 @@ def _zip_lock_owner(archive, object_ids, ready, release):
     ready.set()
     assert release.wait(10)
     os._exit(0)
+
+
+def _bootstrap_lock_owner(root, object_id, ready, start, queue):
+    """Race a first disjoint lifetime-lock admission in a real child process."""
+
+    ready.set()
+    assert start.wait(10)
+    try:
+        lease = _acquire_state_locks(Repo((DirStore(root),)), (object_id,))
+    except BaseException as error:  # pragma: no cover - asserted through parent result.
+        queue.put(type(error).__name__)
+    else:
+        lease.release()
+        queue.put("ok")
 
 
 def test_ownership_composes_graph_reservation_and_state_repo_lock_set(tmp_path):
@@ -206,6 +221,68 @@ def test_read_only_probe_never_recreates_missing_lock_namespace(tmp_path):
         _probe_state_ownership(repo, evidence)
 
     assert not os.path.exists(namespace)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable on this host")
+def test_first_disjoint_process_owners_never_observe_a_partial_namespace(tmp_path, monkeypatch):
+    """A staged first namespace keeps a concurrent disjoint owner admissible."""
+
+    context = multiprocessing.get_context("fork")
+    root = os.fspath(tmp_path / "state")
+    first_ready, second_ready = context.Event(), context.Event()
+    first_start, second_start = context.Event(), context.Event()
+    format_entered, release_format = context.Event(), context.Event()
+    results = context.Queue()
+    original_write = storage_module._write_state_namespace_format
+
+    def pause_before_format(path):
+        format_entered.set()
+        assert release_format.wait(10)
+        original_write(path)
+
+    monkeypatch.setattr(storage_module, "_write_state_namespace_format", pause_before_format)
+    first = context.Process(
+        target=_bootstrap_lock_owner,
+        args=(root, ObjectId(), first_ready, first_start, results),
+    )
+    second = context.Process(
+        target=_bootstrap_lock_owner,
+        args=(root, ObjectId(), second_ready, second_start, results),
+    )
+    first.start()
+    try:
+        assert first_ready.wait(10)
+        first_start.set()
+        assert format_entered.wait(10)
+        second.start()
+        assert second_ready.wait(10)
+        second_start.set()
+        release_format.set()
+        first.join(20)
+        second.join(20)
+        assert first.exitcode == second.exitcode == 0
+        assert sorted((results.get(timeout=2), results.get(timeout=2))) == ["ok", "ok"]
+    finally:
+        release_format.set()
+        for process in (first, second):
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+
+
+def test_failed_initial_namespace_format_leaves_no_final_partial_authority(tmp_path, monkeypatch):
+    """A short format write cleans only unpublished bootstrap staging before retry."""
+
+    store = DirStore(tmp_path / "state")
+    repo = Repo((store,))
+    value = OwnedValue(1, repo=repo)
+    root = os.path.join(store.base_dir, "managed")
+
+    monkeypatch.setattr(storage_module.os, "write", lambda fd, payload: len(payload) - 1)
+    with pytest.raises(ManagedStoreError, match="namespace"):
+        _acquire_state_locks(repo, _object_ids(value))
+
+    assert not os.path.exists(root)
 
 
 def test_probe_validates_the_full_closed_evidence_before_filesystem_effects(tmp_path):

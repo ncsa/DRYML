@@ -47,13 +47,13 @@ def test_promoted_package_keeps_the_destination_export_manifest():
     core = importlib.import_module("dryml.core")
 
     assert core.__all__ == [
-        "load_object", "save_object", "load_state_ref", "LiveReusePolicy", "StoreReport", "StateGraphReservation", "Object", "Serializable", "UniqueID",
+        "load_object", "save_object", "load_state_ref", "LiveReusePolicy", "StoreReport", "SavePublication", "SavedSnapshot", "PublicationPhase", "PublicationStatus", "SaveRouting", "StateGraphReservation", "Object", "Serializable", "UniqueID",
         "Metadata", "Compute", "Definition", "ConcreteDefinition", "DefLink", "Ref", "Mat",
         "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace", "freeze",
         "ArgRole", "RefCDef", "RefCDefArg", "SelectorArg", "MaterializeArg",
         "ValueArg", "QuotedDef", "SelectorSpec", "Selector", "selector", "Par", "Present",
         "Missing", "AnyValue", "Exact", "Choice", "IntRange", "SubclassOf", "Satisfies",
-        "UniformIntRange", "UniformFromSet", "SearchSpace", "SKIP_ARGS", "Repo", "configure",
+        "UniformIntRange", "UniformFromSet", "SearchSpace", "SKIP_ARGS", "Repo", "RepoDefinition", "RepoDefinitionError", "configure",
         "reset_config", "status", "definition_mode", "selector_mode", "space_mode", "dtype",
         "DType", "ConfigRef", "FactorySpec", "ConfigError", "CONFIG_MISSING", "as_tensor_spec",
         "SpecHint", "TensorSpec", "ImportRef", "SourceSpec", "symbol_ref", "resolve_symbol",

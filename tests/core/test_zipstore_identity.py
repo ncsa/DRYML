@@ -144,6 +144,31 @@ def test_existing_only_zip_open_rejects_uncommitted_or_invalid_archive(tmp_path,
     assert not path.exists() if kind == "missing" else path.is_file()
 
 
+def test_open_existing_validates_archive_integrity_once(tmp_path, monkeypatch):
+    """Direct existing-only opens perform one pre-extraction integrity gate."""
+
+    path = tmp_path / "store.zip"
+    store = ZipStore(path)
+    store.write_definition_record(_record())
+    store.commit()
+    store.close()
+    validated = []
+    original_validate = ZipStore._validate_existing_archive
+
+    def observe_validation(cls, archive_path):
+        validated.append(archive_path)
+        return original_validate(archive_path)
+
+    monkeypatch.setattr(
+        ZipStore, "_validate_existing_archive", classmethod(observe_validation),
+    )
+    reopened = ZipStore.open_existing(path)
+    try:
+        assert len(validated) == 1
+    finally:
+        reopened.close()
+
+
 def test_repo_save_reports_and_commits_a_buffered_zip_publication(tmp_path):
     path = tmp_path / "repo-save.zip"
     store = ZipStore(path)
@@ -180,7 +205,7 @@ def test_repo_save_reports_an_unrelated_configured_commit_failure(tmp_path, monk
 
         report = raised.value.report
         assert [(item.store, item.status) for item in report.publications if item.phase == "commit"] == [
-            (target, "completed"), (unrelated, "failed"),
+            (target, "completed"), (unrelated, "uncertain"),
         ]
         reopened = ZipStore(target.archive_path)
         try:
@@ -216,9 +241,17 @@ def test_routed_zip_commit_control_flow_retains_identity_and_report(
 
         report = raised.value.report
         assert [(item.store, item.status) for item in report.publications if item.phase == "commit"] == [
-            (store, "failed"),
+            (store, "completed" if after else "failed"),
         ]
         assert path.exists() is after
+        if after:
+            reopened = ZipStore.open_existing(path)
+            try:
+                assert reopened.read_state_ref_record(
+                    report.snapshots[0].state_ref.digest(),
+                ).state_ref == report.snapshots[0].state_ref
+            finally:
+                reopened.close()
     finally:
         store.close()
 

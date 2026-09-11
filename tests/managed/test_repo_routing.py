@@ -18,6 +18,8 @@ from dryml.managed import (
     managed_operation,
 )
 from dryml.managed.control import ManagedControlStore
+from dryml.managed.errors import ManagedRecoveryError
+from dryml.managed import storage as storage_module
 
 
 class RoutedValue(Pickleable):
@@ -251,6 +253,39 @@ def test_zip_commit_failure_has_report_and_never_associates_checkpoint(tmp_path,
     ).checkpoint_state_ref is None
 
 
+def test_interrupted_completed_zip_commit_preserves_prior_checkpoint(tmp_path, monkeypatch):
+    """A completed orphan never replaces an earlier managed checkpoint after interruption."""
+
+    state = ZipStore(tmp_path / "state.zip")
+    control = DirStore(tmp_path / "control")
+    repo = Repo(state)
+    value = RoutedValue(repo=repo)
+    with pytest.raises(ManagedInterrupted):
+        value.interrupt_then_finish(
+            managed=ManagedConfig(state_repo=repo, control_store=control),
+        )
+    prior = value.interrupt_then_finish.status(
+        state_repo=repo, control_store=control,
+    ).checkpoint_state_ref
+    original = state.commit
+
+    def commit_then_interrupt():
+        original()
+        raise KeyboardInterrupt("commit interruption")
+
+    monkeypatch.setattr(state, "commit", commit_then_interrupt)
+    with pytest.raises(KeyboardInterrupt, match="commit interruption") as caught:
+        value.interrupt_then_finish(
+            managed=ManagedConfig(state_repo=repo, control_store=control),
+        )
+
+    commits = [item for item in caught.value.report.publications if item.phase == "commit"]
+    assert [(item.store, item.status) for item in commits] == [(state, "completed")]
+    assert value.interrupt_then_finish.status(
+        state_repo=repo, control_store=control,
+    ).checkpoint_state_ref == prior
+
+
 def test_control_failure_after_committed_state_leaves_reopenable_orphan(tmp_path, monkeypatch):
     """A control association fault never makes durable state appear associated."""
 
@@ -389,6 +424,85 @@ def test_missing_committed_replica_cannot_be_hidden_by_a_valid_replica(tmp_path,
     assert value.checkpoint_then_finish.status(
         state_repo=repo, control_store=control,
     ).checkpoint_state_ref is None
+
+
+def test_reopened_nested_payloads_are_validated_once_per_durable_closure(tmp_path, monkeypatch):
+    """Replica record checks plus one root closure avoid repeated payload rehashing."""
+
+    state = ZipStore(tmp_path / "state.zip")
+    control = DirStore(tmp_path / "control")
+    repo = Repo(
+        (state,),
+        save_routing=SaveRouting(
+            ((Selector(RoutedRoot), state), (Selector(RoutedValue), state)),
+            graph_mode="per-object",
+        ),
+    )
+    value = RoutedRoot(RoutedValue(repo=repo), repo=repo)
+    reopened = set()
+    validations = []
+    original_open = ZipStore.open_existing
+    original_validate = ZipStore.validate_local_state
+
+    def open_existing(path):
+        store = original_open(path)
+        reopened.add(id(store))
+        return store
+
+    def validate_local_state(self, definition, state_hash):
+        if id(self) in reopened:
+            validations.append((definition.graph_hash(), state_hash))
+        return original_validate(self, definition, state_hash)
+
+    monkeypatch.setattr(ZipStore, "open_existing", staticmethod(open_existing))
+    monkeypatch.setattr(ZipStore, "validate_local_state", validate_local_state)
+    value.checkpoint_then_finish(managed=ManagedConfig(state_repo=repo, control_store=control))
+
+    assert len(validations) == len(set(validations))
+
+
+@pytest.mark.parametrize("missing", ("record", "payload"))
+def test_reopened_root_closure_rejects_missing_nested_replica_authority(
+        tmp_path, monkeypatch, missing):
+    """One root closure still rejects an independently projected child's loss."""
+
+    state = ZipStore(tmp_path / "state.zip")
+    repo = Repo(
+        (state,),
+        save_routing=SaveRouting(
+            ((Selector(RoutedRoot), state), (Selector(RoutedValue), state)),
+            graph_mode="per-object",
+        ),
+    )
+    root = RoutedRoot(RoutedValue(repo=repo), repo=repo)
+    state_ref, report = repo.save_object(root, deep_capture=True, report_stores=True)
+    state.commit()
+    child_ref = next(snapshot.state_ref for snapshot in report.snapshots if snapshot.state_ref != state_ref)
+    reopened = set()
+    original_open = ZipStore.open_existing
+    original_read = ZipStore.read_state_ref_record
+    original_validate = ZipStore.validate_local_state
+
+    def open_existing(path):
+        store = original_open(path)
+        reopened.add(id(store))
+        return store
+
+    def read_state_ref_record(self, digest):
+        if missing == "record" and id(self) in reopened and digest == child_ref.digest():
+            return None
+        return original_read(self, digest)
+
+    def validate_local_state(self, definition, state_hash):
+        if missing == "payload" and id(self) in reopened and state_hash in child_ref.states.values():
+            raise FileNotFoundError("nested payload missing")
+        return original_validate(self, definition, state_hash)
+
+    monkeypatch.setattr(ZipStore, "open_existing", staticmethod(open_existing))
+    monkeypatch.setattr(ZipStore, "read_state_ref_record", read_state_ref_record)
+    monkeypatch.setattr(ZipStore, "validate_local_state", validate_local_state)
+    with pytest.raises(ManagedRecoveryError, match="missing_state_reference"):
+        storage_module._validate_reopened_managed_state(repo, state_ref, report, (state,))
 
 
 def test_dirty_reused_zip_seed_is_required_durable_and_commit_failure_keeps_checkpoint(

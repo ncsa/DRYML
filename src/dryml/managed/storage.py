@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
+import tempfile
 from contextlib import AbstractContextManager
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,12 +14,13 @@ from threading import get_ident
 
 from dryml.core.reference_values import ObjectId, StateRef
 from dryml.core.repo import Repo, RepoSaveError, _commit_save_report
+from dryml.core.repo_plan import _unique_stores
 from dryml.core.session import current_repo
 from dryml.core.store.dir import DirStore
 from dryml.core.store.store import Store
 from dryml.core.store.zip import ZipStore
 from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_json_load_bytes
-from dryml.locking import FileLock, LockError
+from dryml.locking import FileLock, LockError, interprocess_lock
 
 from .errors import (
     ManagedConflictError,
@@ -41,7 +44,8 @@ class ResolvedStores:
 
     ``close()`` returns no value and releases only a one-Store Repo wrapper
     created for an explicit Store. Borrowed Repo and Store handles are never
-    flushed or closed.
+    flushed or closed. Resolution owns no publication or topology lease and is
+    safe only while callers retain the selected borrowed resources.
     """
 
     state_repo: Repo
@@ -57,6 +61,10 @@ class ResolvedStores:
         Side Effects:
             Closes only the private wrapper created by :func:`resolve_stores`.
             The selected caller-owned Repo and Stores remain open and unmodified.
+
+        Raises:
+            BaseException: Propagates a private-wrapper cleanup failure after the
+                wrapper has begun non-committing shutdown.
         """
 
         if self._wrapper is not None:
@@ -299,13 +307,13 @@ def publish_managed_state(state_repo: Repo, obj: object, *, reservation):
 def _required_managed_publication_stores(report) -> tuple[Store, ...]:
     """Return ordered replica and sufficient-recovery Stores from one core report."""
 
-    stores = []
-    for snapshot in report.snapshots:
-        stores.extend(snapshot.stores)
-        stores.extend(snapshot.required_stores)
-    stores.extend(report.required_stores)
-    return tuple(store for index, store in enumerate(stores) if all(
-        store is not earlier for earlier in stores[:index]
+    return _unique_stores((
+        *(
+            store
+            for snapshot in report.snapshots
+            for store in (*snapshot.stores, *snapshot.required_stores)
+        ),
+        *report.required_stores,
     ))
 
 
@@ -354,7 +362,8 @@ def _validate_reopened_managed_state(state_repo: Repo, state_ref: StateRef, repo
                             "missing_state_reference",
                             "reopened managed replica authority is incomplete",
                         )
-                validate_state_ref(durable, snapshot.state_ref)
+                # Exact replica records prove selected publication; the root's exact
+                # closure covers every projected descendant and materializing seed.
             validate_state_ref(durable, state_ref)
         finally:
             durable.close(flush=False)
@@ -554,29 +563,91 @@ def _bootstrap_state_lock_namespaces(stores: tuple[Store, ...], ownership: Mappi
     for store, expected_key in zip(stores, expected_keys, strict=True):
         if _store_key(store) != expected_key:
             raise ManagedRecoveryError("ownership_store_changed", "state Store identity changed during ownership admission")
-        root = _state_lock_root(store)
         try:
-            mode = os.lstat(root).st_mode
-        except FileNotFoundError:
-            try:
-                os.makedirs(root, mode=0o700, exist_ok=False)
-                _write_state_namespace_format(os.path.join(root, "format.json"))
-            except FileExistsError:
-                # A concurrent owner may have installed the shared namespace.
-                _validate_state_lock_namespace(store, expected_key)
-            except OSError as error:
-                raise ManagedStoreError("state_lock_namespace_bootstrap_failed", "could not create managed state lock namespace") from error
-        except OSError as error:
-            raise ManagedStoreError("state_lock_namespace_unavailable", "could not inspect managed state lock namespace") from error
-        else:
-            if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
-                raise ManagedStoreError("invalid_state_lock_namespace", "managed state lock namespace root is not a directory")
-            _validate_state_namespace_format(root)
-        try:
-            os.makedirs(_state_lock_namespace(store), mode=0o700, exist_ok=True)
-        except OSError as error:
+            _bootstrap_state_lock_namespace(store)
+        except (ManagedRecoveryError, ManagedStoreError):
+            raise
+        except (LockError, OSError) as error:
             raise ManagedStoreError("state_lock_namespace_bootstrap_failed", "could not create managed state lock namespace") from error
         _validate_state_lock_namespace(store, expected_key)
+
+
+def _bootstrap_state_lock_namespace(store: Store) -> None:
+    """Publish or extend one Store's shared managed namespace under its stable lock."""
+
+    if type(store) is DirStore:
+        _bootstrap_managed_namespace(store, prepare=_prepare_state_lock_namespace)
+        return
+    root = _state_lock_root(store)
+    with interprocess_lock(_state_namespace_bootstrap_lock_path(store)):
+        _publish_managed_namespace(root, prepare=_prepare_state_lock_namespace)
+
+
+def _bootstrap_managed_namespace(store: DirStore, *, prepare=None, sync_directory=None) -> None:
+    """Use a direct Store writer lock to atomically publish its shared namespace.
+
+    ``prepare`` may add non-control hierarchy inside a new staging directory or an
+    already validated namespace while the same canonical writer lock is retained.
+    ``sync_directory`` preserves control publication's existing durability seam;
+    state-lock bootstrap makes no additional directory-fsync promise.
+    """
+
+    root = _state_lock_root(store)
+    with store.writer_lock():
+        _publish_managed_namespace(root, prepare=prepare, sync_directory=sync_directory)
+
+
+def _state_namespace_bootstrap_lock_path(store: Store) -> str:
+    """Return a Zip sibling bootstrap lock distinct from its replaceable namespace."""
+
+    return _state_lock_root(store) + ".bootstrap.lock"
+
+
+def _publish_managed_namespace(root: str, *, prepare=None, sync_directory=None) -> None:
+    """Install a complete namespace or extend an existing valid one without replacement."""
+
+    try:
+        os.lstat(root)
+    except FileNotFoundError:
+        parent = os.path.dirname(root)
+        staging = tempfile.mkdtemp(prefix=".managed-staging-", dir=parent)
+        try:
+            _write_state_namespace_format(os.path.join(staging, "format.json"))
+            if prepare is not None:
+                prepare(staging)
+            if sync_directory is not None:
+                sync_directory(staging)
+            os.rename(staging, root)
+            if sync_directory is not None:
+                sync_directory(parent)
+        except BaseException:
+            _remove_unpublished_namespace_staging(staging)
+            raise
+        return
+    except OSError:
+        raise
+    _require_directory(root, "managed state lock namespace")
+    _validate_state_namespace_format(root)
+    if prepare is not None:
+        prepare(root)
+
+
+def _prepare_state_lock_namespace(root: str) -> None:
+    """Create the complete versioned lifetime-lock hierarchy before publication."""
+
+    try:
+        os.makedirs(os.path.join(root, "locks", "v1"), mode=0o700, exist_ok=True)
+    except OSError as error:
+        raise ManagedStoreError("state_lock_namespace_bootstrap_failed", "could not create managed state lock namespace") from error
+
+
+def _remove_unpublished_namespace_staging(path: str) -> None:
+    """Remove only this call's never-published namespace staging directory."""
+
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        pass
 
 
 def _validate_state_lock_namespaces(stores: tuple[Store, ...], ownership: Mapping[str, object]) -> None:
@@ -615,7 +686,7 @@ def _require_directory(path: str, label: str) -> None:
 
 
 def _write_state_namespace_format(path: str) -> None:
-    """Install the shared managed format gate while creating a new namespace."""
+    """Write one complete shared format gate into call-owned staging authority."""
 
     payload = canonical_json_bytes(
         {"schema": "dryml-managed", "version": 1},
@@ -623,16 +694,24 @@ def _write_state_namespace_format(path: str) -> None:
     )
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        _validate_state_namespace_format(os.path.dirname(path))
-        return
+    except FileExistsError as error:
+        raise ManagedStoreError("state_lock_namespace_bootstrap_failed", "managed state namespace staging already has a format gate") from error
     try:
-        written = os.write(fd, payload)
-        if written != len(payload):
-            raise OSError("managed state namespace format write was incomplete")
+        _write_all(fd, payload)
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    """Write a bounded format payload fully or fail before its staging is published."""
+
+    offset = 0
+    while offset < len(payload):
+        written = os.write(fd, payload[offset:])
+        if written <= 0:
+            raise OSError("managed state namespace format write was incomplete")
+        offset += written
 
 
 def _validate_state_namespace_format(root: str) -> None:

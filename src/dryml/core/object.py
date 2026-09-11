@@ -370,7 +370,8 @@ class Object(metaclass=Dryml):
             repo: Repository or Store authority used for publication.
             main: Whether to update the target Store's structural main reference
                 after StateRef publication succeeds.
-            store: Optional selected target Store.
+            store: Optional explicit whole-graph closure Store. It bypasses
+                routing, placement, and replication for this save.
             alias: Optional object alias to update after StateRef publication.
             deep_capture: Whether to serialize every owned Serializable node.
             match_mode: Optional ``"first"`` or ``"all"`` routing override.
@@ -394,6 +395,11 @@ class Object(metaclass=Dryml):
             this top-level object's last-state receipt before later derived-index,
             main-reference, or alias updates. A later update failure propagates
             while the completed receipt remains available.
+
+        Concurrency:
+            The delegated Repo save retains one configuration snapshot and keeps
+            completed authority after a partial cross-Store failure; inspect the
+            RepoSaveError report when publication does not complete.
         """
         from dryml.runtime import materialization_admission
         from .repo import save_object

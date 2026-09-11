@@ -229,6 +229,25 @@ def test_status_never_substitutes_live_receiver_keys_for_retained_ownership(tmp_
         value.run.status(state_repo=Repo((first,)), control_store=control_store)
 
 
+def test_reopened_operation_rejects_different_state_store_before_workload_or_locks(tmp_path):
+    """Retained control evidence cannot transfer an operation to a different Repo."""
+
+    original = DirStore(tmp_path / "original")
+    replacement = DirStore(tmp_path / "replacement")
+    control_store = DirStore(tmp_path / "control")
+    original_repo = Repo((original,))
+    value = SeparateControlValue(repo=original_repo)
+    arguments = argument_digest(SeparateControlValue.run, value, (), {"managed": None})
+    control = ManagedControlStore(control_store, original_repo)
+    initial = control.create_initial(_running_snapshot(original_repo, value, arguments))
+    with pytest.raises(ManagedRecoveryError, match="ownership_mismatch"):
+        value.run(managed=ManagedConfig(state_repo=Repo((replacement,)), control_store=control_store))
+
+    assert value.value == 0
+    assert control.inspect(initial.operation_id) == initial
+    assert not os.path.exists(os.path.join(replacement.base_dir, "managed"))
+
+
 def test_missing_lock_namespace_never_becomes_owner_loss_or_recovery_evidence(tmp_path):
     """Status/request probing cannot recreate removed state-lock evidence for a running owner."""
 
