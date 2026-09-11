@@ -20,7 +20,7 @@ class ManagedContext:
     method exits and cannot transfer across a thread or process.
     """
 
-    def __init__(self, token, *, state_store, control_store, operation_id: str,
+    def __init__(self, token, *, control_store, operation_id: str,
                   attempt_id: str, owner_id: str, is_resuming: bool,
                   checkpoint_state_ref: StateRef | None, obj, state_repo,
                   ownership, control, callbacks) -> None:
@@ -28,7 +28,6 @@ class ManagedContext:
 
         if token is not _CONTEXT_TOKEN:
             raise ManagedContextError("context_construction", "managed contexts are runtime-created")
-        self._state_store = state_store
         self._control_store = control_store
         self._operation_id = operation_id
         self._attempt_id = attempt_id
@@ -59,10 +58,10 @@ class ManagedContext:
         )
 
     @property
-    def state_store(self):
-        """Return the caller-selected state ``DirStore`` without changing it."""
+    def state_repo(self):
+        """Return the retained state Repo without changing its configuration."""
 
-        return self._state_store
+        return self._state_repo
 
     @property
     def control_store(self):
@@ -145,11 +144,11 @@ class ManagedContext:
             try:
                 self._ownership.require_owner()
                 state_ref = self._state_repo.save_object(
-                    self._obj, store=self._state_store, main=False, alias=None,
-                    deep_capture=True, reservation=self._ownership.reservation,
+                    self._obj, main=False, alias=None, deep_capture=True,
+                    reservation=self._ownership.reservation,
                 )
                 validate_state_ref = _validate_state_ref()
-                validate_state_ref(self._state_store, state_ref)
+                validate_state_ref(self._state_repo, state_ref)
                 _checkpoint_boundary("state_published")
                 self._control.transition_running_owner(
                     self._operation_id, attempt_id=self._attempt_id, owner_id=self._owner_id,

@@ -1,8 +1,4 @@
-"""Selected DirStore authority for managed control and Object state.
-
-This module deliberately resolves only caller-selected Stores or the current core
-session Repo.  It neither records a locator nor searches control Stores.
-"""
+"""Repo selection, topology evidence, and lifetime locks for managed work."""
 
 from __future__ import annotations
 
@@ -10,6 +6,7 @@ import hashlib
 import os
 import stat
 from contextlib import AbstractContextManager
+from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import get_ident
 
@@ -17,39 +14,55 @@ from dryml.core.reference_values import ObjectId, StateRef
 from dryml.core.repo import Repo, RepoSaveError
 from dryml.core.session import current_repo
 from dryml.core.store.dir import DirStore
+from dryml.core.store.store import Store
+from dryml.core.store.zip import ZipStore
+from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_json_load_bytes
 from dryml.locking import FileLock, LockError
 
 from .errors import ManagedConflictError, ManagedRecoveryError, ManagedStoreError
 
+_MAX_STORES = 256
+_MAX_OBJECTS = 4096
+_MAX_PAIRS = 65536
 
-@dataclass(frozen=True, slots=True)
+
+@dataclass(slots=True)
 class ResolvedStores:
-    """Immutable selected state and control authority for one managed operation.
+    """Selected state Repo and independent control authority.
 
-    Attributes:
-        state_store: DirStore holding exact Object-state references.
-        control_store: DirStore holding managed current-operation authority.
+    Args:
+        state_repo: Borrowed connected Repo used for managed state authority.
+        control_store: Exact ``DirStore`` holding lifecycle control authority.
 
-    The caller retains ownership of both Store handles.  Resolution opens no
-    query indexes and does not create managed control files.
+    ``close()`` returns no value and releases only a one-Store Repo wrapper
+    created for an explicit Store. Borrowed Repo and Store handles are never
+    flushed or closed.
     """
 
-    state_store: DirStore
+    state_repo: Repo
     control_store: DirStore
+    _wrapper: Repo | None = None
+
+    def close(self) -> None:
+        """Release a call-created wrapper without committing borrowed Stores.
+
+        Returns:
+            ``None``.
+
+        Side Effects:
+            Closes only the private wrapper created by :func:`resolve_stores`.
+            The selected caller-owned Repo and Stores remain open and unmodified.
+        """
+
+        if self._wrapper is not None:
+            wrapper, self._wrapper = self._wrapper, None
+            wrapper.close(flush=False)
 
 
 class _StateStoreLockLease(AbstractContextManager):
-    """A process/thread-bound retained lease over selected state-Store lock files.
+    """A process/thread-bound retained set of physical Store lock leases."""
 
-    Instances are created by :func:`_acquire_state_locks`; callers retain no native
-    descriptors themselves.  The lease is invalid after fork and cannot release a
-    parent process's locks or a different thread's locks.
-    """
-
-    def __init__(self, state_store: DirStore, object_ids: tuple[object, ...], leases: tuple[FileLock, ...]):
-        """Record the acquired shared-owner leases for one exact ObjectId set."""
-
-        self.state_store = state_store
+    def __init__(self, object_ids, leases: tuple[FileLock, ...]):
         self.object_ids = object_ids
         self._leases = leases
         self._pid = os.getpid()
@@ -58,49 +71,26 @@ class _StateStoreLockLease(AbstractContextManager):
 
     @property
     def active(self) -> bool:
-        """Return whether the creating process and thread still own every lease."""
+        """Return whether the acquiring process/thread still owns this token."""
 
         return self._active and self._pid == os.getpid() and self._thread_id == get_ident()
 
-    def __enter__(self) -> "_StateStoreLockLease":
-        """Return this active lease for context-manager use.
-
-        Raises:
-            ManagedConflictError: If the lease belongs to another thread/process
-                or was already released.
-        """
-
+    def __enter__(self):
         self.require_owner()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
-        """Release the owned state locks without suppressing an exception."""
-
         self.release()
         return False
 
     def require_owner(self) -> None:
-        """Require use by the process/thread that acquired this lease.
-
-        Raises:
-            ManagedConflictError: If the token is inactive, inherited, or used by
-                a non-owning thread.
-        """
+        """Reject inactive, inherited, and cross-thread token use."""
 
         if not self.active:
             raise ManagedConflictError("invalid_state_owner", "state lock ownership belongs to another process/thread or is inactive")
 
     def release(self) -> bool:
-        """Release every held lock in reverse acquisition order.
-
-        Returns:
-            ``True`` when this owning call released the lease, otherwise ``False``
-            for an already released, inherited, or cross-thread token.
-
-        Raises:
-            ManagedStoreError: If a shared native lock release fails after all
-                possible local cleanup has been attempted.
-        """
+        """Release held locks in reverse order without unlinking shared files."""
 
         if not self.active:
             return False
@@ -110,76 +100,47 @@ class _StateStoreLockLease(AbstractContextManager):
             try:
                 lease.release()
             except LockError as caught:
-                if error is None:
-                    error = caught
+                error = error or caught
         if error is not None:
             raise ManagedStoreError("state_lock_release_failed", "could not release managed state ownership") from error
         return True
 
 
 class _ManagedStateOwnership(AbstractContextManager):
-    """Compose a core live-graph reservation with selected state-Store leases.
+    """Combine core graph/topology reservations and physical state locks."""
 
-    The private owner token is created by :func:`_acquire_state_ownership` and is
-    retained through a complete managed invocation, including user callbacks and final
-    publication.  It never serializes a Repo, Store, or native descriptor.
-    """
-
-    def __init__(self, reservation, state_locks: _StateStoreLockLease):
-        """Join already-acquired core and state-Store ownership resources."""
-
+    def __init__(self, reservation, topology, state_locks, ownership):
         self.reservation = reservation
+        self.topology = topology
         self.state_locks = state_locks
         self.object_ids = state_locks.object_ids
+        self.ownership = ownership
         self._pid = os.getpid()
         self._thread_id = get_ident()
         self._active = True
 
     @property
     def active(self) -> bool:
-        """Return whether both ownership layers remain valid for this caller."""
+        """Return whether every joined ownership layer remains valid."""
 
-        return (
-            self._active
-            and self._pid == os.getpid()
-            and self._thread_id == get_ident()
-            and self.reservation.active
-            and self.state_locks.active
-        )
+        return self._active and self._pid == os.getpid() and self._thread_id == get_ident() and self.reservation.active and self.state_locks.active
 
-    def __enter__(self) -> "_ManagedStateOwnership":
-        """Return the active combined owner for context-manager use."""
-
+    def __enter__(self):
         self.require_owner()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
-        """Release state-Store and live-graph ownership without suppressing errors."""
-
         self.release()
         return False
 
     def require_owner(self) -> None:
-        """Require the exact process/thread that acquired combined ownership.
-
-        Raises:
-            ManagedConflictError: If either layer is inactive, inherited, or used
-                by a non-owning thread.
-        """
+        """Require use by the exact process/thread that acquired ownership."""
 
         if not self.active:
             raise ManagedConflictError("invalid_state_owner", "managed state ownership belongs to another process/thread or is inactive")
 
     def release(self) -> bool:
-        """Release state leases and then the core reservation when still owned.
-
-        Returns:
-            ``True`` if this owning call released the combined token. Inherited or
-            cross-thread calls return ``False`` and cannot release parent state.
-
-        Raises:
-            ManagedStoreError: If shared state-lock cleanup fails.
-        """
+        """Release locks, graph reservation, and topology lease in safe order."""
 
         if not self.active:
             return False
@@ -187,307 +148,201 @@ class _ManagedStateOwnership(AbstractContextManager):
         try:
             self.state_locks.release()
         finally:
-            self.reservation.release()
+            try:
+                self.reservation.release()
+            finally:
+                self.topology.__exit__(None, None, None)
         return True
 
 
-def resolve_stores(
-        obj: object,
-        *,
-        state_store: DirStore | None = None,
-        control_store: DirStore | None = None,
-        require_writable: bool = True) -> ResolvedStores:
-    """Resolve managed Store authority before an operation mutates anything.
+def resolve_stores(obj: object, *, state_repo: Repo | Store | None = None,
+                    control_store: DirStore | None = None,
+                    require_writable: bool = True) -> ResolvedStores:
+    """Resolve managed Repo/control authority without state or control mutation.
+
+    Omitted state authority is exactly the configured current Repo. An explicit
+    Store is wrapped for this call only; it never becomes a session default.
 
     Args:
-        obj: Live Object whose exact last completed StateRef may disambiguate a
-            multi-Store session Repo.
-        state_store: Explicit DirStore for state, if supplied.
-        control_store: Explicit DirStore for control, if supplied.
-        require_writable: Whether both selected Stores must support publication.
+        obj: Managed receiver retained for API symmetry; it is not materialized or
+            mutated during resolution.
+        state_repo: Borrowed Repo or Store, or ``None`` for the configured Repo.
+        control_store: Exact control ``DirStore``, or ``None`` for the Repo default.
+        require_writable: Whether selected state/control Stores must preflight
+            publication capability.
 
     Returns:
-        The selected state/control Store pair.  Omitted control authority uses
-        the selected state Store.
+        Selected state/control authority and any private one-Store wrapper.
 
     Raises:
-        ManagedStoreError: If a Store is unsupported, session discovery is
-            missing or ambiguous, publication is unavailable, or an exact saved
-            StateRef cannot be validated without materializing an Object.
+        ManagedStoreError: If authority is absent, malformed, unsupported, or
+            cannot meet requested publication capability.
 
     Side Effects:
-        Validation reads immutable StateRef authority only.  It never creates a
-        Repo, opens a query index, writes a Store, or migrates state.
+        May construct a private non-owning Repo wrapper for an explicit Store.
+        It never writes, commits, closes, or changes caller-owned resources.
     """
 
-    if state_store is not None and type(state_store) is not DirStore:
-        raise ManagedStoreError(message="state_store must be an exact DirStore")
-    if control_store is not None and type(control_store) is not DirStore:
-        raise ManagedStoreError(message="control_store must be an exact DirStore")
-
-    selected_state = state_store
-    if selected_state is None:
-        selected_state = _resolve_session_state_store(obj)
-    selected_control = selected_state if control_store is None else control_store
-    if require_writable:
-        _require_publication(selected_state, "managed state publication", local_state=True)
-        _require_publication(selected_control, "managed control publication", local_state=False)
-    return ResolvedStores(selected_state, selected_control)
-
-
-def validate_state_ref(store: DirStore, state_ref: StateRef) -> StateRef:
-    """Validate one exact StateRef closure in one selected Store without hooks.
-
-    Args:
-        store: DirStore that must contain the complete immutable closure.
-        state_ref: Exact StateRef to validate.
-
-    Returns:
-        The same exact StateRef after authority-only preflight succeeds.
-
-    Raises:
-        ManagedRecoveryError: If the record is absent, differs from the exact
-            reference, or its local-state closure cannot be read.
-
-    Side Effects:
-        Creates and closes a private non-owning Repo view.  It never
-        materializes, restores, indexes, or mutates user Objects or Stores.
-    """
-
-    if type(store) is not DirStore or type(state_ref) is not StateRef:
-        raise ManagedRecoveryError("invalid_state_reference", "managed state validation requires exact DirStore and StateRef")
+    if state_repo is None:
+        repo = current_repo()
+        if repo is None:
+            raise ManagedStoreError("explicit_state_repo_required", "no current Repo; supply state_repo explicitly")
+        wrapper = None
+    elif isinstance(state_repo, Repo):
+        repo, wrapper = state_repo, None
+    elif isinstance(state_repo, Store):
+        try:
+            repo = Repo._for_state_io((state_repo,))
+        except BaseException as error:
+            raise ManagedStoreError("invalid_state_repo", "could not wrap the supplied state Store") from error
+        wrapper = repo
+    else:
+        raise ManagedStoreError("invalid_state_repo", "state_repo must be a Repo or Store")
     try:
-        record = store.read_state_ref_record(state_ref.digest())
-        if record is None or record.state_ref != state_ref:
-            raise ManagedRecoveryError("missing_state_reference", "selected state Store lacks the exact StateRef")
+        selected_control = repo.default_store if control_store is None else control_store
+        if type(selected_control) is not DirStore:
+            raise ManagedStoreError("invalid_control_store", "control_store must be an exact DirStore")
+        stores = _physical_stores(repo)
+        if require_writable:
+            for store in stores:
+                _require_publication(store, "managed state publication", local_state=True)
+            _require_publication(selected_control, "managed control publication", local_state=False)
+        return ResolvedStores(repo, selected_control, wrapper)
+    except BaseException:
+        if wrapper is not None:
+            wrapper.close(flush=False)
+        raise
+
+
+def validate_state_ref(state_repo: Repo, state_ref: StateRef) -> StateRef:
+    """Validate an exact StateRef closure across the selected connected Repo.
+
+    Args:
+        state_repo: Borrowed Repo supplying all exact recovery authority.
+        state_ref: Exact StateRef whose full closure must be available.
+
+    Returns:
+        The unchanged validated ``state_ref``.
+
+    Raises:
+        ManagedRecoveryError: If types are invalid or the exact closure is absent.
+
+    Side Effects:
+        Reads Store authority only; it creates, commits, and changes no state.
+    """
+
+    if not isinstance(state_repo, Repo) or type(state_ref) is not StateRef:
+        raise ManagedRecoveryError("invalid_state_reference", "managed state validation requires a Repo and exact StateRef")
+    try:
         from dryml.core.materialization import build_exact_state_load_plan
 
-        view = Repo._for_state_io((store,))
-        try:
-            build_exact_state_load_plan(view, state_ref)
-        finally:
-            view.close()
-    except ManagedRecoveryError:
-        raise
+        build_exact_state_load_plan(state_repo, state_ref)
     except BaseException as error:
-        raise ManagedRecoveryError("invalid_state_reference", "selected state Store cannot validate the exact StateRef closure") from error
+        raise ManagedRecoveryError("missing_state_reference", "state Repo lacks the exact StateRef closure") from error
     return state_ref
 
 
-def _state_lock_path(state_store: DirStore, object_id: object) -> str:
-    """Return the canonical managed lifetime-lock path for one ObjectId.
+def state_ref_for_digest(state_repo: Repo, digest: str) -> StateRef:
+    """Return one identical retained StateRef record from a connected Repo.
 
     Args:
-        state_store: Exact selected DirStore whose physical root owns the lock
-            namespace.
-        object_id: Exact core ``ObjectId`` for one stateful graph node.
+        state_repo: Borrowed Repo searched for retained exact StateRef records.
+        digest: Lowercase StateRef digest to resolve.
 
     Returns:
-        A path below ``managed/locks/v1/<hh>/`` named by a SHA-256 digest of the
-        canonical ObjectId encoding.
+        The one consistent retained StateRef value.
 
     Raises:
-        ManagedStoreError: If the Store root or ObjectId cannot supply managed
-            lifetime ownership.
+        ManagedRecoveryError: If records are missing, malformed, or disagree.
 
     Side Effects:
-        None. This function never creates a namespace or opens a lock file.
+        Reads connected Stores only and never creates or changes authority.
     """
 
-    root = _state_store_root(state_store)[0]
-    digest = _object_lock_digest(object_id)
-    return os.path.join(root, "managed", "locks", "v1", digest[:2], digest + ".lock")
-
-
-def _acquire_state_locks(state_store: DirStore, object_ids) -> _StateStoreLockLease:
-    """Acquire every selected state-Store ObjectId lock nonblockingly.
-
-    Args:
-        state_store: Exact DirStore selected as Object-state authority.
-        object_ids: Iterable of exact stateful ``ObjectId`` values.
-
-    Returns:
-        A retained, process/thread-bound lease covering the deduplicated canonical
-        ObjectId order.
-
-    Raises:
-        ManagedConflictError: If any lock is already held by a cooperating owner.
-        ManagedStoreError: If no stateful identities are supplied, bootstrap fails,
-            or native lock support encounters a non-contention failure.
-
-    Side Effects:
-        Initializes the selected state Store's closed ``managed/`` format gate
-        before creating lock files. Partial acquisition is released in reverse
-        order, so a failure never leaves a subset of this operation's leases held.
-    """
-
-    ordered = _ordered_object_ids(object_ids)
-    if not ordered:
-        raise ManagedStoreError("stateful_graph_required", "managed ownership requires at least one stateful ObjectId")
-    _initialize_state_lock_namespace(state_store)
-    leases = []
-    try:
-        for object_id in ordered:
-            lease = FileLock(_state_lock_path(state_store, object_id))
-            if not lease.acquire(blocking=False):
-                raise ManagedConflictError("state_lock_conflict", "managed state lock is already held")
-            leases.append(lease)
-    except BaseException as error:
-        cleanup_error = None
-        for lease in reversed(leases):
-            try:
-                lease.release()
-            except LockError as caught:
-                if cleanup_error is None:
-                    cleanup_error = caught
-        if cleanup_error is not None:
-            raise ManagedStoreError("state_lock_release_failed", "could not release partial managed state ownership") from cleanup_error
-        if isinstance(error, ManagedConflictError):
-            raise
-        if isinstance(error, LockError):
-            raise ManagedStoreError("state_lock_unavailable", "could not acquire managed state ownership") from error
-        raise
-    return _StateStoreLockLease(state_store, ordered, tuple(leases))
-
-
-def _acquire_state_ownership(repo: Repo, obj: object, state_store: DirStore) -> _ManagedStateOwnership:
-    """Reserve one live graph and lease all of its selected state-Store ObjectIds.
-
-    Args:
-        repo: Repo owning live graph preflight and process-local reservation.
-        obj: Live graph root whose stateful descendants require ownership.
-        state_store: Explicit DirStore selected for all managed Object-state work.
-
-    Returns:
-        A combined owner token that must remain active for the complete future
-        managed invocation.
-
-    Raises:
-        ManagedConflictError: If the live graph or any selected state lock is
-            already owned, or a token is used by another thread/process.
-        ManagedStoreError: If pending initial-construction claims require another
-            physical state Store or the selected Store cannot support ownership.
-
-    Side Effects:
-        Acquires a core reservation followed by all selected state-Store locks.
-        Any later acquisition failure releases the reservation without consuming or
-        abandoning caller-owned first-construction claims.
-    """
-
-    if not isinstance(repo, Repo):
-        raise TypeError("managed state ownership requires a Repo")
-    _, nodes, object_ids = repo._state_graph_evidence(obj)
-    _validate_pending_claim_stores(nodes, state_store)
-    try:
-        reservation = repo.reserve_state_graph(obj)
-    except RepoSaveError as error:
-        raise ManagedConflictError("state_graph_conflict", str(error)) from error
-    try:
-        state_locks = _acquire_state_locks(state_store, object_ids)
-    except BaseException:
-        reservation.release()
-        raise
-    return _ManagedStateOwnership(reservation, state_locks)
-
-
-def _probe_state_ownership(state_store: DirStore, object_ids) -> bool:
-    """Return whether every requested managed state lock is presently available.
-
-    Args:
-        state_store: Selected state authority containing the managed lock namespace.
-        object_ids: Iterable of stateful ObjectIds addressed by an inspected owner.
-
-    Returns:
-        ``True`` only when all leases were acquired and then released. ``False``
-        denotes contention and is deliberately inconclusive about a specific
-        control-snapshot owner.
-
-    Raises:
-        ManagedStoreError: If no valid initialized managed lock namespace exists
-            or a native lock failure prevents a reliable probe.
-
-    Side Effects:
-        Briefly opens then releases every requested FileLock. It performs no
-        control mutation and never interprets contention as process death.
-    """
-
-    _require_state_lock_namespace(state_store)
-    try:
-        lease = _acquire_state_locks(state_store, object_ids)
-    except ManagedConflictError:
-        return False
-    lease.release()
-    return True
-
-
-def _resolve_session_state_store(obj: object) -> DirStore:
-    """Choose the sole physical Store or a unique exact-current StateRef match."""
-
-    repo = current_repo()
-    if repo is None:
-        raise ManagedStoreError("explicit_state_store_required", "no current Repo; supply state_store explicitly")
-    stores = tuple(getattr(repo, "stores", ()))
-    if not stores:
-        raise ManagedStoreError("explicit_state_store_required", "current Repo has no Stores; supply state_store explicitly")
-    if any(type(store) is not DirStore for store in stores):
-        raise ManagedStoreError("explicit_state_store_required", "current Repo has a non-DirStore authority; supply state_store explicitly")
-    physical = _deduplicate_roots(stores)
-    if len(physical) == 1:
-        return physical[0]
-    state_ref = getattr(obj, "last_state_ref", None)
-    if type(state_ref) is not StateRef:
-        raise ManagedStoreError("explicit_state_store_required", "multiple Stores require one exact current StateRef match")
     matches = []
-    for store in physical:
-        try:
-            validate_state_ref(store, state_ref)
-        except ManagedRecoveryError as error:
-            if error.__cause__ is not None:
-                raise ManagedStoreError("state_store_unreadable", "could not inspect a current Repo Store") from error
-            continue
-        except BaseException as error:
-            raise ManagedStoreError("state_store_unreadable", "could not inspect a current Repo Store") from error
-        matches.append(store)
-    if len(matches) != 1:
-        raise ManagedStoreError("explicit_state_store_required", "multiple Stores require exactly one full exact StateRef match")
+    for store in state_repo.stores:
+        record = store.read_state_ref_record(digest)
+        if record is not None:
+            if type(record.state_ref) is not StateRef or record.state_ref.digest() != digest:
+                raise ManagedRecoveryError("invalid_state_reference", "state Repo has malformed retained StateRef authority")
+            matches.append(record.state_ref)
+    if not matches or any(item != matches[0] for item in matches[1:]):
+        raise ManagedRecoveryError("missing_state_reference", "state Repo lacks one consistent retained StateRef")
     return matches[0]
 
 
-def _deduplicate_roots(stores: tuple[DirStore, ...]) -> tuple[DirStore, ...]:
-    """Return one handle per canonical physical DirStore root in stable order."""
+def ownership_evidence(repo: Repo, object_ids) -> dict[str, object]:
+    """Return closed hashed physical topology evidence for one state lock set.
 
+    Args:
+        repo: Borrowed Repo whose connected physical Store set is captured.
+        object_ids: Stateful exact ObjectIds included in the managed graph.
+
+    Returns:
+        A v1 mapping of sorted unique SHA-256 Store and ObjectId lock keys.
+
+    Raises:
+        ManagedStoreError: If the Repo, Store topology, ObjectIds, or size bounds
+            cannot support managed ownership.
+
+    Side Effects:
+        Inspects persistent Store identity only; it does not create namespaces or
+        acquire locks.
+    """
+
+    stores = _physical_stores(repo)
+    objects = _ordered_object_ids(object_ids)
+    if not objects:
+        raise ManagedStoreError("stateful_graph_required", "managed ownership requires at least one stateful ObjectId")
+    if len(stores) > _MAX_STORES or len(objects) > _MAX_OBJECTS or len(stores) * len(objects) > _MAX_PAIRS:
+        raise ManagedStoreError("ownership_bounds", "managed ownership topology exceeds its supported bounds")
+    return {
+        "version": 1,
+        "store_keys": sorted(_store_key(store) for store in stores),
+        "object_keys": sorted(_object_lock_digest(object_id) for object_id in objects),
+    }
+
+
+def _physical_stores(repo: Repo) -> tuple[Store, ...]:
+    """Return one supported handle per physical Store in stable connected order."""
+
+    if not isinstance(repo, Repo):
+        raise ManagedStoreError("invalid_state_repo", "managed state authority requires a Repo")
     selected = []
     seen = set()
-    for store in stores:
-        try:
-            root = os.path.realpath(store.base_dir)
-            stat_result = os.stat(root)
-        except OSError as error:
-            raise ManagedStoreError("state_store_unreadable", "could not inspect current Repo Store root") from error
-        key = (root, stat_result.st_dev, stat_result.st_ino)
-        if key not in seen:
-            seen.add(key)
-            selected.append(store)
+    for store in tuple(repo.stores):
+        key = _physical_store_key(store)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(store)
+    if not selected:
+        raise ManagedStoreError("state_repo_empty", "state_repo has no connected Stores")
     return tuple(selected)
 
 
-def _state_store_root(store: DirStore) -> tuple[str, int, int]:
-    """Return the canonical physical state-Store root identity for lock paths."""
+def _physical_store_key(store: Store):
+    """Return one supported canonical physical Store identity."""
 
-    if type(store) is not DirStore:
-        raise ManagedStoreError("invalid_state_store", "managed state locks require an exact DirStore")
     try:
-        root = os.path.realpath(store.base_dir)
-        evidence = os.stat(root)
-    except OSError as error:
-        raise ManagedStoreError("state_store_unreadable", "could not inspect the selected state Store root") from error
-    if not stat.S_ISDIR(evidence.st_mode):
-        raise ManagedStoreError("invalid_state_store", "selected state Store root is not a directory")
-    return root, evidence.st_dev, evidence.st_ino
+        key = Repo._physical_store_key(store)
+    except (OSError, ValueError) as error:
+        raise ManagedStoreError("state_store_unreadable", "could not inspect a managed state Store") from error
+    if key is None:
+        raise ManagedStoreError("unsupported_state_store", "managed ownership requires a direct DirStore or path-backed ZipStore")
+    return key
+
+
+def _store_key(store: Store) -> str:
+    """Hash canonical physical Store identity without serializing its location."""
+
+    key = _physical_store_key(store)
+    payload = b"\0".join(str(item).encode("utf-8") for item in key)
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _object_lock_digest(object_id: object) -> str:
-    """Encode an exact ObjectId as the durable lock-file digest component."""
+    """Return the SHA-256 lock namespace key for one exact ObjectId."""
 
     if type(object_id) is not ObjectId:
         raise ManagedStoreError("invalid_object_id", "managed state locks require exact ObjectId values")
@@ -500,50 +355,351 @@ def _object_lock_digest(object_id: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _ordered_object_ids(object_ids) -> tuple[object, ...]:
-    """Deduplicate and sort ObjectIds by their full canonical lock digest."""
+def _ordered_object_ids(object_ids) -> tuple[ObjectId, ...]:
+    """Deduplicate exact ObjectIds in deterministic lock-name order."""
 
-    pairs = {}
-    for object_id in object_ids:
-        pairs[_object_lock_digest(object_id)] = object_id
-    return tuple(pairs[digest] for digest in sorted(pairs))
+    pairs = {_object_lock_digest(object_id): object_id for object_id in object_ids}
+    return tuple(pairs[key] for key in sorted(pairs))
 
 
-def _initialize_state_lock_namespace(state_store: DirStore) -> None:
-    """Bootstrap a state-only managed lock namespace through the U4 gate protocol."""
+def _state_lock_path(store: Store, object_id: object) -> str:
+    """Return the canonical external lifetime lock path for one Store/ObjectId."""
 
-    from .control import ManagedControlStore
-
-    ManagedControlStore(state_store, state_store).initialize()
+    return _state_lock_path_for_key(store, _object_lock_digest(object_id))
 
 
-def _require_state_lock_namespace(state_store: DirStore) -> None:
-    """Require an existing valid state lock gate without creating control authority."""
+def _state_lock_path_for_key(store: Store, digest: str) -> str:
+    """Return one canonical lifetime lock path for a retained ObjectId digest."""
 
-    from .control import ManagedControlStore
-
-    adapter = ManagedControlStore(state_store, state_store)
-    if not adapter._namespace_present():
-        raise ManagedStoreError("missing_state_lock_namespace", "managed state lock namespace has not been initialized")
+    return os.path.join(_state_lock_namespace(store), digest[:2], digest + ".lock")
 
 
-def _validate_pending_claim_stores(nodes: tuple[object, ...], state_store: DirStore) -> None:
-    """Reject managed cross-Store initial claims before any reservation or save."""
+def _state_lock_root(store: Store) -> str:
+    """Return the persistent managed namespace root after Store identity checks."""
 
-    selected = _state_store_root(state_store)
+    if type(store) is DirStore:
+        root, _, _ = _dir_root(store)
+        return os.path.join(root, "managed")
+    if type(store) is ZipStore:
+        archive = store.archive_path
+        if archive is None:
+            raise ManagedStoreError("unsupported_state_store", "managed ownership requires a path-backed ZipStore")
+        parent = os.path.dirname(os.path.normcase(os.path.realpath(archive))) or "."
+        try:
+            evidence = os.stat(parent)
+        except OSError as error:
+            raise ManagedStoreError("state_store_unreadable", "could not inspect a managed ZipStore parent") from error
+        if not stat.S_ISDIR(evidence.st_mode):
+            raise ManagedStoreError("invalid_state_store", "managed ZipStore parent is not a directory")
+        return f"{os.path.normcase(os.path.realpath(archive))}.dryml-managed"
+    raise ManagedStoreError("unsupported_state_store", "managed ownership requires a direct DirStore or path-backed ZipStore")
+
+
+def _state_lock_namespace(store: Store) -> str:
+    """Return the v1 lifetime-lock namespace without creating it."""
+
+    return os.path.join(_state_lock_root(store), "locks", "v1")
+
+
+def _dir_root(store: DirStore):
+    """Validate and return canonical direct-Store root evidence."""
+
+    try:
+        root = os.path.normcase(os.path.realpath(store.base_dir))
+        evidence = os.stat(root)
+    except OSError as error:
+        raise ManagedStoreError("state_store_unreadable", "could not inspect a managed state Store root") from error
+    if not stat.S_ISDIR(evidence.st_mode):
+        raise ManagedStoreError("invalid_state_store", "managed state Store root is not a directory")
+    return root, evidence.st_dev, evidence.st_ino
+
+
+def _bootstrap_state_lock_namespaces(stores: tuple[Store, ...], ownership: Mapping[str, object]) -> None:
+    """Create valid v1 namespaces only while admitting a new state owner."""
+
+    expected_keys = _canonical_ownership(ownership)["store_keys"]
+    for store, expected_key in zip(stores, expected_keys, strict=True):
+        if _store_key(store) != expected_key:
+            raise ManagedRecoveryError("ownership_store_changed", "state Store identity changed during ownership admission")
+        root = _state_lock_root(store)
+        try:
+            mode = os.lstat(root).st_mode
+        except FileNotFoundError:
+            try:
+                os.makedirs(root, mode=0o700, exist_ok=False)
+                _write_state_namespace_format(os.path.join(root, "format.json"))
+            except FileExistsError:
+                # A concurrent owner may have installed the shared namespace.
+                _validate_state_lock_namespace(store, expected_key)
+            except OSError as error:
+                raise ManagedStoreError("state_lock_namespace_bootstrap_failed", "could not create managed state lock namespace") from error
+        except OSError as error:
+            raise ManagedStoreError("state_lock_namespace_unavailable", "could not inspect managed state lock namespace") from error
+        else:
+            if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+                raise ManagedStoreError("invalid_state_lock_namespace", "managed state lock namespace root is not a directory")
+            _validate_state_namespace_format(root)
+        try:
+            os.makedirs(_state_lock_namespace(store), mode=0o700, exist_ok=True)
+        except OSError as error:
+            raise ManagedStoreError("state_lock_namespace_bootstrap_failed", "could not create managed state lock namespace") from error
+        _validate_state_lock_namespace(store, expected_key)
+
+
+def _validate_state_lock_namespaces(stores: tuple[Store, ...], ownership: Mapping[str, object]) -> None:
+    """Require retained lock namespaces without creating recovery evidence."""
+
+    expected_keys = _canonical_ownership(ownership)["store_keys"]
+    for store, expected_key in zip(stores, expected_keys, strict=True):
+        _validate_state_lock_namespace(store, expected_key)
+
+
+def _validate_state_lock_namespace(store: Store, expected_key: str) -> None:
+    """Validate one stable, versioned lock namespace for a read-only probe."""
+
+    if _store_key(store) != expected_key:
+        raise ManagedRecoveryError("ownership_store_changed", "state Store identity changed during owner probe")
+    root = _state_lock_root(store)
+    _require_directory(root, "managed state lock namespace")
+    _validate_state_namespace_format(root)
+    _require_directory(os.path.join(root, "locks"), "managed state lock hierarchy")
+    _require_directory(os.path.join(root, "locks", "v1"), "managed state lock version namespace")
+    if _store_key(store) != expected_key:
+        raise ManagedRecoveryError("ownership_store_changed", "state Store identity changed during owner probe")
+
+
+def _require_directory(path: str, label: str) -> None:
+    """Require one non-symlink directory without treating absence as available."""
+
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError as error:
+        raise ManagedRecoveryError("state_lock_namespace_missing", f"{label} is absent") from error
+    except OSError as error:
+        raise ManagedStoreError("state_lock_namespace_unavailable", f"could not inspect {label}") from error
+    if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+        raise ManagedRecoveryError("invalid_state_lock_namespace", f"{label} is not a directory")
+
+
+def _write_state_namespace_format(path: str) -> None:
+    """Install the shared managed format gate while creating a new namespace."""
+
+    payload = canonical_json_bytes(
+        {"schema": "dryml-managed", "version": 1},
+        max_depth=1, max_nodes=4, max_entries=2, max_string=64, max_int_bits=8,
+    )
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        _validate_state_namespace_format(os.path.dirname(path))
+        return
+    try:
+        written = os.write(fd, payload)
+        if written != len(payload):
+            raise OSError("managed state namespace format write was incomplete")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _validate_state_namespace_format(root: str) -> None:
+    """Require the exact shared managed format gate without bootstrapping it."""
+
+    path = os.path.join(root, "format.json")
+    try:
+        mode = os.lstat(path).st_mode
+        if not stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+            raise ManagedRecoveryError("invalid_state_lock_namespace", "managed state namespace format is not a regular file")
+        with open(path, "rb") as stream:
+            payload = stream.read(4096)
+    except ManagedRecoveryError:
+        raise
+    except FileNotFoundError as error:
+        raise ManagedRecoveryError("state_lock_namespace_missing", "managed state namespace format is absent") from error
+    except OSError as error:
+        raise ManagedStoreError("state_lock_namespace_unavailable", "could not read managed state namespace format") from error
+    try:
+        data = canonical_json_load_bytes(payload, max_depth=1, max_nodes=4, max_entries=2, max_string=64, max_int_bits=8)
+    except CanonicalJSONError as error:
+        raise ManagedRecoveryError("invalid_state_lock_namespace", "managed state namespace format is malformed") from error
+    if (
+            not hasattr(data, "keys")
+            or set(data) != {"schema", "version"}
+            or data["schema"] != "dryml-managed"
+            or type(data["version"]) is not int
+            or data["version"] != 1):
+        raise ManagedRecoveryError("invalid_state_lock_namespace", "managed state namespace format is unsupported")
+
+
+def _require_existing_lock_paths(paths) -> None:
+    """Require every retained lock file before a non-creating availability probe."""
+
+    for path, _, _ in paths:
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError as error:
+            raise ManagedRecoveryError("state_lock_evidence_missing", "retained managed state lock evidence is absent") from error
+        except OSError as error:
+            raise ManagedStoreError("state_lock_unavailable", "could not inspect retained managed state lock evidence") from error
+        if not stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+            raise ManagedRecoveryError("invalid_state_lock_namespace", "retained managed state lock evidence is not a regular file")
+
+
+def _acquire_state_locks(repo: Repo, object_ids, *, ownership=None) -> _StateStoreLockLease:
+    """Acquire every physical Store/ObjectId lock nonblockingly and atomically."""
+
+    ordered_objects = _ordered_object_ids(object_ids)
+    evidence = ownership_evidence(repo, ordered_objects) if ownership is None else _canonical_ownership(ownership)
+    if tuple(_object_lock_digest(object_id) for object_id in ordered_objects) != tuple(evidence["object_keys"]):
+        raise ManagedRecoveryError("ownership_mismatch", "captured ObjectIds do not match retained ownership evidence")
+    stores = _stores_for_ownership(repo, evidence)
+    _bootstrap_state_lock_namespaces(stores, evidence)
+    return _acquire_lock_paths(
+        ((_state_lock_path_for_key(store, object_key), store, object_key)
+         for store in stores for object_key in evidence["object_keys"]),
+        ordered_objects,
+        create=True,
+    )
+
+
+def _acquire_lock_paths(paths, object_ids, *, create: bool) -> _StateStoreLockLease:
+    """Acquire a supplied deterministic lock-path set or release every partial lease."""
+
+    paths = sorted(paths, key=lambda item: item[0])
+    if not create:
+        _require_existing_lock_paths(paths)
+    leases = []
+    try:
+        for path, _, _ in paths:
+            if create:
+                os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            lease = FileLock(path)
+            if not lease.acquire(blocking=False):
+                raise ManagedConflictError("state_lock_conflict", "managed state lock is already held")
+            leases.append(lease)
+    except BaseException as error:
+        cleanup_error = None
+        for lease in reversed(leases):
+            try:
+                lease.release()
+            except LockError as caught:
+                cleanup_error = cleanup_error or caught
+        if cleanup_error is not None:
+            raise ManagedStoreError("state_lock_release_failed", "could not release partial managed state ownership") from cleanup_error
+        if isinstance(error, ManagedConflictError):
+            raise
+        if isinstance(error, (LockError, OSError)):
+            raise ManagedStoreError("state_lock_unavailable", "could not acquire managed state ownership") from error
+        raise
+    return _StateStoreLockLease(tuple(object_ids), tuple(leases))
+
+
+def _acquire_state_ownership(repo: Repo, obj: object, *, expected_ownership=None) -> _ManagedStateOwnership:
+    """Retain core graph/topology claims and every physical state lock pair."""
+
+    if not isinstance(repo, Repo):
+        raise TypeError("managed state ownership requires a Repo")
+    topology = repo.retain_topology()
+    topology.__enter__()
+    try:
+        try:
+            plan, nodes, object_ids = repo._state_graph_evidence(obj)
+        except RepoSaveError as error:
+            raise ManagedRecoveryError("invalid_target", "managed target requires a fresh exact load") from error
+        evidence = ownership_evidence(repo, object_ids)
+        if expected_ownership is not None and _canonical_ownership(evidence) != _canonical_ownership(expected_ownership):
+            raise ManagedRecoveryError("ownership_mismatch", "live receiver topology does not match retained running ownership")
+        _validate_pending_claim_stores(nodes, repo)
+        try:
+            reservation = repo._reserve_state_graph_evidence(plan, nodes, object_ids)
+        except RepoSaveError as error:
+            raise ManagedConflictError("state_graph_conflict", str(error)) from error
+        try:
+            state_locks = _acquire_state_locks(repo, object_ids, ownership=evidence)
+        except BaseException:
+            reservation.release()
+            raise
+    except BaseException:
+        topology.__exit__(None, None, None)
+        raise
+    return _ManagedStateOwnership(reservation, topology, state_locks, evidence)
+
+
+def _probe_state_ownership(repo: Repo, ownership: Mapping[str, object]) -> bool:
+    """Probe exactly retained lock pairs; contention remains inconclusive.
+
+    Current control authority contains hashes rather than reconstructable ObjectIds.
+    A probe therefore maps its retained Store keys to the supplied Repo and uses the
+    retained Object keys directly for filenames.  It must not infer a smaller graph
+    from the caller's current receiver before declaring an owner absent.
+    """
+
+    stores = _stores_for_ownership(repo, ownership)
+    evidence = _canonical_ownership(ownership)
+    object_keys = evidence["object_keys"]
+    _validate_state_lock_namespaces(stores, evidence)
+    try:
+        lease = _acquire_lock_paths(
+            ((_state_lock_path_for_key(store, object_key), store, object_key)
+             for store in stores for object_key in object_keys),
+            (),
+            create=False,
+        )
+    except ManagedConflictError:
+        return False
+    lease.release()
+    return True
+
+
+def _stores_for_ownership(repo: Repo, ownership: Mapping[str, object]) -> tuple[Store, ...]:
+    """Map every retained hashed Store key to one physical connected Store."""
+
+    expected = _canonical_ownership(ownership)["store_keys"]
+    available = {_store_key(store): store for store in _physical_stores(repo)}
+    if any(key not in available for key in expected):
+        raise ManagedRecoveryError("ownership_store_missing", "state_repo does not map every retained ownership key")
+    return tuple(available[key] for key in expected)
+
+
+def _canonical_ownership(ownership: Mapping[str, object]) -> dict[str, object]:
+    """Validate all bounded v1 ownership fields before any lock side effects."""
+
+    if (
+            not isinstance(ownership, Mapping)
+            or set(ownership) != {"version", "store_keys", "object_keys"}
+            or type(ownership.get("version")) is not int
+            or ownership["version"] != 1):
+        raise ManagedRecoveryError("invalid_ownership", "retained managed ownership evidence is malformed")
+    stores = ownership["store_keys"]
+    objects = ownership["object_keys"]
+    if type(stores) not in (list, tuple) or type(objects) not in (list, tuple):
+        raise ManagedRecoveryError("invalid_ownership", "retained managed ownership keys are malformed")
+    if not stores or not objects or len(stores) > _MAX_STORES or len(objects) > _MAX_OBJECTS or len(stores) * len(objects) > _MAX_PAIRS:
+        raise ManagedRecoveryError("invalid_ownership", "retained managed ownership topology is outside supported bounds")
+    store_keys, object_keys = tuple(stores), tuple(objects)
+    if any(type(key) is not str or len(key) != 64 or any(char not in "0123456789abcdef" for char in key) for key in (*store_keys, *object_keys)):
+        raise ManagedRecoveryError("invalid_ownership", "retained managed ownership keys are malformed")
+    if store_keys != tuple(sorted(set(store_keys))) or object_keys != tuple(sorted(set(object_keys))):
+        raise ManagedRecoveryError("invalid_ownership", "retained managed ownership keys are malformed")
+    return {"version": 1, "store_keys": store_keys, "object_keys": object_keys}
+
+
+def _validate_pending_claim_stores(nodes: tuple[object, ...], repo: Repo) -> None:
+    """Reject pending claims whose physical Store is outside retained topology."""
+
+    connected = {_physical_store_key(store) for store in _physical_stores(repo)}
     for node in nodes:
         leases = list(getattr(node, "_claim_leases", ()))
         lease = getattr(node, "_claim_lease", None)
         if lease is not None and lease not in leases:
             leases.append(lease)
         for claim in leases:
-            claim_store = getattr(claim, "store", None)
-            if claim_store is not None and _state_store_root(claim_store) != selected:
-                raise ManagedStoreError("initial_claim_state_store_mismatch", "pending initial state claims require their declaration Store")
+            if claim.store is not None and _physical_store_key(claim.store) not in connected:
+                raise ManagedStoreError("initial_claim_state_store_mismatch", "pending initial state claims require a connected declaration Store")
 
 
-def _require_publication(store: DirStore, operation: str, *, local_state: bool) -> None:
-    """Translate Store capability failures to a managed boundary error."""
+def _require_publication(store: Store, operation: str, *, local_state: bool) -> None:
+    """Translate Store capability failure at the managed boundary."""
 
     try:
         store.preflight_publication(operation, local_state=local_state)
@@ -551,8 +707,4 @@ def _require_publication(store: DirStore, operation: str, *, local_state: bool) 
         raise ManagedStoreError("store_capability_unavailable", f"{operation} is unavailable") from error
 
 
-__all__ = [
-    "ResolvedStores",
-    "resolve_stores",
-    "validate_state_ref",
-]
+__all__ = ["ResolvedStores", "ownership_evidence", "resolve_stores", "state_ref_for_digest", "validate_state_ref"]

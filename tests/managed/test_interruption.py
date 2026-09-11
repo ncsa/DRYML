@@ -81,7 +81,7 @@ class NestedCallerValue(Pickleable):
     def call_nested(self, *, managed):
         """Allow a disjoint public interruption to escape this ordinary method."""
 
-        type(self).target.stop(managed=ManagedConfig(state_store=managed.state_store))
+        type(self).target.stop(managed=ManagedConfig(state_repo=managed.state_repo))
 
 
 def test_explicit_interrupt_associates_checkpoint_then_preserves_exact_cause(tmp_path):
@@ -93,9 +93,9 @@ def test_explicit_interrupt_associates_checkpoint_then_preserves_exact_cause(tmp
     value.cause = cause
 
     with pytest.raises(ManagedInterrupted) as caught:
-        value.explicit(managed=ManagedConfig(state_store=store))
+        value.explicit(managed=ManagedConfig(state_repo=store))
     assert caught.value.__cause__ is cause
-    status = value.explicit.status(state_store=store)
+    status = value.explicit.status(state_repo=store)
     assert status.state == "interrupted"
     assert status.checkpoint_state_ref is not None
     assert status.final_state_ref is None
@@ -108,11 +108,11 @@ def test_external_request_is_honored_at_the_next_checkpoint(tmp_path):
     store = DirStore(tmp_path / "store")
     value = InterruptValue(repo=Repo((store,)))
     outcome = []
-    thread = Thread(target=lambda: outcome.append(pytest.raises(ManagedInterrupted, value.requested, managed=ManagedConfig(state_store=store)).value))
+    thread = Thread(target=lambda: outcome.append(pytest.raises(ManagedInterrupted, value.requested, managed=ManagedConfig(state_repo=store)).value))
     thread.start()
     try:
         assert InterruptValue.entered.wait(10)
-        assert value.requested.request_interrupt(state_store=store).outcome == "requested"
+        assert value.requested.request_interrupt(state_repo=store).outcome == "requested"
         InterruptValue.release.set()
         thread.join(10)
         assert not thread.is_alive()
@@ -120,7 +120,7 @@ def test_external_request_is_honored_at_the_next_checkpoint(tmp_path):
         InterruptValue.release.set()
         thread.join(10)
     assert type(outcome[0]) is ManagedInterrupted
-    assert value.requested.status(state_store=store).state == "interrupted"
+    assert value.requested.status(state_repo=store).state == "interrupted"
 
 
 def test_keyboard_interrupt_without_checkpoint_requires_explicit_rerun(tmp_path):
@@ -130,12 +130,12 @@ def test_keyboard_interrupt_without_checkpoint_requires_explicit_rerun(tmp_path)
     value = InterruptValue(repo=Repo((store,)))
 
     with pytest.raises(ManagedInterrupted) as caught:
-        value.keyboard(managed=ManagedConfig(state_store=store))
+        value.keyboard(managed=ManagedConfig(state_repo=store))
     assert type(caught.value.__cause__) is KeyboardInterrupt
-    status = value.keyboard.status(state_store=store)
+    status = value.keyboard.status(state_repo=store)
     assert (status.state, status.checkpoint_state_ref, status.final_state_ref) == ("interrupted", None, None)
     with pytest.raises(ManagedRerunRequiredError, match="rerun_required"):
-        value.keyboard(managed=ManagedConfig(state_store=store))
+        value.keyboard(managed=ManagedConfig(state_repo=store))
 
 
 def test_keyboard_interrupt_retains_checkpoint_for_resume_restoration(tmp_path):
@@ -145,12 +145,12 @@ def test_keyboard_interrupt_retains_checkpoint_for_resume_restoration(tmp_path):
     value = InterruptValue(repo=Repo((store,)))
 
     with pytest.raises(ManagedInterrupted) as caught:
-        value.keyboard_after_checkpoint(managed=ManagedConfig(state_store=store))
-    interrupted = value.keyboard_after_checkpoint.status(state_store=store)
+        value.keyboard_after_checkpoint(managed=ManagedConfig(state_repo=store))
+    interrupted = value.keyboard_after_checkpoint.status(state_repo=store)
     assert type(caught.value.__cause__) is KeyboardInterrupt
     assert (interrupted.state, interrupted.checkpoint_state_ref is not None, value.value) == ("interrupted", True, 2)
-    assert value.keyboard_after_checkpoint(managed=ManagedConfig(state_store=store)) == 1
-    assert (value.value, value.keyboard_after_checkpoint.status(state_store=store).state) == (1, "completed")
+    assert value.keyboard_after_checkpoint(managed=ManagedConfig(state_repo=store)) == 1
+    assert (value.value, value.keyboard_after_checkpoint.status(state_repo=store).state) == (1, "completed")
 
 
 def test_disjoint_nested_interruption_fails_the_enclosing_method(tmp_path):
@@ -162,11 +162,11 @@ def test_disjoint_nested_interruption_fails_the_enclosing_method(tmp_path):
     NestedCallerValue.target = nested
     try:
         with pytest.raises(ManagedInterrupted):
-            caller.call_nested(managed=ManagedConfig(state_store=store))
+            caller.call_nested(managed=ManagedConfig(state_repo=store))
     finally:
         NestedCallerValue.target = None
-    assert caller.call_nested.status(state_store=store).failure_code == "method_error"
-    assert nested.stop.status(state_store=store).state == "interrupted"
+    assert caller.call_nested.status(state_repo=store).failure_code == "method_error"
+    assert nested.stop.status(state_repo=store).state == "interrupted"
 
 
 def test_invalid_explicit_interrupt_cause_fails_before_checkpoint_mutation(tmp_path):
@@ -178,6 +178,6 @@ def test_invalid_explicit_interrupt_cause_fails_before_checkpoint_mutation(tmp_p
     value = InterruptValue(repo=Repo((store,)))
     callbacks = []
     with pytest.raises(ManagedContextError, match="invalid_cause"):
-        value.invalid_cause(managed=ManagedConfig(state_store=store, callbacks=[lambda *args: callbacks.append(args)]))
-    status = value.invalid_cause.status(state_store=store)
+        value.invalid_cause(managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: callbacks.append(args)]))
+    status = value.invalid_cause.status(state_repo=store)
     assert (value.value, callbacks, status.state, status.checkpoint_state_ref) == (0, [], "failed", None)

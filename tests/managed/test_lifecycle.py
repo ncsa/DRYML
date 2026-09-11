@@ -39,8 +39,8 @@ def test_start_deep_saves_completes_and_returns_the_ordinary_result(tmp_path):
     repo = Repo((store,))
     value = LifecycleValue(2, repo=repo)
 
-    assert value.add(3, managed=ManagedConfig(state_store=store)) == 5
-    status = value.add.status(state_store=store)
+    assert value.add(3, managed=ManagedConfig(state_repo=store)) == 5
+    status = value.add.status(state_repo=store)
     assert (status.state, status.generation) == ("completed", 2)
     assert status.attempt_id is not None
     assert status.final_state_ref == value.last_state_ref
@@ -106,7 +106,7 @@ def test_stateless_root_deep_saves_its_stateful_descendant(tmp_path):
     repo = Repo((store,))
     root = StatelessRoot(LifecycleValue(1, repo=repo), repo=repo)
 
-    assert root.add_child(4, managed=ManagedConfig(state_store=store)) == 5
+    assert root.add_child(4, managed=ManagedConfig(state_repo=store)) == 5
     assert root.last_state_ref is not None
     assert root.child.last_state_ref is None
 
@@ -118,8 +118,8 @@ def test_method_error_is_recorded_without_replacing_the_application_exception(tm
     value = FailingValue(repo=Repo((store,)))
 
     with pytest.raises(ValueError, match="application failure"):
-        value.fail(managed=ManagedConfig(state_store=store))
-    status = value.fail.status(state_store=store)
+        value.fail(managed=ManagedConfig(state_repo=store))
+    status = value.fail.status(state_repo=store)
     assert (status.state, status.failure_code) == ("failed", "method_error")
 
 
@@ -149,7 +149,7 @@ def test_indeterminate_failure_recording_is_chained_from_the_method_error(tmp_pa
 
     monkeypatch.setattr(ManagedControlStore, "_clear_intent_and_acknowledge", leave_failed_pending)
     with pytest.raises(ManagedPublicationError) as caught:
-        value.fail(managed=ManagedConfig(state_store=store))
+        value.fail(managed=ManagedConfig(state_repo=store))
     assert (caught.value.outcome, caught.value.__cause__) == ("indeterminate", value.error)
 
 
@@ -165,7 +165,7 @@ def test_late_request_does_not_stale_owner_completion_or_failure(tmp_path, membe
 
     def invoke():
         try:
-            outcome.append(operation(managed=ManagedConfig(state_store=store)))
+            outcome.append(operation(managed=ManagedConfig(state_repo=store)))
         except BaseException as error:
             outcome.append(error)
 
@@ -173,7 +173,7 @@ def test_late_request_does_not_stale_owner_completion_or_failure(tmp_path, membe
     worker.start()
     try:
         assert LateRequestValue.entered.wait(10)
-        assert operation.request_interrupt(state_store=store).outcome == "requested"
+        assert operation.request_interrupt(state_repo=store).outcome == "requested"
         LateRequestValue.release.set()
         worker.join(10)
         assert not worker.is_alive()
@@ -187,7 +187,7 @@ def test_late_request_does_not_stale_owner_completion_or_failure(tmp_path, membe
         assert len(outcome) == 1
         assert type(outcome[0]) is ValueError
         assert str(outcome[0]) == "late requested failure"
-    assert operation.status(state_store=store).state == expected
+    assert operation.status(state_repo=store).state == expected
 
 
 def test_indeterminate_completion_preserves_pending_authority_and_withholds_result(tmp_path, monkeypatch):
@@ -204,18 +204,18 @@ def test_indeterminate_completion_preserves_pending_authority_and_withholds_resu
 
     monkeypatch.setattr(ManagedControlStore, "_clear_intent_and_acknowledge", leave_completed_pending)
     with pytest.raises(ManagedPublicationError) as caught:
-        value.add(3, managed=ManagedConfig(state_store=store))
+        value.add(3, managed=ManagedConfig(state_repo=store))
     assert caught.value.outcome == "indeterminate"
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     # Inspection must remain blocked until exact pending reconciliation completes.
     with pytest.raises(ManagedControlError, match="pending_reconciliation"):
-        value.add.status(state_store=store)
+        value.add.status(state_repo=store)
     # Recover through the adapter without treating the ordinary return as delivered.
     from dryml.managed.identity import operation_digest
 
     monkeypatch.setattr(ManagedControlStore, "_clear_intent_and_acknowledge", original)
     control.reconcile(operation_digest(value.object_ref, "add"))
-    assert value.add.status(state_store=store).state == "completed"
+    assert value.add.status(state_repo=store).state == "completed"
 
 
 def test_final_save_failure_records_failed_without_a_completion_association(tmp_path, monkeypatch):
@@ -229,8 +229,8 @@ def test_final_save_failure_records_failed_without_a_completion_association(tmp_
 
     monkeypatch.setattr(Repo, "save_object", fail_final_save)
     with pytest.raises(OSError, match="state publication failed"):
-        value.add(3, managed=ManagedConfig(state_store=store))
-    status = value.add.status(state_store=store)
+        value.add(3, managed=ManagedConfig(state_repo=store))
+    status = value.add.status(state_repo=store)
     assert (status.state, status.failure_code, status.final_state_ref) == ("failed", "publication_error", None)
 
 
@@ -273,7 +273,7 @@ value = AdmissionValue(repo=Repo((store,)))
 session.set_mode("orchestrator")
 try:
     with pytest.raises(RuntimeTransitionError, match="prohibits Object materialization"):
-        value.run(managed=ManagedConfig(state_store=store))
+        value.run(managed=ManagedConfig(state_repo=store))
     assert AdmissionValue.calls == 0
 finally:
     session.reset()

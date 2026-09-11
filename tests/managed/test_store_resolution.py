@@ -24,11 +24,11 @@ def test_explicit_and_single_store_resolution_without_saved_state(tmp_path):
     state = DirStore(tmp_path / "state")
     control = DirStore(tmp_path / "control")
     obj = ResolutionValue()
-    assert resolve_stores(obj, state_store=state, control_store=control).control_store is control
-    assert resolve_stores(obj, state_store=state).control_store is state
+    assert resolve_stores(obj, state_repo=state, control_store=control).control_store is control
+    assert resolve_stores(obj, state_repo=state).control_store is state
     with config(repo=Repo((state,))):
         resolved = resolve_stores(obj)
-    assert resolved.state_store is state
+    assert resolved.state_repo is not None
     assert resolved.control_store is state
 
 
@@ -39,29 +39,18 @@ def test_same_physical_root_handles_are_one_default_store(tmp_path):
     second = DirStore(tmp_path / "shared")
     with config(repo=Repo((first, second))):
         resolved = resolve_stores(ResolutionValue())
-    assert resolved.state_store is first
+    assert resolved.state_repo.default_store is first
 
 
-def test_multistore_requires_one_valid_exact_current_receipt(tmp_path):
-    """Multi-Store discovery rejects zero/two matches and accepts one full closure."""
+def test_multistore_uses_the_current_repo_without_last_state_selection(tmp_path):
+    """Multi-Store discovery retains routing authority without receipt guessing."""
 
     first = DirStore(tmp_path / "first")
     second = DirStore(tmp_path / "second")
     repo = Repo((first, second))
     obj = ResolutionValue(repo=repo)
-    with config(repo=repo), pytest.raises(ManagedStoreError, match="exact current"):
-        resolve_stores(obj)
-    state = repo.save_object(obj, store=first, deep_capture=True)
-    assert state == obj.last_state_ref
     with config(repo=repo):
-        assert resolve_stores(obj).state_store is first
-    second_view = Repo._for_state_io((second,))
-    try:
-        second_view.save_object(obj, store=second, deep_capture=True)
-    finally:
-        second_view.close()
-    with config(repo=repo), pytest.raises(ManagedStoreError, match="exactly one"):
-        resolve_stores(obj)
+        assert resolve_stores(obj).state_repo is repo
 
 
 def test_missing_session_and_incomplete_selected_state_fail_before_mutation(tmp_path):
@@ -78,7 +67,7 @@ def test_missing_session_and_incomplete_selected_state_fail_before_mutation(tmp_
     # validation must not silently select an arbitrary Store or materialize it.
     __import__("os").unlink(state_path)
     with pytest.raises(Exception):
-        validate_state_ref(store, state)
+        validate_state_ref(repo, state)
 
 
 def test_explicit_types_and_stale_session_context_are_not_coerced(tmp_path):
@@ -86,8 +75,8 @@ def test_explicit_types_and_stale_session_context_are_not_coerced(tmp_path):
 
     store = DirStore(tmp_path / "store")
     with pytest.raises(ManagedStoreError):
-        resolve_stores(ResolutionValue(), state_store=object())
+        resolve_stores(ResolutionValue(), state_repo=object())
     with config(repo=Repo((store,))):
-        assert resolve_stores(ResolutionValue()).state_store is store
+        assert resolve_stores(ResolutionValue()).state_repo.default_store is store
     with pytest.raises(ManagedStoreError):
         resolve_stores(ResolutionValue())

@@ -37,27 +37,28 @@ class Counter(Pickleable):
 store = DirStore("./counter-store")
 counter = Counter(repo=Repo((store,)))
 try:
-    counter.advance(2, managed=ManagedConfig(state_store=store))
+    counter.advance(2, managed=ManagedConfig(state_repo=store))
 except ManagedInterrupted:
     raise
 ```
 
 The bound operation takes ordinary arguments plus reserved
 `managed: ManagedConfig | None`; method code receives a private
-`ManagedContext`, not the configuration. `ManagedConfig` accepts optional exact
-`DirStore` `state_store` and `control_store`, exact-bool `rerun`, and `callbacks`
+`ManagedContext`, not the configuration. `ManagedConfig` accepts a borrowed
+`Repo` or existing `Store` as `state_repo`, optional exact `DirStore`
+`control_store`, exact-bool `rerun`, and `callbacks`
 as `None` or a list of at most 64 callables. It is immutable, and invocation
 snapshots its caller-owned callback list without mutating or probing it.
 
-Bound operations expose `status(*, state_store=None, control_store=None)` and
-`request_interrupt(*, state_store=None, control_store=None,
+Bound operations expose `status(*, state_repo=None, control_store=None)` and
+`request_interrupt(*, state_repo=None, control_store=None,
 expected_attempt_id=None)`. Status does not run workload hooks and reports an
 immutable `ManagedStatus`: `not_started`, `running`, `interrupted`, `failed`, or
 `completed`. A request returns an immutable `InterruptRequestResult` with
 `requested`, `already_requested`, `not_running`, or `stale_attempt`; publication
 does not promise that another checkpoint will occur.
 
-The invocation-only context exposes read-only `state_store`, `control_store`,
+The invocation-only context exposes read-only `state_repo`, `control_store`,
 `operation_id`, `attempt_id`, `is_resuming`, and `checkpoint_state_ref`.
 `checkpoint()` publishes/associates a complete StateRef, while
 `interrupt(cause=None)` performs that safe point then raises `ManagedInterrupted`
@@ -74,12 +75,13 @@ container framing, before emitting a digest representation.
 
 ## Lifecycle And Recovery
 
-The persistence layer resolves explicit `DirStore` bindings, or an
-omitted state Store from `dryml.core.session.current_repo`: one physical Store is
-selected directly, while multiple physical Stores require exactly one full match
-for the live object's exact current `StateRef`. Omitted control authority uses
-the selected state Store. Resolution validates publication capabilities before
-mutation and never copies state, migrates control, or records a control locator.
+The persistence layer borrows an explicit `Repo`, wraps an explicit existing
+`Store` in a call-owned one-Store Repo, or uses the configured current Repo.
+Absent current authority fails without automatic storage creation or last-state
+Store selection. Omitted control authority uses the selected Repo's
+`default_store`, resolved once at operation entry. Resolution validates the
+physical state topology and control capability before mutation and never copies
+state, migrates control, or records a control locator.
 
 Managed control authority is a closed, bounded JSON layout rooted at
 `managed/` in the selected control Store. It uses a versioned format gate,

@@ -98,12 +98,12 @@ def test_callbacks_receive_exact_committed_receipt_in_list_order(tmp_path):
     observed = []
 
     def first(obj, context):
-        observed.append(("first", obj is value, context.checkpoint_state_ref, context.state_store))
+        observed.append(("first", obj is value, context.checkpoint_state_ref, context.state_repo))
 
     def second(obj, context):
         observed.append(("second", obj.value, context.checkpoint_state_ref))
 
-    checkpoint = value.run(managed=ManagedConfig(state_store=store, callbacks=[first, second]))
+    checkpoint = value.run(managed=ManagedConfig(state_repo=store, callbacks=[first, second]))
 
     assert observed == [
         ("first", True, checkpoint, store),
@@ -126,8 +126,8 @@ def test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails(tmp_p
         calls.append("late")
 
     with pytest.raises(RuntimeError, match="observer failed"):
-        value.run(managed=ManagedConfig(state_store=store, callbacks=[fail, never]))
-    status = value.run.status(state_store=store)
+        value.run(managed=ManagedConfig(state_repo=store, callbacks=[fail, never]))
+    status = value.run.status(state_repo=store)
     assert (status.state, status.failure_code) == ("failed", "callback_error")
     assert status.checkpoint_state_ref == calls[0]
     assert calls != ["late"]
@@ -146,8 +146,8 @@ def test_caught_callback_error_remains_terminal_without_final_state(tmp_path):
         raise error
 
     with pytest.raises(RuntimeError) as caught:
-        value.catch_callback_error(managed=ManagedConfig(state_store=store, callbacks=[fail]))
-    status = value.catch_callback_error.status(state_store=store)
+        value.catch_callback_error(managed=ManagedConfig(state_repo=store, callbacks=[fail]))
+    status = value.catch_callback_error.status(state_repo=store)
     assert caught.value is error
     assert value.caught_callback_error is error
     assert value.second_callback_error is error
@@ -164,7 +164,7 @@ def test_final_save_never_notifies_checkpoint_callbacks(tmp_path):
     value = CallbackValue(repo=Repo((store,)))
     calls = []
 
-    assert value.no_checkpoint(managed=ManagedConfig(state_store=store, callbacks=[lambda *args: calls.append(args)])) is None
+    assert value.no_checkpoint(managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: calls.append(args)])) is None
     assert calls == []
 
 
@@ -177,11 +177,11 @@ def test_callback_can_save_and_manage_a_disjoint_derived_object(tmp_path):
     derived = DerivedValue(repo=repo)
 
     def save_derived(obj, context):
-        assert derived.bump(managed=ManagedConfig(state_store=context.state_store)) is None
+        assert derived.bump(managed=ManagedConfig(state_repo=context.state_repo)) is None
 
-    value.run(managed=ManagedConfig(state_store=store, callbacks=[save_derived]))
+    value.run(managed=ManagedConfig(state_repo=store, callbacks=[save_derived]))
     assert derived.value == 1
-    assert derived.bump.status(state_store=store).state == "completed"
+    assert derived.bump.status(state_repo=store).state == "completed"
 
 
 def test_callback_cannot_begin_an_overlapping_managed_operation(tmp_path):
@@ -193,10 +193,10 @@ def test_callback_cannot_begin_an_overlapping_managed_operation(tmp_path):
 
     def overlap(obj, context):
         with pytest.raises(ManagedConflictError) as caught:
-            value.no_checkpoint(managed=ManagedConfig(state_store=context.state_store))
+            value.no_checkpoint(managed=ManagedConfig(state_repo=context.state_repo))
         errors.append(caught.value.reason)
 
-    value.run(managed=ManagedConfig(state_store=store, callbacks=[overlap]))
+    value.run(managed=ManagedConfig(state_repo=store, callbacks=[overlap]))
     assert errors == ["state_graph_conflict"]
 
 
@@ -208,12 +208,12 @@ def test_request_arriving_during_callbacks_is_honored_at_that_checkpoint(tmp_pat
     outcomes = []
 
     def request(obj, context):
-        outcomes.append(obj.run.request_interrupt(state_store=context.state_store).outcome)
+        outcomes.append(obj.run.request_interrupt(state_repo=context.state_repo).outcome)
 
     with pytest.raises(ManagedInterrupted):
-        value.run(managed=ManagedConfig(state_store=store, callbacks=[request]))
+        value.run(managed=ManagedConfig(state_repo=store, callbacks=[request]))
     assert outcomes == ["requested"]
-    assert value.run.status(state_store=store).state == "interrupted"
+    assert value.run.status(state_repo=store).state == "interrupted"
 
 
 def test_request_after_callback_decision_waits_for_the_next_checkpoint(tmp_path, monkeypatch):
@@ -225,12 +225,12 @@ def test_request_after_callback_decision_waits_for_the_next_checkpoint(tmp_path,
 
     def request_after_decision(stage):
         if stage == "interruption_decided" and not outcomes:
-            outcomes.append(value.twice.request_interrupt(state_store=store).outcome)
+            outcomes.append(value.twice.request_interrupt(state_repo=store).outcome)
 
     monkeypatch.setattr(context_module, "_checkpoint_boundary", request_after_decision)
     with pytest.raises(ManagedInterrupted):
-        value.twice(managed=ManagedConfig(state_store=store))
-    status = value.twice.status(state_store=store)
+        value.twice(managed=ManagedConfig(state_repo=store))
+    status = value.twice.status(state_repo=store)
     assert outcomes == ["requested"]
     assert (status.state, status.checkpoint_state_ref is not None) == ("interrupted", True)
 
@@ -245,9 +245,9 @@ def test_caught_local_interruption_remains_terminal_and_rejects_safe_points(tmp_
 
     with pytest.raises(ManagedInterrupted):
         value.catch_terminal_interrupt(
-            managed=ManagedConfig(state_store=store, callbacks=[lambda *args: callbacks.append(args)]),
+            managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: callbacks.append(args)]),
         )
-    status = value.catch_terminal_interrupt.status(state_store=store)
+    status = value.catch_terminal_interrupt.status(state_repo=store)
     assert value.rejected_safe_points == ["inactive_context", "inactive_context"]
     assert len(callbacks) == 1
     assert (status.state, status.final_state_ref) == ("interrupted", None)

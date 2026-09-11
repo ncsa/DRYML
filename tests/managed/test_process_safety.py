@@ -24,7 +24,7 @@ class ProcessValue(Serializable):
 def _hold_locks_then_exit(root, object_ids, ready, release):
     """Spawn target retaining state leases until deliberate process exit."""
 
-    lease = _acquire_state_locks(DirStore(root), object_ids)
+    lease = _acquire_state_locks(Repo((DirStore(root),)), object_ids)
     assert lease.active
     ready.set()
     assert release.wait(10)
@@ -44,11 +44,11 @@ def test_spawned_owner_exit_releases_all_managed_state_locks(tmp_path):
     try:
         assert ready.wait(10)
         with pytest.raises(Exception):
-            _acquire_state_locks(DirStore(root), object_ids)
+            _acquire_state_locks(Repo((DirStore(root),)), object_ids)
         release.set()
         owner.join(10)
         assert owner.exitcode == 0
-        lease = _acquire_state_locks(DirStore(root), object_ids)
+        lease = _acquire_state_locks(Repo((DirStore(root),)), object_ids)
         lease.release()
     finally:
         release.set()
@@ -64,14 +64,14 @@ def test_forked_managed_token_cannot_release_parent_or_bypass_parent_lock(tmp_pa
     store = DirStore(tmp_path / "state")
     repo = Repo((store,))
     obj = ProcessValue(1, repo=repo)
-    owner = _acquire_state_ownership(repo, obj, store)
+    owner = _acquire_state_ownership(repo, obj)
     read_fd, write_fd = os.pipe()
     child = os.fork()
     if child == 0:
         os.close(read_fd)
         try:
             try:
-                contender = _acquire_state_locks(store, owner.object_ids)
+                contender = _acquire_state_locks(repo, owner.object_ids)
             except ManagedConflictError:
                 acquired = False
             else:

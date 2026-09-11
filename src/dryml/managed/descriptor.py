@@ -168,11 +168,11 @@ class _BoundOperation:
 
         return invoke(self._descriptor, self._instance, args, managed, kwargs)
 
-    def status(self, *, state_store: object = None, control_store: object = None) -> object:
+    def status(self, *, state_repo: object = None, control_store: object = None) -> object:
         """Read only the selected lifecycle authority without invoking workload.
 
         Args:
-            state_store: Explicit selected state Store override.
+            state_repo: Explicit selected state Repo or Store override.
             control_store: Explicit selected control Store override.
 
         Raises:
@@ -181,13 +181,13 @@ class _BoundOperation:
 
         from .runtime import status
 
-        return status(self._descriptor, self._instance, state_store=state_store, control_store=control_store)
+        return status(self._descriptor, self._instance, state_repo=state_repo, control_store=control_store)
 
-    def request_interrupt(self, *, state_store: object = None, control_store: object = None, expected_attempt_id: str | None = None) -> object:
+    def request_interrupt(self, *, state_repo: object = None, control_store: object = None, expected_attempt_id: str | None = None) -> object:
         """Publish a cooperative interruption request to selected running authority.
 
         Args:
-            state_store: Explicit selected state Store override.
+            state_repo: Explicit selected state Repo or Store override.
             control_store: Explicit selected control Store override.
             expected_attempt_id: Optional stale-attempt precondition.
 
@@ -198,7 +198,7 @@ class _BoundOperation:
         from .runtime import request_interrupt
 
         return request_interrupt(
-            self._descriptor, self._instance, state_store=state_store,
+            self._descriptor, self._instance, state_repo=state_repo,
             control_store=control_store, expected_attempt_id=expected_attempt_id,
         )
 

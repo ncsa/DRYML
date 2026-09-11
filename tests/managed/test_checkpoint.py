@@ -68,9 +68,9 @@ def test_checkpoint_saves_exact_intermediate_state_and_associates_it(tmp_path):
     repo = Repo((store,))
     value = CheckpointValue(repo=repo)
 
-    checkpoint = value.save_then_change(managed=ManagedConfig(state_store=store))
+    checkpoint = value.save_then_change(managed=ManagedConfig(state_repo=store))
 
-    status = value.save_then_change.status(state_store=store)
+    status = value.save_then_change.status(state_repo=store)
     assert value.value == 2
     assert status.checkpoint_state_ref == checkpoint
     assert status.final_state_ref != checkpoint
@@ -89,7 +89,7 @@ def test_context_rejects_cross_thread_and_inactive_checkpoint_use(tmp_path):
     store = DirStore(tmp_path / "store")
     value = CheckpointValue(repo=Repo((store,)))
     outcome = []
-    worker = Thread(target=lambda: outcome.append(value.capture_context(managed=ManagedConfig(state_store=store))))
+    worker = Thread(target=lambda: outcome.append(value.capture_context(managed=ManagedConfig(state_repo=store))))
     worker.start()
     assert CheckpointValue.entered.wait(10)
     try:
@@ -114,8 +114,8 @@ def test_recursive_checkpoint_is_rejected_and_the_saved_checkpoint_is_retained(t
     value = CheckpointValue(repo=Repo((store,)))
 
     with pytest.raises(ManagedContextError, match="recursive_checkpoint"):
-        value.recursive(managed=ManagedConfig(state_store=store, callbacks=[lambda obj, context: context.checkpoint()]))
-    status = value.recursive.status(state_store=store)
+        value.recursive(managed=ManagedConfig(state_repo=store, callbacks=[lambda obj, context: context.checkpoint()]))
+    status = value.recursive.status(state_repo=store)
     assert status.state == "failed"
     assert status.checkpoint_state_ref is not None
 
@@ -126,4 +126,4 @@ def test_forked_child_cannot_use_parent_context(tmp_path):
 
     store = DirStore(tmp_path / "store")
     value = CheckpointValue(repo=Repo((store,)))
-    assert value.fork_context(managed=ManagedConfig(state_store=store)) is None
+    assert value.fork_context(managed=ManagedConfig(state_repo=store)) is None

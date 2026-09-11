@@ -16,7 +16,7 @@ def test_config_is_immutable_and_snapshots_callbacks_without_mutating_caller(tmp
     callback = lambda object_, context: None
     callbacks = [callback]
     config = ManagedConfig(
-        state_store=DirStore(tmp_path / "state"),
+        state_repo=DirStore(tmp_path / "state"),
         control_store=DirStore(tmp_path / "control"),
         rerun=True,
         callbacks=callbacks,
@@ -44,11 +44,10 @@ def test_config_accepts_only_exact_boolean_dirstore_and_callback_list(tmp_path):
         with pytest.raises(ManagedConfigError, match="rerun"):
             ManagedConfig(rerun=rerun)
     with pytest.raises(ManagedStoreError):
-        ManagedConfig(state_store=object())
+        ManagedConfig(state_repo=object())
     with pytest.raises(ManagedStoreError):
         ManagedConfig(control_store=object())
-    with pytest.raises(ManagedStoreError):
-        ManagedConfig(state_store=StoreSubclass(tmp_path / "subclass"))
+    assert isinstance(ManagedConfig(state_repo=StoreSubclass(tmp_path / "subclass")).state_repo, StoreSubclass)
     with pytest.raises(ManagedConfigError, match="list"):
         ManagedConfig(callbacks=())
     with pytest.raises(ManagedConfigError, match="callable"):
@@ -81,7 +80,7 @@ def test_config_is_keyword_only_and_bound_operations_reject_config_subclasses(tm
         ManagedConfig(store)
     value = Value(repo=Repo((store,)))
     with pytest.raises(ManagedConfigError, match="ManagedConfig"):
-        value.run(managed=ConfigSubclass(state_store=store))
+        value.run(managed=ConfigSubclass(state_repo=store))
     assert Value.calls == 0
 
 

@@ -4,24 +4,26 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import shutil
 from uuid import uuid4
 
 import pytest
 
 from dryml.core import Repo
+from dryml.managed.storage import ownership_evidence
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedConfig, managed_operation
 from dryml.managed.control import ControlSnapshot, ManagedControlStore
 from dryml.managed.identity import argument_digest, operation_digest
 from dryml.managed.storage import _acquire_state_locks, _acquire_state_ownership
-from dryml.managed.errors import ManagedStoreError
+from dryml.managed.errors import ManagedRecoveryError, ManagedStoreError
 
 
 def _spawn_lock_owner_then_exit(root, object_ids, ready, exit_now):
     """Retain selected state locks in a spawned process until deliberate exit."""
 
-    _acquire_state_locks(DirStore(root), object_ids)
+    _acquire_state_locks(Repo((DirStore(root),)), object_ids)
     ready.set()
     assert exit_now.wait(10)
     os._exit(0)
@@ -44,7 +46,7 @@ def test_status_is_not_started_for_the_selected_absent_authority_without_hooks(t
     other_control = DirStore(tmp_path / "other-control")
     value = StatusValue(repo=Repo((state,)))
 
-    status = value.run.status(state_store=state, control_store=other_control)
+    status = value.run.status(state_repo=state, control_store=other_control)
     assert (status.state, status.attempt_id, status.generation) == ("not_started", None, 0)
     assert status.operation_id
 
@@ -63,6 +65,17 @@ class SeparateControlValue(Pickleable):
         return self.value
 
 
+def _running_snapshot(repo, value, arguments, *, generation=1, attempt_id=None, owner_id=None):
+    """Build retained v2 ownership evidence from the real selected Repo graph."""
+
+    return ControlSnapshot(
+        operation_digest(value.object_ref, "run"), value.object_ref.digest(), arguments,
+        "run", attempt_id or uuid4().hex, owner_id or uuid4().hex, generation,
+        "running", None, None, None, None,
+        ownership_evidence(repo, value.object_ref.objects.values()),
+    )
+
+
 def test_wrong_selected_control_store_has_independent_not_started_metadata(tmp_path):
     """Managed intentionally does not search for lifecycle authority in other Stores."""
 
@@ -71,9 +84,9 @@ def test_wrong_selected_control_store_has_independent_not_started_metadata(tmp_p
     wrong = DirStore(tmp_path / "wrong-control")
     value = SeparateControlValue(repo=Repo((state,)))
 
-    assert value.run(managed=ManagedConfig(state_store=state, control_store=selected)) == 1
-    assert value.run.status(state_store=state, control_store=selected).state == "completed"
-    assert value.run.status(state_store=state, control_store=wrong).state == "not_started"
+    assert value.run(managed=ManagedConfig(state_repo=state, control_store=selected)) == 1
+    assert value.run.status(state_repo=state, control_store=selected).state == "completed"
+    assert value.run.status(state_repo=state, control_store=wrong).state == "not_started"
 
 
 def test_owner_loss_status_and_request_are_read_only_after_full_free_probe(tmp_path):
@@ -84,15 +97,14 @@ def test_owner_loss_status_and_request_are_read_only_after_full_free_probe(tmp_p
     value = SeparateControlValue(repo=repo)
     operation_id = operation_digest(value.object_ref, "run")
     arguments = argument_digest(SeparateControlValue.run, value, (), {"managed": None})
-    initial = ControlSnapshot(
-        operation_id, value.object_ref.digest(), arguments, "run", uuid4().hex,
-        uuid4().hex, 1, "running", None, None, None, None,
-    )
-    control = ManagedControlStore(store, store)
+    initial = _running_snapshot(repo, value, arguments)
+    control = ManagedControlStore(store, repo)
     control.create_initial(initial)
+    seeded = _acquire_state_locks(repo, value.object_ref.objects.values())
+    seeded.release()
 
-    observed = value.run.status(state_store=store)
-    requested = value.run.request_interrupt(state_store=store)
+    observed = value.run.status(state_repo=store)
+    requested = value.run.request_interrupt(state_repo=store)
     assert (observed.state, observed.failure_code) == ("failed", "owner_lost")
     assert requested.outcome == "not_running"
     assert control.inspect(operation_id) == initial
@@ -107,16 +119,13 @@ def test_request_validates_stale_attempt_and_merges_only_the_current_owner(tmp_p
     operation_id = operation_digest(value.object_ref, "run")
     arguments = argument_digest(SeparateControlValue.run, value, (), {"managed": None})
     attempt_id, owner_id = uuid4().hex, uuid4().hex
-    control = ManagedControlStore(store, store)
-    control.create_initial(ControlSnapshot(
-        operation_id, value.object_ref.digest(), arguments, "run", attempt_id,
-        owner_id, 1, "running", None, None, None, None,
-    ))
+    control = ManagedControlStore(store, repo)
+    control.create_initial(_running_snapshot(repo, value, arguments, attempt_id=attempt_id, owner_id=owner_id))
 
-    with _acquire_state_ownership(repo, value, store):
-        stale = value.run.request_interrupt(state_store=store, expected_attempt_id=uuid4().hex)
-        requested = value.run.request_interrupt(state_store=store, expected_attempt_id=attempt_id)
-        repeated = value.run.request_interrupt(state_store=store, expected_attempt_id=attempt_id)
+    with _acquire_state_ownership(repo, value):
+        stale = value.run.request_interrupt(state_repo=store, expected_attempt_id=uuid4().hex)
+        requested = value.run.request_interrupt(state_repo=store, expected_attempt_id=attempt_id)
+        repeated = value.run.request_interrupt(state_repo=store, expected_attempt_id=attempt_id)
     assert stale.outcome == "stale_attempt"
     assert (requested.outcome, requested.generation) == ("requested", 2)
     assert (repeated.outcome, repeated.generation) == ("already_requested", 2)
@@ -130,11 +139,8 @@ def test_spawned_owner_exit_then_request_does_not_write_running_authority(tmp_pa
     value = SeparateControlValue(repo=repo)
     operation_id = operation_digest(value.object_ref, "run")
     arguments = argument_digest(SeparateControlValue.run, value, (), {"managed": None})
-    initial = ControlSnapshot(
-        operation_id, value.object_ref.digest(), arguments, "run", uuid4().hex,
-        uuid4().hex, 1, "running", None, None, None, None,
-    )
-    control = ManagedControlStore(store, store)
+    initial = _running_snapshot(repo, value, arguments)
+    control = ManagedControlStore(store, repo)
     control.create_initial(initial)
     _, _, object_ids = repo._state_graph_evidence(value)
     context = multiprocessing.get_context("spawn")
@@ -149,7 +155,7 @@ def test_spawned_owner_exit_then_request_does_not_write_running_authority(tmp_pa
         exit_now.set()
         owner.join(10)
         assert owner.exitcode == 0
-        assert value.run.request_interrupt(state_store=store).outcome == "not_running"
+        assert value.run.request_interrupt(state_repo=store).outcome == "not_running"
         assert control.inspect(operation_id) == initial
     finally:
         exit_now.set()
@@ -162,51 +168,87 @@ def test_owner_probe_checks_stale_attempt_before_probe_and_propagates_adapter_er
     """A stale request does not probe, while unavailable probes are not owner loss."""
 
     store = DirStore(tmp_path / "state")
-    value = SeparateControlValue(repo=Repo((store,)))
+    repo = Repo((store,))
+    value = SeparateControlValue(repo=repo)
     operation_id = operation_digest(value.object_ref, "run")
     arguments = argument_digest(SeparateControlValue.run, value, (), {"managed": None})
-    control = ManagedControlStore(store, store)
-    control.create_initial(ControlSnapshot(
-        operation_id, value.object_ref.digest(), arguments, "run", uuid4().hex,
-        uuid4().hex, 1, "running", None, None, None, None,
-    ))
+    control = ManagedControlStore(store, repo)
+    control.create_initial(_running_snapshot(repo, value, arguments))
 
     def unavailable_probe(self, object_ids):
         raise ManagedStoreError("probe_unavailable", "state probe adapter failed")
 
     monkeypatch.setattr(ManagedControlStore, "probe_state_ownership", unavailable_probe)
     assert value.run.request_interrupt(
-        state_store=store, expected_attempt_id=uuid4().hex,
+        state_repo=store, expected_attempt_id=uuid4().hex,
     ).outcome == "stale_attempt"
     with pytest.raises(ManagedStoreError, match="probe_unavailable"):
-        value.run.status(state_store=store)
+        value.run.status(state_repo=store)
     with pytest.raises(ManagedStoreError, match="probe_unavailable"):
-        value.run.request_interrupt(state_store=store)
+        value.run.request_interrupt(state_repo=store)
 
 
 def test_locked_owner_probe_marks_generation_replacement_inconclusive(tmp_path, monkeypatch):
     """A generation replacement during probing is never classified as owner loss."""
 
     store = DirStore(tmp_path / "state")
-    value = SeparateControlValue(repo=Repo((store,)))
+    repo = Repo((store,))
+    value = SeparateControlValue(repo=repo)
     operation_id = operation_digest(value.object_ref, "run")
     arguments = argument_digest(SeparateControlValue.run, value, (), {"managed": None})
-    control = ManagedControlStore(store, store)
-    initial = control.create_initial(ControlSnapshot(
-        operation_id, value.object_ref.digest(), arguments, "run", uuid4().hex,
-        uuid4().hex, 1, "running", None, None, None, None,
-    ))
-    replacement = ControlSnapshot(
-        operation_id, initial.object_ref_digest, initial.argument_digest, "run",
-        initial.attempt_id, uuid4().hex, 2, "running", None, None, None, None,
+    control = ManagedControlStore(store, repo)
+    initial = control.create_initial(_running_snapshot(repo, value, arguments))
+    replacement = _running_snapshot(
+        repo, value, arguments, generation=2, attempt_id=initial.attempt_id,
     )
 
-    def replace_during_probe(self, object_ids):
+    def replace_during_probe(self, ownership):
         self._replace_file(self._current_path(self._operation_path(operation_id)), replacement.to_bytes())
         return True
 
     monkeypatch.setattr(ManagedControlStore, "probe_state_ownership", replace_during_probe)
     observed, ownerless, stable = control.observe_running_owner(
-        operation_id, tuple(value.object_ref.objects.values()),
+        operation_id,
     )
     assert (observed, ownerless, stable) == (replacement, False, False)
+
+
+def test_status_never_substitutes_live_receiver_keys_for_retained_ownership(tmp_path):
+    """A reduced Repo cannot declare an owner dead by probing only its own graph."""
+
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    control_store = DirStore(tmp_path / "control")
+    full_repo = Repo((first, second))
+    value = SeparateControlValue(repo=full_repo)
+    arguments = argument_digest(SeparateControlValue.run, value, (), {"managed": None})
+    control = ManagedControlStore(control_store, full_repo)
+    control.create_initial(_running_snapshot(full_repo, value, arguments))
+
+    with pytest.raises(ManagedRecoveryError, match="ownership_store_missing"):
+        value.run.status(state_repo=Repo((first,)), control_store=control_store)
+
+
+def test_missing_lock_namespace_never_becomes_owner_loss_or_recovery_evidence(tmp_path):
+    """Status/request probing cannot recreate removed state-lock evidence for a running owner."""
+
+    store = DirStore(tmp_path / "state")
+    repo = Repo((store,))
+    value = SeparateControlValue(repo=repo)
+    operation_id = operation_digest(value.object_ref, "run")
+    arguments = argument_digest(SeparateControlValue.run, value, (), {"managed": None})
+    initial = _running_snapshot(repo, value, arguments)
+    control = ManagedControlStore(store, repo)
+    control.create_initial(initial)
+    lease = _acquire_state_locks(repo, value.object_ref.objects.values())
+    lease.release()
+    lock_path = os.path.join(store.base_dir, "managed", "locks", "v1")
+    shutil.rmtree(lock_path)
+
+    with pytest.raises(ManagedRecoveryError, match="state_lock_namespace_missing"):
+        value.run.status(state_repo=store)
+    with pytest.raises(ManagedRecoveryError, match="state_lock_namespace_missing"):
+        value.run.request_interrupt(state_repo=store)
+
+    assert not os.path.exists(lock_path)
+    assert control.inspect(operation_id) == initial

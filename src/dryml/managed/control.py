@@ -13,18 +13,20 @@ import re
 import stat
 import tempfile
 from dataclasses import dataclass, replace
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable
 from uuid import UUID
+from types import MappingProxyType
 
 from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_json_load_bytes
 from dryml.locking import LockError, interprocess_lock
 
 from .errors import ManagedConflictError, ManagedControlError, ManagedPublicationError, ManagedRecoveryError
 from .identity import _operation_digest_from_object_ref_digest
-from .storage import _probe_state_ownership, validate_state_ref
+from .storage import _probe_state_ownership, state_ref_for_digest, validate_state_ref
 
-_MAX_SNAPSHOT_BYTES = 64 * 1024
+_MAX_SNAPSHOT_BYTES = 1024 * 1024
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _FAILURE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _STATES = frozenset({"running", "interrupted", "failed", "completed"})
@@ -65,6 +67,7 @@ class ControlSnapshot:
     checkpoint_digest: str | None
     final_digest: str | None
     failure_code: str | None
+    ownership: Mapping[str, object]
 
     def __post_init__(self) -> None:
         """Reject malformed current authority before it can be published or used."""
@@ -93,6 +96,8 @@ class ControlSnapshot:
                 _digest(value, name)
         if self.failure_code is not None and (type(self.failure_code) is not str or not _FAILURE.fullmatch(self.failure_code)):
             raise ManagedControlError("invalid_current", "failure_code must be a bounded static code")
+        normalized_ownership = _ownership(self.ownership)
+        object.__setattr__(self, "ownership", normalized_ownership)
         _validate_cross_fields(self)
 
     def to_data(self) -> dict[str, object]:
@@ -100,7 +105,7 @@ class ControlSnapshot:
 
         return {
             "schema": "dryml-managed-current",
-            "version": 1,
+            "version": 2,
             "operation_id": self.operation_id,
             "object_ref_digest": self.object_ref_digest,
             "argument_digest": self.argument_digest,
@@ -113,29 +118,34 @@ class ControlSnapshot:
             "checkpoint_digest": self.checkpoint_digest,
             "final_digest": self.final_digest,
             "failure_code": self.failure_code,
+            "ownership": {
+                "version": self.ownership["version"],
+                "store_keys": list(self.ownership["store_keys"]),
+                "object_keys": list(self.ownership["object_keys"]),
+            },
         }
 
     def to_bytes(self) -> bytes:
         """Encode this closed snapshot as bounded canonical JSON bytes."""
 
-        return canonical_json_bytes(self.to_data(), max_depth=3, max_nodes=32, max_entries=16, max_string=512, max_int_bits=64)
+        return canonical_json_bytes(self.to_data(), max_depth=8, max_nodes=16384, max_entries=4096, max_string=512, max_int_bits=64)
 
     @classmethod
     def from_bytes(cls, payload: bytes, *, operation_id: str | None = None) -> "ControlSnapshot":
         """Decode one bounded closed current snapshot and verify its path identity."""
 
         if len(payload) > _MAX_SNAPSHOT_BYTES:
-            raise ManagedControlError("snapshot_too_large", "current snapshot exceeds 64 KiB")
+            raise ManagedControlError("snapshot_too_large", "current snapshot exceeds 1 MiB")
         try:
-            data = canonical_json_load_bytes(payload, max_depth=3, max_nodes=32, max_entries=16, max_string=512, max_int_bits=64)
+            data = canonical_json_load_bytes(payload, max_depth=8, max_nodes=16384, max_entries=4096, max_string=512, max_int_bits=64)
         except CanonicalJSONError as error:
             raise ManagedControlError("invalid_current", "current snapshot is not valid canonical JSON") from error
         required = {
-            "schema", "version", "operation_id", "object_ref_digest", "argument_digest", "member", "attempt_id", "owner_id", "generation", "state", "interrupt_request", "checkpoint_digest", "final_digest", "failure_code",
+            "schema", "version", "operation_id", "object_ref_digest", "argument_digest", "member", "attempt_id", "owner_id", "generation", "state", "interrupt_request", "checkpoint_digest", "final_digest", "failure_code", "ownership",
         }
         if not isinstance(data, dict) and not hasattr(data, "keys"):
             raise ManagedControlError("invalid_current", "current snapshot must be a mapping")
-        if set(data) != required or data["schema"] != "dryml-managed-current" or type(data["version"]) is not int or data["version"] != 1:
+        if set(data) != required or data["schema"] != "dryml-managed-current" or type(data["version"]) is not int or data["version"] != 2:
             raise ManagedControlError("invalid_current", "current snapshot schema is unsupported")
         request = data["interrupt_request"]
         if request is not None:
@@ -143,7 +153,7 @@ class ControlSnapshot:
                 raise ManagedControlError("invalid_current", "interrupt_request is malformed")
             request = (request[0], request[1])
         snapshot = cls(
-            operation_id=data["operation_id"], object_ref_digest=data["object_ref_digest"], argument_digest=data["argument_digest"], member=data["member"], attempt_id=data["attempt_id"], owner_id=data["owner_id"], generation=data["generation"], state=data["state"], interrupt_request=request, checkpoint_digest=data["checkpoint_digest"], final_digest=data["final_digest"], failure_code=data["failure_code"],
+            operation_id=data["operation_id"], object_ref_digest=data["object_ref_digest"], argument_digest=data["argument_digest"], member=data["member"], attempt_id=data["attempt_id"], owner_id=data["owner_id"], generation=data["generation"], state=data["state"], interrupt_request=request, checkpoint_digest=data["checkpoint_digest"], final_digest=data["final_digest"], failure_code=data["failure_code"], ownership=data["ownership"],
         )
         if operation_id is not None and snapshot.operation_id != operation_id:
             raise ManagedControlError("invalid_current", "current snapshot operation_id does not match its path")
@@ -210,22 +220,22 @@ class ManagedControlStore:
     Args:
         control_store: Explicit DirStore where this adapter owns only the closed
             ``managed/`` namespace.
-        state_store: Explicit DirStore used solely to validate referenced exact
-            StateRefs before acceptance.
+        state_repo: Borrowed Repo used solely to validate retained exact StateRefs.
 
     Reads never bootstrap the namespace.  Mutating methods must be called only
     after managed lifecycle code has separately obtained its graph ownership.
     """
 
-    def __init__(self, control_store, state_store) -> None:
-        """Bind two explicit DirStores without changing either Store."""
+    def __init__(self, control_store, state_repo) -> None:
+        """Bind control Store and state Repo without changing either resource."""
 
         from dryml.core.store.dir import DirStore
 
-        if type(control_store) is not DirStore or type(state_store) is not DirStore:
-            raise ManagedControlError("invalid_store", "managed control requires exact DirStore bindings")
+        from dryml.core.repo import Repo
+        if type(control_store) is not DirStore or not isinstance(state_repo, Repo):
+            raise ManagedControlError("invalid_store", "managed control requires an exact DirStore and Repo")
         self.control_store = control_store
-        self.state_store = state_store
+        self.state_repo = state_repo
 
     @property
     def root(self) -> str:
@@ -426,7 +436,7 @@ class ManagedControlStore:
             self._validate_references(proposed)
             return self._publish_replacement(operation, current, current_payload, proposed)
 
-    def observe_running_owner(self, operation_id: str, object_ids) -> tuple[ControlSnapshot | None, bool, bool]:
+    def observe_running_owner(self, operation_id: str) -> tuple[ControlSnapshot | None, bool, bool]:
         """Observe a running owner through one generation-rechecked lock probe.
 
         Returns:
@@ -445,11 +455,11 @@ class ManagedControlStore:
         _digest(operation_id, "operation_id")
         operation = self._operation_path(operation_id)
         with self._control_lock():
-            current, ownerless, stable = self._observe_running_owner_locked(operation, operation_id, object_ids)
+            current, ownerless, stable = self._observe_running_owner_locked(operation, operation_id)
             return current, ownerless, stable
 
     def request_interrupt_if_running(
-            self, operation_id: str, object_ids, *, expected_attempt_id: str | None = None,
+            self, operation_id: str, *, expected_attempt_id: str | None = None,
     ) -> tuple[str, ControlSnapshot | None]:
         """Probe and request interruption under one short control-lock critical section.
 
@@ -470,7 +480,7 @@ class ManagedControlStore:
         operation = self._operation_path(operation_id)
         with self._control_lock():
             current, ownerless, stable = self._observe_running_owner_locked(
-                operation, operation_id, object_ids, expected_attempt_id=expected_attempt_id,
+                operation, operation_id, expected_attempt_id=expected_attempt_id,
             )
             if current is None or current.state != "running":
                 return "not_running", current
@@ -517,11 +527,12 @@ class ManagedControlStore:
                 return snapshot
             return self._reconcile_locked(operation, operation_id)
 
-    def probe_state_ownership(self, object_ids) -> bool:
+    def probe_state_ownership(self, ownership) -> bool:
         """Probe complete selected state-lock availability without changing control.
 
         Args:
-            object_ids: Exact stateful ObjectIds covered by the selected operation.
+            ownership: Exact retained Store/ObjectId lock evidence from current
+                control authority.
 
         Returns:
             ``True`` only when every lock was observed free and released again;
@@ -536,7 +547,7 @@ class ManagedControlStore:
             selected generation before interpreting this evidence.
         """
 
-        return _probe_state_ownership(self.state_store, object_ids)
+        return _probe_state_ownership(self.state_repo, ownership)
 
     def _read_unpending_current(self, operation: str, operation_id: str) -> tuple[ControlSnapshot, bytes]:
         """Read and validate current authority while the caller holds control lock."""
@@ -550,7 +561,7 @@ class ManagedControlStore:
         return current, payload
 
     def _observe_running_owner_locked(
-            self, operation: str, operation_id: str, object_ids,
+            self, operation: str, operation_id: str,
             *, expected_attempt_id: str | None = None,
     ) -> tuple[ControlSnapshot | None, bool, bool]:
         """Return a generation-rechecked owner-loss observation under control lock."""
@@ -562,7 +573,7 @@ class ManagedControlStore:
             expected_attempt_id is not None and current.attempt_id != expected_attempt_id
         ):
             return current, False, True
-        ownerless = self.probe_state_ownership(object_ids)
+        ownerless = self.probe_state_ownership(current.ownership)
         observed, _ = self._read_unpending_current(operation, operation_id)
         if (
             observed.generation != current.generation
@@ -683,12 +694,10 @@ class ManagedControlStore:
             if digest is None:
                 continue
             try:
-                record = self.state_store.read_state_ref_record(digest)
-                if record is None or record.state_ref.digest() != digest:
-                    raise ManagedRecoveryError("missing_state_reference", "managed current references absent exact StateRef authority")
-                if record.state_ref.object.digest() != snapshot.object_ref_digest:
+                state_ref = state_ref_for_digest(self.state_repo, digest)
+                if state_ref.object.digest() != snapshot.object_ref_digest:
                     raise ManagedRecoveryError("state_object_mismatch", "managed current StateRef does not match its object reference")
-                validate_state_ref(self.state_store, record.state_ref)
+                validate_state_ref(self.state_repo, state_ref)
             except ManagedRecoveryError:
                 raise
             except BaseException as error:
@@ -750,7 +759,7 @@ class ManagedControlStore:
         except OSError as error:
             raise ManagedControlError("control_path_unavailable", "could not read managed authority file") from error
         if len(payload) > _MAX_SNAPSHOT_BYTES:
-            raise ManagedControlError("snapshot_too_large", "managed authority file exceeds 64 KiB")
+            raise ManagedControlError("snapshot_too_large", "managed authority file exceeds 1 MiB")
         return payload
 
     @staticmethod
@@ -793,6 +802,29 @@ def _validate_cross_fields(snapshot: ControlSnapshot) -> None:
 def _digest(value: object, name: str) -> None:
     if type(value) is not str or not _HEX.fullmatch(value):
         raise ManagedControlError("invalid_current", f"{name} must be a lowercase SHA-256 digest")
+
+
+def _ownership(value: object) -> MappingProxyType:
+    """Normalize closed v2 hashed ownership evidence without accepting locators."""
+
+    if not isinstance(value, Mapping) or set(value) != {"version", "store_keys", "object_keys"}:
+        raise ManagedControlError("invalid_current", "ownership must be a closed mapping")
+    if type(value["version"]) is not int or value["version"] != 1:
+        raise ManagedControlError("invalid_current", "ownership version is unsupported")
+    stores, objects = value["store_keys"], value["object_keys"]
+    if type(stores) not in (list, tuple) or type(objects) not in (list, tuple):
+        raise ManagedControlError("invalid_current", "ownership keys must be lists")
+    if not stores or not objects or len(stores) > 256 or len(objects) > 4096 or len(stores) * len(objects) > 65536:
+        raise ManagedControlError("invalid_current", "ownership topology is outside supported bounds")
+    for key in (*stores, *objects):
+        _digest(key, "ownership key")
+    if tuple(stores) != tuple(sorted(set(stores))) or tuple(objects) != tuple(sorted(set(objects))):
+        raise ManagedControlError("invalid_current", "ownership keys must be sorted and unique")
+    return MappingProxyType({
+        "version": 1,
+        "store_keys": tuple(stores),
+        "object_keys": tuple(objects),
+    })
 
 
 def _uuid(value: object, name: str) -> None:

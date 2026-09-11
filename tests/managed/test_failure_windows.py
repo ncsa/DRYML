@@ -81,7 +81,7 @@ def _crash_window_worker(store_root, state_ref, member, boundary, reached, relea
 
         context_module._checkpoint_boundary = checkpoint_boundary
         runtime_module._completion_boundary = completion_boundary
-        getattr(value, member)(managed=ManagedConfig(state_store=store))
+        getattr(value, member)(managed=ManagedConfig(state_repo=store))
     finally:
         repo.close()
 
@@ -124,8 +124,8 @@ def test_checkpoint_association_failure_never_advertises_or_notifies_orphan_stat
 
     monkeypatch.setattr(ManagedControlStore, "transition_running_owner", fail_checkpoint)
     with pytest.raises(OSError, match="association failed"):
-        value.checkpoint(managed=ManagedConfig(state_store=store))
-    status = value.checkpoint.status(state_store=store)
+        value.checkpoint(managed=ManagedConfig(state_repo=store))
+    status = value.checkpoint.status(state_repo=store)
     assert (status.state, status.failure_code, status.checkpoint_state_ref) == ("failed", "publication_error", None)
     assert status.final_state_ref is None
 
@@ -160,8 +160,8 @@ def test_second_checkpoint_association_failure_retains_prior_checkpoint_without_
 
     monkeypatch.setattr(ManagedControlStore, "transition_running_owner", fail_second_association)
     with pytest.raises(OSError, match="second association failed"):
-        value.checkpoint(managed=ManagedConfig(state_store=store, callbacks=[lambda *args: callbacks.append(args)]))
-    status = value.checkpoint.status(state_store=store)
+        value.checkpoint(managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: callbacks.append(args)]))
+    status = value.checkpoint.status(state_repo=store)
     assert len(callbacks) == 1
     assert (status.state, status.failure_code, status.checkpoint_state_ref is not None) == (
         "failed", "publication_error", True,
@@ -183,8 +183,8 @@ def test_checkpoint_save_failure_runs_no_callbacks_and_records_failure(tmp_path,
 
     monkeypatch.setattr(Repo, "save_object", fail_checkpoint_save)
     with pytest.raises(OSError, match="checkpoint state write failed"):
-        value.checkpoint(managed=ManagedConfig(state_store=store, callbacks=[lambda *args: callbacks.append(args)]))
-    status = value.checkpoint.status(state_store=store)
+        value.checkpoint(managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: callbacks.append(args)]))
+    status = value.checkpoint.status(state_repo=store)
     assert callbacks == []
     assert (status.state, status.checkpoint_state_ref) == ("failed", None)
 
@@ -212,9 +212,9 @@ def test_interrupted_transition_failure_is_control_failure_not_success(tmp_path,
 
     monkeypatch.setattr(ManagedControlStore, "transition_running_owner", fail_terminal)
     with pytest.raises(ManagedControlError, match="interruption_recording_failed") as caught:
-        value.checkpoint(managed=ManagedConfig(state_store=store))
+        value.checkpoint(managed=ManagedConfig(state_repo=store))
     assert type(caught.value.__cause__) is OSError
-    status = value.checkpoint.status(state_store=store)
+    status = value.checkpoint.status(state_repo=store)
     assert status.state == "failed"
     assert status.checkpoint_state_ref is not None
 
@@ -233,15 +233,15 @@ def test_indeterminate_checkpoint_association_is_not_replaced_by_generic_failure
 
     monkeypatch.setattr(ManagedControlStore, "_clear_intent_and_acknowledge", leave_checkpoint_pending)
     with pytest.raises(ManagedPublicationError) as caught:
-        value.checkpoint(managed=ManagedConfig(state_store=store))
+        value.checkpoint(managed=ManagedConfig(state_repo=store))
     assert caught.value.outcome == "indeterminate"
     with pytest.raises(ManagedControlError, match="pending_reconciliation"):
-        value.checkpoint.status(state_store=store)
+        value.checkpoint.status(state_repo=store)
     monkeypatch.setattr(ManagedControlStore, "_clear_intent_and_acknowledge", original)
     from dryml.managed.identity import operation_digest
 
-    ManagedControlStore(store, store).reconcile(operation_digest(value.object_ref, "checkpoint"))
-    status = value.checkpoint.status(state_store=store)
+    ManagedControlStore(store, Repo((store,))).reconcile(operation_digest(value.object_ref, "checkpoint"))
+    status = value.checkpoint.status(state_repo=store)
     assert (status.state, status.checkpoint_state_ref is not None) == ("failed", True)
 
 
@@ -263,7 +263,7 @@ def test_spawned_crash_preserves_only_associated_checkpoint_or_final_state(
     """Process death at every publication boundary never promotes orphan state authority."""
 
     store, value = _terminate_at_boundary(tmp_path, member, boundary)
-    status = getattr(value, member).status(state_store=store)
+    status = getattr(value, member).status(state_repo=store)
     assert (status.checkpoint_state_ref is not None) is expected_checkpoint
     assert (status.final_state_ref is not None) is expected_final
     if boundary == "interrupted_transition":
@@ -281,9 +281,9 @@ def test_spawned_callback_window_recovery_does_not_replay_observers(tmp_path):
     calls = []
     recovered = Repo._for_state_io((store,))
     try:
-        live = recovered.load_state_ref(value.checkpoint_then_return.status(state_store=store).checkpoint_state_ref, reuse_live="never")
+        live = recovered.load_state_ref(value.checkpoint_then_return.status(state_repo=store).checkpoint_state_ref, reuse_live="never")
         assert live.checkpoint_then_return(
-            managed=ManagedConfig(state_store=store, callbacks=[lambda *args: calls.append(args)]),
+            managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: calls.append(args)]),
         ) == "resumed"
     finally:
         recovered.close()

@@ -6,7 +6,6 @@ from dataclasses import replace
 from uuid import UUID, uuid4
 
 from dryml.core import Object
-from dryml.core.repo import Repo, RepoSaveError
 from dryml.core.reference_values import StateRef
 
 from .context import _create_context
@@ -22,7 +21,7 @@ from .errors import (
 )
 from .identity import argument_digest, operation_digest
 from .model import InterruptRequestResult, ManagedStatus
-from .storage import _acquire_state_ownership, resolve_stores, validate_state_ref
+from .storage import _acquire_state_ownership, resolve_stores, state_ref_for_digest, validate_state_ref
 
 
 def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwargs: dict[str, object]) -> object:
@@ -57,38 +56,40 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
     supplied["managed"] = managed
     arguments = argument_digest(descriptor, instance, args, supplied)
     operation_id = operation_digest(instance.object_ref, descriptor.member)
-    stores = resolve_stores(
-        instance, state_store=options.state_store, control_store=options.control_store,
-    )
+    stores = resolve_stores(instance, state_repo=options.state_repo, control_store=options.control_store)
     # Managed invocation mutates an already materialized Object graph, so it uses
     # the runtime's existing admission boundary rather than bypassing strict mode.
     from dryml.runtime import materialization_admission
 
-    with materialization_admission(operation="managed invocation"):
-        return _invoke_selected(
-            descriptor, instance, args, kwargs, arguments, operation_id, stores, options,
-        )
+    try:
+        with materialization_admission(operation="managed invocation"):
+            return _invoke_selected(
+                descriptor, instance, args, kwargs, arguments, operation_id, stores, options,
+            )
+    finally:
+        stores.close()
 
 
 def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id, stores, options):
     """Execute one already-admitted managed lifecycle against selected Stores."""
 
-    state_repo = Repo._for_state_io((stores.state_store,))
+    state_repo = stores.state_repo
     context = None
     try:
-        # This traverses the retained graph before ownership/control mutation and
-        # rejects an invalidated restore target through the core reservation path.
-        try:
-            state_repo._state_graph_evidence(instance)
-        except RepoSaveError as error:
-            raise ManagedRecoveryError("invalid_target", "managed target requires a fresh exact load") from error
-        control = ManagedControlStore(stores.control_store, stores.state_store)
-        with _acquire_state_ownership(state_repo, instance, stores.state_store) as ownership:
+        control = ManagedControlStore(stores.control_store, state_repo)
+        current = control.reconcile(operation_id)
+        expected_ownership = None if current is None else current.ownership
+        with _acquire_state_ownership(state_repo, instance, expected_ownership=expected_ownership) as ownership:
+            # State topology, graph reservation, and every lifetime lock are now
+            # held, so control bootstrap cannot precede failed ownership admission.
+            control.initialize()
             current = control.reconcile(operation_id)
+            if current is not None and {key: list(value) if isinstance(value, tuple) else value for key, value in current.ownership.items()} != ownership.ownership:
+                raise ManagedConflictError("ownership_changed", "managed ownership changed during admission")
             if current is None:
                 running = _new_running(
                     operation_id, instance.object_ref.digest(), arguments,
-                    descriptor.member, generation=1,
+                    descriptor.member, ownership.ownership, generation=1,
                 )
                 running = control.create_initial(running)
                 is_resuming = False
@@ -106,7 +107,7 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
                         _record_failure(control, running, "restore_error", error)
                         raise
             context = _create_context(
-                state_store=stores.state_store, control_store=stores.control_store,
+                control_store=stores.control_store,
                 operation_id=operation_id, attempt_id=running.attempt_id,
                 owner_id=running.owner_id, is_resuming=is_resuming,
                 checkpoint_state_ref=checkpoint, obj=instance, state_repo=state_repo,
@@ -134,11 +135,8 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
                     _record_failure(control, running, context._failure_code or "method_error", error)
                 raise
             try:
-                final_state = state_repo.save_object(
-                    instance, store=stores.state_store, main=False, alias=None,
-                    deep_capture=True, reservation=ownership.reservation,
-                )
-                validate_state_ref(stores.state_store, final_state)
+                final_state = state_repo.save_object(instance, main=False, alias=None, deep_capture=True, reservation=ownership.reservation)
+                validate_state_ref(state_repo, final_state)
                 _completion_boundary("final_state_published")
                 control.transition_running_owner(
                     operation_id, attempt_id=running.attempt_id, owner_id=running.owner_id,
@@ -157,16 +155,16 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
     finally:
         if context is not None:
             context._deactivate()
-        state_repo.close()
+        pass
 
 
-def status(descriptor, instance: object, *, state_store=None, control_store=None) -> ManagedStatus:
+def status(descriptor, instance: object, *, state_repo=None, control_store=None) -> ManagedStatus:
     """Project exactly one caller-selected authority without activating workload.
 
     Args:
         descriptor: Checked managed declaration for the bound member.
         instance: Exact live receiver used only for identity and ownership evidence.
-        state_store: Optional explicit selected state Store.
+        state_repo: Optional explicit selected state Repo or Store.
         control_store: Optional explicit selected control Store.
 
     Returns:
@@ -180,22 +178,24 @@ def status(descriptor, instance: object, *, state_store=None, control_store=None
 
     _require_receiver(instance)
     operation_id = operation_digest(instance.object_ref, descriptor.member)
-    stores = resolve_stores(instance, state_store=state_store, control_store=control_store, require_writable=False)
-    control = ManagedControlStore(stores.control_store, stores.state_store)
-    initial = control.inspect(operation_id)
-    if initial is None or initial.state != "running":
-        return _status_from_snapshot(initial, operation_id, stores.state_store)
-    object_ids = _immutable_object_ids(instance)
-    for _ in range(3):
-        observed, ownerless, stable = control.observe_running_owner(operation_id, object_ids)
-        if observed is None or observed.state != "running":
-            return _status_from_snapshot(observed, operation_id, stores.state_store)
-        if stable:
-            return _status_from_snapshot(observed, operation_id, stores.state_store, owner_lost=ownerless)
-    return _status_from_snapshot(control.inspect(operation_id), operation_id, stores.state_store)
+    stores = resolve_stores(instance, state_repo=state_repo, control_store=control_store, require_writable=False)
+    try:
+        control = ManagedControlStore(stores.control_store, stores.state_repo)
+        initial = control.inspect(operation_id)
+        if initial is None or initial.state != "running":
+            return _status_from_snapshot(initial, operation_id, stores.state_repo)
+        for _ in range(3):
+            observed, ownerless, stable = control.observe_running_owner(operation_id)
+            if observed is None or observed.state != "running":
+                return _status_from_snapshot(observed, operation_id, stores.state_repo)
+            if stable:
+                return _status_from_snapshot(observed, operation_id, stores.state_repo, owner_lost=ownerless)
+        return _status_from_snapshot(control.inspect(operation_id), operation_id, stores.state_repo)
+    finally:
+        stores.close()
 
 
-def request_interrupt(descriptor, instance: object, *, state_store=None,
+def request_interrupt(descriptor, instance: object, *, state_repo=None,
                       control_store=None, expected_attempt_id: str | None = None) -> InterruptRequestResult:
     """Request interruption of a selected running invocation without creating one.
 
@@ -208,19 +208,21 @@ def request_interrupt(descriptor, instance: object, *, state_store=None,
         _validate_attempt_id(expected_attempt_id)
     _require_receiver(instance)
     operation_id = operation_digest(instance.object_ref, descriptor.member)
-    stores = resolve_stores(instance, state_store=state_store, control_store=control_store)
-    control = ManagedControlStore(stores.control_store, stores.state_store)
-    initial = control.inspect(operation_id)
-    if initial is None or initial.state != "running":
-        return _request_result("not_running", operation_id, initial)
-    object_ids = _immutable_object_ids(instance)
-    for _ in range(3):
-        outcome, observed = control.request_interrupt_if_running(
-            operation_id, object_ids, expected_attempt_id=expected_attempt_id,
-        )
-        if outcome != "changed":
-            return _request_result(outcome, operation_id, observed)
-    raise ManagedConflictError("generation_conflict", "selected running authority changed during interruption request")
+    stores = resolve_stores(instance, state_repo=state_repo, control_store=control_store)
+    try:
+        control = ManagedControlStore(stores.control_store, stores.state_repo)
+        initial = control.inspect(operation_id)
+        if initial is None or initial.state != "running":
+            return _request_result("not_running", operation_id, initial)
+        for _ in range(3):
+            outcome, observed = control.request_interrupt_if_running(
+                operation_id, expected_attempt_id=expected_attempt_id,
+            )
+            if outcome != "changed":
+                return _request_result(outcome, operation_id, observed)
+        raise ManagedConflictError("generation_conflict", "selected running authority changed during interruption request")
+    finally:
+        stores.close()
 
 
 def _enter_existing(control, current, descriptor, arguments: str, rerun: bool):
@@ -234,8 +236,8 @@ def _enter_existing(control, current, descriptor, arguments: str, rerun: bool):
         raise ManagedRecoveryError("invalid_current", "selected authority cannot be resumed")
     if not descriptor.resumable or current.argument_digest != arguments or current.checkpoint_digest is None:
         raise ManagedRerunRequiredError("rerun_required", "selected operation needs explicit rerun")
-    checkpoint = _state_ref_for_digest(control.state_store, current.checkpoint_digest)
-    validate_state_ref(control.state_store, checkpoint)
+    checkpoint = state_ref_for_digest(control.state_repo, current.checkpoint_digest)
+    validate_state_ref(control.state_repo, checkpoint)
     return _transition_to_running(control, current, new_attempt=False, arguments=arguments), True, checkpoint
 
 
@@ -247,7 +249,7 @@ def _transition_to_running(control, current, *, new_attempt: bool, arguments: st
         arguments if new_attempt else current.argument_digest,
         current.member, uuid4().hex if new_attempt else current.attempt_id, uuid4().hex,
         current.generation + 1, "running", None,
-        None if new_attempt else current.checkpoint_digest, None, None,
+        None if new_attempt else current.checkpoint_digest, None, None, current.ownership,
     )
     return control.transition(
         current.operation_id, proposed, expected_generation=current.generation,
@@ -257,12 +259,12 @@ def _transition_to_running(control, current, *, new_attempt: bool, arguments: st
 
 
 def _new_running(operation_id: str, object_ref_digest: str, arguments: str,
-                 member: str, *, generation: int) -> ControlSnapshot:
+                 member: str, ownership: dict[str, object], *, generation: int) -> ControlSnapshot:
     """Build the first running authority for an absent operation lineage."""
 
     return ControlSnapshot(
         operation_id, object_ref_digest, arguments, member, uuid4().hex, uuid4().hex,
-        generation, "running", None, None, None, None,
+        generation, "running", None, None, None, None, ownership,
     )
 
 
@@ -343,28 +345,13 @@ def _require_receiver(instance: object) -> None:
         raise ManagedConfigError("invalid_receiver", "managed operations require a materialized Object receiver")
 
 
-def _immutable_object_ids(instance: Object) -> tuple[object, ...]:
-    """Read exact immutable lock identities without touching invalid live state."""
-
-    return tuple(instance.object_ref.objects.values())
-
-
-def _state_ref_for_digest(store, digest: str) -> StateRef:
-    """Read one already-associated exact StateRef without a locator or search."""
-
-    record = store.read_state_ref_record(digest)
-    if record is None or type(record.state_ref) is not StateRef or record.state_ref.digest() != digest:
-        raise ManagedRecoveryError("missing_state_reference", "selected authority lacks its associated checkpoint")
-    return record.state_ref
-
-
-def _status_from_snapshot(snapshot, operation_id: str, state_store, *, owner_lost: bool = False) -> ManagedStatus:
+def _status_from_snapshot(snapshot, operation_id: str, state_repo, *, owner_lost: bool = False) -> ManagedStatus:
     """Convert validated selected current authority into its immutable public view."""
 
     if snapshot is None:
         return ManagedStatus("not_started", operation_id, None, 0, None, None, False, None)
-    checkpoint = None if snapshot.checkpoint_digest is None else _state_ref_for_digest(state_store, snapshot.checkpoint_digest)
-    final = None if snapshot.final_digest is None else _state_ref_for_digest(state_store, snapshot.final_digest)
+    checkpoint = None if snapshot.checkpoint_digest is None else state_ref_for_digest(state_repo, snapshot.checkpoint_digest)
+    final = None if snapshot.final_digest is None else state_ref_for_digest(state_repo, snapshot.final_digest)
     return ManagedStatus(
         "failed" if owner_lost else snapshot.state, snapshot.operation_id,
         snapshot.attempt_id, snapshot.generation, checkpoint, final,

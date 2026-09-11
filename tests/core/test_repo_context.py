@@ -119,6 +119,19 @@ def test_store_registration_returns_none_and_checks_close_before_opening(monkeyp
     assert calls == []
 
 
+def test_topology_lease_rejects_new_store_spec_before_coercion(tmp_path):
+    """A managed topology lease cannot initialize a rejected Store specification."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    absent = tmp_path / "must-not-open.zip"
+
+    with repo.retain_topology():
+        with pytest.raises(RuntimeError, match="topology"):
+            repo.add_store(absent)
+
+    assert not absent.exists()
+
+
 def test_owned_registration_failure_rolls_back_and_retains_failed_cleanup(tmp_path, monkeypatch):
     """A failed binding refresh neither publishes nor leaks a fresh Store handle."""
 

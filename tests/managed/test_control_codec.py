@@ -15,6 +15,9 @@ from dryml.managed.control import ControlSnapshot, ManagedControlStore
 from dryml.managed.errors import ManagedControlError, ManagedRecoveryError
 
 
+_OWNERSHIP = {"version": 1, "store_keys": ["d" * 64], "object_keys": ["e" * 64]}
+
+
 def _operation_id(object_digest="b" * 64, member="run"):
     """Encode the U3 operation identity for closed-control test fixtures."""
 
@@ -35,7 +38,7 @@ def _snapshot(*, generation=1, state="running", owner=True, checkpoint=None, fin
     owner_id = uuid4().hex if owner else None
     return ControlSnapshot(
         _operation_id(), "b" * 64, "c" * 64, "run", attempt, owner_id, generation,
-        state, None, checkpoint, final, failure,
+        state, None, checkpoint, final, failure, _OWNERSHIP,
     )
 
 
@@ -68,7 +71,7 @@ def test_absent_inspection_is_read_only_and_bad_namespace_fails_closed(tmp_path)
     """Inspection never bootstraps absent control authority or masks bad gates."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     assert control.inspect("a" * 64) is None
     assert not os.path.exists(os.path.join(store.base_dir, "managed"))
     os.mkdir(os.path.join(store.base_dir, "managed"))
@@ -80,7 +83,7 @@ def test_existing_operation_without_current_never_restarts(tmp_path):
     """An operation directory is a lineage gate even if its current file vanished."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     control.initialize()
     path = os.path.join(control.root, "operations", "v1", "aa", "a" * 64)
     os.makedirs(path)
@@ -95,9 +98,9 @@ def test_snapshot_path_identity_request_and_generation_are_checked():
     with pytest.raises(ManagedControlError):
         ControlSnapshot.from_bytes(snapshot.to_bytes(), operation_id="d" * 64)
     with pytest.raises(ManagedControlError):
-        ControlSnapshot(_operation_id(), "b" * 64, "c" * 64, "run", "not-a-uuid", None, 1, "interrupted", None, None, None, None)
+        ControlSnapshot(_operation_id(), "b" * 64, "c" * 64, "run", "not-a-uuid", None, 1, "interrupted", None, None, None, None, _OWNERSHIP)
     with pytest.raises(ManagedControlError):
-        ControlSnapshot(_operation_id(), "b" * 64, "c" * 64, "run", uuid4().hex, uuid4().hex, 1, "running", (uuid4().hex, uuid4().hex), None, None, None)
+        ControlSnapshot(_operation_id(), "b" * 64, "c" * 64, "run", uuid4().hex, uuid4().hex, 1, "running", (uuid4().hex, uuid4().hex), None, None, None, _OWNERSHIP)
 
 
 def test_snapshot_rejects_malformed_json_state_and_wrong_operation_identity():
@@ -108,9 +111,9 @@ def test_snapshot_rejects_malformed_json_state_and_wrong_operation_identity():
     with pytest.raises(ManagedControlError):
         ControlSnapshot.from_bytes(malformed_state)
     with pytest.raises(ManagedControlError):
-        ControlSnapshot(_operation_id(), "b" * 64, "c" * 64, "run", uuid4().hex, uuid4().hex, 1, [], None, None, None, None)
+        ControlSnapshot(_operation_id(), "b" * 64, "c" * 64, "run", uuid4().hex, uuid4().hex, 1, [], None, None, None, None, _OWNERSHIP)
     with pytest.raises(ManagedControlError, match="operation_id"):
-        ControlSnapshot("a" * 64, "b" * 64, "c" * 64, "run", uuid4().hex, uuid4().hex, 1, "running", None, None, None, None)
+        ControlSnapshot("a" * 64, "b" * 64, "c" * 64, "run", uuid4().hex, uuid4().hex, 1, "running", None, None, None, None, _OWNERSHIP)
 
 
 def test_completed_current_requires_the_selected_exact_state_closure(tmp_path):
@@ -121,9 +124,9 @@ def test_completed_current_requires_the_selected_exact_state_closure(tmp_path):
     state = repo.save_object(CodecValue(repo=repo), deep_capture=True)
     snapshot = ControlSnapshot(
         _operation_id(state.object.digest()), state.object.digest(), "c" * 64, "run", uuid4().hex, None,
-        1, "completed", None, None, state.digest(), None,
+        1, "completed", None, None, state.digest(), None, _OWNERSHIP,
     )
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, repo)
     assert control.create_initial(snapshot) == snapshot
     os.unlink(store._state_ref_path(state.digest()))
     with pytest.raises(ManagedRecoveryError, match="StateRef"):
@@ -137,10 +140,10 @@ def test_initial_and_reconciled_old_current_require_matching_state_object(tmp_pa
     repo = Repo((store,))
     first = repo.save_object(CodecValue(1), deep_capture=True)
     second = repo.save_object(CodecValue(2), deep_capture=True)
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, repo)
     mismatched = ControlSnapshot(
         _operation_id(first.object.digest()), first.object.digest(), "c" * 64, "run", uuid4().hex, uuid4().hex,
-        1, "running", None, second.digest(), None, None,
+        1, "running", None, second.digest(), None, None, _OWNERSHIP,
     )
     with pytest.raises(ManagedRecoveryError, match="object"):
         control.create_initial(mismatched)
@@ -148,13 +151,13 @@ def test_initial_and_reconciled_old_current_require_matching_state_object(tmp_pa
 
     initial = ControlSnapshot(
         _operation_id(first.object.digest()), first.object.digest(), "c" * 64, "run", uuid4().hex, uuid4().hex,
-        1, "running", None, first.digest(), None, None,
+        1, "running", None, first.digest(), None, None, _OWNERSHIP,
     )
     assert control.create_initial(initial) == initial
     operation = control._operation_path(initial.operation_id)
     proposed = ControlSnapshot(
         initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id,
-        initial.owner_id, 2, "running", None, initial.checkpoint_digest, None, None,
+        initial.owner_id, 2, "running", None, initial.checkpoint_digest, None, None, _OWNERSHIP,
     )
     intent = control_module._PendingIntent(initial.operation_id, 1, control_module._payload_digest(initial.to_bytes()), 2, control_module._payload_digest(proposed.to_bytes()))
     control._write_new(control._pending_path(operation), intent.to_bytes())

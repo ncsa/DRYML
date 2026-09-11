@@ -6,11 +6,13 @@ import errno
 import hashlib
 import multiprocessing
 import os
+from dataclasses import replace
 from threading import Barrier, Event, Thread
 from uuid import uuid4
 
 import pytest
 
+from dryml.core import Repo
 from dryml.core.store.dir import DirStore
 from dryml.managed import control as control_module
 from dryml.managed.control import ControlSnapshot, ManagedControlStore
@@ -33,14 +35,23 @@ def _operation_id(object_digest="b" * 64, member="run"):
 def _snapshot(*, operation=None, generation=1, owner=None):
     """Create a minimal running current record with no StateRef association."""
 
-    return ControlSnapshot(operation or _operation_id(), "b" * 64, "c" * 64, "run", uuid4().hex, owner or uuid4().hex, generation, "running", None, None, None, None)
+    return ControlSnapshot(operation or _operation_id(), "b" * 64, "c" * 64, "run", uuid4().hex, owner or uuid4().hex, generation, "running", None, None, None, None, {"version": 1, "store_keys": ["d" * 64], "object_keys": ["e" * 64]})
+
+
+def _next(snapshot, *, generation=None, owner_id=None):
+    """Build a same-attempt v2 replacement while retaining ownership evidence."""
+
+    return replace(
+        snapshot, generation=snapshot.generation + 1 if generation is None else generation,
+        owner_id=snapshot.owner_id if owner_id is None else owner_id,
+    )
 
 
 def _bootstrap_worker(root, ready, start, queue):
     """Spawn target that races only managed namespace bootstrap publication."""
 
     store = DirStore(root)
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     ready.set()
     start.wait(10)
     try:
@@ -54,7 +65,7 @@ def _initial_worker(root, ready, start, queue):
     """Spawn target that races generation-one publication for one operation."""
 
     store = DirStore(root)
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     ready.set()
     start.wait(10)
     try:
@@ -70,15 +81,35 @@ def test_initial_operation_and_expected_transition_are_atomic(tmp_path):
     """Initial staging settles pending and stale transitions cannot overwrite current."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = _snapshot()
     assert control.create_initial(initial) == initial
     assert control.inspect(initial.operation_id) == initial
-    proposed = _snapshot(generation=2, owner=initial.owner_id)
-    proposed = ControlSnapshot(initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id, initial.owner_id, 2, "running", None, None, None, None)
+    proposed = _next(initial)
     assert control.transition(initial.operation_id, proposed, expected_generation=1, expected_attempt_id=initial.attempt_id, expected_owner_id=initial.owner_id) == proposed
     with pytest.raises(ManagedConflictError):
         control.transition(initial.operation_id, proposed, expected_generation=1)
+
+
+def test_v2_ownership_evidence_has_a_closed_bounded_json_shape():
+    """Current authority retains only bounded hashed Store/Object lock evidence."""
+
+    snapshot = _snapshot()
+    assert snapshot.to_data()["ownership"] == {
+        "version": 1, "store_keys": ["d" * 64], "object_keys": ["e" * 64],
+    }
+    for ownership in (
+        {"version": 1, "store_keys": ["d" * 64] * 257, "object_keys": ["e" * 64]},
+        {"version": 1, "store_keys": ["d" * 64], "object_keys": ["e" * 64] * 4097},
+        {"version": 1, "store_keys": [f"{index:064x}" for index in range(256)], "object_keys": [f"{index:064x}" for index in range(257)]},
+    ):
+        with pytest.raises(ManagedControlError, match="ownership topology"):
+            ControlSnapshot(
+                snapshot.operation_id, snapshot.object_ref_digest, snapshot.argument_digest,
+                snapshot.member, snapshot.attempt_id, snapshot.owner_id, snapshot.generation,
+                snapshot.state, snapshot.interrupt_request, snapshot.checkpoint_digest,
+                snapshot.final_digest, snapshot.failure_code, ownership,
+            )
 
 
 @pytest.mark.parametrize("invalid_ancestor", ("operations", "v1", "shard"))
@@ -86,7 +117,7 @@ def test_operation_ancestor_files_are_never_absent_authority(tmp_path, invalid_a
     """Existing non-directory operation ancestors fail closed in every control path."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = _snapshot()
     operations = os.path.join(control.root, "operations")
     control.initialize()
@@ -101,11 +132,7 @@ def test_operation_ancestor_files_are_never_absent_authority(tmp_path, invalid_a
     with open(ancestor, "xb"):
         pass
 
-    proposed = ControlSnapshot(
-        initial.operation_id, initial.object_ref_digest, initial.argument_digest,
-        initial.member, initial.attempt_id, initial.owner_id, 2, "running", None,
-        None, None, None,
-    )
+    proposed = _next(initial)
     for operation in (
         lambda: control.inspect(initial.operation_id),
         lambda: control.reconcile(initial.operation_id),
@@ -120,7 +147,7 @@ def test_absent_operation_hierarchy_is_not_started_without_bootstrap(tmp_path):
     """A valid gate with no operation directories remains read-only absent authority."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     control.initialize()
     operation_id = _operation_id()
 
@@ -133,7 +160,7 @@ def test_unreadable_operation_ancestor_is_a_typed_control_error(tmp_path, monkey
     """An unreadable operation ancestor is not inferred to be absent authority."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     control.initialize()
     operations = os.path.join(control.root, "operations")
     original_lstat = control_module.os.lstat
@@ -152,9 +179,9 @@ def test_replace_failure_preserves_old_authority_then_reconciles(tmp_path, monke
     """A failure after intent publication blocks inspection and accepts only old current."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = control.create_initial(_snapshot())
-    proposed = ControlSnapshot(initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id, initial.owner_id, 2, "running", None, None, None, None)
+    proposed = _next(initial)
     monkeypatch.setattr(control_module, "_replace_file", lambda path, payload: (_ for _ in ()).throw(OSError("replace failed")))
     with pytest.raises(ManagedPublicationError) as caught:
         control.transition(initial.operation_id, proposed, expected_generation=1)
@@ -168,7 +195,7 @@ def test_short_write_and_initial_staging_failure_are_not_committed(tmp_path, mon
     """Incomplete writes preserve prior authority and classify pre-publish failure."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     control.initialize()
     original_write = control_module._write_new
     monkeypatch.setattr(control_module, "_write_new", lambda path, payload: (_ for _ in ()).throw(OSError("short write")))
@@ -177,7 +204,7 @@ def test_short_write_and_initial_staging_failure_are_not_committed(tmp_path, mon
     assert caught.value.outcome == "not_committed"
     monkeypatch.setattr(control_module, "_write_new", original_write)
     initial = control.create_initial(_snapshot())
-    proposed = ControlSnapshot(initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id, initial.owner_id, 2, "running", None, None, None, None)
+    proposed = _next(initial)
     monkeypatch.setattr(control_module, "_replace_file", lambda path, payload: (_ for _ in ()).throw(OSError("short write")))
     with pytest.raises(ManagedPublicationError) as caught:
         control.transition(initial.operation_id, proposed, expected_generation=1)
@@ -189,9 +216,9 @@ def test_partial_pending_write_preserves_old_current_without_malformed_intent(tm
     """An interrupted pending write never exposes a malformed authoritative intent."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = control.create_initial(_snapshot())
-    proposed = ControlSnapshot(initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id, initial.owner_id, 2, "running", None, None, None, None)
+    proposed = _next(initial)
     monkeypatch.setattr(control_module.os, "write", lambda fd, payload: len(payload) - 1)
     with pytest.raises(ManagedPublicationError) as caught:
         control.transition(initial.operation_id, proposed, expected_generation=1)
@@ -204,9 +231,9 @@ def test_pending_fsync_failure_preserves_old_current_with_a_typed_outcome(tmp_pa
     """A portable temporary-file sync failure cannot expose a partial intent or current."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = control.create_initial(_snapshot())
-    proposed = ControlSnapshot(initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id, initial.owner_id, 2, "running", None, None, None, None)
+    proposed = _next(initial)
     monkeypatch.setattr(control_module.os, "fsync", lambda fd: (_ for _ in ()).throw(OSError("fsync failed")))
     with pytest.raises(ManagedPublicationError) as caught:
         control.transition(initial.operation_id, proposed, expected_generation=1)
@@ -218,7 +245,7 @@ def test_initial_reconciliation_syncs_current_with_write_handle_without_changing
     """Simulate Windows fsync requirements while retaining the exact initial bytes."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = _snapshot()
     current = control._current_path(control._operation_path(initial.operation_id))
     current_modes = {}
@@ -252,9 +279,9 @@ def test_replace_failure_after_current_swap_reconciles_exact_new_authority(tmp_p
     """A post-replace fault retains the complete intent and recovers only its new current."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = control.create_initial(_snapshot())
-    proposed = ControlSnapshot(initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id, initial.owner_id, 2, "running", None, None, None, None)
+    proposed = _next(initial)
     original_replace = control_module._replace_file
 
     def replace_then_fail(path, payload):
@@ -272,7 +299,7 @@ def test_initial_directory_publication_retains_pending_until_reconciliation(tmp_
     """A fault after generation-one directory publication leaves recoverable intent evidence."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = _snapshot()
     operation = control._operation_path(initial.operation_id)
     operation_parent = os.path.dirname(operation)
@@ -297,9 +324,9 @@ def test_ack_failure_and_new_pending_recovery_do_not_replay_or_guess(tmp_path, m
     """Acknowledgement uncertainty preserves exact new authority for reconciliation."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = control.create_initial(_snapshot())
-    proposed = ControlSnapshot(initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id, initial.owner_id, 2, "running", None, None, None, None)
+    proposed = _next(initial)
     calls = [0]
     original_sync = control_module._sync_directory
 
@@ -322,9 +349,9 @@ def test_absent_pending_after_ack_failure_is_a_committed_exact_generation(tmp_pa
     """A failed receipt cannot turn an already acknowledged current into uncertainty."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = control.create_initial(_snapshot())
-    proposed = ControlSnapshot(initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id, initial.owner_id, 2, "running", None, None, None, None)
+    proposed = _next(initial)
     monkeypatch.setattr(control_module, "_publication_acknowledged", lambda: (_ for _ in ()).throw(OSError("receipt failed")))
     assert control.transition(initial.operation_id, proposed, expected_generation=1) == proposed
     assert control.inspect(initial.operation_id) == proposed
@@ -334,9 +361,9 @@ def test_recovered_pending_issues_a_completed_acknowledgement(tmp_path, monkeypa
     """Reconciliation recognizes an exact new current as committed after intent removal."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = control.create_initial(_snapshot())
-    proposed = ControlSnapshot(initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id, initial.owner_id, 2, "running", None, None, None, None)
+    proposed = _next(initial)
     operation = control._operation_path(initial.operation_id)
     control._replace_file(control._current_path(operation), proposed.to_bytes())
     intent = control_module._PendingIntent(initial.operation_id, 1, control_module._payload_digest(initial.to_bytes()), 2, control_module._payload_digest(proposed.to_bytes()))
@@ -351,9 +378,9 @@ def test_inspection_holds_the_shared_control_lock_through_current_validation(tmp
     """Inspection cannot accept a generation while a writer changes pending/current authority."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = control.create_initial(_snapshot())
-    proposed = ControlSnapshot(initial.operation_id, initial.object_ref_digest, initial.argument_digest, initial.member, initial.attempt_id, initial.owner_id, 2, "running", None, None, None, None)
+    proposed = _next(initial)
     entered, release, writer_done = Event(), Event(), Event()
     observed = []
     original_read_current = ManagedControlStore._read_current
@@ -369,7 +396,7 @@ def test_inspection_holds_the_shared_control_lock_through_current_validation(tmp
 
     def transition():
         try:
-            ManagedControlStore(store, store).transition(initial.operation_id, proposed, expected_generation=1)
+            ManagedControlStore(store, Repo((store,))).transition(initial.operation_id, proposed, expected_generation=1)
         finally:
             writer_done.set()
 
@@ -390,7 +417,7 @@ def test_pending_neither_current_fails_closed_and_generation_overflow(tmp_path):
     """Reconciliation never chooses an unrelated current or wraps generation."""
 
     store = DirStore(tmp_path / "store")
-    control = ManagedControlStore(store, store)
+    control = ManagedControlStore(store, Repo((store,)))
     initial = control.create_initial(_snapshot())
     operation = control._operation_path(initial.operation_id)
     intent = control_module._PendingIntent(initial.operation_id, 1, "d" * 64, 2, "e" * 64)
@@ -398,9 +425,9 @@ def test_pending_neither_current_fails_closed_and_generation_overflow(tmp_path):
     with pytest.raises(ManagedControlError, match="does not identify"):
         control.reconcile(initial.operation_id)
     other = DirStore(tmp_path / "other")
-    control = ManagedControlStore(other, other)
+    control = ManagedControlStore(other, Repo((other,)))
     base = control.create_initial(_snapshot())
-    overflow = ControlSnapshot(base.operation_id, base.object_ref_digest, base.argument_digest, base.member, base.attempt_id, base.owner_id, 2**63 - 1, "running", None, None, None, None)
+    overflow = _next(base, generation=2**63 - 1)
     control._replace_file(control._current_path(control._operation_path(base.operation_id)), overflow.to_bytes())
     with pytest.raises(ManagedControlError, match="overflow"):
         control.transition(overflow.operation_id, overflow, expected_generation=2**63 - 1)
@@ -423,7 +450,7 @@ def test_spawned_bootstrap_uses_writer_lock_and_one_final_gate(tmp_path):
     assert first.exitcode == second.exitcode == 0
     assert sorted((queue.get(timeout=2), queue.get(timeout=2))) == ["ok", "ok"]
     store = DirStore(root)
-    assert ManagedControlStore(store, store).inspect("a" * 64) is None
+    assert ManagedControlStore(store, Repo((store,))).inspect("a" * 64) is None
 
 
 def test_spawned_initializers_publish_one_generation_one_lineage(tmp_path):
@@ -443,7 +470,7 @@ def test_spawned_initializers_publish_one_generation_one_lineage(tmp_path):
     assert first.exitcode == second.exitcode == 0
     assert sorted((queue.get(timeout=2), queue.get(timeout=2))) == ["conflict", "ok"]
     store = DirStore(root)
-    assert ManagedControlStore(store, store).inspect(_operation_id()).generation == 1
+    assert ManagedControlStore(store, Repo((store,))).inspect(_operation_id()).generation == 1
 
 
 def test_concurrent_initial_operation_has_one_lineage_gate(tmp_path):
@@ -454,7 +481,7 @@ def test_concurrent_initial_operation_has_one_lineage_gate(tmp_path):
     outcomes = []
 
     def create():
-        control = ManagedControlStore(store, store)
+        control = ManagedControlStore(store, Repo((store,)))
         barrier.wait()
         try:
             outcomes.append(control.create_initial(_snapshot()))

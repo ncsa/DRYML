@@ -492,6 +492,7 @@ class Repo:
         self._configuration_lock = RLock()
         self._configuration_version = 0
         self._save_context_leases = 0
+        self._topology_leases = 0
         self._save_routing = None
         self._closing = False
         self._closed = False
@@ -629,6 +630,12 @@ class Repo:
         with self._configuration_lock:
             if self._closing or self._closed:
                 raise RuntimeError("Cannot change Store configuration after Repo close begins.")
+            # Do not coerce a new specification while managed work has frozen the
+            # physical state set: coercion can initialize persistent storage.
+            if self._topology_leases and (
+                    not isinstance(store, Store)
+                    or not any(existing is store for existing in self.stores)):
+                raise RuntimeError("Cannot change Store topology while an active topology lease retains resources.")
         opened = False
         if not isinstance(store, Store):
             store = make_store(store)
@@ -651,6 +658,14 @@ class Repo:
                     candidate, reject_physical=self._save_routing is not None,
                 ))
                 previous_stores = self.stores
+                if self._topology_leases and {
+                    self._physical_store_key(item) or ("opaque", id(item))
+                    for item in candidate
+                } != {
+                    self._physical_store_key(item) or ("opaque", id(item))
+                    for item in previous_stores
+                }:
+                    raise RuntimeError("Cannot change Store topology while an active topology lease retains resources.")
                 previous_version = self._configuration_version
                 self.stores = candidate
                 self._configuration_version += 1
@@ -857,6 +872,33 @@ class Repo:
             with self._configuration_lock:
                 self._save_context_leases -= 1
 
+    @contextmanager
+    def retain_topology(self):
+        """Retain the connected physical Store set without selecting save routes.
+
+        Returns:
+            A context manager covering the current connected physical Store set.
+
+        Raises:
+            RuntimeError: If the Repo is closing or closed.
+
+        Side Effects:
+            Prevents Store addition and Repo close until release. Routing and
+            default-order changes remain valid because they do not alter the
+            physical connected set.
+        """
+
+        with self._configuration_lock:
+            if self._closing or self._closed:
+                raise RuntimeError("Cannot retain topology after Repo close begins.")
+            self._normalize_store_handles(self.stores, reject_physical=True)
+            self._topology_leases += 1
+        try:
+            yield self
+        finally:
+            with self._configuration_lock:
+                self._topology_leases -= 1
+
     def _select_save_destinations(self, context, value) -> tuple[Store, ...]:
         """Select retained routing destinations for one Object without publishing.
 
@@ -1055,10 +1097,20 @@ class Repo:
             is not opened or mutated.
         """
 
+        plan, nodes, object_ids = self._state_graph_evidence(obj)
+        return self._reserve_state_graph_evidence(plan, nodes, object_ids)
+
+    def _reserve_state_graph_evidence(self, plan, nodes, object_ids):
+        """Reserve one already-captured exact live state graph.
+
+        Managed admission captures graph evidence after retaining its topology and
+        must reuse that exact capture for reservation rather than rebuilding a
+        potentially changed live graph.
+        """
+
         from .state import reserve
 
-        plan, nodes, object_ids = self._state_graph_evidence(obj)
-        reservation = reserve(obj.object_ref, nodes, object_ids)
+        reservation = reserve(plan.object_ref, nodes, object_ids)
         # The reservation is the exact route-neutral evidence boundary.  A
         # later save using this token must not rebuild bindings against a
         # potentially changed routing configuration.
@@ -3346,6 +3398,8 @@ class Repo:
         with self._configuration_lock:
             if self._save_context_leases:
                 raise RuntimeError("Cannot close Repo while an active save context retains resources.")
+            if self._topology_leases:
+                raise RuntimeError("Cannot close Repo while an active topology lease retains resources.")
             if self._closed:
                 return
             self._closing = True
