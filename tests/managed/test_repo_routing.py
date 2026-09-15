@@ -8,7 +8,9 @@ import pytest
 
 from dryml.core import Object, Repo, SaveRouting, Selector
 from dryml.core.object import Pickleable
+from dryml.core.reference_values import StateRef
 from dryml.core.repo import RepoSaveError
+from dryml.core.signatures import Ref
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
 from dryml.managed import (
@@ -29,7 +31,7 @@ class RoutedValue(Pickleable):
         self.value = value
 
     @managed_operation(resumable=True)
-    def checkpoint_then_finish(self, *, managed):
+    def checkpoint_then_finish(self, *, managed) -> Ref[StateRef]:
         """Publish a checkpoint before changing the final payload."""
 
         self.value = 1
@@ -73,7 +75,7 @@ class RoutedRoot(Object):
         self.child = child
 
     @managed_operation()
-    def checkpoint_then_finish(self, *, managed):
+    def checkpoint_then_finish(self, *, managed) -> Ref[StateRef]:
         """Publish distinct child checkpoint and final values."""
 
         self.child.value = 1

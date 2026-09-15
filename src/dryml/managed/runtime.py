@@ -18,7 +18,7 @@ from .errors import (
     ManagedRecoveryError,
     ManagedRerunRequiredError,
 )
-from .identity import argument_digest, operation_digest
+from .identity import _argument_digest_bound, operation_digest
 from .model import InterruptRequestResult, ManagedStatus
 from .storage import (
     _acquire_state_ownership,
@@ -57,11 +57,15 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
         raise ManagedConfigError(message="managed must be a ManagedConfig or None")
     config = ManagedConfig() if managed is None else managed
     options = config.snapshot()
-    supplied = dict(kwargs)
-    supplied["managed"] = managed
-    arguments = argument_digest(descriptor, instance, args, supplied)
+    bound = descriptor.bind_arguments(instance, args, kwargs)
     operation_id = operation_digest(instance.object_ref, descriptor.member)
     stores = resolve_stores(instance, state_repo=options.state_repo, control_store=options.control_store)
+    arguments_boundary = descriptor.signature_plan().prepare_bound(bound, repo=stores.state_repo)
+    encoded = tuple(
+        (name, arguments_boundary.authority[name] if arguments_boundary.plan.slots[name].explicit else value)
+        for name, value in bound.items()
+    )
+    arguments = _argument_digest_bound(encoded)
     # Managed invocation mutates an already materialized Object graph, so it uses
     # the runtime's existing admission boundary rather than bypassing strict mode.
     from dryml.runtime import materialization_admission
@@ -69,13 +73,13 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
     try:
         with materialization_admission(operation="managed invocation"):
             return _invoke_selected(
-                descriptor, instance, args, kwargs, arguments, operation_id, stores, options,
+                descriptor, instance, kwargs, arguments_boundary, arguments, operation_id, stores, options,
             )
     finally:
         stores.close()
 
 
-def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id, stores, options):
+def _invoke_selected(descriptor, instance, kwargs, arguments_boundary, arguments, operation_id, stores, options):
     """Execute one already-admitted managed lifecycle against selected Stores."""
 
     state_repo = stores.state_repo
@@ -103,14 +107,25 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
                 running, is_resuming, checkpoint = _enter_existing(
                     control, current, descriptor, arguments, options.rerun,
                 )
+            reserved_live = {instance.object_ref.digest(): instance}
+            if checkpoint is not None:
+                reserved_live[checkpoint.digest()] = instance
+            try:
+                has_mat_argument = any(
+                    arguments_boundary.plan.slots[name].role == "mat"
+                    for name in arguments_boundary.authority
+                )
+                call_args, call_kwargs = arguments_boundary.deliver_args(
+                    extra_mat_roots=() if checkpoint is None or not has_mat_argument else (checkpoint,),
+                    reservation=ownership.reservation, reserved_live=reserved_live,
+                )
                 if is_resuming:
-                    try:
-                        state_repo.restore_state_ref_into(
-                            instance, checkpoint, reservation=ownership.reservation,
-                        )
-                    except BaseException as error:
-                        _record_failure(control, running, "restore_error", error)
-                        raise
+                    state_repo.restore_state_ref_into(
+                        instance, checkpoint, reservation=ownership.reservation,
+                    )
+            except BaseException as error:
+                _record_failure(control, running, "restore_error" if is_resuming else "method_error", error)
+                raise
             context = _create_context(
                 control_store=stores.control_store,
                 operation_id=operation_id, attempt_id=running.attempt_id,
@@ -119,8 +134,18 @@ def _invoke_selected(descriptor, instance, args, kwargs, arguments, operation_id
                 ownership=ownership, control=control, callbacks=options.callbacks,
             )
             try:
-                result = descriptor._target(instance, *args, managed=context, **kwargs)
+                result = descriptor._target(instance, *call_args, managed=context, **call_kwargs)
                 context._raise_if_interrupted()
+                plan = descriptor.signature_plan()
+                if plan.return_slot is not None:
+                    return_boundary = plan.prepare_return(result, repo=state_repo)
+                    return_reserved = {instance.object_ref.digest(): instance}
+                    last_state_ref = instance.last_state_ref
+                    if last_state_ref is not None:
+                        return_reserved[last_state_ref.digest()] = instance
+                    result = return_boundary.deliver_return(
+                        reservation=ownership.reservation, reserved_live=return_reserved,
+                    )
             except ManagedInterrupted as error:
                 if context._terminal_interrupted:
                     raise

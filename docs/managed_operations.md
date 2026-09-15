@@ -55,6 +55,14 @@ unconfigured closure behavior; paths and Store lists are not managed inputs.
 selected Repo is retained intact, including its routes and replicas, and is never
 reduced to the Store containing a prior StateRef.
 
+Ordinary authored arguments and returns use the shared [Signatures](signatures.md)
+boundary. The receiver and injected `managed` control are excluded. Managed binds
+and selects before lifecycle publication, realizes Mat arguments under its retained
+ownership reservation, then applies a fresh return boundary after its terminal
+interruption guard and before final publication. Unannotated structural returns
+therefore materialize; use a top-level `Ref[StateRef]`, `Ref[ObjectRef]`, or other
+supported Ref form when returning structural data deliberately.
+
 `control_store` is an optional exact `DirStore`. When omitted, it is resolved
 once from `state_repo.default_store`, not from a matching route or root save
 destination. An absent, unwritable, ZipStore, or otherwise unsupported default

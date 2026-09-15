@@ -15,10 +15,10 @@ _EXPECTED_CORE_EXPORTS = (
     "load_object", "save_object", "load_state_ref", "LiveReusePolicy",
     "StoreReport", "SavePublication", "SavedSnapshot", "PublicationPhase", "PublicationStatus",
     "SaveRouting", "StateGraphReservation", "Object", "Serializable", "UniqueID", "Metadata",
-    "Compute", "Definition", "ConcreteDefinition", "DefLink", "Ref", "Mat",
+    "Compute", "Definition", "ConcreteDefinition", "DefLink", "Ref", "Mat", "AutoRef",
+    "normalize_args", "normalize_return", "signature_context", "function", "SignatureError",
     "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace",
-    "freeze", "ArgRole", "RefCDef", "RefCDefArg", "SelectorArg",
-    "MaterializeArg", "ValueArg", "QuotedDef", "SelectorSpec", "Selector",
+    "freeze", "QuotedDef", "SelectorSpec", "Selector",
     "selector", "Par", "Present", "Missing", "AnyValue", "Exact", "Choice",
     "IntRange", "SubclassOf", "Satisfies", "UniformIntRange", "UniformFromSet",
     "SearchSpace", "SKIP_ARGS", "Repo", "RepoDefinition", "RepoDefinitionError", "configure", "reset_config", "status",
@@ -39,8 +39,8 @@ _EXPECTED_CORE_EXPORTS = (
 _EXPORT_MODULES = {
     **dict.fromkeys(("Object", "Serializable", "UniqueID", "Metadata", "Compute", "definition_mode", "selector_mode", "space_mode"), "dryml.core.object"),
     **dict.fromkeys(("ConcreteDefinition", "Definition", "SKIP_ARGS", "freeze"), "dryml.core.definition"),
-    **dict.fromkeys(("ArgRole", "MaterializeArg", "RefCDef", "RefCDefArg", "SelectorArg", "ValueArg"), "dryml.core.arg_roles"),
-    **dict.fromkeys(("DefLink", "Mat", "Ref"), "dryml.core.links"),
+    "DefLink": "dryml.core.links",
+    **dict.fromkeys(("AutoRef", "Mat", "Ref", "SignatureError", "function", "normalize_args", "normalize_return", "signature_context"), "dryml.core.signatures"),
     **dict.fromkeys(("ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace"), "dryml.core.reference_values"),
     **dict.fromkeys(("AnyValue", "Choice", "Exact", "IntRange", "Missing", "Par", "Present", "Satisfies", "SubclassOf", "UniformFromSet", "UniformIntRange"), "dryml.core.params"),
     **dict.fromkeys(("QuotedDef", "SelectorSpec"), "dryml.core.quoted"),
@@ -76,7 +76,7 @@ def _run_import_probe(code: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.parametrize("module_name", ("dryml.core.object", "dryml.core.tensor_spec"))
+@pytest.mark.parametrize("module_name", ("dryml.core.object", "dryml.core.tensor_spec", "dryml.core.signatures"))
 def test_narrow_core_module_imports_do_not_load_heavy_packages(module_name: str) -> None:
     """Narrow core modules load without persistence, runtime, consumer, or backend imports."""
 

@@ -6,6 +6,8 @@ import pytest
 
 from dryml.core import Repo
 from dryml.core.object import Pickleable
+from dryml.core.reference_values import StateRef
+from dryml.core.signatures import Ref
 from dryml.core.store.dir import DirStore
 from dryml.managed import (
     ManagedConfig,
@@ -24,7 +26,7 @@ class CallbackValue(Pickleable):
         self.value = value
 
     @managed_operation()
-    def run(self, *, managed):
+    def run(self, *, managed) -> Ref[StateRef]:
         """Save a callback-visible intermediate state then complete normally."""
 
         self.value = 4

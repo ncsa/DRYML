@@ -88,7 +88,31 @@ def argument_digest(descriptor: object, instance: object, args: tuple[object, ..
         bound.apply_defaults()
     except TypeError as error:
         raise ManagedConfigError(message="managed arguments do not bind") from error
-    values = [(name, value) for name, value in bound.arguments.items() if name not in {instance_parameter, "managed"}]
+    return _argument_digest_bound(
+        tuple((name, value) for name, value in bound.arguments.items() if name not in {instance_parameter, "managed"}),
+    )
+
+
+def _argument_digest_bound(values: tuple[tuple[str, object], ...]) -> str:
+    """Digest one already-bound managed argument record without rebinding it.
+
+    Args:
+        values: Ordered native parameter/value pairs after defaults and injected
+            controls have been removed. Callers retain source-category choices
+            while replacing explicitly annotated slots with pinned authority.
+
+    Returns:
+        The stable closed-grammar SHA-256 digest for the supplied bound record.
+
+    Raises:
+        ManagedConfigError: If a retained name or value is outside the existing
+            bounded managed identity grammar.
+
+    Side Effects:
+        None. This preserves the established encoder tags and never realizes a
+        selected authority.
+    """
+
     encoder = _ArgumentEncoder()
     budget = _PreimageBudget()
     budget.add(len(_ARGUMENT_DOMAIN))

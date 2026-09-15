@@ -114,6 +114,7 @@ class _Slot:
     targets: tuple[Any, ...]
     nullable: bool
     mode: str
+    explicit: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,7 +322,7 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
         if not all(member in (Definition, ConcreteDefinition, ObjectRef, StateRef) for member in members):
             raise SignatureError("role union targets are incomparable", slot)
         mode = "union"
-    return _Slot(role, members, nullable, mode)
+    return _Slot(role, members, nullable, mode, True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -517,18 +518,32 @@ class BoundaryPlan:
     _owner: tuple[int, int | None] = field(default_factory=_execution_identity, init=False, repr=False)
     _delivered: bool = field(default=False, init=False, repr=False)
 
-    def deliver_args(self) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    def deliver_args(self, *, extra_mat_roots: tuple[Any, ...] = (),
+                     reservation: Any = None,
+                     reserved_live: Mapping[str, Any] | None = None) -> tuple[tuple[Any, ...], dict[str, Any]]:
         """Deliver normalized arguments once through the original signature shape.
 
         Returns:
             Positional and keyword values for target invocation.
+
+        Args:
+            extra_mat_roots: Additional selected materializing authorities that
+                must share this boundary's aggregate preflight but are not
+                delivered to the target.
+            reservation: Optional active Repo state-graph reservation retained by
+                a higher-level lifecycle owner.
+            reserved_live: Optional exact-reference digest to live-object mapping
+                admitted through ``reservation`` for overlap reuse.
 
         Raises:
             SignatureError: If mode, ownership, or one-shot state is invalid.
         """
 
         self._consume("args")
-        values = self._deliver_materializing_values(dict(self.authority.items()))
+        values = self._deliver_materializing_values(
+            dict(self.authority.items()), extra_mat_roots=extra_mat_roots,
+            reservation=reservation, reserved_live=reserved_live,
+        )
         args, kwargs = [], {}
         for parameter in self.plan.signature.parameters.values():
             value = values[parameter.name]
@@ -542,7 +557,8 @@ class BoundaryPlan:
                 kwargs.update(value)
         return tuple(args), kwargs
 
-    def deliver_return(self) -> Any:
+    def deliver_return(self, *, reservation: Any = None,
+                       reserved_live: Mapping[str, Any] | None = None) -> Any:
         """Deliver one normalized result exactly once.
 
         Returns:
@@ -550,16 +566,33 @@ class BoundaryPlan:
 
         Raises:
             SignatureError: If mode, ownership, or one-shot state is invalid.
+
+        Args:
+            reservation: Optional active Repo state-graph reservation retained by
+                a higher-level lifecycle owner.
+            reserved_live: Optional exact-reference digest to live-object mapping
+                admitted through ``reservation`` for overlap reuse.
         """
 
         self._consume("return")
-        return self._deliver_materializing_values({"return": self.authority})["return"]
+        return self._deliver_materializing_values(
+            {"return": self.authority}, reservation=reservation,
+            reserved_live=reserved_live,
+        )["return"]
 
-    def _deliver_materializing_values(self, values: dict[str, Any]) -> dict[str, Any]:
+    def _deliver_materializing_values(self, values: dict[str, Any], *,
+                                      extra_mat_roots: tuple[Any, ...] = (),
+                                      reservation: Any = None,
+                                      reserved_live: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Delegate every Mat slot to one Repo-owned aggregate admission.
 
         Args:
             values: Selected argument or return values keyed by signature slot.
+            extra_mat_roots: Selected materializing roots preflighted but not
+                delivered through this boundary.
+            reservation: Optional active state-graph reservation for reuse.
+            reserved_live: Optional exact-reference digest to retained live-object
+                mapping used only with ``reservation``.
 
         Returns:
             The same mapping with only materializing slots realized.
@@ -577,7 +610,7 @@ class BoundaryPlan:
             name for name in values
             if (self.plan.return_slot if name == "return" else self.plan.slots[name]).role == "mat"
         ]
-        if not names:
+        if not names and not extra_mat_roots:
             return values
         from .definition import ConcreteDefinition, Definition
         from .object import Object
@@ -597,7 +630,8 @@ class BoundaryPlan:
                 return any(requires_repo(item, seen) for item in value)
             return False
 
-        if not any(requires_repo(values[name], set()) for name in names):
+        roots = tuple(values[name] for name in names) + tuple(extra_mat_roots)
+        if not any(requires_repo(value, set()) for value in roots):
             return values
         if self.controls.repo is None:
             raise SignatureError("materializing delivery requires a repo")
@@ -605,11 +639,13 @@ class BoundaryPlan:
         if not callable(materialize):
             raise SignatureError("repo does not support aggregate materialization")
         realized = materialize(
-            tuple(values[name] for name in names),
+            roots,
             cache=self.controls.cache,
             reuse_live=self.controls.reuse_live,
+            reservation=reservation,
+            reserved_live=reserved_live,
         )
-        if len(realized) != len(names):
+        if len(realized) != len(roots):
             raise SignatureError("repo aggregate materialization returned an invalid result")
         values.update(zip(names, realized))
         return values

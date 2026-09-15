@@ -75,3 +75,7 @@ Store placement or replication.
 Pre-V2 CDef records, raw tuple/dict records, missing identity versions, and mixed
 graphs are rejected before construction. There is no migration, converter, or dual
 reader. Durable layouts and validation limits are described in [Formats](formats.md).
+
+Constructor and call-boundary roles are documented in [Signatures](signatures.md).
+Newly formed live-argument definitions follow their declared Ref/Mat role; this
+does not rewrite existing Store definitions or their identity algorithms.

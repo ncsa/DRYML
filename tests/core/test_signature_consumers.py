@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import pickle
+from pathlib import Path
 
 import pytest
 
@@ -168,3 +170,81 @@ def test_all_constructor_entry_points_delegate_to_signature_normalization(monkey
     PlainConsumer(3)
 
     assert calls == ["value", "value", "value"]
+
+
+def test_public_signature_surface_has_one_owner_and_no_role_facades() -> None:
+    """Core and root re-export only the supported signature vocabulary."""
+
+    import dryml
+    import dryml.core as core
+    import dryml.core.signatures as signatures
+
+    public = (
+        "Ref", "Mat", "AutoRef", "normalize_args", "normalize_return",
+        "signature_context", "function", "SignatureError",
+    )
+    retired = (
+        "ArgRole", "MaterializeArg", "RefCDef", "RefCDefArg", "SelectorArg",
+        "ValueArg", "apply_arg_roles", "apply_bound_arg_roles",
+        "apply_definition_arg_roles", "resolve_arg_roles", "normalize_role",
+        "role_from_annotation",
+    )
+
+    assert all(getattr(dryml, name) is getattr(core, name) is getattr(signatures, name) for name in public)
+    assert not any(hasattr(module, name) for module in (dryml, core) for name in retired)
+    assert importlib.util.find_spec("dryml.core.arg_roles") is None
+    assert not any(hasattr(core, name) for name in ("SignaturePlan", "BoundaryPlan", "compile_signature"))
+    assert all(hasattr(signatures, name) for name in ("SignaturePlan", "BoundaryPlan", "compile_signature"))
+
+
+def test_public_wrapper_delegates_selection_and_materialization_to_the_core_owner(monkeypatch) -> None:
+    """A backend-free public flow binds, selects, and realizes without private policy."""
+
+    import dryml
+    import dryml.core.signatures as signatures
+
+    cdef = Definition(ConsumerLeaf, 9).concretize()
+    calls = []
+    original = signatures._normalize_value
+
+    def observe(*args, **kwargs):
+        calls.append(args[2])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(signatures, "_normalize_value", observe)
+
+    def build(value):
+        return value.definition
+
+    build.__annotations__ = {
+        "value": dryml.Mat[ConcreteDefinition],
+        "return": dryml.Ref[ConcreteDefinition],
+    }
+    build = dryml.function(build)
+
+    with dryml.signature_context(repo=Repo()):
+        result = build(cdef)
+
+    assert result == cdef
+    assert calls == ["value", "return"]
+
+
+def test_signature_documentation_centralizes_contract_and_migration() -> None:
+    """The public page owns conversion rules while consumer pages link to it."""
+
+    docs = Path(__file__).resolve().parents[2] / "docs"
+    signatures = (docs / "signatures.md").read_text(encoding="utf-8")
+    required = (
+        "AutoRef", "Same-role unions", "Nullable forms", "QuotedDef",
+        "already fully bound", "available", "Mat[StateRef]", "reuse_live",
+        "normalize_args", "signature_context", "Managed", "no aliases",
+        "RefCDef", "RefCDefArg", "SelectorArg", "MaterializeArg", "ValueArg",
+        "ArgRole", "__dryml_arg_roles__",
+    )
+
+    assert all(item.lower() in signatures.lower() for item in required)
+    for name in (
+        "ref_selector_values.md", "objects_and_defs.md", "immutable_definition_graph.md",
+        "methods.md", "managed_operations.md",
+    ):
+        assert "signatures.md" in (docs / name).read_text(encoding="utf-8")

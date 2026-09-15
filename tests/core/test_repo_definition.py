@@ -51,7 +51,7 @@ class ReconstructionTarget(Object):
         self.value = value
 
 
-class SelectorArgumentTarget(Object):
+class SelectorDataTarget(Object):
     def __init__(self, selector: Ref[SelectorSpec]):
         super().__init__()
         self.selector = selector
@@ -860,10 +860,10 @@ def test_reconstruction_failure_closes_only_freshly_opened_resources(tmp_path, m
 
 
 def test_reconstruction_retains_exact_selector_data_and_subclass_semantics(tmp_path):
-    """Nested exact CDefs retain SelectorArg data, links, and live subclasses."""
+    """Nested exact CDefs retain selector data, links, and live subclasses."""
 
     nested = Selector(Definition(ReconstructionTarget, SKIP_ARGS, value=Exact("nested")))
-    selector_cdef = Definition(SelectorArgumentTarget, nested).concretize()
+    selector_cdef = Definition(SelectorDataTarget, nested).concretize()
     ref_cdef = Definition(
         RefArgumentTarget, Definition(ReconstructionTarget, "").concretize()
     ).concretize()
@@ -1040,7 +1040,7 @@ def test_definition_reconstruction_preserves_roles_and_exact_reference_identity(
     object_ref = ObjectRef(shared, {GraphPath(): ObjectId(("selector",))})
     state_ref = StateRef(object_ref, {GraphPath(): _state_hash("e")})
     nested = Selector(Definition(ReconstructionTarget, SKIP_ARGS, value=Exact("nested")))
-    role_value = Definition(SelectorArgumentTarget, nested).concretize()
+    role_value = Definition(SelectorDataTarget, nested).concretize()
     ref_value = Definition(
         RefArgumentTarget, Definition(ReconstructionTarget, "").concretize()
     ).concretize()

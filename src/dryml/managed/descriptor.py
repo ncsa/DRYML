@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import inspect
 import types
+from dataclasses import replace
 
 from dryml.annotations import attach_annotation, own_annotations
 
@@ -83,6 +84,7 @@ class ManagedOperation:
         ):
             raise ManagedDeclarationError(message="managed operations require a keyword-only managed parameter")
         self._instance_parameter = parameters[0].name
+        self._signature_plan = None
         self._member: str | None = None
         # Do not copy the function dictionary: it can already contain passive
         # annotations, which are copied below through their owning API.
@@ -113,6 +115,73 @@ class ManagedOperation:
         """Return the native first positional parameter name used only for binding."""
 
         return self._instance_parameter
+
+    def bind_arguments(self, instance: object, args: tuple[object, ...], kwargs: dict[str, object]):
+        """Bind ordinary caller values once while excluding lifecycle controls.
+
+        Args:
+            instance: Bound managed receiver for the native first parameter.
+            args: Caller positional ordinary arguments.
+            kwargs: Caller keyword ordinary arguments without ``managed``.
+
+        Returns:
+            A core ``BoundArguments`` record in authored parameter order, with
+            defaults applied and receiver/injected context removed.
+
+        Raises:
+            ManagedConfigError: If the native author signature cannot bind the
+                supplied ordinary call. No lifecycle authority is created.
+
+        Side Effects:
+            None. It only performs native signature binding.
+        """
+
+        from dryml.core.bound_args import BoundArguments
+
+        try:
+            bound = self._author_signature.bind(instance, *args, managed=None, **kwargs)
+            bound.apply_defaults()
+        except TypeError as error:
+            raise ManagedConfigError(message="managed arguments do not bind") from error
+        return BoundArguments(
+            (name, value) for name, value in bound.arguments.items()
+            if name not in {self._instance_parameter, "managed"}
+        )
+
+    def signature_plan(self):
+        """Return the cached core plan for ordinary authored managed slots.
+
+        Returns:
+            A ``SignaturePlan`` excluding the receiver and injected ``managed``
+            control parameter while retaining all ordinary authored annotations.
+
+        Raises:
+            SignatureError: If activation of an ordinary authored annotation fails.
+
+        Side Effects:
+            Compiles and caches the immutable core plan on first lifecycle use;
+            no binding, Store access, selection, or materialization occurs.
+        """
+
+        if self._signature_plan is None:
+            from dryml.core.signatures import compile_signature
+
+            parameters = tuple(
+                parameter for parameter in self._author_signature.parameters.values()
+                if parameter.name not in {self._instance_parameter, "managed"}
+            )
+
+            def boundary_target(*args, **kwargs):
+                """Carry the ordinary managed call surface for core compilation."""
+
+            boundary_target.__signature__ = self._author_signature.replace(parameters=parameters)
+            boundary_target.__annotations__ = {
+                name: annotation for name, annotation in self._target.__annotations__.items()
+                if name not in {self._instance_parameter, "managed"}
+            }
+            plan = compile_signature(boundary_target, annotation_namespace=self._target.__globals__)
+            self._signature_plan = replace(plan, target=lambda: None)
+        return self._signature_plan
 
     def __set_name__(self, owner: type, name: str) -> None:
         """Record one stable member name and reject multi-name descriptor reuse."""

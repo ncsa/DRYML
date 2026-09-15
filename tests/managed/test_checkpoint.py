@@ -9,6 +9,8 @@ import pytest
 
 from dryml.core import Repo
 from dryml.core.object import Pickleable
+from dryml.core.reference_values import StateRef
+from dryml.core.signatures import Ref
 from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedConfig, ManagedContextError, managed_operation
 
@@ -24,7 +26,7 @@ class CheckpointValue(Pickleable):
         self.value = value
 
     @managed_operation(resumable=True)
-    def save_then_change(self, *, managed):
+    def save_then_change(self, *, managed) -> Ref[StateRef]:
         """Publish value one before mutating the final state to value two."""
 
         self.value = 1

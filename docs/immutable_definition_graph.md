@@ -7,3 +7,6 @@ Every CDef constructor field is addressed by `Parameter(name)`. Typed container 
 Raw nested CDefs and `Mat(...)` are materializing edges. `Ref(...)` is non-materializing and remains an unchanged lightweight target at runtime. CDef graph encoding uses deterministic graph-local labels, rejects duplicate or dangling declarations, and recreates private tokens on decode. Inspection, graph hashing, and reference projection do not resolve classes.
 
 An `ObjectRef` expands owned materializing topology and records ObjectIds at its canonical primary paths. A `StateRef` adds local-state hashes at exactly those paths. Thus graph topology, durable lineage, and a checkpoint remain distinct values.
+
+The signature boundary determines newly authored Ref/Mat edges; see
+[Signatures](signatures.md) for supported annotations and delivery behavior.

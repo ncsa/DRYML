@@ -209,6 +209,8 @@ signatures. These failures occur before a rejected candidate runs.
 
 ## Related Docs
 
+- [Signatures](signatures.md) documents the selected implementation's Ref/Mat
+  argument and return boundary, including return-error timing and Repo effects.
 - [Tensor Specs](tensor_specs.md)
 - [Data API](data.md)
 - [Models API](models.md)

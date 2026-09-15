@@ -8,8 +8,18 @@ from typing import Any
 class QuotedDef:
     """Store a Definition expression as local constructor data, not an object edge.
 
-    SelectorArg constructors receive this wrapper at runtime when the stored
-    value originated from a quoted Definition.
+    Args:
+        value: Definition expression frozen into canonical selector data.
+
+    ``Ref[QuotedDef]`` boundaries deliver this wrapper as expression data when a
+    caller explicitly requests quotation rather than materialization.
+
+    Raises:
+        TypeError: If ``value`` cannot be represented as selector data.
+
+    Side Effects:
+        Freezes ``value`` during construction without selecting, materializing, or
+        saving an Object.
     """
 
     value: Any
@@ -24,8 +34,18 @@ class QuotedDef:
 class SelectorSpec:
     """Store a Selector expression as local constructor data.
 
-    SelectorArg constructors receive this wrapper at runtime when the stored
-    value originated from a Selector.
+    Args:
+        selector: Selector expression frozen into canonical selector data.
+
+    ``Ref[SelectorSpec]`` boundaries deliver this wrapper as expression data when
+    a caller explicitly requests selector quotation.
+
+    Raises:
+        TypeError: If ``selector`` cannot be represented as selector data.
+
+    Side Effects:
+        Freezes ``selector`` during construction without selecting,
+        materializing, or saving an Object.
     """
 
     selector: Any

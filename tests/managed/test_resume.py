@@ -23,12 +23,11 @@ class ResumeValue(Pickleable):
 
     @managed_operation(resumable=True)
     def add(self, amount, *, managed):
-        """Return resume metadata after mutating restored state."""
+        """Return scalar resume metadata after mutating restored state."""
 
         was_resuming = managed.is_resuming
-        checkpoint = managed.checkpoint_state_ref
         self.value += amount
-        return was_resuming, checkpoint, self.value
+        return was_resuming, self.value
 
 
 def test_resume_restores_the_supplied_live_target_and_keeps_attempt_identity(tmp_path):
@@ -49,9 +48,10 @@ def test_resume_restores_the_supplied_live_target_and_keeps_attempt_identity(tmp
     ))
     value.value = 99
 
-    was_resuming, restored_checkpoint, result = operation(3, managed=ManagedConfig(state_repo=store))
+    was_resuming, result = operation(3, managed=ManagedConfig(state_repo=store))
     status = operation.status(state_repo=store)
-    assert (was_resuming, restored_checkpoint, result, value.value) == (True, checkpoint, 7, 7)
+    assert (was_resuming, result, value.value) == (True, 7, 7)
+    assert status.checkpoint_state_ref == checkpoint
     assert status.attempt_id == attempt_id
     assert status.state == "completed"
 

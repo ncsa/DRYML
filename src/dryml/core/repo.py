@@ -2947,7 +2947,8 @@ class Repo:
                 path=path,
             )
 
-    def materialize_boundary(self, roots, *, cache=None, reuse_live=None):
+    def materialize_boundary(self, roots, *, cache=None, reuse_live=None,
+                             reservation=None, reserved_live=None):
         """Realize selected materializing boundary roots under one admission cut.
 
         Args:
@@ -2957,6 +2958,11 @@ class Repo:
                 are forwarded unchanged to structural realization.
             reuse_live: ``None`` preserves exact-load ``"matching"``; supplied
                 values are forwarded unchanged to exact realization.
+            reservation: Optional active state-graph reservation retained by an
+                outer lifecycle that owns overlapping live state.
+            reserved_live: Optional mapping from exact StateRef or ObjectRef
+                digests to live Objects covered by ``reservation``. These entries
+                are admitted only after complete aggregate authority preflight.
 
         Returns:
             A tuple of runtime values in ``roots`` order, preserving aliases across
@@ -2989,6 +2995,9 @@ class Repo:
 
         if not isinstance(roots, (tuple, list)):
             raise TypeError("materialize_boundary roots must be an ordered sequence.")
+        if reserved_live is not None and (reservation is None or not isinstance(reserved_live, Mapping)):
+            raise TypeError("reserved live materialization requires a reservation and mapping.")
+        reserved_live = {} if reserved_live is None else dict(reserved_live)
 
         def concretize_definitions(value, memo):
             """Lower materializing Definition values before authority admission."""
@@ -3064,12 +3073,32 @@ class Repo:
         }
         state_actions = {}
         for exact in exact_plans.values():
+            effective_actions = {}
             for action in exact.actions:
+                # An enclosing exact StateRef is authoritative over an embedded
+                # seed for the same ObjectId. Compare only the effective action
+                # from each root before combining roots in this admission.
+                if action.reference == exact.state_ref or action.object_id not in effective_actions:
+                    effective_actions[action.object_id] = action
+            for action in effective_actions.values():
                 previous = state_actions.setdefault(action.object_id, action)
                 if previous.state_hash != action.state_hash:
                     raise RepoLoadError(
                         "Materializing boundary has incompatible effective StateRef demands."
                     )
+
+        # Managed lifecycle ownership may retain the receiver while this generic
+        # boundary preflights its checkpoint beside ordinary Mat roots. Validate
+        # that every admitted overlap is genuinely covered before bypassing the
+        # generic candidate search, which correctly excludes reserved live state.
+        for exact in exact_plans.values():
+            reserved = reserved_live.get(exact.state_ref.digest())
+            if reserved is None:
+                continue
+            if not isinstance(reserved, Object) or reserved.object_ref != exact.state_ref.object:
+                raise RepoLoadError("Reserved live materialization does not match exact StateRef authority.")
+            _, nodes, object_ids = self._state_graph_evidence(reserved)
+            reservation._covers(nodes, object_ids)
 
         # An ObjectRef shares any exact root selected for the same identity.  For
         # the remaining identities, choose live first, then one saved authority,
@@ -3080,6 +3109,14 @@ class Repo:
         results, claim_roots = {}, []
         for digest, reference in object_refs.items():
             if digest in state_for_object:
+                continue
+            reserved = reserved_live.get(digest)
+            if reserved is not None:
+                if not isinstance(reserved, Object) or reserved.object_ref != reference:
+                    raise RepoLoadError("Reserved live materialization does not match ObjectRef authority.")
+                _, nodes, object_ids = self._state_graph_evidence(reserved)
+                reservation._covers(nodes, object_ids)
+                results[digest] = reserved
                 continue
             live = tuple(
                 candidate for candidate in self._all_live_candidates()
@@ -3145,9 +3182,12 @@ class Repo:
 
                 reference_memo = {}
                 for digest, exact in exact_plans.items():
-                    results[exact.state_ref.object.digest()] = execute_exact_state_load_plan(
-                        self, exact, reuse_live=plan.reuse_live, cache=plan.cache,
-                        _reference_memo=reference_memo,
+                    reserved = reserved_live.get(exact.state_ref.digest())
+                    results[exact.state_ref.object.digest()] = (
+                        reserved if reserved is not None else execute_exact_state_load_plan(
+                            self, exact, reuse_live=plan.reuse_live, cache=plan.cache,
+                            _reference_memo=reference_memo,
+                        )
                     )
 
                 cdef_memo = _NodeBindings()
@@ -3190,7 +3230,7 @@ class Repo:
                     elif isinstance(value, StateRef):
                         result = results[value.object.digest()]
                     elif isinstance(value, ObjectRef):
-                        result = results.get(value.digest()) or build_claim(value)
+                        result = results.get(value.digest()) or reserved_live.get(value.digest()) or build_claim(value)
                     elif isinstance(value, DefLink):
                         result = value.target if value.kind is EdgeKind.REF else realize(value.target, memo)
                     elif isinstance(value, list):
