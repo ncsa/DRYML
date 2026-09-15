@@ -15,9 +15,9 @@ from dryml.core.tensor_spec import BatchMode, SpecTree
 from .errors import ImplementationDeclarationError, ImplementationSelectionError, MethodError, PreparedCallMismatchError
 from .implementation import (
     MethodImplementation,
+    SelectedDescriptorAdapter,
     direct_invocation_active,
     ensure_supported_descriptor,
-    invoke_direct_descriptor,
     invoke_descriptor,
 )
 from .signature import (
@@ -45,25 +45,14 @@ class _CapturedDirectCall:
 
 @dataclass(slots=True)
 class _CachedInvocation:
-    """An unbound descriptor invocation record that cannot retain its Method key."""
+    """One weak selected-descriptor adapter retained for cached Method calls."""
 
-    name: str
-    descriptor: object
-    receiver_ref: weakref.ReferenceType[object]
-    receiver_type: type
-    direct: bool = False
-    invoker: object | None = None
+    adapter: SelectedDescriptorAdapter
 
     def invoke(self, args: tuple[object, ...], kwargs: dict[str, object]) -> object:
-        """Bind the retained descriptor to its still-live receiver and invoke it."""
+        """Run one cached raw call through its retained selected signature plan."""
 
-        receiver = self.receiver_ref()
-        if receiver is None:
-            raise MethodError("The cached Method receiver is no longer live.")
-        if callable(self.invoker):
-            return self.invoker(*args, **kwargs)
-        invocation = invoke_direct_descriptor if self.direct else invoke_descriptor
-        return invocation(self.descriptor, receiver, self.receiver_type, args, kwargs, name=self.name)
+        return self.adapter.invoke(args, kwargs)
 
 
 @dataclass(slots=True)
@@ -207,7 +196,7 @@ class Method(Object):
         """
 
         captured = owner.__dict__.get(_DIRECT_CALL_ATTR)
-        if type(captured) is _CapturedDirectCall and direct_invocation_active(receiver):
+        if type(captured) is _CapturedDirectCall and direct_invocation_active(receiver, captured.descriptor):
             return invoke_descriptor(
                 captured.descriptor,
                 receiver,
@@ -565,19 +554,9 @@ class Method(Object):
                 )
             except TypeError as error:
                 raise MethodError("Method learning could not normalize its first input.") from error
-            try:
-                cached = _CachedInvocation(
-                    implementation.name,
-                    implementation._descriptor,
-                    weakref.ref(receiver),
-                    implementation._receiver_type,
-                    implementation._direct,
-                    implementation._invoker,
-                )
-            except TypeError as error:
-                raise MethodError("Method instances must support weak references.") from error
-            if cached.descriptor is None or cached.receiver_type is None:
-                raise ImplementationDeclarationError("Selected Method implementation is not bindable.")
+            adapter = implementation.selected_adapter()
+            call_args, call_kwargs = adapter.prepare(args, kwargs)
+            cached = _CachedInvocation(adapter)
             signature = replace(signature, batch_mode=effective_batch)
             with _STATE_LOCK:
                 # Same-instance transition races are unsupported; a successful
@@ -585,7 +564,7 @@ class Method(Object):
                 state.mode = "cached"
                 state.signature = signature
                 state.cached = cached
-            return cached.invoke(args, kwargs)
+            return adapter.invoke_prepared(call_args, call_kwargs)
         implementation = receiver._select(backend, effective_batch)
         return implementation(*args, **kwargs)
 
