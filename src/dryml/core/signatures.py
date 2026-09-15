@@ -114,7 +114,12 @@ class _Slot:
     targets: tuple[Any, ...]
     nullable: bool
     mode: str
-    explicit: bool = False
+
+    @property
+    def explicit(self) -> bool:
+        """Return whether the author declared an explicit Ref/Mat role."""
+
+        return self.mode != "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,7 +327,7 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
         if not all(member in (Definition, ConcreteDefinition, ObjectRef, StateRef) for member in members):
             raise SignatureError("role union targets are incomparable", slot)
         mode = "union"
-    return _Slot(role, members, nullable, mode, True)
+    return _Slot(role, members, nullable, mode)
 
 
 @dataclass(frozen=True, slots=True)
@@ -753,11 +758,12 @@ def _select_authority(value: Any, slot: _Slot, name: str,
             raise SignatureError("requested authority is unavailable", name) from error
         except _SelectionAmbiguous as error:
             raise SignatureError("requested authority is ambiguous", name) from error
+    definition, cdef, object_ref, state_ref = _authority_types()
     ranks = {
-        _authority_types()[3]: 3,
-        _authority_types()[2]: 2,
-        _authority_types()[1]: 1,
-        _authority_types()[0]: 0,
+        state_ref: 3,
+        object_ref: 2,
+        cdef: 1,
+        definition: 0,
     }
     for target in sorted(slot.targets, key=lambda item: ranks[item], reverse=True):
         try:
@@ -1138,7 +1144,6 @@ def function(target: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(target)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        _active_context()
         call_args, call_kwargs = plan.prepare_args(args, kwargs).deliver_args()
         return plan.prepare_return(target(*call_args, **call_kwargs)).deliver_return()
 

@@ -155,26 +155,6 @@ def invoke_descriptor(
     return _bound_descriptor(descriptor, receiver, receiver_type, name=name)(*args, **kwargs)
 
 
-def invoke_direct_descriptor(
-    descriptor: object,
-    receiver: object,
-    receiver_type: type,
-    args: tuple[object, ...],
-    kwargs: dict[str, object],
-    *,
-    name: str,
-) -> object:
-    """Invoke a captured direct target while marking cooperative-super context."""
-
-    return invoke_direct_bound(
-        _bound_descriptor(descriptor, receiver, receiver_type, name=name),
-        receiver,
-        descriptor,
-        args,
-        kwargs,
-    )
-
-
 @dataclass(slots=True)
 class SelectedDescriptorAdapter:
     """Run one selected descriptor through its core signature plan.
@@ -265,11 +245,16 @@ class SelectedDescriptorAdapter:
         if self.invoker is not None:
             result = self.invoker(*args, **kwargs)
         elif self.descriptor is not None:
-            invoke = lambda *call_args, **call_kwargs: self._invoke_raw(
-                receiver,
-                call_args,
-                call_kwargs,
-            )
+            def invoke(*call_args, **call_kwargs):
+                return invoke_descriptor(
+                    self.descriptor,
+                    receiver,
+                    self.receiver_type,
+                    call_args,
+                    call_kwargs,
+                    name=self.name,
+                )
+
             result = (
                 invoke_direct_bound(invoke, receiver, self.descriptor, args, kwargs)
                 if self.direct
@@ -278,25 +263,6 @@ class SelectedDescriptorAdapter:
         else:
             raise ImplementationDeclarationError(f"Method implementation {self.name!r} is not bindable.")
         return self.plan.prepare_return(result).deliver_return()
-
-    def _invoke_raw(
-        self,
-        receiver: object,
-        args: tuple[object, ...],
-        kwargs: dict[str, object],
-    ) -> object:
-        """Call a selected raw descriptor without rebinding its Method receiver."""
-
-        assert self.descriptor is not None
-        kind = _descriptor_kind(self.descriptor)
-        if kind is types.FunctionType:
-            return self.descriptor(receiver, *args, **kwargs)
-        if kind is staticmethod:
-            return self.descriptor.__func__(*args, **kwargs)
-        if kind is classmethod:
-            return self.descriptor.__func__(self.receiver_type, *args, **kwargs)
-        ensure_supported_descriptor(self.descriptor, name=self.name)
-        raise AssertionError("supported descriptors always have a binding kind")
 
 
 @dataclass(frozen=True, slots=True)

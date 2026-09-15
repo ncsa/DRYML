@@ -44,18 +44,6 @@ class _CapturedDirectCall:
 
 
 @dataclass(slots=True)
-class _CachedInvocation:
-    """One weak selected-descriptor adapter retained for cached Method calls."""
-
-    adapter: SelectedDescriptorAdapter
-
-    def invoke(self, args: tuple[object, ...], kwargs: dict[str, object]) -> object:
-        """Run one cached raw call through its retained selected signature plan."""
-
-        return self.adapter.invoke(args, kwargs)
-
-
-@dataclass(slots=True)
 class _PreparationState:
     """The process-local state associated with exactly one weak Method identity."""
 
@@ -63,7 +51,7 @@ class _PreparationState:
     default_batched: bool | None = None
     mode: MethodCallMode = "eager"
     signature: MethodCallSignature | None = None
-    cached: _CachedInvocation | None = None
+    cached: SelectedDescriptorAdapter | None = None
 
 
 _STATE_LOCK = Lock()
@@ -556,14 +544,13 @@ class Method(Object):
                 raise MethodError("Method learning could not normalize its first input.") from error
             adapter = implementation.selected_adapter()
             call_args, call_kwargs = adapter.prepare(args, kwargs)
-            cached = _CachedInvocation(adapter)
             signature = replace(signature, batch_mode=effective_batch)
             with _STATE_LOCK:
                 # Same-instance transition races are unsupported; a successful
                 # learning call publishes atomically before user target code.
                 state.mode = "cached"
                 state.signature = signature
-                state.cached = cached
+                state.cached = adapter
             return adapter.invoke_prepared(call_args, call_kwargs)
         implementation = receiver._select(backend, effective_batch)
         return implementation(*args, **kwargs)

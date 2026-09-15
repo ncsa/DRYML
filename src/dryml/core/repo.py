@@ -3033,7 +3033,7 @@ class Repo:
 
         # The visitor uses object identity for private CDef nodes, while exact
         # reference identities deliberately deduplicate by digest.
-        cdefs, object_refs, state_refs = [], {}, {}
+        object_refs, state_refs = {}, {}
         visited = set()
 
         def visit(value):
@@ -3050,7 +3050,6 @@ class Repo:
                 if key in visited:
                     return
                 visited.add(key)
-                cdefs.append(value)
                 for edge in iter_value_edges(value):
                     visit(edge.value)
                 return
@@ -3181,7 +3180,7 @@ class Repo:
                     scope.add_claim_cleanup(abandon_claims)
 
                 reference_memo = {}
-                for digest, exact in exact_plans.items():
+                for exact in exact_plans.values():
                     reserved = reserved_live.get(exact.state_ref.digest())
                     results[exact.state_ref.object.digest()] = (
                         reserved if reserved is not None else execute_exact_state_load_plan(

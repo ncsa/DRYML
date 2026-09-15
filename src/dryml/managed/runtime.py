@@ -73,13 +73,15 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
     try:
         with materialization_admission(operation="managed invocation"):
             return _invoke_selected(
-                descriptor, instance, kwargs, arguments_boundary, arguments, operation_id, stores, options,
+                descriptor, instance, arguments_boundary, arguments,
+                operation_id, stores, options,
             )
     finally:
         stores.close()
 
 
-def _invoke_selected(descriptor, instance, kwargs, arguments_boundary, arguments, operation_id, stores, options):
+def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
+                     operation_id, stores, options):
     """Execute one already-admitted managed lifecycle against selected Stores."""
 
     state_repo = stores.state_repo
