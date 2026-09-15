@@ -26,7 +26,8 @@ Exact requests deliver that exact authority: a `StateRef` supplied to
 incoming reference kind; for a live Object it selects CDef for an entirely
 stateless materializing graph, its known last `StateRef` for a stateful graph, or
 its `ObjectRef` otherwise. Automatic selection never saves or searches for a new
-receipt.
+receipt. `AutoRef` is an annotation-only marker class; use `Ref[AutoRef]`, not
+`Ref[AutoRef()]`, on every supported Python version.
 
 Same-role unions such as `Ref[ConcreteDefinition | ObjectRef | StateRef]` select
 the strictest reachable authority independent of member order. Ambiguous

@@ -90,21 +90,19 @@ class _RoleVocabulary:
         return self._name
 
 
-class _AutoRef:
-    """Marker for graph-aware automatic reference selection in a Ref boundary."""
+class AutoRef:
+    """Annotation-only marker for automatic selection via ``Ref[AutoRef]``.
 
-    def __repr__(self) -> str:
-        """Return the stable marker spelling."""
-
-        return "AutoRef"
+    Use the class itself, not an instance. At an activated Ref boundary, it
+    selects a CDef, ObjectRef, or StateRef from the supplied value without saving
+    or materializing it. Unsupported inputs raise ``SignatureError``.
+    """
 
 
 Ref = _RoleVocabulary("Ref", EdgeKind.REF)
 """Callable/subscriptable reference assertion and annotation vocabulary."""
 Mat = _RoleVocabulary("Mat", EdgeKind.MATERIALIZE)
 """Callable/subscriptable materializing assertion and annotation vocabulary."""
-AutoRef = _AutoRef()
-"""Marker used only as ``Ref[AutoRef]``."""
 
 
 @dataclass(frozen=True, slots=True)

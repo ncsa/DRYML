@@ -7,7 +7,7 @@ import contextvars
 import pickle
 import threading
 from types import SimpleNamespace
-from typing import Annotated
+from typing import Annotated, get_args, get_type_hints
 
 import pytest
 
@@ -79,6 +79,20 @@ def test_callable_subscriptions_and_auto_ref_are_distinct() -> None:
     assert isinstance(Ref(_cdef()), DefLink)
     assert Ref[ConcreteDefinition] != Mat[ConcreteDefinition]
     assert Ref[AutoRef] != Ref[ConcreteDefinition | None]
+
+
+def test_auto_ref_is_a_valid_annotated_type_argument() -> None:
+    """Python 3.10 requires the Annotated base to be a type, not a sentinel."""
+
+    def target(value: Ref[AutoRef]) -> Ref[AutoRef]:
+        return value
+
+    assert isinstance(AutoRef, type)
+    hints = get_type_hints(target, include_extras=True)
+    assert get_args(hints["value"])[0] is AutoRef
+    assert get_args(hints["return"])[0] is AutoRef
+    cdef = _cdef()
+    assert function(target)(cdef) is cdef
 
 
 def test_constructor_mode_uses_the_constructor_annotation_snapshot() -> None:
