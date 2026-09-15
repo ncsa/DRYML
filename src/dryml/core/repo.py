@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 _active_object_ref_builds: ContextVar[frozenset[tuple[int, str]]] = ContextVar(
     "dryml_active_object_ref_builds", default=frozenset()
 )
+_active_object_ref_results: ContextVar[Mapping[tuple[int, str], Object] | None] = ContextVar(
+    "dryml_active_object_ref_results", default=None
+)
 
 
 def _node_key(key):
@@ -2000,11 +2003,15 @@ class Repo:
             store.write_claim_record(ClaimRecord(reference.digest(), generation, "claimed", owner, now + self._lease_duration))
             return _ClaimLease(store, reference, generation, owner)
 
-    def _pending_declaration_references(self, reference):
+    def _pending_declaration_references(self, reference, *, validate_stores=True):
         """Return materializing nested declarations in dependency-first order.
 
         Args:
             reference: Registered parent ``ObjectRef`` to inspect.
+            validate_stores: Whether each dependency must have one unambiguous
+                connected Store during this traversal. Aggregate admission sets
+                this false because its later claim preflight owns pinned Store
+                and authority-fence-domain selection.
 
         Returns:
             Tuples of materializing ``GraphPath`` and unique nested ``ObjectRef``
@@ -2012,15 +2019,17 @@ class Repo:
 
         Raises:
             TypeError: If ``reference`` is not an ObjectRef.
-            RepoLoadError: If a materializing nested ObjectRef has no unambiguous
-                declaration Store or materializing declarations form a cycle.
+            RepoLoadError: If materializing declarations form a cycle, or when
+                ``validate_stores`` is true and a nested ObjectRef has no
+                unambiguous declaration Store.
 
         Side Effects:
             None. The direct authority scan neither claims nor constructs a node.
 
         Store Requirements:
-            Each nested ObjectRef must be registered in exactly one connected
-            Store. Ref-only links and embedded StateRefs are not declarations.
+            With ``validate_stores``, each nested ObjectRef must be registered in
+            exactly one connected Store. Ref-only links and embedded StateRefs
+            are not declarations.
         """
         from .cdef_graph import EdgeKind
         from .definition import ConcreteDefinition
@@ -2061,7 +2070,8 @@ class Repo:
                 return
             active.add(digest)
             try:
-                self._selected_declaration_store(child, None)
+                if validate_stores:
+                    self._selected_declaration_store(child, None)
                 visit_cdef(child.definition, path)
                 result.append((path, child))
                 seen.add(digest)
@@ -2948,7 +2958,8 @@ class Repo:
             )
 
     def materialize_boundary(self, roots, *, cache=None, reuse_live=None,
-                             reservation=None, reserved_live=None):
+                             reservation=None, reserved_live=None,
+                             declaration_stores=None):
         """Realize selected materializing boundary roots under one admission cut.
 
         Args:
@@ -2963,6 +2974,9 @@ class Repo:
             reserved_live: Optional mapping from exact StateRef or ObjectRef
                 digests to live Objects covered by ``reservation``. These entries
                 are admitted only after complete aggregate authority preflight.
+            declaration_stores: Optional mapping from selected ObjectRef digests
+                to exact connected declaration Stores. A selected Store is
+                revalidated with its declaration and ClaimRecord before effects.
 
         Returns:
             A tuple of runtime values in ``roots`` order, preserving aliases across
@@ -2970,8 +2984,10 @@ class Repo:
 
         Raises:
             RepoLoadError: If exact authority is incomplete or incompatible,
-                claim admission fails, or a constructor/restore fails.
-            TypeError: If ``roots`` is not an ordered materializing boundary.
+                a selected declaration Store is disconnected, stale, or
+                incompatible, claim admission fails, or construction/restore
+                fails.
+            TypeError: If ``roots`` or ``declaration_stores`` is malformed.
 
         Side Effects:
             May acquire first-construction claims, reserve/reuse live objects,
@@ -2981,7 +2997,14 @@ class Repo:
         """
 
         from .cdef_graph import EdgeKind
-        from .canonical import to_canonical
+        from .canonical import (
+            NodeKind,
+            is_value_container_kind,
+            node_kind,
+            rebuild_dict_kind,
+            rebuild_sequence_kind,
+            to_canonical,
+        )
         from .cdef_identity import cdef_node_key
         from .definition import Definition
         from .links import DefLink
@@ -2998,6 +3021,18 @@ class Repo:
         if reserved_live is not None and (reservation is None or not isinstance(reserved_live, Mapping)):
             raise TypeError("reserved live materialization requires a reservation and mapping.")
         reserved_live = {} if reserved_live is None else dict(reserved_live)
+        if declaration_stores is None:
+            declaration_stores = {}
+        if not isinstance(declaration_stores, Mapping):
+            raise TypeError("materialize_boundary declaration_stores must be a mapping.")
+        declaration_stores = dict(declaration_stores)
+        for digest, store in declaration_stores.items():
+            if not isinstance(digest, str) or not isinstance(store, Store):
+                raise TypeError("materialize_boundary declaration_stores must map digests to Stores.")
+            if not any(store is connected for connected in self.stores):
+                raise RepoLoadError("Selected declaration Store is not connected to this Repo.")
+
+        canonical_memo = {}
 
         def concretize_definitions(value, memo):
             """Lower materializing Definition values before authority admission."""
@@ -3006,24 +3041,47 @@ class Repo:
             if key in memo:
                 return memo[key]
             if isinstance(value, Definition):
-                result = to_canonical(value, repo=self)
-            elif isinstance(value, list):
-                result = []
-                memo[key] = result
-                result.extend(concretize_definitions(item, memo) for item in value)
-            elif isinstance(value, tuple):
-                result = tuple(concretize_definitions(item, memo) for item in value)
-            elif isinstance(value, dict):
-                result = {
-                    item: concretize_definitions(child, memo)
-                    for item, child in value.items()
-                }
+                result = to_canonical(value, repo=self, memo=canonical_memo)
             else:
-                result = value
+                kind = node_kind(value)
+                if kind is NodeKind.LIST:
+                    result = []
+                    memo[key] = result
+                    result.extend(concretize_definitions(item, memo) for item in value)
+                elif kind is NodeKind.DICT:
+                    result = {}
+                    memo[key] = result
+                    result.update(
+                        (item, concretize_definitions(child, memo))
+                        for item, child in value.items()
+                    )
+                elif kind is NodeKind.SET:
+                    result = set()
+                    memo[key] = result
+                    result.update(concretize_definitions(item, memo) for item in value)
+                elif is_value_container_kind(kind):
+                    if kind is NodeKind.FROZEN_DICT:
+                        result = rebuild_dict_kind(
+                            kind,
+                            {
+                                item: concretize_definitions(child, memo)
+                                for item, child in value.items()
+                            },
+                        )
+                    else:
+                        result = rebuild_sequence_kind(
+                            kind,
+                            (concretize_definitions(item, memo) for item in value),
+                        )
+                elif isinstance(value, frozenset):
+                    result = frozenset(concretize_definitions(item, memo) for item in value)
+                else:
+                    result = value
             memo[key] = result
             return result
 
-        roots = tuple(concretize_definitions(root, {}) for root in roots)
+        concretization_memo = {}
+        roots = tuple(concretize_definitions(root, concretization_memo) for root in roots)
         plan = AggregateMaterializationPlan(
             tuple(roots), "weak" if cache is None else cache,
             "matching" if reuse_live is None else reuse_live,
@@ -3039,11 +3097,10 @@ class Repo:
         def visit(value):
             if isinstance(value, StateRef):
                 state_refs.setdefault(value.digest(), value)
-                visit(value.object)
+                object_refs.setdefault(value.object.digest(), value.object)
                 return
             if isinstance(value, ObjectRef):
                 object_refs.setdefault(value.digest(), value)
-                visit(value.definition)
                 return
             if isinstance(value, ConcreteDefinition):
                 key = cdef_node_key(value)
@@ -3063,50 +3120,42 @@ class Repo:
         for root in plan.roots:
             visit(root)
 
-        # Every exact state closure is validated before any constructor, restore,
-        # claim, or live reservation can occur.  Compare effective local actions,
-        # not embedded seed StateRefs, so an enclosing StateRef remains decisive.
-        exact_plans = {
-            digest: build_exact_state_load_plan(self, reference)
-            for digest, reference in state_refs.items()
-        }
-        state_actions = {}
-        for exact in exact_plans.values():
-            effective_actions = {}
-            for action in exact.actions:
-                # An enclosing exact StateRef is authoritative over an embedded
-                # seed for the same ObjectId. Compare only the effective action
-                # from each root before combining roots in this admission.
-                if action.reference == exact.state_ref or action.object_id not in effective_actions:
-                    effective_actions[action.object_id] = action
-            for action in effective_actions.values():
-                previous = state_actions.setdefault(action.object_id, action)
-                if previous.state_hash != action.state_hash:
-                    raise RepoLoadError(
-                        "Materializing boundary has incompatible effective StateRef demands."
-                    )
+        from .store.records import ClaimRecord
 
-        # Managed lifecycle ownership may retain the receiver while this generic
-        # boundary preflights its checkpoint beside ordinary Mat roots. Validate
-        # that every admitted overlap is genuinely covered before bypassing the
-        # generic candidate search, which correctly excludes reserved live state.
-        for exact in exact_plans.values():
-            reserved = reserved_live.get(exact.state_ref.digest())
-            if reserved is None:
-                continue
-            if not isinstance(reserved, Object) or reserved.object_ref != exact.state_ref.object:
-                raise RepoLoadError("Reserved live materialization does not match exact StateRef authority.")
-            _, nodes, object_ids = self._state_graph_evidence(reserved)
-            reservation._covers(nodes, object_ids)
+        def validate_declaration_store(reference, store):
+            """Revalidate one exact selected declaration and claim authority."""
+
+            declaration = store.read_declaration_record(reference.digest())
+            claim = store.read_claim_record(reference.digest())
+            if declaration is None or declaration.object_ref != reference:
+                raise RepoLoadError("Selected Store does not contain this ObjectRef declaration.")
+            if not isinstance(claim, ClaimRecord) or claim.object_digest != reference.digest():
+                raise RepoLoadError("Selected Store lacks matching declaration claim authority.")
+
+        for digest, store in declaration_stores.items():
+            reference = object_refs.get(digest)
+            if reference is None:
+                raise RepoLoadError("Selected declaration Store does not match a materializing ObjectRef.")
+            validate_declaration_store(reference, store)
 
         # An ObjectRef shares any exact root selected for the same identity.  For
         # the remaining identities, choose live first, then one saved authority,
         # and only then the registered construction claim.
         state_for_object = {
-            exact.state_ref.object.digest(): exact for exact in exact_plans.values()
+            reference.object.digest() for reference in state_refs.values()
         }
         results, claim_roots = {}, []
-        for digest, reference in object_refs.items():
+        pending_refs = list(object_refs)
+        queued_refs = set(pending_refs)
+        processed_refs = set()
+        pending_index = 0
+        while pending_index < len(pending_refs):
+            digest = pending_refs[pending_index]
+            pending_index += 1
+            if digest in processed_refs:
+                continue
+            processed_refs.add(digest)
+            reference = object_refs[digest]
             if digest in state_for_object:
                 continue
             reserved = reserved_live.get(digest)
@@ -3131,22 +3180,81 @@ class Repo:
             if len(matches) > 1:
                 raise RepoLoadError("Materializing ObjectRef has ambiguous saved StateRef authority.")
             if matches:
-                exact = build_exact_state_load_plan(self, matches[0])
-                exact_plans.setdefault(matches[0].digest(), exact)
-                state_for_object[digest] = exact
+                state_refs.setdefault(matches[0].digest(), matches[0])
+                state_for_object.add(digest)
             else:
                 claim_roots.append(reference)
+                visit(reference.definition)
+                state_for_object.update(
+                    state.object.digest() for state in state_refs.values()
+                )
+                for discovered in object_refs:
+                    if discovered not in queued_refs:
+                        pending_refs.append(discovered)
+                        queued_refs.add(discovered)
+
+        # Build every direct or ObjectRef-selected exact closure before aggregate
+        # conflict admission. Enclosing exact plans own their embedded reference
+        # topology, so the visitor deliberately stops at each exact boundary.
+        exact_plans = {
+            digest: build_exact_state_load_plan(self, reference)
+            for digest, reference in state_refs.items()
+        }
+
+        # Every exact state closure, including snapshots selected from ObjectRefs,
+        # is complete before conflict admission. Compare each enclosing snapshot's
+        # effective local actions rather than its overridden embedded seed actions.
+        state_actions = {}
+        for exact in exact_plans.values():
+            effective_actions = {}
+            for action in exact.actions:
+                if action.reference == exact.state_ref or action.object_id not in effective_actions:
+                    effective_actions[action.object_id] = action
+            for action in effective_actions.values():
+                previous = state_actions.setdefault(action.object_id, action)
+                if previous.state_hash != action.state_hash:
+                    raise RepoLoadError(
+                        "Materializing boundary has incompatible effective StateRef demands."
+                    )
+
+        # Managed lifecycle ownership may retain the receiver while this generic
+        # boundary preflights its checkpoint beside ordinary Mat roots. Validate
+        # that every admitted overlap is genuinely covered before bypassing the
+        # generic candidate search, which correctly excludes reserved live state.
+        for exact in exact_plans.values():
+            reserved = reserved_live.get(exact.state_ref.digest())
+            if reserved is None:
+                continue
+            if not isinstance(reserved, Object) or reserved.object_ref != exact.state_ref.object:
+                raise RepoLoadError("Reserved live materialization does not match exact StateRef authority.")
+            _, nodes, object_ids = self._state_graph_evidence(reserved)
+            reservation._covers(nodes, object_ids)
 
         # Establish the complete dependency closure and acquire each live claim
         # before the first root executes.  The DFS is deterministic and retains
         # child-before-parent ordering required by current completion semantics.
         claim_order, claim_stores, seen_claims = [], {}, set()
+        claim_roots = [
+            reference for reference in claim_roots
+            if reference.digest() not in state_for_object
+            and reference.digest() not in results
+        ]
+        claim_digests = {reference.digest() for reference in claim_roots}
 
         def add_claim(reference):
             if reference.digest() in seen_claims:
                 return
             seen_claims.add(reference.digest())
-            for _, dependency in self._pending_declaration_references(reference):
+            for _, dependency in self._pending_declaration_references(
+                reference, validate_stores=False
+            ):
+                dependency_digest = dependency.digest()
+                if dependency_digest not in claim_digests:
+                    if dependency_digest not in state_for_object and dependency_digest not in results:
+                        raise RepoLoadError(
+                            "Materializing ObjectRef dependency escaped aggregate authority preflight."
+                        )
+                    continue
                 add_claim(dependency)
             matches = [
                 store for store in self.stores
@@ -3155,7 +3263,20 @@ class Repo:
             ]
             if not matches:
                 raise RepoLoadError("Materializing ObjectRef lacks registered declaration authority.")
-            claim_stores[reference.digest()] = matches[0]
+            selected = declaration_stores.get(reference.digest())
+            if selected is not None:
+                validate_declaration_store(reference, selected)
+            else:
+                by_domain = {}
+                for store in matches:
+                    by_domain.setdefault(store.authority_fence_key(), store)
+                if len(by_domain) != 1:
+                    raise RepoLoadError(
+                        "Materializing ObjectRef requires an explicit declaration Store or one unambiguous Store domain."
+                    )
+                selected = next(iter(by_domain.values()))
+                validate_declaration_store(reference, selected)
+            claim_stores[reference.digest()] = selected
             claim_order.append(reference)
 
         for reference in sorted(claim_roots, key=lambda item: item.digest()):
@@ -3168,16 +3289,12 @@ class Repo:
                     lease = self._acquire_claim(reference, claim_stores[reference.digest()])
                     if lease is None:
                         raise RepoLoadError("Declared ObjectRef completed during aggregate admission.")
+                    scope.add_claim_cleanup(
+                        lambda acquired_lease=lease: self._abandon_claim(acquired_lease)
+                    )
                     leases[reference.digest()] = lease
                 for lease in leases.values():
                     self._renew_claim(lease)
-
-                def abandon_claims():
-                    for lease in reversed(tuple(leases.values())):
-                        self._abandon_claim(lease)
-
-                if leases:
-                    scope.add_claim_cleanup(abandon_claims)
 
                 reference_memo = {}
                 for exact in exact_plans.values():
@@ -3190,6 +3307,10 @@ class Repo:
                     )
 
                 cdef_memo = _NodeBindings()
+                for digest, obj in results.items():
+                    reference = object_refs.get(digest)
+                    if reference is not None:
+                        cdef_memo[reference.definition] = obj
 
                 def build_claim(reference):
                     known = results.get(reference.digest())
@@ -3198,13 +3319,21 @@ class Repo:
                     lease = leases[reference.digest()]
                     active = _active_object_ref_builds.get()
                     token = _active_object_ref_builds.set(
-                        active | {(id(self), item.object_ref.digest()) for item in leases.values()}
+                        active
+                        | {(id(self), item.object_ref.digest()) for item in leases.values()}
+                        | {(id(self), digest) for digest in results}
                     )
+                    active_results = _active_object_ref_results.get() or {}
+                    results_token = _active_object_ref_results.set({
+                        **active_results,
+                        **{(id(self), digest): obj for digest, obj in results.items()},
+                    })
                     try:
                         obj = self._materialize_cdef(
                             reference.definition, cache=plan.cache, memo=cdef_memo,
                         )
                     finally:
+                        _active_object_ref_results.reset(results_token)
                         _active_object_ref_builds.reset(token)
                     from .repo_plan import apply_exact_reference_identity
 
@@ -3229,19 +3358,46 @@ class Repo:
                     elif isinstance(value, StateRef):
                         result = results[value.object.digest()]
                     elif isinstance(value, ObjectRef):
-                        result = results.get(value.digest()) or reserved_live.get(value.digest()) or build_claim(value)
+                        digest = value.digest()
+                        if digest in results:
+                            result = results[digest]
+                        elif digest in reserved_live:
+                            result = reserved_live[digest]
+                        else:
+                            result = build_claim(value)
                     elif isinstance(value, DefLink):
                         result = value.target if value.kind is EdgeKind.REF else realize(value.target, memo)
-                    elif isinstance(value, list):
-                        result = []
-                        memo[key] = result
-                        result.extend(realize(item, memo) for item in value)
-                    elif isinstance(value, tuple):
-                        result = tuple(realize(item, memo) for item in value)
-                    elif isinstance(value, dict):
-                        result = {item: realize(child, memo) for item, child in value.items()}
                     else:
-                        result = value
+                        kind = node_kind(value)
+                        if kind is NodeKind.LIST:
+                            result = []
+                            memo[key] = result
+                            result.extend(realize(item, memo) for item in value)
+                        elif kind is NodeKind.DICT:
+                            result = {}
+                            memo[key] = result
+                            result.update(
+                                (item, realize(child, memo))
+                                for item, child in value.items()
+                            )
+                        elif kind is NodeKind.SET:
+                            result = set()
+                            memo[key] = result
+                            result.update(realize(item, memo) for item in value)
+                        elif is_value_container_kind(kind):
+                            if kind is NodeKind.FROZEN_DICT:
+                                result = rebuild_dict_kind(
+                                    kind,
+                                    {item: realize(child, memo) for item, child in value.items()},
+                                )
+                            else:
+                                result = rebuild_sequence_kind(
+                                    kind, (realize(item, memo) for item in value)
+                                )
+                        elif isinstance(value, frozenset):
+                            result = frozenset(realize(item, memo) for item in value)
+                        else:
+                            result = value
                     memo[key] = result
                     return result
 
@@ -3294,9 +3450,10 @@ class Repo:
             path=None):
         """Materialize an ObjectRef only through its declaration claim.
 
-        Nested ObjectRefs whose claims were acquired by ``build_object_ref`` use
-        that enclosing operation's context-local authorization. Every other call
-        enters the public declaration-and-claim path.
+        Nested ObjectRefs whose claims were acquired by ``build_object_ref`` or
+        whose live/saved results were pinned by aggregate admission use that
+        enclosing operation's context-local authorization and memo. Every other
+        call enters the public declaration-and-claim path.
 
         Args:
             reference: Exact ObjectRef requested by a materializing CDef edge.
@@ -3313,13 +3470,23 @@ class Repo:
 
         Side Effects:
             May acquire declaration claims, construct Objects, and update caches.
+            Aggregate-preflight results are reused without reacquiring claims.
         """
         from .reference_values import ObjectRef
         from .repo_plan import apply_exact_reference_identity
 
         if not isinstance(reference, ObjectRef):
             raise TypeError("ObjectRef materialization requires an ObjectRef.")
-        if (id(self), reference.digest()) not in _active_object_ref_builds.get():
+        key = (id(self), reference.digest())
+        active_results = _active_object_ref_results.get()
+        preflight_result = None if active_results is None else active_results.get(key)
+        if preflight_result is not None:
+            if not isinstance(preflight_result, Object) or preflight_result.object_ref != reference:
+                raise RepoLoadError(
+                    "Aggregate-preflight ObjectRef result does not match requested authority."
+                )
+            return preflight_result
+        if key not in _active_object_ref_builds.get():
             realized = self.build_object_ref(reference)
             from .repo_plan import current_realization_scope
 

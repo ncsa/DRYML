@@ -7,10 +7,18 @@ from pathlib import Path
 import pytest
 
 from dryml.core import ConcreteDefinition, Definition, Object, Repo, Serializable
+from dryml.core.freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from dryml.core.repo import RepoLoadError
 from dryml.core.reference_values import ObjectRef, StateRef
 from dryml.core.signatures import Mat, Ref, SignatureError, compile_signature
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import (
+    ClaimRecord,
+    DeclarationRecord,
+    DefinitionRecord,
+    StateRefRecord,
+)
+from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
 class BoundaryValue(Serializable):
@@ -34,9 +42,33 @@ class BoundaryValue(Serializable):
 class BoundaryPair(Object):
     """Container fixture retaining constructor argument identity."""
 
+    constructions = 0
+
     def __init__(self, left, right):
+        type(self).constructions += 1
         self.left = left
         self.right = right
+
+
+class BoundaryOwner(Serializable):
+    """Durable parent fixture retaining one materializing ObjectRef child."""
+
+    def __init__(self, child, label):
+        self.child = child
+        self.label = label
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        Path(dest_dir, "label").write_text(self.label, encoding="ascii")
+
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
+        self.label = Path(src_dir, "label").read_text(encoding="ascii")
+
+
+class FalseyBoundaryValue(BoundaryValue):
+    """Stateful fixture whose valid live instances have false truthiness."""
+
+    def __bool__(self):
+        return False
 
 
 def _plan(*annotations):
@@ -104,6 +136,56 @@ def test_aggregate_keeps_independent_private_cdefs_distinct_and_direct_live():
     assert delivered.value == 8
 
 
+def test_aggregate_concretization_preserves_repeated_roots_and_nested_aliases():
+    """One Definition identity remains shared across the complete boundary."""
+
+    repo = Repo()
+    shared = Definition(BoundaryValue, 5)
+    parent = Definition(BoundaryPair, shared, shared)
+    independent = Definition(BoundaryValue, 5)
+
+    root, loaded_parent, separate = repo.materialize_boundary(
+        (shared, parent, independent), cache="none"
+    )
+
+    assert root is loaded_parent.left is loaded_parent.right
+    assert separate is not root
+    assert separate.definition == root.definition
+
+
+def test_materialization_rebuilds_mutable_frozen_and_plain_frozenset_containers(tmp_path):
+    """Recursive Mat delivery preserves container families and reference aliases."""
+
+    source = Repo(DirStore(tmp_path / "store"))
+    state = source.save_object(BoundaryValue(4, repo=source))
+    roots = (
+        [state],
+        (state,),
+        {"value": state},
+        {state},
+        frozenset({state}),
+        FrozenList((state,)),
+        FrozenTuple((state,)),
+        FrozenSet((state,)),
+        FrozenDict({"value": state}),
+    )
+
+    realized = Repo(DirStore(tmp_path / "store")).materialize_boundary(
+        roots, reuse_live="never"
+    )
+    values = tuple(
+        item["value"] if isinstance(item, (dict, FrozenDict)) else next(iter(item))
+        for item in realized
+    )
+
+    assert tuple(type(item) for item in realized) == (
+        list, tuple, dict, set, frozenset,
+        FrozenList, FrozenTuple, FrozenSet, FrozenDict,
+    )
+    assert all(value is values[0] for value in values)
+    assert values[0].value == 4
+
+
 def test_conflicting_state_demands_fail_before_any_restore(tmp_path):
     """Two exact roots for one ObjectId reject before a restoration hook runs."""
 
@@ -118,6 +200,52 @@ def test_conflicting_state_demands_fail_before_any_restore(tmp_path):
         Repo(DirStore(tmp_path / "store")).materialize_boundary((first, second))
 
     assert BoundaryValue.restores == 0
+
+
+@pytest.mark.parametrize("use_object_refs", (False, True))
+def test_overlapping_descendant_state_demands_fail_before_effects(tmp_path, use_object_refs):
+    """Explicit and ObjectRef-selected descendant conflicts share one preflight."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    child = BoundaryValue(1, repo=repo)
+    first = repo.save_object(BoundaryPair(child, "first", repo=repo), deep_capture=True)
+    child.value = 2
+    second = repo.save_object(BoundaryPair(child, "second", repo=repo), deep_capture=True)
+    BoundaryValue.constructions = BoundaryValue.restores = 0
+    BoundaryPair.constructions = 0
+    roots = (first.object, second.object) if use_object_refs else (first, second)
+
+    with pytest.raises(RepoLoadError, match="incompatible effective"):
+        Repo(DirStore(tmp_path / "store")).materialize_boundary(roots)
+
+    assert BoundaryValue.constructions == 0
+    assert BoundaryValue.restores == 0
+    assert BoundaryPair.constructions == 0
+
+
+def test_enclosing_snapshot_controls_embedded_object_ref_state(tmp_path):
+    """An ObjectRef seed does not override its enclosing exact snapshot action."""
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    child_ref = repo.declare_object(Definition(BoundaryValue, 1).concretize(repo=repo))
+    child = repo.build_object_ref(child_ref)
+    child.value = 7
+    seed = repo.save_object(child, deep_capture=True)
+    child.value = 9
+    updated = repo.save_object(child, deep_capture=True)
+    child_path = GraphPath((Parameter("left"),))
+    parent_cdef = Definition(BoundaryPair, seed.object, "parent").concretize(repo=repo)
+    parent_ref = ObjectRef(parent_cdef, {child_path: child_ref.object_id})
+    enclosing = StateRef(parent_ref, {child_path: next(iter(updated.states.values()))})
+    store.write_definition_record(DefinitionRecord(parent_cdef), stored_root=False)
+    store.write_state_ref_record(StateRefRecord(enclosing))
+
+    loaded = Repo(DirStore(tmp_path / "store")).materialize_boundary(
+        (enclosing,), reuse_live="never"
+    )[0]
+
+    assert loaded.left.value == 9
 
 
 def test_ref_never_materializes_and_mat_forwards_reuse_policy(tmp_path):
@@ -187,3 +315,164 @@ def test_materializing_object_ref_uses_unique_saved_authority_before_claim(tmp_p
 
     assert result.object_ref == reference
     assert result.value == 14
+
+
+def test_pending_parent_reuses_saved_nested_object_ref_without_reclaiming(tmp_path):
+    """A pending parent loads its completed child from aggregate preflight."""
+
+    path = tmp_path / "store"
+    source = Repo(DirStore(path))
+    child_ref = source.declare_object(
+        Definition(BoundaryValue, 41).concretize(repo=source)
+    )
+    child = source.build_object_ref(child_ref)
+    child.value = 42
+    source.save_object(child, deep_capture=True)
+    parent_ref = source.declare_object(
+        Definition(BoundaryOwner, child_ref, "saved").concretize(repo=source)
+    )
+
+    loaded_repo = Repo(DirStore(path))
+    parent = loaded_repo.materialize_boundary(
+        (parent_ref,), reuse_live="never"
+    )[0]
+
+    assert parent.object_ref == parent_ref
+    assert parent.child.object_ref == child_ref
+    assert parent.child.value == 42
+    assert loaded_repo.default_store.read_claim_record(child_ref.digest()).status == "completed"
+    assert loaded_repo.default_store.read_claim_record(parent_ref.digest()).status == "claimed"
+
+
+def test_pending_parent_reuses_live_nested_object_ref_without_reclaiming(tmp_path):
+    """A pending parent receives the exact live child selected in preflight."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    child_ref = repo.declare_object(
+        Definition(BoundaryValue, 51).concretize(repo=repo)
+    )
+    child = repo.build_object_ref(child_ref)
+    child_claim = repo.default_store.read_claim_record(child_ref.digest())
+    parent_ref = repo.declare_object(
+        Definition(BoundaryOwner, child_ref, "live").concretize(repo=repo)
+    )
+
+    parent = repo.materialize_boundary((parent_ref,))[0]
+    retained_claim = repo.default_store.read_claim_record(child_ref.digest())
+
+    assert parent.object_ref == parent_ref
+    assert parent.child is child
+    assert retained_claim.status == "claimed"
+    assert retained_claim.generation == child_claim.generation
+    assert retained_claim.owner == child_claim.owner
+
+
+def test_pending_parent_uses_pinned_store_for_nested_claim(tmp_path):
+    """Aggregate admission reuses one pinned nested claim across parent roots."""
+
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    repo = Repo((first, second))
+    child_ref = repo.declare_object(
+        Definition(BoundaryValue, 61).concretize(repo=repo), store=first
+    )
+    claim = first.read_claim_record(child_ref.digest())
+    second.write_definition_record(
+        DefinitionRecord(child_ref.definition), stored_root=False
+    )
+    second.write_claim_record(ClaimRecord(
+        child_ref.digest(), claim.generation, claim.status
+    ))
+    second.write_declaration_record(DeclarationRecord(child_ref))
+    parent_ref = repo.declare_object(
+        Definition(BoundaryOwner, child_ref, "pinned").concretize(repo=repo),
+        store=first,
+    )
+
+    parent, child = repo.materialize_boundary(
+        (parent_ref, child_ref),
+        declaration_stores={
+            parent_ref.digest(): first,
+            child_ref.digest(): second,
+        },
+    )
+
+    assert parent.child is child
+    assert parent._claim_lease.store is first
+    assert child._claim_lease.store is second
+    assert first.read_claim_record(child_ref.digest()).status == "available"
+    assert second.read_claim_record(child_ref.digest()).status == "claimed"
+
+
+def test_falsey_loaded_object_ref_result_does_not_fall_back_to_claim_build(tmp_path):
+    """A valid falsey exact result remains selected without truthiness fallback."""
+
+    source = Repo(DirStore(tmp_path / "store"))
+    state = source.save_object(FalseyBoundaryValue(13, repo=source), deep_capture=True)
+
+    result = Repo(DirStore(tmp_path / "store")).materialize_boundary(
+        (state.object,), reuse_live="never"
+    )[0]
+
+    assert not result
+    assert result.object_ref == state.object
+    assert result.value == 13
+
+
+@pytest.mark.parametrize("failure", (RuntimeError("later acquire"), KeyboardInterrupt()))
+def test_later_claim_acquisition_failure_abandons_the_first_generation(tmp_path, monkeypatch, failure):
+    """Every successful acquisition has cleanup before the next acquisition."""
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    references = tuple(
+        repo.declare_object(Definition(BoundaryValue, value).concretize(repo=repo))
+        for value in (21, 22)
+    )
+    original = repo._acquire_claim
+    calls = 0
+
+    def fail_second(reference, selected_store):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise failure
+        return original(reference, selected_store)
+
+    monkeypatch.setattr(repo, "_acquire_claim", fail_second)
+    BoundaryValue.constructions = 0
+    with pytest.raises(type(failure), match=str(failure) if str(failure) else None):
+        repo.materialize_boundary(references)
+
+    assert BoundaryValue.constructions == 0
+    assert all(store.read_claim_record(reference.digest()).status == "available" for reference in references)
+
+
+def test_renewal_failure_runs_independent_reverse_claim_cleanups(tmp_path, monkeypatch):
+    """One abandonment error cannot skip cleanup of another acquired generation."""
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    references = tuple(
+        repo.declare_object(Definition(BoundaryValue, value).concretize(repo=repo))
+        for value in (31, 32)
+    )
+    original_abandon = repo._abandon_claim
+    abandoned = []
+
+    def fail_one_abandon(lease):
+        abandoned.append(lease)
+        if len(abandoned) == 1:
+            raise OSError("cleanup failed")
+        return original_abandon(lease)
+
+    monkeypatch.setattr(repo, "_renew_claim", lambda lease: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(repo, "_abandon_claim", fail_one_abandon)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        repo.materialize_boundary(references)
+
+    assert len(abandoned) == 2
+    assert any("cleanup failed" in note for note in getattr(caught.value, "__notes__", ()))
+    assert sum(store.read_claim_record(reference.digest()).status == "available" for reference in references) == 1
+    for lease in abandoned:
+        original_abandon(lease)

@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from dryml.core import Repo
 from dryml.core.object import Pickleable
+from dryml.core.repo import RepoLoadError
 from dryml.core.reference_values import ObjectRef, StateRef
 from dryml.core.signatures import Mat, Ref, SignatureError
 from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedConfig, managed_operation
-from dryml.managed.control import ManagedControlStore
+from dryml.managed.control import ControlSnapshot, ManagedControlStore
 from dryml.managed.identity import _argument_digest_bound, operation_digest
+from dryml.managed.storage import ownership_evidence
 from dryml.managed import runtime as runtime_module
 
 
@@ -119,6 +123,36 @@ def test_managed_signature_rejects_opposing_input_before_body_or_control_creatio
     assert receiver.opposing.status(state_repo=store).state == "not_started"
 
 
+def test_managed_signature_preflight_closes_only_its_private_repo_wrapper(tmp_path, monkeypatch):
+    """Every post-resolution preflight exit deterministically closes the wrapper."""
+
+    store = DirStore(tmp_path / "state")
+    external_repo = Repo((store,))
+    receiver = SignatureValue(repo=external_repo)
+    snapshot = external_repo.save_object(receiver, deep_capture=True)
+    closed = []
+    original_close = Repo.close
+
+    def observe_close(self, *args, **kwargs):
+        closed.append((self, kwargs.get("flush", True)))
+        return original_close(self, *args, **kwargs)
+
+    monkeypatch.setattr(Repo, "close", observe_close)
+    monkeypatch.setattr(
+        store, "close", lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("borrowed Store must not close")
+        ),
+    )
+
+    with pytest.raises(SignatureError):
+        receiver.opposing(Ref(snapshot), managed=ManagedConfig(state_repo=store))
+
+    assert len(closed) == 1
+    assert closed[0][0] is not external_repo
+    assert closed[0][1] is False
+    assert external_repo.default_store is store
+
+
 def test_managed_return_normalization_records_failure_without_completion(tmp_path):
     """Return normalization follows the terminal guard and precedes final publication."""
 
@@ -199,6 +233,49 @@ def test_managed_argument_delivery_keeps_the_snapshot_pinned_at_digest_time(tmp_
 
     assert delivered.value == 1
     assert control.argument_digest == _argument_digest_bound((("value", first),))
+
+
+@pytest.mark.parametrize("conflicting", (False, True))
+def test_managed_resume_preflights_checkpoint_with_overlapping_mat_state_ref(tmp_path, conflicting):
+    """Compatible overlap reuses ownership; conflicting overlap restores nothing."""
+
+    store = DirStore(tmp_path / "state")
+    repo = Repo((store,))
+    receiver = SignatureValue(4, repo=repo)
+    checkpoint = repo.save_object(receiver, deep_capture=True)
+    argument = checkpoint
+    if conflicting:
+        receiver.value = 7
+        argument = repo.save_object(receiver, deep_capture=True)
+    receiver.value = 99
+    operation_id = operation_digest(receiver.object_ref, "receive")
+    arguments = _argument_digest_bound((("value", argument),))
+    ManagedControlStore(store, repo).create_initial(ControlSnapshot(
+        operation_id,
+        receiver.object_ref.digest(),
+        arguments,
+        "receive",
+        uuid4().hex,
+        None,
+        1,
+        "interrupted",
+        None,
+        checkpoint.digest(),
+        None,
+        None,
+        ownership_evidence(repo, receiver.object_ref.objects.values()),
+    ))
+
+    if conflicting:
+        with pytest.raises(RepoLoadError, match="incompatible effective"):
+            receiver.receive(argument, managed=ManagedConfig(state_repo=repo))
+        assert receiver.value == 99
+        assert receiver.calls == 0
+    else:
+        delivered = receiver.receive(argument, managed=ManagedConfig(state_repo=repo))
+        assert delivered is receiver
+        assert receiver.value == 4
+        assert receiver.calls == 1
 
 
 def test_managed_argument_claim_transfer_survives_later_final_publication_failure(tmp_path, monkeypatch):

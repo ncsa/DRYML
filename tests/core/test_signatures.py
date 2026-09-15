@@ -5,18 +5,26 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import pickle
+import threading
+from types import SimpleNamespace
 from typing import Annotated
 
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, Object
+from dryml.core import ConcreteDefinition, Definition, Object, Repo
+from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_codec import encode_cdef_graph
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.freeze import FrozenDict
 from dryml.core.links import DefLink
+from dryml.core.quoted import QuotedDef
+from dryml.core.reference_values import ObjectRef
 from dryml.core.signatures import (
     AutoRef,
     Mat,
     Ref,
     SignatureError,
+    ReferenceSelection,
     compile_signature,
     function,
     normalize_args,
@@ -51,6 +59,18 @@ def _direct_helper_target(value):
 
     args, kwargs = normalize_args(value)
     return normalize_return(args[0], **kwargs)
+
+
+def _plan(annotation: object, *, returns: object | None = None):
+    """Compile one local annotation without future-local name resolution."""
+
+    def target(value):
+        return value
+
+    target.__annotations__["value"] = annotation
+    if returns is not None:
+        target.__annotations__["return"] = returns
+    return compile_signature(target)
 
 
 def test_callable_subscriptions_and_auto_ref_are_distinct() -> None:
@@ -165,15 +185,17 @@ def test_context_resets_and_rejects_copied_or_foreign_ambient_use() -> None:
     """Borrowed context authority is scoped to its originating task and lifetime."""
 
     plan = compile_signature(lambda value: value)
+    wrapped = function(lambda value: value)
     with signature_context(repo=object()):
         copied = contextvars.copy_context()
         assert plan.prepare_args((1,), {}).deliver_args() == ((1,), {})
     with pytest.raises(SignatureError):
-        copied.run(lambda: plan.prepare_args((1,), {}))
+        copied.run(lambda: wrapped(1))
 
     async def child() -> None:
         with pytest.raises(SignatureError):
-            plan.prepare_args((1,), {})
+            wrapped(1)
+        assert plan.prepare_args((1,), {}, repo=object()).deliver_args() == ((1,), {})
 
     with signature_context(repo=object()):
         asyncio.run(child())
@@ -204,6 +226,241 @@ def test_nullable_roles_do_not_bypass_wrapper_conflicts() -> None:
     assert target(None) is None
     with pytest.raises(SignatureError):
         target(Mat(_cdef()))
+    with pytest.raises(SignatureError, match="only plain None"):
+        target(Ref(None))
+
+    @function
+    def materializing(value: Mat[ConcreteDefinition] | None):
+        return value
+
+    assert materializing(None) is None
+    with pytest.raises(SignatureError, match="only plain None"):
+        materializing(Mat(None))
+
+
+@pytest.mark.parametrize("role", (Ref, Mat))
+def test_outer_nullable_and_distributed_same_role_unions_are_flat(role) -> None:
+    """Outer None and same-role branches compile to one ordered nullable slot."""
+
+    inner = _plan(role[ConcreteDefinition | None]).slots["value"]
+    outer = _plan(role[ConcreteDefinition] | None).slots["value"]
+    distributed = _plan(
+        role[ConcreteDefinition] | role[ObjectRef] | None
+    ).slots["value"]
+    return_plan = _plan(
+        object, returns=role[ConcreteDefinition] | None
+    )
+
+    assert inner == outer
+    assert distributed.role == ("ref" if role is Ref else "mat")
+    assert distributed.targets == (ConcreteDefinition, ObjectRef)
+    assert distributed.nullable
+    assert _plan(role[ConcreteDefinition] | None).prepare_args(
+        (None,), {}
+    ).deliver_args() == ((None,), {})
+    assert return_plan.prepare_return(None).deliver_return() is None
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    (
+        Ref[ConcreteDefinition] | ConcreteDefinition,
+        Ref[ConcreteDefinition] | Mat[ConcreteDefinition] | None,
+        Ref[Definition] | Ref[QuotedDef],
+        list[Ref[ConcreteDefinition]],
+    ),
+)
+def test_outer_role_unions_reject_plain_mixed_incomparable_and_nested_branches(
+    annotation: object,
+) -> None:
+    """Only None may be plain and all role branches must be comparable."""
+
+    with pytest.raises(SignatureError):
+        _plan(annotation)
+
+
+def test_annotated_variadics_normalize_each_occurrence_and_preserve_projection() -> None:
+    """Ref roles apply to each expanded positional and keyword occurrence."""
+
+    first, second, third = _cdef(), _cdef(), _cdef()
+
+    def target(*values, **named):
+        return values, named
+
+    target.__annotations__ = {
+        "values": Ref[ConcreteDefinition],
+        "named": Ref[ConcreteDefinition],
+    }
+    boundary = compile_signature(target).prepare_args(
+        (first, second), {"third": third}
+    )
+
+    assert boundary.authority["values"] == (first, second)
+    assert boundary.authority["named"] == {"third": third}
+    assert boundary.canonical["values"] == (first, second)
+    assert boundary.canonical["named"] == {"third": third}
+    assert boundary.deliver_args() == ((first, second), {"third": third})
+
+
+def test_bound_variadics_reject_malformed_packed_values() -> None:
+    """Already-bound records fail cleanly when variadic packing is invalid."""
+
+    def positional(*values):
+        return values
+
+    def keyword(**values):
+        return values
+
+    with pytest.raises(SignatureError, match="must be a tuple"):
+        compile_signature(positional).prepare_bound(BoundArguments((("values", 1),)))
+    with pytest.raises(SignatureError, match="must be a mapping"):
+        compile_signature(keyword).prepare_bound(BoundArguments((("values", {1: 2}),)))
+
+
+def test_variadic_selections_use_exact_occurrence_keys_and_validate_before_reads() -> None:
+    """Selections use ``(name, index-or-key)`` and invalid paths fail preflight."""
+
+    cdef = _cdef()
+    reference = ObjectRef(cdef, {})
+    store = object()
+    reads = 0
+
+    def evidence(_cdef):
+        nonlocal reads
+        reads += 1
+        candidate = SimpleNamespace(object_ref=reference, stores=(store,))
+        return SimpleNamespace(declarations=(candidate,), states=())
+
+    repo = SimpleNamespace(reference_evidence=evidence)
+
+    def target(*values):
+        return values
+
+    target.__annotations__["values"] = Ref[ObjectRef]
+    plan = compile_signature(target)
+    boundary = plan.prepare_args(
+        (cdef,), {}, repo=repo,
+        selections={("values", 0): ReferenceSelection(reference, store)},
+    )
+    assert boundary.authority["values"] == (reference,)
+    assert boundary.selections[("values", 0)].object_ref == reference
+    assert boundary.selections[("values", 0)].store is store
+    with pytest.raises(TypeError):
+        boundary.selections[("values", 0)] = reference
+
+    reads = 0
+    with pytest.raises(SignatureError, match="selection controls are invalid"):
+        plan.prepare_args(
+            (cdef,), {}, repo=repo, selections={("values", 1): reference}
+        )
+    assert reads == 0
+    with pytest.raises(SignatureError, match="selection controls are invalid"):
+        plan.prepare_args((cdef,), {}, repo=repo, selections={"values": reference})
+    assert reads == 0
+
+    def keyword_target(**values):
+        return values
+
+    keyword_target.__annotations__["values"] = Ref[ObjectRef]
+    keyword_boundary = compile_signature(keyword_target).prepare_args(
+        (), {"item": cdef}, repo=repo,
+        selections={("values", "item"): ReferenceSelection(reference, store)},
+    )
+    assert keyword_boundary.authority["values"] == {"item": reference}
+    assert keyword_boundary.deliver_args() == ((), {"item": reference})
+
+
+def test_direct_live_objects_need_no_repo_in_supported_containers() -> None:
+    """Already-live Mat values stay local while frozen structural values need Repo."""
+
+    live = SignatureObject()
+    direct = _plan(Mat[Object]).prepare_args((live,), {}).deliver_args()[0][0]
+    nested = FrozenDict({"plain": [live], "frozen": (live,)})
+    delivered = _plan(object).prepare_args((nested,), {}).deliver_args()[0][0]
+
+    assert direct is live
+    assert delivered is nested
+    with pytest.raises(SignatureError, match="requires a repo"):
+        _plan(object).prepare_args(
+            (FrozenDict({"value": _cdef()}),), {}
+        ).deliver_args()
+
+
+def test_active_finalized_links_deliver_compatible_targets_and_reject_conflicts() -> None:
+    """Persisted links cannot leak through an active declared call boundary."""
+
+    cdef = _cdef()
+    ref = DefLink.finalized(EdgeKind.REF, cdef)
+    mat = DefLink.finalized(EdgeKind.MATERIALIZE, cdef)
+
+    assert _plan(Ref[ConcreteDefinition]).prepare_args(
+        (ref,), {}
+    ).deliver_args()[0][0] is cdef
+    realized = _plan(Mat[ConcreteDefinition]).prepare_args(
+        (mat,), {}, repo=Repo()
+    ).deliver_args()[0][0]
+    assert isinstance(realized, SignatureObject)
+    with pytest.raises(SignatureError, match="conflicts"):
+        _plan(Mat[ConcreteDefinition]).prepare_args((ref,), {})
+    with pytest.raises(SignatureError, match="conflicts"):
+        _plan(Ref[ConcreteDefinition]).prepare_args((mat,), {})
+    with pytest.raises(SignatureError, match="conflicts"):
+        _plan(Mat[ConcreteDefinition]).prepare_bound(
+            BoundArguments((("value", ref),))
+        )
+
+
+@pytest.mark.parametrize("value", (1, [1], Definition(SignatureObject)))
+def test_auto_ref_rejects_values_outside_its_documented_family(value: object) -> None:
+    """AutoRef failures are public SignatureErrors, never private control flow."""
+
+    with pytest.raises(SignatureError, match="requested authority is unavailable"):
+        _plan(Ref[AutoRef]).prepare_args((value,), {})
+
+
+def test_borrowed_boundaries_expire_and_snapshots_are_immutable() -> None:
+    """Delayed delivery retains lease lifetime while explicit plans ignore ambient."""
+
+    import dryml.core.signatures as signatures
+
+    plan = _plan(Mat[Definition])
+    selections: dict[object, object] = {}
+    with signature_context(repo=Repo(), selections=selections) as context:
+        controls = signatures._ambient_controls()
+        boundary = plan._prepare_args((Definition(SignatureObject),), {}, controls)
+        selections["value"] = object()
+        assert not context.selections
+        with pytest.raises(TypeError):
+            plan.slots["value"] = plan.slots["value"]
+        with pytest.raises(TypeError):
+            context.selections["value"] = object()
+        explicit = plan.prepare_args((Definition(SignatureObject),), {})
+        with pytest.raises(SignatureError, match="requires a repo"):
+            explicit.deliver_args()
+
+    with pytest.raises(SignatureError, match="borrowed context is unavailable"):
+        boundary.deliver_args()
+
+
+def test_boundary_delivery_rejects_foreign_threads() -> None:
+    """Invocation-owned boundaries cannot move to another thread."""
+
+    boundary = _plan(object).prepare_args((1,), {})
+    errors = []
+
+    def deliver() -> None:
+        try:
+            boundary.deliver_args()
+        except Exception as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=deliver)
+    thread.start()
+    thread.join()
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], SignatureError)
+    assert "another thread or task" in str(errors[0])
 
 
 def test_direct_helpers_normalize_unique_immediate_target() -> None:

@@ -3,10 +3,10 @@
 import numpy as np
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, Object
+from dryml.core import ConcreteDefinition, Definition, Object, Repo
 from dryml.core.links import DefLink
 from dryml.core.reference_values import ObjectRef
-from dryml.core.signatures import Mat, Ref, SignatureError
+from dryml.core.signatures import Mat, Ref, SignatureError, signature_context
 from dryml.methods import Method, PreparedCallMismatchError, traits
 
 
@@ -43,18 +43,18 @@ def test_selected_targets_compile_once_and_normalize_every_fresh_return(monkeypa
 
     compiled, returns = [], []
     original_compile = signatures.compile_signature
-    original_return = signatures.SignaturePlan.prepare_return
+    original_return = signatures.SignaturePlan._prepare_ambient_return
 
     def compile_once(target, **kwargs):
         compiled.append(target)
         return original_compile(target, **kwargs)
 
-    def observe_return(self, value, **kwargs):
+    def observe_return(self, value):
         returns.append(value)
-        return original_return(self, value, **kwargs)
+        return original_return(self, value)
 
     monkeypatch.setattr(signatures, "compile_signature", compile_once)
-    monkeypatch.setattr(signatures.SignaturePlan, "prepare_return", observe_return)
+    monkeypatch.setattr(signatures.SignaturePlan, "_prepare_ambient_return", observe_return)
 
     assert object.__new__(Direct)(value) == value
     alternative = object.__new__(Alternative)
@@ -67,6 +67,68 @@ def test_selected_targets_compile_once_and_normalize_every_fresh_return(monkeypa
 
     assert len(compiled) == 4
     assert returns == [value] * 5
+
+
+def test_direct_method_materializes_live_object_argument_and_return_once():
+    """A successful Method Mat argument and return preserve direct live delivery."""
+
+    class DirectMat(Method):
+        def __call__(self, value: Mat[Object]) -> Mat[Object]:
+            return value
+
+    value = SignatureValue()
+
+    assert object.__new__(DirectMat)(value) is value
+
+
+def test_direct_and_eager_methods_borrow_repo_for_cdef_arguments_and_returns():
+    """Direct and selected eager Methods realize substantive Mat boundaries."""
+
+    class DirectMat(Method):
+        def __call__(self, value: Mat[ConcreteDefinition]) -> Mat[ConcreteDefinition]:
+            assert isinstance(value, SignatureValue)
+            return value.definition
+
+    class EagerMat(Method):
+        @traits()
+        def generic(self, value: Mat[ConcreteDefinition]) -> Mat[ConcreteDefinition]:
+            assert isinstance(value, SignatureValue)
+            return value.definition
+
+    definition = _definition()
+    with signature_context(repo=Repo()):
+        direct = object.__new__(DirectMat)(definition)
+        eager = object.__new__(EagerMat)(definition)
+
+    assert isinstance(direct, SignatureValue)
+    assert isinstance(eager, SignatureValue)
+    assert direct.definition is definition
+    assert eager.definition is definition
+
+
+def test_learning_and_cached_methods_borrow_repo_for_cdef_returns():
+    """Backend-selected learning and cached calls realize ambient Mat returns."""
+
+    definition = _definition()
+
+    class LearningMat(Method):
+        @traits(backend="numpy")
+        def numpy(self, tensor) -> Mat[ConcreteDefinition]:
+            return definition
+
+    method = object.__new__(LearningMat)
+    method.learn()
+    tensor = np.ones((2,), dtype=np.float32)
+
+    with signature_context(repo=Repo()):
+        learned = method(tensor)
+        cached = method(tensor)
+
+    assert method.call_mode == "cached"
+    assert isinstance(learned, SignatureValue)
+    assert isinstance(cached, SignatureValue)
+    assert learned.definition is definition
+    assert cached.definition is definition
 
 
 def test_tensor_selection_precedes_selected_annotation_normalization_without_materialization():

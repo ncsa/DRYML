@@ -114,6 +114,12 @@ def _iter_direct_edges_from_value(
 
         if isinstance(value.target, (ObjectRef, StateRef)):
             return
+        if isinstance(value.target, (QuotedDef, SelectorSpec)):
+            if value.kind is not EdgeKind.REF:
+                raise ConcreteDefinitionGraphError(
+                    f"Quotation DefLink at {path!s} must be a Ref boundary."
+                )
+            return
         if not isinstance(value.target, ConcreteDefinition):
             raise ConcreteDefinitionGraphError(
                 f"DefLink at {path!s} does not resolve to a ConcreteDefinition boundary."
@@ -377,7 +383,7 @@ class ConcreteDefinitionGraph:
             return root
         value = root.graph_path(path)
         if isinstance(value, DefLink):
-            return value.target
+            value = value.target
         if not isinstance(value, ConcreteDefinition):
             raise ConcreteDefinitionGraphError(
                 f"Path {path!s} does not resolve to a ConcreteDefinition boundary."

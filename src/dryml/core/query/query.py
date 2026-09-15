@@ -824,11 +824,24 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
     if isinstance(selector, Selector):
         selector = selector.root
 
+    from ..cdef_graph import EdgeKind
+    if (
+        isinstance(selector, DefLink)
+        and selector.kind is EdgeKind.REF
+        and isinstance(selector.target, (QuotedDef, SelectorSpec))
+    ):
+        selector = selector.target
+    if (
+        isinstance(target, DefLink)
+        and target.kind is EdgeKind.REF
+        and isinstance(target.target, (QuotedDef, SelectorSpec))
+    ):
+        target = target.target
+
     if isinstance(selector, ConcreteDefinition):
             return isinstance(target, ConcreteDefinition) and cdef_equal(selector, target)
 
     if isinstance(selector, DefLink):
-        from ..cdef_graph import EdgeKind
         if selector.kind is EdgeKind.MATERIALIZE:
             target_value = target.target if isinstance(target, DefLink) and target.kind is EdgeKind.MATERIALIZE else target
             return _query_match(selector.target, target_value, strict=strict, class_match=class_match)

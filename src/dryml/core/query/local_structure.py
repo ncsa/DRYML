@@ -87,10 +87,15 @@ def _walk(
     is_target = mode.startswith("target")
     is_local = mode.endswith("local")
     if isinstance(value, DefLink):
-        if is_local and path:
-            target = value.target.root if isinstance(value.target, Selector) else value.target
+        target = value.target
+        if value.kind is EdgeKind.REF and isinstance(target, (QuotedDef, SelectorSpec)):
+            value = target
+        elif is_local and path:
+            target = target.root if isinstance(target, Selector) else target
             consumer.definition_boundary(path, target, edge_kind=value.kind)
-        return
+            return
+        else:
+            return
 
     if isinstance(value, Selector):
         value = SelectorSpec(value)

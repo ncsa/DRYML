@@ -16,6 +16,7 @@ from .cdef_identity import cdef_node_key
 from .definition import ConcreteDefinition
 from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .links import DefLink
+from .quoted import QuotedDef, SelectorSpec
 from .reference_values import ObjectRef, StateRef
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
@@ -412,9 +413,16 @@ def _decode_value(
                 f"Invalid CDef link kind {data['edge_kind']!r}."
             ) from error
         target = _decode_value(data["target"], build, payloads)
-        if not isinstance(target, (ConcreteDefinition, ObjectRef, StateRef)):
+        if not isinstance(target, (
+            ConcreteDefinition, ObjectRef, StateRef, QuotedDef, SelectorSpec,
+        )):
             raise CDefGraphCodecError(
-                "CDef link target must be a CDef, ObjectRef, or StateRef reference."
+                "CDef link target must be a CDef, ObjectRef, StateRef, or "
+                "exact constructor-data quotation."
+            )
+        if isinstance(target, (QuotedDef, SelectorSpec)) and edge_kind is not EdgeKind.REF:
+            raise CDefGraphCodecError(
+                "CDef constructor-data quotation links must use a Ref edge."
             )
         return DefLink.finalized(edge_kind, target)
     if kind == "dict":

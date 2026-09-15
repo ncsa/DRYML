@@ -8,15 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, Object, Repo
+from dryml.core import ConcreteDefinition, Definition, Object, Repo, Selector
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_codec import decode_cdef_graph, encode_cdef_graph
-from dryml.core.cdef_graph import EdgeKind
+from dryml.core.cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from dryml.core.factory import FactorySpec
 from dryml.core.freeze import FrozenList
 from dryml.core.links import DefLink
 from dryml.core.params import Present
-from dryml.core.signatures import Ref, SignatureError, compile_signature
+from dryml.core.quoted import QuotedDef, SelectorSpec
+from dryml.core.signatures import Mat, Ref, SignatureError, compile_signature
 
 
 class ConsumerLeaf(Object):
@@ -48,10 +49,31 @@ class RefPair(Object):
         self.right = right
 
 
+class MatConsumer(Object):
+    """Receive one exact CDef through a materializing constructor role."""
+
+    def __init__(self, child: Mat[ConcreteDefinition]):
+        self.child = child
+
+
 class PlainConsumer(Object):
     """Exercise the default materializing constructor slot."""
 
     def __init__(self, value):
+        self.value = value
+
+
+class ExactDefinitionDataConsumer(Object):
+    """Retain exact Definition data rather than its persisted quotation marker."""
+
+    def __init__(self, value: Ref[Definition]):
+        self.value = value
+
+
+class ExactSelectorDataConsumer(Object):
+    """Retain exact Selector data rather than its persisted quotation marker."""
+
+    def __init__(self, value: Ref[Selector]):
         self.value = value
 
 
@@ -88,6 +110,28 @@ def test_constructor_ref_annotations_choose_finalized_edges_and_keep_sharing() -
         assert pair.parameters["left"].target is pair.parameters["right"].target
 
 
+def test_fresh_constructor_exact_roles_validate_finalized_link_authority() -> None:
+    """Compatible canonical links normalize while opposing fresh links fail."""
+
+    child = Definition(ConsumerLeaf, 3).concretize()
+    ref_link = DefLink.finalized(EdgeKind.REF, child)
+    mat_link = DefLink.finalized(EdgeKind.MATERIALIZE, child)
+
+    reference_owner = Definition(PreparedConsumer, ref_link).concretize()
+    material_owner = Definition(MatConsumer, mat_link).concretize()
+
+    assert reference_owner.parameters["child"].kind is EdgeKind.REF
+    assert reference_owner.parameters["child"].target is child
+    assert material_owner.parameters["child"] is child
+    assert Repo().load_or_build(reference_owner).child is child
+    assert isinstance(Repo().load_or_build(material_owner).child, ConsumerLeaf)
+
+    with pytest.raises(SignatureError, match="conflicts"):
+        Definition(PreparedConsumer, mat_link).concretize()
+    with pytest.raises(SignatureError, match="conflicts"):
+        Definition(MatConsumer, ref_link).concretize()
+
+
 def test_persisted_ref_edges_replay_without_signature_reinterpretation() -> None:
     """Codec and pickle reconstruction retain existing normalized Ref bytes."""
 
@@ -101,6 +145,89 @@ def test_persisted_ref_edges_replay_without_signature_reinterpretation() -> None
 
     assert encode_cdef_graph(restored) == encoded
     assert restored.parameters["value"].kind is EdgeKind.REF
+    built = Repo().load_or_build(restored)
+    assert built.value is restored.parameters["value"].target
+    assert not isinstance(built.value, DefLink)
+
+
+def test_constructor_exact_data_roles_round_trip_and_decode_without_recompilation(
+    monkeypatch,
+) -> None:
+    """Canonical quotation markers replay as exact Definition/Selector data."""
+
+    definition = Definition(ConsumerLeaf)
+    selector = Selector(Definition(ConsumerLeaf, value=Present()))
+    definition_cdef = Definition(ExactDefinitionDataConsumer, definition).concretize()
+    selector_cdef = Definition(ExactSelectorDataConsumer, selector).concretize()
+
+    definition_marker = definition_cdef.parameters["value"]
+    selector_marker = selector_cdef.parameters["value"]
+    assert isinstance(definition_marker, DefLink)
+    assert isinstance(definition_marker.target, QuotedDef)
+    assert isinstance(selector_marker, DefLink)
+    assert isinstance(selector_marker.target, SelectorSpec)
+    assert ConcreteDefinitionGraph.from_root(definition_cdef).edges() == ()
+    assert ConcreteDefinitionGraph.from_root(selector_cdef).edges() == ()
+    assert encode_cdef_graph(definition_cdef) != encode_cdef_graph(selector_cdef)
+
+    restored_definition = decode_cdef_graph(encode_cdef_graph(definition_cdef))
+    restored_selector = decode_cdef_graph(encode_cdef_graph(selector_cdef))
+    monkeypatch.setattr(
+        "dryml.core.signatures.compile_signature",
+        lambda *args, **kwargs: pytest.fail("persisted constructor replay compiled a signature"),
+    )
+
+    definition_owner = Repo().load_or_build(restored_definition)
+    selector_owner = Repo().load_or_build(restored_selector)
+    assert isinstance(definition_owner.value, Definition)
+    assert definition_owner.value == definition
+    assert isinstance(selector_owner.value, Selector)
+    assert selector_owner.value == selector
+
+
+def test_direct_quotation_roles_still_deliver_wrapper_types() -> None:
+    """Ref[QuotedDef]/Ref[SelectorSpec] remain distinct from exact unwrapped data."""
+
+    quoted = QuotedDef(Definition(ConsumerLeaf))
+    spec = SelectorSpec(Selector(Definition(ConsumerLeaf)))
+
+    def target(definition, selector):
+        return definition, selector
+
+    target.__annotations__ = {
+        "definition": Ref[QuotedDef],
+        "selector": Ref[SelectorSpec],
+    }
+    result = compile_signature(target).prepare_args((quoted, spec), {}).deliver_args()[0]
+    assert result == (quoted, spec)
+
+
+@pytest.mark.parametrize(
+    ("consumer", "value", "query_value"),
+    (
+        (
+            ExactDefinitionDataConsumer,
+            Definition(ConsumerLeaf),
+            QuotedDef(Definition(ConsumerLeaf)),
+        ),
+        (
+            ExactSelectorDataConsumer,
+            Selector(Definition(ConsumerLeaf, value=Present())),
+            SelectorSpec(Selector(Definition(ConsumerLeaf, value=Present()))),
+        ),
+    ),
+)
+def test_constructor_exact_data_markers_remain_query_transparent(
+    consumer, value, query_value,
+) -> None:
+    """Query indexing treats constructor markers as their quotation payloads."""
+
+    cdef = Definition(consumer, value).concretize()
+    repo = Repo()
+    repo._query_catalog.register_stored(cdef, object())
+
+    selector = Definition(consumer, query_value)
+    assert repo.query(selector).stored(refresh=False).count() == 1
 
 
 def test_partial_query_definitions_do_not_activate_constructor_signatures(monkeypatch) -> None:
@@ -191,6 +318,9 @@ def test_public_signature_surface_has_one_owner_and_no_role_facades() -> None:
     )
 
     assert all(getattr(dryml, name) is getattr(core, name) is getattr(signatures, name) for name in public)
+    import dryml.core.links as links
+
+    assert not any(hasattr(links, name) for name in ("Ref", "Mat"))
     assert not any(hasattr(module, name) for module in (dryml, core) for name in retired)
     assert importlib.util.find_spec("dryml.core.arg_roles") is None
     assert not any(hasattr(core, name) for name in ("SignaturePlan", "BoundaryPlan", "compile_signature"))

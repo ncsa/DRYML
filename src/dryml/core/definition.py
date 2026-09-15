@@ -393,7 +393,14 @@ class Definition(DefInterface, Mapping):
         return self
 
     def freeze(self):
-        """Return a quoted Definition snapshot for expression-as-data use."""
+        """Return this expression as immutable quoted constructor data.
+
+        Returns:
+            A ``QuotedDef`` preserving this Definition without concretization.
+
+        Side Effects:
+            None. This assertion does not construct or resolve the expression.
+        """
 
         return self.quote()
 
@@ -457,11 +464,29 @@ class Definition(DefInterface, Mapping):
         return DefinitionLens(self, path)
 
     def ref(self):
-        from .links import Ref
+        """Assert reference delivery for this Definition at an activated boundary.
+
+        Returns:
+            A transient ``DefLink`` assertion retaining this exact expression.
+
+        Side Effects:
+            None. Signature normalization validates the assertion later.
+        """
+
+        from .signatures import Ref
         return Ref(self)
 
     def mat(self):
-        from .links import Mat
+        """Assert materializing delivery for this Definition at an activated boundary.
+
+        Returns:
+            A transient ``DefLink`` assertion retaining this exact expression.
+
+        Side Effects:
+            None. Construction is deferred to an activated signature boundary.
+        """
+
+        from .signatures import Mat
         return Mat(self)
 
     def quote(self):
@@ -832,18 +857,39 @@ class ConcreteDefinition(DefInterface, Mapping):
         """Return a non-materializing canonical reference to this CDef.
 
         Returns:
-            A ``Ref`` that preserves this exact identity without materializing
-            the referenced object.
+            A transient ``DefLink`` Ref assertion preserving this exact identity.
+
+        Side Effects:
+            None. Validation and reference delivery occur only at an activated
+            signature boundary.
         """
 
         return self.ref()
 
     def ref(self):
-        from .links import Ref
+        """Assert reference delivery for this exact CDef identity.
+
+        Returns:
+            A transient ``DefLink`` assertion retaining this CDef.
+
+        Side Effects:
+            None. The assertion neither materializes nor persists its target.
+        """
+
+        from .signatures import Ref
         return Ref(self)
 
     def mat(self):
-        from .links import Mat
+        """Assert materializing delivery for this exact CDef identity.
+
+        Returns:
+            A transient ``DefLink`` assertion retaining this CDef.
+
+        Side Effects:
+            None. Repo realization occurs only at an activated signature boundary.
+        """
+
+        from .signatures import Mat
         return Mat(self)
 
     def thaw(self, memo: dict | None = None) -> Any:

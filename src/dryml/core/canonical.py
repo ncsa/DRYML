@@ -925,7 +925,12 @@ class _FromCanonicalTransformer(GraphTransformer):
 
         if kind is NodeKind.DEFLINK:
             from .cdef_graph import EdgeKind
+            from .quoted import QuotedDef, SelectorSpec
             if obj.kind is EdgeKind.REF:
+                if isinstance(obj.target, QuotedDef):
+                    return obj.target.value
+                if isinstance(obj.target, SelectorSpec):
+                    return obj.target.selector
                 return obj.target
             return self.transform(obj.target, ctx.child("target"))
 
@@ -982,13 +987,37 @@ def to_canonical(
     x: Any,
     *,
     repo: "Repo | None" = None,
+    memo: dict | None = None,
     path: list[str | int] | tuple[str | int, ...] | None = None,
 ):
+    """Convert one value to canonical form under an optional shared graph memo.
+
+    Args:
+        x: Supported runtime or Definition value to canonicalize.
+        repo: Optional caller-owned Repo used for live metadata resolution.
+        memo: Optional operation-local identity memo shared across related roots.
+        path: Optional diagnostic path for this root.
+
+    Returns:
+        The canonical value, preserving identities already present in ``memo``.
+
+    Raises:
+        Exception: Propagates unsupported-value, concretization, symbol, and Repo
+            metadata failures without changing their type.
+
+    Side Effects:
+        May cache supplied live Objects weakly and read caller-supplied Repo
+        metadata. It never saves or materializes an Object.
+    """
+
     from .repo import manage_repo
 
+    if memo is None:
+        memo = {}
     if repo is not None and callable(getattr(repo, "resolve_state_selector", None)):
         ctx = GraphCtx(
             path=tuple(path) if path is not None else (),
+            memo=memo,
             state={"repo": repo},
         )
         return _ToCanonicalTransformer().transform(x, ctx)
@@ -996,6 +1025,7 @@ def to_canonical(
     with manage_repo(repo=repo) as sub_repo:
         ctx = GraphCtx(
             path=tuple(path) if path is not None else (),
+            memo=memo,
             state={"repo": sub_repo},
         )
         return _ToCanonicalTransformer().transform(x, ctx)
@@ -1212,6 +1242,7 @@ def _freeze_concrete_value(value: Any, *, stack: set[int], path: tuple[str | int
     if kind is NodeKind.DEFLINK:
         from .definition import ConcreteDefinition
         from .cdef_graph import EdgeKind
+        from .quoted import QuotedDef, SelectorSpec
         from .selector import Selector
         if not value.is_finalized:
             raise TypeError(
@@ -1219,6 +1250,20 @@ def _freeze_concrete_value(value: Any, *, stack: set[int], path: tuple[str | int
             )
         if isinstance(value.target, Selector):
             raise CannotConcretizeSelectorReference(path, value.target)
+        if isinstance(value.target, (QuotedDef, SelectorSpec)):
+            if value.kind is not EdgeKind.REF:
+                raise TypeError(
+                    f"ConcreteDefinition quotation links at {_path_label(path)} must be Ref edges."
+                )
+            from .utils.stable_hash import stable_hash_function
+
+            try:
+                stable_hash_function(value.target)
+            except Exception as error:
+                raise TypeError(
+                    f"ConcreteDefinition quotation link at {_path_label(path)} must be stable-hashable."
+                ) from error
+            return value
         if not isinstance(value.target, ConcreteDefinition):
             raise TypeError(
                 f"ConcreteDefinition link values at {_path_label(path)} must target ConcreteDefinition values."
@@ -1262,14 +1307,22 @@ def freeze_selector_value(value: Any) -> Any:
 
 
 def freeze_link_target(value: Any) -> Any:
-    """Freeze and validate a link target."""
+    """Freeze and validate a graph authority or exact constructor-data target."""
 
     from .definition import ConcreteDefinition, Definition
     from .object import Object
+    from .quoted import QuotedDef, SelectorSpec
     from .selector import Selector
 
     if isinstance(value, Object):
         return value.definition
-    if isinstance(value, (Definition, ConcreteDefinition, Selector, ObjectRef, StateRef, StateSelectorRef)):
+    if isinstance(value, (
+        Definition, ConcreteDefinition, Selector, QuotedDef, SelectorSpec,
+        ObjectRef, StateRef, StateSelectorRef,
+    )):
         return value
-    raise TypeError(f"DefLink target must be Definition, ConcreteDefinition, Selector, ObjectRef, StateRef, StateSelectorRef, or Object; got {type(value).__name__}.")
+    raise TypeError(
+        "DefLink target must be Definition, ConcreteDefinition, Selector, "
+        "QuotedDef, SelectorSpec, ObjectRef, StateRef, StateSelectorRef, or "
+        f"Object; got {type(value).__name__}."
+    )

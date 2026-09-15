@@ -60,17 +60,17 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
     bound = descriptor.bind_arguments(instance, args, kwargs)
     operation_id = operation_digest(instance.object_ref, descriptor.member)
     stores = resolve_stores(instance, state_repo=options.state_repo, control_store=options.control_store)
-    arguments_boundary = descriptor.signature_plan().prepare_bound(bound, repo=stores.state_repo)
-    encoded = tuple(
-        (name, arguments_boundary.authority[name] if arguments_boundary.plan.slots[name].explicit else value)
-        for name, value in bound.items()
-    )
-    arguments = _argument_digest_bound(encoded)
-    # Managed invocation mutates an already materialized Object graph, so it uses
-    # the runtime's existing admission boundary rather than bypassing strict mode.
-    from dryml.runtime import materialization_admission
-
     try:
+        arguments_boundary = descriptor.signature_plan().prepare_bound(bound, repo=stores.state_repo)
+        encoded = tuple(
+            (name, arguments_boundary.authority[name] if arguments_boundary.plan.slots[name].explicit else value)
+            for name, value in bound.items()
+        )
+        arguments = _argument_digest_bound(encoded)
+        # Managed invocation mutates an already materialized Object graph, so it
+        # uses the runtime's existing admission boundary rather than bypassing it.
+        from dryml.runtime import materialization_admission
+
         with materialization_admission(operation="managed invocation"):
             return _invoke_selected(
                 descriptor, instance, arguments_boundary, arguments,

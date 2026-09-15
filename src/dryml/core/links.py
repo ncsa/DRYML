@@ -1,4 +1,4 @@
-"""Persistent DefLink structure and lazy shared Ref/Mat vocabulary access."""
+"""Persistent DefLink structure for graph edges and normalized data markers."""
 
 from __future__ import annotations
 
@@ -100,23 +100,3 @@ class DefLink:
         if not self._finalized:
             raise TypeError("Unresolved DefLink assertions cannot be pickled.")
         return type(self), (self.kind, self.target)
-
-
-def __getattr__(name: str) -> Any:
-    """Lazily expose the shared Ref/Mat vocabulary without an import cycle.
-
-    Args:
-        name: Requested legacy module attribute.
-
-    Returns:
-        The shared callable/subscriptable vocabulary singleton.
-
-    Raises:
-        AttributeError: If ``name`` is not a supported vocabulary member.
-    """
-
-    if name not in {"Ref", "Mat"}:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from .signatures import Mat, Ref
-
-    return {"Ref": Ref, "Mat": Mat}[name]

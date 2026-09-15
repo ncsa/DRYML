@@ -32,14 +32,35 @@ Same-role unions such as `Ref[ConcreteDefinition | ObjectRef | StateRef]` select
 the strictest reachable authority independent of member order. Ambiguous
 strengthening fails instead of falling back. Nullable forms are flat:
 `Ref[ObjectRef | None]` and `Ref[ObjectRef] | None` accept a plain `None`;
-`Ref[None]` does not. Ref/Mat forms are top-level only. Nested roles such as
+distributed forms such as `Ref[ConcreteDefinition] | Ref[ObjectRef] | None` are
+equivalent. Only plain `None` may appear outside role branches, and opposing value
+wrappers still conflict before the nullable branch is considered. `Ref[None]` does
+not compile. Ref/Mat forms are top-level only. Nested roles such as
 `list[Ref[ObjectRef]]`, container targets, mixed Ref/Mat unions, incomparable data
 unions, and Object-subclass annotations fail with `SignatureError`.
 
 `QuotedDef` and `SelectorSpec` are expression data. Use `Ref[QuotedDef]`,
 `Ref[Selector]`, or `Ref[SelectorSpec]` to wrap, unwrap, or deliver them without
 constructing a target. `Mat` rejects quoted input until the caller explicitly
-unwraps it.
+unwraps it. Constructor CDefs retain quotation data inertly, while a constructor
+declaring `Ref[Definition]` or `Ref[Selector]` receives the exact unwrapped type at
+runtime. Persisted reconstruction does not rerun preparation, binding, or signature
+interpretation. Query indexing and matching treat these constructor markers as their
+quotation payloads rather than as graph boundaries.
+
+A fresh constructor with an explicit Ref/Mat role validates finalized structural
+links against that role before canonicalization can erase their edge authority.
+Opposing links fail, while compatible links normalize to the declared recipient
+type. Unannotated constructor slots continue to accept finalized canonical links as
+intentional structure, and persisted or already-bound replay remains inert.
+
+A role on `*items` or `**extra` applies independently to every expanded occurrence;
+the packed tuple/mapping in `BoundaryPlan.authority` and ordinary Python call
+projection are preserved. Selection controls name ordinary slots with a string,
+the return with `"return"`, positional variadic occurrences with `("items", 0)`,
+and keyword variadic occurrences with `("extra", "key")`. Parameter-level or
+unbound variadic paths, malformed selection values, and unknown paths raise before
+authority reads or realization.
 
 ## Authority And Effects
 
@@ -48,6 +69,11 @@ expression; it cannot fill defaults or run a search. CDef-to-ObjectRef selection
 uses matching authoritative declarations even when their claims are `available`,
 `claimed`, or `completed`. That declaration eligibility does not grant construction:
 `Mat` separately requires an eligible live object, saved state, or active claim.
+When `ReferenceSelection` pins a declaration Store for a Mat slot, delivery requires
+that exact handle to remain connected with matching declaration and ClaimRecord
+authority. Repo does not substitute another replica; conflicting Store domains for
+the same selected identity fail before realization effects. Duplicate connected
+handles in one authority-fence domain are treated as the same Store domain.
 
 `Mat[StateRef]` submits the selected exact snapshot to Repo. Repo owns claim
 admission, reservations, caching, restoration, and cleanup. A direct live Object
@@ -56,6 +82,12 @@ is preserved for ordinary `Mat[Object]` delivery. Under Repo's existing
 mutated after that checkpoint can be reused without restoration; use
 `reuse_live="never"` when a fresh load is required. This accepted limitation does
 not permit selecting another identity or snapshot.
+
+Aggregate ObjectRef admission classifies nested dependencies before claims are
+acquired. A nested identity already selected as live or from saved state is reused
+during parent construction rather than reclaimed or reconstructed. Unresolved
+nested declarations use their preflighted claim and any explicitly pinned
+declaration Store.
 
 Selection, normalization, and `function` never save, open a Repo, allocate an
 identity, or capture payloads. They can read supplied Repo authority for reference
@@ -76,11 +108,24 @@ Use `signature_context(repo=..., cache=..., reuse_live=..., selections=...)` to
 borrow controls without consuming target keywords. Contexts are limited to the
 originating thread and task, invalidate on exit, and do not open or close the
 caller-owned Repo. Each boundary is one-shot and belongs to its creating
-thread/task; concurrent callers must provide independent valid controls.
+thread/task; concurrent callers must provide independent valid controls. Context
+and boundary selection mappings are immutable snapshots. A prepared boundary
+retains the borrowed lease and cannot realize after context exit or in another
+task/thread.
+
+Advanced `SignaturePlan.prepare_args`, `prepare_bound`, and `prepare_return` use
+only controls passed explicitly to that call; they never fall back to ambient
+authority. The official `function`, `normalize_args`, and `normalize_return`
+helpers deliberately borrow an active `signature_context` for each boundary.
+Consequently an integration can pass explicit controls in a child task even when
+an inherited ambient context is invalid, provided the explicitly borrowed
+Repo/Store lifetime remains valid.
 
 Constructors normalize once after `__prepare_args__`; persisted and already-bound
 records do not replay preparation. `Method` selects from raw tensor facts first,
-then normalizes the selected implementation's arguments and return. Managed
+then normalizes the selected implementation's arguments and return. Method adapters
+deliberately borrow the active `signature_context` through the same core-owned path
+as `function`, including its task/thread and lease checks. Managed
 operations exclude their receiver and injected `managed` control, digest selected
 annotated authority before realization, retain unannotated argument identity tags,
 and normalize returns after the terminal-interruption guard and before final

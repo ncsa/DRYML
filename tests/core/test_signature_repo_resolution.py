@@ -62,6 +62,16 @@ def _plan(annotation):
     return compile_signature(target)
 
 
+def _pair_plan(annotation):
+    """Compile two ordinary slots with the same supplied annotation."""
+
+    def target(first, second):
+        return first, second
+
+    target.__annotations__.update(first=annotation, second=annotation)
+    return compile_signature(target)
+
+
 def _stateful_reference(repo: Repo):
     """Declare, build, and save one exact Counter reference for selection tests."""
 
@@ -127,7 +137,8 @@ def test_state_selection_deduplicates_replicas_and_rejects_ambiguity(tmp_path):
 
     assert _plan(Ref[StateRef]).prepare_args((reference,), {}, repo=replicas).authority["value"] == state
     with signature_context(repo=replicas):
-        assert _plan(Ref[StateRef]).prepare_args((reference,), {}).authority["value"] == state
+        with pytest.raises(SignatureError, match="authority is unavailable"):
+            _plan(Ref[StateRef]).prepare_args((reference,), {})
     second_state = StateRef(
         reference, {path: "pkl-" + "b" * 64 for path in reference.objects}
     )
@@ -196,6 +207,95 @@ def test_explicit_selection_and_definition_strengthening_guards(tmp_path):
     assert _plan(Ref[ConcreteDefinition]).prepare_args((Definition(SignatureCounter, 1),), {}).authority["value"] == cdef
     with pytest.raises(SignatureError, match="unavailable"):
         _plan(Ref[ConcreteDefinition]).prepare_args((Definition(SignatureCounter),), {})
+
+
+def test_materializing_selection_claims_only_the_pinned_replica(tmp_path):
+    """Boundary delivery retains the selected declaration Store through admission."""
+
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    source = Repo(first)
+    reference = source.declare_object(SignatureCounter(7).definition)
+    _replicate_declaration(second, reference, first.read_claim_record(reference.digest()))
+    repo = Repo((first, second))
+
+    boundary = _plan(Mat[ObjectRef]).prepare_args(
+        (reference.definition,), {}, repo=repo,
+        selections={"value": ReferenceSelection(reference, second)},
+    )
+    live = boundary.deliver_args()[0][0]
+
+    assert live.object_ref == reference
+    assert live._claim_lease.store is second
+    assert first.read_claim_record(reference.digest()).status == "available"
+    assert second.read_claim_record(reference.digest()).status == "claimed"
+
+
+def test_materializing_selection_revalidates_stale_and_disconnected_stores(tmp_path, monkeypatch):
+    """A prepared Store pin cannot be substituted after its authority changes."""
+
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    repo = Repo(first)
+    reference = repo.declare_object(SignatureCounter(8).definition)
+    _replicate_declaration(second, reference, first.read_claim_record(reference.digest()))
+    connected = Repo((first, second))
+    stale = _plan(Mat[ObjectRef]).prepare_args(
+        (reference,), {}, repo=connected,
+        selections={"value": ReferenceSelection(reference, second)},
+    )
+    monkeypatch.setattr(second, "read_claim_record", lambda digest: None)
+    with pytest.raises(RepoLoadError, match="claim authority"):
+        stale.deliver_args()
+    assert first.read_claim_record(reference.digest()).status == "available"
+
+    disconnected = DirStore(tmp_path / "disconnected")
+    boundary = _plan(Mat[ObjectRef]).prepare_args(
+        (reference,), {}, repo=repo,
+        selections={"value": ReferenceSelection(reference, disconnected)},
+    )
+    with pytest.raises(RepoLoadError, match="not connected"):
+        boundary.deliver_args()
+    assert first.read_claim_record(reference.digest()).status == "available"
+
+
+def test_conflicting_replica_pins_fail_before_claims_but_same_domain_handles_agree(tmp_path):
+    """Distinct Store domains conflict while duplicate handles name one authority."""
+
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    source = Repo(first)
+    reference = source.declare_object(SignatureCounter(9).definition)
+    _replicate_declaration(second, reference, first.read_claim_record(reference.digest()))
+    repo = Repo((first, second))
+    conflicting = _pair_plan(Mat[ObjectRef]).prepare_args(
+        (reference, reference), {}, repo=repo,
+        selections={
+            "first": ReferenceSelection(reference, first),
+            "second": ReferenceSelection(reference, second),
+        },
+    )
+
+    with pytest.raises(SignatureError, match="conflicting declaration Store"):
+        conflicting.deliver_args()
+    assert first.read_claim_record(reference.digest()).status == "available"
+    assert second.read_claim_record(reference.digest()).status == "available"
+
+    shared_first = DirStore(tmp_path / "shared")
+    shared_second = DirStore(tmp_path / "shared")
+    shared_repo = Repo((shared_first, shared_second))
+    shared_ref = shared_repo.declare_object(
+        SignatureCounter(10).definition, store=shared_first
+    )
+    agreeing = _pair_plan(Mat[ObjectRef]).prepare_args(
+        (shared_ref, shared_ref), {}, repo=shared_repo,
+        selections={
+            "first": ReferenceSelection(shared_ref, shared_first),
+            "second": ReferenceSelection(shared_ref, shared_second),
+        },
+    )
+    left, right = agreeing.deliver_args()[0]
+    assert left is right
 
 
 def test_source_guards_and_quotation_data_are_preserved(tmp_path):

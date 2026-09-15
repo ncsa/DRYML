@@ -226,9 +226,19 @@ class SelectedDescriptorAdapter:
         args: tuple[object, ...],
         kwargs: dict[str, object],
     ) -> tuple[tuple[object, ...], dict[str, object]]:
-        """Normalize one fresh input boundary through the retained selected plan."""
+        """Normalize input while borrowing the caller's active signature context.
 
-        return self.plan.prepare_args(args, kwargs).deliver_args()
+        Returns:
+            Positional and keyword arguments delivered through the selected plan.
+
+        Raises:
+            SignatureError: If ambient authority, normalization, or delivery fails.
+
+        Side Effects:
+            Materializing slots may realize through the caller-owned ambient Repo.
+        """
+
+        return self.plan._prepare_ambient_args(args, kwargs).deliver_args()
 
     def invoke(self, args: tuple[object, ...], kwargs: dict[str, object]) -> object:
         """Normalize inputs, invoke the selected target, and normalize its return."""
@@ -237,7 +247,19 @@ class SelectedDescriptorAdapter:
         return self.invoke_prepared(call_args, call_kwargs)
 
     def invoke_prepared(self, args: tuple[object, ...], kwargs: dict[str, object]) -> object:
-        """Invoke already-normalized inputs and freshly normalize the result."""
+        """Invoke prepared inputs and normalize the result with ambient authority.
+
+        Returns:
+            The selected target's freshly delivered return value.
+
+        Raises:
+            MethodError: If the selected receiver is no longer live.
+            SignatureError: If return normalization or ambient delivery fails.
+
+        Side Effects:
+            Invokes the selected target once. A materializing return may realize
+            through the caller-owned ambient Repo.
+        """
 
         receiver = self.receiver_ref()
         if receiver is None:
@@ -262,7 +284,7 @@ class SelectedDescriptorAdapter:
             )
         else:
             raise ImplementationDeclarationError(f"Method implementation {self.name!r} is not bindable.")
-        return self.plan.prepare_return(result).deliver_return()
+        return self.plan._prepare_ambient_return(result).deliver_return()
 
 
 @dataclass(frozen=True, slots=True)
