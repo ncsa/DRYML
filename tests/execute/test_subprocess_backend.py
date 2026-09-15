@@ -49,14 +49,35 @@ def _emit_and_return(value: str) -> str:
 
 
 def _hold_affinity(marker_directory: str, name: str) -> list[int]:
-    """Publish actual worker affinity, then wait for a file-based release signal."""
+    """Atomically publish affinity before exposing the worker readiness signal."""
     directory = Path(marker_directory)
     affinity = sorted(os.sched_getaffinity(0))
-    (directory / f"{name}.running").write_text(",".join(map(str, affinity)), encoding="ascii")
+    pending = directory / f"{name}.pending"
+    pending.write_text(",".join(map(str, affinity)), encoding="ascii")
+    pending.replace(directory / f"{name}.running")
     release = directory / f"{name}.release"
     while not release.exists():
         sleep(0.01)
     return affinity
+
+
+def test_affinity_marker_is_visible_only_after_payload_write(tmp_path, monkeypatch):
+    """An observer cannot mistake a created but unwritten marker for readiness."""
+    marker = tmp_path / "worker.running"
+    (tmp_path / "worker.release").touch()
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {1, 3}, raising=False)
+    original_write = Path.write_text
+
+    def observe_write(path, data, **kwargs):
+        original_write(path, "", **kwargs)
+        assert not marker.exists()
+        return original_write(path, data, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", observe_write)
+
+    assert _hold_affinity(str(tmp_path), "worker") == [1, 3]
+    assert marker.read_text(encoding="ascii") == "1,3"
+    assert not (tmp_path / "worker.pending").exists()
 
 
 def _write_sentinel(path: str) -> str:
