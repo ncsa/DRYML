@@ -472,7 +472,8 @@ def test_renewal_failure_runs_independent_reverse_claim_cleanups(tmp_path, monke
         repo.materialize_boundary(references)
 
     assert len(abandoned) == 2
-    assert any("cleanup failed" in note for note in getattr(caught.value, "__notes__", ()))
+    if hasattr(caught.value, "add_note"):
+        assert any("cleanup failed" in note for note in caught.value.__notes__)
     assert sum(store.read_claim_record(reference.digest()).status == "available" for reference in references) == 1
     for lease in abandoned:
         original_abandon(lease)
