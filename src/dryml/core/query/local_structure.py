@@ -174,9 +174,6 @@ def _walk_checked(
         return
 
     if is_selector and isinstance(value, Definition):
-        from ..arg_roles import apply_definition_arg_roles
-
-        value = apply_definition_arg_roles(value)
         if is_local and path:
             consumer.definition_boundary(path, value, edge_kind=EdgeKind.MATERIALIZE)
             return

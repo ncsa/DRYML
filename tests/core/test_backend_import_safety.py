@@ -331,6 +331,7 @@ from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.links import DefLink
 from dryml.core.query.fingerprint import target_local_fingerprint
 from dryml.core.query.selector_graph import compile_selector_graph
 from dryml.core.symbol import ImportRef
@@ -341,7 +342,7 @@ child = ConcreteDefinition._from_bound_record(
 )
 root = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.torch.base", "Model"),
-    BoundArguments((("child", child.freeze()),)),
+    BoundArguments((("child", DefLink.finalized(EdgeKind.REF, child)),)),
 )
 
 class FakeStore:
@@ -353,7 +354,10 @@ assert graph.edges()[0].kind is EdgeKind.REF
 target_local_fingerprint(root)
 selector_graph = compile_selector_graph(root)
 assert selector_graph.edges == ()
-selector = Definition(ImportRef("dryml.models.torch.base", "Model"), child=child.freeze())
+selector = Definition(
+    ImportRef("dryml.models.torch.base", "Model"),
+    child=DefLink.finalized(EdgeKind.REF, child),
+)
 selector_graph = compile_selector_graph(selector)
 assert selector_graph.edges[0].edge_kind is EdgeKind.REF
 

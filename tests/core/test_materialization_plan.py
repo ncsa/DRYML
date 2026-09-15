@@ -1,7 +1,9 @@
 import pytest
 
 from dryml.core import ConcreteDefinition, Definition, Object, Repo, Serializable
+from dryml.core.cdef_graph import EdgeKind
 from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.links import DefLink
 from dryml.core.materialization import MaterializationAction, build_materialization_plan, execute_materialization_plan, from_canonical_local
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
@@ -134,9 +136,15 @@ def test_materialization_shared_child_constructed_once():
 def test_materialization_stops_at_ref_edge_before_materialized_subgraph():
     repo = Repo()
     d_def = Definition(MaterialChainNode, "D")
-    c_def = Definition(MaterialChainNode, "C", ref=d_def.ref())
-    b_def = Definition(MaterialChainNode, "B", child=c_def.mat())
-    a_def = Definition(MaterialChainNode, "A", ref=b_def.ref())
+    c_def = Definition(
+        MaterialChainNode, "C", ref=DefLink.finalized(EdgeKind.REF, d_def)
+    )
+    b_def = Definition(
+        MaterialChainNode, "B", child=DefLink.finalized(EdgeKind.MATERIALIZE, c_def)
+    )
+    a_def = Definition(
+        MaterialChainNode, "A", ref=DefLink.finalized(EdgeKind.REF, b_def)
+    )
     a_cdef = a_def.concretize(repo=repo)
     b_cdef = a_cdef.kwargs["ref"].target
 

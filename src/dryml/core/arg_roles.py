@@ -7,7 +7,7 @@ from types import UnionType
 from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 from .definition import ConcreteDefinition, Definition
-from .links import DefLink, Ref
+from .links import DefLink
 from .quoted import QuotedDef, SelectorSpec
 from .selector import Selector
 from .bound_args import BoundArguments
@@ -43,9 +43,13 @@ class RefCDefArg(ArgRole):
         if isinstance(value, DefLink):
             return value
         if isinstance(value, Object):
-            return Ref(value.definition)
+            from .cdef_graph import EdgeKind
+
+            return DefLink.finalized(EdgeKind.REF, value.definition)
         if isinstance(value, (ConcreteDefinition, Definition, Selector)):
-            return Ref(value)
+            from .cdef_graph import EdgeKind
+
+            return DefLink.finalized(EdgeKind.REF, value)
         raise TypeError(
             "RefCDef argument expects Object, Definition, ConcreteDefinition, Selector, or Ref; "
             f"got {type(value).__name__}."

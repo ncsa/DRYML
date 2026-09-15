@@ -1,7 +1,9 @@
 import pytest
 
-from dryml.core import Definition, Mat, ObjectId, ObjectRef, Ref, StateRef
+from dryml.core import Definition, ObjectId, ObjectRef, StateRef
+from dryml.core.cdef_graph import EdgeKind
 from dryml.core.cdef_codec import CDefGraphCodecError, decode_cdef_graph, encode_cdef_graph
+from dryml.core.links import DefLink
 from dryml.core.object import Object, Serializable
 from dryml.core.utils.graph.path import GraphPath
 
@@ -23,7 +25,10 @@ def _state_ref():
 
 def test_exact_references_are_atomic_canonical_values_and_codec_round_trip():
     state = _state_ref()
-    cdef = Definition(CanonicalOwner, {"state": state, "ref": Ref(state)}).concretize()
+    cdef = Definition(
+        CanonicalOwner,
+        {"state": state, "ref": DefLink.finalized(EdgeKind.REF, state)},
+    ).concretize()
 
     assert cdef.parameters["value"]["state"] is state
     assert cdef.parameters["value"]["ref"].target is state
@@ -46,7 +51,14 @@ def test_soft_state_selector_resolves_once_before_cdef_identity():
             return state
 
     repo = FakeRepo()
-    cdef = Definition(CanonicalOwner, [selector, Ref(selector), Mat(selector)]).concretize(repo=repo)
+    cdef = Definition(
+        CanonicalOwner,
+        [
+            selector,
+            DefLink.finalized(EdgeKind.REF, selector),
+            DefLink.finalized(EdgeKind.MATERIALIZE, selector),
+        ],
+    ).concretize(repo=repo)
     assert repo.calls == 1
     assert cdef.parameters["value"][0] is state
     assert cdef.parameters["value"][1].target is state

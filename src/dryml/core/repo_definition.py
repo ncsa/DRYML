@@ -502,6 +502,8 @@ class _SelectorEncoder:
         if isinstance(value, (ImportRef, SourceSpec)):
             return _symbol_data(value, representation="symbolic", path=path)
         if isinstance(value, DefLink):
+            if not value.is_finalized:
+                raise _error(path, "unresolved link assertion is not portable")
             return {"kind": "link", "edge": value.kind.value, "target": self.value(value.target, path + ".target", depth + 1)}
         if isinstance(value, ObjectRef):
             return {"kind": "object-ref", "definition": self.definition(value.definition, path + ".definition", depth + 1), "objects": value.to_data()["objects"]}
@@ -1206,7 +1208,7 @@ def _selector_from_data(value: Mapping[str, Any]):
         if kind == "map":
             return FrozenDict((name, item(child)) for name, child in current["items"])
         if kind == "link":
-            return DefLink(EdgeKind(current["edge"]), item(current["target"]))
+            return DefLink.finalized(EdgeKind(current["edge"]), item(current["target"]))
         if kind == "par":
             matcher_data = current["matcher"]
             matcher_kind = matcher_data["kind"]

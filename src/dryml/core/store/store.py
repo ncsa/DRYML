@@ -83,6 +83,44 @@ class Store(ABC):
         """
         return nullcontext()
 
+    def authority_fence_key(self) -> str:
+        """Return the stable lock-domain key for an authority evidence cut.
+
+        Returns:
+            A deterministic key identifying the cooperating writer domain used by
+            :meth:`authority_read_fence`.
+
+        Raises:
+            StoreCapabilityError: If this backend does not declare serialized
+            writer authority and therefore cannot provide a stable evidence cut.
+
+        Side Effects:
+            None. This method neither reads nor changes Store authority.
+        """
+        if not self.publication_capabilities.writer_serialization:
+            raise StoreCapabilityError(
+                "Store does not provide a stable authority-read fence."
+            )
+        return self.catalog_key()
+
+    def authority_read_fence(self):
+        """Return the fence that stabilizes authoritative metadata reads.
+
+        Returns:
+            A context manager excluding cooperating writers for the duration of
+            one metadata evidence cut.
+
+        Raises:
+            StoreCapabilityError: If the backend cannot provide writer-serialized
+            authority reads.
+
+        Side Effects:
+            Acquires the backend's cooperating-writer fence; it never publishes,
+            loads payloads, or consults a derived query index.
+        """
+        self.authority_fence_key()
+        return self.writer_lock()
+
     @abstractmethod
     def read_definition_record(self, digest: str) -> DefinitionRecord | None:
         """Read one immutable DefinitionRecord by its derived digest."""

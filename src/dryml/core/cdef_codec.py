@@ -343,6 +343,8 @@ def _encode_value(value: Any, labels: dict[object, str]) -> dict[str, Any]:
     if isinstance(value, ConcreteDefinition):
         return {"kind": "cdef", "label": labels[cdef_node_key(value)]}
     if isinstance(value, DefLink):
+        if not value.is_finalized:
+            raise CDefGraphCodecError("Unresolved DefLink assertions cannot be encoded.")
         return {
             "kind": "link",
             "edge_kind": value.kind.value,
@@ -414,7 +416,7 @@ def _decode_value(
             raise CDefGraphCodecError(
                 "CDef link target must be a CDef, ObjectRef, or StateRef reference."
             )
-        return DefLink(edge_kind, target)
+        return DefLink.finalized(edge_kind, target)
     if kind == "dict":
         _require_exact_keys(data, {"kind", "items"}, "CDef dict")
         if not isinstance(data["items"], list):

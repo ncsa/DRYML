@@ -1,6 +1,8 @@
 import pytest
 
-from dryml.core import Definition, Mat, ObjectId, ObjectRef, Ref, StateRef
+from dryml.core import Definition, ObjectId, ObjectRef, StateRef
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.links import DefLink
 from dryml.core.object import Object, Serializable
 from dryml.core.utils.graph.path import GraphPath, Parameter
 
@@ -59,7 +61,9 @@ def test_materializing_exact_references_expand_but_ref_edges_do_not():
     expanded = ObjectRef(imported, {child_path: leaf_ref.object_id})
     assert expanded.at(child_path) == leaf_ref
 
-    ref_only = Definition(ReferenceWrapper, Ref(leaf_ref)).concretize()
+    ref_only = Definition(
+        ReferenceWrapper, DefLink.finalized(EdgeKind.REF, leaf_ref)
+    ).concretize()
     assert ObjectRef(ref_only, {}).objects == {}
     with pytest.raises(ValueError, match="Ref-only"):
         ObjectRef(ref_only, {}).at(child_path)
@@ -94,7 +98,7 @@ def test_imported_reference_projections_traverse_and_rebase_nested_topology(
         else imported
     )
     if materialized:
-        imported_value = Mat(imported_value)
+        imported_value = DefLink.finalized(EdgeKind.MATERIALIZE, imported_value)
     outer_definition = Definition(
         ReferenceWrapper, imported_value, child_alias=imported_value
     ).concretize()

@@ -2,7 +2,8 @@ import pytest
 from pathlib import Path
 
 from dryml.core import Definition, Object, Repo, Serializable
-from dryml.core.links import Ref
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.links import DefLink
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
 
@@ -44,7 +45,7 @@ class IdentifiedReferenceParent(Serializable):
 def test_ref_exact_value_is_retained_without_materialization():
     repo = Repo()
     target = Definition(ReferenceLeaf, "exact").concretize(repo=repo)
-    parent = ReferenceParent(Ref(target), repo=repo)
+    parent = ReferenceParent(DefLink.finalized(EdgeKind.REF, target), repo=repo)
 
     assert parent.graph_at('$[@param("target")]') is target
 

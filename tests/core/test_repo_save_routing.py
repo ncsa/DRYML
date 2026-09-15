@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core import Object, Ref, Repo, SaveRouting, Selector, Serializable, save_object
+from dryml.core import Object, Repo, SaveRouting, Selector, Serializable, save_object
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.links import DefLink
 from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord, StoredRootRecord
@@ -598,7 +600,7 @@ def test_ref_only_import_does_not_create_a_routed_seed_payload(tmp_path):
             ((Selector(SeedRoot), root_store), (Selector(RoutedLeaf), leaf_store)),
         ),
     )
-    root = SeedRoot(Ref(imported), repo=repo)
+    root = SeedRoot(DefLink.finalized(EdgeKind.REF, imported), repo=repo)
 
     state = repo.save_object(root, deep_capture=True)
 

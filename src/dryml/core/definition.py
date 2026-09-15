@@ -275,11 +275,9 @@ class Definition(DefInterface, Mapping):
                 )
             return self._kwargs
         from .bound_args import bind_partial_arguments
-        from .arg_roles import apply_bound_arg_roles
 
         args = () if self._args is None else tuple(self._args)
         bound_args = bind_partial_arguments(self._cls, args, self._kwargs)
-        bound_args = apply_bound_arg_roles(self._cls, bound_args)
         return FrozenDict(
             (name, self._freeze_value(value))
             for name, value in bound_args.items()
@@ -1413,11 +1411,6 @@ class SelectorMatcher(GraphMatcher):
     def match_dryml(self, selector, target, ctx: GraphCtx) -> bool:
         sel_def = self._normalize_dryml(selector)
         tgt_def = self._normalize_dryml(target)
-        if isinstance(sel_def, Definition):
-            from .arg_roles import apply_definition_arg_roles
-
-            sel_def = apply_definition_arg_roles(sel_def)
-
         compare_failed = False
 
         if sel_def.cls is not None:

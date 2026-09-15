@@ -4,7 +4,7 @@ import os
 import glob
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from io import IOBase
 from pathlib import Path
 import weakref
@@ -20,7 +20,7 @@ from uuid import uuid4
 from .definition import Definition, ConcreteDefinition
 from .cdef_graph import ConcreteDefinitionGraph
 from .object import Object
-from .store.store import Store
+from .store.store import Store, StoreCapabilityError
 from .policies import CachePolicy, LiveReusePolicy, RepoGraphOptions
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
@@ -317,6 +317,57 @@ class RepoSaveError(Exception):
     def __init__(self, message: str, *, report=None) -> None:
         super().__init__(message)
         self.report = report
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceDeclarationEvidence:
+    """One deduplicated declaration identity observed in a stable Store cut.
+
+    Attributes:
+        object_ref: Complete declared identity whose definition matched the
+            requested complete topology.
+        stores: Connected Store handles carrying equal declaration replicas.
+        claim_statuses: Valid associated ClaimRecord statuses in Store order.
+
+    Declaration identity is evidence for reference selection only.  It does not
+    grant construction permission or acquire a claim.
+    """
+
+    object_ref: object
+    stores: tuple[Store, ...]
+    claim_statuses: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceStateEvidence:
+    """One deduplicated exact StateRef observed in a stable Store cut.
+
+    Attributes:
+        state_ref: Complete immutable snapshot authority.
+        stores: Connected Store handles carrying equal immutable replicas.
+
+    State-only evidence can satisfy an explicitly supplied ObjectRef lookup but
+    does not become declaration evidence for CDef strengthening.
+    """
+
+    state_ref: object
+    stores: tuple[Store, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceEvidence:
+    """Authoritative declaration and snapshot facts from one Repo evidence cut.
+
+    Attributes:
+        declarations: Topology-matching declared identities with validated claims.
+        states: Topology-matching immutable snapshots, including state-only facts.
+
+    The value contains no live Objects, payload bytes, query-index results, or
+    construction reservations.  It is intended for read-only authority selection.
+    """
+
+    declarations: tuple[ReferenceDeclarationEvidence, ...]
+    states: tuple[ReferenceStateEvidence, ...]
 
 
 def _record_late_publication(
@@ -1607,6 +1658,94 @@ class Repo:
             raise TypeError("resolve_state_alias requires an ObjectRef scope.")
         return self.resolve_state_selector(StateSelectorRef(object_ref, alias))
 
+    def reference_evidence(self, cdef: ConcreteDefinition) -> ReferenceEvidence:
+        """Read matching declaration and StateRef facts under one stable cut.
+
+        Args:
+            cdef: Complete CDef topology for which reference authority is sought.
+
+        Returns:
+            Deduplicated matching declaration and StateRef evidence. Equal
+            replicas remain represented by every contributing Store handle.
+
+        Raises:
+            TypeError: If ``cdef`` is not a ConcreteDefinition.
+            RepoLoadError: If a required authoritative record is inaccessible,
+            corrupt, incompatible, or lacks its associated ClaimRecord.
+            StoreCapabilityError: If any connected Store cannot provide a stable
+            metadata-read fence.
+
+        Side Effects:
+            Acquires all connected Store authority fences in deterministic order.
+            It never queries derived indexes, acquires claims, creates identities,
+            loads payloads, or writes Store records.
+
+        Concurrency:
+            Cooperating publication is excluded over the complete scan. Duplicate
+            handles in one Store lock domain acquire one fence while retaining
+            their separate read provenance in the returned evidence.
+        """
+        from .store.records import ClaimRecord
+
+        if not isinstance(cdef, ConcreteDefinition):
+            raise TypeError("reference_evidence requires a ConcreteDefinition.")
+        groups: dict[str, list[Store]] = {}
+        for store in self.stores:
+            key = store.authority_fence_key()
+            groups.setdefault(key, []).append(store)
+        declarations: list[ReferenceDeclarationEvidence] = []
+        states: list[ReferenceStateEvidence] = []
+
+        def add_declaration(reference, store, claim):
+            for index, current in enumerate(declarations):
+                if current.object_ref == reference:
+                    declarations[index] = ReferenceDeclarationEvidence(
+                        reference, current.stores + (store,),
+                        current.claim_statuses + (claim.status,),
+                    )
+                    return
+            declarations.append(
+                ReferenceDeclarationEvidence(reference, (store,), (claim.status,))
+            )
+
+        def add_state(reference, store):
+            for index, current in enumerate(states):
+                if current.state_ref == reference:
+                    states[index] = ReferenceStateEvidence(
+                        reference, current.stores + (store,)
+                    )
+                    return
+            states.append(ReferenceStateEvidence(reference, (store,)))
+
+        try:
+            with ExitStack() as fences:
+                for key in sorted(groups):
+                    fences.enter_context(groups[key][0].authority_read_fence())
+                for store in self.stores:
+                    for record in store.iter_declaration_records():
+                        reference = record.object_ref
+                        if not reference.definition.graph_equal(cdef):
+                            continue
+                        claim = store.read_claim_record(reference.digest())
+                        if not isinstance(claim, ClaimRecord):
+                            raise RepoLoadError(
+                                "Matching declaration lacks authoritative ClaimRecord evidence."
+                            )
+                        if claim.object_digest != reference.digest():
+                            raise RepoLoadError(
+                                "Matching declaration has incompatible ClaimRecord evidence."
+                            )
+                        add_declaration(reference, store, claim)
+                    for record in store.iter_state_ref_records():
+                        state_ref = record.state_ref
+                        if state_ref.definition.graph_equal(cdef):
+                            add_state(state_ref, store)
+        except (RepoLoadError, StoreCapabilityError):
+            raise
+        except Exception as error:
+            raise RepoLoadError("Authoritative reference evidence could not be read.") from error
+        return ReferenceEvidence(tuple(declarations), tuple(states))
+
     def _references(self):
         """Yield every Store-authoritative ObjectRef once with its Store/source."""
         seen = set()
@@ -2807,6 +2946,273 @@ class Repo:
                 memo=memo,
                 path=path,
             )
+
+    def materialize_boundary(self, roots, *, cache=None, reuse_live=None):
+        """Realize selected materializing boundary roots under one admission cut.
+
+        Args:
+            roots: Ordered selected values from one signature argument or return
+                boundary.  Ref-valued delivery must not call this API.
+            cache: ``None`` preserves Repo's ``"weak"`` default; supplied values
+                are forwarded unchanged to structural realization.
+            reuse_live: ``None`` preserves exact-load ``"matching"``; supplied
+                values are forwarded unchanged to exact realization.
+
+        Returns:
+            A tuple of runtime values in ``roots`` order, preserving aliases across
+            all roots and ordinary supported containers.
+
+        Raises:
+            RepoLoadError: If exact authority is incomplete or incompatible,
+                claim admission fails, or a constructor/restore fails.
+            TypeError: If ``roots`` is not an ordered materializing boundary.
+
+        Side Effects:
+            May acquire first-construction claims, reserve/reuse live objects,
+            construct, restore, and populate caches.  It never saves or creates
+            declaration authority.  A failed call abandons only its own acquired
+            claim generations in reverse order.
+        """
+
+        from .cdef_graph import EdgeKind
+        from .canonical import to_canonical
+        from .cdef_identity import cdef_node_key
+        from .definition import Definition
+        from .links import DefLink
+        from .materialization import (
+            build_exact_state_load_plan,
+            execute_exact_state_load_plan,
+        )
+        from .reference_values import ObjectRef, StateRef
+        from .repo_plan import AggregateMaterializationPlan, _NodeBindings, realization_scope
+        from .utils.graph.value import iter_value_edges
+
+        if not isinstance(roots, (tuple, list)):
+            raise TypeError("materialize_boundary roots must be an ordered sequence.")
+
+        def concretize_definitions(value, memo):
+            """Lower materializing Definition values before authority admission."""
+
+            key = id(value)
+            if key in memo:
+                return memo[key]
+            if isinstance(value, Definition):
+                result = to_canonical(value, repo=self)
+            elif isinstance(value, list):
+                result = []
+                memo[key] = result
+                result.extend(concretize_definitions(item, memo) for item in value)
+            elif isinstance(value, tuple):
+                result = tuple(concretize_definitions(item, memo) for item in value)
+            elif isinstance(value, dict):
+                result = {
+                    item: concretize_definitions(child, memo)
+                    for item, child in value.items()
+                }
+            else:
+                result = value
+            memo[key] = result
+            return result
+
+        roots = tuple(concretize_definitions(root, {}) for root in roots)
+        plan = AggregateMaterializationPlan(
+            tuple(roots), "weak" if cache is None else cache,
+            "matching" if reuse_live is None else reuse_live,
+        )
+        if plan.reuse_live not in {"matching", "greedy", "never"}:
+            raise ValueError("reuse_live must be 'matching', 'greedy', or 'never'.")
+
+        # The visitor uses object identity for private CDef nodes, while exact
+        # reference identities deliberately deduplicate by digest.
+        cdefs, object_refs, state_refs = [], {}, {}
+        visited = set()
+
+        def visit(value):
+            if isinstance(value, StateRef):
+                state_refs.setdefault(value.digest(), value)
+                visit(value.object)
+                return
+            if isinstance(value, ObjectRef):
+                object_refs.setdefault(value.digest(), value)
+                visit(value.definition)
+                return
+            if isinstance(value, ConcreteDefinition):
+                key = cdef_node_key(value)
+                if key in visited:
+                    return
+                visited.add(key)
+                cdefs.append(value)
+                for edge in iter_value_edges(value):
+                    visit(edge.value)
+                return
+            if isinstance(value, DefLink):
+                if value.kind is EdgeKind.MATERIALIZE:
+                    visit(value.target)
+                return
+            for edge in iter_value_edges(value):
+                visit(edge.value)
+
+        for root in plan.roots:
+            visit(root)
+
+        # Every exact state closure is validated before any constructor, restore,
+        # claim, or live reservation can occur.  Compare effective local actions,
+        # not embedded seed StateRefs, so an enclosing StateRef remains decisive.
+        exact_plans = {
+            digest: build_exact_state_load_plan(self, reference)
+            for digest, reference in state_refs.items()
+        }
+        state_actions = {}
+        for exact in exact_plans.values():
+            for action in exact.actions:
+                previous = state_actions.setdefault(action.object_id, action)
+                if previous.state_hash != action.state_hash:
+                    raise RepoLoadError(
+                        "Materializing boundary has incompatible effective StateRef demands."
+                    )
+
+        # An ObjectRef shares any exact root selected for the same identity.  For
+        # the remaining identities, choose live first, then one saved authority,
+        # and only then the registered construction claim.
+        state_for_object = {
+            exact.state_ref.object.digest(): exact for exact in exact_plans.values()
+        }
+        results, claim_roots = {}, []
+        for digest, reference in object_refs.items():
+            if digest in state_for_object:
+                continue
+            live = tuple(
+                candidate for candidate in self._all_live_candidates()
+                if getattr(candidate, "object_ref", None) == reference
+            )
+            if len(live) == 1:
+                results[digest] = live[0]
+                continue
+            if len(live) > 1:
+                raise RepoLoadError("Materializing ObjectRef has ambiguous live authority.")
+            evidence = self.reference_evidence(reference.definition)
+            matches = [item.state_ref for item in evidence.states if item.state_ref.object == reference]
+            if len(matches) > 1:
+                raise RepoLoadError("Materializing ObjectRef has ambiguous saved StateRef authority.")
+            if matches:
+                exact = build_exact_state_load_plan(self, matches[0])
+                exact_plans.setdefault(matches[0].digest(), exact)
+                state_for_object[digest] = exact
+            else:
+                claim_roots.append(reference)
+
+        # Establish the complete dependency closure and acquire each live claim
+        # before the first root executes.  The DFS is deterministic and retains
+        # child-before-parent ordering required by current completion semantics.
+        claim_order, claim_stores, seen_claims = [], {}, set()
+
+        def add_claim(reference):
+            if reference.digest() in seen_claims:
+                return
+            seen_claims.add(reference.digest())
+            for _, dependency in self._pending_declaration_references(reference):
+                add_claim(dependency)
+            matches = [
+                store for store in self.stores
+                if (record := store.read_declaration_record(reference.digest())) is not None
+                and record.object_ref == reference
+            ]
+            if not matches:
+                raise RepoLoadError("Materializing ObjectRef lacks registered declaration authority.")
+            claim_stores[reference.digest()] = matches[0]
+            claim_order.append(reference)
+
+        for reference in sorted(claim_roots, key=lambda item: item.digest()):
+            add_claim(reference)
+
+        with realization_scope() as scope:
+            leases = {}
+            try:
+                for reference in claim_order:
+                    lease = self._acquire_claim(reference, claim_stores[reference.digest()])
+                    if lease is None:
+                        raise RepoLoadError("Declared ObjectRef completed during aggregate admission.")
+                    leases[reference.digest()] = lease
+                for lease in leases.values():
+                    self._renew_claim(lease)
+
+                def abandon_claims():
+                    for lease in reversed(tuple(leases.values())):
+                        self._abandon_claim(lease)
+
+                if leases:
+                    scope.add_claim_cleanup(abandon_claims)
+
+                reference_memo = {}
+                for digest, exact in exact_plans.items():
+                    results[exact.state_ref.object.digest()] = execute_exact_state_load_plan(
+                        self, exact, reuse_live=plan.reuse_live, cache=plan.cache,
+                        _reference_memo=reference_memo,
+                    )
+
+                cdef_memo = _NodeBindings()
+
+                def build_claim(reference):
+                    known = results.get(reference.digest())
+                    if known is not None:
+                        return known
+                    lease = leases[reference.digest()]
+                    active = _active_object_ref_builds.get()
+                    token = _active_object_ref_builds.set(
+                        active | {(id(self), item.object_ref.digest()) for item in leases.values()}
+                    )
+                    try:
+                        obj = self._materialize_cdef(
+                            reference.definition, cache=plan.cache, memo=cdef_memo,
+                        )
+                    finally:
+                        _active_object_ref_builds.reset(token)
+                    from .repo_plan import apply_exact_reference_identity
+
+                    apply_exact_reference_identity(obj, reference)
+                    obj._store_affinity = lease.store
+                    obj._claim_lease = lease
+                    obj._claim_leases = tuple(leases[item.digest()] for item in claim_order)
+                    results[reference.digest()] = obj
+                    return obj
+
+                for reference in claim_roots:
+                    build_claim(reference)
+
+                def realize(value, memo):
+                    key = id(value)
+                    if key in memo:
+                        return memo[key]
+                    if isinstance(value, Object):
+                        return value
+                    if isinstance(value, ConcreteDefinition):
+                        result = self._materialize_cdef(value, cache=plan.cache, memo=cdef_memo)
+                    elif isinstance(value, StateRef):
+                        result = results[value.object.digest()]
+                    elif isinstance(value, ObjectRef):
+                        result = results.get(value.digest()) or build_claim(value)
+                    elif isinstance(value, DefLink):
+                        result = value.target if value.kind is EdgeKind.REF else realize(value.target, memo)
+                    elif isinstance(value, list):
+                        result = []
+                        memo[key] = result
+                        result.extend(realize(item, memo) for item in value)
+                    elif isinstance(value, tuple):
+                        result = tuple(realize(item, memo) for item in value)
+                    elif isinstance(value, dict):
+                        result = {item: realize(child, memo) for item, child in value.items()}
+                    else:
+                        result = value
+                    memo[key] = result
+                    return result
+
+                memo = {}
+                return tuple(realize(root, memo) for root in plan.roots)
+            except BaseException:
+                # ``realization_scope`` runs this same cleanup after any nested
+                # construction failure; retain it here for failures before scope
+                # exit and keep reverse generation-safe abandonment authoritative.
+                raise
 
     # -------------------------------------------------------------------------
     # Core: turn a ConcreteDefinition into a live Object under load knobs

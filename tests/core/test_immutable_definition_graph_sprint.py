@@ -7,12 +7,10 @@ from dryml.core import (
     ConcreteDefinition,
     Definition,
     EdgeKind,
-    Mat,
     Missing,
     Present,
     QuotedDef,
     Ref,
-    RefCDef,
     Repo,
     SearchSpace,
     Selector,
@@ -26,6 +24,7 @@ from dryml.core import (
 )
 from dryml.core.object import Object
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.links import DefLink
 from dryml.core.errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference, CycleError
 from dryml.core.freeze import FrozenDict, FrozenList, FrozenTuple
 from dryml.core.query.path import Arg, Index
@@ -36,6 +35,14 @@ from tests.core import core_objects as objects
 Cls1 = objects.TestClass1
 Cls2 = objects.TestClass2
 Nest3 = objects.TestNest3
+
+
+def _ref(value):
+    return DefLink.finalized(EdgeKind.REF, value)
+
+
+def _mat(value):
+    return DefLink.finalized(EdgeKind.MATERIALIZE, value)
 
 
 class AuditChainNode(Object):
@@ -79,7 +86,7 @@ def test_definition_deep_freezes_user_containers_and_updates():
 def test_concretize_ref_mat_quoted_and_par_behaviour():
     child = Definition(Cls1, 3)
     quoted = Definition(Cls2, model=Definition(Cls1, test=Present())).quote()
-    parent = Definition(Nest3, child.mat(), ref=child.ref(), quoted=quoted)
+    parent = Definition(Nest3, _mat(child), ref=_ref(child), quoted=quoted)
 
     cdef = parent.concretize()
 
@@ -95,7 +102,7 @@ def test_concretize_ref_mat_quoted_and_par_behaviour():
 
 def test_cdef_graph_uses_ref_edges_and_materialize_only_containment():
     child = Definition(Cls1, 3)
-    parent = Definition(Nest3, child, ref=Definition(Cls1, 4).ref()).concretize()
+    parent = Definition(Nest3, child, ref=_ref(Definition(Cls1, 4))).concretize()
     graph = ConcreteDefinitionGraph.from_root(parent)
 
     edge_kinds = {(str(edge.path), edge.kind) for edge in graph.edges()}
@@ -111,9 +118,9 @@ def test_cdef_graph_uses_ref_edges_and_materialize_only_containment():
 
 def test_query_index_graph_expands_ref_targets_without_changing_containment():
     d = Definition(AuditChainNode, "D", width=512)
-    c = Definition(AuditChainNode, "C", ref=d.ref())
-    b = Definition(AuditChainNode, "B", child=c.mat())
-    a = Definition(AuditChainNode, "A", ref=b.ref()).concretize()
+    c = Definition(AuditChainNode, "C", ref=_ref(d))
+    b = Definition(AuditChainNode, "B", child=_mat(c))
+    a = Definition(AuditChainNode, "A", ref=_ref(b)).concretize()
     b_cdef = a.kwargs["ref"].target
     c_cdef = b_cdef.kwargs["child"]
     d_cdef = c_cdef.kwargs["ref"].target
@@ -136,10 +143,10 @@ def test_query_index_graph_expands_ref_targets_without_changing_containment():
 
 def test_selector_matches_ref_edges_and_matchers():
     child = Definition(Cls1, 3)
-    target = Definition(Nest3, ref=child.ref(), value=10).concretize()
+    target = Definition(Nest3, ref=_ref(child), value=10).concretize()
 
-    assert Selector(Definition(Nest3, ref=Definition(Cls1, AnyValue()).ref())).matches(target)
-    assert not Selector(Definition(Nest3, ref=Definition(Cls1, AnyValue()).mat())).matches(target)
+    assert Selector(Definition(Nest3, ref=_ref(Definition(Cls1, AnyValue())))).matches(target)
+    assert not Selector(Definition(Nest3, ref=_mat(Definition(Cls1, AnyValue())))).matches(target)
     assert Selector(Definition(Nest3, missing=Missing())).matches(target)
     assert Selector(Definition(Nest3, value=Choice([9, 10]))).matches(target)
 
@@ -189,28 +196,28 @@ class FakeStore:
 
 
 class AuditRefOwner(Object):
-    def __init__(self, child: RefCDef):
+    def __init__(self, child: Ref[ConcreteDefinition]):
         self.child = child
 
 
 def test_indexed_query_can_inspect_ref_target_subgraph():
     repo = Repo()
     d = Definition(AuditChainNode, "D", width=512)
-    c = Definition(AuditChainNode, "C", ref=d.ref())
-    b = Definition(AuditChainNode, "B", child=c.mat())
-    a = Definition(AuditChainNode, "A", ref=b.ref()).concretize()
+    c = Definition(AuditChainNode, "C", ref=_ref(d))
+    b = Definition(AuditChainNode, "B", child=_mat(c))
+    a = Definition(AuditChainNode, "A", ref=_ref(b)).concretize()
     repo._query_catalog.register_stored(a, FakeStore())
 
     selector = Definition(
         AuditChainNode,
         "A",
-        ref=Ref(Selector(Definition(
+        ref=_ref(Selector(Definition(
             AuditChainNode,
             "B",
             child=Definition(
                 AuditChainNode,
                 "C",
-                ref=Definition(AuditChainNode, "D", width=512).ref(),
+                ref=_ref(Definition(AuditChainNode, "D", width=512)),
             ),
         ))),
     )
@@ -251,8 +258,8 @@ def test_user_supplied_frozen_containers_are_revalidated():
 
 
 def test_definition_match_uses_selector_semantics_for_par_and_ref():
-    target = Definition(Nest3, ref=Definition(Cls1, 10).ref()).concretize()
-    selector = Definition(Nest3, ref=Definition(Cls1, AnyValue()).ref())
+    target = Definition(Nest3, ref=_ref(Definition(Cls1, 10))).concretize()
+    selector = Definition(Nest3, ref=_ref(Definition(Cls1, AnyValue())))
 
     assert selector.match(target)
 
@@ -269,10 +276,10 @@ def test_ref_selector_cannot_concretize_with_clear_error():
     selector = Selector(Definition(Cls1, test=Present()))
 
     with pytest.raises(CannotConcretizeSelectorReference):
-        Definition(Nest3, Ref(selector)).concretize()
+        Definition(Nest3, _ref(selector)).concretize()
 
     with pytest.raises(CannotConcretizeSelectorReference):
-        Definition(Nest3, Mat(selector)).concretize()
+        Definition(Nest3, _mat(selector)).concretize()
 
 
 def test_nested_mapping_missing_matches_absent_key():
@@ -287,7 +294,7 @@ def test_indexed_query_missing_does_not_require_presence():
     root_missing = Definition(Cls2).concretize()
     nested_missing = Definition(Nest3, cfg={}).concretize()
     ref_child = Definition(Cls1, {}).concretize()
-    ref_parent = Definition(Nest3, ref=ref_child.ref()).concretize()
+    ref_parent = Definition(Nest3, ref=_ref(ref_child)).concretize()
     for cdef in (root_missing, nested_missing, ref_parent):
         repo._query_catalog.register_stored(cdef, FakeStore())
 
@@ -296,7 +303,7 @@ def test_indexed_query_missing_does_not_require_presence():
 
     ref_selector = Definition(
         Nest3,
-        ref=Ref(Selector(Definition(Cls1, x={"missing": Missing()}))),
+        ref=_ref(Selector(Definition(Cls1, x={"missing": Missing()}))),
     )
     assert list(repo.query(ref_selector).stored(refresh=False).defs()) == [ref_parent]
 
@@ -304,7 +311,7 @@ def test_indexed_query_missing_does_not_require_presence():
 def test_concrete_definition_collapses_materialize_links():
     child = Definition(Cls1, 12).concretize()
     raw = ConcreteDefinition(Nest3, FrozenTuple((child,)), FrozenDict({}))
-    linked = ConcreteDefinition(Nest3, FrozenTuple((Mat(child),)), FrozenDict({}))
+    linked = ConcreteDefinition(Nest3, FrozenTuple((_mat(child),)), FrozenDict({}))
 
     assert linked.args[0] == child
     assert linked == raw
@@ -355,7 +362,7 @@ def test_nested_concrete_boundary_error_reports_path():
 
 def test_concrete_definition_collapses_nested_materialize_links():
     child = Definition(Cls1, 14).concretize()
-    cdef = ConcreteDefinition(Nest3, FrozenTuple((FrozenList([Mat(child)]),)), FrozenDict({}))
+    cdef = ConcreteDefinition(Nest3, FrozenTuple((FrozenList([_mat(child)]),)), FrozenDict({}))
 
     assert cdef.args[0][0] == child
 

@@ -1,7 +1,8 @@
 import pytest
 
 from dryml.core import Definition, Object, Repo
-from dryml.core.links import Ref
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.links import DefLink
 from dryml.core.utils.graph.path import GraphPathError
 
 
@@ -23,7 +24,9 @@ def test_graph_at_returns_completed_endpoint_forms_without_lookup(monkeypatch):
     repo = Repo()
     child = GraphAtLeaf("child", repo=repo)
     target = Definition(GraphAtLeaf, "target").concretize(repo=repo)
-    parent = GraphAtParent(child, Ref(target), GraphAtLeaf, repo=repo)
+    parent = GraphAtParent(
+        child, DefLink.finalized(EdgeKind.REF, target), GraphAtLeaf, repo=repo
+    )
 
     monkeypatch.setattr(repo, "get_cached", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
     assert parent.graph_at() is parent

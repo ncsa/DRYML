@@ -590,6 +590,42 @@ class ConcreteDefinitionGraphBuilder:
         return tuple(out)
 
 
+def has_stateful_materialization(cdef: ConcreteDefinition) -> bool:
+    """Report whether a materializing CDef graph contains a stateful node.
+
+    Args:
+        cdef: Concrete root whose materializing topology is inspected.
+
+    Returns:
+        ``True`` when the root or a materializing descendant has recorded
+        ``Serializable`` class status. Ref-only descendants are excluded.
+
+    Raises:
+        TypeError: If ``cdef`` is not a ConcreteDefinition.
+        ConcreteDefinitionGraphError: If its materializing graph is malformed.
+
+    Side Effects:
+        None. The traversal reads recorded CDef role metadata without resolving a
+        class, constructing an Object, or loading payload state.
+    """
+    graph = ConcreteDefinitionGraph.from_root(cdef)
+    pending = list(graph.roots)
+    visited = set()
+    while pending:
+        current = pending.pop()
+        key = cdef_node_key(current)
+        if key in visited:
+            continue
+        visited.add(key)
+        if current._stateful_role:
+            return True
+        pending.extend(
+            edge.child for edge in graph.outgoing(current)
+            if edge.kind is EdgeKind.MATERIALIZE
+        )
+    return False
+
+
 def _unique_nodes(
     cdefs: Iterable[ConcreteDefinition],
 ) -> tuple[ConcreteDefinition, ...]:

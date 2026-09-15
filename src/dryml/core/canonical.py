@@ -689,9 +689,13 @@ class _ToCanonicalTransformer(GraphTransformer):
 
         if kind is NodeKind.DEFLINK:
             from .cdef_graph import EdgeKind
-            from .links import Ref
+            from .links import DefLink
             from .selector import Selector
 
+            if not obj.is_finalized:
+                raise TypeError(
+                    f"Unresolved DefLink assertion cannot enter canonical identity at {ctx.path_str()}."
+                )
             if isinstance(obj.target, Selector):
                 raise CannotConcretizeSelectorReference(tuple(ctx.path), obj.target)
 
@@ -699,7 +703,7 @@ class _ToCanonicalTransformer(GraphTransformer):
             if obj.kind is EdgeKind.MATERIALIZE:
                 return target
             if obj.kind is EdgeKind.REF:
-                return Ref(target)
+                return DefLink.finalized(EdgeKind.REF, target)
             raise TypeError(f"Unknown DefLink kind {obj.kind!r} at {ctx.path_str()}")
 
         if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC}:
@@ -728,12 +732,15 @@ class _ToCanonicalTransformer(GraphTransformer):
                     f"ConcreteDefinition class target at {ctx.path_str()} must resolve to a class, "
                     f"got {type(live_cls).__name__}."
                 )
-            prep_args, prep_kwargs = live_cls.__prepare_args__(*obj.args, **obj.kwargs)
-            from .arg_roles import apply_bound_arg_roles
-            from .bound_args import BoundArguments, bind_complete_arguments
+            from .bound_args import BoundArguments
+            from .signatures import compile_signature
 
-            bound_args = bind_complete_arguments(live_cls, tuple(prep_args), dict(prep_kwargs))
-            bound_args = apply_bound_arg_roles(live_cls, bound_args)
+            # New definitions have one owner for preparation, binding, and role
+            # assertions. Persisted CDefs bypass this branch entirely.
+            boundary = compile_signature(live_cls, constructor=True).prepare_constructor_args(
+                tuple(obj.args), dict(obj.kwargs), repo=repo,
+            )
+            bound_args = boundary.canonical
             canonical_bound_args = BoundArguments(
                 (name, self.transform(value, ctx.child(name)))
                 for name, value in bound_args.items()
@@ -1091,7 +1098,7 @@ def thaw_definition_surface_value(value: Any, *, memo: dict | None = None) -> An
     if kind is NodeKind.DEFLINK:
         from .links import DefLink
 
-        return DefLink(value.kind, thaw_definition_surface_value(value.target, memo=memo))
+        return DefLink.finalized(value.kind, thaw_definition_surface_value(value.target, memo=memo))
     if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.SELECTOR, NodeKind.PAR}:
         return value
     return value
@@ -1206,6 +1213,10 @@ def _freeze_concrete_value(value: Any, *, stack: set[int], path: tuple[str | int
         from .definition import ConcreteDefinition
         from .cdef_graph import EdgeKind
         from .selector import Selector
+        if not value.is_finalized:
+            raise TypeError(
+                f"Unresolved DefLink assertion cannot enter ConcreteDefinition at {_path_label(path)}."
+            )
         if isinstance(value.target, Selector):
             raise CannotConcretizeSelectorReference(path, value.target)
         if not isinstance(value.target, ConcreteDefinition):
@@ -1243,6 +1254,10 @@ def _freeze_concrete_value(value: Any, *, stack: set[int], path: tuple[str | int
 def freeze_selector_value(value: Any) -> Any:
     """Deep-freeze values stored inside quoted selector/expression wrappers."""
 
+    from .links import DefLink
+
+    if isinstance(value, DefLink) and not value.is_finalized:
+        raise TypeError("Unresolved DefLink assertions cannot enter quoted persistence.")
     return freeze_def_value(value)
 
 

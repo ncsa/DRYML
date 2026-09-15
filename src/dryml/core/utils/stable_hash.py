@@ -220,6 +220,8 @@ class StableHashGraphHasher(GraphHasher):
             return self._hash_mapping(type_marker, dict(items), ctx)
 
         if isinstance(obj, DefLink):
+            if not obj.is_finalized:
+                raise TypeError("Unresolved DefLink assertions cannot be stable-hashed.")
             type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
             return self._hash_mapping(type_marker, {"kind": obj.kind.value, "target": obj.target}, ctx)
 

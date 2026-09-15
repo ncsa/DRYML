@@ -1,6 +1,8 @@
 import pytest
 
-from dryml.core import Definition, Object, ObjectRef, Ref, Repo, Serializable
+from dryml.core import Definition, Object, ObjectRef, Repo, Serializable
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.links import DefLink
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DeclarationRecord, DefinitionRecord
@@ -64,7 +66,9 @@ def test_reference_filters_keep_exact_paths_aliases_and_all_ephemeral_refs(tmp_p
 def test_object_terminal_preserves_nested_ref_state_reference(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-    parent = repo.save_object(ReferenceQueryRefParent(Ref(state), repo=repo))
+    parent = repo.save_object(
+        ReferenceQueryRefParent(DefLink.finalized(EdgeKind.REF, state), repo=repo)
+    )
 
     loaded = repo.query(parent.definition).stored().objects(cache="none").one()
 

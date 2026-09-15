@@ -1,4 +1,4 @@
-from typing import Annotated, Optional
+from typing import Optional
 
 import dryml
 import pytest
@@ -7,14 +7,11 @@ from dryml.core import (
     Definition,
     EdgeKind,
     QuotedDef,
+    Mat,
     Ref,
-    RefCDef,
-    RefCDefArg,
     Selector,
-    SelectorArg,
     SelectorSpec,
 )
-from dryml.core.arg_roles import resolve_arg_roles
 from dryml.core.cdef_graph import ConcreteDefinitionGraph, ConcreteDefinitionGraphError
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.links import DefLink
@@ -26,29 +23,32 @@ from tests.core import core_objects as objects
 
 
 class RefOwner(Object):
-    def __init__(self, child: RefCDef, *, label="owner"):
+    def __init__(self, child: Ref[ConcreteDefinition], *, label="owner"):
         self.child = child
         self.label = label
 
 
 class OptionalRefOwner(Object):
-    def __init__(self, child: Optional[Annotated[ConcreteDefinition, RefCDefArg()]] = None):
+    def __init__(self, child: Ref[ConcreteDefinition | None] = None):
         self.child = child
 
 
 class SelectorOwner(Object):
-    def __init__(self, selector: SelectorArg):
+    def __init__(self, selector: Ref[SelectorSpec]):
         self.selector = selector
 
 
 class OptionalSelectorOwner(Object):
-    def __init__(self, selector: Optional[Annotated[object, SelectorArg()]] = None):
+    def __init__(self, selector: Ref[SelectorSpec | None] = None):
         self.selector = selector
 
 
 def test_ref_wrapper_is_non_materializing_cdef_edge():
     child = Definition(objects.TestClass1, 1).concretize()
-    parent = Definition(objects.TestNest3, Ref(child)).concretize()
+    parent = Definition(
+        objects.TestNest3,
+        DefLink.finalized(EdgeKind.REF, child),
+    ).concretize()
 
     assert parent.args[0].kind is EdgeKind.REF
     assert parent.args[0].target == child
@@ -67,7 +67,6 @@ def test_ref_role_canonicalizes_object_and_cdef_values():
 
     assert cdef.parameters["child"].kind is EdgeKind.REF
     assert cdef.parameters["child"].target == child
-    assert isinstance(resolve_arg_roles(RefOwner)["child"], RefCDefArg)
 
 
 def test_optional_ref_role_resolution():
@@ -97,7 +96,7 @@ def test_selector_arg_stores_quoted_selector_data_not_edge():
 
     assert isinstance(cdef.parameters["selector"], SelectorSpec)
     assert ConcreteDefinitionGraph.from_root(cdef).edges() == ()
-    assert Selector(Definition(SelectorOwner, selector=selector)).matches(cdef)
+    assert Selector(Definition(SelectorOwner, selector=SelectorSpec(selector))).matches(cdef)
 
 
 def test_selector_arg_runtime_constructor_receives_wrapper():
@@ -125,7 +124,9 @@ def test_quoted_def_stores_expression_data_not_edge():
 
 def test_same_child_can_be_ref_and_materialize_edges():
     child = Definition(objects.TestClass1, 4).concretize()
-    parent = Definition(objects.TestNest3, child, ref=Ref(child)).concretize()
+    parent = Definition(
+        objects.TestNest3, child, ref=DefLink.finalized(EdgeKind.REF, child)
+    ).concretize()
     edges = ConcreteDefinitionGraph.from_root(parent).edges()
 
     assert {edge.kind for edge in edges} == {EdgeKind.MATERIALIZE, EdgeKind.REF}
@@ -133,7 +134,9 @@ def test_same_child_can_be_ref_and_materialize_edges():
 
 def test_materialize_only_containment_ignores_ref_only_child():
     ref_child = Definition(objects.TestClass1, 5).concretize()
-    parent = Definition(objects.TestNest3, ref=Ref(ref_child)).concretize()
+    parent = Definition(
+        objects.TestNest3, ref=DefLink.finalized(EdgeKind.REF, ref_child)
+    ).concretize()
     graph = ConcreteDefinitionGraph.from_root(parent)
 
     assert not graph.contains(parent, ref_child)
@@ -141,7 +144,12 @@ def test_materialize_only_containment_ignores_ref_only_child():
 
 
 def test_selector_graph_ref_edge_kind():
-    selector = Definition(objects.TestNest3, ref=Definition(objects.TestClass1, dryml.AnyValue()).ref())
+    selector = Definition(
+        objects.TestNest3,
+        ref=DefLink.finalized(
+            EdgeKind.REF, Definition(objects.TestClass1, dryml.AnyValue())
+        ),
+    )
     graph = compile_selector_graph(selector)
 
     assert graph.edges[0].edge_kind is EdgeKind.REF
@@ -163,5 +171,5 @@ def test_invalid_ref_graph_edge_validation_message():
 
 
 def test_public_ref_exports():
-    for name in ("Ref", "Mat", "RefCDef", "RefCDefArg", "SelectorArg", "SelectorSpec", "QuotedDef"):
+    for name in ("Ref", "Mat", "SelectorSpec", "QuotedDef"):
         assert hasattr(dryml, name)

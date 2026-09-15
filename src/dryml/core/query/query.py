@@ -5,7 +5,6 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..canonical import matching_container_family
-from ..arg_roles import apply_definition_arg_roles
 from ..cdef_identity import V2_IDENTITY_VERSION
 from ..definition import ConcreteDefinition, Definition, categorical_definition, selector_match
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
@@ -790,7 +789,7 @@ def _resolve_query_state_selectors(source, repo):
             return memo[key]
         if isinstance(value, DefLink):
             target = visit(value.target)
-            return target if value.kind is EdgeKind.MATERIALIZE else DefLink(value.kind, target)
+            return target if value.kind is EdgeKind.MATERIALIZE else DefLink.finalized(value.kind, target)
         if isinstance(value, Definition):
             args = (SKIP_ARGS,) if value.args is None else tuple(visit(item) for item in value.args)
             prefix = () if value.cls is None else (value.cls, *args)
@@ -854,7 +853,6 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
         return selector.matches(target, present=True)
 
     if isinstance(selector, Definition):
-        selector = apply_definition_arg_roles(selector)
         if not isinstance(target, (Definition, ConcreteDefinition)):
             return False
         if selector.cls is not None:
@@ -870,7 +868,6 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
                 # Missing/Present selectors may intentionally mention a
                 # parameter absent from the live constructor. Bind the known
                 # portion, then retain those structural absence constraints.
-                from ..arg_roles import apply_bound_arg_roles
                 from ..bound_args import _constructor_signature, bind_partial_arguments
 
                 if selector.cls is None or not isinstance(selector.cls, type):
@@ -888,7 +885,6 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
                 }
                 args = () if selector.args is None else tuple(selector.args)
                 bound = bind_partial_arguments(selector.cls, args, known_kwargs)
-                bound = apply_bound_arg_roles(selector.cls, bound)
                 selector_parameters = dict(bound.items())
                 selector_parameters.update(unknown_kwargs)
             for name, child in selector_parameters.items():

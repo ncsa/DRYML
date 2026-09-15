@@ -258,11 +258,11 @@ def test_private_v2_defaults_are_snapshotted_and_change_identity_later():
 
 
 def test_private_v2_binding_and_canonicalization_fail_at_semantic_parameter_paths():
-    with pytest.raises(TypeError, match="required"):
+    with pytest.raises(TypeError, match="argument binding failed"):
         Definition(RequiredFixture).concretize()
     with pytest.raises(TypeError, match="value"):
         Definition(UnsupportedDefaultFixture).concretize()
-    with pytest.raises(TypeError, match="unknown"):
+    with pytest.raises(TypeError, match="argument binding failed"):
         Definition(InvalidPreparedFixture, 1).concretize()
 
 

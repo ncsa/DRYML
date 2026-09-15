@@ -174,6 +174,26 @@ class RealizationScope:
         self._claim_cleanups.append(cleanup)
 
 
+@dataclass(frozen=True, slots=True)
+class AggregateMaterializationPlan:
+    """Detached selected roots admitted together by :class:`dryml.core.repo.Repo`.
+
+    Args:
+        roots: Selected materializing boundary values in caller delivery order.
+        cache: Effective cache policy retained for structural realization.
+        reuse_live: Effective exact-state live-reuse policy.
+
+    This plan deliberately carries no live Objects, payload bytes, or callable
+    constructors.  Repo completes its authority preflight and claim admission
+    before executing it, so a signature boundary cannot recreate restoration
+    policy or publication behavior.
+    """
+
+    roots: tuple[Any, ...]
+    cache: str
+    reuse_live: str
+
+
 _CURRENT_REALIZATION_SCOPE: ContextVar[RealizationScope | None] = ContextVar(
     "dryml_realization_scope", default=None
 )

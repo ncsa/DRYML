@@ -9,13 +9,12 @@ import subprocess
 import sys
 import textwrap
 import threading
-from typing import Annotated
 
 import pytest
 
 from dryml.core import (
-    AnyValue, Choice, Definition, Exact, IntRange, Mat, Missing, ObjectId,
-    ObjectRef, Par, Present, Ref, Repo, RepoDefinition, RepoDefinitionError,
+    AnyValue, Choice, ConcreteDefinition, Definition, Exact, IntRange, Mat, Missing, ObjectId,
+    ObjectRef, Par, Present, Ref, Repo, RepoDefinition, RepoDefinitionError, SelectorSpec,
     Satisfies, Selector, SKIP_ARGS, StateRef, SubclassOf, UniformFromSet,
     UniformIntRange,
 )
@@ -25,8 +24,8 @@ from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
 from dryml.core.repo_plan import SaveRouting
 from dryml.core.symbol import ImportRef
-from dryml.core.arg_roles import SelectorArg
-from dryml.core.arg_roles import RefCDefArg
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.links import DefLink
 import dryml.core.session as session
 from dryml.core.utils.graph.path import GraphPath, Parameter
 from dryml.core.utils.graph.value import iter_set_members
@@ -53,13 +52,13 @@ class ReconstructionTarget(Object):
 
 
 class SelectorArgumentTarget(Object):
-    def __init__(self, selector: Annotated[Definition, SelectorArg()]):
+    def __init__(self, selector: Ref[SelectorSpec]):
         super().__init__()
         self.selector = selector
 
 
 class RefArgumentTarget(Object):
-    def __init__(self, child: Annotated[Definition, RefCDefArg()]):
+    def __init__(self, child: Ref[ConcreteDefinition]):
         super().__init__()
         self.child = child
 
@@ -275,13 +274,18 @@ def test_definition_encodes_complete_nested_reference_topology_inertly(tmp_path,
     imported_state = StateRef(imported, {GraphPath(): _state_hash("b")})
     outer = Definition(
         ReferenceWrapper,
-        Mat(imported_state),
-        child_alias=Ref(imported_state),
+        DefLink.finalized(EdgeKind.MATERIALIZE, imported_state),
+        child_alias=DefLink.finalized(EdgeKind.REF, imported_state),
     ).concretize()
     outer_ref = ObjectRef(outer, {child_path: imported.object_id})
     state = StateRef(outer_ref, {child_path: _state_hash("c")})
     selector = Selector(
-        Definition(DefinitionTarget, Mat(state), ref=Ref(state), open_leaf={"x": state})
+        Definition(
+            DefinitionTarget,
+            DefLink.finalized(EdgeKind.MATERIALIZE, state),
+            ref=DefLink.finalized(EdgeKind.REF, state),
+            open_leaf={"x": state},
+        )
     )
     store = DirStore(tmp_path / "store", query_index="none")
     data = Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition().to_data()
@@ -860,7 +864,9 @@ def test_reconstruction_retains_exact_selector_data_and_subclass_semantics(tmp_p
 
     nested = Selector(Definition(ReconstructionTarget, SKIP_ARGS, value=Exact("nested")))
     selector_cdef = Definition(SelectorArgumentTarget, nested).concretize()
-    ref_cdef = Definition(RefArgumentTarget, Definition(ReconstructionTarget)).concretize()
+    ref_cdef = Definition(
+        RefArgumentTarget, Definition(ReconstructionTarget, "").concretize()
+    ).concretize()
     selector = Selector(
         Definition(
             ReconstructionTarget,
@@ -1035,7 +1041,9 @@ def test_definition_reconstruction_preserves_roles_and_exact_reference_identity(
     state_ref = StateRef(object_ref, {GraphPath(): _state_hash("e")})
     nested = Selector(Definition(ReconstructionTarget, SKIP_ARGS, value=Exact("nested")))
     role_value = Definition(SelectorArgumentTarget, nested).concretize()
-    ref_value = Definition(RefArgumentTarget, Definition(ReconstructionTarget)).concretize()
+    ref_value = Definition(
+        RefArgumentTarget, Definition(ReconstructionTarget, "").concretize()
+    ).concretize()
     selector = Selector(Definition(
         ReconstructionTarget,
         value=Exact([shared, shared, independent, object_ref, state_ref, role_value, ref_value]),
