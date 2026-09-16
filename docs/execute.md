@@ -90,6 +90,28 @@ control Store. It is task/thread owned, is unavailable outside that scope, and
 does not modify caller session state. Reconstructed handles close with
 `flush=False`; a control Store shared with the Repo is reopened only once.
 
+`dryml.core.execute.CoreOptions` is an inert reusable core-adapter override.
+At submission preparation, `resolve_core_options()` resolves per-call settings
+over reusable executor settings over the current core session's Repo/cache
+defaults. `"inherit"` falls through one layer, while `None` explicitly clears a
+Repo, control Store, or runtime selection. Runtime inheritance ends at `None`:
+workers use their established INLINE baseline rather than a clone of caller
+runtime state. In orchestration mode, requests for live returned Objects or
+argument updates fail before any Store export, opening, mutation, or backend
+submission.
+
+`prepare_shared_storage()` is the U4 storage seam consumed by the later callable
+adapter. It exports a live Repo exactly once, derives the full worker Store table
+and control role from that one detached `RepoDefinition`, and retains a fresh,
+submission-owned recovery Repo. The initial `SharedDirStoreStrategy` accepts
+only existing direct `DirStore` authority; it rejects absent storage, ZipStore
+descriptors (including extracted archive handles), inaccessible directories,
+ambiguous physical destinations, and unsupported strategy identities. A control
+Store shared with the Repo is encoded as its table index; a separate Store uses
+an explicit direct-directory descriptor. Snapshot cleanup uses `flush=False` and
+never closes caller-borrowed handles. Callable payload preparation and generic
+submission remain unavailable until the later call-codec stage.
+
 Its `WorkerSetup.data` is exactly one self-validating envelope:
 
 ```json
