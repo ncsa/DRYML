@@ -1047,7 +1047,7 @@ def _validate_selector(value: Any, path: str) -> None:
                 pair_path = f"{item_path}[{index}]"
                 if not isinstance(pair, list) or len(pair) != 2 or type(pair[0]) not in {str, int}:
                     raise _error(pair_path, "map entry is invalid")
-                key = (type(pair[0]), pair[0])
+                key = pair[0]
                 if key in names:
                     raise _error(pair_path, "map key is duplicated")
                 names.add(key)

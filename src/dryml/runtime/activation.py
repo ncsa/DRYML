@@ -21,7 +21,7 @@ from .allocation import RuntimeAllocationView
 from .bootstrap import validate_framework_transition
 from .context import RuntimeState, publication
 from .devices import DeviceVisibilityPolicy, build_device_visibility_plan
-from .enforcement import build_control_plan
+from .enforcement import ControlStatus, build_control_plan
 from .errors import RuntimeTransitionError
 from .modes import RuntimeMode
 from .publication import EffectPlan, PublicationService, SessionGeneration
@@ -270,7 +270,7 @@ def _state_for(spec: RuntimeContextSpec, grant: ExecutionGrant) -> RuntimeState:
     return RuntimeState(RuntimeMode.INLINE, allocation, spec)
 
 
-def _effects_for(state: RuntimeState, grant: ExecutionGrant, service: PublicationService) -> tuple[EffectPlan, dict[str, str]]:
+def _effects_for(state: RuntimeState, grant: ExecutionGrant, service: PublicationService) -> tuple[EffectPlan, dict[str, ControlStatus]]:
     """Plan only controls backed by the active grant and publication seams."""
     spec = state.spec
     assert spec is not None
@@ -281,11 +281,11 @@ def _effects_for(state: RuntimeState, grant: ExecutionGrant, service: Publicatio
     environment = {**grant.env, **spec.env, **visibility.env_updates}
     affinity = grant.exact_cpus if grant.is_exact and grant.exact_cpus and service.supports_cpu_affinity else None
     memory = grant.memory if grant.is_exact and grant.memory is not None and service.supports_process_memory else None
-    statuses = {name: value.value for name, value in build_control_plan(state.mode, affinity=bool(grant.exact_cpus), process_memory=grant.memory is not None, framework_controls=bool(spec.framework), accelerator_memory=bool(grant.accelerator_memory)).statuses.items()}
+    statuses = dict(build_control_plan(state.mode, affinity=bool(grant.exact_cpus), process_memory=grant.memory is not None, framework_controls=bool(spec.framework), accelerator_memory=bool(grant.accelerator_memory)).statuses)
     if grant.exact_cpus:
-        statuses["affinity"] = "enforced" if affinity is not None else "unsupported"
+        statuses["affinity"] = ControlStatus.ENFORCED if affinity is not None else ControlStatus.UNSUPPORTED
     if grant.memory is not None:
-        statuses["process_memory"] = "enforced" if memory is not None else "unsupported"
+        statuses["process_memory"] = ControlStatus.ENFORCED if memory is not None else ControlStatus.UNSUPPORTED
     return EffectPlan(environment=environment, cpu_affinity=affinity, process_memory=memory), statuses
 
 

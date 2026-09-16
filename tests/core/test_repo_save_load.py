@@ -217,16 +217,16 @@ def test_deletion_save_uses_strong_cache_snapshot_and_unraisable_cleanup(tmp_pat
 
     original_close = repo.close
 
-    def close(*, flush=True):
+    def close(*, flush=True, _close=original_close):
         closes.append(flush)
-        return original_close(flush=flush)
+        return _close(flush=flush)
 
     repo.save = save
     repo.close = close
     monkeypatch.setattr(sys, "unraisablehook", lambda args: unraisable.append(args))
 
     repo.save_objs_on_deletion = True
-    del first, failing, later, original_close
+    del first, failing, later, original_close, close
     del repo
     gc.collect()
 
