@@ -1,6 +1,7 @@
 """U5 direct-record save, structural-load, and future exact-restore contracts."""
 
 import inspect
+import gc
 import os
 import subprocess
 import sys
@@ -194,6 +195,95 @@ def test_changed_save_surface_rejects_retired_revision_options_and_generation_ke
     for keyword, value in (("revision", "retired"), ("options", {}), ("generation", 1)):
         with pytest.raises(TypeError):
             repo.save_object(SaveLoadValue(1), **{keyword: value})
+
+
+def test_deletion_save_uses_strong_cache_snapshot_and_unraisable_cleanup(tmp_path, monkeypatch):
+    """Deletion saves stop at the first failure but still perform non-flushing cleanup."""
+
+    repo = Repo(tmp_path / "store.zip")
+    first = SaveLoadValue("first", repo=repo)
+    failing = SaveLoadValue("failing", repo=repo)
+    later = SaveLoadValue("later", repo=repo)
+    for obj in (first, failing, later):
+        repo.cache_strong(obj)
+    saved = []
+    closes = []
+    unraisable = []
+
+    def save(obj, **kwargs):
+        saved.append(obj.value)
+        if obj.value == "failing":
+            raise RuntimeError("implicit save failed")
+
+    original_close = repo.close
+
+    def close(*, flush=True):
+        closes.append(flush)
+        return original_close(flush=flush)
+
+    repo.save = save
+    repo.close = close
+    monkeypatch.setattr(sys, "unraisablehook", lambda args: unraisable.append(args))
+
+    repo.save_objs_on_deletion = True
+    del first, failing, later, original_close
+    del repo
+    gc.collect()
+
+    assert saved == ["first", "failing"]
+    assert closes == [False]
+    assert len(unraisable) == 1
+    assert unraisable[0].exc_type is RuntimeError
+    assert str(unraisable[0].exc_value) == "Repo deletion cleanup failed."
+
+
+def test_deletion_save_reports_sanitized_failure_to_default_unraisable_hook():
+    """The interpreter's real unraisable hook receives no save exception details."""
+
+    completed = _run_fresh_process(
+        """
+import gc
+
+from dryml.core import Repo, Serializable
+
+
+repo = Repo()
+repo.save_objs_on_deletion = True
+repo.cache_strong(Serializable(repo=repo))
+def save_failure(obj):
+    raise RuntimeError("save secret: top-secret")
+
+
+repo.save = save_failure
+del repo
+gc.collect()
+"""
+    )
+
+    assert completed.returncode == 0
+    assert "Repo deletion cleanup failed" in completed.stderr
+    assert "top-secret" not in completed.stderr
+    assert "save_failure" not in completed.stderr
+    assert "Repo object at" not in completed.stderr
+
+
+def test_partially_constructed_repo_deletion_is_inert():
+    """Destructor cleanup tolerates constructor failure before Repo state exists."""
+
+    partial = Repo.__new__(Repo)
+    partial.__del__()
+
+
+def test_nonflushing_close_never_runs_deletion_saves(tmp_path, monkeypatch):
+    """Worker-style non-flushing cleanup cannot publish a deletion-save snapshot."""
+
+    repo = Repo(tmp_path / "store.zip")
+    obj = SaveLoadValue("cached", repo=repo)
+    repo.cache_strong(obj)
+    repo.save_objs_on_deletion = True
+    monkeypatch.setattr(repo, "save", lambda *args, **kwargs: pytest.fail("unexpected save"))
+
+    repo.close(flush=False)
 
 
 def test_make_store_accepts_a_delegating_binary_file_wrapper():

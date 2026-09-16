@@ -2574,6 +2574,9 @@ class Repo:
             TypeError: If ``definition`` is not a RepoDefinition.
             RepoDefinitionError: If descriptors, selectors, or existing Store
                 authority cannot be reconstructed.  Storage failures are chained.
+            RepoDefinitionReconstructionError: If cleanup after a reconstruction
+                failure cannot close a fresh handle; the error retains only those
+                handles for bounded idempotent retry.
 
         Side Effects:
             Opens only existing supported Store authority. It neither installs a
@@ -2900,9 +2903,12 @@ class Repo:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_save"):
+            # Retain an explicit target before the flush scope is captured so a
+            # newly connected buffered archive cannot be omitted from its commit.
+            selected_store = self._ensure_store(store)
             with self._retain_save_context() as context:
                 result = self.save_object(
-                    obj, main=main, store=store, alias=alias,
+                    obj, main=main, store=selected_store, alias=alias,
                     deep_capture=deep_capture, match_mode=match_mode,
                     graph_mode=graph_mode,
                     report_stores=True, _save_context=context,
@@ -4137,8 +4143,9 @@ class Repo:
             Optionally commits configured Stores, closes Repo-owned query
             bindings, and closes each Store handle opened by this Repo exactly
             once. Supplied Store handles remain borrowed and are not closed.
-            A failed commit or owned-handle cleanup leaves the Repo open for
-            inspection/retry; ``flush=False`` skips commits.
+            A failed commit or cleanup leaves the Repo open for inspection/retry;
+            cleanup still attempts every owned Store handle. ``flush=False``
+            skips commits and never triggers deletion-save publication.
         """
 
         with self._configuration_lock:
@@ -4152,8 +4159,17 @@ class Repo:
         try:
             if flush and not self._state_io:
                 self.flush()
-            self._query_index.close()
-            self._close_owned_stores()
+            errors = []
+            try:
+                self._query_index.close()
+            except BaseException as error:
+                errors.append(error)
+            try:
+                self._close_owned_stores()
+            except BaseException as error:
+                errors.append(error)
+            if errors:
+                raise errors[0]
             if self._state_io:
                 self.clear_cache(strong=True, weak=True)
         except BaseException:
@@ -4165,9 +4181,36 @@ class Repo:
             self._closed = True
 
     def __del__(self):
-        if self.save_objs_on_deletion:
-            self.save()
-            self.close(flush=True)
+        """Best-effort deletion cleanup for an explicitly configured Repo.
+
+        A Repo with ``save_objs_on_deletion`` saves a detached strong-cache
+        snapshot in cache order until its first failure, then closes owned
+        resources without flushing. Failures are reported through Python's
+        unraisable hook because destructors cannot safely propagate them.
+        """
+
+        if (
+                not getattr(self, "save_objs_on_deletion", False)
+                or getattr(self, "_closed", True)
+                or getattr(self, "_closing", True)
+                or not hasattr(self, "_query_index")):
+            return
+
+        failed = False
+        for _, obj in tuple(self.strong_obj_cache.items()):
+            try:
+                self.save(obj)
+            except BaseException:
+                failed = True
+                break
+        try:
+            self.close(flush=False)
+        except BaseException:
+            failed = True
+        if failed:
+            # Raising delegates valid UnraisableHookArgs construction to CPython
+            # and prevents the original exception's details from escaping.
+            raise RuntimeError("Repo deletion cleanup failed.") from None
 
     def clear_cache(self, strong=False, weak=True):
         if strong:
@@ -4426,9 +4469,11 @@ def save_object(
                 # failed buffered save instead of retrying and masking it.
                 sub_repo._skip_cleanup_flush = True
             main = main or ((repo is not sub_repo) and isinstance(obj, Object))
+            # See Repo.save: the temporary wrapper owns this commit scope.
+            selected_store = sub_repo._ensure_store(store)
             with sub_repo._retain_save_context() as context:
                 result = sub_repo.save_object(
-                    obj, main=main, store=store, alias=alias,
+                    obj, main=main, store=selected_store, alias=alias,
                     deep_capture=deep_capture, match_mode=match_mode,
                     graph_mode=graph_mode,
                     report_stores=True, _save_context=context,

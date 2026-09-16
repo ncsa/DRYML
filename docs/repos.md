@@ -143,6 +143,26 @@ Repo owns its freshly opened handles. `close(flush=True)` retains normal commit
 behavior, while `close(flush=False)` releases those owned resources without a
 commit. Reconstructed cleanup never closes caller-supplied borrowed handles.
 
+Live reconstruction rejects descriptors that name the same physical Store through
+duplicate, dot-segment, or symlink paths before opening duplicate handles.
+Portable Selector map keys retain their `str` or `int` type, so the keys `1` and
+`"1"` remain distinct after a definition round trip. If a reconstruction fails
+and a newly opened handle also cannot close, it raises
+`RepoDefinitionReconstructionError`. Its `cleanup_stores` property lists only
+those fresh failed handles, and concurrent `retry_cleanup()` calls serialize
+close attempts and return `True` only when no retained handle remains. A
+`KeyboardInterrupt` or `SystemExit` continues to propagate; when it has retained
+failed cleanup, its public `repo_cleanup_error` attribute provides the same retry
+object.
+
+A Repo configured with `save_objs_on_deletion=True` attempts a detached
+strong-cache snapshot in cache order when it is collected. The first save failure
+stops later deletion saves, but owned resources still receive non-flushing close
+attempts. Cleanup failure is reported through Python's unraisable-hook mechanism
+with a fixed bounded message; it does not include the original exception, its
+traceback, or the Repo representation. Explicit `close(flush=False)` never runs
+deletion saves.
+
 Definition export rejects dirty, missing, or zero-length ZipStore archives,
 file-like archives, unsupported Store types/settings, nonportable configuration,
 ambiguous built-in physical destinations, and explicit custom clocks or owner

@@ -15,6 +15,7 @@ import re
 import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any
 
 from dryml.formats.canonical import canonical_json_bytes, canonical_json_dumps
@@ -39,6 +40,76 @@ class RepoDefinitionError(ValueError):
     which can contain sensitive configuration. It has no side effects and does
     not imply that a partially reconstructed Repo is usable.
     """
+
+
+class RepoDefinitionReconstructionError(RepoDefinitionError):
+    """Report a reconstruction failure with bounded retryable Store cleanup.
+
+    Args:
+        message: Sanitized reconstruction failure summary.
+        cleanup_stores: Newly opened Store handles whose close operation failed.
+        cleanup_issues: Sanitized bounded cleanup issue labels.
+
+    The original reconstruction failure is retained as ``__cause__``. Only
+    fresh handles whose close failed remain available through
+    :meth:`retry_cleanup`; borrowed caller handles are never retained or closed.
+    """
+
+    _MAX_CLEANUP_ISSUES = 16
+
+    def __init__(self, message: str, *, cleanup_stores=(), cleanup_issues=()):
+        super().__init__(message)
+        self._cleanup_stores = list(cleanup_stores)
+        self._cleanup_lock = RLock()
+        self.cleanup_issues = tuple(cleanup_issues[:self._MAX_CLEANUP_ISSUES])
+
+    @property
+    def cleanup_stores(self) -> tuple[Any, ...]:
+        """Return fresh Store handles still requiring close retry.
+
+        Returns:
+            A snapshot of the bounded failed-close handle set. The handles are
+            owned exclusively by this reconstruction error until retry succeeds.
+        """
+
+        return tuple(self._cleanup_stores)
+
+    def retry_cleanup(self) -> bool:
+        """Retry close once for each retained fresh Store handle.
+
+        Returns:
+            ``True`` when no failed-close handles remain, otherwise ``False``.
+
+        Side Effects:
+            Closes only handles retained by this error. Successful handles are
+            removed, so repeated successful calls are idempotent.
+
+        Raises:
+            KeyboardInterrupt: If closing a retained Store is interrupted. The
+                interrupted and unattempted handles remain available for retry.
+            SystemExit: If closing a retained Store requests process exit. The
+                interrupted and unattempted handles remain available for retry.
+        """
+
+        with self._cleanup_lock:
+            stores = tuple(self._cleanup_stores)
+            remaining = []
+            issues = list(self.cleanup_issues)
+            for index, store in enumerate(stores):
+                try:
+                    store.close()
+                except BaseException as error:
+                    remaining.append(store)
+                    if len(issues) < self._MAX_CLEANUP_ISSUES:
+                        issues.append(type(error).__name__)
+                    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                        remaining.extend(stores[index + 1:])
+                        self._cleanup_stores = remaining
+                        self.cleanup_issues = tuple(issues)
+                        raise
+            self._cleanup_stores = remaining
+            self.cleanup_issues = tuple(issues)
+            return not remaining
 
 
 def _error(path: str, message: str) -> RepoDefinitionError:
@@ -512,9 +583,12 @@ class _SelectorEncoder:
         if isinstance(value, Par):
             return self.par(value, path, depth + 1)
         if isinstance(value, (FrozenDict, dict)):
-            if any(not isinstance(key, str) for key in value):
-                raise _error(path, "map keys must be strings")
-            return {"kind": "map", "items": [[key, self.value(item, f"{path}.items[{index}]", depth + 1)] for index, (key, item) in enumerate(sorted(value.items()))]}
+            from .utils.graph.path import canonical_key_bytes
+
+            if any(type(key) not in {str, int} for key in value):
+                raise _error(path, "map keys must be strings or integers")
+            items = sorted(value.items(), key=lambda item: canonical_key_bytes(item[0]))
+            return {"kind": "map", "items": [[key, self.value(item, f"{path}.items[{index}]", depth + 1)] for index, (key, item) in enumerate(items)]}
         if isinstance(value, (FrozenList, list)):
             return {"kind": "list", "items": [self.value(item, f"{path}.items[{index}]", depth + 1) for index, item in enumerate(value)]}
         if isinstance(value, (FrozenTuple, tuple)):
@@ -675,6 +749,42 @@ def _validate_par(value: Mapping[str, Any], path: str, validate_value: Any) -> N
     raise _error(path, "generator is invalid")
 
 
+def _validate_reference_graph_path(value: Any, path: str) -> None:
+    """Validate the canonical closed GraphPath form used inside references."""
+
+    from .utils.graph.path import GRAPH_PATH_SCHEMA_VERSION
+
+    record = _exact_keys(value, {"schema_version", "segments"}, path)
+    if record["schema_version"] != GRAPH_PATH_SCHEMA_VERSION or not isinstance(record["segments"], list):
+        raise _error(path, "reference path is invalid")
+    for index, segment in enumerate(record["segments"]):
+        segment_path = f"{path}.segments[{index}]"
+        if not isinstance(segment, Mapping) or not isinstance(segment.get("kind"), str):
+            raise _error(segment_path, "reference path segment is invalid")
+        kind = segment["kind"]
+        if kind in {"parameter", "kwarg"}:
+            _exact_keys(segment, {"kind", "name"}, segment_path)
+            if not isinstance(segment["name"], str):
+                raise _error(segment_path, "reference path segment is invalid")
+        elif kind in {"arg", "index"}:
+            _exact_keys(segment, {"kind", "index"}, segment_path)
+            if type(segment["index"]) is not int or segment["index"] < 0:
+                raise _error(segment_path, "reference path segment is invalid")
+        elif kind == "key":
+            _exact_keys(segment, {"kind", "value"}, segment_path)
+            if type(segment["value"]) not in {str, int}:
+                raise _error(segment_path, "reference path segment is invalid")
+        elif kind == "set_member":
+            _exact_keys(segment, {"kind", "fingerprint", "ordinal"}, segment_path)
+            if (
+                    not isinstance(segment["fingerprint"], str)
+                    or type(segment["ordinal"]) is not int
+                    or segment["ordinal"] < 0):
+                raise _error(segment_path, "reference path segment is invalid")
+        else:
+            raise _error(segment_path, "reference path segment is invalid")
+
+
 def _validate_selector(value: Any, path: str) -> None:
     record = _exact_keys(value, {"root", "strict", "cls_policy", "nodes"}, path)
     if type(record["strict"]) is not bool or record["cls_policy"] not in _CLASS_POLICIES:
@@ -759,6 +869,7 @@ def _validate_selector(value: Any, path: str) -> None:
             entry_path = f"{item_path}[{index}]"
             _exact_keys(entry, {"path", "state"} if state else {"path", "object_id"}, entry_path)
             try:
+                _validate_reference_graph_path(entry["path"], entry_path + ".path")
                 graph_path = GraphPath.from_data(entry["path"])
                 if graph_path in result:
                     raise ValueError()
@@ -927,11 +1038,12 @@ def _validate_selector(value: Any, path: str) -> None:
             names = set()
             for index, pair in enumerate(current["items"]):
                 pair_path = f"{item_path}[{index}]"
-                if not isinstance(pair, list) or len(pair) != 2 or not isinstance(pair[0], str):
+                if not isinstance(pair, list) or len(pair) != 2 or type(pair[0]) not in {str, int}:
                     raise _error(pair_path, "map entry is invalid")
-                if pair[0] in names:
+                key = (type(pair[0]), pair[0])
+                if key in names:
                     raise _error(pair_path, "map key is duplicated")
-                names.add(pair[0])
+                names.add(key)
                 item(pair[1], pair_path, depth + 1)
             return
         if kind == "link":
@@ -1157,6 +1269,10 @@ def _symbol_from_data(value: Mapping[str, Any], *, require_live: bool = False) -
         )
     if value["representation"] == "symbolic" and not require_live:
         return result
+    if symbol["kind"] == "source" and "live_class" in symbol and not require_live:
+        # SourceSpec equality preserves the original live-class identity for
+        # default, exact, and strict Selector matching after reconstruction.
+        return result
     try:
         result = result.resolve()
     except Exception as error:
@@ -1295,8 +1411,11 @@ def repo_from_definition(definition: RepoDefinition):
     routing_data = data["routing"]
     try:
         _preflight_store_descriptors(data["stores"])
+        _validate_live_store_identities(data["stores"])
         routing_parts = None if routing_data is None else _reconstruct_routing(routing_data)
     except (KeyboardInterrupt, SystemExit):
+        raise
+    except RepoDefinitionError:
         raise
     except Exception as error:
         raise RepoDefinitionError("Repo definition reconstruction preflight failed.") from error
@@ -1334,20 +1453,46 @@ def repo_from_definition(definition: RepoDefinition):
         repo._adopt_owned_stores(opened)
         return repo
     except BaseException as error:
+        issues = []
+        cleanup_control_flow = None
         if repo is not None:
-            repo._adopt_owned_stores(opened)
+            # This Repo is not returned. Prevent its destructor from publishing
+            # cached Objects while reconstruction cleanup unwinds.
+            repo._closing = True
             try:
-                repo.close(flush=False)
-            except BaseException:
-                pass
-        else:
-            for store in reversed(opened):
-                try:
-                    store.close()
-                except BaseException:
-                    pass
+                repo._query_index.close()
+            except BaseException as cleanup_error:
+                issues.append(type(cleanup_error).__name__)
+                if isinstance(cleanup_error, (KeyboardInterrupt, SystemExit)):
+                    cleanup_control_flow = cleanup_error
+        failed_stores = []
+        for store in reversed(opened):
+            try:
+                store.close()
+            except BaseException as cleanup_error:
+                failed_stores.append(store)
+                issues.append(type(cleanup_error).__name__)
+                if (
+                        cleanup_control_flow is None
+                        and isinstance(cleanup_error, (KeyboardInterrupt, SystemExit))):
+                    cleanup_control_flow = cleanup_error
+        cleanup_error = None
+        if failed_stores:
+            cleanup_error = RepoDefinitionReconstructionError(
+                "Repo definition reconstruction cleanup requires retry.",
+                cleanup_stores=failed_stores,
+                cleanup_issues=issues,
+            )
+        if cleanup_control_flow is not None:
+            if cleanup_error is not None:
+                cleanup_control_flow.repo_cleanup_error = cleanup_error
+            raise cleanup_control_flow
         if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            if cleanup_error is not None:
+                error.repo_cleanup_error = cleanup_error
             raise
+        if cleanup_error is not None:
+            raise cleanup_error from error
         if isinstance(error, RepoDefinitionError):
             raise
         raise RepoDefinitionError("Repo definition could not open required Store authority.") from error
@@ -1372,6 +1517,23 @@ def _preflight_store_descriptors(stores: list[Mapping[str, Any]]) -> None:
             DirStore._validate_existing_root(descriptor["path"])
         else:
             ZipStore._validate_existing_archive(descriptor["path"])
+
+
+def _validate_live_store_identities(stores: list[Mapping[str, Any]]) -> None:
+    """Reject equivalent existing Store destinations before opening any handles."""
+
+    identities = set()
+    for descriptor in stores:
+        if descriptor["kind"] == "dir":
+            evidence = os.stat(descriptor["path"])
+            identity = ("dir", evidence.st_dev, evidence.st_ino)
+        else:
+            identity = ("zip", os.path.normcase(os.path.realpath(descriptor["path"])))
+        if identity in identities:
+            raise RepoDefinitionError(
+                "Repo definition names duplicate physical Store destinations."
+            )
+        identities.add(identity)
 
 
 def _duplicate_free_mapping(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1475,4 +1637,4 @@ def definition_from_repo(repo: Any) -> RepoDefinition:
             repo._save_context_leases -= 1
 
 
-__all__ = ["RepoDefinition", "RepoDefinitionError"]
+__all__ = ["RepoDefinition", "RepoDefinitionError", "RepoDefinitionReconstructionError"]

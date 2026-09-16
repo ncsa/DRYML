@@ -5,7 +5,7 @@ from dryml.core import (
     Repo, SavePublication, SaveRouting, SavedSnapshot, Selector, Serializable,
     StoreReport,
 )
-from dryml.core.repo import RepoSaveError
+from dryml.core.repo import RepoSaveError, save_object
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
 
@@ -58,6 +58,31 @@ def test_unconfigured_repo_save_commits_each_store_once_with_completed_report(tm
         (first, "completed"),
         (second, "completed"),
     ]
+
+
+@pytest.mark.parametrize("temporary", [False, True], ids=["repo", "convenience"])
+def test_explicit_new_zip_target_is_committed_and_reported(tmp_path, temporary):
+    """A flush-owning save includes a newly selected archive in its commit ledger."""
+
+    target = tmp_path / "target.zip"
+    obj = ReportState()
+    if temporary:
+        state, report = save_object(
+            obj, repo=DirStore(tmp_path / "unrelated"), store=target, report_stores=True,
+        )
+    else:
+        repo = Repo()
+        state, report = repo.save(obj, store=target, report_stores=True)
+
+    commits = [item for item in report.publications if item.phase == "commit"]
+    assert [(item.store.archive_path, item.status) for item in commits if isinstance(item.store, ZipStore)] == [
+        (str(target), "completed"),
+    ]
+    reopened = ZipStore.open_existing(target)
+    try:
+        assert Repo(reopened).load_state_ref(state, reuse_live="never").value == 0
+    finally:
+        reopened.close()
 
 
 def test_bounded_dirty_commits_preplan_later_required_work(tmp_path, monkeypatch):

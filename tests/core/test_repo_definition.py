@@ -5,16 +5,17 @@ from io import BytesIO
 import json
 import os
 import shutil
+import threading
 import subprocess
 import sys
 import textwrap
-import threading
 
 import pytest
 
 from dryml.core import (
     AnyValue, Choice, ConcreteDefinition, Definition, Exact, IntRange, Mat, Missing, ObjectId,
-    ObjectRef, Par, Present, Ref, Repo, RepoDefinition, RepoDefinitionError, SelectorSpec,
+    ObjectRef, Par, Present, Ref, Repo, RepoDefinition, RepoDefinitionError,
+    RepoDefinitionReconstructionError, SelectorSpec,
     Satisfies, Selector, SKIP_ARGS, StateRef, SubclassOf, UniformFromSet,
     UniformIntRange,
 )
@@ -232,6 +233,110 @@ def test_definition_decoding_is_inert(monkeypatch, tmp_path):
 
     assert RepoDefinition.from_data(data).to_data() == data
     assert RepoDefinition.from_json(RepoDefinition.from_data(data).to_json()).to_data() == data
+
+
+def test_definition_reconstruction_preserves_source_backed_live_class_matching(tmp_path):
+    """Source-backed local classes retain default, exact, and strict route matches."""
+
+    class LocalSourceTarget(Object):
+        pass
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    target = Definition(LocalSourceTarget).concretize()
+    for policy in ({}, {"cls_policy": "exact"}, {"strict": True}):
+        selector = Selector(Definition(LocalSourceTarget), **policy)
+        source = Repo(store, save_routing=SaveRouting(((selector, store),)))
+        rebuilt = Repo.from_definition(source.to_definition())
+        try:
+            assert selector.matches(target)
+            assert rebuilt.save_routing.routes[0][0].matches(target)
+        finally:
+            rebuilt.close(flush=False)
+
+
+def test_definition_round_trips_typed_canonical_map_keys(tmp_path):
+    """Portable selector maps preserve distinct integer and string keys."""
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    mapping = {1: "integer", "1": "string"}
+    selector = Selector(Definition(DefinitionTarget, value=Exact(mapping)))
+    definition = Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition()
+    rebuilt = Repo.from_definition(RepoDefinition.from_json(definition.to_json()))
+    try:
+        rebuilt_mapping = rebuilt.save_routing.routes[0][0].root.kwargs["value"].matcher.value
+        assert rebuilt_mapping == mapping
+        assert set(rebuilt_mapping) == {1, "1"}
+    finally:
+        rebuilt.close(flush=False)
+
+
+@pytest.mark.parametrize("alias", ["dot", "symlink"], ids=str)
+def test_definition_rejects_physical_store_aliases_before_opening(tmp_path, monkeypatch, alias):
+    """Live reconstruction rejects duplicate destinations before opening either handle."""
+
+    archive = _archive_store(tmp_path / "archive.zip")
+    data = Repo(archive).to_definition().to_data()
+    if alias == "dot":
+        duplicate = os.path.join(tmp_path, ".", "archive.zip")
+    else:
+        duplicate = tmp_path / "archive-alias.zip"
+        duplicate.symlink_to(archive.archive_path)
+    data["stores"].append({"kind": "zip", "path": str(duplicate)})
+    opened = []
+    monkeypatch.setattr(
+        ZipStore,
+        "open_existing",
+        classmethod(lambda cls, path: opened.append(path)),
+    )
+
+    definition = RepoDefinition.from_data(data)
+    with pytest.raises(RepoDefinitionError):
+        Repo.from_definition(definition)
+
+    assert opened == []
+    archive.close()
+
+
+@pytest.mark.parametrize("mutation", ["envelope", "segment", "unversioned"], ids=str)
+def test_definition_rejects_unknown_or_unversioned_nested_graph_paths(tmp_path, mutation):
+    """Reference path envelopes and segments use only the closed portable grammar."""
+
+    leaf = Definition(ReferenceLeaf).concretize()
+    root = Definition(ReferenceWrapper, leaf).concretize()
+    path = GraphPath((Parameter("child"),))
+    reference = ObjectRef(root, {path: ObjectId(("child",))})
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(
+        store,
+        save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, reference)), store),)),
+    ).to_definition().to_data()
+
+    def first_reference(value):
+        if isinstance(value, dict):
+            if value.get("kind") == "object-ref":
+                return value
+            for child in value.values():
+                found = first_reference(child)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = first_reference(child)
+                if found is not None:
+                    return found
+        return None
+
+    descriptor = first_reference(data["routing"]["routes"][0]["selector"])
+    encoded_path = descriptor["objects"][0]["path"]
+    if mutation == "envelope":
+        encoded_path["unknown"] = True
+    elif mutation == "segment":
+        encoded_path["segments"][0]["unknown"] = True
+    else:
+        descriptor["objects"][0]["path"] = encoded_path["segments"]
+
+    with pytest.raises(RepoDefinitionError, match="reference path"):
+        RepoDefinition.from_data(data)
 
 
 @pytest.mark.parametrize("field, value", [
@@ -857,6 +962,146 @@ def test_reconstruction_failure_closes_only_freshly_opened_resources(tmp_path, m
     assert opened
     assert source_store.read_main_ref() is None
     archive.close()
+
+
+def test_reconstruction_failure_retains_only_failed_new_handle_for_retry(tmp_path, monkeypatch):
+    """A close error after a later open failure remains actionable without touching source handles."""
+
+    source_store = DirStore(tmp_path / "source", query_index="none")
+    source = Repo(source_store)
+    data = source.to_definition().to_data()
+    archive = _archive_store(tmp_path / "archive.zip")
+    data["stores"].append({"kind": "zip", "path": str(archive.archive_path)})
+    opened = []
+    closes = []
+    original_open = DirStore.open_existing
+    original_close = DirStore.close
+
+    def open_existing(cls, path, *, query_index):
+        result = original_open(path, query_index=query_index)
+        opened.append(result)
+        return result
+
+    def fail_then_close(self):
+        closes.append(self)
+        if self is opened[0] and closes.count(self) == 1:
+            raise OSError("close failed")
+        return original_close(self)
+
+    monkeypatch.setattr(DirStore, "open_existing", classmethod(open_existing))
+    monkeypatch.setattr(DirStore, "close", fail_then_close)
+    monkeypatch.setattr(
+        ZipStore,
+        "open_existing",
+        classmethod(lambda cls, path: (_ for _ in ()).throw(OSError("later open failed"))),
+    )
+
+    with pytest.raises(RepoDefinitionError) as raised:
+        Repo.from_definition(RepoDefinition.from_data(data))
+
+    error = raised.value
+    assert error.__cause__ is not None
+    assert error.cleanup_stores == (opened[0],)
+    assert len(error.cleanup_issues) == 1
+    assert error.retry_cleanup() is True
+    assert closes == [opened[0], opened[0]]
+    assert error.retry_cleanup() is True
+    assert closes == [opened[0], opened[0]]
+    assert source_store not in closes
+    archive.close()
+
+
+def test_reconstruction_interrupt_retains_failed_close_without_deletion_save(tmp_path, monkeypatch):
+    """Control-flow interruption retains failed fresh cleanup without destructor publication."""
+
+    source_store = DirStore(tmp_path / "source", query_index="none")
+    source = Repo(source_store)
+    data = source.to_definition().to_data()
+    archive = _archive_store(tmp_path / "archive.zip")
+    data["stores"].append({"kind": "zip", "path": str(archive.archive_path)})
+    opened = []
+    saved = []
+    original_open = DirStore.open_existing
+    original_close = DirStore.close
+
+    def open_existing(cls, path, *, query_index):
+        result = original_open(path, query_index=query_index)
+        opened.append(result)
+        return result
+
+    def fail_then_close(self):
+        if self is opened[0] and not getattr(self, "_test_close_failed", False):
+            self._test_close_failed = True
+            raise OSError("close failed")
+        return original_close(self)
+
+    def interrupt_adoption(self, stores):
+        self.save_objs_on_deletion = True
+        self.cache_strong(Serializable(repo=self))
+        self.save = lambda obj: saved.append(obj)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(DirStore, "open_existing", classmethod(open_existing))
+    monkeypatch.setattr(DirStore, "close", fail_then_close)
+    monkeypatch.setattr(Repo, "_adopt_owned_stores", interrupt_adoption)
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        Repo.from_definition(RepoDefinition.from_data(data))
+
+    cleanup = raised.value.repo_cleanup_error
+    assert cleanup.cleanup_stores == (opened[0],)
+    assert cleanup.retry_cleanup() is True
+    assert saved == []
+    archive.close()
+
+
+def test_reconstruction_cleanup_retry_serializes_concurrent_callers():
+    """Concurrent retry callers never close the same retained Store twice."""
+
+    class BlockingStore:
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def close(self):
+            with self.lock:
+                self.calls += 1
+                self.started.set()
+            assert self.release.wait(timeout=5)
+
+    store = BlockingStore()
+    error = RepoDefinitionReconstructionError("cleanup required", cleanup_stores=(store,))
+    first = threading.Thread(target=error.retry_cleanup)
+    second = threading.Thread(target=error.retry_cleanup)
+    first.start()
+    assert store.started.wait(timeout=5)
+    second.start()
+    store.release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert store.calls == 1
+    assert error.cleanup_stores == ()
+
+
+def test_reconstruction_cleanup_retry_preserves_interrupt_ownership():
+    """An interrupted retry keeps the unclosed handle instead of reporting success."""
+
+    class InterruptedStore:
+        def close(self):
+            raise KeyboardInterrupt
+
+    store = InterruptedStore()
+    error = RepoDefinitionReconstructionError("cleanup required", cleanup_stores=(store,))
+
+    with pytest.raises(KeyboardInterrupt):
+        error.retry_cleanup()
+
+    assert error.cleanup_stores == (store,)
 
 
 def test_reconstruction_retains_exact_selector_data_and_subclass_semantics(tmp_path):
