@@ -15,7 +15,7 @@ import pytest
 from dryml.core import (
     AnyValue, Choice, ConcreteDefinition, Definition, Exact, IntRange, Mat, Missing, ObjectId,
     ObjectRef, Par, Present, Ref, Repo, RepoDefinition, RepoDefinitionError,
-    RepoDefinitionReconstructionError, SelectorSpec,
+    RepoReconstructionError, SelectorSpec,
     Satisfies, Selector, SKIP_ARGS, StateRef, SubclassOf, UniformFromSet,
     UniformIntRange,
 )
@@ -996,16 +996,16 @@ def test_reconstruction_failure_retains_only_failed_new_handle_for_retry(tmp_pat
         classmethod(lambda cls, path: (_ for _ in ()).throw(OSError("later open failed"))),
     )
 
-    with pytest.raises(RepoDefinitionError) as raised:
+    with pytest.raises(RepoReconstructionError) as raised:
         Repo.from_definition(RepoDefinition.from_data(data))
 
     error = raised.value
-    assert error.__cause__ is not None
-    assert error.cleanup_stores == (opened[0],)
+    assert isinstance(error.__cause__, OSError)
+    assert not hasattr(error, "cleanup_stores")
     assert len(error.cleanup_issues) == 1
-    assert error.retry_cleanup() is True
+    assert error.cleanup() is None
     assert closes == [opened[0], opened[0]]
-    assert error.retry_cleanup() is True
+    assert error.cleanup() is None
     assert closes == [opened[0], opened[0]]
     assert source_store not in closes
     archive.close()
@@ -1049,14 +1049,14 @@ def test_reconstruction_interrupt_retains_failed_close_without_deletion_save(tmp
         Repo.from_definition(RepoDefinition.from_data(data))
 
     cleanup = raised.value.repo_cleanup_error
-    assert cleanup.cleanup_stores == (opened[0],)
-    assert cleanup.retry_cleanup() is True
+    assert isinstance(cleanup, RepoReconstructionError)
+    assert cleanup.cleanup() is None
     assert saved == []
     archive.close()
 
 
-def test_reconstruction_cleanup_retry_serializes_concurrent_callers():
-    """Concurrent retry callers never close the same retained Store twice."""
+def test_reconstruction_cleanup_serializes_concurrent_callers():
+    """Concurrent cleanup callers never close the same retained Store twice."""
 
     class BlockingStore:
         def __init__(self):
@@ -1072,9 +1072,9 @@ def test_reconstruction_cleanup_retry_serializes_concurrent_callers():
             assert self.release.wait(timeout=5)
 
     store = BlockingStore()
-    error = RepoDefinitionReconstructionError("cleanup required", cleanup_stores=(store,))
-    first = threading.Thread(target=error.retry_cleanup)
-    second = threading.Thread(target=error.retry_cleanup)
+    error = RepoReconstructionError("cleanup required", _retained_stores=(store,))
+    first = threading.Thread(target=error.cleanup)
+    second = threading.Thread(target=error.cleanup)
     first.start()
     assert store.started.wait(timeout=5)
     second.start()
@@ -1085,23 +1085,55 @@ def test_reconstruction_cleanup_retry_serializes_concurrent_callers():
     assert not first.is_alive()
     assert not second.is_alive()
     assert store.calls == 1
-    assert error.cleanup_stores == ()
 
 
-def test_reconstruction_cleanup_retry_preserves_interrupt_ownership():
-    """An interrupted retry keeps the unclosed handle instead of reporting success."""
+def test_reconstruction_cleanup_reraises_owner_when_close_still_fails():
+    """A failed cleanup retry updates and re-raises its original owner error."""
+
+    class FailingStore:
+        def __init__(self):
+            self.calls = 0
+
+        def close(self):
+            self.calls += 1
+            if self.calls < 2:
+                raise OSError("close failed")
+
+    store = FailingStore()
+    error = RepoReconstructionError("cleanup required", _retained_stores=(store,))
+
+    with pytest.raises(RepoReconstructionError) as raised:
+        error.cleanup()
+
+    assert raised.value is error
+    assert len(error.cleanup_issues) == 1
+    assert error.cleanup() is None
+    assert store.calls == 2
+
+
+def test_reconstruction_cleanup_preserves_interrupt_ownership():
+    """An interrupted cleanup keeps ownership attached for a later retry."""
 
     class InterruptedStore:
+        def __init__(self):
+            self.interrupted = True
+            self.calls = 0
+
         def close(self):
-            raise KeyboardInterrupt
+            self.calls += 1
+            if self.interrupted:
+                raise KeyboardInterrupt
 
     store = InterruptedStore()
-    error = RepoDefinitionReconstructionError("cleanup required", cleanup_stores=(store,))
+    error = RepoReconstructionError("cleanup required", _retained_stores=(store,))
 
-    with pytest.raises(KeyboardInterrupt):
-        error.retry_cleanup()
+    with pytest.raises(KeyboardInterrupt) as raised:
+        error.cleanup()
 
-    assert error.cleanup_stores == (store,)
+    assert raised.value.repo_cleanup_error is error
+    store.interrupted = False
+    assert error.cleanup() is None
+    assert store.calls == 2
 
 
 def test_reconstruction_retains_exact_selector_data_and_subclass_semantics(tmp_path):

@@ -53,7 +53,7 @@ def test_promoted_package_keeps_the_destination_export_manifest():
         "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace", "freeze",
         "QuotedDef", "SelectorSpec", "Selector", "selector", "Par", "Present",
         "Missing", "AnyValue", "Exact", "Choice", "IntRange", "SubclassOf", "Satisfies",
-        "UniformIntRange", "UniformFromSet", "SearchSpace", "SKIP_ARGS", "Repo", "RepoDefinition", "RepoDefinitionError", "configure",
+        "UniformIntRange", "UniformFromSet", "SearchSpace", "SKIP_ARGS", "Repo", "RepoDefinition", "RepoDefinitionError", "RepoReconstructionError", "configure",
         "reset_config", "status", "definition_mode", "selector_mode", "space_mode", "dtype",
         "DType", "ConfigRef", "FactorySpec", "ConfigError", "CONFIG_MISSING", "as_tensor_spec",
         "SpecHint", "TensorSpec", "ImportRef", "SourceSpec", "symbol_ref", "resolve_symbol",

@@ -42,59 +42,64 @@ class RepoDefinitionError(ValueError):
     """
 
 
-class RepoDefinitionReconstructionError(RepoDefinitionError):
-    """Report a reconstruction failure with bounded retryable Store cleanup.
+class RepoReconstructionError(RepoDefinitionError):
+    """Report reconstruction cleanup that still owns fresh Store handles.
 
     Args:
         message: Sanitized reconstruction failure summary.
-        cleanup_stores: Newly opened Store handles whose close operation failed.
         cleanup_issues: Sanitized bounded cleanup issue labels.
 
-    The original reconstruction failure is retained as ``__cause__``. Only
-    fresh handles whose close failed remain available through
-    :meth:`retry_cleanup`; borrowed caller handles are never retained or closed.
+    The original reconstruction failure is retained as ``__cause__``. This
+    error privately owns only fresh reconstruction handles whose non-flushing
+    close failed; it never owns borrowed caller handles. :meth:`cleanup` closes
+    each retained handle at most once per call, serializes concurrent callers,
+    and removes handles that close successfully. If ordinary close failures
+    remain, it re-raises this same error with updated bounded issues. Control
+    flow that derives directly from :class:`BaseException` propagates with this
+    error attached as ``repo_cleanup_error`` so the caller retains ownership for
+    a later retry.
     """
 
     _MAX_CLEANUP_ISSUES = 16
 
-    def __init__(self, message: str, *, cleanup_stores=(), cleanup_issues=()):
+    def __init__(self, message: str, *, _retained_stores=(), cleanup_issues=()):
         super().__init__(message)
-        self._cleanup_stores = list(cleanup_stores)
         self._cleanup_lock = RLock()
-        self.cleanup_issues = tuple(cleanup_issues[:self._MAX_CLEANUP_ISSUES])
+        self._retained_stores = list(_retained_stores)
+        self._cleanup_issues = tuple(cleanup_issues[:self._MAX_CLEANUP_ISSUES])
 
     @property
-    def cleanup_stores(self) -> tuple[Any, ...]:
-        """Return fresh Store handles still requiring close retry.
+    def cleanup_issues(self) -> tuple[str, ...]:
+        """Return immutable bounded diagnostics from failed cleanup attempts.
 
         Returns:
-            A snapshot of the bounded failed-close handle set. The handles are
-            owned exclusively by this reconstruction error until retry succeeds.
-        """
-
-        return tuple(self._cleanup_stores)
-
-    def retry_cleanup(self) -> bool:
-        """Retry close once for each retained fresh Store handle.
-
-        Returns:
-            ``True`` when no failed-close handles remain, otherwise ``False``.
-
-        Side Effects:
-            Closes only handles retained by this error. Successful handles are
-            removed, so repeated successful calls are idempotent.
-
-        Raises:
-            KeyboardInterrupt: If closing a retained Store is interrupted. The
-                interrupted and unattempted handles remain available for retry.
-            SystemExit: If closing a retained Store requests process exit. The
-                interrupted and unattempted handles remain available for retry.
+            Sanitized failure type names in occurrence order. The tuple is a
+            snapshot and never exposes retained Store handles.
         """
 
         with self._cleanup_lock:
-            stores = tuple(self._cleanup_stores)
+            return self._cleanup_issues
+
+    def cleanup(self) -> None:
+        """Retry non-flushing close once for every privately retained handle.
+
+        Side Effects:
+            Closes only this error's fresh reconstruction handles. Successful
+            closes are removed, making cleanup idempotent after all handles
+            close. Concurrent callers are serialized.
+
+        Raises:
+            RepoReconstructionError: This same error, if a non-control-flow
+                close failure leaves any retained handle.
+            BaseException: If cleanup receives control flow outside
+                :class:`Exception`. This error remains attached as
+                ``repo_cleanup_error`` for a later retry.
+        """
+
+        with self._cleanup_lock:
+            stores = tuple(self._retained_stores)
             remaining = []
-            issues = list(self.cleanup_issues)
+            issues = list(self._cleanup_issues)
             for index, store in enumerate(stores):
                 try:
                     store.close()
@@ -102,14 +107,16 @@ class RepoDefinitionReconstructionError(RepoDefinitionError):
                     remaining.append(store)
                     if len(issues) < self._MAX_CLEANUP_ISSUES:
                         issues.append(type(error).__name__)
-                    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    if not isinstance(error, Exception):
                         remaining.extend(stores[index + 1:])
-                        self._cleanup_stores = remaining
-                        self.cleanup_issues = tuple(issues)
+                        self._retained_stores = remaining
+                        self._cleanup_issues = tuple(issues)
+                        error.repo_cleanup_error = self
                         raise
-            self._cleanup_stores = remaining
-            self.cleanup_issues = tuple(issues)
-            return not remaining
+            self._retained_stores = remaining
+            self._cleanup_issues = tuple(issues)
+            if remaining:
+                raise self
 
 
 def _error(path: str, message: str) -> RepoDefinitionError:
@@ -1463,7 +1470,7 @@ def repo_from_definition(definition: RepoDefinition):
                 repo._query_index.close()
             except BaseException as cleanup_error:
                 issues.append(type(cleanup_error).__name__)
-                if isinstance(cleanup_error, (KeyboardInterrupt, SystemExit)):
+                if not isinstance(cleanup_error, Exception):
                     cleanup_control_flow = cleanup_error
         failed_stores = []
         for store in reversed(opened):
@@ -1474,20 +1481,20 @@ def repo_from_definition(definition: RepoDefinition):
                 issues.append(type(cleanup_error).__name__)
                 if (
                         cleanup_control_flow is None
-                        and isinstance(cleanup_error, (KeyboardInterrupt, SystemExit))):
+                        and not isinstance(cleanup_error, Exception)):
                     cleanup_control_flow = cleanup_error
         cleanup_error = None
         if failed_stores:
-            cleanup_error = RepoDefinitionReconstructionError(
+            cleanup_error = RepoReconstructionError(
                 "Repo definition reconstruction cleanup requires retry.",
-                cleanup_stores=failed_stores,
+                _retained_stores=failed_stores,
                 cleanup_issues=issues,
             )
         if cleanup_control_flow is not None:
             if cleanup_error is not None:
                 cleanup_control_flow.repo_cleanup_error = cleanup_error
             raise cleanup_control_flow
-        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+        if not isinstance(error, Exception):
             if cleanup_error is not None:
                 error.repo_cleanup_error = cleanup_error
             raise
@@ -1637,4 +1644,4 @@ def definition_from_repo(repo: Any) -> RepoDefinition:
             repo._save_context_leases -= 1
 
 
-__all__ = ["RepoDefinition", "RepoDefinitionError", "RepoDefinitionReconstructionError"]
+__all__ = ["RepoDefinition", "RepoDefinitionError", "RepoReconstructionError"]

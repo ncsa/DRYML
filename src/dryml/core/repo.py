@@ -2574,9 +2574,9 @@ class Repo:
             TypeError: If ``definition`` is not a RepoDefinition.
             RepoDefinitionError: If descriptors, selectors, or existing Store
                 authority cannot be reconstructed.  Storage failures are chained.
-            RepoDefinitionReconstructionError: If cleanup after a reconstruction
-                failure cannot close a fresh handle; the error retains only those
-                handles for bounded idempotent retry.
+            RepoReconstructionError: If cleanup after a reconstruction failure
+                cannot close a fresh handle. The error privately retains only
+                those handles for bounded idempotent cleanup retry.
 
         Side Effects:
             Opens only existing supported Store authority. It neither installs a

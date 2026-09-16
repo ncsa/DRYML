@@ -148,12 +148,15 @@ duplicate, dot-segment, or symlink paths before opening duplicate handles.
 Portable Selector map keys retain their `str` or `int` type, so the keys `1` and
 `"1"` remain distinct after a definition round trip. If a reconstruction fails
 and a newly opened handle also cannot close, it raises
-`RepoDefinitionReconstructionError`. Its `cleanup_stores` property lists only
-those fresh failed handles, and concurrent `retry_cleanup()` calls serialize
-close attempts and return `True` only when no retained handle remains. A
-`KeyboardInterrupt` or `SystemExit` continues to propagate; when it has retained
-failed cleanup, its public `repo_cleanup_error` attribute provides the same retry
-object.
+`RepoReconstructionError`, chained from the original reconstruction failure.
+It privately retains only fresh failed-close handles, exposes bounded immutable
+`cleanup_issues`, and its serialized `cleanup()` retries every retained handle
+once. Successful handles are removed; if ordinary failures remain, `cleanup()`
+re-raises that same error with updated issues, and after all closes succeed it is
+a no-op. Direct `BaseException` control flow, including `KeyboardInterrupt` or
+`SystemExit`, continues to propagate with the owner error attached as
+`repo_cleanup_error`, preserving retry ownership. It never retains or closes
+caller-supplied borrowed handles.
 
 A Repo configured with `save_objs_on_deletion=True` attempts a detached
 strong-cache snapshot in cache order when it is collected. The first save failure
