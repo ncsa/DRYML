@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import sys
 from time import monotonic
+from types import SimpleNamespace
 
 import pytest
 
+from dryml.execute._protocol import BootstrapDescriptor, Correlation, FrameState, FrameType, ProtocolConversation, decode_exact_frame, encode_control, encode_frame
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.admission import _admit_observed_logical
-from dryml.execute.models import EnvironmentCandidate
+from dryml.execute.models import EnvironmentCandidate, WorkerSetup
 from dryml.execute.ray import RayBackendConfig, RayFuture, _logical_world, _native_error, _native_options, _requested_amounts, _resource_amounts
 from dryml.environments.specs import PythonExecutableSpec
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
@@ -125,3 +127,92 @@ def test_ray_logical_cpu_grant_passes_owner_checks_without_cpu_ids():
 
     assert decision.go
     assert decision.allocation is None
+
+
+class _SetupSocket:
+    """Record backend frames while exposing the narrow timeout/write socket surface."""
+
+    def __init__(self):
+        self.frames: list[bytes] = []
+        self.timeout = object()
+
+    def sendall(self, data):
+        """Retain one complete fake wire write."""
+        self.frames.append(bytes(data))
+
+    def settimeout(self, timeout):
+        """Record the coordinator's post-GO socket policy."""
+        self.timeout = timeout
+
+
+class _SetupReader:
+    """Return a deterministic fake-Ray worker frame sequence."""
+
+    def __init__(self, frames):
+        self.frames = iter(frames)
+
+    def read(self):
+        """Return the next prevalidated worker frame."""
+        try:
+            return next(self.frames)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+
+def _setup_conversation(correlation):
+    """Advance a private conversation through GO for direct setup-path tests."""
+    conversation = ProtocolConversation(correlation, header_limit=512, invocation_limit=512, result_limit=512, output_limit=128, owner_limit=512, admission_limit=512)
+    for state, control in ((FrameState.HELLO, {"worker": "ray"}), (FrameState.PREPARE, {"owners": []}), (FrameState.READY, {"ready": True}), (FrameState.GO, {"permit": True})):
+        conversation.accept(encode_control(state, correlation, control, header_limit=512))
+    return conversation
+
+
+def test_fake_ray_setup_sends_native_evidence_and_drains_output_before_readiness():
+    """Ray setup receives Ray-only grant evidence and preserves pre-payload output."""
+    backend = RayBackendConfig(control_header_limit_bytes=512, owner_envelope_limit_bytes=512, admission_message_limit_bytes=512).create_backend()
+    correlation = Correlation("ray-setup", 0, 1)
+    descriptor = BootstrapDescriptor(correlation, "token", "127.0.0.1", 43123, 512, 512, 512, 512, 512, 128)
+    socket = _SetupSocket()
+    output = ExecutionOutput()
+    output._bind("ray-setup", output_limit_bytes=512, live_output_queue_limit_bytes=512, stream_output=False, start_live=False)
+    future = RayFuture("ray-setup", output=output, termination_timeout=5)
+    run = SimpleNamespace(connection=socket, native_node_id="node", native_task_id="task", worker_id="ray:worker", outcome_validated=False)
+    call = SimpleNamespace(worker_setup=WorkerSetup(factory="tests.execute.test_ray_backend_unit:setup_factory", data={}), submission_id="ray-setup", output=output)
+    reader = _SetupReader((
+        decode_exact_frame(encode_frame(FrameState.OUTPUT, FrameType.OUTPUT, correlation, b"setup output", header_limit=512, stream="stdout", sequence=0), header_limit=512, payload_limit=512),
+        decode_exact_frame(encode_control(FrameState.SETUP_READY, correlation, {"ready": True}, header_limit=512), header_limit=512, payload_limit=512),
+    ))
+
+    assert backend._send_setup(call, future, run, descriptor, _setup_conversation(correlation), reader, None, {"assigned_resources": {"CPU": 1.0}})
+    sent = decode_exact_frame(socket.frames[0], header_limit=512, payload_limit=512)
+    assert sent.state is FrameState.SETUP
+    assert b'"kind":"ray"' in sent.payload
+    assert output.snapshot().stdout == "setup output"
+
+
+def test_fake_ray_setup_failure_keeps_payload_withheld_and_cleanup_incomplete():
+    """A fake Ray setup terminal publishes failure without sending a workload payload."""
+    backend = RayBackendConfig(control_header_limit_bytes=512, owner_envelope_limit_bytes=512, admission_message_limit_bytes=512).create_backend()
+    correlation = Correlation("ray-failure", 0, 1)
+    descriptor = BootstrapDescriptor(correlation, "token", "127.0.0.1", 43123, 512, 512, 512, 512, 512, 128)
+    socket = _SetupSocket()
+    output = ExecutionOutput()
+    output._bind("ray-failure", output_limit_bytes=512, live_output_queue_limit_bytes=512, stream_output=False, start_live=False)
+    future = RayFuture("ray-failure", output=output, termination_timeout=5)
+    run = SimpleNamespace(connection=socket, native_node_id="node", native_task_id="task", worker_id="ray:worker", outcome_validated=False)
+    call = SimpleNamespace(worker_setup=WorkerSetup(factory="tests.execute.test_ray_backend_unit:setup_factory", data={}), submission_id="ray-failure", output=output)
+    terminal = b'{"cleanup":[{"type":"RuntimeError"}],"type":"ValueError"}'
+    reader = _SetupReader((
+        decode_exact_frame(encode_frame(FrameState.ERROR, FrameType.ERROR, correlation, terminal, header_limit=512), header_limit=512, payload_limit=512),
+    ))
+
+    assert not backend._send_setup(call, future, run, descriptor, _setup_conversation(correlation), reader, None, {})
+    assert future.snapshot().cleanup_state == "incomplete"
+    assert len(socket.frames) == 1
+
+
+def setup_factory(_context, _data):
+    """Provide an importable inert factory identifier for fake-Ray transport tests."""
+    from contextlib import nullcontext
+
+    return nullcontext()

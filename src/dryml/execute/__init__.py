@@ -29,6 +29,9 @@ from .models import (
     OutputSnapshot,
     ResourceAmounts,
     ResourceSnapshot,
+    WorkerSetup,
+    WorkerSetupContext,
+    WorkerSetupFactory,
 )
 from .output import ExecutionOutput
 
@@ -57,6 +60,9 @@ __all__ = [
     "RemoteExecutionError",
     "ResourceAmounts",
     "ResourceSnapshot",
+    "WorkerSetup",
+    "WorkerSetupContext",
+    "WorkerSetupFactory",
     "run",
     "submit",
 ]

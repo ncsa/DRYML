@@ -27,7 +27,7 @@ from .backend import Backend
 from .config import BackendConfig
 from .errors import AdmissionError, CleanupError, ExecutionError
 from .future import ExecutionFuture
-from .models import DiscoverySnapshot, ResourceSnapshot, SubmittedCall
+from .models import DiscoverySnapshot, ResourceSnapshot, SubmittedCall, WorkerSetup
 from .output import ExecutionOutput
 
 
@@ -177,6 +177,7 @@ class Executor:
         stream_output: bool | None = None,
         done_callbacks: Sequence[Callable[[ExecutionFuture[T]], None]] = (),
         output: ExecutionOutput | None = None,
+        worker_setup: WorkerSetup | None = None,
     ) -> ExecutionFuture[T]:
         """Preflight and asynchronously dispatch one immutable callable snapshot.
 
@@ -192,6 +193,8 @@ class Executor:
             stream_output: Optional per-call live-output override.
             done_callbacks: Finite coordinator callbacks copied before preflight.
             output: Optional single-use retained output owner.
+            worker_setup: Optional inert factory/data control entered before worker
+                payload deserialization.
 
         Returns:
             The exact concrete Future created by the selected backend.
@@ -210,8 +213,8 @@ class Executor:
             execution-owned spool child after an all-or-nothing reservation.
         """
         self._validate_requirements(environment, world)
-        call_kwargs, callbacks, effective_timeout, effective_stream, output_owner = self._validate_controls(
-            kwargs, execution_timeout, stream_output, done_callbacks, output
+        call_kwargs, callbacks, effective_timeout, effective_stream, output_owner, setup = self._validate_controls(
+            kwargs, execution_timeout, stream_output, done_callbacks, output, worker_setup
         )
         self._register_preflight()
         payload = None
@@ -239,6 +242,7 @@ class Executor:
                 execution_timeout=effective_timeout,
                 stream_output=effective_stream,
                 output=output_owner,
+                worker_setup=setup,
             )
             record = _Submission(future, payload, reservation, backend)
             future._install_initial_callbacks(callbacks)
@@ -294,6 +298,7 @@ class Executor:
         stream_output: bool | None = None,
         done_callbacks: Sequence[Callable[[ExecutionFuture[T]], None]] = (),
         output: ExecutionOutput | None = None,
+        worker_setup: WorkerSetup | None = None,
     ) -> T:
         """Submit one call and return its ordinary result without closing this executor.
 
@@ -307,6 +312,7 @@ class Executor:
             stream_output: Optional live-output override.
             done_callbacks: Copied coordinator completion callbacks.
             output: Optional single-use retained output owner.
+            worker_setup: Optional inert setup bound before workload keywords.
 
         Returns:
             The workload's result.
@@ -321,6 +327,7 @@ class Executor:
             fn, *args, kwargs=kwargs, environment=environment, world=world,
             execution_timeout=execution_timeout, stream_output=stream_output,
             done_callbacks=done_callbacks, output=output,
+            worker_setup=worker_setup,
         ).result()
 
     def with_options(
@@ -332,6 +339,7 @@ class Executor:
         stream_output: bool | None = None,
         done_callbacks: Sequence[Callable[[ExecutionFuture[Any]], None]] = (),
         output: ExecutionOutput | None = None,
+        worker_setup: WorkerSetup | None = None,
     ) -> "ExecutorView":
         """Bind immutable execution controls without initializing or reserving work.
 
@@ -344,6 +352,7 @@ class Executor:
             stream_output: Optional live-output override for view submissions.
             done_callbacks: Finite callbacks copied for each submitted Future.
             output: Optional single-use retained output holder bound on submit.
+            worker_setup: Optional inert worker setup bound to every view call.
 
         Returns:
             A parent-retaining view whose call keywords are always workload values.
@@ -356,11 +365,11 @@ class Executor:
             Copies callback registrations only; it does not create backend or spool
             resources. Later view submissions retain the parent lifecycle.
         """
-        _, callbacks, effective_timeout, effective_stream, _ = self._validate_controls(
-            {}, execution_timeout, stream_output, done_callbacks, output
+        _, callbacks, effective_timeout, effective_stream, _, setup = self._validate_controls(
+            {}, execution_timeout, stream_output, done_callbacks, output, worker_setup
         )
         self._validate_requirements(environment, world)
-        return ExecutorView(self, environment, world, effective_timeout, effective_stream, callbacks, output)
+        return ExecutorView(self, environment, world, effective_timeout, effective_stream, callbacks, output, setup)
 
     def discover(
         self,
@@ -496,6 +505,7 @@ class Executor:
                 self._condition.wait(remaining)
             futures = tuple(self._submissions)
         try:
+            worker_cleanup_failure: CleanupError | None = None
             if cancel:
                 for future in futures:
                     if not future.done():
@@ -518,7 +528,15 @@ class Executor:
                     self._condition.wait(remaining)
             for future in futures:
                 self._wait_terminal(future, deadline)
-                future.cleanup(timeout=self._cleanup_budget(deadline))
+                try:
+                    future.cleanup(timeout=self._cleanup_budget(deadline))
+                except CleanupError as exc:
+                    if not future._has_unobserved_worker_cleanup():
+                        raise
+                    # The worker's setup exit cannot be retrospectively observed,
+                    # but local process/task and spool ownership can still retire.
+                    self._cleanup_submission(future, self._cleanup_budget(deadline))
+                    worker_cleanup_failure = exc
             spooler = self._spooler
             if spooler is not None:
                 spooler.reconcile_cleanup()
@@ -526,6 +544,8 @@ class Executor:
             if backend is not None:
                 backend.close(cancel=cancel, timeout=self._cleanup_budget(deadline))
             self._release_lease()
+            if worker_cleanup_failure is not None:
+                raise worker_cleanup_failure
         except BaseException as exc:
             with self._condition:
                 self._state = "cleanup_incomplete"
@@ -810,7 +830,8 @@ class Executor:
         stream_output: bool | None,
         callbacks: Sequence[Callable[[ExecutionFuture[Any]], None]],
         output: ExecutionOutput | None,
-    ) -> tuple[dict[str, Any], tuple[Callable[[ExecutionFuture[Any]], None], ...], float | None, bool, ExecutionOutput]:
+        worker_setup: WorkerSetup | None,
+    ) -> tuple[dict[str, Any], tuple[Callable[[ExecutionFuture[Any]], None], ...], float | None, bool, ExecutionOutput, WorkerSetup | None]:
         """Synchronously copy every control before quota, serializer, or factory work."""
         if kwargs is None:
             copied_kwargs: dict[str, Any] = {}
@@ -839,7 +860,16 @@ class Executor:
             effective_stream = stream_output
         if output is not None and not isinstance(output, ExecutionOutput):
             raise TypeError("output must be an ExecutionOutput or None")
-        return copied_kwargs, copied_callbacks, effective_timeout, effective_stream, ExecutionOutput() if output is None else output
+        if worker_setup is not None and not isinstance(worker_setup, WorkerSetup):
+            raise TypeError("worker_setup must be a WorkerSetup or None")
+        if worker_setup is not None:
+            # Reject caller-controlled setup data before it can reserve a spool or
+            # launch a backend. Backend evidence is checked under the same limits.
+            worker_setup.to_data(limit_bytes=min(
+                self._config.owner_envelope_limit_bytes,
+                self._config.admission_message_limit_bytes,
+            ))
+        return copied_kwargs, copied_callbacks, effective_timeout, effective_stream, ExecutionOutput() if output is None else output, worker_setup
 
     @staticmethod
     def _validate_future(future: object, submission_id: str, output: ExecutionOutput) -> None:
@@ -960,6 +990,7 @@ class ExecutorView:
     stream_output: bool
     done_callbacks: tuple[Callable[[ExecutionFuture[Any]], None], ...]
     output: ExecutionOutput | None
+    worker_setup: WorkerSetup | None
 
     def submit(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> ExecutionFuture[T]:
         """Submit one workload with bound controls and unmodified workload keywords.
@@ -993,6 +1024,7 @@ class ExecutorView:
             stream_output=self.stream_output,
             done_callbacks=self.done_callbacks,
             output=self.output,
+            worker_setup=self.worker_setup,
         )
 
     def run(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
@@ -1148,12 +1180,14 @@ def submit(
     stream_output: bool | None = None,
     done_callbacks: Sequence[Callable[[ExecutionFuture[T]], None]] = (),
     output: ExecutionOutput | None = None,
+    worker_setup: WorkerSetup | None = None,
 ) -> ExecutionFuture[T]:
     """Submit one explicit-backend call while retaining a hidden owner through cleanup.
 
-    Args and failures match :meth:`Executor.submit`; ``backend`` is mandatory and
-    no ambient backend is selected. The returned Future's ``cleanup`` reconciles
-    this call and then closes the hidden owner without touching reusable callers.
+    Args and failures, including ``worker_setup``, match :meth:`Executor.submit`;
+    ``backend`` is mandatory and no ambient backend is selected. The returned
+    Future's ``cleanup`` reconciles this call and then closes the hidden owner
+    without touching reusable callers.
     """
     if not isinstance(backend, BackendConfig):
         raise TypeError("backend must be a BackendConfig")
@@ -1169,6 +1203,7 @@ def submit(
             stream_output=stream_output,
             done_callbacks=done_callbacks,
             output=output,
+            worker_setup=worker_setup,
         ),
     )
 
@@ -1185,10 +1220,12 @@ def run(
     stream_output: bool | None = None,
     done_callbacks: Sequence[Callable[[ExecutionFuture[T]], None]] = (),
     output: ExecutionOutput | None = None,
+    worker_setup: WorkerSetup | None = None,
 ) -> T:
     """Run one explicit-backend call, then perform bounded hidden-owner cleanup.
 
-    Returns the ordinary workload value. A cleanup-only failure raises
+    ``worker_setup`` follows :meth:`submit` and enters only in the admitted
+    worker. Returns the ordinary workload value. A cleanup-only failure raises
     :class:`CleanupError` retaining the Future; if both work and cleanup fail, the
     workload exception remains primary and chains that recovery error as cause.
     """
@@ -1196,6 +1233,7 @@ def run(
         fn, *args, backend=backend, kwargs=kwargs, environment=environment,
         world=world, execution_timeout=execution_timeout, stream_output=stream_output,
         done_callbacks=done_callbacks, output=output,
+        worker_setup=worker_setup,
     )
     try:
         result = future.result()

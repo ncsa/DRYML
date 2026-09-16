@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from concurrent.futures import CancelledError
 from pathlib import Path
 from threading import Event
@@ -16,8 +17,9 @@ import pytest
 from dryml.execute import executor as executor_module
 from dryml.execute import subprocess as subprocess_module
 from dryml.execute.accounting import ResourceAuthority
-from dryml.execute.errors import AdmissionError, ExecutionUncertainError
+from dryml.execute.errors import AdmissionError, CleanupError, ExecutionUncertainError
 from dryml.execute.executor import Executor
+from dryml.execute.models import WorkerSetup
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.subprocess import SubProcessConfig, SubProcessFuture
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
@@ -114,6 +116,47 @@ def _identity(value: object) -> object:
     return value
 
 
+@contextmanager
+def worker_setup_factory(context, data):
+    """Record verified setup entry/exit around a worker payload fixture."""
+    path = Path(data["path"])
+    assert context.backend == "subprocess"
+    assert context.submission_id
+    assert context.native_grant["kind"] == "subprocess"
+    os.write(1, b"setup entered\n")
+    if data.get("output_bytes"):
+        os.write(1, b"x" * data["output_bytes"])
+    path.write_text("entered", encoding="ascii")
+    try:
+        yield
+    finally:
+        os.write(2, b"setup exited\n")
+        if data.get("output_bytes"):
+            os.write(2, b"y" * data["output_bytes"])
+        path.write_text("exited", encoding="ascii")
+
+
+def _require_setup_entry(path: str) -> str:
+    """Require that pre-deserialization setup has entered before invocation."""
+    marker = Path(path)
+    assert marker.read_text(encoding="ascii") == "entered"
+    return "result"
+
+
+@contextmanager
+def failing_worker_setup_factory(_context, _data):
+    """Produce a deterministic setup-exit failure after an encoded result exists."""
+    yield
+    raise RuntimeError("teardown must not replace the result")
+
+
+@contextmanager
+def failing_worker_setup_entry(_context, _data):
+    """Fail setup entry before the worker can receive its payload frame."""
+    raise RuntimeError("entry failure")
+    yield
+
+
 def _wait_for(path: Path, timeout: float = 10) -> None:
     """Wait for a real worker file marker without serializing a synchronization primitive."""
     deadline = monotonic() + timeout
@@ -138,6 +181,91 @@ def test_subprocess_future_runs_descriptor_payload_and_retains_output(tmp_path: 
         assert "worker stderr" in output.snapshot().stderr
         future.cleanup(timeout=5)
         assert "worker stdout" in output.snapshot().stdout
+    finally:
+        executor.close(cancel=True, timeout=5)
+
+
+def test_subprocess_worker_setup_runs_before_payload_and_preserves_teardown_output(tmp_path: Path):
+    """Post-GO setup receives qualified evidence and unwinds after result encoding."""
+    marker = tmp_path / "setup-marker"
+    output = ExecutionOutput()
+    executor = Executor(SubProcessConfig(spool_directory=tmp_path))
+    setup = WorkerSetup(
+        factory="tests.execute.test_subprocess_backend:worker_setup_factory",
+        data={"path": str(marker)},
+    )
+    try:
+        future = executor.submit(_require_setup_entry, str(marker), worker_setup=setup, output=output)
+        assert future.result(timeout=10) == "result"
+        assert marker.read_text(encoding="ascii") == "exited"
+        snapshot = output.snapshot()
+        assert "setup entered" in snapshot.stdout
+        assert "setup exited" in snapshot.stderr
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=5)
+
+
+def test_subprocess_setup_teardown_failure_preserves_result_and_cleanup_evidence(tmp_path: Path):
+    """A setup exit failure is independent evidence, not a replacement terminal error."""
+    executor = Executor(SubProcessConfig(spool_directory=tmp_path))
+    setup = WorkerSetup(
+        factory="tests.execute.test_subprocess_backend:failing_worker_setup_factory",
+        data={},
+    )
+    try:
+        future = executor.submit(_add, 2, 3, worker_setup=setup)
+        assert future.result(timeout=10) == 5
+        assert future.snapshot().cleanup_issues[-1].code == "worker_setup_exit_failed"
+        assert future.snapshot().cleanup_issues[-1].message == "RuntimeError"
+        assert future.snapshot().cleanup_state == "incomplete"
+        with pytest.raises(CleanupError):
+            future.cleanup(timeout=5)
+        assert future.result(timeout=0) == 5
+        assert future.snapshot().cleanup_state == "incomplete"
+        with pytest.raises(CleanupError):
+            executor.close(cancel=True, timeout=5)
+    finally:
+        if executor._state != "cleanup_incomplete":
+            executor.close(cancel=True, timeout=5)
+
+
+def test_subprocess_setup_entry_failure_withholds_payload_deserialization(tmp_path: Path):
+    """A setup-entry failure exits once and never delivers the serialized workload."""
+    marker = tmp_path / "unpickled"
+    executor = Executor(SubProcessConfig(spool_directory=tmp_path))
+    setup = WorkerSetup(
+        factory="tests.execute.test_subprocess_backend:failing_worker_setup_entry",
+        data={},
+    )
+    try:
+        future = executor.submit(_identity, _UnpickleMarker(str(marker)), worker_setup=setup)
+        with pytest.raises(Exception, match="setup failed"):
+            future.result(timeout=10)
+        assert not marker.exists()
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=5)
+
+
+def test_subprocess_setup_output_larger_than_a_pipe_drains_before_payload(tmp_path: Path):
+    """Setup and teardown output drain concurrently without blocking payload transfer."""
+    marker = tmp_path / "setup-marker"
+    output = ExecutionOutput()
+    executor = Executor(SubProcessConfig(
+        spool_directory=tmp_path, output_frame_limit_bytes=1024,
+        live_output_queue_limit_bytes=1024, output_limit_bytes=2048,
+    ))
+    setup = WorkerSetup(
+        factory="tests.execute.test_subprocess_backend:worker_setup_factory",
+        data={"path": str(marker), "output_bytes": 131_072},
+    )
+    try:
+        future = executor.submit(_require_setup_entry, str(marker), worker_setup=setup, output=output)
+        assert future.result(timeout=10) == "result"
+        snapshot = output.snapshot()
+        assert snapshot.stdout_truncated and snapshot.stderr_truncated
+        future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=5)
 

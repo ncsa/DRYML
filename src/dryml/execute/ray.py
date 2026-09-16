@@ -37,6 +37,7 @@ from ._protocol import (
     SocketFrameReader,
     WORKER_PROTOCOL_ID,
     decode_control,
+    decode_setup_terminal,
     encode_bootstrap_descriptor,
     encode_control,
     encode_frame_parts,
@@ -1095,19 +1096,96 @@ class RayBackend(Backend):
         go = encode_control(FrameState.GO, descriptor.correlation, {"deadline": execution_deadline, "permit": descriptor.rendezvous_token}, header_limit=self._config.control_header_limit_bytes)
         self._send(run.connection, go)
         conversation.accept(go)
+        # A post-GO setup is workload execution, not an extension of admission.
+        run.connection.settimeout(None)
         with run.lock:
             run.issued = True
             run.terminal_event = run.terminal_event or Event()
         if execution_deadline is not None:
             Thread(target=self._deadline_watch, args=(run, execution_deadline), name="dryml-execute-ray-deadline", daemon=True).start()
+        if call.worker_setup is not None:
+            if not self._send_setup(call, future, run, descriptor, conversation, reader, record, native):
+                return
         payload = call.payload.path.read_bytes()
         if len(payload) != call.payload.size_bytes or hashlib.sha256(payload).hexdigest() != call.payload.sha256:
             raise ExecutionError("coordinator invocation spool changed before Ray transfer")
         payload_frame, payload_prefix, payload_view = encode_frame_parts(FrameState.PAYLOAD, FrameType.PAYLOAD, descriptor.correlation, payload, header_limit=self._config.control_header_limit_bytes)
         self._send(run.connection, (payload_prefix, payload_view))
         conversation.accept_frame(payload_frame)
-        run.connection.settimeout(None)
         self._receive_active(call, future, run, descriptor, conversation)
+
+    def _send_setup(self, call: SubmittedCall[T], future: RayFuture[T], run: _Run, descriptor: BootstrapDescriptor, conversation: ProtocolConversation, reader: SocketFrameReader, record: EnvironmentRecord | None, native: Mapping[str, object]) -> bool:
+        """Send qualified Ray grant evidence and drain setup output before payload."""
+        assert run.connection is not None and call.worker_setup is not None
+        native_grant = {
+            "kind": "ray",
+            "node_id": run.native_node_id,
+            "task_id": run.native_task_id,
+            "worker_id": run.worker_id,
+            "resources": dict(native.get("assigned_resources", {})) if isinstance(native.get("assigned_resources"), Mapping) else {},
+        }
+        context = {
+            "submission_id": call.submission_id,
+            "backend": "ray",
+            "environment": None if record is None else record.to_data(),
+            "allocation": None,
+            "native_grant": native_grant,
+        }
+        try:
+            encoded = call.worker_setup.to_envelope(
+                context, owner_limit_bytes=self._config.owner_envelope_limit_bytes,
+                admission_limit_bytes=self._config.admission_message_limit_bytes,
+            )
+        except BaseException as exc:
+            raise ExecutionError("Ray worker setup could not be encoded") from exc
+        frame = encode_owner_envelope(FrameState.SETUP, descriptor.correlation, OwnerEnvelopeType.SETUP, encoded, header_limit=self._config.control_header_limit_bytes, owner_limit=self._config.owner_envelope_limit_bytes)
+        self._send(run.connection, frame)
+        conversation.accept(frame)
+        while True:
+            frame = reader.read()
+            conversation.accept_frame(frame)
+            if frame.state is FrameState.OUTPUT:
+                assert frame.stream is not None and frame.sequence is not None
+                call.output._capture(frame.stream, frame.payload, frame.sequence)
+                continue
+            if frame.state is FrameState.OUTPUT_FINAL:
+                data = _json(frame.payload, self._config.control_header_limit_bytes)
+                call.output._finalize(data["stream"], data["next_sequence"])
+                continue
+            if frame.state is FrameState.SETUP_READY:
+                ready = decode_control(frame, limit_bytes=self._config.control_header_limit_bytes, required_keys={"ready"})
+                if ready["ready"] is not True:
+                    raise ExecutionError("Ray worker setup readiness evidence is invalid")
+                return True
+            if frame.state is FrameState.ERROR:
+                _, remote_type, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                future._record_worker_cleanup_issues(issues)
+                future._publish_exception(RemoteExecutionError(f"remote Ray setup failed ({remote_type})", remote_type=remote_type or "RemoteError"))
+                run.outcome_validated = True
+                self._drain_setup_failure(call, run, reader, conversation)
+                return False
+            raise FrameError("Ray worker setup sent an invalid frame")
+
+    def _drain_setup_failure(self, call: SubmittedCall[T], run: _Run, reader: SocketFrameReader, conversation: ProtocolConversation) -> None:
+        """Drain only bounded final output after setup fails before payload delivery."""
+        assert run.connection is not None
+        deadline = time.monotonic() + self._config.output_final_timeout
+        try:
+            while time.monotonic() < deadline:
+                run.connection.settimeout(max(0.001, deadline - time.monotonic()))
+                try:
+                    frame = reader.read()
+                    conversation.accept_frame(frame)
+                except (OSError, EOFError, FrameError):
+                    return
+                if frame.state is FrameState.OUTPUT:
+                    assert frame.stream is not None and frame.sequence is not None
+                    call.output._capture(frame.stream, frame.payload, frame.sequence)
+                elif frame.state is FrameState.OUTPUT_FINAL:
+                    data = _json(frame.payload, self._config.control_header_limit_bytes)
+                    call.output._finalize(data["stream"], data["next_sequence"])
+        finally:
+            run.connection.settimeout(None)
 
     def _receive_active(self, call: SubmittedCall[T], future: RayFuture[T], run: _Run, descriptor: BootstrapDescriptor, conversation: ProtocolConversation) -> None:
         """Route common output and publish only a validated channel terminal state."""
@@ -1137,7 +1215,12 @@ class RayBackend(Backend):
                     return
                 outcome_seen = True
                 try:
-                    future._publish_result(future._receive_result(frame.payload))
+                    payload = frame.payload
+                    if call.worker_setup is not None:
+                        payload, _, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                        assert payload is not None
+                        future._record_worker_cleanup_issues(issues)
+                    future._publish_result(future._receive_result(payload))
                 except BaseException:
                     future._publish_exception(ExecutionError("Ray worker result could not be decoded"))
                 run.outcome_validated = True
@@ -1145,8 +1228,12 @@ class RayBackend(Backend):
                 if outcome_seen or not self._claim_outcome(run):
                     return
                 outcome_seen = True
-                data = _json(frame.payload, self._config.result_limit_bytes)
-                remote_type = str(data.get("type", "RemoteError"))[:self._config.diagnostic_text_limit_bytes]
+                if call.worker_setup is not None:
+                    _, remote_type, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                    future._record_worker_cleanup_issues(issues)
+                else:
+                    data = _json(frame.payload, self._config.result_limit_bytes)
+                    remote_type = str(data.get("type", "RemoteError"))[:self._config.diagnostic_text_limit_bytes]
                 future._publish_exception(RemoteExecutionError(f"remote Ray execution failed ({remote_type})", remote_type=remote_type))
                 run.outcome_validated = True
 

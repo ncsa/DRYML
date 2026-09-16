@@ -84,6 +84,7 @@ class ExecutionFuture(Generic[T]):
             raise TypeError("initial_callbacks entries must be callable")
         self._cleanup_state = "pending"
         self._cleanup_issues: list[ExecutionIssue] = []
+        self._worker_cleanup_unobserved = False
         self._cleanup_reconciler: Callable[[float], None] | None = None
         self._diagnostic_text_limit_bytes = 65_536
         self._diagnostic_issue_limit = 64
@@ -271,6 +272,9 @@ class ExecutionFuture(Generic[T]):
         with self._condition:
             if self._outcome is _MISSING:
                 raise RuntimeError("cleanup requires a terminal execution outcome")
+            if self._worker_cleanup_unobserved:
+                self._cleanup_state = "incomplete"
+                raise self._cleanup_error("worker setup cleanup could not be observed")
             if self._cleanup_state == "complete":
                 return
             if self._cleanup_state != "reconciling":
@@ -590,6 +594,37 @@ class ExecutionFuture(Generic[T]):
         """Retain one bounded cleanup diagnostic without exposing arbitrary failure payloads."""
         if len(self._cleanup_issues) < self._diagnostic_issue_limit:
             self._cleanup_issues.append(ExecutionIssue("cleanup_failed", self._bounded_text(type(failure).__name__)))
+
+    def _record_worker_cleanup_issues(self, issue_types: Sequence[str]) -> None:
+        """Retain bounded worker setup-exit evidence without changing the outcome.
+
+        Args:
+            issue_types: Sanitized exception type names from a validated terminal.
+
+        Side Effects:
+            Appends independent cleanup diagnostics while preserving an already
+            serialized result or workload error.
+        """
+        with self._condition:
+            if self._worker_cleanup_unobserved:
+                self._cleanup_state = "incomplete"
+                self._condition.notify_all()
+                return
+            for issue_type in issue_types:
+                if len(self._cleanup_issues) >= self._diagnostic_issue_limit:
+                    break
+                if not isinstance(issue_type, str):
+                    continue
+                self._cleanup_issues.append(ExecutionIssue("worker_setup_exit_failed", self._bounded_text(issue_type)))
+                self._worker_cleanup_unobserved = True
+            if self._worker_cleanup_unobserved:
+                self._cleanup_state = "incomplete"
+                self._condition.notify_all()
+
+    def _has_unobserved_worker_cleanup(self) -> bool:
+        """Return whether remote setup teardown remains independently unobserved."""
+        with self._condition:
+            return self._worker_cleanup_unobserved
 
     def _bounded_text(self, value: str) -> str:
         """Return a UTF-8 byte-bounded diagnostic without retaining arbitrary text."""

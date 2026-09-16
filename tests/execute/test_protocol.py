@@ -118,6 +118,38 @@ def test_conversation_rejects_payload_or_repeated_go_before_permission_without_m
         conversation.accept(payload)
 
 
+def test_conversation_withholds_payload_until_setup_ready_but_allows_setup_output():
+    """A post-GO setup exchange gates payload while its captured output drains."""
+    conversation = _conversation()
+    for state, control in ((FrameState.HELLO, {"worker": "w"}), (FrameState.PREPARE, {"controls": []}), (FrameState.READY, {"ready": True}), (FrameState.GO, {"permit": True})):
+        conversation.accept(encode_control(state, _correlation(), control, header_limit=512))
+    setup = encode_owner_envelope(FrameState.SETUP, _correlation(), OwnerEnvelopeType.SETUP, b"{}", header_limit=512, owner_limit=32)
+    conversation.accept(setup)
+    conversation.accept(encode_frame(FrameState.OUTPUT, FrameType.OUTPUT, _correlation(), b"setup output", header_limit=512, stream="stdout", sequence=0))
+    with pytest.raises(FrameError, match="out of order"):
+        conversation.accept(encode_frame(FrameState.PAYLOAD, FrameType.PAYLOAD, _correlation(), b"call", header_limit=512))
+    conversation.accept(encode_control(FrameState.SETUP_READY, _correlation(), {"ready": True}, header_limit=512))
+    conversation.accept(encode_frame(FrameState.PAYLOAD, FrameType.PAYLOAD, _correlation(), b"call", header_limit=512))
+
+
+def test_setup_rejects_pre_invocation_result_and_cannot_resume_after_error():
+    """A failed setup may drain final output but never authorize payload transfer."""
+    conversation = _conversation()
+    for state, control in ((FrameState.HELLO, {"worker": "w"}), (FrameState.PREPARE, {"controls": []}), (FrameState.READY, {"ready": True}), (FrameState.GO, {"permit": True})):
+        conversation.accept(encode_control(state, _correlation(), control, header_limit=512))
+    conversation.accept(encode_owner_envelope(FrameState.SETUP, _correlation(), OwnerEnvelopeType.SETUP, b"{}", header_limit=512, owner_limit=32))
+    with pytest.raises(FrameError, match="out of order"):
+        conversation.accept(encode_frame(FrameState.RESULT, FrameType.RESULT, _correlation(), b"result", header_limit=512))
+
+    conversation.accept(encode_frame(FrameState.ERROR, FrameType.ERROR, _correlation(), b"failure", header_limit=512))
+    with pytest.raises(FrameError, match="out of order"):
+        conversation.accept(encode_control(FrameState.SETUP_READY, _correlation(), {"ready": True}, header_limit=512))
+    with pytest.raises(FrameError, match="out of order"):
+        conversation.accept(encode_frame(FrameState.PAYLOAD, FrameType.PAYLOAD, _correlation(), b"call", header_limit=512))
+    conversation.accept(encode_control(FrameState.OUTPUT_FINAL, _correlation(), {"stream": "stdout", "next_sequence": 0}, header_limit=512))
+    conversation.accept(encode_control(FrameState.OUTPUT_FINAL, _correlation(), {"stream": "stderr", "next_sequence": 0}, header_limit=512))
+
+
 def test_conversation_bounds_each_admission_phase_before_owner_parsing():
     """PREPARE and READY sums include their control payloads and reset per phase."""
     conversation = _conversation()

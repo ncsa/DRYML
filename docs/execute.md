@@ -55,7 +55,8 @@ with Executor(SubProcessConfig()) as executor:
 ```
 
 `Executor.submit(fn, /, *args, kwargs=None, environment=None, world=None,
-execution_timeout="inherit", stream_output=None, done_callbacks=(), output=None)`
+execution_timeout="inherit", stream_output=None, done_callbacks=(), output=None,
+worker_setup=None)`
 copies controls, serializes exactly one callable/argument graph to an
 execution-owned spool child, and returns the backend's concrete
 `ExecutionFuture`. `kwargs` is the workload keyword mapping; it is deliberately
@@ -69,6 +70,17 @@ an `ExecutorView` retaining the parent executor. A view has the same `run(fn,
 /, *args, **kwargs)` and `submit(fn, /, *args, **kwargs)` workload boundary, so
 control-named workload keywords remain ordinary workload data. The view never
 owns a second backend, quota, future set, or close operation.
+
+`WorkerSetup(factory="module:qualname", data={...})` is an optional immutable
+generic control for a trusted worker-local context manager. The factory identifier
+is bounded and importable-shaped; `data` is detached JSON only. After verified
+admission and `GO`, Execute sends the bounded setup/evidence envelope, captures
+setup output, enters the factory, waits for `SETUP_READY`, and only then sends the
+callable payload. Calls without `worker_setup` retain the direct `GO`-to-payload
+sequence. Setup entry failure withholds the payload. Setup exit covers result
+encoding; an exit failure preserves an already encoded result or workload error,
+but leaves the Future cleanup state incomplete and `cleanup()` raises rather than
+claiming that unobserved worker teardown was reconciled.
 
 Module-level `submit(fn, /, *args, backend=..., ...)` and `run(...,
 backend=..., ...)` require a `BackendConfig`; they retain a hidden owner until
@@ -128,12 +140,12 @@ capture does not probe or create them.
 
 | Setting | Default and validation | Effect and override |
 | --- | --- | --- |
-| `admission_timeout` | `30.0` seconds, positive finite float/int | Bounds preflight/backend admission for each call. Fixed config policy. |
+| `admission_timeout` | `30.0` seconds, positive finite float/int | Bounds preflight/backend admission for each call. It ends at `GO`; it never times post-GO setup. |
 | `discovery_timeout` | `30.0` seconds, positive finite | Default for `discover()` and `resources()`; each accepts a positive `timeout=` override. |
 | `termination_timeout` | `5.0` seconds, positive finite | Default future cleanup/cancellation bound; `close(timeout=)` and `cleanup(timeout=)` can supply a positive override. |
 | `one_off_cleanup_attempts` | `2`, positive integer | Bounded automatic retries for hidden one-off owners. |
 | `one_off_cleanup_retry_interval` | `0.1` seconds, positive finite | Cadence for retained one-off cleanup retries. |
-| `execution_timeout` | `None`, or positive finite seconds | Default workload deadline. Per call uses `"inherit"`, `None`, or a positive override. |
+| `execution_timeout` | `None`, or positive finite seconds | One deadline for post-GO setup, payload transfer, invocation, result encoding, and normal setup exit. Per call uses `"inherit"`, `None`, or a positive override; `None` disables that deadline. |
 | `output_final_timeout` | `5.0` seconds, positive finite | Seconds to wait after terminal outcome for output final fences; it changes output completeness only. |
 | `spool_directory` | `None`, or `pathlib.Path` | Parent for coordinator-owned spool children. `None` chooses the platform temp parent. The executor creates/removes only its child data and never deletes a caller parent; Windows children and files receive a verified private ACL before payload bytes are written. |
 | `spool_limit_bytes` | `4,294,967,296`, positive integer bytes | Process-global aggregate spool quota across all active executor leases, backend types, and spool parents; must cover invocation plus result limits. |
@@ -142,8 +154,8 @@ capture does not probe or create them.
 | `invocation_limit_bytes` | `67,108,864`, positive integer bytes | Maximum serialized callable/argument payload and wire frame. |
 | `result_limit_bytes` | `67,108,864`, positive integer bytes | Maximum serialized result and result wire frame. |
 | `control_header_limit_bytes` | `1,048,576`, positive integer bytes, at most 4-byte frame range | Maximum protocol control header; cannot exceed `admission_message_limit_bytes`. |
-| `owner_envelope_limit_bytes` | `16,777,216`, positive integer bytes | Maximum encoded environment/world owner envelope. |
-| `admission_message_limit_bytes` | `83,886,080`, positive integer bytes | Maximum bounded admission message. |
+| `owner_envelope_limit_bytes` | `16,777,216`, positive integer bytes | Maximum encoded environment/world/SETUP owner envelope. |
+| `admission_message_limit_bytes` | `83,886,080`, positive integer bytes | Maximum bounded admission message, including one SETUP envelope and its backend evidence. |
 | `output_frame_limit_bytes` | `65,536`, positive integer bytes | Maximum worker output frame; cannot exceed live queue capacity. |
 | `output_limit_bytes` | `1,048,576`, positive integer bytes | Retained byte prefix limit for each output stream. |
 | `live_output_queue_limit_bytes` | `262,144`, positive integer bytes | Bounded coordinator live-delivery queue; overflow disables mirroring but preserves retained capture. |
@@ -252,8 +264,11 @@ Invocation and result data remain in the submission child until qualified future
 cleanup; the caller-owned spool parent, current directory, existing
 environments, and Ray deployment are preserved.
 
-The coordinator validates the common framed protocol and executes only after
-the worker handshake/admission evidence and GO gate. Callable graphs, callbacks,
+The coordinator validates private protocol v2 and executes only after the worker
+handshake/admission evidence and GO gate. Setup-bearing calls add `SETUP`,
+setup-time `OUTPUT`, and `SETUP_READY` before `PAYLOAD`; `RESULT` is forbidden
+before payload transfer. A setup `ERROR` cannot resume with readiness or payload,
+though bounded final output frames are still drained. Callable graphs, callbacks,
 native handles, and live futures are never transported as worker controls. The
 result slot is reserved before launch so result receipt cannot bypass the quota.
 Worker output is streamed through bounded frames into coordinator memory; this

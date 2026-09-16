@@ -40,6 +40,7 @@ from ._protocol import (
     FrameType,
     OwnerEnvelopeType,
     ProtocolConversation,
+    decode_setup_terminal,
     decode_control,
     SocketFrameReader,
     encode_bootstrap_descriptor,
@@ -570,11 +571,17 @@ class SubProcessBackend(Backend):
         go = encode_control(FrameState.GO, descriptor.correlation, {"deadline": execution_deadline, "permit": descriptor.rendezvous_token}, header_limit=self._config.control_header_limit_bytes)
         self._send(run.connection, go)
         conversation.accept(go)
+        # GO begins the one configured execution budget. Admission may no longer
+        # impose a socket deadline while setup waits for its worker-local factory.
+        run.connection.settimeout(None)
         with run.lock:
             run.issued = True
             run.terminal_event = run.terminal_event or Event()
         if execution_deadline is not None:
             Thread(target=self._deadline_watch, args=(run, execution_deadline), name="dryml-execute-deadline", daemon=True).start()
+        if call.worker_setup is not None:
+            if not self._send_setup(call, future, run, descriptor, conversation, reader, record, allocation, worker_id, pid):
+                return
         payload = call.payload.path.read_bytes()
         if len(payload) != call.payload.size_bytes or hashlib.sha256(payload).hexdigest() != call.payload.sha256:
             raise ExecutionError("coordinator invocation spool changed before transfer")
@@ -583,10 +590,73 @@ class SubProcessBackend(Backend):
             run.payload_transfer_started = True
         self._send(run.connection, (payload_prefix, payload_view))
         conversation.accept_frame(payload_frame)
-        # The admission socket bound cannot turn an explicitly unlimited workload
-        # into an invented execution deadline.
-        run.connection.settimeout(None)
         self._receive_active(call, future, run, descriptor, conversation)
+
+    def _send_setup(self, call: SubmittedCall[T], future: SubProcessFuture[T], run: _Run, descriptor: BootstrapDescriptor, conversation: ProtocolConversation, reader: SocketFrameReader, record: EnvironmentRecord | None, allocation: WorldAllocation | None, worker_id: str, pid: int) -> bool:
+        """Transmit verified post-GO setup data and wait while draining setup output."""
+        assert run.connection is not None and call.worker_setup is not None
+        context = {
+            "submission_id": call.submission_id,
+            "backend": "subprocess",
+            "environment": None if record is None else record.to_data(),
+            "allocation": None if allocation is None else allocation.to_data(),
+            "native_grant": {"kind": "subprocess", "pid": pid, "worker_id": worker_id, "allocation": "exact" if allocation is not None else "none"},
+        }
+        try:
+            encoded = call.worker_setup.to_envelope(
+                context, owner_limit_bytes=self._config.owner_envelope_limit_bytes,
+                admission_limit_bytes=self._config.admission_message_limit_bytes,
+            )
+        except BaseException as exc:
+            raise ExecutionError("worker setup could not be encoded") from exc
+        frame = encode_owner_envelope(FrameState.SETUP, descriptor.correlation, OwnerEnvelopeType.SETUP, encoded, header_limit=self._config.control_header_limit_bytes, owner_limit=self._config.owner_envelope_limit_bytes)
+        self._send(run.connection, frame)
+        conversation.accept(frame)
+        while True:
+            frame = reader.read()
+            conversation.accept_frame(frame)
+            if frame.state is FrameState.OUTPUT:
+                assert frame.stream is not None and frame.sequence is not None
+                call.output._capture(frame.stream, frame.payload, frame.sequence)
+                continue
+            if frame.state is FrameState.OUTPUT_FINAL:
+                control = _json(frame.payload, self._config.control_header_limit_bytes)
+                call.output._finalize(control["stream"], control["next_sequence"])
+                continue
+            if frame.state is FrameState.SETUP_READY:
+                ready = decode_control(frame, limit_bytes=self._config.control_header_limit_bytes, required_keys={"ready"})
+                if ready["ready"] is not True:
+                    raise ExecutionError("worker setup readiness evidence is invalid")
+                return True
+            if frame.state is FrameState.ERROR:
+                _, remote_type, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                future._record_worker_cleanup_issues(issues)
+                future._publish_exception(RemoteExecutionError(f"remote subprocess setup failed ({remote_type})", remote_type=remote_type or "RemoteError"))
+                run.qualified_terminal = True
+                self._drain_setup_failure(call, run, reader, conversation)
+                return False
+            raise FrameError("worker setup sent an invalid frame")
+
+    def _drain_setup_failure(self, call: SubmittedCall[T], run: _Run, reader: SocketFrameReader, conversation: ProtocolConversation) -> None:
+        """Drain bounded post-failure output fences without permitting setup resume."""
+        assert run.connection is not None
+        deadline = time.monotonic() + self._config.output_final_timeout
+        try:
+            while time.monotonic() < deadline:
+                run.connection.settimeout(max(0.001, deadline - time.monotonic()))
+                try:
+                    frame = reader.read()
+                    conversation.accept_frame(frame)
+                except (OSError, EOFError, FrameError):
+                    return
+                if frame.state is FrameState.OUTPUT:
+                    assert frame.stream is not None and frame.sequence is not None
+                    call.output._capture(frame.stream, frame.payload, frame.sequence)
+                elif frame.state is FrameState.OUTPUT_FINAL:
+                    control = _json(frame.payload, self._config.control_header_limit_bytes)
+                    call.output._finalize(control["stream"], control["next_sequence"])
+        finally:
+            run.connection.settimeout(None)
 
     def _accept_worker(self, listener: socket.socket, descriptor: BootstrapDescriptor, deadline: float) -> tuple[socket.socket, Any, ProtocolConversation]:
         """Return only a correlation/token-validated HELLO before accepting a worker.
@@ -651,7 +721,12 @@ class SubProcessBackend(Backend):
                     return
                 outcome_seen = True
                 try:
-                    value = self._receive_result(future, frame.payload)
+                    payload = frame.payload
+                    if call.worker_setup is not None:
+                        payload, _, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                        assert payload is not None
+                        future._record_worker_cleanup_issues(issues)
+                    value = self._receive_result(future, payload)
                 except BaseException:
                     future._publish_exception(ExecutionError("worker result could not be decoded"))
                 else:
@@ -662,8 +737,12 @@ class SubProcessBackend(Backend):
                 if outcome_seen or not self._claim_outcome(run):
                     return
                 outcome_seen = True
-                detail = _json(frame.payload, self._config.result_limit_bytes)
-                remote_type = str(detail.get("type", "RemoteError"))[:128]
+                if call.worker_setup is not None:
+                    _, remote_type, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                    future._record_worker_cleanup_issues(issues)
+                else:
+                    detail = _json(frame.payload, self._config.result_limit_bytes)
+                    remote_type = str(detail.get("type", "RemoteError"))[:128]
                 future._publish_exception(RemoteExecutionError(f"remote subprocess execution failed ({remote_type})", remote_type=remote_type))
                 run.qualified_terminal = True
                 continue

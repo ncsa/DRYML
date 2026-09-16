@@ -189,6 +189,24 @@ def test_cleanup_is_independent_retryable_and_keeps_known_result():
     assert future.snapshot().cleanup_state == "complete"
 
 
+def test_worker_cleanup_evidence_keeps_successful_result_but_blocks_reconciliation():
+    """An unobserved worker teardown never becomes a later cleanup success."""
+    future = ConcreteFuture("worker-cleanup", termination_timeout=0.1)
+    attempts: list[float] = []
+    future._set_cleanup_reconciler(lambda timeout: attempts.append(timeout))
+    future._record_worker_cleanup_issues(("RuntimeError",))
+    future._publish_result(9)
+
+    assert future.result() == 9
+    assert future.snapshot().cleanup_state == "incomplete"
+    for _ in range(2):
+        with pytest.raises(CleanupError) as failure:
+            future.cleanup()
+        assert failure.value.execution is future
+        assert future.snapshot().cleanup_state == "incomplete"
+    assert attempts == []
+
+
 def test_cleanup_start_failure_is_retryable_and_diagnostics_use_prepared_limits(monkeypatch):
     """A failed cleanup worker launch never strands reconciliation or bypasses caps."""
     future = ConcreteFuture("cleanup-start", termination_timeout=0.1)

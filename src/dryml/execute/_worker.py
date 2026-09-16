@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib
 import os
 import secrets
 import socket
@@ -14,13 +15,14 @@ from collections.abc import Mapping
 
 import dill
 
-from dryml.environments import EnvironmentRequirement, inspect_current
+from dryml.environments import EnvironmentRecord, EnvironmentRequirement, inspect_current
 from dryml.formats import canonical_json_bytes, canonical_json_load_bytes
 from dryml.worlds import ProcessSpec, ResourceSpec, RoleSpec, WorldAllocation, WorldRequirement, WorldSpec
 
 from ._protocol import WORKER_PROTOCOL_ID, BootstrapDescriptor, FrameError, FrameState, FrameType, OwnerEnvelopeType, ProtocolConversation, SocketFrameReader, decode_bootstrap_descriptor, decode_control, decode_owner_envelopes, encode_control, encode_frame, encode_owner_envelope
 from ._spooling import deserialize_call, serialize_result
 from .admission import _admit_observed_logical, admit
+from .models import WorkerSetupContext
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,15 +143,26 @@ def _run(descriptor: BootstrapDescriptor, *, worker_id: str | None = None, nativ
         workload_deadline = permit["deadline"]
         if workload_deadline is not None and (not isinstance(workload_deadline, (int, float)) or isinstance(workload_deadline, bool) or time.monotonic() >= workload_deadline):
             return
-        # Admission timeouts must not remain an artificial execution timeout.
+        # GO begins the configured execution period. A disabled execution deadline
+        # deliberately leaves setup and invocation without an admission timeout.
         connection.settimeout(None)
-        payload_frame = reader.read()
-        conversation.accept_frame(payload_frame)
+        first_frame = reader.read()
+        conversation.accept_frame(first_frame)
         if workload_deadline is not None and time.monotonic() >= workload_deadline:
             return
-        if payload_frame.state is not FrameState.PAYLOAD or payload_frame.frame_type is not FrameType.PAYLOAD:
-            return
-        _invoke(connection, send_lock, descriptor, payload_frame.payload, workload_deadline)
+        if first_frame.state is FrameState.SETUP:
+            if first_frame.owner is not OwnerEnvelopeType.SETUP:
+                return
+            setup = _setup_data(
+                first_frame.payload, descriptor.owner_envelope_limit_bytes,
+                descriptor.admission_message_limit_bytes,
+            )
+            _invoke(
+                connection, send_lock, descriptor, None, workload_deadline,
+                setup=setup, reader=reader, conversation=conversation,
+            )
+        elif first_frame.state is FrameState.PAYLOAD and first_frame.frame_type is FrameType.PAYLOAD:
+            _invoke(connection, send_lock, descriptor, first_frame.payload, workload_deadline)
     except BaseException as exc:
         # The coordinator receives only a bounded exception type, never raw worker
         # arguments, environment values, tokens, or traceback paths.
@@ -245,32 +258,90 @@ def _logical_count(value: object) -> int | None:
     return int(value)
 
 
-def _invoke(connection: socket.socket, send_lock: threading.Lock, descriptor: BootstrapDescriptor, payload: bytes, deadline: float | None) -> None:
-    """Capture real fd output while loading, invoking, and serializing one payload."""
+def _invoke(
+    connection: socket.socket,
+    send_lock: threading.Lock,
+    descriptor: BootstrapDescriptor,
+    payload: bytes | None,
+    deadline: float | None,
+    *,
+    setup: dict[str, object] | None = None,
+    reader: SocketFrameReader | None = None,
+    conversation: ProtocolConversation | None = None,
+) -> None:
+    """Capture setup/workload output and preserve outcomes across setup teardown.
+
+    Setup resolution and entry occur only after GO, under redirected descriptors.
+    A setup-bearing worker acknowledges readiness before it reads payload bytes, so
+    the coordinator can prove a pre-ack failure withheld deserialization.
+    """
     original = {1: os.dup(1), 2: os.dup(2)}
     readers: list[threading.Thread] = []
     sequences = {"stdout": 0, "stderr": 0}
     outcome: bytes | None = None
     outcome_type: FrameType | None = None
+    cleanup_issues: list[str] = []
+    manager: object | None = None
+    entered = False
+    workload_error: BaseException | None = None
     try:
         for fd, stream in ((1, "stdout"), (2, "stderr")):
             read_fd, write_fd = os.pipe()
             os.dup2(write_fd, fd)
             os.close(write_fd)
-            reader = threading.Thread(target=_drain, args=(read_fd, stream, sequences, connection, send_lock, descriptor), daemon=True)
-            reader.start()
-            readers.append(reader)
-        try:
-            if deadline is not None and time.monotonic() >= deadline:
-                return
-            fn, args, kwargs = deserialize_call(payload, limit_bytes=descriptor.invocation_limit_bytes)
-            if deadline is not None and time.monotonic() >= deadline:
-                return
-            value = fn(*args, **kwargs)
-            outcome = serialize_result(value, limit_bytes=descriptor.result_limit_bytes)
-            outcome_type = FrameType.RESULT
-        except BaseException as exc:
-            outcome = canonical_json_bytes({"type": type(exc).__name__[:128]}, max_depth=1, max_nodes=2, max_entries=1, max_string=128, max_int_bits=64)
+            drainer = threading.Thread(target=_drain, args=(read_fd, stream, sequences, connection, send_lock, descriptor), daemon=True)
+            drainer.start()
+            readers.append(drainer)
+        if setup is not None:
+            try:
+                manager = _resolve_setup(setup)
+                enter = getattr(manager, "__enter__")
+                exit_ = getattr(manager, "__exit__")
+                if not callable(enter) or not callable(exit_):
+                    raise TypeError("worker setup factory did not return a context manager")
+                enter()
+                entered = True
+                assert conversation is not None and reader is not None
+                ready = encode_control(FrameState.SETUP_READY, descriptor.correlation, {"ready": True}, header_limit=descriptor.control_header_limit_bytes)
+                _send(connection, send_lock, ready)
+                conversation.accept(ready)
+                payload_frame = reader.read()
+                conversation.accept_frame(payload_frame)
+                if payload_frame.state is not FrameState.PAYLOAD or payload_frame.frame_type is not FrameType.PAYLOAD:
+                    raise FrameError("worker payload frame is invalid")
+                payload = payload_frame.payload
+            except BaseException as exc:
+                workload_error = exc
+        if workload_error is None:
+            try:
+                if payload is None or deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("execution deadline elapsed before payload deserialization")
+                fn, args, kwargs = deserialize_call(payload, limit_bytes=descriptor.invocation_limit_bytes)
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("execution deadline elapsed before invocation")
+                value = fn(*args, **kwargs)
+                outcome = serialize_result(
+                    value,
+                    limit_bytes=_setup_result_payload_limit(descriptor.result_limit_bytes)
+                    if setup is not None else descriptor.result_limit_bytes,
+                )
+                outcome_type = FrameType.RESULT
+            except BaseException as exc:
+                workload_error = exc
+        if entered:
+            try:
+                assert manager is not None
+                suppressed = manager.__exit__(
+                    None if workload_error is None else type(workload_error),
+                    workload_error,
+                    None if workload_error is None else workload_error.__traceback__,
+                )
+                if workload_error is not None and suppressed:
+                    workload_error = RuntimeError("worker setup suppressed an execution failure")
+            except BaseException as exc:
+                cleanup_issues.append(type(exc).__name__[:128])
+        if workload_error is not None:
+            outcome = canonical_json_bytes({"type": type(workload_error).__name__[:128]}, max_depth=1, max_nodes=2, max_entries=1, max_string=128, max_int_bits=64)
             outcome_type = FrameType.ERROR
     finally:
         _flush_standard_streams()
@@ -285,7 +356,77 @@ def _invoke(connection: socket.socket, send_lock: threading.Lock, descriptor: Bo
             reader.join(max(0.0, finish_at - time.monotonic()))
         if outcome is not None and outcome_type is not None:
             state = FrameState.RESULT if outcome_type is FrameType.RESULT else FrameState.ERROR
-            _send(connection, send_lock, encode_frame(state, outcome_type, descriptor.correlation, outcome, header_limit=descriptor.control_header_limit_bytes))
+            terminal = outcome if setup is None else _terminal_envelope(outcome_type, outcome, cleanup_issues, descriptor.result_limit_bytes)
+            _send(connection, send_lock, encode_frame(state, outcome_type, descriptor.correlation, terminal, header_limit=descriptor.control_header_limit_bytes))
+
+
+def _setup_data(payload: bytes, owner_limit: int, admission_limit: int) -> dict[str, object]:
+    """Decode one closed setup envelope before any factory import occurs."""
+    limit = min(owner_limit, admission_limit)
+    if len(payload) > owner_limit or len(payload) > admission_limit:
+        raise FrameError("worker setup exceeds configured admission limits")
+    value = canonical_json_load_bytes(payload, max_depth=64, max_nodes=65_536, max_entries=65_536, max_string=limit, max_int_bits=4096)
+    if not isinstance(value, Mapping) or set(value) != {"context", "data", "factory"}:
+        raise FrameError("worker setup envelope has an invalid shape")
+    if not isinstance(value["factory"], str) or not isinstance(value["data"], Mapping) or not isinstance(value["context"], Mapping):
+        raise FrameError("worker setup envelope has invalid fields")
+    return {"factory": value["factory"], "data": dict(value["data"]), "context": dict(value["context"])}
+
+
+def _resolve_setup(setup: Mapping[str, object]) -> object:
+    """Import and construct one setup context manager after output capture starts."""
+    factory_id = setup["factory"]
+    context_data = setup["context"]
+    data = setup["data"]
+    if not isinstance(factory_id, str) or not isinstance(context_data, Mapping) or not isinstance(data, Mapping):
+        raise FrameError("worker setup fields are invalid")
+    module_name, separator, qualname = factory_id.partition(":")
+    if not separator:
+        raise FrameError("worker setup factory is invalid")
+    factory: object = importlib.import_module(module_name)
+    for attribute in qualname.split("."):
+        factory = getattr(factory, attribute)
+    if not callable(factory):
+        raise TypeError("worker setup factory is not callable")
+    context = _setup_context(context_data)
+    return factory(context, dict(data))
+
+
+def _setup_context(data: Mapping[str, object]) -> WorkerSetupContext:
+    """Rebuild verified setup evidence without accepting caller allocation authority."""
+    expected = {"allocation", "backend", "environment", "native_grant", "submission_id"}
+    if set(data) != expected:
+        raise FrameError("worker setup context has an invalid shape")
+    environment = None if data["environment"] is None else EnvironmentRecord.from_data(data["environment"])
+    allocation = None if data["allocation"] is None else WorldAllocation.from_data(data["allocation"])
+    return WorkerSetupContext(
+        submission_id=data["submission_id"], backend=data["backend"],
+        environment=environment, allocation=allocation, native_grant=data["native_grant"],
+    )
+
+
+def _terminal_envelope(kind: FrameType, payload: bytes, cleanup_issues: list[str], limit: int) -> bytes:
+    """Encode a setup terminal without letting teardown replace an existing outcome."""
+    data: dict[str, object] = {"cleanup": [{"type": value} for value in cleanup_issues]}
+    if kind is FrameType.RESULT:
+        data["payload"] = base64.b64encode(payload).decode("ascii")
+    else:
+        error = canonical_json_load_bytes(payload, max_depth=1, max_nodes=2, max_entries=1, max_string=128, max_int_bits=64)
+        data["type"] = error["type"] if isinstance(error, Mapping) else "RemoteError"
+    try:
+        encoded = canonical_json_bytes(data, max_depth=3, max_nodes=128, max_entries=64, max_string=limit, max_int_bits=64)
+    except BaseException as exc:
+        raise FrameError("worker setup terminal exceeds configured result limit") from exc
+    if len(encoded) > limit:
+        raise FrameError("worker setup terminal exceeds configured result limit")
+    return encoded
+
+
+def _setup_result_payload_limit(limit: int) -> int:
+    """Reserve terminal-envelope space before serializing a setup-bearing result."""
+    # A single setup exit can add one bounded type-only cleanup issue. Reserving
+    # its JSON and base64 expansion keeps an already encoded result transportable.
+    return max(1, ((limit - 256) * 3) // 4)
 
 
 def _drain(read_fd: int, stream: str, sequences: dict[str, int], connection: socket.socket, send_lock: threading.Lock, descriptor: BootstrapDescriptor) -> None:

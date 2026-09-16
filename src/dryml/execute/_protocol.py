@@ -12,6 +12,7 @@ import io
 import ipaddress
 import math
 import re
+import base64
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,10 +21,10 @@ from typing import BinaryIO
 from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_json_load_bytes, json_ready
 
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 # This is deliberately a protocol identity, rather than a package version: a
 # selected interpreter must execute the same worker implementation contract.
-WORKER_PROTOCOL_ID = "dryml.execute.worker.v1"
+WORKER_PROTOCOL_ID = "dryml.execute.worker.v2"
 _HEADER_LENGTH_BYTES = 4
 _PAYLOAD_LENGTH_BYTES = 8
 _MAX_HEADER_LENGTH = (1 << (_HEADER_LENGTH_BYTES * 8)) - 1
@@ -54,6 +55,8 @@ class FrameState(str, Enum):
     READY = "ready"
     GO = "go"
     STOP = "stop"
+    SETUP = "setup"
+    SETUP_READY = "setup-ready"
     PAYLOAD = "payload"
     OUTPUT = "output"
     OUTPUT_FINAL = "output-final"
@@ -68,6 +71,7 @@ class OwnerEnvelopeType(str, Enum):
     WORLD = "world"
     ALLOCATION = "allocation"
     CONTROLS = "controls"
+    SETUP = "setup"
 
 
 _STATE_TYPES = {
@@ -76,6 +80,8 @@ _STATE_TYPES = {
     FrameState.READY: {FrameType.CONTROL, FrameType.OWNER},
     FrameState.GO: {FrameType.CONTROL},
     FrameState.STOP: {FrameType.CONTROL},
+    FrameState.SETUP: {FrameType.OWNER},
+    FrameState.SETUP_READY: {FrameType.CONTROL},
     FrameState.PAYLOAD: {FrameType.PAYLOAD},
     FrameState.OUTPUT: {FrameType.OUTPUT},
     FrameState.OUTPUT_FINAL: {FrameType.CONTROL},
@@ -438,6 +444,40 @@ def decode_control(frame: Frame, *, limit_bytes: int, required_keys: set[str]) -
     return json_ready(control, max_depth=8, max_nodes=1024, max_entries=64, max_string=limit_bytes, max_int_bits=64)
 
 
+def decode_setup_terminal(frame: Frame, *, limit_bytes: int) -> tuple[bytes | None, str | None, tuple[str, ...]]:
+    """Decode a setup-bearing terminal while retaining result bytes and cleanup facts.
+
+    Returns:
+        ``(result_bytes, error_type, cleanup_types)``. Exactly one of result bytes
+        and error type is present; cleanup types are bounded safe type names.
+
+    Raises:
+        FrameError: If the terminal payload is not the closed setup envelope.
+    """
+    if frame.state not in {FrameState.RESULT, FrameState.ERROR} or frame.frame_type not in {FrameType.RESULT, FrameType.ERROR}:
+        raise FrameError("frame is not a setup terminal")
+    try:
+        value = canonical_json_load_bytes(frame.payload, max_depth=3, max_nodes=128, max_entries=64, max_string=limit_bytes, max_int_bits=64)
+    except CanonicalJSONError as exc:
+        raise FrameError("setup terminal is not canonical") from exc
+    if not isinstance(value, Mapping):
+        raise FrameError("setup terminal has an invalid shape")
+    cleanup = value.get("cleanup")
+    if not isinstance(cleanup, tuple) or any(not isinstance(issue, Mapping) or set(issue) != {"type"} or not isinstance(issue["type"], str) or len(issue["type"]) > 128 for issue in cleanup):
+        raise FrameError("setup terminal cleanup evidence is invalid")
+    if frame.frame_type is FrameType.RESULT:
+        if set(value) != {"cleanup", "payload"} or not isinstance(value["payload"], str):
+            raise FrameError("setup result terminal has an invalid shape")
+        try:
+            payload = base64.b64decode(value["payload"].encode("ascii"), validate=True)
+        except (UnicodeEncodeError, ValueError) as exc:
+            raise FrameError("setup result terminal payload is invalid") from exc
+        return payload, None, tuple(issue["type"] for issue in cleanup)
+    if set(value) != {"cleanup", "type"} or not isinstance(value["type"], str) or len(value["type"]) > 128:
+        raise FrameError("setup error terminal has an invalid shape")
+    return None, value["type"], tuple(issue["type"] for issue in cleanup)
+
+
 def encode_owner_envelope(state: FrameState, correlation: Correlation, owner: OwnerEnvelopeType, envelope: bytes, *, header_limit: int, owner_limit: int) -> bytes:
     """Encode one opaque owner envelope in its own typed frame and own limit."""
     _validate_limit("owner envelope limit", owner_limit, _MAX_PAYLOAD_LENGTH)
@@ -533,7 +573,8 @@ class ProtocolConversation:
         """Validate one frame without mutating state on an invalid transition.
 
         PREPARE and READY each admit one control followed by distinct owner
-        envelopes.  GO authorizes exactly one payload.  After that payload, the
+        envelopes. GO admits either a direct payload or one setup envelope plus
+        SETUP_READY. Setup output may arrive before readiness. After payload, the
         result/error and the two output stream fences may arrive independently.
         """
         if self._terminal:
@@ -576,23 +617,47 @@ class ProtocolConversation:
                 self._terminal = True
                 return frame
             if frame.state is FrameState.GO and frame.frame_type is FrameType.CONTROL:
-                self._phase = "payload"
+                self._phase = "after-go"
                 return frame
             if frame.state is FrameState.STOP and frame.frame_type is FrameType.CONTROL:
                 self._terminal = True
                 return frame
             self._accept_owner(frame, FrameState.READY)
             return frame
-        if self._phase == "payload":
+        if self._phase == "after-go":
             if self._is_admission_error(frame):
                 self._terminal = True
                 return frame
             if frame.state is FrameState.STOP and frame.frame_type is FrameType.CONTROL:
                 self._terminal = True
                 return frame
+            if frame.state is FrameState.PAYLOAD and frame.frame_type is FrameType.PAYLOAD:
+                self._phase = "active"
+                return frame
+            self._require(frame, FrameState.SETUP, FrameType.OWNER)
+            if frame.owner is not OwnerEnvelopeType.SETUP:
+                raise FrameError("setup frame has an invalid owner type")
+            self._phase = "setup-ready"
+            return frame
+        if self._phase == "setup-ready":
+            if frame.state is FrameState.ERROR and frame.frame_type is FrameType.ERROR:
+                self._outcome = FrameType.ERROR
+                self._phase = "setup-failed"
+                return frame
+            if self._accept_output(frame):
+                return frame
+            if frame.state is FrameState.SETUP_READY and frame.frame_type is FrameType.CONTROL:
+                self._phase = "payload"
+                return frame
+            raise FrameError("frame is out of order")
+        if self._phase == "payload":
             self._require(frame, FrameState.PAYLOAD, FrameType.PAYLOAD)
             self._phase = "active"
             return frame
+        if self._phase == "setup-failed":
+            if self._accept_output(frame):
+                return frame
+            raise FrameError("frame is out of order")
         self._accept_active(frame)
         return frame
 
@@ -626,27 +691,38 @@ class ProtocolConversation:
         self._phase_total += len(frame.payload)
 
     def _accept_active(self, frame: Frame) -> None:
-        """Accept independent output fences and exactly one validated outcome."""
+        """Accept active output/fences and exactly one validated terminal outcome."""
+        if not self._accept_terminal(frame):
+            raise FrameError("frame is out of order")
+
+    def _accept_terminal(self, frame: Frame) -> bool:
+        """Accept a terminal-phase output, fence, or outcome without phase changes."""
+        if self._accept_output(frame):
+            return True
+        if frame.state in {FrameState.RESULT, FrameState.ERROR} and frame.frame_type in {FrameType.RESULT, FrameType.ERROR}:
+            if self._outcome is not None:
+                raise FrameError("frame is out of order")
+            self._outcome = frame.frame_type
+            self._finish_if_complete()
+            return True
+        return False
+
+    def _accept_output(self, frame: Frame) -> bool:
+        """Accept only ordered output evidence and final fences for the current phase."""
         if frame.state is FrameState.OUTPUT and frame.frame_type is FrameType.OUTPUT:
             assert frame.stream is not None and frame.sequence is not None
             if frame.stream in self._stream_finals or frame.sequence != self._stream_sequences[frame.stream]:
                 raise FrameError("output frame is outside its stream sequence")
             self._stream_sequences[frame.stream] += 1
-            return
+            return True
         if frame.state is FrameState.OUTPUT_FINAL and frame.frame_type is FrameType.CONTROL:
             stream, sequence = self._output_final_fence(frame)
             if stream in self._stream_finals or sequence != self._stream_sequences[stream]:
                 raise FrameError("output final is outside its stream sequence")
             self._stream_finals.add(stream)
             self._finish_if_complete()
-            return
-        if frame.state in {FrameState.RESULT, FrameState.ERROR} and frame.frame_type in {FrameType.RESULT, FrameType.ERROR}:
-            if self._outcome is not None:
-                raise FrameError("frame is out of order")
-            self._outcome = frame.frame_type
-            self._finish_if_complete()
-            return
-        raise FrameError("frame is out of order")
+            return True
+        return False
 
     @staticmethod
     def _output_final_fence(frame: Frame) -> tuple[str, int]:
@@ -669,4 +745,4 @@ class ProtocolConversation:
             self._terminal = True
 
 
-__all__ = ["BootstrapDescriptor", "Correlation", "Frame", "FrameError", "FrameState", "FrameType", "OwnerEnvelopeType", "PROTOCOL_VERSION", "ProtocolConversation", "decode_bootstrap_descriptor", "decode_control", "decode_exact_frame", "decode_frame", "decode_owner_envelopes", "encode_bootstrap_descriptor", "encode_control", "encode_frame", "encode_frame_parts", "encode_owner_envelope"]
+__all__ = ["BootstrapDescriptor", "Correlation", "Frame", "FrameError", "FrameState", "FrameType", "OwnerEnvelopeType", "PROTOCOL_VERSION", "ProtocolConversation", "decode_bootstrap_descriptor", "decode_control", "decode_exact_frame", "decode_frame", "decode_owner_envelopes", "decode_setup_terminal", "encode_bootstrap_descriptor", "encode_control", "encode_frame", "encode_frame_parts", "encode_owner_envelope"]

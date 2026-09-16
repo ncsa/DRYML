@@ -14,4 +14,4 @@ def test_worker_bootstrap_imports_the_execute_protocol_marker_directly():
     assert "deserialize_call(payload" in source
     assert "go_frame.state" in source
     assert "dryml.execute.v0.3" not in source
-    assert PROTOCOL_VERSION == 1
+    assert PROTOCOL_VERSION == 2

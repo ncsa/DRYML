@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Callable, ContextManager, Generic, Literal, TypeAlias, TypeVar
 
 from dryml.environments import CompatibilityReport, EnvironmentRecord, EnvironmentRequirement
 from dryml.environments.specs import EnvironmentSpec
+from dryml.formats import CanonicalJSONError, canonical_json_bytes, deep_freeze_json
 from dryml.worlds import LocalResourceInventory, WorldAllocation, WorldCompatibilityReport, WorldRequirement, WorldSpec
 
 if TYPE_CHECKING:
@@ -19,6 +21,181 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T")
+JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | Mapping[str, "JsonValue"]
+WorkerSetupFactory: TypeAlias = Callable[["WorkerSetupContext", Mapping[str, JsonValue]], ContextManager[None]]
+_FACTORY_IDENTIFIER = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\Z")
+_FACTORY_IDENTIFIER_LIMIT = 512
+_SETUP_MAX_DEPTH = 64
+_SETUP_MAX_NODES = 65_536
+_SETUP_MAX_ENTRIES = 65_536
+_SETUP_MAX_STRING = (1 << 64) - 1
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class WorkerSetup:
+    """Describe a detached worker-local context-manager factory.
+
+    Args:
+        factory: Importable ``module:qualname`` factory identifier.
+        data: JSON-compatible mapping copied into an immutable bounded projection.
+
+    Raises:
+        TypeError: If the factory or data mapping has an unsupported type.
+        ValueError: If the factory is not importable-shaped or data exceeds the
+            closed JSON representation bounds.
+
+    Side Effects:
+        Construction imports nothing and invokes no factory. The worker resolves
+        the factory only after backend admission has issued GO.
+    """
+
+    factory: str
+    data: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        """Validate an inert factory reference and detach its closed data mapping."""
+        if not isinstance(self.factory, str):
+            raise TypeError("worker setup factory must be a string")
+        if len(self.factory) > _FACTORY_IDENTIFIER_LIMIT or not _FACTORY_IDENTIFIER.fullmatch(self.factory):
+            raise ValueError("worker setup factory must be an importable module:qualname")
+        if not isinstance(self.data, Mapping):
+            raise TypeError("worker setup data must be a mapping")
+        try:
+            frozen = deep_freeze_json(
+                self.data, max_depth=_SETUP_MAX_DEPTH, max_nodes=_SETUP_MAX_NODES,
+                max_entries=_SETUP_MAX_ENTRIES, max_string=_SETUP_MAX_STRING,
+                max_int_bits=4096,
+            )
+        except CanonicalJSONError as exc:
+            raise TypeError("worker setup data must be bounded JSON-compatible data") from exc
+        if not isinstance(frozen, Mapping):
+            raise TypeError("worker setup data must be a mapping")
+        object.__setattr__(self, "data", frozen)
+
+    def to_data(self, *, limit_bytes: int) -> dict[str, JsonValue]:
+        """Return a fresh bounded protocol projection for one accepted submission.
+
+        Args:
+            limit_bytes: Effective configured setup-envelope byte allowance.
+
+        Returns:
+            A detached JSON-compatible setup envelope.
+
+        Raises:
+            ValueError: If the configured envelope cannot contain this setup.
+
+        Side Effects:
+            None. This does not import the factory or retain caller containers.
+        """
+        try:
+            encoded = canonical_json_bytes(
+                {"factory": self.factory, "data": self.data}, max_depth=_SETUP_MAX_DEPTH,
+                max_nodes=_SETUP_MAX_NODES, max_entries=_SETUP_MAX_ENTRIES,
+                max_string=limit_bytes,
+                max_int_bits=4096,
+            )
+        except CanonicalJSONError as exc:
+            raise ValueError("worker setup data exceeds configured bounds") from exc
+        if len(encoded) > limit_bytes:
+            raise ValueError("worker setup exceeds configured envelope limit")
+        return {"factory": self.factory, "data": _thaw_json(self.data)}
+
+    def to_envelope(
+        self, context: Mapping[str, JsonValue], *, owner_limit_bytes: int,
+        admission_limit_bytes: int,
+    ) -> bytes:
+        """Encode setup data and verified evidence under the configured wire budgets.
+
+        Args:
+            context: Backend-produced JSON evidence for the admitted worker.
+            owner_limit_bytes: Maximum SETUP owner-envelope size.
+            admission_limit_bytes: Maximum aggregate setup/evidence admission size.
+
+        Returns:
+            The closed canonical setup envelope.
+
+        Raises:
+            ValueError: If setup data or backend evidence exceeds either configured
+                budget or the shared bounded representation.
+
+        Side Effects:
+            None. Factory resolution remains worker-local and post-GO.
+        """
+        if not isinstance(context, Mapping):
+            raise TypeError("worker setup context must be a mapping")
+        if isinstance(owner_limit_bytes, bool) or not isinstance(owner_limit_bytes, int) or owner_limit_bytes <= 0:
+            raise ValueError("worker setup owner limit must be a positive integer")
+        if isinstance(admission_limit_bytes, bool) or not isinstance(admission_limit_bytes, int) or admission_limit_bytes <= 0:
+            raise ValueError("worker setup admission limit must be a positive integer")
+        limit = min(owner_limit_bytes, admission_limit_bytes)
+        try:
+            encoded = canonical_json_bytes(
+                {"factory": self.factory, "data": self.data, "context": context},
+                max_depth=_SETUP_MAX_DEPTH, max_nodes=_SETUP_MAX_NODES,
+                max_entries=_SETUP_MAX_ENTRIES, max_string=limit,
+                max_int_bits=4096,
+            )
+        except CanonicalJSONError as exc:
+            raise ValueError("worker setup data exceeds configured bounds") from exc
+        if len(encoded) > owner_limit_bytes or len(encoded) > admission_limit_bytes:
+            raise ValueError("worker setup and admission evidence exceed configured limits")
+        return encoded
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerSetupContext:
+    """Provide worker setup with verified backend admission evidence.
+
+    Args:
+        submission_id: Coordinator-assigned submission identity.
+        backend: Backend implementation identity that qualified the worker.
+        environment: Worker-observed selected environment, when applicable.
+        allocation: Exact worker allocation only when the backend supplied one.
+        native_grant: Detached backend-native grant evidence.
+
+    Side Effects:
+        Construction detaches native evidence; it neither reserves resources nor
+        authorizes a second allocator.
+    """
+
+    submission_id: str
+    backend: str
+    environment: EnvironmentRecord | None
+    allocation: WorldAllocation | None
+    native_grant: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        """Freeze only closed JSON native evidence supplied by the backend."""
+        if not isinstance(self.submission_id, str) or not self.submission_id:
+            raise ValueError("worker setup submission_id must be nonempty text")
+        if not isinstance(self.backend, str) or not self.backend:
+            raise ValueError("worker setup backend must be nonempty text")
+        if self.environment is not None and not isinstance(self.environment, EnvironmentRecord):
+            raise TypeError("worker setup environment must be an EnvironmentRecord or None")
+        if self.allocation is not None and not isinstance(self.allocation, WorldAllocation):
+            raise TypeError("worker setup allocation must be a WorldAllocation or None")
+        if not isinstance(self.native_grant, Mapping):
+            raise TypeError("worker setup native_grant must be a mapping")
+        try:
+            frozen = deep_freeze_json(
+                self.native_grant, max_depth=_SETUP_MAX_DEPTH, max_nodes=_SETUP_MAX_NODES,
+                max_entries=_SETUP_MAX_ENTRIES, max_string=_SETUP_MAX_STRING,
+                max_int_bits=4096,
+            )
+        except CanonicalJSONError as exc:
+            raise TypeError("worker setup native_grant must be bounded JSON-compatible data") from exc
+        if not isinstance(frozen, Mapping):
+            raise TypeError("worker setup native_grant must be a mapping")
+        object.__setattr__(self, "native_grant", frozen)
+
+
+def _thaw_json(value: object) -> JsonValue:
+    """Copy one frozen JSON value into a transport-only mutable projection."""
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}  # type: ignore[dict-item]
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value  # type: ignore[return-value]
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +329,7 @@ class SubmittedCall(Generic[T]):
         execution_timeout: Optional post-GO workload deadline.
         stream_output: Whether accepted output mirrors live best-effort.
         output: Bound caller-owned output holder.
+        worker_setup: Optional detached pre-deserialization worker setup control.
 
     Side Effects:
         None. Backends receive this transport record, not a live callable object.
@@ -165,6 +343,7 @@ class SubmittedCall(Generic[T]):
     execution_timeout: float | None
     stream_output: bool
     output: "ExecutionOutput"
+    worker_setup: WorkerSetup | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,4 +574,4 @@ class DiscoverySnapshot:
         object.__setattr__(self, "issues", tuple(self.issues))
 
 
-__all__ = ["ActiveAllocation", "AdmissionReport", "DiscoverySnapshot", "EnvironmentCandidate", "ExecutionIssue", "ExecutionSnapshot", "FeasiblePlan", "OutputSnapshot", "PayloadSpool", "ResourceAmounts", "ResourceSnapshot", "ResultSpool", "SubmittedCall"]
+__all__ = ["ActiveAllocation", "AdmissionReport", "DiscoverySnapshot", "EnvironmentCandidate", "ExecutionIssue", "ExecutionSnapshot", "FeasiblePlan", "JsonValue", "OutputSnapshot", "PayloadSpool", "ResourceAmounts", "ResourceSnapshot", "ResultSpool", "SubmittedCall", "WorkerSetup", "WorkerSetupContext", "WorkerSetupFactory"]
