@@ -1117,12 +1117,16 @@ class RayBackend(Backend):
     def _send_setup(self, call: SubmittedCall[T], future: RayFuture[T], run: _Run, descriptor: BootstrapDescriptor, conversation: ProtocolConversation, reader: SocketFrameReader, record: EnvironmentRecord | None, native: Mapping[str, object]) -> bool:
         """Send qualified Ray grant evidence and drain setup output before payload."""
         assert run.connection is not None and call.worker_setup is not None
+        assigned = native.get("assigned_resources")
+        accelerator_ids = native.get("accelerator_ids")
         native_grant = {
             "kind": "ray",
             "node_id": run.native_node_id,
             "task_id": run.native_task_id,
             "worker_id": run.worker_id,
-            "resources": dict(native.get("assigned_resources", {})) if isinstance(native.get("assigned_resources"), Mapping) else {},
+            "resources": dict(assigned) if isinstance(assigned, Mapping) else {},
+            "memory_bytes": _whole_amount(assigned.get("memory")) if isinstance(assigned, Mapping) else None,
+            "accelerator_ids": dict(accelerator_ids) if isinstance(accelerator_ids, Mapping) else {},
         }
         context = {
             "submission_id": call.submission_id,

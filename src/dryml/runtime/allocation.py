@@ -29,10 +29,35 @@ NoAllocation = _NoAllocation()
 
 @dataclass(frozen=True, slots=True)
 class RuntimeAllocationView:
-    """One role-qualified exact current-process allocation.
+    """One role-qualified current-process backend grant projection.
 
-    This value projects U4 allocation facts without reserving resources or
-    starting a process.
+    Exact grants retain CPU IDs and a world allocation association. Logical
+    backend grants retain only reported capacity and accelerator evidence; they
+    never become affinity or allocation identity claims. A baseline grant has
+    no resource controls because its backend supplied no allocation evidence.
+    This value does not reserve resources or start a process.
+
+    Args:
+        role: Selected role, or ``"main"`` for a non-exact backend grant.
+        replica: Selected role replica, or ``0`` for a non-exact grant.
+        rank: Exact global rank when supplied by an exact allocation.
+        local_rank: Exact local rank when supplied by an exact allocation.
+        cpus: Exact physical CPU IDs; empty for logical or baseline grants.
+        memory: Verified byte quantity when the backend reports one.
+        accelerators: Verified accelerator IDs grouped by accelerator kind.
+        accelerator_memory: Verified per-accelerator byte limits.
+        env: Backend-provided worker environment controls.
+        world_allocation_id: Exact world-allocation identity, if available.
+        metadata: Detached diagnostic allocation metadata.
+        logical_cpus: Verified logical CPU capacity, if the backend reports one.
+        grant_provenance: ``"exact"``, ``"logical"``, or ``"baseline"``.
+
+    Raises:
+        RuntimeTransitionError: If resource evidence is malformed or a logical or
+            baseline view claims exact CPU/allocation authority.
+
+    Side Effects:
+        Construction validates and freezes the supplied detached evidence only.
     """
 
     role: str | None = None
@@ -46,6 +71,8 @@ class RuntimeAllocationView:
     env: Mapping[str, str] = field(default_factory=dict)
     world_allocation_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    logical_cpus: int | None = None
+    grant_provenance: str = "exact"
 
     def __post_init__(self) -> None:
         """Freeze and validate an exact, role-qualified process projection."""
@@ -77,6 +104,12 @@ class RuntimeAllocationView:
                 raise RuntimeTransitionError("accelerator memory must be positive and reference assigned devices")
         if not isinstance(self.env, Mapping) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.env.items()):
             raise RuntimeTransitionError("runtime allocation environment must be a string mapping")
+        if self.logical_cpus is not None and (isinstance(self.logical_cpus, bool) or not isinstance(self.logical_cpus, int) or self.logical_cpus < 0):
+            raise RuntimeTransitionError("runtime logical CPU capacity must be a non-negative integer")
+        if self.grant_provenance not in {"exact", "logical", "baseline"}:
+            raise RuntimeTransitionError("runtime allocation grant provenance must be exact, logical, or baseline")
+        if self.grant_provenance in {"logical", "baseline"} and (cpus or self.world_allocation_id is not None):
+            raise RuntimeTransitionError("logical or baseline runtime grants cannot claim CPU IDs or world allocation identity")
         object.__setattr__(self, "cpus", cpus)
         try:
             object.__setattr__(self, "memory", parse_byte_size(self.memory))

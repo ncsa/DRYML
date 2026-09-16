@@ -113,6 +113,22 @@ generation. An admitted operation holds a generation lease, so an incompatible
 transition receives `PublicationBusyError`. Uncertain irreversible effects or
 failed rollback publish terminal failure and require process restart.
 
+## Execution Worker Activation
+
+`runtime.activation_scope(spec, grant)` activates a disposable Execute worker
+from a healthy, effect-free `NONE` baseline before any Store reconstruction or
+workload deserialization. `ExecutionGrant` retains either exact subprocess CPU
+and world-allocation evidence or Ray logical CPU capacity plus native evidence.
+Ray grants never gain CPU affinity or a `world_allocation_id`; exact-only runtime
+intent fails instead. A subprocess that has no `WorldAllocation` receives a
+baseline grant with no invented physical controls. Logical capacity can only
+bound registered framework-owned thread planning; generic `OMP_NUM_THREADS`
+controls are not synthesized. Preinitialized core session state or watched
+framework roots fail before Store opening. The scope restores journal-owned
+reversible effects. A watched framework import marks the worker terminal after
+restoration, so worker retirement rather than a claimed pristine reset remains
+the teardown guarantee.
+
 ## Process Controls
 
 The status vocabulary is closed to `undeclared`, `not-applicable`,

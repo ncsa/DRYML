@@ -82,6 +82,41 @@ encoding; an exit failure preserves an already encoded result or workload error,
 but leaves the Future cleanup state incomplete and `cleanup()` raises rather than
 claiming that unobserved worker teardown was reconciled.
 
+The core adapter's `dryml.core.execute:core_worker_setup` is a worker setup
+factory. It publishes runtime controls before reopening a detached `RepoDefinition`,
+then temporarily installs `core.session.config` and `current_context()`. The
+context exposes only the worker's borrowed Repo and optional explicitly selected
+control Store. It is task/thread owned, is unavailable outside that scope, and
+does not modify caller session state. Reconstructed handles close with
+`flush=False`; a control Store shared with the Repo is reopened only once.
+
+Its `WorkerSetup.data` is exactly one self-validating envelope:
+
+```json
+{
+  "contract_version": "1.1",
+  "schema": "dryml.core.execute.v1.1",
+  "kind": "worker_setup",
+  "payload": {
+    "runtime": "dryml.runtime.v1.1 runtime_context envelope",
+    "repo": "dryml-repo-definition envelope",
+    "role": "main",
+    "replica": 0,
+    "control_store": null
+  },
+  "id": "core_setup-v1.1-<sha256>"
+}
+```
+
+`payload` has no aliases or extra fields. Core decoding remains inert until both
+nested owner envelopes validate; only then can runtime activation precede Store
+reconstruction. A subprocess setup without a world allocation receives a
+baseline grant with no invented CPU IDs, allocation identity, affinity, or
+memory control. Ray receives only its verified logical CPU/memory quantities and
+accelerator IDs. Framework thread requests belong to a registered framework's
+runtime plan and must not exceed reported logical capacity; generic thread-limit
+environment controls are rejected.
+
 Module-level `submit(fn, /, *args, backend=..., ...)` and `run(...,
 backend=..., ...)` require a `BackendConfig`; they retain a hidden owner until
 the future's cleanup completes. One-off automatic cleanup uses the configured

@@ -27,7 +27,7 @@ class RuntimeState:
         mode = RuntimeMode.coerce(self.mode)
         if mode is RuntimeMode.INLINE and is_no_allocation(self.allocation):
             from .errors import RuntimeTransitionError
-            raise RuntimeTransitionError("INLINE runtime requires one exact current-process allocation")
+            raise RuntimeTransitionError("INLINE runtime requires one current-process backend grant")
         if mode in {RuntimeMode.NONE, RuntimeMode.ORCHESTRATOR} and not is_no_allocation(self.allocation):
             from .errors import RuntimeTransitionError
             raise RuntimeTransitionError(f"{mode.value} runtime cannot hold a workload allocation")

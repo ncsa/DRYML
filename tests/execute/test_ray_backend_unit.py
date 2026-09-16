@@ -14,6 +14,7 @@ from dryml.execute.admission import _admit_observed_logical
 from dryml.execute.models import EnvironmentCandidate, WorkerSetup
 from dryml.execute.ray import RayBackendConfig, RayFuture, _logical_world, _native_error, _native_options, _requested_amounts, _resource_amounts
 from dryml.environments.specs import PythonExecutableSpec
+from dryml.formats import canonical_json_load_bytes
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
 
 
@@ -183,10 +184,16 @@ def test_fake_ray_setup_sends_native_evidence_and_drains_output_before_readiness
         decode_exact_frame(encode_control(FrameState.SETUP_READY, correlation, {"ready": True}, header_limit=512), header_limit=512, payload_limit=512),
     ))
 
-    assert backend._send_setup(call, future, run, descriptor, _setup_conversation(correlation), reader, None, {"assigned_resources": {"CPU": 1.0}})
+    assert backend._send_setup(call, future, run, descriptor, _setup_conversation(correlation), reader, None, {
+        "assigned_resources": {"CPU": 1.0, "memory": 4096},
+        "accelerator_ids": {"GPU": ["0"]},
+    })
     sent = decode_exact_frame(socket.frames[0], header_limit=512, payload_limit=512)
     assert sent.state is FrameState.SETUP
     assert b'"kind":"ray"' in sent.payload
+    grant = canonical_json_load_bytes(sent.payload, max_depth=64, max_nodes=65_536, max_entries=65_536, max_string=512, max_int_bits=4096)["context"]["native_grant"]
+    assert grant["memory_bytes"] == 4096
+    assert grant["accelerator_ids"] == {"GPU": ("0",)}
     assert output.snapshot().stdout == "setup output"
 
 

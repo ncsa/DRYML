@@ -7,6 +7,7 @@ configuration belongs to :mod:`dryml.session`; workers, dispatch, and probes are
 outside this selective port.
 """
 
+from .activation import ExecutionGrant, RuntimeActivation, activation_scope
 from .allocation import NoAllocation, RuntimeAllocationView, is_no_allocation
 from .compatibility import RuntimeCompatibilityIssue, RuntimeCompatibilityReport, check_runtime_spec_satisfies_requirement
 from .context import RuntimeState, active_runtime, active_runtime_mode, publication
@@ -21,4 +22,4 @@ from .publication import EffectPlan, EffectRecord, FrameworkAdmission, Publicati
 from .specs import RuntimeContextSpec
 from dryml.worlds import LocalResourceInventory
 
-__all__ = ["CONTROL_CATEGORIES", "ControlPlan", "ControlStatus", "DeviceVisibilityError", "DeviceVisibilityPlan", "DeviceVisibilityPolicy", "ForkSafetyError", "FrameworkBootstrapPlan", "FrameworkCapabilities", "FrameworkImportPlan", "FrameworkImportSafetyError", "FrameworkPostResult", "FrameworkRegistration", "FrameworkRegistry", "LocalResourceInventory", "MaterializationAction", "NoAllocation", "PublicationBusyError", "PublicationError", "PublicationFailedError", "PublicationReentryError", "RuntimeAllocationView", "RuntimeCompatibilityIssue", "RuntimeCompatibilityReport", "RuntimeContextSpec", "RuntimeEnforcement", "RuntimeErrorBase", "RuntimeMode", "RuntimeSpecError", "RuntimeState", "RuntimeTransitionError", "active_runtime", "active_runtime_mode", "build_control_plan", "build_device_visibility_plan", "build_framework_bootstrap_plan", "check_runtime_spec_satisfies_requirement", "framework_registry", "is_no_allocation", "materialization_scope", "validate_framework_transition"]
+__all__ = ["CONTROL_CATEGORIES", "ControlPlan", "ControlStatus", "DeviceVisibilityError", "DeviceVisibilityPlan", "DeviceVisibilityPolicy", "ExecutionGrant", "ForkSafetyError", "FrameworkBootstrapPlan", "FrameworkCapabilities", "FrameworkImportPlan", "FrameworkImportSafetyError", "FrameworkPostResult", "FrameworkRegistration", "FrameworkRegistry", "LocalResourceInventory", "MaterializationAction", "NoAllocation", "PublicationBusyError", "PublicationError", "PublicationFailedError", "PublicationReentryError", "RuntimeActivation", "RuntimeAllocationView", "RuntimeCompatibilityIssue", "RuntimeCompatibilityReport", "RuntimeContextSpec", "RuntimeEnforcement", "RuntimeErrorBase", "RuntimeMode", "RuntimeSpecError", "RuntimeState", "RuntimeTransitionError", "activation_scope", "active_runtime", "active_runtime_mode", "build_control_plan", "build_device_visibility_plan", "build_framework_bootstrap_plan", "check_runtime_spec_satisfies_requirement", "framework_registry", "is_no_allocation", "materialization_scope", "validate_framework_transition"]
