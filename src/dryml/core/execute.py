@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import math
 import os
 import threading
 from collections.abc import Iterator, Mapping
@@ -20,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, TypeAlias
 
 from dryml.execute.models import WorkerSetupContext
-from dryml.formats import validate_envelope
+from dryml.formats import make_envelope, semantic_id, validate_envelope
 from dryml.runtime import (
     ExecutionGrant,
     RuntimeContextSpec,
@@ -29,7 +28,7 @@ from dryml.runtime import (
     active_runtime,
 )
 
-from .freeze import FrozenDict
+from dryml.formats import deep_freeze_json
 from .repo import Repo
 from .repo_definition import RepoDefinition
 from .session import config, get_config
@@ -94,35 +93,7 @@ def _freeze_storage_setup(value: Mapping[str, Any]) -> Mapping[str, Any]:
     Side Effects:
         None. This helper never opens a Store or renders caller values in errors.
     """
-    entries = 0
-
-    def freeze(item: Any, depth: int) -> Any:
-        nonlocal entries
-        entries += 1
-        if depth > _SETUP_BOUNDS["max_depth"] or entries > _SETUP_BOUNDS["max_entries"]:
-            raise ValueError("core storage setup exceeds bounded structure limits")
-        if item is None or type(item) in {bool, int}:
-            return item
-        if isinstance(item, float):
-            if not math.isfinite(item):
-                raise ValueError("core storage setup requires finite JSON numbers")
-            return item
-        if isinstance(item, str):
-            if len(item.encode("utf-8")) > 1_048_576:
-                raise ValueError("core storage setup string exceeds the bounded limit")
-            return item
-        if isinstance(item, Mapping):
-            frozen_items = []
-            for key, child in item.items():
-                if not isinstance(key, str):
-                    raise TypeError("core storage setup requires string mapping keys")
-                frozen_items.append((key, freeze(child, depth + 1)))
-            return FrozenDict(frozen_items)
-        if isinstance(item, (list, tuple)):
-            return tuple(freeze(child, depth + 1) for child in item)
-        raise TypeError("core storage setup requires JSON-compatible values")
-
-    frozen = freeze(value, 0)
+    frozen = deep_freeze_json(value, max_depth=64, max_nodes=65_536, max_entries=65_536)
     assert isinstance(frozen, Mapping)
     return frozen
 
@@ -132,8 +103,8 @@ class PreparedCoreCall:
     """Immutable strategy output retained between preparation and recovery.
 
     Args:
-        invocation: Strategy-owned bounded invocation bytes. U5 defines their
-            callable codec; U4 deliberately does not serialize live call values.
+        invocation: Strategy-owned bounded invocation bytes; it never contains
+            live core values.
         storage_setup: Detached JSON storage-role description for worker setup.
 
     Raises:
@@ -157,6 +128,46 @@ class PreparedCoreCall:
             raise TypeError("core storage setup must be a mapping")
         object.__setattr__(self, "storage_setup", _freeze_storage_setup(self.storage_setup))
 
+    def worker_setup(self, runtime: RuntimeContextSpec | None = None):
+        """Create the generic Execute setup required to invoke this prepared call.
+
+        Args:
+            runtime: Optional detached worker runtime specification. ``None`` uses
+                the dependency-light inline core runtime.
+
+        Returns:
+            A generic ``WorkerSetup`` which opens only the frozen Store table in
+            the receiving worker.
+
+        Raises:
+            ValueError: If this call did not retain a complete shared Store setup.
+
+        Side Effects:
+            None. Factory resolution and Store reconstruction remain worker-local.
+        """
+        from dryml.execute.models import WorkerSetup
+
+        spec = RuntimeContextSpec(RuntimeMode.INLINE) if runtime is None else runtime
+        if not isinstance(spec, RuntimeContextSpec):
+            raise TypeError("runtime must be a RuntimeContextSpec or None")
+        setup = self.storage_setup
+        if set(setup) != {"repo", "control_store"} or not isinstance(setup["repo"], Mapping):
+            raise ValueError("prepared core call has no complete shared Store setup")
+        payload = {
+            "runtime": spec.to_data(), "repo": setup["repo"], "role": "main",
+            "replica": 0, "control_store": setup["control_store"],
+        }
+        envelope = make_envelope(
+            schema=_SETUP_SCHEMA, kind=_SETUP_KIND, prefix=_SETUP_PREFIX,
+            payload=payload,
+            semantic_id=semantic_id(
+                _SETUP_PREFIX, _SETUP_SCHEMA, _SETUP_KIND, payload,
+                **_SETUP_BOUNDS,
+            ),
+            **_SETUP_BOUNDS,
+        )
+        return WorkerSetup(factory="dryml.core.execute:core_worker_setup", data=envelope)
+
 
 class MarshallingStrategy(Protocol):
     """Own storage eligibility and future core call/result transport mechanics."""
@@ -168,24 +179,24 @@ class MarshallingStrategy(Protocol):
             self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any],
             *, repo: Repo | None, control_store: DirStore | None,
             update_args: bool) -> PreparedCoreCall:
-        """Prepare one detached call; implemented by U5's callable codec."""
+        """Prepare one detached call through the strategy's bounded codec."""
 
     def invoke(self, invocation: bytes, *, repo: Repo | None, update_args: bool) -> bytes:
-        """Invoke strategy bytes after worker setup; implemented by U5."""
+        """Invoke strategy bytes after worker setup."""
 
     def recover(
             self, result: bytes, prepared: PreparedCoreCall, *, repo: Repo | None,
             args: tuple[Any, ...], kwargs: Mapping[str, Any],
             return_objects: bool, update_args: bool) -> Any:
-        """Recover strategy output; implemented by U5/U6."""
+        """Recover strategy output after worker completion."""
 
 
 class SharedDirStoreStrategy:
     """Initial marshalling strategy for existing directly shared DirStore authority.
 
-    The strategy accepts only a detached Repo definition containing directly
-    reopenable ``DirStore`` descriptors. Call/result codec methods intentionally
-    remain unavailable until U5 so this stage cannot pickle live core values.
+    The strategy freezes directly reopenable ``DirStore`` descriptors once for
+    each prepared call. Its result adapter remains unavailable until result
+    publication owns recovery of live core values.
     """
 
     def validate(self, *, repo: Repo | RepoDefinition | None, control_store: DirStore | None) -> None:
@@ -201,7 +212,7 @@ class SharedDirStoreStrategy:
 
         Side Effects:
             A live Repo is exported once only when callers invoke this public
-            method directly. U4 snapshot preparation supplies a definition so it
+            method directly. Snapshot preparation supplies a definition so it
             never takes a second export.
         """
         if repo is None:
@@ -216,17 +227,75 @@ class SharedDirStoreStrategy:
         if control_store is not None and type(control_store) is not DirStore:
             raise ValueError("SharedDirStoreStrategy control_store must be a direct DirStore")
 
-    def prepare(self, *args: Any, **kwargs: Any) -> PreparedCoreCall:
-        """Reject premature callable preparation until U5 owns the codec."""
-        raise NotImplementedError("SharedDirStoreStrategy callable preparation is implemented by U5")
+    def prepare(self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any], *,
+                repo: Repo | None, control_store: DirStore | None, update_args: bool,
+                selections: Mapping[Any, Any] | None = None,
+                _frozen_storage: "_FrozenSharedStorage | None" = None,
+                invocation_limit_bytes: int = 67_108_864) -> PreparedCoreCall:
+        """Encode one inert whole-call graph without saving or activating annotations.
 
-    def invoke(self, *args: Any, **kwargs: Any) -> bytes:
-        """Reject premature invocation until U5 owns the codec."""
-        raise NotImplementedError("SharedDirStoreStrategy invocation is implemented by U5")
+        ``selections`` is the optional explicit signature selection table. The
+        generic backend's resolved invocation budget must be forwarded through
+        ``invocation_limit_bytes``; no strategy-local one-megabyte limit applies.
+        """
+        del update_args
+        if repo is None:
+            raise ValueError("SharedDirStoreStrategy requires configured shared Store authority")
+        from .execute_codec import encode_invocation
+        frozen = _frozen_storage or _freeze_shared_storage(repo, control_store)
+        if frozen.source_repo is not repo:
+            raise ValueError("frozen core storage does not belong to the prepared Repo")
+        return PreparedCoreCall(
+            encode_invocation(
+                fn, args, kwargs, repo=repo, selections=selections,
+                store_table=frozen.source_stores, limit_bytes=invocation_limit_bytes,
+            ),
+            frozen.storage_setup,
+        )
+
+    def invoke(self, invocation: bytes, *, repo: Repo | None, update_args: bool,
+               invocation_limit_bytes: int = 67_108_864,
+               result_limit_bytes: int | None = None) -> bytes:
+        """Run one reconstructed worker-local call through its single signature boundary."""
+        del update_args
+        if repo is None:
+            raise ValueError("SharedDirStoreStrategy requires worker Repo authority")
+        from .execute_codec import invoke_invocation
+        from dryml.managed import ManagedConfig
+        try:
+            control_store = current_context().control_store
+        except RuntimeError:
+            control_store = None
+        return invoke_invocation(
+            invocation, repo=repo, invocation_limit_bytes=invocation_limit_bytes,
+            result_limit_bytes=result_limit_bytes or invocation_limit_bytes,
+            managed_config=ManagedConfig(state_repo=repo, control_store=control_store),
+        )
 
     def recover(self, *args: Any, **kwargs: Any) -> Any:
-        """Reject premature recovery until U5/U6 own result adaptation."""
-        raise NotImplementedError("SharedDirStoreStrategy recovery is implemented by U5/U6")
+        """Reject recovery until result adaptation owns publication and refresh."""
+        raise NotImplementedError("SharedDirStoreStrategy recovery is not available before result adaptation")
+
+
+def invoke_prepared_call(invocation: bytes) -> Any:
+    """Invoke prepared core bytes inside an already-installed generic worker setup.
+
+    Args:
+        invocation: One bounded :class:`PreparedCoreCall` invocation byte string.
+
+    Returns:
+        The decoded ordinary worker result.
+
+    Raises:
+        RuntimeError: If no active core worker context owns a reconstructed Repo.
+
+    Side Effects:
+        Invokes the transported workload once through that worker's core boundary.
+    """
+    import dill
+
+    context = current_context()
+    return dill.loads(SharedDirStoreStrategy().invoke(invocation, repo=context.repo, update_args=False))
 
 
 def _validate_strategy_identity(value: object) -> type[SharedDirStoreStrategy]:
@@ -404,12 +473,38 @@ def _shared_storage_setup(
     return {"repo": data, "control_store": control_descriptor}
 
 
+@dataclass(frozen=True, slots=True)
+class _FrozenSharedStorage:
+    """One submission's detached Store table and its originating handle identities."""
+
+    source_repo: Repo
+    source_stores: tuple[DirStore, ...]
+    definition: RepoDefinition
+    storage_setup: Mapping[str, Any]
+
+
+def _freeze_shared_storage(repo: Repo, control_store: DirStore | None) -> _FrozenSharedStorage:
+    """Export one Repo once and retain the exact table used for subsequent pins.
+
+    The handle tuple is intentionally private and exists only while coordinator
+    preparation encodes selected Store indexes. Worker setup receives the detached
+    definition and never observes the caller's handles.
+    """
+    definition = repo.to_definition()
+    setup = _freeze_storage_setup(_shared_storage_setup(definition, control_store))
+    source_stores = tuple(repo.stores)
+    if not all(type(store) is DirStore for store in source_stores):
+        raise ValueError("SharedDirStoreStrategy requires only configured DirStores")
+    return _FrozenSharedStorage(repo, source_stores, definition, setup)
+
+
 @dataclass(slots=True)
 class _PreparedSharedStorage:
     """Submission-owned recovery Repo plus detached worker storage role data."""
 
     storage_setup: Mapping[str, Any]
     recovery_repo: Repo
+    frozen_storage: _FrozenSharedStorage | None
     runtime: RuntimeContextSpec | None
     cache: CacheMode
     marshalling: type[SharedDirStoreStrategy]
@@ -458,18 +553,26 @@ def prepare_shared_storage(
     if selected is None:
         strategy.validate(repo=None, control_store=effective.control_store)
     if isinstance(selected, Repo):
-        definition = selected.to_definition()
+        frozen = _freeze_shared_storage(selected, effective.control_store)
+        definition = frozen.definition
     elif isinstance(selected, RepoDefinition):
         definition = selected
     else:
         raise TypeError("core repo must resolve to Repo, RepoDefinition, or None")
     # Validation consumes the detached definition, preserving the one-export cut.
     strategy.validate(repo=definition, control_store=effective.control_store)
-    setup = _freeze_storage_setup(_shared_storage_setup(definition, effective.control_store))
+    if not isinstance(selected, Repo):
+        # A detached definition has no live handles to pin. Build only its worker
+        # table; public callable preparation still requires a live source Repo.
+        setup = _freeze_storage_setup(_shared_storage_setup(definition, effective.control_store))
+        frozen = None
+    else:
+        setup = frozen.storage_setup
     recovery_repo = Repo.from_definition(definition)
     return _PreparedSharedStorage(
         setup,
         recovery_repo,
+        frozen,
         effective.runtime,
         effective.cache,
         effective.marshalling,

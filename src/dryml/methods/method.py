@@ -175,6 +175,7 @@ class Method(Object):
         owner: type,
         args: tuple[object, ...],
         kwargs: dict[str, object],
+        on_raw_result=None,
     ) -> object:
         """Route one ordinary call to the direct target captured by ``owner``.
 
@@ -185,7 +186,7 @@ class Method(Object):
 
         captured = owner.__dict__.get(_DIRECT_CALL_ATTR)
         if type(captured) is _CapturedDirectCall and direct_invocation_active(receiver, captured.descriptor):
-            return invoke_descriptor(
+            result = invoke_descriptor(
                 captured.descriptor,
                 receiver,
                 type(receiver),
@@ -193,7 +194,22 @@ class Method(Object):
                 kwargs,
                 name="__call__",
             )
-        return Method._alternative_call(receiver, args, kwargs)
+            return on_raw_result(result) if on_raw_result is not None else result
+        return Method._alternative_call(receiver, args, kwargs, on_raw_result=on_raw_result)
+
+    __dryml_execute_owner__ = "method"
+
+    def __dryml_execute_invoke__(self, args, kwargs, *, repo, on_raw_result):
+        """Run one worker-local Method boundary and expose its raw selected result.
+
+        The method remains responsible for selection, argument delivery, and final
+        return normalization. Execute supplies only the worker Repo and result
+        interception callback.
+        """
+        from dryml.core.signatures import signature_context
+
+        with signature_context(repo=repo, reuse_live="never"):
+            return self._call_gateway(self, type(self), tuple(args), dict(kwargs), on_raw_result)
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         """Run the central gateway for subclasses without a captured direct call.
@@ -490,6 +506,8 @@ class Method(Object):
         receiver: object,
         args: tuple[object, ...],
         kwargs: dict[str, object],
+        *,
+        on_raw_result=None,
     ) -> object:
         """Run the eager, learning, or cached alternative-backed call gateway."""
 
@@ -512,7 +530,7 @@ class Method(Object):
                 observed = replace(observed, batch_mode=expected.batch_mode)
             if observed != expected:
                 raise PreparedCallMismatchError(expected, observed)
-            return cached.invoke(args, kwargs)
+            return cached.invoke(args, kwargs, on_raw_result=on_raw_result)
         try:
             backend, batch_mode = runtime_facts(args, kwargs)
         except ValueError as error:
@@ -551,9 +569,12 @@ class Method(Object):
                 state.mode = "cached"
                 state.signature = signature
                 state.cached = adapter
-            return adapter.invoke_prepared(call_args, call_kwargs)
+            return adapter.invoke_prepared(call_args, call_kwargs, on_raw_result=on_raw_result)
         implementation = receiver._select(backend, effective_batch)
-        return implementation(*args, **kwargs)
+        return (
+            implementation.invoke_with_raw_result(args, kwargs, on_raw_result)
+            if on_raw_result is not None else implementation(*args, **kwargs)
+        )
 
     def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
         """Infer a normalized output specification without executing an implementation.

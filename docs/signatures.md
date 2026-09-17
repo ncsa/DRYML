@@ -133,6 +133,21 @@ and normalize returns after the terminal-interruption guard and before final
 publication. An unannotated managed structural return now materializes; annotate a
 top-level structural result with `Ref[...]` when it must remain data.
 
+Core Execute reconstructs a new worker-local plan rather than transporting a
+`SignaturePlan` or `BoundaryPlan`. Its function, Method, and managed integrations
+use their owners' narrow raw-result seam: the owner delivers arguments and invokes
+once, Execute may publish a live result, and that same owner then performs its one
+declared return normalization. These seams do not make contexts, prepared plans,
+or caller-owned Repo/Store handles portable.
+
+Core Execute's call description structurally lowers live Objects to their selected
+`StateRef` or CDef authority and uses a single receiving Repo boundary for Mat
+delivery. It recursively walks closure globals, defaults, annotations, instance
+attributes, and `__slots__`; live Repo/Store resources are rejected rather than
+being carried by a pickle fallback. Selected declaration Stores are represented by
+the frozen execution Store table, never filesystem paths. This transport remains
+internal and bounded; it is not a general pickle or RPC format.
+
 ## Migration
 
 | Retired spelling | Replacement or rationale |

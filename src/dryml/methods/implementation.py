@@ -240,13 +240,15 @@ class SelectedDescriptorAdapter:
 
         return self.plan._prepare_ambient_args(args, kwargs).deliver_args()
 
-    def invoke(self, args: tuple[object, ...], kwargs: dict[str, object]) -> object:
+    def invoke(self, args: tuple[object, ...], kwargs: dict[str, object], *,
+               on_raw_result: Callable[[object], object] | None = None) -> object:
         """Normalize inputs, invoke the selected target, and normalize its return."""
 
         call_args, call_kwargs = self.prepare(args, kwargs)
-        return self.invoke_prepared(call_args, call_kwargs)
+        return self.invoke_prepared(call_args, call_kwargs, on_raw_result=on_raw_result)
 
-    def invoke_prepared(self, args: tuple[object, ...], kwargs: dict[str, object]) -> object:
+    def invoke_prepared(self, args: tuple[object, ...], kwargs: dict[str, object], *,
+                        on_raw_result: Callable[[object], object] | None = None) -> object:
         """Invoke prepared inputs and normalize the result with ambient authority.
 
         Returns:
@@ -284,6 +286,8 @@ class SelectedDescriptorAdapter:
             )
         else:
             raise ImplementationDeclarationError(f"Method implementation {self.name!r} is not bindable.")
+        if on_raw_result is not None:
+            result = on_raw_result(result)
         return self.plan._prepare_ambient_return(result).deliver_return()
 
 
@@ -367,6 +371,20 @@ class MethodImplementation:
             if not valid:
                 raise ImplementationSelectionError("conflict")
         return self.selected_adapter().invoke(args, kwargs)
+
+    def invoke_with_raw_result(
+        self, args: tuple[object, ...], kwargs: dict[str, object],
+        on_raw_result: Callable[[object], object],
+    ) -> object:
+        """Invoke this selected implementation once and intercept its raw result.
+
+        Execute uses this owner seam after Method selection. It preserves the
+        selected adapter's single argument and return boundaries.
+        """
+        if self._input_spec is not None:
+            if not args or not satisfies(self._input_spec, runtime_node_for_constraint(args[0], self._input_spec)):
+                raise ImplementationSelectionError("conflict")
+        return self.selected_adapter().invoke(args, kwargs, on_raw_result=on_raw_result)
 
 
 __all__ = ["MethodImplementation"]

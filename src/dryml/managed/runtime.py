@@ -29,7 +29,8 @@ from .storage import (
 )
 
 
-def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwargs: dict[str, object]) -> object:
+def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwargs: dict[str, object],
+           *, on_raw_result=None) -> object:
     """Execute one bound managed method synchronously through selected authority.
 
     Args:
@@ -74,14 +75,14 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
         with materialization_admission(operation="managed invocation"):
             return _invoke_selected(
                 descriptor, instance, arguments_boundary, arguments,
-                operation_id, stores, options,
+                operation_id, stores, options, on_raw_result=on_raw_result,
             )
     finally:
         stores.close()
 
 
 def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
-                     operation_id, stores, options):
+                     operation_id, stores, options, *, on_raw_result=None):
     """Execute one already-admitted managed lifecycle against selected Stores."""
 
     state_repo = stores.state_repo
@@ -138,6 +139,8 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
             try:
                 result = descriptor._target(instance, *call_args, managed=context, **call_kwargs)
                 context._raise_if_interrupted()
+                if on_raw_result is not None:
+                    result = on_raw_result(result)
                 plan = descriptor.signature_plan()
                 if plan.return_slot is not None:
                     return_boundary = plan.prepare_return(result, repo=state_repo)

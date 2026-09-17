@@ -645,6 +645,7 @@ class BoundaryPlan:
         return self.controls.selections
 
     def deliver_args(self, *, extra_mat_roots: tuple[Any, ...] = (),
+                     on_extra_materialized: Callable[[tuple[Any, ...]], None] | None = None,
                      reservation: Any = None,
                      reserved_live: Mapping[str, Any] | None = None) -> tuple[tuple[Any, ...], dict[str, Any]]:
         """Deliver normalized arguments once through the original signature shape.
@@ -656,6 +657,10 @@ class BoundaryPlan:
             extra_mat_roots: Additional selected materializing authorities that
                 must share this boundary's aggregate preflight but are not
                 delivered to the target.
+            on_extra_materialized: Optional owner callback receiving the delivered
+                extra roots after the same aggregate admission as arguments. It is
+                invoked before target invocation and is intended for a receiver or
+                capture that must be installed after materialization.
             reservation: Optional active Repo state-graph reservation retained by
                 a higher-level lifecycle owner.
             reserved_live: Optional exact-reference digest to live-object mapping
@@ -675,6 +680,7 @@ class BoundaryPlan:
         self._consume("args")
         values = self._deliver_materializing_values(
             dict(self.authority.items()), extra_mat_roots=extra_mat_roots,
+            on_extra_materialized=on_extra_materialized,
             reservation=reservation, reserved_live=reserved_live,
         )
         args, kwargs = [], {}
@@ -720,15 +726,18 @@ class BoundaryPlan:
         )["return"]
 
     def _deliver_materializing_values(self, values: dict[str, Any], *,
-                                      extra_mat_roots: tuple[Any, ...] = (),
-                                      reservation: Any = None,
-                                      reserved_live: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                                       extra_mat_roots: tuple[Any, ...] = (),
+                                       on_extra_materialized: Callable[[tuple[Any, ...]], None] | None = None,
+                                       reservation: Any = None,
+                                       reserved_live: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Delegate every Mat slot to one Repo-owned aggregate admission.
 
         Args:
             values: Selected argument or return values keyed by signature slot.
             extra_mat_roots: Selected materializing roots preflighted but not
                 delivered through this boundary.
+            on_extra_materialized: Optional callback receiving realized extra
+                roots before the caller invokes its target.
             reservation: Optional active state-graph reservation for reuse.
             reserved_live: Optional exact-reference digest to retained live-object
                 mapping used only with ``reservation``.
@@ -776,6 +785,8 @@ class BoundaryPlan:
 
         roots = tuple(values[name] for name in names) + tuple(extra_mat_roots)
         if not any(requires_repo(value, set()) for value in roots):
+            if on_extra_materialized is not None:
+                on_extra_materialized(tuple(extra_mat_roots))
             return values
         if self.controls.repo is None:
             raise SignatureError("materializing delivery requires a repo")
@@ -815,6 +826,8 @@ class BoundaryPlan:
         if len(realized) != len(roots):
             raise SignatureError("repo aggregate materialization returned an invalid result")
         values.update(zip(names, realized))
+        if on_extra_materialized is not None:
+            on_extra_materialized(tuple(realized[len(names):]))
         return values
 
     def _consume(self, expected: str) -> None:
@@ -1498,10 +1511,57 @@ def function(target: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(target)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        call_args, call_kwargs = plan._prepare_ambient_args(args, kwargs).deliver_args()
-        result = target(*call_args, **call_kwargs)
-        return plan._prepare_ambient_return(result).deliver_return()
+        return _invoke_function_with_raw_result(
+            plan, target, args, kwargs, ambient=True,
+        )
 
     wrapped.__signature__ = plan.signature
     wrapped.__dryml_signature_plan__ = plan
+    # Execute transports the original callable and asks this owner to establish
+    # exactly one local boundary; the compiled caller plan never crosses workers.
+    wrapped.__dryml_execute_raw_target__ = target
     return wrapped
+
+
+def _invoke_function_with_raw_result(
+    plan: SignaturePlan,
+    target: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    *,
+    repo: Any = None,
+    cache: Any = None,
+    reuse_live: Any = None,
+    selections: Mapping[Any, Any] | None = None,
+    ambient: bool = False,
+    on_raw_result: Callable[[Any], Any] | None = None,
+    extra_mat_roots: tuple[Any, ...] = (),
+    on_extra_materialized: Callable[[tuple[Any, ...]], None] | None = None,
+) -> Any:
+    """Invoke one function owner once and expose its live result before conversion.
+
+    This narrow integration seam is intentionally module-private: callers must
+    reconstruct a worker-local plan and supply explicit controls. ``on_raw_result``
+    is reserved for Execute's publication owner and may replace the value that the
+    single normal return boundary receives.
+    """
+    boundary = (
+        plan._prepare_ambient_args(args, kwargs)
+        if ambient else plan.prepare_args(
+            args, kwargs, repo=repo, cache=cache, reuse_live=reuse_live,
+            selections=selections,
+        )
+    )
+    call_args, call_kwargs = boundary.deliver_args(
+        extra_mat_roots=extra_mat_roots,
+        on_extra_materialized=on_extra_materialized,
+    )
+    result = target(*call_args, **call_kwargs)
+    if on_raw_result is not None:
+        result = on_raw_result(result)
+    return (
+        plan._prepare_ambient_return(result).deliver_return()
+        if ambient else plan.prepare_return(
+            result, repo=repo, cache=cache, reuse_live=reuse_live,
+        ).deliver_return()
+    )

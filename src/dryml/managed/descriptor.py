@@ -242,6 +242,28 @@ class _BoundOperation:
 
         return invoke(self._descriptor, self._instance, args, managed, kwargs)
 
+    __dryml_execute_owner__ = "managed"
+
+    def __dryml_execute_invoke__(self, args, kwargs, *, repo, on_raw_result, managed_config=None):
+        """Run the managed lifecycle once using the worker's installed state Repo.
+
+        Execute does not introduce a second state Store. The managed owner still
+        performs its own admission, checkpoint, final-state publication, cleanup,
+        and one return-normalization boundary.
+        """
+        from .runtime import invoke
+
+        if managed_config is None:
+            managed_config = ManagedConfig(state_repo=repo)
+        if type(managed_config) is not ManagedConfig:
+            raise ManagedConfigError(message="managed execution requires a ManagedConfig")
+
+        return invoke(
+            self._descriptor, self._instance, tuple(args),
+            managed_config,
+            dict(kwargs), on_raw_result=on_raw_result,
+        )
+
     def status(self, *, state_repo: object = None, control_store: object = None) -> object:
         """Read only the selected lifecycle authority without invoking workload.
 
