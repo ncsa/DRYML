@@ -190,7 +190,7 @@ def test_cleanup_is_independent_retryable_and_keeps_known_result():
 
 
 def test_worker_cleanup_evidence_keeps_successful_result_but_blocks_reconciliation():
-    """An unobserved worker teardown never becomes a later cleanup success."""
+    """Unobserved worker teardown still releases independent local resources."""
     future = ConcreteFuture("worker-cleanup", termination_timeout=0.1)
     attempts: list[float] = []
     future._set_cleanup_reconciler(lambda timeout: attempts.append(timeout))
@@ -204,7 +204,7 @@ def test_worker_cleanup_evidence_keeps_successful_result_but_blocks_reconciliati
             future.cleanup()
         assert failure.value.execution is future
         assert future.snapshot().cleanup_state == "incomplete"
-    assert attempts == []
+    assert attempts == [0.1, 0.1]
 
 
 def test_cleanup_start_failure_is_retryable_and_diagnostics_use_prepared_limits(monkeypatch):
@@ -259,7 +259,7 @@ def test_cleanup_timeout_keeps_reconciliation_pending_until_the_hook_really_succ
 
 
 def test_callback_delivery_retries_a_thread_start_failure_without_rewriting_outcome(monkeypatch):
-    """A detached-delivery launch failure cannot escape terminal publication or lose callbacks."""
+    """A detached-delivery launch failure retries at the next safe consumer seam."""
     future = ConcreteFuture("callback-start")
     delivered = Event()
     late = Event()
@@ -277,10 +277,9 @@ def test_callback_delivery_retries_a_thread_start_failure_without_rewriting_outc
     monkeypatch.setattr("dryml.execute.future.Thread.start", fail_twice)
     assert future._publish_result(2)
     assert future.result() == 2
-    assert not delivered.is_set()
+    assert delivered.wait(1)
     monkeypatch.setattr("dryml.execute.future.Thread.start", original_start)
     future.add_done_callback(lambda value: late.set())
-    assert delivered.wait(1)
     assert late.wait(1)
 
 

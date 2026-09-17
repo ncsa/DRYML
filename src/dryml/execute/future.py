@@ -169,6 +169,10 @@ class ExecutionFuture(Generic[T]):
             BaseException: The stored execution failure or uncertainty.
         """
         outcome = self._wait_outcome(timeout)
+        # A prior detached callback-thread launch can fail transiently. Reading a
+        # terminal Future is a safe coordinator consumer seam to retry retained
+        # callbacks without running any under the Future lock.
+        self._dispatch_callbacks(())
         if self._outcome_kind in {"error", "cancelled"}:
             assert isinstance(outcome, BaseException)
             raise outcome
@@ -185,6 +189,7 @@ class ExecutionFuture(Generic[T]):
             CancelledError: If cancellation was confirmed by the backend.
         """
         outcome = self._wait_outcome(timeout)
+        self._dispatch_callbacks(())
         if self._outcome_kind == "cancelled":
             raise outcome
         return outcome if self._outcome_kind == "error" else None
@@ -272,9 +277,6 @@ class ExecutionFuture(Generic[T]):
         with self._condition:
             if self._outcome is _MISSING:
                 raise RuntimeError("cleanup requires a terminal execution outcome")
-            if self._worker_cleanup_unobserved:
-                self._cleanup_state = "incomplete"
-                raise self._cleanup_error("worker setup cleanup could not be observed")
             if self._cleanup_state == "complete":
                 return
             if self._cleanup_state != "reconciling":
@@ -587,7 +589,10 @@ class ExecutionFuture(Generic[T]):
                 self._condition.notify_all()
         else:
             with self._condition:
-                self._cleanup_state = "complete"
+                # Remote setup teardown can remain unobserved while independent
+                # coordinator resources (spools, charges, and one-off owners) are
+                # still safely released by the reconciler.
+                self._cleanup_state = "incomplete" if self._worker_cleanup_unobserved else "complete"
                 self._condition.notify_all()
 
     def _append_cleanup_issue_locked(self, failure: BaseException) -> None:

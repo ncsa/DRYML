@@ -112,6 +112,48 @@ an explicit direct-directory descriptor. Snapshot cleanup uses `flush=False` and
 never closes caller-borrowed handles. Callable payload preparation and generic
 submission proceed through the prepared call codec.
 
+### Core Executor Facade
+
+`dryml.core.execute.Executor(config, core=None)` owns one generic `Executor`
+and exposes core-aware `submit`, `run`, `with_options`, `discover`, `resources`,
+`start`, and `close` methods. Its configuration is the same explicit public
+`BackendConfig` used by generic Execute, so configured deadlines, framing limits,
+output limits, polling, and cleanup budgets are forwarded to the worker setup,
+invocation, outcome, and recovery path without a core-local override.
+
+`Executor.submit(fn, /, *args, kwargs=None, core=None, environment=None,
+world=None, execution_timeout="inherit", stream_output=None,
+done_callbacks=(), output=None)` returns `CoreExecutionFuture`, not the generic
+byte Future. Per-call core options are resolved over executor options and the
+submission caller's session once before callable preparation; the Store table,
+runtime, cache policy, result materialization decision, and caller refresh
+targets cannot be changed by later caller/session mutations. `"auto"` result
+materialization is decided in that submission caller, not the adaptation thread.
+
+`CoreExecutionFuture.backend_future` is borrowed advanced access to the public
+generic `ExecutionFuture[bytes]`; its result is internal outcome bytes. Use the
+core facade's `result`, `exception`, awaiting, callbacks, `snapshot`, and
+`cleanup` methods for the recovered result. One public generic completion callback
+per submission performs recovery and requested argument refresh exactly once.
+Concurrent waiters, callbacks, and awaiters join that adaptation. Caller wait
+timeouts do not cancel backend work or recovery. Core callbacks receive the core
+facade after adaptation and their exceptions cannot change its terminal result.
+
+`CoreExecutionSnapshot` contains the nested generic snapshot, core adaptation
+state/phase, detached `CoreOutcomeEvidence` and refresh ledger, plus independent
+cleanup state/issues. `cleanup()` rejects before core terminality, then joins
+generic cleanup and closes only the facade's reconstructed recovery Repo with
+`flush=False`. A later cleanup failure remains observable and raises
+`CleanupError`, but does not rewrite a successful recovered result or close a
+caller-borrowed Repo/Store.
+
+`Executor.with_options(...)` returns `ExecutorView`, which binds core and generic
+controls without a second backend. Every keyword passed to a view's `run` or
+`submit` is workload data, including names that collide with executor controls.
+Module-level `dryml.core.execute.submit(..., backend=...)` and `run(...,
+backend=...)` require an explicit backend and use the generic bounded one-off
+owner; their core recovery resources remain independently owned by the facade.
+
 ### Core Results
 
 `SharedDirStoreStrategy` transports one bounded tagged outcome rather than a
@@ -163,7 +205,8 @@ Its `WorkerSetup.data` is exactly one self-validating envelope:
     "repo": "dryml-repo-definition envelope",
     "role": "main",
     "replica": 0,
-    "control_store": null
+    "control_store": null,
+    "cache": "weak"
   },
   "id": "core_setup-v1.1-<sha256>"
 }

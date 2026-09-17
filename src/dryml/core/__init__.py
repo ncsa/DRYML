@@ -112,6 +112,19 @@ _EXPORT_MODULES = {
     "QueryPathError": "dryml.core.query",
     "SetMember": "dryml.core.query",
     "StateRefResultSet": "dryml.core.query",
+    "CoreExecutionError": "dryml.core.execute",
+    "CoreExecutionFuture": "dryml.core.execute",
+    "CoreExecutionSnapshot": "dryml.core.execute",
+    "CoreOptions": "dryml.core.execute",
+    "CoreOutcomeEvidence": "dryml.core.execute",
+    "CorePublicationEvidence": "dryml.core.execute",
+    "CoreRefreshEvidence": "dryml.core.execute",
+    "Executor": "dryml.core.execute",
+    "ExecutorView": "dryml.core.execute",
+    "PreparedCoreCall": "dryml.core.execute",
+    "SharedDirStoreStrategy": "dryml.core.execute",
+    "run": "dryml.core.execute",
+    "submit": "dryml.core.execute",
 }
 
 
@@ -245,6 +258,19 @@ __all__ = [
     "QueryPathError",
     "SetMember",
     "StateRefResultSet",
+    "CoreExecutionError",
+    "CoreExecutionFuture",
+    "CoreExecutionSnapshot",
+    "CoreOptions",
+    "CoreOutcomeEvidence",
+    "CorePublicationEvidence",
+    "CoreRefreshEvidence",
+    "Executor",
+    "ExecutorView",
+    "PreparedCoreCall",
+    "SharedDirStoreStrategy",
+    "run",
+    "submit",
 ]
 
 

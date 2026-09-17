@@ -9,18 +9,24 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import math
 import os
 import threading
+import time
 from uuid import uuid4
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Condition, RLock, Thread
 from typing import Any, Callable, Literal, Protocol, TypeAlias
 
-from dryml.execute.models import WorkerSetupContext
-from dryml.execute.errors import ExecutionError
+from dryml.execute import BackendConfig, ExecutionFuture, ExecutionOutput
+from dryml.execute import Executor as _GenericExecutor
+from dryml.execute import submit as _generic_submit
+from dryml.execute.errors import CleanupError, ExecutionError
+from dryml.execute.models import ExecutionIssue, ExecutionSnapshot, WorkerSetupContext
 from dryml.formats import make_envelope, semantic_id, validate_envelope
 from dryml.runtime import (
     ExecutionGrant,
@@ -72,11 +78,13 @@ _SETUP_SCHEMA = "dryml.core.execute.v1.1"
 _SETUP_KIND = "worker_setup"
 _SETUP_PREFIX = "core_setup"
 _SETUP_FIELDS = frozenset({"runtime", "repo", "role", "replica", "control_store"})
+_SETUP_FIELDS_WITH_CACHE = _SETUP_FIELDS | {"cache"}
 _SETUP_BOUNDS = {"max_depth": 64, "max_nodes": 65_536, "max_entries": 65_536}
 Inherit: TypeAlias = Literal["inherit"]
 CacheMode: TypeAlias = Literal["none", "weak", "strong"]
 ReturnObjects: TypeAlias = bool | Literal["auto"]
 _INHERIT = "inherit"
+_MISSING = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,12 +297,13 @@ class PreparedCoreCall:
         frozen_targets = deep_freeze_json({"targets": list(self.update_targets)}, max_depth=64, max_nodes=65_536, max_entries=65_536)
         object.__setattr__(self, "update_targets", tuple(frozen_targets["targets"]))
 
-    def worker_setup(self, runtime: RuntimeContextSpec | None = None):
+    def worker_setup(self, runtime: RuntimeContextSpec | None = None, *, cache: CacheMode = "weak"):
         """Create the generic Execute setup required to invoke this prepared call.
 
         Args:
             runtime: Optional detached worker runtime specification. ``None`` uses
                 the dependency-light inline core runtime.
+            cache: Detached core session cache policy installed before invocation.
 
         Returns:
             A generic ``WorkerSetup`` which opens only the frozen Store table in
@@ -311,12 +320,14 @@ class PreparedCoreCall:
         spec = RuntimeContextSpec(RuntimeMode.INLINE) if runtime is None else runtime
         if not isinstance(spec, RuntimeContextSpec):
             raise TypeError("runtime must be a RuntimeContextSpec or None")
+        if cache not in {"none", "weak", "strong"}:
+            raise ValueError("cache must be 'none', 'weak', or 'strong'")
         setup = self.storage_setup
         if set(setup) != {"repo", "control_store"} or not isinstance(setup["repo"], Mapping):
             raise ValueError("prepared core call has no complete shared Store setup")
         payload = {
             "runtime": spec.to_data(), "repo": setup["repo"], "role": "main",
-            "replica": 0, "control_store": setup["control_store"],
+            "replica": 0, "control_store": setup["control_store"], "cache": cache,
         }
         envelope = make_envelope(
             schema=_SETUP_SCHEMA, kind=_SETUP_KIND, prefix=_SETUP_PREFIX,
@@ -452,7 +463,9 @@ class SharedDirStoreStrategy:
     def recover(
             self, result: bytes, prepared: PreparedCoreCall, *, repo: Repo | None,
             args: tuple[Any, ...], kwargs: Mapping[str, Any], return_objects: bool,
-            update_args: bool, _recovery: _CoreRecovery | None = None) -> Any:
+            update_args: bool, _recovery: _CoreRecovery | None = None,
+            _decoded: CoreAdaptationOutcome | None = None,
+            result_limit_bytes: int = 67_108_864) -> Any:
         """Recover one tagged outcome and optionally restore original arguments.
 
         Args:
@@ -464,6 +477,8 @@ class SharedDirStoreStrategy:
             return_objects: Whether reference results should be materialized locally.
             update_args: Whether published update StateRefs should be restored into
                 the original live argument instances.
+            result_limit_bytes: Frozen generic transport budget used to validate
+                this delivered outcome.
 
         Returns:
             The decoded result, or its requested fresh local materialization.
@@ -480,7 +495,9 @@ class SharedDirStoreStrategy:
         """
         if repo is None:
             raise ValueError("SharedDirStoreStrategy requires caller Repo authority")
-        decoded = decode_core_outcome(result, repo=repo)
+        decoded = _decoded or decode_core_outcome(
+            result, repo=repo, result_limit_bytes=result_limit_bytes,
+        )
         outcome = decoded.value
         if not outcome["success"]:
             raise CoreExecutionError(
@@ -545,12 +562,15 @@ class SharedDirStoreStrategy:
         return recovered
 
 
-def decode_core_outcome(result: bytes, *, repo: Repo) -> CoreAdaptationOutcome:
+def decode_core_outcome(
+        result: bytes, *, repo: Repo, result_limit_bytes: int = 67_108_864,
+) -> CoreAdaptationOutcome:
     """Decode a tagged outcome into a value plus detached exact evidence.
 
-    Args:
-        result: Bounded bytes returned by :class:`SharedDirStoreStrategy`.
-        repo: Caller-owned Repo used only to validate the closed result graph.
+        Args:
+            result: Bounded bytes returned by :class:`SharedDirStoreStrategy`.
+            repo: Caller-owned Repo used only to validate the closed result graph.
+            result_limit_bytes: Frozen generic outcome byte budget.
 
     Returns:
         A future-retainable value/evidence pair. Failed outcomes retain ``value`` as
@@ -566,7 +586,7 @@ def decode_core_outcome(result: bytes, *, repo: Repo) -> CoreAdaptationOutcome:
     """
     from .execute_codec import CoreCallCodecError, decode_outcome
 
-    outcome = decode_outcome(result, repo=repo)
+    outcome = decode_outcome(result, repo=repo, limit_bytes=result_limit_bytes)
     publications = []
     publication_statuses = {"completed", "failed", "uncertain", "unattempted"}
     for item in outcome["publications"]:
@@ -726,6 +746,36 @@ def invoke_prepared_call(invocation: bytes) -> Any:
     if not outcome["success"]:
         raise CoreCallCodecError(f"core execution worker outcome failed: {outcome['reason']}")
     return outcome["result"]
+
+
+def _invoke_prepared_outcome(
+        invocation: bytes, invocation_limit_bytes: int, result_limit_bytes: int,
+        update_args: bool,
+) -> bytes:
+    """Return one opaque core outcome from an already configured worker.
+
+    Generic Execute transports only this byte result.  Decoding and recovery stay
+    in the submission coordinator, where the frozen caller-side Store snapshot is
+    available and no live core value crosses the generic result boundary.
+
+    Args:
+        invocation: Prepared strategy invocation bytes.
+        invocation_limit_bytes: Captured public backend invocation bound.
+        result_limit_bytes: Captured public backend outcome bound.
+        update_args: Captured caller-refresh policy.
+
+    Returns:
+        The strategy-owned tagged outcome bytes.
+
+    Raises:
+        RuntimeError: If called outside the core worker setup scope.
+    """
+    context = current_context()
+    return SharedDirStoreStrategy().invoke(
+        invocation, repo=context.repo, update_args=update_args,
+        invocation_limit_bytes=invocation_limit_bytes,
+        result_limit_bytes=result_limit_bytes,
+    )
 
 
 def _validate_strategy_identity(value: object) -> type[SharedDirStoreStrategy]:
@@ -954,7 +1004,9 @@ class _PreparedSharedStorage:
 
 
 def prepare_shared_storage(
-        core: CoreOptions | None = None, *, executor: CoreOptions | None = None) -> _PreparedSharedStorage:
+        core: CoreOptions | None = None, *, executor: CoreOptions | None = None,
+        _effective: _EffectiveCoreOptions | None = None,
+) -> _PreparedSharedStorage:
     """Freeze eligible shared storage and open an owned recovery reconstruction.
 
     Args:
@@ -977,7 +1029,7 @@ def prepare_shared_storage(
         the retained recovery Repo. It never saves, creates, installs, or closes
         caller-owned resources.
     """
-    effective = resolve_core_options(core, executor=executor)
+    effective = resolve_core_options(core, executor=executor) if _effective is None else _effective
     strategy = effective.marshalling()
     selected = effective.repo
     if selected is None:
@@ -1069,7 +1121,7 @@ def worker_context(value: ExecutionContext) -> Iterator[ExecutionContext]:
         _current_context.reset(token)
 
 
-def _decode_setup(data: Mapping[str, Any]) -> tuple[RuntimeContextSpec, RepoDefinition, str, int, Mapping[str, Any] | None]:
+def _decode_setup(data: Mapping[str, Any]) -> tuple[RuntimeContextSpec, RepoDefinition, str, int, Mapping[str, Any] | None, CacheMode]:
     """Decode one inert, closed core worker-setup envelope before activation.
 
     The ``dryml.core.execute.v1.1`` ``worker_setup`` payload has exactly
@@ -1085,19 +1137,22 @@ def _decode_setup(data: Mapping[str, Any]) -> tuple[RuntimeContextSpec, RepoDefi
         identifying_payload=raw_payload, **_SETUP_BOUNDS,
     )
     payload = envelope["payload"]
-    if set(payload) != _SETUP_FIELDS:
+    if set(payload) not in {_SETUP_FIELDS, _SETUP_FIELDS_WITH_CACHE}:
         raise ValueError("core worker setup payload fields are closed")
     runtime = payload["runtime"]
     repo = payload["repo"]
     role = payload["role"]
     replica = payload["replica"]
     control_store = payload["control_store"]
+    cache = payload.get("cache", "weak")
     if not isinstance(runtime, Mapping) or not isinstance(repo, Mapping):
         raise TypeError("core worker setup runtime and Repo definitions must be envelopes")
     if not isinstance(role, str) or not role or isinstance(replica, bool) or not isinstance(replica, int) or replica < 0:
         raise ValueError("core worker role and replica are invalid")
     if control_store is not None and not isinstance(control_store, Mapping):
         raise TypeError("core worker control Store descriptor must be a mapping or null")
+    if cache not in {"none", "weak", "strong"}:
+        raise ValueError("core worker cache policy is invalid")
     if isinstance(control_store, Mapping):
         if set(control_store) == {"repo_store"}:
             index = control_store["repo_store"]
@@ -1110,7 +1165,7 @@ def _decode_setup(data: Mapping[str, Any]) -> tuple[RuntimeContextSpec, RepoDefi
             or not isinstance(control_store["query_index"], str)
         ):
             raise ValueError("core worker control Store descriptor is invalid")
-    return RuntimeContextSpec.from_data(runtime), RepoDefinition.from_data(repo), role, replica, control_store
+    return RuntimeContextSpec.from_data(runtime), RepoDefinition.from_data(repo), role, replica, control_store, cache
 
 
 def _require_pristine_session() -> None:
@@ -1168,7 +1223,7 @@ def core_worker_setup(context: WorkerSetupContext, data: Mapping[str, Any]) -> I
     """
     if not isinstance(context, WorkerSetupContext) or not isinstance(data, Mapping):
         raise TypeError("core worker setup requires WorkerSetupContext and mapping data")
-    spec, definition, role, replica, descriptor = _decode_setup(data)
+    spec, definition, role, replica, descriptor, cache = _decode_setup(data)
     _require_pristine_session()
     grant = ExecutionGrant.from_worker_setup(context, role=role, replica=replica)
     with ExitStack() as stack:
@@ -1179,14 +1234,748 @@ def core_worker_setup(context: WorkerSetupContext, data: Mapping[str, Any]) -> I
         if opened_control:
             assert control is not None
             stack.callback(control.close)
-        stack.enter_context(config(repo=repo))
+        stack.enter_context(config(repo=repo, cache=cache))
         stack.enter_context(worker_context(ExecutionContext(repo, control)))
         yield None
 
 
+@dataclass(frozen=True, slots=True)
+class CoreExecutionSnapshot:
+    """Immutable combined backend and core-adaptation observation.
+
+    Args:
+        backend: The nested generic execution snapshot.
+        state: Core lifecycle state, including the adaptation interval.
+        phase: Current or terminal core phase.
+        cleanup_state: Aggregate generic/recovery-resource cleanup state.
+        cleanup_issues: Independent cleanup observations.
+        evidence: Detached worker publication and refresh evidence, when delivered.
+
+    The value contains no caller Repo, Store, arguments, or recovered result.
+    Cleanup observations may change after a successful adapted result is stored.
+    """
+
+    backend: ExecutionSnapshot
+    state: str
+    phase: str
+    cleanup_state: str
+    cleanup_issues: tuple[ExecutionIssue, ...]
+    evidence: CoreOutcomeEvidence | None
+
+
+CoreCallback: TypeAlias = Callable[["CoreExecutionFuture"], None]
+
+
+class CoreExecutionFuture:
+    """Adapt one public generic byte Future into a recovered core outcome.
+
+    Only :class:`Executor` and the module one-off helpers construct this facade.
+    The generic Future remains the backend owner; this facade registers one public
+    completion callback, recovers the byte outcome once, and retains only the
+    submission-owned recovery Repo until cleanup.
+
+    Args:
+        backend_future: Accepted public generic Future carrying outcome bytes.
+        prepared_storage: Owned caller-side recovery snapshot.
+        prepared: Detached invocation/storage handoff retained for recovery.
+        recovery: Caller-object bindings created before submission returns.
+        return_objects: Captured result-materialization decision.
+        result_limit_bytes: Captured public generic result limit.
+        done_callbacks: Coordinator-local callbacks receiving this facade.
+        one_off: Whether generic one-off cleanup should also release recovery state.
+
+    Wait timeouts affect only the waiting caller. Callback and cleanup failures
+    never overwrite an already adapted result.
+    """
+
+    def __init__(
+            self, backend_future: ExecutionFuture[bytes], *,
+            prepared_storage: _PreparedSharedStorage, prepared: PreparedCoreCall,
+            recovery: _CoreRecovery, return_objects: bool, result_limit_bytes: int,
+            done_callbacks: Sequence[CoreCallback] = (), one_off: bool = False,
+    ) -> None:
+        if not isinstance(backend_future, ExecutionFuture):
+            raise TypeError("backend_future must be an ExecutionFuture")
+        callbacks = tuple(done_callbacks)
+        if not all(callable(callback) for callback in callbacks):
+            raise TypeError("done_callbacks entries must be callable")
+        self._backend_future = backend_future
+        self._storage = prepared_storage
+        self._prepared = prepared
+        self._recovery = recovery
+        self._return_objects = return_objects
+        self._result_limit_bytes = result_limit_bytes
+        self._condition = Condition(RLock())
+        self._state = "pending"
+        self._phase = "prepare"
+        self._outcome: Any = _MISSING
+        self._outcome_kind: str | None = None
+        self._evidence: CoreOutcomeEvidence | None = None
+        self._callbacks = list(callbacks)
+        self._callback_queue: list[CoreCallback] = []
+        self._cleanup_state = "pending"
+        self._cleanup_issues: list[ExecutionIssue] = []
+        self._diagnostic_text_limit_bytes = backend_future._diagnostic_text_limit_bytes
+        self._diagnostic_issue_limit = backend_future._diagnostic_issue_limit
+        self._cleanup_timeout = backend_future._termination_timeout
+        self._storage_cleanup_thread: Thread | None = None
+        self._storage_cleanup_done = False
+        self._generic_cleanup_complete = False
+        self._one_off = one_off
+        backend_future.add_done_callback(self._backend_completed)
+
+    @property
+    def backend_future(self) -> ExecutionFuture[bytes]:
+        """Return borrowed advanced inspection access to the generic byte Future."""
+        return self._backend_future
+
+    @property
+    def submission_id(self) -> str:
+        """Return the immutable backend-assigned submission identifier."""
+        return self._backend_future.submission_id
+
+    @property
+    def output(self) -> ExecutionOutput:
+        """Return the generic output owner retained across core adaptation."""
+        return self._backend_future.output
+
+    def done(self) -> bool:
+        """Return whether core recovery has produced one stable adapted outcome."""
+        with self._condition:
+            return self._outcome is not _MISSING
+
+    def running(self) -> bool:
+        """Return whether generic execution or coordinator adaptation is active."""
+        backend = self._backend_future.snapshot()
+        with self._condition:
+            return self._outcome is _MISSING and (
+                backend.state == "running" or self._state == "adapting"
+            )
+
+    def cancelled(self) -> bool:
+        """Return whether the backend confirmed cancellation before core adaptation."""
+        if self._backend_future.cancelled():
+            return True
+        with self._condition:
+            return self._state == "cancelled"
+
+    def snapshot(self) -> CoreExecutionSnapshot:
+        """Return nested backend, adaptation, evidence, and cleanup observations."""
+        backend = self._backend_future.snapshot()
+        with self._condition:
+            issues = tuple(backend.cleanup_issues) + tuple(self._cleanup_issues)
+            cleanup_state = self._cleanup_state
+            if cleanup_state == "pending" and backend.cleanup_state != "pending":
+                cleanup_state = backend.cleanup_state
+            state = self._state
+            if self._outcome is _MISSING:
+                if backend.state in {"pending", "admitting", "running"}:
+                    state = backend.state
+                elif state != "adapting":
+                    state = "adapting"
+            return CoreExecutionSnapshot(
+                backend=backend, state=state, phase=self._phase,
+                cleanup_state=cleanup_state, cleanup_issues=issues,
+                evidence=self._evidence,
+            )
+
+    def result(self, timeout: float | None = None) -> Any:
+        """Wait for and return the recovered result or raise its stable error.
+
+        ``timeout`` limits only this caller's wait and never cancels worker or
+        adaptation work.
+        """
+        outcome = self._wait(timeout)
+        with self._condition:
+            kind = self._outcome_kind
+        if kind in {"error", "cancelled"}:
+            assert isinstance(outcome, BaseException)
+            raise outcome
+        return outcome
+
+    def exception(self, timeout: float | None = None) -> BaseException | None:
+        """Wait for and return the core-adapted failure without changing work."""
+        outcome = self._wait(timeout)
+        with self._condition:
+            kind = self._outcome_kind
+        if kind == "cancelled":
+            assert isinstance(outcome, BaseException)
+            raise outcome
+        return outcome if kind == "error" else None
+
+    def add_done_callback(self, callback: CoreCallback) -> None:
+        """Schedule one callback after core adaptation, outside synchronization."""
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        with self._condition:
+            if self._outcome is _MISSING:
+                self._callbacks.append(callback)
+                pending = True
+            else:
+                pending = False
+        if pending:
+            # If generic callback delivery was queued after a transient thread
+            # launch failure, this consumer starts the same guarded adaptation.
+            if self._backend_future.done():
+                self._backend_completed(self._backend_future)
+            return
+        self._dispatch_callbacks((callback,))
+
+    def cancel(self) -> bool:
+        """Delegate truthful pre-GO cancellation to the owned generic Future."""
+        return self._backend_future.cancel()
+
+    def request_cancel(self) -> bool:
+        """Delegate a running-work cancellation request without fabricating success."""
+        return self._backend_future.request_cancel()
+
+    def cleanup(self, timeout: float | None = None) -> None:
+        """Join generic cleanup and release this facade's owned recovery Repo.
+
+        Raises:
+            RuntimeError: If adaptation has not reached terminality.
+            CleanupError: If generic or recovery-resource cleanup remains incomplete.
+
+        Side Effects:
+            Starts at most one owned recovery-Repo close and bounds this caller's
+            join of that synchronous Store operation. A close that outlives the
+            caller budget remains observable as incomplete for a later join.
+        """
+        if timeout is not None:
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                raise TypeError("timeout must be a finite positive number of seconds")
+            if not math.isfinite(timeout) or timeout <= 0:
+                raise ValueError("timeout must be a finite positive number of seconds")
+        deadline = time.monotonic() + (self._cleanup_timeout if timeout is None else float(timeout))
+        with self._condition:
+            if self._outcome is _MISSING:
+                raise RuntimeError("cleanup requires a terminal core execution outcome")
+            if self._cleanup_state == "complete":
+                return
+            if self._cleanup_state == "reconciling":
+                # The generic Future owns bounded reconciliation. A concurrent
+                # caller joins that work rather than closing the recovery Repo twice.
+                while self._cleanup_state == "reconciling":
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        raise CleanupError("core execution cleanup is still running", execution=self)
+                    self._condition.wait(remaining)
+                if self._cleanup_state == "complete":
+                    return
+                raise CleanupError("core execution cleanup remains incomplete", execution=self)
+            self._cleanup_state = "reconciling"
+        failure: BaseException | None = None
+        try:
+            remaining = self._cleanup_remaining(deadline)
+            self._backend_future.cleanup(timeout=remaining)
+            self._generic_cleanup_complete = self._backend_future.snapshot().cleanup_state == "complete"
+        except BaseException as error:
+            failure = error
+        storage_failure = self._start_or_join_storage_cleanup(deadline)
+        if storage_failure is not None and failure is None:
+            failure = storage_failure
+        with self._condition:
+            if self._storage_cleanup_thread is None:
+                self._cleanup_state = "complete" if (
+                    failure is None and self._generic_cleanup_complete and self._storage_cleanup_done
+                ) else "incomplete"
+                self._condition.notify_all()
+        if failure is not None:
+            if isinstance(failure, CleanupError):
+                raise failure
+            raise CleanupError("core recovery cleanup failed", execution=self) from failure
+
+    def _cleanup_remaining(self, deadline: float | None) -> float | None:
+        """Return this caller's remaining cleanup budget without inventing one."""
+        if deadline is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CleanupError("core execution cleanup timed out", execution=self)
+        return remaining
+
+    @staticmethod
+    def _wait_remaining(deadline: float | None) -> float | None:
+        """Return a Future wait budget without converting expiry into cleanup state."""
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+    def _start_or_join_storage_cleanup(self, deadline: float | None) -> BaseException | None:
+        """Bound joining the synchronous recovery-Repo close without abandoning it.
+
+        Store close remains a synchronous Store operation in its own owner thread;
+        this facade only bounds callers joining that operation.  A later cleanup
+        joins the same close rather than opening a second close attempt.
+        """
+        with self._condition:
+            thread = self._storage_cleanup_thread
+            if not self._storage_cleanup_done and thread is None:
+                thread = Thread(
+                    target=self._close_storage, name="dryml-core-execute-cleanup", daemon=True,
+                )
+                self._storage_cleanup_thread = thread
+                try:
+                    thread.start()
+                except BaseException:
+                    self._storage_cleanup_thread = None
+                    self._append_cleanup_issue_locked()
+                    return CleanupError("core recovery cleanup could not start", execution=self)
+        while thread is not None and thread.is_alive():
+            remaining = self._cleanup_remaining(deadline)
+            thread.join(remaining)
+            if thread.is_alive() and deadline is not None and time.monotonic() >= deadline:
+                return CleanupError("core recovery cleanup is still running", execution=self)
+        with self._condition:
+            return None if self._storage_cleanup_done else CleanupError(
+                "core recovery cleanup remains incomplete", execution=self,
+            )
+
+    def _close_storage(self) -> None:
+        """Release the facade-owned reconstruction handles without blocking callers."""
+        try:
+            self._storage.close()
+        except BaseException:
+            with self._condition:
+                self._storage_cleanup_thread = None
+                self._append_cleanup_issue_locked()
+                self._cleanup_state = "incomplete"
+                self._condition.notify_all()
+        else:
+            with self._condition:
+                self._storage_cleanup_thread = None
+                self._storage_cleanup_done = True
+                self._cleanup_state = "complete" if self._generic_cleanup_complete else "incomplete"
+                self._condition.notify_all()
+
+    def _append_cleanup_issue_locked(self) -> None:
+        """Record one configured-bounded, non-sensitive facade cleanup failure."""
+        backend_issues = len(self._backend_future.snapshot().cleanup_issues)
+        if backend_issues + len(self._cleanup_issues) >= self._diagnostic_issue_limit:
+            return
+        message = "cleanup failure".encode("utf-8")[:self._diagnostic_text_limit_bytes].decode("utf-8", errors="ignore")
+        self._cleanup_issues.append(ExecutionIssue("core_recovery_cleanup_failed", message))
+
+    def __await__(self) -> Generator[Any, None, Any]:
+        """Await the same single adapted outcome without cancelling backend work."""
+        return self._await_result().__await__()
+
+    async def _await_result(self) -> Any:
+        """Bridge the coordinator callback into the current event loop."""
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[Any] = loop.create_future()
+
+        def completed(future: CoreExecutionFuture) -> None:
+            def deliver() -> None:
+                if waiter.done():
+                    return
+                try:
+                    waiter.set_result(future.result())
+                except BaseException as error:
+                    waiter.set_exception(error)
+            try:
+                loop.call_soon_threadsafe(deliver)
+            except RuntimeError:
+                pass
+
+        self.add_done_callback(completed)
+        try:
+            return await asyncio.shield(waiter)
+        finally:
+            self._remove_callback(completed)
+            if not waiter.done():
+                waiter.cancel()
+
+    def _backend_completed(self, _: ExecutionFuture[bytes]) -> None:
+        """Run exactly one coordinator adaptation after generic terminality."""
+        with self._condition:
+            if self._outcome is not _MISSING or self._state == "adapting":
+                return
+            self._state = "adapting"
+            self._phase = "recover"
+        phase = "backend"
+        try:
+            data = self._backend_future.result()
+            if not isinstance(data, bytes):
+                raise TypeError("generic core transport result must be bytes")
+            phase = "recover"
+            decoded = decode_core_outcome(
+                data, repo=self._storage.recovery_repo,
+                result_limit_bytes=self._result_limit_bytes,
+            )
+            # Recovery runs in generic callback threads, which do not inherit the
+            # caller's ContextVars.  Install only this frozen call's owned Repo and
+            # cache policy; the scope restores the callback thread's original state.
+            with config(repo=self._storage.recovery_repo, cache=self._storage.cache):
+                value = SharedDirStoreStrategy().recover(
+                    data, self._prepared, repo=self._storage.recovery_repo,
+                    args=(), kwargs={}, return_objects=self._return_objects,
+                    update_args=self._storage.update_args, _recovery=self._recovery,
+                    _decoded=decoded, result_limit_bytes=self._result_limit_bytes,
+                )
+            with self._condition:
+                self._evidence = self._recovery.ledger.evidence(decoded.evidence)
+        except BaseException as error:
+            if isinstance(error, CoreExecutionError):
+                error.execution = self
+            evidence = getattr(error, "evidence", None)
+            if isinstance(evidence, CoreOutcomeEvidence):
+                with self._condition:
+                    self._evidence = evidence
+            backend_state = self._backend_future.snapshot().state
+            state = "cancelled" if self._backend_future.cancelled() else (
+                "uncertain" if backend_state == "uncertain" else "failed"
+            )
+            terminal_phase = error.phase if isinstance(error, CoreExecutionError) else phase
+            self._finish(error, state, "cancelled" if state == "cancelled" else "error", phase=terminal_phase)
+        else:
+            self._finish(value, "succeeded", "result", phase="refresh" if self._storage.update_args else "recover")
+        if self._one_off:
+            try:
+                self.cleanup()
+            except CleanupError:
+                pass
+
+    def _finish(self, outcome: Any, state: str, kind: str, *, phase: str) -> None:
+        """Store one adapted terminal outcome and dispatch detached callbacks."""
+        with self._condition:
+            if self._outcome is not _MISSING:
+                return
+            self._outcome = outcome
+            self._outcome_kind = kind
+            self._state = state
+            self._phase = phase
+            callbacks = tuple(self._callbacks)
+            self._callbacks.clear()
+            self._condition.notify_all()
+        self._dispatch_callbacks(callbacks)
+
+    def _wait(self, timeout: float | None) -> Any:
+        if timeout is not None:
+            if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                    or not math.isfinite(timeout) or timeout < 0):
+                raise ValueError("timeout must be a finite nonnegative number of seconds")
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
+        # A generic callback can be temporarily queued when callback-thread start
+        # fails.  Any core consumer therefore joins or starts the one adaptation
+        # after the backend reaches terminality instead of waiting forever for a
+        # later generic callback registration.
+        try:
+            self._backend_future.result(timeout=self._wait_remaining(deadline))
+        except TimeoutError:
+            raise TimeoutError("core execution did not finish before timeout") from None
+        except BaseException:
+            pass
+        self._backend_completed(self._backend_future)
+        with self._condition:
+            if self._outcome is _MISSING and timeout is not None:
+                while self._outcome is _MISSING:
+                    remaining = self._wait_remaining(deadline)
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError("core execution did not finish before timeout")
+                    self._condition.wait(remaining)
+            while self._outcome is _MISSING:
+                self._condition.wait()
+            return self._outcome
+
+    def _dispatch_callbacks(self, callbacks: Sequence[CoreCallback]) -> None:
+        """Isolate callbacks and retain launch failures for a later safe retry."""
+        with self._condition:
+            pending = tuple(self._callback_queue) + tuple(callbacks)
+            self._callback_queue.clear()
+        failed: list[CoreCallback] = []
+        for callback in pending:
+            for _ in range(2):
+                try:
+                    Thread(target=self._run_callback, args=(callback,), name="dryml-core-execute-callback", daemon=True).start()
+                    break
+                except BaseException:
+                    pass
+            else:
+                failed.append(callback)
+        with self._condition:
+            self._callback_queue.extend(failed)
+
+    def _remove_callback(self, callback: CoreCallback) -> None:
+        """Release an undelivered await bridge after its local waiter is cancelled."""
+        with self._condition:
+            try:
+                self._callbacks.remove(callback)
+            except ValueError:
+                try:
+                    self._callback_queue.remove(callback)
+                except ValueError:
+                    pass
+
+    def _run_callback(self, callback: CoreCallback) -> None:
+        try:
+            callback(self)
+        except BaseException:
+            pass
+
+
+def _submit_core_call(
+        submitter: Callable[..., ExecutionFuture[bytes]], config: BackendConfig,
+        executor_core: CoreOptions | None, fn: Callable[..., Any], args: tuple[Any, ...],
+        *, kwargs: Mapping[str, Any] | None, core: CoreOptions | None,
+        environment: Any, world: Any, execution_timeout: Any, stream_output: bool | None,
+        done_callbacks: Sequence[CoreCallback], output: ExecutionOutput | None,
+        one_off: bool,
+) -> CoreExecutionFuture:
+    """Freeze and submit one core call through a public generic submission function."""
+    if kwargs is not None and not isinstance(kwargs, Mapping):
+        raise TypeError("kwargs must be a mapping or None")
+    call_kwargs = {} if kwargs is None else dict(kwargs)
+    if not all(isinstance(key, str) for key in call_kwargs):
+        raise TypeError("kwargs keys must be strings")
+    if not isinstance(done_callbacks, Sequence):
+        raise TypeError("done_callbacks must be a finite sequence")
+    callbacks = tuple(done_callbacks)
+    if not all(callable(callback) for callback in callbacks):
+        raise TypeError("done_callbacks entries must be callable")
+    effective = resolve_core_options(core, executor=executor_core)
+    storage = prepare_shared_storage(_effective=effective)
+    try:
+        if not isinstance(effective.repo, Repo):
+            raise ValueError("core callable execution requires a live Repo")
+        strategy = effective.marshalling()
+        prepared = strategy.prepare(
+            fn, args, call_kwargs, repo=effective.repo,
+            control_store=effective.control_store, update_args=effective.update_args,
+            _frozen_storage=storage.frozen_storage,
+            invocation_limit_bytes=config.invocation_limit_bytes,
+        )
+        recovery = strategy.bind_recovery(prepared, args=args, kwargs=call_kwargs)
+        # ``auto`` is resolved at acceptance, not in the generic callback thread.
+        return_objects = effective.return_objects is True or (
+            effective.return_objects == "auto" and active_runtime().mode is not RuntimeMode.ORCHESTRATOR
+        )
+        backend_future = submitter(
+            _invoke_prepared_outcome, prepared.invocation,
+            config.invocation_limit_bytes, config.result_limit_bytes, effective.update_args,
+            kwargs=None, environment=environment, world=world,
+            execution_timeout=execution_timeout, stream_output=stream_output,
+            output=output, worker_setup=prepared.worker_setup(effective.runtime, cache=effective.cache),
+        )
+        return CoreExecutionFuture(
+            backend_future, prepared_storage=storage, prepared=prepared, recovery=recovery,
+            return_objects=return_objects, result_limit_bytes=config.result_limit_bytes,
+            done_callbacks=callbacks, one_off=one_off,
+        )
+    except BaseException:
+        storage.close()
+        raise
+
+
+class Executor:
+    """Own one generic backend lifetime while adapting core byte outcomes.
+
+    Args:
+        config: Explicit generic backend configuration and its operational limits.
+        core: Optional inert defaults resolved beneath per-call core options.
+
+    Construction does not open Stores or start a worker. Each submission freezes
+    caller session/core controls once, then delegates execution to exactly one
+    generic executor and retains its own reconstruction resources until cleanup.
+    """
+
+    def __init__(self, config: BackendConfig, *, core: CoreOptions | None = None) -> None:
+        if not isinstance(config, BackendConfig):
+            raise TypeError("config must be a BackendConfig")
+        if core is not None and not isinstance(core, CoreOptions):
+            raise TypeError("core must be CoreOptions or None")
+        self._config = config
+        self._core = core
+        self._generic = _GenericExecutor(config)
+        self._condition = Condition(RLock())
+        self._futures: set[CoreExecutionFuture] = set()
+
+    def start(self) -> "Executor":
+        """Start the owned generic backend and return this core facade."""
+        self._generic.start()
+        return self
+
+    def __enter__(self) -> "Executor":
+        """Start this executor for a context-managed core execution lifetime."""
+        return self.start()
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        """Close owned work without suppressing a context-body exception."""
+        self.close()
+
+    def submit(
+            self, fn: Callable[..., Any], /, *args: Any, kwargs: Mapping[str, Any] | None = None,
+            core: CoreOptions | None = None, environment: Any = None, world: Any = None,
+            execution_timeout: float | None | Literal["inherit"] = "inherit",
+            stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
+            output: ExecutionOutput | None = None,
+    ) -> CoreExecutionFuture:
+        """Prepare and submit one core-aware call through the owned generic executor.
+
+        ``kwargs`` is the workload mapping. Invalid preparation fails before generic
+        acceptance; accepted worker, publication, and recovery failures are stored
+        on the returned facade.
+        """
+        future = _submit_core_call(
+            self._generic.submit, self._config, self._core, fn, args, kwargs=kwargs,
+            core=core, environment=environment, world=world,
+            execution_timeout=execution_timeout, stream_output=stream_output,
+            done_callbacks=done_callbacks, output=output, one_off=False,
+        )
+        with self._condition:
+            self._futures.add(future)
+        return future
+
+    def run(
+            self, fn: Callable[..., Any], /, *args: Any, kwargs: Mapping[str, Any] | None = None,
+            core: CoreOptions | None = None, environment: Any = None, world: Any = None,
+            execution_timeout: float | None | Literal["inherit"] = "inherit",
+            stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
+            output: ExecutionOutput | None = None,
+    ) -> Any:
+        """Submit one call and return its recovered result without closing this executor."""
+        return self.submit(
+            fn, *args, kwargs=kwargs, core=core, environment=environment, world=world,
+            execution_timeout=execution_timeout, stream_output=stream_output,
+            done_callbacks=done_callbacks, output=output,
+        ).result()
+
+    def with_options(
+            self, *, core: CoreOptions | None = None, environment: Any = None, world: Any = None,
+            execution_timeout: float | None | Literal["inherit"] = "inherit",
+            stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
+            output: ExecutionOutput | None = None,
+    ) -> "ExecutorView":
+        """Return a non-owning view whose call keywords remain workload data."""
+        if core is not None and not isinstance(core, CoreOptions):
+            raise TypeError("core must be CoreOptions or None")
+        return ExecutorView(
+            self, core, environment, world, execution_timeout, stream_output,
+            tuple(done_callbacks), output,
+        )
+
+    def discover(self, *, environment: Any = None, world: Any = None, timeout: float | None = None) -> Any:
+        """Delegate a bounded non-reserving discovery query to the generic backend."""
+        return self._generic.discover(environment=environment, world=world, timeout=timeout)
+
+    def resources(self, *, timeout: float | None = None) -> Any:
+        """Delegate bounded resource inspection to the owned generic backend."""
+        return self._generic.resources(timeout=timeout)
+
+    def close(self, *, cancel: bool = False, timeout: float | None = None) -> None:
+        """Join core adaptation/cleanup before releasing the generic backend owner."""
+        if not isinstance(cancel, bool):
+            raise TypeError("cancel must be bool")
+        if timeout is not None:
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                raise TypeError("timeout must be a finite nonnegative number of seconds")
+            if not math.isfinite(timeout) or timeout < 0:
+                raise ValueError("timeout must be a finite nonnegative number of seconds")
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
+        with self._condition:
+            futures = tuple(self._futures)
+        if cancel:
+            for future in futures:
+                if not future.done():
+                    if not future.cancel():
+                        try:
+                            future.request_cancel()
+                        except ExecutionError:
+                            pass
+        for future in futures:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            try:
+                future.result(timeout=remaining)
+            except BaseException:
+                pass
+            future.cleanup(timeout=remaining)
+        self._generic.close(cancel=cancel, timeout=timeout)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutorView:
+    """Bind core/generic controls to one parent without owning another backend."""
+
+    executor: Executor
+    core: CoreOptions | None
+    environment: Any
+    world: Any
+    execution_timeout: float | None | Literal["inherit"]
+    stream_output: bool | None
+    done_callbacks: tuple[CoreCallback, ...]
+    output: ExecutionOutput | None
+
+    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> CoreExecutionFuture:
+        """Submit workload data with bound controls; no keyword is interpreted as a control."""
+        return self.executor.submit(
+            fn, *args, kwargs=kwargs, core=self.core, environment=self.environment,
+            world=self.world, execution_timeout=self.execution_timeout,
+            stream_output=self.stream_output, done_callbacks=self.done_callbacks,
+            output=self.output,
+        )
+
+    def run(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        """Submit view-bound workload data and return the adapted result."""
+        return self.submit(fn, *args, **kwargs).result()
+
+
+def submit(
+        fn: Callable[..., Any], /, *args: Any, backend: BackendConfig,
+        kwargs: Mapping[str, Any] | None = None, core: CoreOptions | None = None,
+        environment: Any = None, world: Any = None,
+        execution_timeout: float | None | Literal["inherit"] = "inherit",
+        stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
+        output: ExecutionOutput | None = None,
+) -> CoreExecutionFuture:
+    """Submit one explicit-backend core call with generic one-off ownership.
+
+    The hidden generic owner follows its bounded cleanup policy. The returned core
+    facade keeps only its independently owned recovery Repo and never closes
+    caller-borrowed Repo or Store handles.
+    """
+    if not isinstance(backend, BackendConfig):
+        raise TypeError("backend must be a BackendConfig")
+    return _submit_core_call(
+        lambda *call_args, **controls: _generic_submit(*call_args, backend=backend, **controls),
+        backend, None, fn, args, kwargs=kwargs, core=core, environment=environment,
+        world=world, execution_timeout=execution_timeout, stream_output=stream_output,
+        done_callbacks=done_callbacks, output=output, one_off=True,
+    )
+
+
+def run(
+        fn: Callable[..., Any], /, *args: Any, backend: BackendConfig,
+        kwargs: Mapping[str, Any] | None = None, core: CoreOptions | None = None,
+        environment: Any = None, world: Any = None,
+        execution_timeout: float | None | Literal["inherit"] = "inherit",
+        stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
+        output: ExecutionOutput | None = None,
+) -> Any:
+    """Run one explicit-backend core call and reconcile its hidden owner.
+
+    Raises the adapted workload failure as primary when both execution and cleanup
+    fail; successful results are returned only after cleanup succeeds.
+    """
+    future = submit(
+        fn, *args, backend=backend, kwargs=kwargs, core=core, environment=environment,
+        world=world, execution_timeout=execution_timeout, stream_output=stream_output,
+        done_callbacks=done_callbacks, output=output,
+    )
+    try:
+        result = future.result()
+    except BaseException as error:
+        try:
+            future.cleanup()
+        except CleanupError as cleanup_error:
+            raise error from cleanup_error
+        raise
+    future.cleanup()
+    return result
+
+
 __all__ = [
-    "CoreAdaptationOutcome", "CoreExecutionError", "CoreOutcomeEvidence",
-    "CorePublicationEvidence", "CoreRefreshEvidence", "ExecutionContext",
-    "SharedDirStoreStrategy", "core_worker_setup", "current_context",
-    "decode_core_outcome", "worker_context",
+    "CoreAdaptationOutcome", "CoreExecutionError", "CoreExecutionFuture",
+    "CoreExecutionSnapshot", "CoreOptions", "CoreOutcomeEvidence",
+    "CorePublicationEvidence", "CoreRefreshEvidence", "ExecutionContext", "Executor",
+    "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy", "core_worker_setup",
+    "current_context", "decode_core_outcome", "prepare_shared_storage", "run", "submit",
+    "worker_context",
 ]

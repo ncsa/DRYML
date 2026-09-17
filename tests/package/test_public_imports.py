@@ -321,7 +321,8 @@ _EXPECTED_EXECUTE_EXPORTS = {
     "ExecutionError", "ExecutionFuture", "ExecutionIssue", "ExecutionOutput",
     "ExecutionSnapshot", "ExecutionUncertainError", "Executor", "ExecutorView",
     "FeasiblePlan", "OutputSnapshot", "RemoteExecutionError", "ResourceAmounts",
-    "ResourceSnapshot", "run", "submit",
+    "ResourceSnapshot", "WorkerSetup", "WorkerSetupContext", "WorkerSetupFactory",
+    "run", "submit",
 }
 
 _EXPECTED_EXECUTE_SPECIALIZATIONS = {
@@ -926,10 +927,10 @@ print(json.dumps({
         for name, exports in data["specializations"].items()
     } == _EXPECTED_EXECUTE_SPECIALIZATIONS
     assert data["parameters"] == {
-        "run": ["fn", "args", "backend", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output"],
-        "submit": ["fn", "args", "backend", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output"],
-        "Executor.run": ["self", "fn", "args", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output"],
-        "Executor.submit": ["self", "fn", "args", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output"],
+        "run": ["fn", "args", "backend", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"],
+        "submit": ["fn", "args", "backend", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"],
+        "Executor.run": ["self", "fn", "args", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"],
+        "Executor.submit": ["self", "fn", "args", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"],
     }
     assert not data["ray_loaded"]
     assert data["subprocess_result"] == 10
