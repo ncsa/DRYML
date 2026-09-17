@@ -11,6 +11,7 @@ import builtins
 import ast
 import dis
 import inspect
+import pathlib
 import sys
 import types
 from collections.abc import Mapping
@@ -35,6 +36,15 @@ _DEFAULT_LIMIT = 67_108_864
 _MAX_NODES = 65_536
 _MAX_DEPTH = 64
 _OUTCOME_VERSION = 1
+_PATH_TYPES = {
+    cls.__name__: cls
+    for cls in (
+        pathlib.PosixPath,
+        pathlib.WindowsPath,
+        pathlib.PurePosixPath,
+        pathlib.PureWindowsPath,
+    )
+}
 
 
 class CoreCallCodecError(TypeError):
@@ -233,6 +243,20 @@ class _Encoder:
         self.active: set[int] = set()
         self.limit_bytes = limit_bytes
         self.automatic_references = automatic_references or set()
+        self.imported_captures: dict[int, ImportRef] = {}
+
+    def _capture(self, value: Any, path: str, depth: int) -> int:
+        """Import stable DRYML dependencies and capture caller helpers by value."""
+        module_name = getattr(value, "__module__", None)
+        if (
+            inspect.isfunction(value)
+            and isinstance(module_name, str)
+            and (module_name == "dryml" or module_name.startswith("dryml."))
+        ):
+            ref = _import_ref(value)
+            if ref is not None:
+                self.imported_captures[id(value)] = ref
+        return self.value(value, path, depth)
 
     def value(self, value: Any, path: str, depth: int = 0) -> int:
         if depth > _MAX_DEPTH:
@@ -257,6 +281,12 @@ class _Encoder:
     def _node(self, value: Any, path: str, depth: int) -> dict[str, Any]:
         if _is_resource(value):
             _fail("live core resource", path)
+        imported_capture = self.imported_captures.get(id(value))
+        if imported_capture is not None:
+            return {
+                "tag": "import", "module": imported_capture.module,
+                "qualname": imported_capture.qualname,
+            }
         automatic = id(value) in self.automatic_references
         if isinstance(value, ConcreteDefinition):
             return {"tag": "auto_cdef" if automatic else "cdef", "value": encode_cdef_graph(value)}
@@ -286,6 +316,8 @@ class _Encoder:
             }
         if isinstance(value, (set, frozenset)):
             return {"tag": "frozenset" if isinstance(value, frozenset) else "set", "items": [self.value(item, f"{path}.member[{index}]", depth + 1) for index, item in enumerate(value)]}
+        if type(value) in _PATH_TYPES.values():
+            return {"tag": "path", "kind": type(value).__name__, "value": str(value)}
         if inspect.ismodule(value):
             return {"tag": "import", "module": value.__name__, "qualname": None}
         if inspect.ismethod(value):
@@ -299,7 +331,7 @@ class _Encoder:
             for name in _annotation_names(value.__annotations__):
                 if name in value.__globals__:
                     capture_values.setdefault(name, value.__globals__[name])
-            captures = {name: self.value(item, f"{path}.capture[{index}]", depth + 1) for index, (name, item) in enumerate(capture_values.items())}
+            captures = {name: self._capture(item, f"{path}.capture[{index}]", depth + 1) for index, (name, item) in enumerate(capture_values.items())}
             return {
                 "tag": "function", "code": _dill_code(value.__code__, path), "name": value.__name__,
                 "defaults": self.value(value.__defaults__, f"{path}.defaults", depth + 1),
@@ -379,6 +411,7 @@ class _Decoder:
             "import": {"tag", "module", "qualname"}, "link": {"tag", "kind", "target"},
             "tuple": {"tag", "items"}, "list": {"tag", "items"}, "set": {"tag", "items"},
             "frozenset": {"tag", "items"}, "dict": {"tag", "items"},
+            "path": {"tag", "kind", "value"},
             "bound_method": {"tag", "function", "receiver"},
             "function": {"tag", "code", "name", "defaults", "kwdefaults", "annotations", "captures", "freevars"},
             "class": {"tag", "name", "bases", "namespace"},
@@ -391,6 +424,12 @@ class _Decoder:
             tag = node["tag"]
             if tag in {"tuple", "list", "set", "frozenset"} and not isinstance(node["items"], list):
                 _fail("malformed container", f"$.node[{index}]")
+            if tag == "path" and (
+                not isinstance(node["kind"], str)
+                or node["kind"] not in _PATH_TYPES
+                or not isinstance(node["value"], str)
+            ):
+                _fail("malformed path", f"$.node[{index}]")
             if tag == "dict" and (not isinstance(node["items"], list) or any(not isinstance(item, list) or len(item) != 2 for item in node["items"])):
                 _fail("malformed mapping", f"$.node[{index}]")
             if tag in {"function", "class", "instance"}:
@@ -479,6 +518,20 @@ class _Decoder:
                     _fail("malformed mapping entry", path)
                 result[self.value(item[0], f"{path}.key")] = self.value(item[1], f"{path}.value")
             return result
+        if tag == "path":
+            kind, value = node.get("kind"), node.get("value")
+            if (
+                not isinstance(kind, str)
+                or kind not in _PATH_TYPES
+                or not isinstance(value, str)
+            ):
+                _fail("malformed path", path)
+            try:
+                return _PATH_TYPES[kind](value)
+            except (NotImplementedError, OSError, ValueError) as error:
+                raise CoreCallCodecError(
+                    f"core execution transport rejected incompatible path at {path}"
+                ) from error
         if tag == "import":
             module, qualname = node.get("module"), node.get("qualname")
             if not isinstance(module, str) or (qualname is not None and not isinstance(qualname, str)):

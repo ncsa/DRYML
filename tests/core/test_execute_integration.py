@@ -321,7 +321,11 @@ def test_real_subprocess_core_pre_and_post_go_cancellation_are_not_reported_as_r
         running = executor.submit(_wait_for_release, marker, tmp_path / "release")
         deadline = time.monotonic() + 10
         while not marker.exists():
-            assert not running.done()
+            if running.done():
+                failure = running.exception()
+                if failure is not None:
+                    raise failure
+                pytest.fail("worker returned before publishing its running marker")
             assert time.monotonic() < deadline
             time.sleep(0.01)
         assert running.request_cancel()

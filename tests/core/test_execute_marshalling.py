@@ -8,7 +8,7 @@ import pytest
 
 from dryml.core import ObjectRef, Repo, Serializable
 from dryml.core.execute import CoreOptions, SharedDirStoreStrategy, prepare_shared_storage
-from dryml.core.execute_codec import CoreCallCodecError, encode_invocation, invoke_invocation
+from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation
 from dryml.core.signatures import Ref, ReferenceSelection
 from dryml.core.store.dir import DirStore
 from dryml.core.symbol import ImportRef
@@ -54,6 +54,35 @@ def _blob_size(value):
 
 def _reference_identity(value: Ref[ObjectRef]) -> Ref[ObjectRef]:
     return value
+
+
+def _path_identity(value):
+    """Return public path data after transport reconstructs the concrete path."""
+    return str(value), value.name
+
+
+_USER_HELPER_GLOBAL = 0
+_USER_HELPER_REPO = None
+
+
+def _user_helper(value, adjustment=1):
+    """Use module state and a default that transport must snapshot."""
+    return value + adjustment + _USER_HELPER_GLOBAL
+
+
+def _call_user_helper(value):
+    """Call a user-owned module helper captured by the transported target."""
+    return _user_helper(value)
+
+
+def _user_helper_with_repo():
+    """Expose a module-level live resource capture to structural validation."""
+    return _USER_HELPER_REPO
+
+
+def _call_user_helper_with_repo():
+    """Call a user-owned helper whose own capture graph is invalid."""
+    return _user_helper_with_repo()
 
 
 def _invoke(strategy, fn, args, *, repo, **kwargs):
@@ -173,6 +202,45 @@ def test_explicit_invocation_and_result_limits_are_honored(tmp_path):
         strategy.invoke(prepared.invocation, repo=repo, update_args=False, result_limit_bytes=1)
 
 
+def test_path_arguments_use_public_value_transport_instead_of_private_slots(tmp_path):
+    """Path transport is independent of CPython's version-specific slot layout."""
+    repo = Repo(DirStore(tmp_path / "state"))
+    path = tmp_path / "marker"
+
+    invocation = encode_invocation(_path_identity, (path,), {}, repo=repo)
+    graph = dill.loads(invocation)
+    path_nodes = [node for node in graph["nodes"] if node.get("tag") == "path"]
+
+    assert path_nodes == [{"tag": "path", "kind": type(path).__name__, "value": str(path)}]
+    outcome = decode_outcome(invoke_invocation(invocation, repo=repo), repo=repo)
+    assert outcome["success"]
+    assert outcome["result"] == (str(path), path.name)
+
+
+def test_user_helper_globals_and_defaults_are_structural_snapshots(tmp_path, monkeypatch):
+    """User helpers retain coordinator globals and defaults instead of worker imports."""
+    repo = Repo(DirStore(tmp_path / "state"))
+    monkeypatch.setitem(globals(), "_USER_HELPER_GLOBAL", 7)
+    monkeypatch.setattr(_user_helper, "__defaults__", (11,))
+
+    invocation = encode_invocation(_call_user_helper, (3,), {}, repo=repo)
+    monkeypatch.setitem(globals(), "_USER_HELPER_GLOBAL", -100)
+    monkeypatch.setattr(_user_helper, "__defaults__", (-200,))
+
+    outcome = decode_outcome(invoke_invocation(invocation, repo=repo), repo=repo)
+    assert outcome["success"]
+    assert outcome["result"] == 21
+
+
+def test_user_helper_live_repo_capture_is_rejected(tmp_path, monkeypatch):
+    """User helper indirection cannot hide a live Repo from capture validation."""
+    repo = Repo(DirStore(tmp_path / "state"))
+    monkeypatch.setitem(globals(), "_USER_HELPER_REPO", repo)
+
+    with pytest.raises(CoreCallCodecError, match="live core resource"):
+        encode_invocation(_call_user_helper_with_repo, (), {}, repo=repo)
+
+
 def test_unsupported_targets_and_unsaved_objects_fail_before_body_invocation(tmp_path):
     """Coordinator-detectable unsupported shapes never reach the workload body."""
     repo = Repo(DirStore(tmp_path / "state"))
@@ -267,3 +335,15 @@ def test_malformed_nodes_fail_before_symbol_resolution_without_sensitive_fields(
     with pytest.raises(CoreCallCodecError, match="malformed graph node") as error:
         invoke_invocation(payload, repo=repo)
     assert secret not in str(error.value)
+
+
+def test_malformed_path_kind_fails_with_codec_error(tmp_path):
+    """An unhashable path kind is rejected without leaking a raw TypeError."""
+    repo = Repo(DirStore(tmp_path / "state"))
+    payload = dill.dumps({
+        "version": 1, "root": 0,
+        "nodes": [{"tag": "path", "kind": [], "value": "marker"}],
+    }, protocol=5)
+
+    with pytest.raises(CoreCallCodecError, match="malformed path"):
+        invoke_invocation(payload, repo=repo)

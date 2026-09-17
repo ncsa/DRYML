@@ -71,10 +71,13 @@ def _cycle_after_update(value):
 
 def _live_repo_after_update(value):
     """Return a rejected worker Repo after mutating a selected update root."""
-    from dryml.core.execute import current_context
-
     value.value += 1
     return current_context().repo
+
+
+def _worker_store_count():
+    """Return ordinary data through the framework-owned worker context getter."""
+    return len(current_context().repo.stores)
 
 
 def _independent_same_identity_results(reference: Ref[StateRef]):
@@ -202,6 +205,23 @@ def test_live_resource_result_does_not_publish_selected_updates(tmp_path, monkey
 
     assert not decode_core_outcome(output, repo=repo).value["success"]
     assert saves == []
+
+
+def test_framework_current_context_dependency_resolves_in_worker(tmp_path):
+    """A stable DRYML context getter resolves against worker-local state."""
+    repo = Repo(DirStore(tmp_path / "store"))
+    strategy = SharedDirStoreStrategy()
+    prepared = strategy.prepare(
+        _worker_store_count, (), {}, repo=repo, control_store=None,
+        update_args=False,
+    )
+
+    with worker_context(ExecutionContext(repo, None)):
+        output = strategy.invoke(prepared.invocation, repo=repo, update_args=False)
+
+    outcome = decode_core_outcome(output, repo=repo).value
+    assert outcome["success"]
+    assert outcome["result"] == 1
 
 
 def test_same_identity_independent_result_graphs_do_not_share_a_snapshot(tmp_path):

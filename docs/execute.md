@@ -118,6 +118,11 @@ The core adapter supports ordinary functions, lambdas, nested functions and
 closures, bound methods, callable instances, `@function` callables, `Method`, and
 managed-operation callables. It sends one whole callable/argument/capture graph,
 including globals, defaults, annotations, instance fields, and `__slots__`.
+Stable captured API function dependencies owned by `dryml.*`, such as process-local
+context getters, use their import reference. Caller-owned helper functions,
+including importable module-level helpers, and closure values remain structurally
+captured with their coordinator globals and defaults. Standard `pathlib` values
+use their public kind and text rather than version-specific private slots.
 Live `Repo` and `Store` captures are rejected. Core values lower to exact CDef,
 `ObjectRef`, or `StateRef` authority; a selected declaration Store is a pinned
 index in the frozen Store table, never a path. The worker reconstructs one local
