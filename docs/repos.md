@@ -172,6 +172,25 @@ ambiguous built-in physical destinations, and explicit custom clocks or owner
 token factories. A definition describes configuration, not a frozen data snapshot:
 use StateRefs to request exact saved Object state.
 
+### Core Execute Shared Storage
+
+`dryml.core.execute` is a separate, same-host execution adapter, not a general
+Repo transport. Its initial `SharedDirStoreStrategy` accepts only an existing
+direct `DirStore` table that a worker can reopen at the same physical locations.
+At submission it exports the selected live Repo once, freezes that one
+`RepoDefinition` and Store order, and opens one fresh coordinator-owned recovery
+Repo. A separate direct control Store is represented explicitly; a Store already
+in the table is represented by its table index and is reopened once in the worker.
+
+The adapter rejects missing storage, ZipStore authority, inaccessible or ambiguous
+physical destinations, unsupported query policy, and non-direct strategies before
+worker submission. It neither creates a Store nor substitutes a replica. The
+definition is configuration only, so input Objects are not auto-saved. Worker
+publication uses normal Repo save authority; result/update evidence contains only
+exact StateRefs and Store-table-relative facts. Recovery and worker teardown close
+their freshly opened handles with `flush=False` and never close the caller's Repo
+or Store. See [Generic Execute](execute.md) for the execution lifecycle.
+
 ## Store Authority And Lifetime
 
 `DirStore` is the supported directory checkpoint backend. Its immutable

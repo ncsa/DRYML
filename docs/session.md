@@ -90,8 +90,12 @@ make weak declared secrets safe.
 This session facade configures only the current process. It does not publish
 future-worker state, dispatch functions, wrap direct calls, start workers,
 select providers, run probes, install packages, or migrate persisted data.
-Existing `dryml.execute` and legacy context APIs are independent subsystems and
-are not integrated by these session declarations.
+Generic `dryml.execute` and legacy context APIs are independent subsystems and
+are not integrated by these session declarations. `dryml.core.execute` reads the
+submission caller's core Repo/cache defaults once when preparing a call, but it
+does not transfer this process session. Its worker setup installs a temporary,
+task/thread-owned core session only after runtime activation; it restores it on
+exit and never changes caller session state.
 
 See [World And Runtime](world_runtime.md), [Objects and Definitions](objects_and_defs.md),
 and [Repos and Stores](repos.md).

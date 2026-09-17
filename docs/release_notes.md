@@ -14,9 +14,26 @@ cross-coordinator accounting. The focused Linux Python 3.12 CI fixture prepares
 its own ephemeral test server and environments; remote CI evidence remains
 pending until the workflow passes on the pushed revision.
 
-This is the Execute core/backend/managed-runtime/dispatch boundary only. It does
-not claim whole Stage 7 completion, a core transport adapter, or deferred
-runtime/dispatch integration.
+`dryml.core.execute` now supplies the separate core-aware facade over generic
+Execute. It freezes call options and one shared `DirStore`/`RepoDefinition`
+snapshot at submission; current support requires existing directly shared
+`DirStore` authority and rejects archive, absent, ambiguous, and replacement
+storage. It transports whole callable/capture graphs through worker setup, runs
+one owner-specific function/Method/managed boundary, publishes returned live
+Object graphs through ordinary Repo saving, and returns exact references plus
+bounded Store-table-relative evidence. Inputs are not auto-saved. Opt-in argument
+refresh coalesces maximal roots, can reuse a returned descendant StateRef, and is
+not transactional: failed recovery neither rolls back completed publications nor
+replays work.
+
+Core futures adapt one generic byte future once, retain separate cleanup evidence,
+and close only their reconstructed recovery Repo with `flush=False`; they never
+close caller handles. The adapter uses version-local worker/coordinator codecs,
+not cross-version RPC. Worker runtime activation precedes Store and payload work;
+subprocess grants can be exact while Ray grants are logical only. Each Ray worker
+uses one attempt and one runtime boundary. This remains an execution boundary, not
+automatic Store/environment/cluster provisioning, distributed transfer, physical
+isolation, or a transaction/rollback guarantee.
 
 Stage 4 adds `dryml.requirements`, the dependency-light shared contract for
 explicit hard requirements. Its public API is `RequirementSource`,

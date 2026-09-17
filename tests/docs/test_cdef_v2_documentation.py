@@ -15,7 +15,8 @@ DOCUMENTS = (
         "repos.md", "managed_operations.md", "formats.md", "graph_querying.md",
         "query_index_backend_contracts.md", "sqlite_lowering.md",
         "ref_selector_values.md", "release_notes.md", "table_of_content.md",
-        "testing.md",
+        "testing.md", "execute.md", "signatures.md", "session.md",
+        "world_runtime.md",
     )),
 )
 RETIRED = re.compile(r"\b(ObjectDef|load_alias|RepoSaveOptions|ephemeral_depth|save_self|dry_args|dry_kwargs)\b")

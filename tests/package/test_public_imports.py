@@ -330,6 +330,22 @@ _EXPECTED_EXECUTE_SPECIALIZATIONS = {
     "dryml.execute.ray": {"RayBackend", "RayBackendConfig", "RayFuture"},
 }
 
+_EXPECTED_CORE_EXECUTE_EXPORTS = {
+    "CoreExecutionError", "CoreExecutionFuture", "CoreExecutionSnapshot",
+    "CoreOptions", "CoreOutcomeEvidence", "CorePublicationEvidence",
+    "CoreRefreshEvidence", "Executor", "ExecutorView", "PreparedCoreCall",
+    "SharedDirStoreStrategy", "run", "submit",
+}
+
+_EXPECTED_CORE_EXECUTE_MODULE_EXPORTS = {
+    "CoreAdaptationOutcome", "CoreExecutionError", "CoreExecutionFuture",
+    "CoreExecutionSnapshot", "CoreOptions", "CoreOutcomeEvidence",
+    "CorePublicationEvidence", "CoreRefreshEvidence", "ExecutionContext",
+    "Executor", "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy",
+    "core_worker_setup", "current_context", "decode_core_outcome",
+    "prepare_shared_storage", "run", "submit", "worker_context",
+}
+
 
 def test_installed_root_exports_and_version_match_metadata(
     installed_python: Path,
@@ -392,6 +408,7 @@ def test_installed_declaration_imports_are_passive(
         """
 import importlib.util
 import json
+import importlib
 import sys
 import dryml
 import dryml.annotations
@@ -948,6 +965,56 @@ def test_source_execute_surface_matches_installed_manifest() -> None:
     assert set(execute.__all__) == _EXPECTED_EXECUTE_EXPORTS
     assert set(subprocess_execute.__all__) == _EXPECTED_EXECUTE_SPECIALIZATIONS["dryml.execute.subprocess"]
     assert set(ray_execute.__all__) == _EXPECTED_EXECUTE_SPECIALIZATIONS["dryml.execute.ray"]
+
+
+def test_installed_core_execute_surface_stays_in_the_core_namespace(
+    installed_python: Path,
+) -> None:
+    """Require installed core Execute exports without promoting them to dryml root."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+import importlib
+import sys
+
+import dryml
+import dryml.core
+
+before = set(sys.modules)
+core_execute = importlib.import_module("dryml.core.execute")
+print(json.dumps({
+    "core_exports": sorted(set(dryml.core.__all__) & set(%r)),
+    "module_exports": sorted(core_execute.__all__),
+    "root_pollution": sorted(set(dryml.__all__) & set(%r)),
+    "ray_loaded": "ray" in sys.modules,
+    "optional_loaded": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib") if name in sys.modules),
+    "core_loaded_execute": "dryml.execute" in sys.modules,
+    "core_import_was_passive": "dryml.execute" not in before,
+}))
+""" % (tuple(sorted(_EXPECTED_CORE_EXECUTE_EXPORTS)), tuple(sorted(_EXPECTED_CORE_EXECUTE_EXPORTS))),
+    )
+    data = json.loads(result.stdout)
+    assert set(data["core_exports"]) == _EXPECTED_CORE_EXECUTE_EXPORTS
+    assert set(data["module_exports"]) == _EXPECTED_CORE_EXECUTE_MODULE_EXPORTS
+    assert data["root_pollution"] == []
+    assert data["ray_loaded"] is False
+    assert data["optional_loaded"] == []
+    assert data["core_import_was_passive"] is True
+    assert data["core_loaded_execute"] is True
+
+
+def test_source_core_execute_surface_stays_in_the_core_namespace() -> None:
+    """Keep source core Execute exports aligned with the installed namespace contract."""
+
+    import dryml
+    import dryml.core
+    core_execute = importlib.import_module("dryml.core.execute")
+
+    assert set(dryml.core.__all__) & _EXPECTED_CORE_EXECUTE_EXPORTS == _EXPECTED_CORE_EXECUTE_EXPORTS
+    assert set(core_execute.__all__) == _EXPECTED_CORE_EXECUTE_MODULE_EXPORTS
+    assert not set(dryml.__all__) & _EXPECTED_CORE_EXECUTE_EXPORTS
 
 
 def test_installed_sdist_wheel_exercises_current_reference_authority(

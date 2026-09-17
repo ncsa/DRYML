@@ -1,9 +1,12 @@
 # Generic Execute
 
 `dryml.execute` runs one trusted Python callable through an explicitly
-selected backend. It is not `Repo`/`Store` transport, managed-operation
-execution, Dispatch selection, a runtime/session API, or a safe-deserialization
-boundary. Callable graphs and serialized payloads are trusted inputs.
+selected backend. It is the generic byte-oriented execution layer: it is not
+`Repo`/`Store` transport, managed-operation execution, Dispatch selection, a
+runtime/session API, or a safe-deserialization boundary. Callable graphs and
+serialized payloads are trusted inputs. `dryml.core.execute` is the separate
+opt-in core adapter which owns core reference transport, worker setup, result
+publication, and caller recovery over this generic layer.
 
 There is no persistent resource ledger: each executor reports only
 coordinator-and-backend scoped observations.
@@ -15,9 +18,10 @@ functions, closures with serializable captures, and importable unbound builtins.
 It does not promise that every value satisfying `Callable` is transportable.
 Stateful bound methods, bound builtin methods, and callable instances are
 rejected synchronously before backend submission. Known DRYML core references
-are also rejected by a fixed generic transport error; a DRYML core adapter is
-deferred. The generic rejection does not expose type-specific core phrases or
-the submitted value's private details.
+are also rejected by a fixed generic transport error; use the explicit
+`dryml.core.execute` adapter when a call needs core authority. The generic
+rejection does not expose type-specific core phrases or the submitted value's
+private details.
 
 Use `Executor` for a reusable backend lifetime, or the explicit one-off `run`
 and `submit` helpers. The common facade does not eagerly import subprocess or
@@ -82,6 +86,16 @@ encoding; an exit failure preserves an already encoded result or workload error,
 but leaves the Future cleanup state incomplete and `cleanup()` raises rather than
 claiming that unobserved worker teardown was reconciled.
 
+The generic private worker protocol is version 2. After admission and `GO`,
+setup-bearing calls send `SETUP` and wait for `SETUP_READY` before `PAYLOAD`.
+Bounded `OUTPUT` may arrive during setup, invocation, and teardown; terminal
+outcomes and final output fences complete the exchange. An incompatible worker fails before `GO`;
+`RESULT` before `PAYLOAD`, or payload after setup failure, is invalid. The
+post-`GO` `execution_timeout` covers setup, payload transfer, invocation, outcome
+encoding, and normal setup exit. It is independent of `admission_timeout` and
+`output_final_timeout`; the configuration matrix below gives their defaults and
+other limits.
+
 The core adapter's `dryml.core.execute:core_worker_setup` is a worker setup
 factory. It publishes runtime controls before reopening a detached `RepoDefinition`,
 then temporarily installs `core.session.config` and `current_context()`. The
@@ -99,6 +113,16 @@ workers use their established INLINE baseline rather than a clone of caller
 runtime state. In orchestration mode, requests for live returned Objects or
 argument updates fail before any Store export, opening, mutation, or backend
 submission.
+
+The core adapter supports ordinary functions, lambdas, nested functions and
+closures, bound methods, callable instances, `@function` callables, `Method`, and
+managed-operation callables. It sends one whole callable/argument/capture graph,
+including globals, defaults, annotations, instance fields, and `__slots__`.
+Live `Repo` and `Store` captures are rejected. Core values lower to exact CDef,
+`ObjectRef`, or `StateRef` authority; a selected declaration Store is a pinned
+index in the frozen Store table, never a path. The worker reconstructs one local
+owner boundary: function, Method, and managed owners each deliver/invoke/normalize
+once rather than gaining a second generic signature boundary.
 
 `prepare_shared_storage()` is the core-call storage seam. It exports a live Repo
 exactly once, derives the full worker Store table
@@ -163,6 +187,11 @@ path before shared automatic reference selection. Stateful graphs therefore
 return a `StateRef`; stateless graphs return their CDef; incoming CDef,
 `ObjectRef`, and `StateRef` result values remain reference data.
 
+Execute owns result publication before requesting shared-signature `AutoRef`
+selection; signature selection itself never saves an Object. The core codec
+is a bounded, version-local worker/coordinator implementation detail. It is not a
+Store format, general pickle format, or a cross-version RPC compatibility promise.
+
 With `update_args=False` (the default), execution never saves merely-mutated
 arguments and result recovery never restores into an original caller Object.
 With `update_args=True`, explicitly materialized live argument graphs are
@@ -171,6 +200,13 @@ instances after all delivered update references preflight successfully. A failed
 restore leaves previously applied targets intact and does not replay execution.
 Overlapping returned roots and descendants reuse the update StateRef, with a
 descendant represented by `root_state_ref.at(path)`.
+
+The worker validates the complete result and selected update graph before any
+publication. It coalesces each graph to maximal roots and reuses the one saved
+snapshot for a returned root or descendant and its matching update. It does not
+promise an atomic result/update transaction: completed authoritative publications
+remain visible after a later failure, and refresh failure neither rolls back
+earlier restores nor replays the workload.
 
 `decode_core_outcome()` exposes `CoreAdaptationOutcome` and
 `CoreOutcomeEvidence` value types. Evidence has exact StateRefs and
@@ -320,6 +356,13 @@ capture does not probe or create them.
 | `address` | `"auto"`, or existing `host:port` text | `RayBackendConfig` never accepts a URI or provisioning form; explicit endpoints never fall back to discovery. |
 | `namespace` | `None`, or nonempty string | Optional existing Ray namespace that must match a borrowed caller connection. |
 | `connect_timeout` | `30.0` seconds, positive finite | Bounds a caller waiting for Ray initialization, not an uninterruptible SDK initializer; late initialization remains owned and cannot revive a timed-out submission. |
+
+Each submitted Ray worker uses one attempt (`max_retries=0`,
+`retry_exceptions=False`) and one runtime boundary (`max_calls=1`). Subprocess
+workers likewise have one owned runtime boundary per accepted call. Subprocess
+may carry an exact `WorldAllocation` grant with CPU IDs; Ray carries only verified
+logical scheduler quantities and native evidence. Neither form creates a
+cross-coordinator reservation or physical-isolation claim.
 
 ## Backends And Existing Environments
 

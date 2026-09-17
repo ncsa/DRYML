@@ -148,6 +148,15 @@ being carried by a pickle fallback. Selected declaration Stores are represented 
 the frozen execution Store table, never filesystem paths. This transport remains
 internal and bounded; it is not a general pickle or RPC format.
 
+The callable graph includes globals, defaults, annotations, closure cells, bound
+receivers, instance attributes, and `__slots__` in one pass, preserving aliases
+with the delivered arguments. Live Repo/Store captures fail rather than falling
+back to pickling. A `ReferenceSelection` keeps its declaration Store pinned by
+the frozen worker Store table, so recovery cannot choose a path-equivalent or
+different replica. Execute does not auto-save inputs: only its core result owner
+may publish a returned live Object or explicitly delivered update root after the
+owner's raw-return seam.
+
 ## Migration
 
 | Retired spelling | Replacement or rationale |

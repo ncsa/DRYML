@@ -129,6 +129,14 @@ reversible effects. A watched framework import marks the worker terminal after
 restoration, so worker retirement rather than a claimed pristine reset remains
 the teardown guarantee.
 
+Core Execute enters this one runtime scope before Repo reconstruction, callable
+deserialization, signature/Method/managed activation, or materialization. Each
+accepted subprocess or Ray call uses at most one worker runtime boundary. A
+subprocess can report exact allocation identity and CPU IDs; Ray uses one-attempt
+workers and reports only logical scheduler capacity plus native evidence. A caller
+timeout, cancellation request, forced termination, or incomplete cleanup never
+proves a restored worker or successful workload.
+
 ## Process Controls
 
 The status vocabulary is closed to `undeclared`, `not-applicable`,

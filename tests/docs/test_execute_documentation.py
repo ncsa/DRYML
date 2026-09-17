@@ -16,6 +16,9 @@ from dryml.execute.executor import Executor, ExecutorView
 from dryml.execute.future import ExecutionFuture
 from dryml.execute.ray import RayBackend, RayFuture
 from dryml.execute.subprocess import SubProcessBackend, SubProcessConfig, SubProcessFuture
+from dryml.core.execute import CoreExecutionFuture, CoreOptions
+from dryml.core.execute import Executor as CoreExecutor
+from dryml.core.execute import ExecutorView as CoreExecutorView
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -158,6 +161,25 @@ def test_execute_public_operation_docstrings_state_contract_sections() -> None:
         documentation = inspect.getdoc(property_.fget) or ""
         assert "Returns:" in documentation
         assert "Side Effects:" in documentation
+    core_operations = (
+        (CoreExecutor.start, ("Returns:", "Raises:", "Side Effects:")),
+        (CoreExecutor.submit, ("Args:", "Returns:", "Raises:", "Side Effects:")),
+        (CoreExecutor.run, ("Args:", "Returns:", "Raises:", "Side Effects:")),
+        (CoreExecutor.with_options, ("Args:", "Returns:", "Raises:", "Side Effects:")),
+        (CoreExecutor.close, ("Args:", "Returns:", "Raises:", "Side Effects:")),
+        (CoreExecutorView.submit, ("Args:", "Returns:", "Raises:", "Side Effects:")),
+        (CoreExecutorView.run, ("Args:", "Returns:", "Raises:", "Side Effects:")),
+        (CoreExecutionFuture.result, ("Args:", "Returns:", "Raises:", "Side Effects:")),
+        (CoreExecutionFuture.cleanup, ("Raises:", "Side Effects:")),
+    )
+    for operation, sections in core_operations:
+        documentation = inspect.getdoc(operation) or ""
+        for section in sections:
+            assert section in documentation, operation
+    for value in (CoreOptions, CoreExecutionFuture, CoreExecutor, CoreExecutorView):
+        documentation = inspect.getdoc(value) or ""
+        for section in ("Args:", "Side Effects:"):
+            assert section in documentation, value
 
 
 def test_execute_docs_link_and_preserve_implemented_boundaries() -> None:
@@ -182,11 +204,17 @@ def test_execute_docs_link_and_preserve_implemented_boundaries() -> None:
         "spool parent", "only after the final lease reaches zero",
         "Per-executor payload limits and spool locations may still vary",
         "lambdas", "nested functions", "closures", "importable unbound builtins",
-        "Stateful bound methods", "callable instances", "core adapter is deferred",
-        "fixed generic transport error", "type-specific core phrases",
+        "Stateful bound methods", "callable instances", "fixed generic transport error",
+        "type-specific core phrases", "generic byte-oriented execution layer",
+        "version 2", "SETUP_READY", "execution_timeout", "CoreOptions",
+        "pinned index in the frozen Store table", "@function", "managed-operation",
+        "AutoRef", "version-local worker/coordinator", "cross-version RPC",
+        "maximal roots", "neither rolls back", "nor replays the workload",
+        "max_calls=1", "exact `WorldAllocation` grant", "logical scheduler quantities",
     ):
         assert phrase in guide, phrase
-    assert "whole Stage 7 completion" in release_notes
+    assert "dryml.core.execute` now supplies" in release_notes
+    assert "not transactional" in release_notes
     assert "not native Windows Ray or GPU evidence" in testing
 
 

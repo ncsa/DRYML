@@ -59,7 +59,8 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
   resumable lifecycle control without dispatch or a background execution backend.
 - `dryml.execute` runs trusted ordinary callables through an explicit local
   subprocess or existing same-host Ray backend without Store transport or
-  environment/cluster provisioning.
+  environment/cluster provisioning; `dryml.core.execute` is its separate
+  core-aware adapter namespace and is intentionally not promoted to `dryml`.
 - Tests are grouped by feature category and automatically bucketed into smoke, medium, and heavy speed tiers.
 
 ## Documentation Status
