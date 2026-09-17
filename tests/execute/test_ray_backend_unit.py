@@ -197,7 +197,7 @@ def test_fake_ray_setup_sends_native_evidence_and_drains_output_before_readiness
     assert output.snapshot().stdout == "setup output"
 
 
-def test_fake_ray_setup_failure_keeps_payload_withheld_and_cleanup_incomplete():
+def test_fake_ray_setup_failure_publishes_validated_terminal_before_withholding_payload(monkeypatch):
     """A fake Ray setup terminal publishes failure without sending a workload payload."""
     backend = RayBackendConfig(control_header_limit_bytes=512, owner_envelope_limit_bytes=512, admission_message_limit_bytes=512).create_backend()
     correlation = Correlation("ray-failure", 0, 1)
@@ -207,6 +207,14 @@ def test_fake_ray_setup_failure_keeps_payload_withheld_and_cleanup_incomplete():
     output._bind("ray-failure", output_limit_bytes=512, live_output_queue_limit_bytes=512, stream_output=False, start_live=False)
     future = RayFuture("ray-failure", output=output, termination_timeout=5)
     run = SimpleNamespace(connection=socket, native_node_id="node", native_task_id="task", worker_id="ray:worker", outcome_validated=False)
+    publish_exception = future._publish_exception
+
+    def assert_validated_before_terminal(error):
+        """Prevent Future publication from reopening the validated-terminal race."""
+        assert run.outcome_validated
+        publish_exception(error)
+
+    monkeypatch.setattr(future, "_publish_exception", assert_validated_before_terminal)
     call = SimpleNamespace(worker_setup=WorkerSetup(factory="tests.execute.test_ray_backend_unit:setup_factory", data={}), submission_id="ray-failure", output=output)
     terminal = b'{"cleanup":[{"type":"RuntimeError"}],"type":"ValueError"}'
     reader = _SetupReader((

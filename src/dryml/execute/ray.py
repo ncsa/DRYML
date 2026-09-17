@@ -1162,10 +1162,10 @@ class RayBackend(Backend):
                     raise ExecutionError("Ray worker setup readiness evidence is invalid")
                 return True
             if frame.state is FrameState.ERROR:
+                run.outcome_validated = True
                 _, remote_type, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
                 future._record_worker_cleanup_issues(issues)
                 future._publish_exception(RemoteExecutionError(f"remote Ray setup failed ({remote_type})", remote_type=remote_type or "RemoteError"))
-                run.outcome_validated = True
                 self._drain_setup_failure(call, run, reader, conversation)
                 return False
             raise FrameError("Ray worker setup sent an invalid frame")
@@ -1218,6 +1218,9 @@ class RayBackend(Backend):
                 if outcome_seen or not self._claim_outcome(run):
                     return
                 outcome_seen = True
+                # Cleanup can begin as soon as publishing wakes the coordinator.
+                # The accepted terminal frame is already sufficient evidence.
+                run.outcome_validated = True
                 try:
                     payload = frame.payload
                     if call.worker_setup is not None:
@@ -1227,11 +1230,11 @@ class RayBackend(Backend):
                     future._publish_result(future._receive_result(payload))
                 except BaseException:
                     future._publish_exception(ExecutionError("Ray worker result could not be decoded"))
-                run.outcome_validated = True
             elif frame.state is FrameState.ERROR:
                 if outcome_seen or not self._claim_outcome(run):
                     return
                 outcome_seen = True
+                run.outcome_validated = True
                 if call.worker_setup is not None:
                     _, remote_type, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
                     future._record_worker_cleanup_issues(issues)
@@ -1239,7 +1242,6 @@ class RayBackend(Backend):
                     data = _json(frame.payload, self._config.result_limit_bytes)
                     remote_type = str(data.get("type", "RemoteError"))[:self._config.diagnostic_text_limit_bytes]
                 future._publish_exception(RemoteExecutionError(f"remote Ray execution failed ({remote_type})", remote_type=remote_type))
-                run.outcome_validated = True
 
     def _watch_native(self, run: _Run) -> None:
         """Pair the exact task's marker with channel evidence for qualified release."""
