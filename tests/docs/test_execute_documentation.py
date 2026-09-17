@@ -238,6 +238,8 @@ def test_ray_ci_job_enables_real_integration_and_uses_job_owned_fixture() -> Non
         "--disable-usage-stats", "DRYML_EXECUTE_INTEGRATION=1",
         "DRYML_TEST_RAY_ADDRESS=127.0.0.1:6379", "DRYML_TEST_CONDA_PREFIX",
         "DRYML_TEST_VENV_PYTHON", "tests/ray/test_execute_ray_backend.py",
+        "tests/ray/test_core_execute_ray.py",
+        "tests/core/test_execute_integration.py",
         "tests/ray/test_execute_ray_environments.py",
         "tests/execute/test_backend_conformance.py",
         "tests/execute/test_existing_environments.py",
