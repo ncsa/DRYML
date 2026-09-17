@@ -1,8 +1,7 @@
-"""Callable-owner and capture coverage for core Execute U5."""
+"""Callable-owner and capture coverage for core Execute."""
 
 from __future__ import annotations
 
-import dill
 import os
 from pathlib import Path
 import pytest
@@ -19,11 +18,15 @@ from dryml.methods import Method
 
 
 def _invoke(fn, args, repo):
-    """Run one U5 call in a worker context and decode its ordinary result."""
+    """Run one core Execute call in a worker context and decode its ordinary result."""
     strategy = SharedDirStoreStrategy()
     prepared = strategy.prepare(fn, args, {}, repo=repo, control_store=None, update_args=False)
     with worker_context(ExecutionContext(repo, None)):
-        return dill.loads(strategy.invoke(prepared.invocation, repo=repo, update_args=False))
+        output = strategy.invoke(prepared.invocation, repo=repo, update_args=False)
+    return strategy.recover(
+        output, prepared, repo=repo, args=args, kwargs={},
+        return_objects=False, update_args=False,
+    )
 
 
 @function
@@ -136,8 +139,8 @@ def test_method_and_managed_owners_invoke_once_without_a_second_outer_boundary(t
     assert receiver.calls == 0
 
 
-def test_method_and_managed_raw_returns_are_intercepted_once_before_result_encoding(tmp_path, monkeypatch):
-    """Owner seams reject live raw results after one body call and before pickling."""
+def test_method_and_managed_raw_returns_are_published_once_before_return_encoding(tmp_path, monkeypatch):
+    """Owner seams publish live raw results after one body call before return handling."""
     repo = Repo(DirStore(tmp_path / "state"))
     strategy = SharedDirStoreStrategy()
     direct_marker = tmp_path / "direct-marker"
@@ -146,8 +149,11 @@ def test_method_and_managed_raw_returns_are_intercepted_once_before_result_encod
         DirectRawResult(), (), {}, repo=repo,
         control_store=None, update_args=False,
     )
-    with pytest.raises(CoreCallCodecError, match="result publication is required"):
-        strategy.invoke(direct.invocation, repo=repo, update_args=False)
+    direct_output = strategy.invoke(direct.invocation, repo=repo, update_args=False)
+    assert strategy.recover(
+        direct_output, direct, repo=repo, args=(), kwargs={},
+        return_objects=False, update_args=False,
+    ).object_id is not None
     assert direct_marker.read_text(encoding="ascii") == "once"
 
     receiver = ManagedValue(repo=repo)
@@ -158,8 +164,11 @@ def test_method_and_managed_raw_returns_are_intercepted_once_before_result_encod
         receiver.raw_result, (), {}, repo=repo,
         control_store=None, update_args=False,
     )
-    with pytest.raises(CoreCallCodecError, match="result publication is required"):
-        strategy.invoke(managed.invocation, repo=repo, update_args=False)
+    managed_output = strategy.invoke(managed.invocation, repo=repo, update_args=False)
+    assert strategy.recover(
+        managed_output, managed, repo=repo, args=(), kwargs={},
+        return_objects=False, update_args=False,
+    ).object_id is not None
     assert managed_marker.read_text(encoding="ascii") == "once"
 
 

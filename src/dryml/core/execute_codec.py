@@ -20,6 +20,7 @@ import dill
 
 from .cdef_codec import decode_cdef_graph, encode_cdef_graph
 from .cdef_graph import has_stateful_materialization
+from .definition import ConcreteDefinition
 from .links import DefLink
 from .object import Object
 from .reference_values import ObjectRef, StateRef
@@ -33,6 +34,7 @@ _VERSION = 1
 _DEFAULT_LIMIT = 67_108_864
 _MAX_NODES = 65_536
 _MAX_DEPTH = 64
+_OUTCOME_VERSION = 1
 
 
 class CoreCallCodecError(TypeError):
@@ -61,6 +63,84 @@ def _dill_result(value: Any, path: str) -> bytes:
         return dill.dumps(value, protocol=5, byref=False, recurse=True)
     except Exception as error:
         raise CoreCallCodecError(f"core execution transport rejected ordinary result at {path}") from error
+
+
+def _result_graph(value: Any, *, limit_bytes: int,
+                  automatic_references: set[int]) -> bytes:
+    """Encode an already-published result graph with the call graph grammar."""
+    encoder = _Encoder(limit_bytes=limit_bytes, automatic_references=automatic_references)
+    return encoder.finish(encoder.value(value, "$.result"))
+
+
+def _load_result_graph(data: bytes, *, repo: Repo, limit_bytes: int) -> tuple[Any, frozenset[int]]:
+    """Decode one result graph after its outcome envelope has been validated."""
+    decoder = _Decoder(data, repo=repo, limit_bytes=limit_bytes)
+    return decoder.value(decoder.graph["root"], "$.result"), frozenset(decoder.automatic_references)
+
+
+def _outcome(success: bool, *, result: bytes | None = None,
+             updates: list[dict[str, Any]] | None = None,
+             publications: list[dict[str, Any]] | None = None,
+             reason: str | None = None, limit_bytes: int) -> bytes:
+    """Encode one bounded tagged worker outcome without live core values."""
+    value = {
+        "version": _OUTCOME_VERSION,
+        "tag": "core-outcome",
+        "success": success,
+        "result": result,
+        "updates": updates or [],
+        "publications": publications or [],
+        "reason": reason,
+    }
+    try:
+        encoded = dill.dumps(value, protocol=5, byref=False, recurse=True)
+    except Exception as error:
+        raise CoreCallCodecError("core execution transport could not encode result outcome") from error
+    if len(encoded) > limit_bytes:
+        # Publication/update evidence is authority already made durable; only the
+        # result graph may be dropped after a completed publication.
+        value["success"] = False
+        value["result"] = None
+        value["reason"] = "result outcome exceeds configured bound after publication"
+        encoded = dill.dumps(value, protocol=5, byref=False, recurse=True)
+        if len(encoded) > limit_bytes:
+            raise CoreCallCodecError("core execution transport rejected oversized result outcome evidence")
+    return encoded
+
+
+def _failure_reason(error: Exception) -> str:
+    """Project expected owner failures into a bounded transport-safe category."""
+    if isinstance(error, SignatureError):
+        return f"SignatureError:{error.reason}" + ("" if error.slot is None else f":{error.slot}")
+    return type(error).__name__
+
+
+def decode_outcome(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LIMIT) -> dict[str, Any]:
+    """Decode one closed worker outcome into portable result and update authority.
+
+    The returned mapping contains only ordinary values, immutable references, and
+    Store-table-relative publication facts. It never reconstructs a StoreReport.
+    """
+    if not isinstance(data, bytes) or len(data) > limit_bytes:
+        raise CoreCallCodecError("core execution transport rejected oversized result")
+    value = _load(data, "$.outcome")
+    fields = {"version", "tag", "success", "result", "updates", "publications", "reason"}
+    if not isinstance(value, Mapping) or set(value) != fields or value.get("version") != _OUTCOME_VERSION or value.get("tag") != "core-outcome":
+        raise CoreCallCodecError("core execution transport rejected malformed result outcome")
+    if type(value["success"]) is not bool or not isinstance(value["updates"], list) or not isinstance(value["publications"], list):
+        raise CoreCallCodecError("core execution transport rejected malformed result outcome")
+    if value["reason"] is not None and not isinstance(value["reason"], str):
+        raise CoreCallCodecError("core execution transport rejected malformed result outcome")
+    if value["success"]:
+        if not isinstance(value["result"], bytes):
+            raise CoreCallCodecError("core execution transport rejected malformed successful outcome")
+        value = dict(value)
+        value["result"], value["automatic_references"] = _load_result_graph(
+            value["result"], repo=repo, limit_bytes=limit_bytes,
+        )
+    elif value["result"] is not None:
+        raise CoreCallCodecError("core execution transport rejected malformed failed outcome")
+    return value
 
 
 def _load(data: Any, path: str) -> Any:
@@ -146,11 +226,13 @@ def _class_has_resource(value: type) -> bool:
 class _Encoder:
     """Encode one whole call graph while preserving aliases and rejecting cycles."""
 
-    def __init__(self, *, limit_bytes: int) -> None:
+    def __init__(self, *, limit_bytes: int,
+                 automatic_references: set[int] | None = None) -> None:
         self.nodes: list[dict[str, Any]] = []
         self.memo: dict[int, int] = {}
         self.active: set[int] = set()
         self.limit_bytes = limit_bytes
+        self.automatic_references = automatic_references or set()
 
     def value(self, value: Any, path: str, depth: int = 0) -> int:
         if depth > _MAX_DEPTH:
@@ -175,6 +257,9 @@ class _Encoder:
     def _node(self, value: Any, path: str, depth: int) -> dict[str, Any]:
         if _is_resource(value):
             _fail("live core resource", path)
+        automatic = id(value) in self.automatic_references
+        if isinstance(value, ConcreteDefinition):
+            return {"tag": "auto_cdef" if automatic else "cdef", "value": encode_cdef_graph(value)}
         if isinstance(value, Object):
             if has_stateful_materialization(value.definition):
                 state = value.last_state_ref
@@ -183,9 +268,9 @@ class _Encoder:
                 return {"tag": "state", "value": state.to_data()}
             return {"tag": "cdef", "value": encode_cdef_graph(value.definition)}
         if isinstance(value, StateRef):
-            return {"tag": "state", "value": value.to_data()}
+            return {"tag": "auto_state" if automatic else "state", "value": value.to_data()}
         if isinstance(value, ObjectRef):
-            return {"tag": "object_ref", "value": value.to_data()}
+            return {"tag": "auto_object_ref" if automatic else "object_ref", "value": value.to_data()}
         if isinstance(value, DefLink):
             if not value.is_finalized:
                 _fail("unresolved reference assertion", path)
@@ -280,6 +365,7 @@ class _Decoder:
         self.repo = repo
         self.memo: dict[int, Any] = {}
         self.active: set[int] = set()
+        self.automatic_references: set[int] = set()
 
     def _validate_graph(self) -> None:
         """Reject malformed closed nodes before imports or Repo materialization."""
@@ -287,7 +373,9 @@ class _Decoder:
             _fail("malformed graph root", "$")
         allowed = {
             "atom": {"tag", "value"}, "cdef": {"tag", "value"},
-            "state": {"tag", "value"}, "object_ref": {"tag", "value"},
+            "auto_cdef": {"tag", "value"}, "state": {"tag", "value"},
+            "auto_state": {"tag", "value"}, "object_ref": {"tag", "value"},
+            "auto_object_ref": {"tag", "value"},
             "import": {"tag", "module", "qualname"}, "link": {"tag", "kind", "target"},
             "tuple": {"tag", "items"}, "list": {"tag", "items"}, "set": {"tag", "items"},
             "frozenset": {"tag", "items"}, "dict": {"tag", "items"},
@@ -363,12 +451,18 @@ class _Decoder:
             if value is not None and type(value) not in {bool, int, float, str, bytes}:
                 _fail("malformed atom", path)
             return value
-        if tag == "cdef":
-            return decode_cdef_graph(node.get("value"))
-        if tag == "state":
-            return StateRef.from_data(node.get("value"))
-        if tag == "object_ref":
-            return ObjectRef.from_data(node.get("value"))
+        if tag in {"cdef", "auto_cdef"}:
+            value = decode_cdef_graph(node.get("value"))
+        elif tag in {"state", "auto_state"}:
+            value = StateRef.from_data(node.get("value"))
+        elif tag in {"object_ref", "auto_object_ref"}:
+            value = ObjectRef.from_data(node.get("value"))
+        else:
+            value = None
+        if tag in {"cdef", "auto_cdef", "state", "auto_state", "object_ref", "auto_object_ref"}:
+            if tag.startswith("auto_"):
+                self.automatic_references.add(id(value))
+            return value
         if tag in {"tuple", "list", "set", "frozenset"}:
             items = node.get("items")
             if not isinstance(items, list):
@@ -515,6 +609,7 @@ def encode_invocation(
         selections: Mapping[Any, Any] | None = None,
         store_table: tuple[Store, ...] | None = None,
         limit_bytes: int = _DEFAULT_LIMIT,
+        update_targets: tuple[Mapping[str, Any], ...] = (),
 ) -> bytes:
     """Encode one detached call graph without activating annotations or saving input state."""
     if not callable(fn) or not isinstance(args, tuple) or not isinstance(kwargs, Mapping) or not all(isinstance(key, str) for key in kwargs):
@@ -529,25 +624,32 @@ def encode_invocation(
     if inspect.iscoroutinefunction(annotation_target) or inspect.isgeneratorfunction(annotation_target) or inspect.isasyncgenfunction(annotation_target):
         raise CoreCallCodecError("core execution transport rejected async or generator target")
     encoder = _Encoder(limit_bytes=limit_bytes)
-    root = encoder.value({"target": target, "args": args, "kwargs": dict(kwargs), "owner": owner, "selections": _selection_data(selections or {}, repo, store_table)}, "$")
+    if not isinstance(update_targets, tuple):
+        raise CoreCallCodecError("core execution transport requires tuple update targets")
+    root = encoder.value({"target": target, "args": args, "kwargs": dict(kwargs), "owner": owner, "selections": _selection_data(selections or {}, repo, store_table), "updates": list(update_targets)}, "$")
     return encoder.finish(root)
 
 
-def decode_invocation(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LIMIT) -> tuple[Any, tuple[Any, ...], dict[str, Any], str, Mapping[Any, Any]]:
+def decode_invocation(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LIMIT) -> tuple[Any, tuple[Any, ...], dict[str, Any], str, Mapping[Any, Any], tuple[Mapping[str, Any], ...]]:
     """Reconstruct a call graph after worker setup and before one local boundary."""
     decoder = _Decoder(data, repo=repo, limit_bytes=limit_bytes)
     decoded = decoder.value(decoder.graph["root"])
-    if not isinstance(decoded, Mapping) or set(decoded) != {"target", "args", "kwargs", "owner", "selections"}:
+    if not isinstance(decoded, Mapping) or set(decoded) != {"target", "args", "kwargs", "owner", "selections", "updates"}:
         raise CoreCallCodecError("core execution transport rejected malformed call descriptor")
     if not callable(decoded["target"]) or not isinstance(decoded["args"], tuple) or not isinstance(decoded["kwargs"], dict) or not all(isinstance(key, str) for key in decoded["kwargs"]):
         raise CoreCallCodecError("core execution transport rejected malformed call descriptor")
-    if decoded["owner"] not in {"ordinary", "function", "method", "managed"} or not isinstance(decoded["selections"], Mapping):
+    if decoded["owner"] not in {"ordinary", "function", "method", "managed"} or not isinstance(decoded["selections"], Mapping) or not isinstance(decoded["updates"], list):
         raise CoreCallCodecError("core execution transport rejected malformed call descriptor")
     from .definition import ConcreteDefinition, Definition
     if decoded["owner"] in {"method", "managed"} and isinstance(
             decoded["target"], (ConcreteDefinition, Definition, ObjectRef, StateRef)):
         decoded["target"] = repo.materialize_boundary((decoded["target"],), reuse_live="never")[0]
-    return decoded["target"], decoded["args"], decoded["kwargs"], decoded["owner"], _selection_controls(decoded["selections"], repo)
+    targets = []
+    for item in decoded["updates"]:
+        if not isinstance(item, Mapping) or set(item) != {"target", "object_digest", "path"} or not all(isinstance(item[name], str) and item[name] for name in item):
+            raise CoreCallCodecError("core execution transport rejected malformed update target")
+        targets.append(item)
+    return decoded["target"], decoded["args"], decoded["kwargs"], decoded["owner"], _selection_controls(decoded["selections"], repo), tuple(targets)
 
 
 def _target_materializing_roots(target: Any) -> tuple[tuple[Any, ...], Any]:
@@ -602,16 +704,362 @@ def _target_materializing_roots(target: Any) -> tuple[tuple[Any, ...], Any]:
     return tuple(roots), install
 
 
-def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = _DEFAULT_LIMIT,
-                      result_limit_bytes: int = _DEFAULT_LIMIT, managed_config: Any = None) -> bytes:
-    """Activate one worker-local signature boundary, invoke once, and encode ordinary output.
+def _walk_live_objects(value: Any, found: list[Object], seen: set[int], active: set[int]) -> None:
+    """Collect supported live Object leaves once while rejecting result cycles."""
+    if isinstance(value, Object):
+        if id(value) not in seen:
+            found.append(value)
+            seen.add(id(value))
+        return
+    if isinstance(value, (ObjectRef, StateRef)):
+        return
+    if isinstance(value, (tuple, list)):
+        identity = id(value)
+        if identity in active:
+            raise CoreCallCodecError("core execution transport rejected cyclic graph at $.result")
+        if identity in seen:
+            return
+        seen.add(identity)
+        active.add(identity)
+        try:
+            for item in value:
+                _walk_live_objects(item, found, seen, active)
+        finally:
+            active.remove(identity)
+        return
+    if isinstance(value, Mapping):
+        identity = id(value)
+        if identity in active:
+            raise CoreCallCodecError("core execution transport rejected cyclic graph at $.result")
+        if identity in seen:
+            return
+        seen.add(identity)
+        active.add(identity)
+        try:
+            for key, item in value.items():
+                _walk_live_objects(key, found, seen, active)
+                _walk_live_objects(item, found, seen, active)
+        finally:
+            active.remove(identity)
 
-    Live output publication is deliberately left to U6; this seam rejects it rather
-    than pickling a live Object.
+
+def _maximal_roots(values: list[Object]) -> list[Object]:
+    """Coalesce repeated selected Objects and descendants into first maximal roots."""
+    roots: list[Object] = []
+    for value in values:
+        if any(value is candidate for candidate in roots):
+            continue
+        ancestors = [
+            root for root in roots
+            if any(bound is value for bound in getattr(root, "_runtime_projection", {}).values())
+        ]
+        if ancestors:
+            continue
+        descendants = [
+            root for root in roots
+            if any(bound is root for bound in getattr(value, "_runtime_projection", {}).values())
+        ]
+        if descendants:
+            roots = [root for root in roots if root not in descendants]
+        roots.append(value)
+    return roots
+
+
+def _report_data(report: Any, repo: Repo, state_ref: StateRef | None) -> list[dict[str, Any]]:
+    """Project ephemeral StoreReport facts into Store-table-relative evidence."""
+    if report is None:
+        return []
+    indexes = {id(store): index for index, store in enumerate(repo.stores)}
+    facts = []
+    for item in report.publications:
+        index = indexes.get(id(item.store))
+        reference = item.state_ref if isinstance(item.state_ref, StateRef) else state_ref
+        if index is None or not isinstance(reference, StateRef):
+            continue
+        facts.append({
+            "state": reference.to_data(), "store": index, "phase": item.phase,
+            "status": item.status, "path": str(item.path),
+        })
+    return facts
+
+
+class _ResultPublisher:
+    """Publish live result/update graphs once and replace them with exact authority."""
+
+    def __init__(self, repo: Repo, updates: list[tuple[str, Object]], *, result_limit_bytes: int) -> None:
+        self.repo = repo
+        self._result_limit_bytes = result_limit_bytes
+        self.updates = self._maximal_updates(updates)
+        self.references: dict[int, StateRef] = {}
+        self.publications: list[dict[str, Any]] = []
+        self.update_states: list[dict[str, Any]] = []
+        self._published_updates = False
+        self._memo: dict[int, Any] = {}
+        self._active: set[int] = set()
+        self.automatic_references: set[int] = set()
+        self._prospective_states: dict[int, StateRef] = {}
+
+    @staticmethod
+    def _maximal_updates(values: list[tuple[str, Object]]) -> list[tuple[str, Object]]:
+        """Coalesce selected roots while retaining the winning caller token."""
+        roots: list[tuple[str, Object]] = []
+        for target, value in values:
+            if any(value is root for _, root in roots):
+                continue
+            if any(any(bound is value for bound in getattr(root, "_runtime_projection", {}).values()) for _, root in roots):
+                continue
+            roots = [item for item in roots if not any(
+                bound is item[1] for bound in getattr(value, "_runtime_projection", {}).values()
+            )]
+            roots.append((target, value))
+        return roots
+
+    def _remember_graph(self, root: Object, state: StateRef) -> None:
+        self.references[id(root)] = state
+        for path, bound in getattr(root, "_runtime_projection", {}).items():
+            if isinstance(bound, Object):
+                if bound is root:
+                    continue
+                try:
+                    self.references[id(bound)] = state.at(path)
+                except ValueError:
+                    # Non-materializing runtime values never carry StateRef state.
+                    continue
+
+    def _save(self, root: Object, *, update: bool, target: str | None = None) -> StateRef:
+        try:
+            state, report = self.repo.save(root, deep_capture=True, report_stores=True)
+        except BaseException as error:
+            report = getattr(error, "report", None)
+            state = getattr(root, "last_state_ref", None)
+            self.publications.extend(_report_data(
+                report, self.repo, state if isinstance(state, StateRef) else None,
+            ))
+            raise
+        self.publications.extend(_report_data(report, self.repo, state))
+        self._remember_graph(root, state)
+        if update:
+            assert target is not None
+            self.update_states.append({"state": state.to_data(), "object": state.object.to_data(), "target": target})
+        return state
+
+    def publish_updates(self) -> None:
+        """Deep-save selected maximal worker argument roots exactly once."""
+        if self._published_updates:
+            return
+        self._published_updates = True
+        for target, root in self.updates:
+            self._save(root, update=True, target=target)
+
+    def _prospective_state(self, value: Object) -> StateRef:
+        """Build a shape-accurate future receipt without saving ``value``."""
+        state = self._prospective_states.get(id(value))
+        if state is None:
+            state = StateRef(value.object_ref, {
+                path: "core-" + "0" * 64 for path in value.object_ref.objects
+            })
+            self._prospective_states[id(value)] = state
+        return state
+
+    def _preflight_graph(self, value: Any, path: str, memo: dict[int, Any],
+                         active: set[int], depth: int = 0) -> Any:
+        """Detach live Objects and reject unsupported result data before a save."""
+        if depth > _MAX_DEPTH:
+            _fail("graph depth exceeds the transport bound", path)
+        if _is_resource(value):
+            _fail("live core resource", path)
+        if isinstance(value, Object):
+            return self._prospective_state(value)
+        if isinstance(value, (ObjectRef, StateRef, ConcreteDefinition)):
+            return value
+        identity = id(value)
+        if isinstance(value, tuple):
+            if identity in active:
+                _fail("cyclic graph", path)
+            if identity not in memo:
+                active.add(identity)
+                try:
+                    memo[identity] = tuple(
+                        self._preflight_graph(item, f"{path}[{index}]", memo, active, depth + 1)
+                        for index, item in enumerate(value)
+                    )
+                finally:
+                    active.remove(identity)
+            return memo[identity]
+        if isinstance(value, list):
+            if identity in active:
+                _fail("cyclic graph", path)
+            if identity not in memo:
+                active.add(identity)
+                try:
+                    memo[identity] = [
+                        self._preflight_graph(item, f"{path}[{index}]", memo, active, depth + 1)
+                        for index, item in enumerate(value)
+                    ]
+                finally:
+                    active.remove(identity)
+            return memo[identity]
+        if isinstance(value, Mapping):
+            if identity in active:
+                _fail("cyclic graph", path)
+            if identity not in memo:
+                active.add(identity)
+                try:
+                    memo[identity] = {
+                        self._preflight_graph(key, f"{path}.key[{index}]", memo, active, depth + 1):
+                        self._preflight_graph(item, f"{path}.value[{index}]", memo, active, depth + 1)
+                        for index, (key, item) in enumerate(value.items())
+                    }
+                finally:
+                    active.remove(identity)
+            return memo[identity]
+        if isinstance(value, (set, frozenset)):
+            if identity in active:
+                _fail("cyclic graph", path)
+            if identity not in memo:
+                active.add(identity)
+                try:
+                    items = [
+                        self._preflight_graph(item, f"{path}.member[{index}]", memo, active, depth + 1)
+                        for index, item in enumerate(value)
+                    ]
+                    memo[identity] = frozenset(items) if isinstance(value, frozenset) else set(items)
+                finally:
+                    active.remove(identity)
+            return memo[identity]
+        return value
+
+    def _validate_before_publication(self, value: Any) -> None:
+        """Validate the result and every selected update root without side effects."""
+        graph = self._preflight_graph(
+            {"result": value, "updates": tuple(root for _, root in self.updates)},
+            "$.preflight", {}, set(),
+        )
+        _result_graph(graph, limit_bytes=self._result_limit_bytes, automatic_references=set())
+
+    def _reserve_evidence(self, value: Any) -> None:
+        """Prove the configured outcome bound can retain all possible save evidence."""
+        if len(self.repo.stores) > _MAX_NODES:
+            raise CoreCallCodecError("core execution transport rejected oversized Store table")
+        result_objects: list[Object] = []
+        _walk_live_objects(value, result_objects, set(), set())
+        roots = [root for _, root in self.updates] + _maximal_roots(result_objects)
+        if len(roots) > _MAX_NODES:
+            raise CoreCallCodecError("core execution transport rejected oversized publication roots")
+        graph = self._preflight_graph(value, "$.result", {}, set())
+        result = _result_graph(graph, limit_bytes=self._result_limit_bytes, automatic_references=set())
+        updates = [
+            {"state": self._prospective_state(root).to_data(),
+             "object": root.object_ref.to_data(), "target": target}
+            for target, root in self.updates
+        ]
+        phases = ("definition", "state", "snapshot", "membership", "index", "main", "alias", "commit")
+        publications = [
+            {"state": state.to_data(), "store": store_index, "phase": phase,
+             "status": "completed", "path": str(path)}
+            for root in roots
+            for state in (self._prospective_state(root),)
+            for path in state.states
+            for store_index in range(len(self.repo.stores))
+            for phase in phases
+        ]
+        _outcome(True, result=result, updates=updates, publications=publications,
+                 limit_bytes=self._result_limit_bytes)
+
+    def raw_result(self, value: Any) -> Any:
+        """Validate and reserve the full result/update graph before publication."""
+        self._validate_before_publication(value)
+        self._reserve_evidence(value)
+        self.publish_updates()
+        if isinstance(value, (ObjectRef, StateRef, ConcreteDefinition)):
+            return value
+        return self.value(value)
+
+    def value(self, value: Any) -> Any:
+        """Replace supported nested live Object leaves with automatic references."""
+        if isinstance(value, (ObjectRef, StateRef, ConcreteDefinition)):
+            return value
+        if isinstance(value, Object):
+            state = self.references.get(id(value))
+            if state is None:
+                state = self._save(value, update=False)
+            from .signatures import _select_automatic
+            selected = state if has_stateful_materialization(value.definition) else _select_automatic(value, "return")
+            self.automatic_references.add(id(selected))
+            return selected
+        if isinstance(value, tuple):
+            return self._container(value, lambda items: tuple(items))
+        if isinstance(value, list):
+            return self._container(value, lambda items: list(items))
+        if isinstance(value, Mapping):
+            identity = id(value)
+            if identity in self._active:
+                raise CoreCallCodecError("core execution transport rejected cyclic graph at $.result")
+            if identity in self._memo:
+                return self._memo[identity]
+            self._active.add(identity)
+            try:
+                result = {self.value(key): self.value(item) for key, item in value.items()}
+                self._memo[identity] = result
+                return result
+            finally:
+                self._active.remove(identity)
+        return value
+
+    def _container(self, value: tuple[Any, ...] | list[Any], build: Any) -> Any:
+        identity = id(value)
+        if identity in self._active:
+            raise CoreCallCodecError("core execution transport rejected cyclic graph at $.result")
+        if identity in self._memo:
+            return self._memo[identity]
+        self._active.add(identity)
+        try:
+            result = build(self.value(item) for item in value)
+            self._memo[identity] = result
+            return result
+        finally:
+            self._active.remove(identity)
+
+
+def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = _DEFAULT_LIMIT,
+                       result_limit_bytes: int = _DEFAULT_LIMIT, managed_config: Any = None,
+                       update_args: bool = False) -> bytes:
+    """Invoke once, publish selected state, and return a tagged portable outcome.
+
+    Result publication happens at each owner's raw-return seam, before its one
+    existing return-normalization boundary. Expected invocation, publication, and
+    result-encoding failures retain any completed publication ledger in the
+    returned outcome rather than escaping as a type-only worker exception.
     """
-    target, args, kwargs, owner, selections = decode_invocation(
+    target, args, kwargs, owner, selections, update_targets = decode_invocation(
         data, repo=repo, limit_bytes=invocation_limit_bytes,
     )
+    publisher: _ResultPublisher | None = None
+    delivered: list[Object] = []
+
+    def on_delivered(call_args: tuple[Any, ...], call_kwargs: Mapping[str, Any]) -> None:
+        nonlocal publisher
+        # Only delivered argument positions count: captures and Ref values remain
+        # outside the update set, while nested materialized Object values are kept.
+        for value in (*call_args, *call_kwargs.values()):
+            _walk_live_objects(value, delivered, set(), set())
+        selected: list[tuple[str, Object]] = []
+        unmatched = list(update_targets)
+        for value in delivered:
+            for index, item in enumerate(unmatched):
+                if value.object_ref.digest() == item["object_digest"]:
+                    selected.append((item["target"], value))
+                    unmatched.pop(index)
+                    break
+        publisher = _ResultPublisher(
+            repo, selected if update_args else [], result_limit_bytes=result_limit_bytes,
+        )
+
+    def on_raw_result(value: Any) -> Any:
+        if publisher is None:
+            raise CoreCallCodecError("core execution transport did not deliver arguments")
+        return publisher.raw_result(value)
+
     try:
         capture_roots, install_captures = _target_materializing_roots(target)
         if owner == "function":
@@ -619,7 +1067,8 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
             plan = compile_signature(target)
             result = _invoke_function_with_raw_result(
                 plan, target, args, kwargs, repo=repo, reuse_live="never",
-                selections=selections, on_raw_result=_reject_live_result,
+                selections=selections, on_raw_result=on_raw_result,
+                on_delivered_args=on_delivered,
                 extra_mat_roots=capture_roots, on_extra_materialized=install_captures,
             )
         elif owner in {"method", "managed"}:
@@ -627,10 +1076,12 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
             if not callable(invoke):
                 raise CoreCallCodecError("core execution transport rejected missing owner invocation seam")
             if owner == "managed":
-                result = invoke(args, kwargs, repo=repo, on_raw_result=_reject_live_result,
-                                managed_config=managed_config)
+                publisher = _ResultPublisher(repo, [], result_limit_bytes=result_limit_bytes)
+                result = invoke(args, kwargs, repo=repo, on_raw_result=publisher.raw_result,
+                                 managed_config=managed_config)
             else:
-                result = invoke(args, kwargs, repo=repo, on_raw_result=_reject_live_result)
+                publisher = _ResultPublisher(repo, [], result_limit_bytes=result_limit_bytes)
+                result = invoke(args, kwargs, repo=repo, on_raw_result=publisher.raw_result)
         else:
             plan = compile_signature(target)
             call_args, call_kwargs = plan.prepare_args(
@@ -638,45 +1089,32 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
             ).deliver_args(
                 extra_mat_roots=capture_roots, on_extra_materialized=install_captures,
             )
-            result = _reject_live_result(target(*call_args, **call_kwargs))
-            result = plan.prepare_return(result, repo=repo, reuse_live="never").deliver_return()
-    except SignatureError:
+            on_delivered(call_args, call_kwargs)
+            result = on_raw_result(target(*call_args, **call_kwargs))
+            result = plan.prepare_return(
+                result, repo=repo, reuse_live="never", preserve_reference_data=True,
+            ).deliver_return(preserve_reference_data=True)
+        assert publisher is not None
+        # A default materializing return can load a fresh local Object after raw
+        # publication. Its saved receipt maps it back to the exact first snapshot.
+        adapted = publisher.value(result)
+        return _outcome(
+            True, result=_result_graph(
+                adapted, limit_bytes=result_limit_bytes,
+                automatic_references=publisher.automatic_references,
+            ),
+            updates=publisher.update_states, publications=publisher.publications,
+            limit_bytes=result_limit_bytes,
+        )
+    except (KeyboardInterrupt, SystemExit):
         raise
-    encoded = _dill_result(result, "$.result")
-    if len(encoded) > result_limit_bytes:
-        raise CoreCallCodecError("core execution transport rejected oversized result")
-    return encoded
+    except Exception as error:
+        publications = [] if publisher is None else publisher.publications
+        updates = [] if publisher is None else publisher.update_states
+        return _outcome(
+            False, updates=updates, publications=publications,
+            reason=_failure_reason(error), limit_bytes=result_limit_bytes,
+        )
 
 
-def _reject_live_result(value: Any) -> Any:
-    """Keep U5 from falling back to live-result pickling before U6 publication."""
-    active: set[int] = set()
-
-    def visit(current: Any) -> None:
-        identity = id(current)
-        if identity in active:
-            return
-        active.add(identity)
-        try:
-            if isinstance(current, (Object, Repo, Store)):
-                raise CoreCallCodecError("core execution result publication is required for live resource output")
-            if isinstance(current, Mapping):
-                for key, item in current.items():
-                    visit(key)
-                    visit(item)
-            elif isinstance(current, (tuple, list, set, frozenset)):
-                for item in current:
-                    visit(item)
-            else:
-                fields = _instance_fields(current)
-                if fields is not None:
-                    for item in fields.values():
-                        visit(item)
-        finally:
-            active.remove(identity)
-
-    visit(value)
-    return value
-
-
-__all__ = ["CoreCallCodecError", "decode_invocation", "encode_invocation", "invoke_invocation"]
+__all__ = ["CoreCallCodecError", "decode_invocation", "decode_outcome", "encode_invocation", "invoke_invocation"]

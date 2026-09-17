@@ -556,7 +556,8 @@ class SignaturePlan:
         )
 
     def prepare_return(self, value: Any, *, repo: Any = None, cache: Any = None,
-                       reuse_live: Any = None, selections: Mapping[Any, Any] | None = None) -> "BoundaryPlan":
+                       reuse_live: Any = None, selections: Mapping[Any, Any] | None = None,
+                       preserve_reference_data: bool = False) -> "BoundaryPlan":
         """Normalize one fresh return boundary without realization.
 
         Args:
@@ -565,6 +566,8 @@ class SignaturePlan:
             cache: Optional Repo cache policy.
             reuse_live: Optional Repo live-reuse policy.
             selections: Optional exact selection keyed by ``"return"``.
+            preserve_reference_data: Internal owner control that keeps a
+                pre-published raw result's reference leaves as data.
 
         Returns:
             A return-mode boundary with authority and canonical views.
@@ -582,10 +585,13 @@ class SignaturePlan:
         controls = _validate_controls(
             _explicit_controls(repo, cache, reuse_live, selections), {"return"}
         )
-        return self._prepare_return(value, controls)
+        return self._prepare_return(value, controls, preserve_reference_data=preserve_reference_data)
 
-    def _prepare_return(self, value: Any, controls: _Controls) -> "BoundaryPlan":
+    def _prepare_return(self, value: Any, controls: _Controls, *,
+                        preserve_reference_data: bool = False) -> "BoundaryPlan":
         """Normalize one return using already resolved controls."""
+        if preserve_reference_data:
+            return BoundaryPlan(self, "return", value, value, controls)
 
         if self.return_slot is None:
             return BoundaryPlan(self, "return", value, value, controls)
@@ -594,7 +600,8 @@ class SignaturePlan:
         )
         return BoundaryPlan(self, "return", authority, canonical, controls)
 
-    def _prepare_ambient_return(self, value: Any) -> "BoundaryPlan":
+    def _prepare_ambient_return(self, value: Any, *,
+                                preserve_reference_data: bool = False) -> "BoundaryPlan":
         """Prepare a return while deliberately borrowing the active context.
 
         This private integration seam validates return-only selections and
@@ -602,7 +609,7 @@ class SignaturePlan:
         """
 
         controls = _validate_controls(_ambient_controls(), {"return"})
-        return self._prepare_return(value, controls)
+        return self._prepare_return(value, controls, preserve_reference_data=preserve_reference_data)
 
 
 @dataclass(slots=True)
@@ -617,8 +624,8 @@ class BoundaryPlan:
         controls: Immutable explicit or deliberately borrowed normalization
             controls, including retained selection Store provenance.
 
-    Selection is complete before this object is returned. U2 retains controls and
-    selected source authority for U3's Repo-owned materialization admission.
+    Selection is complete before this object is returned. It retains controls and
+    selected source authority for Repo-owned materialization admission.
     """
 
     plan: SignaturePlan
@@ -697,7 +704,8 @@ class BoundaryPlan:
         return tuple(args), kwargs
 
     def deliver_return(self, *, reservation: Any = None,
-                       reserved_live: Mapping[str, Any] | None = None) -> Any:
+                       reserved_live: Mapping[str, Any] | None = None,
+                       preserve_reference_data: bool = False) -> Any:
         """Deliver one normalized result exactly once.
 
         Returns:
@@ -713,6 +721,9 @@ class BoundaryPlan:
                 a higher-level lifecycle owner.
             reserved_live: Optional exact-reference digest to live-object mapping
                 admitted through ``reservation`` for overlap reuse.
+            preserve_reference_data: Keep already-normalized reference leaves as
+                data instead of recursively materializing them. This is reserved
+                for an owner that published a raw return before this boundary.
 
         Side Effects:
             A materializing return may cause Repo to claim, reserve, construct,
@@ -720,6 +731,8 @@ class BoundaryPlan:
         """
 
         self._consume("return")
+        if preserve_reference_data:
+            return self.authority
         return self._deliver_materializing_values(
             {"return": self.authority}, reservation=reservation,
             reserved_live=reserved_live,
@@ -1535,6 +1548,7 @@ def _invoke_function_with_raw_result(
     selections: Mapping[Any, Any] | None = None,
     ambient: bool = False,
     on_raw_result: Callable[[Any], Any] | None = None,
+    on_delivered_args: Callable[[tuple[Any, ...], Mapping[str, Any]], None] | None = None,
     extra_mat_roots: tuple[Any, ...] = (),
     on_extra_materialized: Callable[[tuple[Any, ...]], None] | None = None,
 ) -> Any:
@@ -1556,12 +1570,18 @@ def _invoke_function_with_raw_result(
         extra_mat_roots=extra_mat_roots,
         on_extra_materialized=on_extra_materialized,
     )
+    if on_delivered_args is not None:
+        on_delivered_args(call_args, call_kwargs)
     result = target(*call_args, **call_kwargs)
+    preserve_reference_data = on_raw_result is not None
     if on_raw_result is not None:
         result = on_raw_result(result)
     return (
-        plan._prepare_ambient_return(result).deliver_return()
+        plan._prepare_ambient_return(result, preserve_reference_data=preserve_reference_data).deliver_return(
+            preserve_reference_data=preserve_reference_data,
+        )
         if ambient else plan.prepare_return(
             result, repo=repo, cache=cache, reuse_live=reuse_live,
-        ).deliver_return()
+            preserve_reference_data=preserve_reference_data,
+        ).deliver_return(preserve_reference_data=preserve_reference_data)
     )

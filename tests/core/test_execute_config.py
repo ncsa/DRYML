@@ -97,7 +97,7 @@ def test_orchestration_floor_rejects_live_results_and_updates_before_export(tmp_
 
 
 def test_prepared_core_call_owns_only_detached_frozen_data():
-    """Prepared call storage remains deeply immutable after caller mutation."""
+    """Prepared calls retain only detached transport and storage descriptions."""
 
     storage = {"repo": {"stores": [{"path": "state"}]}}
     prepared = PreparedCoreCall(b"invocation", storage)
@@ -107,3 +107,5 @@ def test_prepared_core_call_owns_only_detached_frozen_data():
     assert prepared.storage_setup["repo"]["stores"][0]["path"] == "state"
     with pytest.raises(TypeError):
         prepared.storage_setup["new"] = "value"
+    assert not hasattr(prepared, "refresh_targets")
+    assert not hasattr(prepared, "_refresh_ledger")

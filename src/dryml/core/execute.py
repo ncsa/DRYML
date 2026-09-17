@@ -11,14 +11,16 @@ import asyncio
 import importlib
 import os
 import threading
+from uuid import uuid4
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, TypeAlias
 
 from dryml.execute.models import WorkerSetupContext
+from dryml.execute.errors import ExecutionError
 from dryml.formats import make_envelope, semantic_id, validate_envelope
 from dryml.runtime import (
     ExecutionGrant,
@@ -31,8 +33,10 @@ from dryml.runtime import (
 from dryml.formats import deep_freeze_json
 from .repo import Repo
 from .repo_definition import RepoDefinition
+from .execute_codec import CoreCallCodecError
 from .session import config, get_config
 from .store.dir import DirStore
+from .reference_values import StateRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +79,156 @@ ReturnObjects: TypeAlias = bool | Literal["auto"]
 _INHERIT = "inherit"
 
 
+@dataclass(frozen=True, slots=True)
+class CorePublicationEvidence:
+    """Portable fact for one Store-table-relative publication boundary.
+
+    Args:
+        state_ref: Exact StateRef associated with the observed boundary.
+        store_index: Index in the frozen Repo Store table, never a Store handle.
+        phase: Repo publication phase reported by the owning save path.
+        status: Observed completed, failed, uncertain, or unattempted status.
+        path: Canonical graph path recorded by the save report.
+
+    The value is detached from the worker's ephemeral StoreReport and is safe for
+    Future snapshots may retain it after worker cleanup.
+    """
+
+    state_ref: StateRef
+    store_index: int
+    phase: str
+    status: str
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class CoreRefreshEvidence:
+    """One caller-target refresh observation for a future facade.
+
+    Args:
+        target: Opaque stable target association, never a live Object.
+        state_ref: Exact published snapshot requested for that target.
+        status: ``pending``, ``applied``, ``preflight_failed``, ``invalidated``,
+            or ``skipped``.
+
+    Coordinator recovery state retains this ledger for one call, so repeated
+    future result access cannot retry a partial refresh.
+    """
+
+    target: str
+    state_ref: StateRef
+    status: Literal["pending", "applied", "preflight_failed", "invalidated", "skipped"]
+
+
+@dataclass(frozen=True, slots=True)
+class CoreOutcomeEvidence:
+    """Detached exact authority published by a completed worker outcome.
+
+    Args:
+        publications: Store-table-relative publication boundaries from Repo save
+            reports, including partial publication evidence.
+        updates: Exact maximal-root StateRefs selected for optional caller refresh.
+
+    No live Store, Repo, StoreReport, workload argument, or result is retained.
+    Publication failure is therefore inspectable without presenting it as rollback.
+    """
+
+    publications: tuple[CorePublicationEvidence, ...]
+    updates: tuple[StateRef, ...]
+    refreshes: tuple[CoreRefreshEvidence, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CoreAdaptationOutcome:
+    """Decoded result and evidence retained for a future core facade.
+
+    Args:
+        value: Decoded ordinary value or immutable reference graph. It contains no
+            live StoreReport or Store handle.
+        evidence: Exact detached publication/update evidence.
+
+    A future may cache this immutable outcome for repeated access without
+    repeating publication, recovery, or refresh work.
+    """
+
+    value: Any
+    evidence: CoreOutcomeEvidence
+
+
+class CoreExecutionError(ExecutionError):
+    """A core execution phase failed while retaining detached authority evidence.
+
+    Args:
+        message: Bounded phase failure category, never a workload value representation.
+        phase: Core adaptation phase which failed.
+        execution: Optional future retaining this adaptation.
+        evidence: Publication/update/refresh facts completed before the failure.
+
+    This error does not claim rollback or retry. A future retains it directly rather
+    than introducing a second outcome-error scheme.
+    """
+
+    def __init__(self, message: str, *, phase: str,
+                 evidence: CoreOutcomeEvidence | None = None,
+                 execution: Any = None) -> None:
+        super().__init__(message)
+        self.phase = phase
+        self.evidence = evidence
+        self.execution = execution
+
+
+class _RefreshLedger:
+    """Retain one call's deterministic refresh progress without retaining result data."""
+
+    def __init__(self) -> None:
+        self.entries: list[CoreRefreshEvidence] = []
+        self.error: CoreExecutionError | None = None
+
+    def begin(self, updates: tuple[tuple[str, StateRef], ...]) -> None:
+        if not self.entries:
+            self.entries = [CoreRefreshEvidence(token, state, "pending") for token, state in updates]
+
+    def replace(self, index: int, status: Literal["pending", "applied", "preflight_failed", "invalidated", "skipped"]) -> None:
+        current = self.entries[index]
+        self.entries[index] = CoreRefreshEvidence(current.target, current.state_ref, status)
+
+    def evidence(self, base: CoreOutcomeEvidence) -> CoreOutcomeEvidence:
+        return CoreOutcomeEvidence(base.publications, base.updates, tuple(self.entries))
+
+
+@dataclass(slots=True)
+class _CoreRecovery:
+    """Coordinator-only caller bindings and refresh progress for one submission.
+
+    A future creates this state immediately after preparation, before caller code can
+    mutate arguments. ``PreparedCoreCall`` remains detached transport data.
+    """
+
+    targets: Mapping[str, Any]
+    ledger: _RefreshLedger = field(default_factory=_RefreshLedger)
+
+    @classmethod
+    def bind(cls, prepared: "PreparedCoreCall", args: tuple[Any, ...],
+             kwargs: Mapping[str, Any]) -> "_CoreRecovery":
+        """Bind prepared opaque tokens to the supplied caller object identities."""
+        if not prepared.update_targets:
+            return cls({})
+        available = {
+            (item["path"], item["object_digest"]): item["object"]
+            for item in _prepared_update_targets(args, kwargs)
+        }
+        targets = {}
+        for item in prepared.update_targets:
+            key = (item["path"], item["object_digest"])
+            try:
+                targets[item["target"]] = available.pop(key)
+            except KeyError as error:
+                raise CoreCallCodecError("core execution update targets do not match recovery arguments") from error
+        if available:
+            raise CoreCallCodecError("core execution recovery arguments have unexpected update targets")
+        return cls(targets)
+
+
 def _freeze_storage_setup(value: Mapping[str, Any]) -> Mapping[str, Any]:
     """Deeply detach one bounded JSON storage-role description.
 
@@ -106,6 +260,7 @@ class PreparedCoreCall:
         invocation: Strategy-owned bounded invocation bytes; it never contains
             live core values.
         storage_setup: Detached JSON storage-role description for worker setup.
+        update_targets: Detached transport descriptors for optional caller refresh.
 
     Raises:
         TypeError: If invocation is not bytes or storage setup is not a JSON
@@ -114,11 +269,13 @@ class PreparedCoreCall:
 
     Side Effects:
         Copies and freezes storage setup. The value owns no Repo, Store, runtime,
-        or caller-session resource.
+        or caller-session resource. Coordinator recovery state retains original
+        caller Objects separately from this transport value.
     """
 
     invocation: bytes
     storage_setup: Mapping[str, Any]
+    update_targets: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         """Validate and recursively freeze the strategy-owned handoff data."""
@@ -126,7 +283,11 @@ class PreparedCoreCall:
             raise TypeError("core invocation must be bytes")
         if not isinstance(self.storage_setup, Mapping):
             raise TypeError("core storage setup must be a mapping")
+        if not isinstance(self.update_targets, tuple):
+            raise TypeError("core update targets must be a tuple")
         object.__setattr__(self, "storage_setup", _freeze_storage_setup(self.storage_setup))
+        frozen_targets = deep_freeze_json({"targets": list(self.update_targets)}, max_depth=64, max_nodes=65_536, max_entries=65_536)
+        object.__setattr__(self, "update_targets", tuple(frozen_targets["targets"]))
 
     def worker_setup(self, runtime: RuntimeContextSpec | None = None):
         """Create the generic Execute setup required to invoke this prepared call.
@@ -167,7 +328,6 @@ class PreparedCoreCall:
             **_SETUP_BOUNDS,
         )
         return WorkerSetup(factory="dryml.core.execute:core_worker_setup", data=envelope)
-
 
 class MarshallingStrategy(Protocol):
     """Own storage eligibility and future core call/result transport mechanics."""
@@ -238,26 +398,42 @@ class SharedDirStoreStrategy:
         generic backend's resolved invocation budget must be forwarded through
         ``invocation_limit_bytes``; no strategy-local one-megabyte limit applies.
         """
-        del update_args
         if repo is None:
             raise ValueError("SharedDirStoreStrategy requires configured shared Store authority")
         from .execute_codec import encode_invocation
         frozen = _frozen_storage or _freeze_shared_storage(repo, control_store)
         if frozen.source_repo is not repo:
             raise ValueError("frozen core storage does not belong to the prepared Repo")
+        bindings = _prepared_update_targets(args, kwargs) if update_args else ()
+        update_targets = tuple({
+            "target": uuid4().hex,
+            "path": binding["path"],
+            "object_digest": binding["object_digest"],
+        } for binding in bindings)
         return PreparedCoreCall(
             encode_invocation(
                 fn, args, kwargs, repo=repo, selections=selections,
                 store_table=frozen.source_stores, limit_bytes=invocation_limit_bytes,
+                update_targets=update_targets,
             ),
             frozen.storage_setup,
+            update_targets,
         )
+
+    def bind_recovery(self, prepared: PreparedCoreCall, *, args: tuple[Any, ...],
+                      kwargs: Mapping[str, Any]) -> _CoreRecovery:
+        """Create coordinator-only refresh state before caller mutation.
+
+        This internal adapter seam returns the sole object retaining caller
+        Objects. The future owns it for its lifetime and never serializes it,
+        attaches it to ``prepared``, or registers it globally.
+        """
+        return _CoreRecovery.bind(prepared, args, kwargs)
 
     def invoke(self, invocation: bytes, *, repo: Repo | None, update_args: bool,
                invocation_limit_bytes: int = 67_108_864,
                result_limit_bytes: int | None = None) -> bytes:
         """Run one reconstructed worker-local call through its single signature boundary."""
-        del update_args
         if repo is None:
             raise ValueError("SharedDirStoreStrategy requires worker Repo authority")
         from .execute_codec import invoke_invocation
@@ -270,11 +446,259 @@ class SharedDirStoreStrategy:
             invocation, repo=repo, invocation_limit_bytes=invocation_limit_bytes,
             result_limit_bytes=result_limit_bytes or invocation_limit_bytes,
             managed_config=ManagedConfig(state_repo=repo, control_store=control_store),
+            update_args=update_args,
         )
 
-    def recover(self, *args: Any, **kwargs: Any) -> Any:
-        """Reject recovery until result adaptation owns publication and refresh."""
-        raise NotImplementedError("SharedDirStoreStrategy recovery is not available before result adaptation")
+    def recover(
+            self, result: bytes, prepared: PreparedCoreCall, *, repo: Repo | None,
+            args: tuple[Any, ...], kwargs: Mapping[str, Any], return_objects: bool,
+            update_args: bool, _recovery: _CoreRecovery | None = None) -> Any:
+        """Recover one tagged outcome and optionally restore original arguments.
+
+        Args:
+            result: Bounded worker outcome bytes from :meth:`invoke`.
+            prepared: The immutable submission-local handoff retained by the caller.
+            repo: Caller-owned recovery Repo.
+            args: Original caller positional arguments used only for exact refresh.
+            kwargs: Original caller keyword arguments used only for exact refresh.
+            return_objects: Whether reference results should be materialized locally.
+            update_args: Whether published update StateRefs should be restored into
+                the original live argument instances.
+
+        Returns:
+            The decoded result, or its requested fresh local materialization.
+
+        Raises:
+            CoreCallCodecError: If the delivered outcome is malformed or the worker
+                reported a failed invocation/publication.
+            RepoLoadError: If exact result recovery or requested in-place refresh
+                fails. Earlier refreshes remain applied and no refresh is retried.
+
+        Side Effects:
+            May materialize result references and restores only caller objects
+            explicitly associated with a worker-published update snapshot.
+        """
+        if repo is None:
+            raise ValueError("SharedDirStoreStrategy requires caller Repo authority")
+        decoded = decode_core_outcome(result, repo=repo)
+        outcome = decoded.value
+        if not outcome["success"]:
+            raise CoreExecutionError(
+                f"core execution worker outcome failed: {outcome['reason']}",
+                phase="invoke", evidence=decoded.evidence,
+            )
+        updates = tuple((item["target"], StateRef.from_data(item["state"])) for item in outcome["updates"])
+        recovery = _recovery or self.bind_recovery(prepared, args=args, kwargs=kwargs)
+        targets = recovery.targets
+        if updates and not update_args:
+            raise CoreCallCodecError("core execution outcome has unexpected update targets")
+        if any(target not in targets for target, _ in updates):
+            raise CoreCallCodecError("core execution outcome has unassociated update targets")
+        recovered = outcome["result"]
+        try:
+            if return_objects:
+                recovered = _recover_result_objects(
+                    recovered, repo, outcome["automatic_references"],
+                )
+        except Exception as error:
+            if isinstance(error, CoreExecutionError):
+                raise
+            raise CoreExecutionError(
+                "core execution result recovery failed", phase="recover",
+                evidence=decoded.evidence,
+            ) from error
+        if not update_args:
+            return recovered
+        ledger = recovery.ledger
+        if ledger.error is not None:
+            raise ledger.error
+        ledger.begin(updates)
+        if any(entry.status != "pending" for entry in ledger.entries):
+            return recovered
+        # Complete result recovery and every non-mutating authority preflight before
+        # the first caller object can be restored.
+        for index, (_, state) in enumerate(updates):
+            try:
+                repo.load_state_ref(state, reuse_live="never")
+            except Exception as error:
+                ledger.replace(index, "preflight_failed")
+                for later in range(index + 1, len(ledger.entries)):
+                    ledger.replace(later, "skipped")
+                ledger.error = CoreExecutionError(
+                    "core execution refresh preflight failed", phase="refresh",
+                    evidence=ledger.evidence(decoded.evidence),
+                )
+                raise ledger.error from error
+        for index, (token, state) in enumerate(updates):
+            try:
+                repo.restore_state_ref_into(targets[token], state)
+            except Exception as error:
+                ledger.replace(index, "invalidated" if getattr(targets[token], "_restore_failed", False) else "preflight_failed")
+                for later in range(index + 1, len(ledger.entries)):
+                    ledger.replace(later, "skipped")
+                ledger.error = CoreExecutionError(
+                    "core execution refresh failed", phase="refresh",
+                    evidence=ledger.evidence(decoded.evidence),
+                )
+                raise ledger.error from error
+            ledger.replace(index, "applied")
+        return recovered
+
+
+def decode_core_outcome(result: bytes, *, repo: Repo) -> CoreAdaptationOutcome:
+    """Decode a tagged outcome into a value plus detached exact evidence.
+
+    Args:
+        result: Bounded bytes returned by :class:`SharedDirStoreStrategy`.
+        repo: Caller-owned Repo used only to validate the closed result graph.
+
+    Returns:
+        A future-retainable value/evidence pair. Failed outcomes retain ``value`` as
+        their closed transport mapping so callers can inspect its bounded reason.
+
+    Raises:
+        CoreCallCodecError: If the transport outcome or evidence grammar is
+            malformed. No caller object is materialized or refreshed here.
+
+    Side Effects:
+        Reads the supplied Repo only while decoding authority graph nodes; it does
+        not save, restore, or close any caller-owned resource.
+    """
+    from .execute_codec import CoreCallCodecError, decode_outcome
+
+    outcome = decode_outcome(result, repo=repo)
+    publications = []
+    publication_statuses = {"completed", "failed", "uncertain", "unattempted"}
+    for item in outcome["publications"]:
+        if not isinstance(item, Mapping) or set(item) != {"state", "store", "phase", "status", "path"}:
+            raise CoreCallCodecError("core execution transport rejected malformed publication evidence")
+        if (isinstance(item["store"], bool) or not isinstance(item["store"], int)
+                or not 0 <= item["store"] < len(repo.stores)
+                or not all(isinstance(item[name], str) for name in ("phase", "status", "path"))
+                or item["status"] not in publication_statuses):
+            raise CoreCallCodecError("core execution transport rejected malformed publication evidence")
+        try:
+            state = StateRef.from_data(item["state"])
+        except (TypeError, ValueError) as error:
+            raise CoreCallCodecError("core execution transport rejected malformed publication evidence") from error
+        publications.append(CorePublicationEvidence(state, item["store"], item["phase"], item["status"], item["path"]))
+    updates = []
+    for item in outcome["updates"]:
+        if not isinstance(item, Mapping) or set(item) != {"state", "object", "target"}:
+            raise CoreCallCodecError("core execution transport rejected malformed update evidence")
+        try:
+            state = StateRef.from_data(item["state"])
+        except (TypeError, ValueError) as error:
+            raise CoreCallCodecError("core execution transport rejected malformed update evidence") from error
+        if state.object.to_data() != item["object"] or not isinstance(item["target"], str) or not item["target"]:
+            raise CoreCallCodecError("core execution transport rejected mismatched update evidence")
+        updates.append(state)
+    if len({item["target"] for item in outcome["updates"]}) != len(updates):
+        raise CoreCallCodecError("core execution transport rejected duplicate update target")
+    return CoreAdaptationOutcome(
+        outcome,
+        CoreOutcomeEvidence(
+            tuple(publications), tuple(updates),
+            tuple(CoreRefreshEvidence(item["target"], state, "pending") for item, state in zip(outcome["updates"], updates)),
+        ),
+    )
+
+
+def _prepared_update_targets(
+        args: tuple[Any, ...], kwargs: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    """Detach first-appearance live argument associations without saving or selecting.
+
+    These internal records bind recovery arguments to prepared descriptors. The
+    worker still selects only delivered materialized values, so a Ref position or
+    callable capture cannot create a refresh merely by appearing here.
+    """
+    from .object import Object
+
+    targets: list[Mapping[str, Any]] = []
+    seen: set[int] = set()
+
+    def visit(value: Any, path: str) -> None:
+        if isinstance(value, Object):
+            if id(value) not in seen:
+                seen.add(id(value))
+                targets.append({"path": path, "object_digest": value.object_ref.digest(), "object": value})
+            return
+        if isinstance(value, Mapping):
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+            for index, (key, item) in enumerate(value.items()):
+                visit(key, f"{path}.key[{index}]")
+                visit(item, f"{path}.value[{index}]")
+        elif isinstance(value, (tuple, list)):
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+            for index, item in enumerate(value):
+                visit(item, f"{path}[{index}]")
+
+    visit(args, "args")
+    visit(kwargs, "kwargs")
+    return tuple(targets)
+
+
+def _recover_result_objects(value: Any, repo: Repo, automatic_references: frozenset[int],
+                            memo: dict[int, Any] | None = None) -> Any:
+    """Materialize only Execute-created result references in one aggregate boundary.
+
+    Explicit ``Ref[...]`` leaves are intentionally ordinary data. The aggregate
+    materialization call gives every auto-converted leaf one fresh graph memo, so
+    repeated and diamond result aliases stay shared without reusing caller inputs.
+    """
+    from .definition import ConcreteDefinition
+    from .reference_values import ObjectRef, StateRef
+
+    references: list[Any] = []
+    seen_references: set[int] = set()
+
+    def collect(item: Any, seen: set[int]) -> None:
+        if isinstance(item, (ConcreteDefinition, ObjectRef, StateRef)):
+            if id(item) in automatic_references and id(item) not in seen_references:
+                references.append(item)
+                seen_references.add(id(item))
+            return
+        if isinstance(item, (tuple, list, Mapping)):
+            if id(item) in seen:
+                return
+            seen.add(id(item))
+            if isinstance(item, Mapping):
+                for key, child in item.items():
+                    collect(key, seen)
+                    collect(child, seen)
+            else:
+                for child in item:
+                    collect(child, seen)
+
+    collect(value, set())
+    materialized = dict(zip((id(item) for item in references), repo.materialize_boundary(
+        tuple(references), reuse_live="never",
+    )))
+    memo = {} if memo is None else memo
+
+    def replace(item: Any) -> Any:
+        if isinstance(item, (ConcreteDefinition, ObjectRef, StateRef)):
+            return materialized.get(id(item), item)
+        if isinstance(item, tuple):
+            if id(item) not in memo:
+                memo[id(item)] = tuple(replace(child) for child in item)
+            return memo[id(item)]
+        if isinstance(item, list):
+            if id(item) not in memo:
+                memo[id(item)] = [replace(child) for child in item]
+            return memo[id(item)]
+        if isinstance(item, Mapping):
+            if id(item) not in memo:
+                memo[id(item)] = {replace(key): replace(child) for key, child in item.items()}
+            return memo[id(item)]
+        return item
+
+    return replace(value)
 
 
 def invoke_prepared_call(invocation: bytes) -> Any:
@@ -292,10 +716,16 @@ def invoke_prepared_call(invocation: bytes) -> Any:
     Side Effects:
         Invokes the transported workload once through that worker's core boundary.
     """
-    import dill
-
     context = current_context()
-    return dill.loads(SharedDirStoreStrategy().invoke(invocation, repo=context.repo, update_args=False))
+    from .execute_codec import CoreCallCodecError, decode_outcome
+
+    outcome = decode_outcome(
+        SharedDirStoreStrategy().invoke(invocation, repo=context.repo, update_args=False),
+        repo=context.repo,
+    )
+    if not outcome["success"]:
+        raise CoreCallCodecError(f"core execution worker outcome failed: {outcome['reason']}")
+    return outcome["result"]
 
 
 def _validate_strategy_identity(value: object) -> type[SharedDirStoreStrategy]:
@@ -754,4 +1184,9 @@ def core_worker_setup(context: WorkerSetupContext, data: Mapping[str, Any]) -> I
         yield None
 
 
-__all__ = ["ExecutionContext", "core_worker_setup", "current_context", "worker_context"]
+__all__ = [
+    "CoreAdaptationOutcome", "CoreExecutionError", "CoreOutcomeEvidence",
+    "CorePublicationEvidence", "CoreRefreshEvidence", "ExecutionContext",
+    "SharedDirStoreStrategy", "core_worker_setup", "current_context",
+    "decode_core_outcome", "worker_context",
+]

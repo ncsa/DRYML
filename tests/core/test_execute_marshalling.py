@@ -1,4 +1,4 @@
-"""Focused whole-call authority and preflight proofs for core Execute U5."""
+"""Focused whole-call authority and preflight proofs for core Execute."""
 
 from __future__ import annotations
 
@@ -59,7 +59,11 @@ def _reference_identity(value: Ref[ObjectRef]) -> Ref[ObjectRef]:
 def _invoke(strategy, fn, args, *, repo, **kwargs):
     """Prepare and execute one codec call directly in an explicit worker Repo."""
     prepared = strategy.prepare(fn, args, {}, repo=repo, control_store=None, update_args=False, **kwargs)
-    return prepared, dill.loads(strategy.invoke(prepared.invocation, repo=repo, update_args=False))
+    result = strategy.recover(
+        strategy.invoke(prepared.invocation, repo=repo, update_args=False), prepared,
+        repo=repo, args=args, kwargs={}, return_objects=False, update_args=False,
+    )
+    return prepared, result
 
 
 def test_saved_authority_is_used_without_detecting_or_saving_later_mutation(tmp_path):
@@ -236,15 +240,18 @@ def test_slots_captures_lower_saved_objects_and_reject_live_repo_globals(tmp_pat
     assert secret not in str(error.value)
 
 
-def test_nested_live_results_reject_before_result_pickle(tmp_path):
-    """U5 cannot serialize a live Object hidden in an ordinary result graph."""
+def test_nested_live_results_publish_before_result_transport(tmp_path):
+    """Core Execute publishes a live Object hidden in a nested ordinary result graph."""
     repo = Repo(DirStore(tmp_path / "state"))
     def target():
         return {"nested": [SavedValue()]}
 
     invocation = encode_invocation(target, (), {}, repo=repo)
-    with pytest.raises(CoreCallCodecError, match="result publication is required"):
-        invoke_invocation(invocation, repo=repo)
+    from dryml.core.execute_codec import decode_outcome
+
+    outcome = decode_outcome(invoke_invocation(invocation, repo=repo), repo=repo)
+    assert outcome["success"]
+    assert outcome["result"]["nested"][0].object_id is not None
 
 
 def test_malformed_nodes_fail_before_symbol_resolution_without_sensitive_fields(tmp_path, monkeypatch):

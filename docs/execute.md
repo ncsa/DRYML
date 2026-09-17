@@ -100,8 +100,8 @@ runtime state. In orchestration mode, requests for live returned Objects or
 argument updates fail before any Store export, opening, mutation, or backend
 submission.
 
-`prepare_shared_storage()` is the U4 storage seam consumed by the later callable
-adapter. It exports a live Repo exactly once, derives the full worker Store table
+`prepare_shared_storage()` is the core-call storage seam. It exports a live Repo
+exactly once, derives the full worker Store table
 and control role from that one detached `RepoDefinition`, and retains a fresh,
 submission-owned recovery Repo. The initial `SharedDirStoreStrategy` accepts
 only existing direct `DirStore` authority; it rejects absent storage, ZipStore
@@ -110,7 +110,46 @@ ambiguous physical destinations, and unsupported strategy identities. A control
 Store shared with the Repo is encoded as its table index; a separate Store uses
 an explicit direct-directory descriptor. Snapshot cleanup uses `flush=False` and
 never closes caller-borrowed handles. Callable payload preparation and generic
-submission remain unavailable until the later call-codec stage.
+submission proceed through the prepared call codec.
+
+### Core Results
+
+`SharedDirStoreStrategy` transports one bounded tagged outcome rather than a
+pickled live Object or `StoreReport`. A live returned Object is saved through the
+worker Repo's normal flushing `save(..., deep_capture=True, report_stores=True)`
+path before shared automatic reference selection. Stateful graphs therefore
+return a `StateRef`; stateless graphs return their CDef; incoming CDef,
+`ObjectRef`, and `StateRef` result values remain reference data.
+
+With `update_args=False` (the default), execution never saves merely-mutated
+arguments and result recovery never restores into an original caller Object.
+With `update_args=True`, explicitly materialized live argument graphs are
+coalesced to maximal roots, saved once, and restored into their original caller
+instances after all delivered update references preflight successfully. A failed
+restore leaves previously applied targets intact and does not replay execution.
+Overlapping returned roots and descendants reuse the update StateRef, with a
+descendant represented by `root_state_ref.at(path)`.
+
+`decode_core_outcome()` exposes `CoreAdaptationOutcome` and
+`CoreOutcomeEvidence` value types. Evidence has exact StateRefs and
+Store-table-relative publication status only; it never carries a live Repo,
+Store, `StoreReport`, argument, or result. A delivered worker failure preserves
+known publication evidence but does not imply rollback, retry, or successful
+caller refresh.
+
+`PreparedCoreCall` contains only invocation bytes, frozen storage setup, and
+opaque update descriptors. It never retains caller Objects or refresh progress.
+The future-facing coordinator binds `SharedDirStoreStrategy.bind_recovery()`
+immediately after preparation, before caller mutation, and retains that private
+state for recovery. Direct `recover()` remains supported by binding its supplied
+arguments for that one call.
+
+Before a worker saves an update or result, it validates the complete result and
+selected update graphs and reserves the configured result bound for every
+possible StateRef and Store-table publication fact. If a result cannot fit after
+publication, the failed outcome drops only result bytes and retains exact
+publication/update evidence; it never replaces that evidence with a generic
+failure.
 
 Its `WorkerSetup.data` is exactly one self-validating envelope:
 
