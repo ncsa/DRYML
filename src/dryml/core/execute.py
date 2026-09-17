@@ -255,7 +255,7 @@ def _freeze_storage_setup(value: Mapping[str, Any]) -> Mapping[str, Any]:
     Side Effects:
         None. This helper never opens a Store or renders caller values in errors.
     """
-    frozen = deep_freeze_json(value, max_depth=64, max_nodes=65_536, max_entries=65_536)
+    frozen = deep_freeze_json(value, **_SETUP_BOUNDS)
     assert isinstance(frozen, Mapping)
     return frozen
 
@@ -294,7 +294,9 @@ class PreparedCoreCall:
         if not isinstance(self.update_targets, tuple):
             raise TypeError("core update targets must be a tuple")
         object.__setattr__(self, "storage_setup", _freeze_storage_setup(self.storage_setup))
-        frozen_targets = deep_freeze_json({"targets": list(self.update_targets)}, max_depth=64, max_nodes=65_536, max_entries=65_536)
+        frozen_targets = deep_freeze_json(
+            {"targets": list(self.update_targets)}, **_SETUP_BOUNDS,
+        )
         object.__setattr__(self, "update_targets", tuple(frozen_targets["targets"]))
 
     def worker_setup(self, runtime: RuntimeContextSpec | None = None, *, cache: CacheMode = "weak"):
@@ -815,6 +817,9 @@ class CoreOptions:
     defaults. ``None`` is an explicit clearing value for Repo, control Store, or
     runtime selection. Construction validates shape only; it never exports,
     opens, reconstructs, saves, or closes a Store.
+
+    Side Effects:
+        None. This immutable value owns no runtime, Repo, Store, or worker.
     """
 
     repo: Repo | RepoDefinition | None | Inherit = _INHERIT
@@ -970,12 +975,35 @@ def _freeze_shared_storage(repo: Repo, control_store: DirStore | None) -> _Froze
     preparation encodes selected Store indexes. Worker setup receives the detached
     definition and never observes the caller's handles.
     """
-    definition = repo.to_definition()
-    setup = _freeze_storage_setup(_shared_storage_setup(definition, control_store))
-    source_stores = tuple(repo.stores)
-    if not all(type(store) is DirStore for store in source_stores):
-        raise ValueError("SharedDirStoreStrategy requires only configured DirStores")
+    with repo._configuration_lock:
+        definition = repo.to_definition()
+        source_stores = _definition_store_table(definition, tuple(repo.stores))
+        setup = _freeze_storage_setup(_shared_storage_setup(definition, control_store))
     return _FrozenSharedStorage(repo, source_stores, definition, setup)
+
+
+def _definition_store_table(
+        definition: RepoDefinition, stores: tuple[object, ...],
+) -> tuple[DirStore, ...]:
+    """Associate source handles with immutable definition descriptors by identity.
+
+    The caller captures ``stores`` while its Repo configuration is locked.  The
+    returned table follows the frozen definition rather than a later mutable Repo
+    order, so pinned selection indexes always address the worker's matching Store.
+    """
+    handles: dict[tuple[int, int], DirStore] = {}
+    for store in stores:
+        if type(store) is not DirStore:
+            raise ValueError("SharedDirStoreStrategy requires only configured DirStores")
+        identity = _store_identity(store.base_dir)
+        if identity in handles:
+            raise ValueError("shared Store definition has duplicate physical authority")
+        handles[identity] = store
+    try:
+        descriptors = definition.to_data()["stores"]
+        return tuple(handles[_store_identity(descriptor["path"])] for descriptor in descriptors)
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("shared Store handles do not match the frozen definition") from None
 
 
 @dataclass(slots=True)
@@ -1044,13 +1072,20 @@ def prepare_shared_storage(
     # Validation consumes the detached definition, preserving the one-export cut.
     strategy.validate(repo=definition, control_store=effective.control_store)
     if not isinstance(selected, Repo):
-        # A detached definition has no live handles to pin. Build only its worker
-        # table; public callable preparation still requires a live source Repo.
+        # A detached definition is reconstructed once. Its owned handles serve as
+        # both preparation pins and recovery authority for this submission.
         setup = _freeze_storage_setup(_shared_storage_setup(definition, effective.control_store))
-        frozen = None
+        recovery_repo = Repo.from_definition(definition)
+        try:
+            with recovery_repo._configuration_lock:
+                source_stores = _definition_store_table(definition, tuple(recovery_repo.stores))
+            frozen = _FrozenSharedStorage(recovery_repo, source_stores, definition, setup)
+        except BaseException:
+            recovery_repo.close(flush=False)
+            raise
     else:
         setup = frozen.storage_setup
-    recovery_repo = Repo.from_definition(definition)
+        recovery_repo = Repo.from_definition(definition)
     return _PreparedSharedStorage(
         setup,
         recovery_repo,
@@ -1284,8 +1319,20 @@ class CoreExecutionFuture:
         done_callbacks: Coordinator-local callbacks receiving this facade.
         one_off: Whether generic one-off cleanup should also release recovery state.
 
-    Wait timeouts affect only the waiting caller. Callback and cleanup failures
-    never overwrite an already adapted result.
+    Returns:
+        A future facade whose result methods yield a recovered core value rather
+        than the generic byte outcome.
+
+    Raises:
+        TypeError: If construction receives a non-generic future or invalid
+            callback sequence. Public callers receive failures from result,
+            recovery, or cleanup methods instead.
+
+    Side Effects:
+        Registers one generic completion callback and owns the supplied recovery
+        snapshot until cleanup. It borrows ``backend_future`` and never closes a
+        caller Repo or Store. Wait timeouts affect only the waiting caller;
+        callback and cleanup failures never overwrite an adapted result.
     """
 
     def __init__(
@@ -1326,17 +1373,38 @@ class CoreExecutionFuture:
 
     @property
     def backend_future(self) -> ExecutionFuture[bytes]:
-        """Return borrowed advanced inspection access to the generic byte Future."""
+        """Return borrowed advanced inspection access to the generic byte Future.
+
+        Returns:
+            The public generic future carrying internal tagged outcome bytes.
+
+        Side Effects:
+            None. The core facade retains generic-future ownership boundaries.
+        """
         return self._backend_future
 
     @property
     def submission_id(self) -> str:
-        """Return the immutable backend-assigned submission identifier."""
+        """Return the immutable backend-assigned submission identifier.
+
+        Returns:
+            The opaque identifier assigned by the generic backend.
+
+        Side Effects:
+            None. Reading the identifier does not start, cancel, or clean work.
+        """
         return self._backend_future.submission_id
 
     @property
     def output(self) -> ExecutionOutput:
-        """Return the generic output owner retained across core adaptation."""
+        """Return the generic output owner retained across core adaptation.
+
+        Returns:
+            The caller-owned generic output holder for this submission.
+
+        Side Effects:
+            None. Output remains available after facade cleanup.
+        """
         return self._backend_future.output
 
     def done(self) -> bool:
@@ -1382,8 +1450,19 @@ class CoreExecutionFuture:
     def result(self, timeout: float | None = None) -> Any:
         """Wait for and return the recovered result or raise its stable error.
 
-        ``timeout`` limits only this caller's wait and never cancels worker or
-        adaptation work.
+        Args:
+            timeout: Optional finite nonnegative caller wait in seconds.
+
+        Returns:
+            The one recovered core result.
+
+        Raises:
+            TimeoutError: If this caller's wait expires.
+            BaseException: The stored backend, publication, or recovery failure.
+
+        Side Effects:
+            May join or start the single adaptation after generic terminality.
+            ``timeout`` never cancels worker or adaptation work.
         """
         outcome = self._wait(timeout)
         with self._condition:
@@ -1394,7 +1473,21 @@ class CoreExecutionFuture:
         return outcome
 
     def exception(self, timeout: float | None = None) -> BaseException | None:
-        """Wait for and return the core-adapted failure without changing work."""
+        """Wait for and return the core-adapted failure without changing work.
+
+        Args:
+            timeout: Optional finite nonnegative caller wait in seconds.
+
+        Returns:
+            The stored failure, or ``None`` for a recovered success.
+
+        Raises:
+            TimeoutError: If this caller's wait expires.
+            BaseException: The stored cancellation outcome.
+
+        Side Effects:
+            May join the one adaptation; it never retries execution or refresh.
+        """
         outcome = self._wait(timeout)
         with self._condition:
             kind = self._outcome_kind
@@ -1404,7 +1497,18 @@ class CoreExecutionFuture:
         return outcome if kind == "error" else None
 
     def add_done_callback(self, callback: CoreCallback) -> None:
-        """Schedule one callback after core adaptation, outside synchronization."""
+        """Schedule one callback after core adaptation, outside synchronization.
+
+        Args:
+            callback: Callable receiving this core future after adaptation.
+
+        Raises:
+            TypeError: If ``callback`` is not callable.
+
+        Side Effects:
+            Runs callbacks asynchronously and isolates their failures from the
+            stored outcome. A callback does not own execution or cleanup.
+        """
         if not callable(callback):
             raise TypeError("callback must be callable")
         with self._condition:
@@ -1422,11 +1526,29 @@ class CoreExecutionFuture:
         self._dispatch_callbacks((callback,))
 
     def cancel(self) -> bool:
-        """Delegate truthful pre-GO cancellation to the owned generic Future."""
+        """Delegate truthful pre-GO cancellation to the owned generic Future.
+
+        Returns:
+            ``True`` only when generic execution confirms cancellation before GO.
+
+        Side Effects:
+            Does not claim cancellation of running work or alter stored evidence.
+        """
         return self._backend_future.cancel()
 
     def request_cancel(self) -> bool:
-        """Delegate a running-work cancellation request without fabricating success."""
+        """Delegate a running-work cancellation request without fabricating success.
+
+        Returns:
+            Whether the generic backend accepted a best-effort request.
+
+        Raises:
+            ExecutionError: If the backend cannot accept the request.
+
+        Side Effects:
+            Requests backend cancellation only; terminality and cleanup remain
+            independently observable.
+        """
         return self._backend_future.request_cancel()
 
     def cleanup(self, timeout: float | None = None) -> None:
@@ -1734,11 +1856,15 @@ def _submit_core_call(
     effective = resolve_core_options(core, executor=executor_core)
     storage = prepare_shared_storage(_effective=effective)
     try:
-        if not isinstance(effective.repo, Repo):
-            raise ValueError("core callable execution requires a live Repo")
+        from dryml.execute._worker import setup_result_bytes_limit
+
+        core_result_limit = setup_result_bytes_limit(config.result_limit_bytes)
+        if core_result_limit <= 0:
+            raise ValueError("configured result limit cannot transport a core outcome with worker setup")
         strategy = effective.marshalling()
+        preparation_repo = storage.recovery_repo if isinstance(effective.repo, RepoDefinition) else effective.repo
         prepared = strategy.prepare(
-            fn, args, call_kwargs, repo=effective.repo,
+            fn, args, call_kwargs, repo=preparation_repo,
             control_store=effective.control_store, update_args=effective.update_args,
             _frozen_storage=storage.frozen_storage,
             invocation_limit_bytes=config.invocation_limit_bytes,
@@ -1750,14 +1876,14 @@ def _submit_core_call(
         )
         backend_future = submitter(
             _invoke_prepared_outcome, prepared.invocation,
-            config.invocation_limit_bytes, config.result_limit_bytes, effective.update_args,
+            config.invocation_limit_bytes, core_result_limit, effective.update_args,
             kwargs=None, environment=environment, world=world,
             execution_timeout=execution_timeout, stream_output=stream_output,
             output=output, worker_setup=prepared.worker_setup(effective.runtime, cache=effective.cache),
         )
         return CoreExecutionFuture(
             backend_future, prepared_storage=storage, prepared=prepared, recovery=recovery,
-            return_objects=return_objects, result_limit_bytes=config.result_limit_bytes,
+            return_objects=return_objects, result_limit_bytes=core_result_limit,
             done_callbacks=callbacks, one_off=one_off,
         )
     except BaseException as error:
@@ -1783,6 +1909,13 @@ class Executor:
     Construction does not open Stores or start a worker. Each submission freezes
     caller session/core controls once, then delegates execution to exactly one
     generic executor and retains its own reconstruction resources until cleanup.
+
+    Raises:
+        TypeError: If configuration or reusable options have the wrong type.
+
+    Side Effects:
+        Owns the generic executor and each accepted facade's recovery resources;
+        it borrows caller Repo and Store handles.
     """
 
     def __init__(self, config: BackendConfig, *, core: CoreOptions | None = None) -> None:
@@ -1797,7 +1930,18 @@ class Executor:
         self._futures: set[CoreExecutionFuture] = set()
 
     def start(self) -> "Executor":
-        """Start the owned generic backend and return this core facade."""
+        """Start the owned generic backend and return this core facade.
+
+        Returns:
+            This executor after generic backend initialization.
+
+        Raises:
+            ExecutionError: If the configured backend cannot start.
+
+        Side Effects:
+            Starts only the owned generic backend; it does not export or open core
+            storage until a submission.
+        """
         self._generic.start()
         return self
 
@@ -1818,9 +1962,30 @@ class Executor:
     ) -> CoreExecutionFuture:
         """Prepare and submit one core-aware call through the owned generic executor.
 
-        ``kwargs`` is the workload mapping. Invalid preparation fails before generic
-        acceptance; accepted worker, publication, and recovery failures are stored
-        on the returned facade.
+        Args:
+            fn: Trusted synchronous core-aware callable.
+            args: Positional workload values.
+            kwargs: Optional string-keyed workload mapping.
+            core: Per-call inert core overrides.
+            environment: Generic environment requirement or selection.
+            world: Generic world requirement or selection.
+            execution_timeout: Inherited, disabled, or positive workload deadline.
+            stream_output: Optional generic live-output override.
+            done_callbacks: Core-future callbacks.
+            output: Optional caller-owned generic output holder.
+
+        Returns:
+            A CoreExecutionFuture with the one recovered result/evidence outcome.
+
+        Raises:
+            TypeError: If controls or workload mapping are invalid.
+            ValueError: If frozen storage, materialization floor, or call graph is
+                unsupported before generic acceptance.
+
+        Side Effects:
+            Exports eligible live Repo authority once, opens an owned recovery Repo,
+            and submits exactly one generic worker call. Accepted asynchronous
+            failures remain on the returned future; caller handles are borrowed.
         """
         future = _submit_core_call(
             self._generic.submit, self._config, self._core, fn, args, kwargs=kwargs,
@@ -1839,7 +2004,29 @@ class Executor:
             stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
             output: ExecutionOutput | None = None,
     ) -> Any:
-        """Submit one call and return its recovered result without closing this executor."""
+        """Submit one call and return its recovered result without closing this executor.
+
+        Args:
+            fn: Trusted synchronous core-aware callable.
+            args: Positional workload values.
+            kwargs: Optional string-keyed workload mapping.
+            core: Per-call inert core overrides.
+            environment: Generic environment requirement or selection.
+            world: Generic world requirement or selection.
+            execution_timeout: Inherited, disabled, or positive workload deadline.
+            stream_output: Optional generic live-output override.
+            done_callbacks: Core-future callbacks.
+            output: Optional caller-owned generic output holder.
+
+        Returns:
+            The recovered core result.
+
+        Raises:
+            BaseException: Validation, backend, publication, or recovery failure.
+
+        Side Effects:
+            Has submit's ownership effects but does not close this reusable executor.
+        """
         return self.submit(
             fn, *args, kwargs=kwargs, core=core, environment=environment, world=world,
             execution_timeout=execution_timeout, stream_output=stream_output,
@@ -1852,7 +2039,26 @@ class Executor:
             stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
             output: ExecutionOutput | None = None,
     ) -> "ExecutorView":
-        """Return a non-owning view whose call keywords remain workload data."""
+        """Return a non-owning view whose call keywords remain workload data.
+
+        Args:
+            core: Reusable core overrides for calls through the view.
+            environment: Generic environment requirement or selection.
+            world: Generic world requirement or selection.
+            execution_timeout: Inherited, disabled, or positive workload deadline.
+            stream_output: Optional generic live-output override.
+            done_callbacks: Core-future callbacks.
+            output: Optional caller-owned generic output holder.
+
+        Returns:
+            A lightweight view retaining this executor.
+
+        Raises:
+            TypeError: If ``core`` is not CoreOptions or None.
+
+        Side Effects:
+            None. The view owns no backend, future set, or storage resource.
+        """
         if core is not None and not isinstance(core, CoreOptions):
             raise TypeError("core must be CoreOptions or None")
         return ExecutorView(
@@ -1869,7 +2075,24 @@ class Executor:
         return self._generic.resources(timeout=timeout)
 
     def close(self, *, cancel: bool = False, timeout: float | None = None) -> None:
-        """Join core adaptation/cleanup before releasing the generic backend owner."""
+        """Join core adaptation/cleanup before releasing the generic backend owner.
+
+        Args:
+            cancel: Whether to request cancellation for unfinished calls first.
+            timeout: Optional finite nonnegative total caller close budget.
+
+        Returns:
+            ``None`` after owned cleanup completes.
+
+        Raises:
+            TypeError: If controls have invalid types.
+            ValueError: If ``timeout`` is invalid.
+            CleanupError: If an owned future or backend cannot reconcile cleanup.
+
+        Side Effects:
+            Stops future acceptance through the generic owner, joins accepted core
+            adaptation, and releases only executor/facade-owned resources.
+        """
         if not isinstance(cancel, bool):
             raise TypeError("cancel must be bool")
         if timeout is not None:
@@ -1900,7 +2123,26 @@ class Executor:
 
 @dataclass(frozen=True, slots=True)
 class ExecutorView:
-    """Bind core/generic controls to one parent without owning another backend."""
+    """Bind core/generic controls to one parent without owning another backend.
+
+    Args:
+        executor: Parent core executor that owns backend and future lifetime.
+        core: Frozen reusable core overrides.
+        environment: Frozen generic environment requirement or selection.
+        world: Frozen generic world requirement or selection.
+        execution_timeout: Frozen generic workload deadline control.
+        stream_output: Frozen generic live-output control.
+        done_callbacks: Frozen core-future callback sequence.
+        output: Optional caller-owned generic output holder.
+
+    Every keyword received by :meth:`submit` or :meth:`run` is workload data;
+    controls are fixed when this value is created. The view borrows its parent and
+    cannot start, close, or allocate a second backend.
+
+    Side Effects:
+        Construction retains the parent reference only and does not start work or
+        acquire storage.
+    """
 
     executor: Executor
     core: CoreOptions | None
@@ -1912,7 +2154,22 @@ class ExecutorView:
     output: ExecutionOutput | None
 
     def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> CoreExecutionFuture:
-        """Submit workload data with bound controls; no keyword is interpreted as a control."""
+        """Submit workload data with bound controls; no keyword is interpreted as a control.
+
+        Args:
+            fn: Trusted synchronous core-aware callable.
+            args: Positional workload values.
+            kwargs: Workload keyword values, including control-named values.
+
+        Returns:
+            The parent-owned CoreExecutionFuture.
+
+        Raises:
+            BaseException: The parent submission's synchronous validation failure.
+
+        Side Effects:
+            Delegates to the parent; this view owns no submission resource.
+        """
         return self.executor.submit(
             fn, *args, kwargs=kwargs, core=self.core, environment=self.environment,
             world=self.world, execution_timeout=self.execution_timeout,
@@ -1921,7 +2178,22 @@ class ExecutorView:
         )
 
     def run(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
-        """Submit view-bound workload data and return the adapted result."""
+        """Submit view-bound workload data and return the adapted result.
+
+        Args:
+            fn: Trusted synchronous core-aware callable.
+            args: Positional workload values.
+            kwargs: Workload keyword values, including control-named values.
+
+        Returns:
+            The parent future's recovered core result.
+
+        Raises:
+            BaseException: The parent submission or recovered execution failure.
+
+        Side Effects:
+            Delegates to the parent without closing it or owning a backend.
+        """
         return self.submit(fn, *args, **kwargs).result()
 
 
@@ -1935,9 +2207,30 @@ def submit(
 ) -> CoreExecutionFuture:
     """Submit one explicit-backend core call with generic one-off ownership.
 
-    The hidden generic owner follows its bounded cleanup policy. The returned core
-    facade keeps only its independently owned recovery Repo and never closes
-    caller-borrowed Repo or Store handles.
+    Args:
+        fn: Trusted synchronous core-aware callable.
+        args: Positional workload values.
+        backend: Required explicit generic backend configuration.
+        kwargs: Optional string-keyed workload mapping.
+        core: Per-call inert core overrides.
+        environment: Generic environment requirement or selection.
+        world: Generic world requirement or selection.
+        execution_timeout: Inherited, disabled, or positive workload deadline.
+        stream_output: Optional generic live-output override.
+        done_callbacks: Core-future callbacks.
+        output: Optional caller-owned generic output holder.
+
+    Returns:
+        A CoreExecutionFuture retaining the one-off owner's recovered outcome.
+
+    Raises:
+        TypeError: If ``backend`` or controls are invalid.
+        ValueError: If core preparation rejects the call before acceptance.
+
+    Side Effects:
+        Creates a hidden generic one-off owner following its bounded cleanup policy.
+        The returned facade owns only its recovery Repo and never closes
+        caller-borrowed Repo or Store handles.
     """
     if not isinstance(backend, BackendConfig):
         raise TypeError("backend must be a BackendConfig")
@@ -1959,8 +2252,29 @@ def run(
 ) -> Any:
     """Run one explicit-backend core call and reconcile its hidden owner.
 
-    Raises the adapted workload failure as primary when both execution and cleanup
-    fail; successful results are returned only after cleanup succeeds.
+    Args:
+        fn: Trusted synchronous core-aware callable.
+        args: Positional workload values.
+        backend: Required explicit generic backend configuration.
+        kwargs: Optional string-keyed workload mapping.
+        core: Per-call inert core overrides.
+        environment: Generic environment requirement or selection.
+        world: Generic world requirement or selection.
+        execution_timeout: Inherited, disabled, or positive workload deadline.
+        stream_output: Optional generic live-output override.
+        done_callbacks: Core-future callbacks.
+        output: Optional caller-owned generic output holder.
+
+    Returns:
+        The recovered core result after one-off cleanup completes.
+
+    Raises:
+        BaseException: The adapted workload failure, with cleanup chained when
+            both fail, or CleanupError after a successful result cannot clean up.
+
+    Side Effects:
+        Creates and reconciles a hidden one-off owner. It never closes caller
+        Repo or Store handles.
     """
     future = submit(
         fn, *args, backend=backend, kwargs=kwargs, core=core, environment=environment,

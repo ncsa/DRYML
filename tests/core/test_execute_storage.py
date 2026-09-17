@@ -6,12 +6,14 @@ import threading
 
 import pytest
 
-from dryml.core import Repo, RepoDefinition
-from dryml.core.execute import CoreOptions, prepare_shared_storage
+from dryml.core import Object, Repo, RepoDefinition
+from dryml.core.execute import CoreOptions, SharedDirStoreStrategy, prepare_shared_storage
+from dryml.core.execute_codec import CoreCallCodecError, decode_invocation
 from dryml.core.repo_plan import SaveRouting
 from dryml.core.session import config
 from dryml.core.selector import Selector
 from dryml.core.definition import Definition
+from dryml.core.signatures import ReferenceSelection
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
 
@@ -20,8 +22,17 @@ class StorageTarget:
     """Minimal selector target used to retain an ordered route in a Repo export."""
 
 
+class PinnedStorageTarget(Object):
+    """Minimal persisted value used to check frozen selected-Store bindings."""
+
+
+def _pinned_value():
+    """Provide a callable root for detached selection-table encoding."""
+    return None
+
+
 def test_storage_snapshot_uses_one_export_and_survives_later_topology_changes(tmp_path, monkeypatch):
-    """The table and recovery Repo derive from one old-or-new exported definition."""
+    """An export and selected-Store table remain one locked configuration generation."""
 
     first = DirStore(tmp_path / "first", query_index="none")
     second = DirStore(tmp_path / "second", query_index="none")
@@ -29,12 +40,14 @@ def test_storage_snapshot_uses_one_export_and_survives_later_topology_changes(tm
         [first, second],
         save_routing=SaveRouting(((Selector(Definition(StorageTarget)), second),)),
     )
+    pinned = repo.save(PinnedStorageTarget(repo=repo), deep_capture=True)
     original_export = repo.to_definition
     calls = []
 
     entered = threading.Event()
     release = threading.Event()
     result = []
+    reordered = threading.Event()
 
     def export_then_wait():
         definition = original_export()
@@ -51,10 +64,14 @@ def test_storage_snapshot_uses_one_export_and_survives_later_topology_changes(tm
     thread = threading.Thread(target=prepare)
     thread.start()
     assert entered.wait(timeout=5)
-    repo.set_default_store(second)
+    reorder = threading.Thread(target=lambda: (repo.set_default_store(second), reordered.set()))
+    reorder.start()
+    assert not reordered.wait(timeout=0.1)
     release.set()
     thread.join(timeout=5)
+    reorder.join(timeout=5)
     assert not thread.is_alive()
+    assert not reorder.is_alive()
     snapshot = result.pop()
     try:
         assert len(calls) == 1
@@ -63,7 +80,31 @@ def test_storage_snapshot_uses_one_export_and_survives_later_topology_changes(tm
         ]
         assert snapshot.storage_setup["repo"]["routing"]["routes"][0]["store"] == 1
         assert snapshot.recovery_repo.to_definition().to_data() == calls[0].to_data()
+        assert [str(store.base_dir) for store in snapshot.frozen_storage.source_stores] == [
+            descriptor["path"] for descriptor in calls[0].to_data()["stores"]
+        ]
         assert repo.default_store is second
+
+        prepared = SharedDirStoreStrategy().prepare(
+            _pinned_value, (), {}, repo=repo, control_store=None, update_args=False,
+            selections={"pin": ReferenceSelection(pinned.object, first)},
+            _frozen_storage=snapshot.frozen_storage,
+        )
+        _, _, _, _, selections, _ = decode_invocation(
+            prepared.invocation, repo=snapshot.recovery_repo,
+        )
+        assert selections["pin"].store is snapshot.recovery_repo.stores[0]
+
+        wrong = DirStore(tmp_path / "wrong", query_index="none")
+        try:
+            with pytest.raises(CoreCallCodecError, match="unsupported selected Store"):
+                SharedDirStoreStrategy().prepare(
+                    _pinned_value, (), {}, repo=repo, control_store=None, update_args=False,
+                    selections={"pin": ReferenceSelection(pinned.object, wrong)},
+                    _frozen_storage=snapshot.frozen_storage,
+                )
+        finally:
+            wrong.close()
     finally:
         snapshot.close()
 

@@ -63,4 +63,7 @@ def test_promoted_package_keeps_the_destination_export_manifest():
         "GraphPathError", "Index", "Key", "Kwarg", "Parameter", "ObjectResultSet",
         "ObjectRefResultSet", "OccurrenceResultSet", "ReferenceOccurrence", "ReferenceQuery", "ReferenceResultSet", "QueryCardinalityError", "QueryDomainError", "QueryError",
         "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember", "StateRefResultSet",
+        "CoreExecutionError", "CoreExecutionFuture", "CoreExecutionSnapshot", "CoreOptions",
+        "CoreOutcomeEvidence", "CorePublicationEvidence", "CoreRefreshEvidence", "Executor",
+        "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy", "run", "submit",
     ]

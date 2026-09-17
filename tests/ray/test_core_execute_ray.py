@@ -70,6 +70,11 @@ def _ray_control_store_path():
     return None if control_store is None else control_store.base_dir
 
 
+def _ray_scalar():
+    """Return one importable ordinary result through detached Ray authority."""
+    return 5
+
+
 def _ray_block(marker: Path) -> None:
     """Mark post-GO execution and remain alive until Ray cancels its exact task."""
     marker.write_text("running", encoding="ascii")
@@ -137,6 +142,26 @@ def test_existing_ray_core_recovers_training_results_nested_updates_and_control_
         assert control.result(timeout=30) == str(control_store.base_dir)
         control.cleanup(timeout=30)
         assert executor.resources(timeout=10).allocated.cpus == 0.0
+    finally:
+        executor.close(cancel=True, timeout=30)
+
+
+def test_existing_ray_core_accepts_a_detached_repo_definition(tmp_path: Path):
+    """The supplied Ray path accepts reconstructed detached core authority."""
+    store = DirStore(tmp_path / "state", query_index="none")
+    definition = Repo(store).to_definition()
+    executor = CoreExecutor(
+        RayBackendConfig(
+            address=require_ray_integration(), spool_directory=tmp_path,
+            admission_timeout=90, connect_timeout=60, termination_timeout=10,
+            invocation_limit_bytes=1_000_000, result_limit_bytes=1_000_000,
+        ),
+        core=CoreOptions(repo=definition, return_objects=False),
+    )
+    try:
+        future = executor.submit(_ray_scalar, world=_one_cpu_world())
+        assert future.result(timeout=30) == 5
+        future.cleanup(timeout=30)
     finally:
         executor.close(cancel=True, timeout=30)
 

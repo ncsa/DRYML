@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from collections.abc import Mapping
+from functools import lru_cache
 
 import dill
 
@@ -427,6 +428,38 @@ def _setup_result_payload_limit(limit: int) -> int:
     # A single setup exit can add one bounded type-only cleanup issue. Reserving
     # its JSON and base64 expansion keeps an already encoded result transportable.
     return max(1, ((limit - 256) * 3) // 4)
+
+
+def setup_result_bytes_limit(limit: int) -> int:
+    """Return the safely usable byte value for a setup-bearing generic result.
+
+    Core execution transports an already encoded outcome as a ``bytes`` value.
+    The generic worker serializes that value with dill before wrapping it in the
+    setup terminal, so its usable budget reserves the serializer's maximum
+    protocol-5 bytes framing overhead. Tiny configured limits return zero for
+    caller-side rejection before a worker is launched.
+    """
+    payload_limit = _setup_result_payload_limit(limit)
+    if payload_limit <= _setup_result_serialization_overhead():
+        return 0
+    return payload_limit - _setup_result_serialization_overhead()
+
+
+@lru_cache(maxsize=1)
+def _setup_result_serialization_overhead() -> int:
+    """Verify dill's bounded bytes framing before any configured-budget preflight.
+
+    Protocol-5 dill bytes framing has at most 18 bytes of overhead across short,
+    16-bit, 32-bit, and larger-length opcode forms. Fixed representatives verify
+    the owning serializer while limiting every dummy allocation to 65,536 bytes;
+    the static ceiling safely covers lengths that cannot be probed cheaply.
+    """
+    ceiling = 18
+    for size in (0, 1, 255, 256, 65_535, 65_536):
+        encoded = serialize_result(b"\0" * size, limit_bytes=size + ceiling)
+        if len(encoded) - size > ceiling:
+            raise ValueError("result serializer bytes framing exceeds the setup budget")
+    return ceiling
 
 
 def _drain(read_fd: int, stream: str, sequences: dict[str, int], connection: socket.socket, send_lock: threading.Lock, descriptor: BootstrapDescriptor) -> None:

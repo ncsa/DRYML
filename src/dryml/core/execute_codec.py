@@ -938,7 +938,7 @@ class _ResultPublisher:
         _result_graph(graph, limit_bytes=self._result_limit_bytes, automatic_references=set())
 
     def _reserve_evidence(self, value: Any) -> None:
-        """Prove the configured outcome bound can retain all possible save evidence."""
+        """Prove the actual outcome budget can retain all possible save evidence."""
         if len(self.repo.stores) > _MAX_NODES:
             raise CoreCallCodecError("core execution transport rejected oversized Store table")
         result_objects: list[Object] = []
@@ -946,8 +946,6 @@ class _ResultPublisher:
         roots = [root for _, root in self.updates] + _maximal_roots(result_objects)
         if len(roots) > _MAX_NODES:
             raise CoreCallCodecError("core execution transport rejected oversized publication roots")
-        graph = self._preflight_graph(value, "$.result", {}, set())
-        result = _result_graph(graph, limit_bytes=self._result_limit_bytes, automatic_references=set())
         updates = [
             {"state": self._prospective_state(root).to_data(),
              "object": root.object_ref.to_data(), "target": target}
@@ -963,8 +961,13 @@ class _ResultPublisher:
             for store_index in range(len(self.repo.stores))
             for phase in phases
         ]
-        _outcome(True, result=result, updates=updates, publications=publications,
-                 limit_bytes=self._result_limit_bytes)
+        # The ordinary result can be dropped after publication, but durable
+        # evidence cannot. Reserve exactly the fallback outcome before saving.
+        _outcome(
+            False, updates=updates, publications=publications,
+            reason="result outcome exceeds configured bound after publication",
+            limit_bytes=self._result_limit_bytes,
+        )
 
     def raw_result(self, value: Any) -> Any:
         """Validate and reserve the full result/update graph before publication."""
@@ -988,9 +991,9 @@ class _ResultPublisher:
             self.automatic_references.add(id(selected))
             return selected
         if isinstance(value, tuple):
-            return self._container(value, lambda items: tuple(items))
+            return self._container(value, tuple)
         if isinstance(value, list):
-            return self._container(value, lambda items: list(items))
+            return self._container(value, list)
         if isinstance(value, Mapping):
             identity = id(value)
             if identity in self._active:
@@ -1041,8 +1044,10 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
         nonlocal publisher
         # Only delivered argument positions count: captures and Ref values remain
         # outside the update set, while nested materialized Object values are kept.
+        seen: set[int] = set()
+        active: set[int] = set()
         for value in (*call_args, *call_kwargs.values()):
-            _walk_live_objects(value, delivered, set(), set())
+            _walk_live_objects(value, delivered, seen, active)
         selected: list[tuple[str, Object]] = []
         unmatched = list(update_targets)
         for value in delivered:

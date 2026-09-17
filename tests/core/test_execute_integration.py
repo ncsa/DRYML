@@ -11,7 +11,7 @@ import pytest
 
 from dryml.core import ConcreteDefinition, Executor as CoreExecutor
 from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef, function
-from dryml.core.execute import CoreOptions, PreparedCoreCall
+from dryml.core.execute import CoreExecutionError, CoreOptions, PreparedCoreCall
 from dryml.core.store.dir import DirStore
 from dryml.execute import Executor, ExecutionOutput, WorkerSetup
 from dryml.execute.errors import RemoteExecutionError
@@ -23,6 +23,11 @@ from dryml.methods import Method
 def _core_value(value):
     """Return an ordinary core result after worker-local setup has completed."""
     return value + 1
+
+
+def _near_boundary_publication(value):
+    """Publish durable state while returning ordinary bytes near the core outcome bound."""
+    return TrainingValue(11), b"x" * value
 
 
 def _payload_marker(path):
@@ -271,6 +276,29 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
         control.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=10)
+
+
+def test_real_subprocess_core_retains_publication_evidence_when_setup_budget_drops_its_result(tmp_path):
+    """A setup-safe core budget returns exact evidence instead of a generic terminal error."""
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(
+        SubProcessConfig(
+            spool_directory=spool, invocation_limit_bytes=4096, result_limit_bytes=4096,
+        ),
+        core=CoreOptions(repo=repo, return_objects=False),
+    )
+    try:
+        future = executor.submit(_near_boundary_publication, 2_000)
+        assert isinstance(future.backend_future.result(timeout=10), bytes)
+        with pytest.raises(CoreExecutionError, match="result outcome exceeds configured bound") as raised:
+            future.result(timeout=10)
+        assert raised.value.evidence.publications
+        assert future.snapshot().evidence == raised.value.evidence
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=5)
 
 
 def test_real_subprocess_core_pre_and_post_go_cancellation_are_not_reported_as_results(tmp_path):

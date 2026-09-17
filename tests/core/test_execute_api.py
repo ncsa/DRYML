@@ -73,6 +73,35 @@ def test_core_executor_view_keeps_control_named_keywords_as_workload_data(tmp_pa
         executor.close(cancel=True, timeout=5)
 
 
+def test_core_executor_accepts_a_detached_repo_definition_and_closes_only_its_handles(tmp_path, monkeypatch):
+    """Detached Repo authority reconstructs once for preparation and recovery."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    definition = Repo(store).to_definition()
+    closed = []
+    original_close = DirStore.close
+
+    def observe_close(self):
+        """Record coordinator-owned reconstructed handles without changing close behavior."""
+        closed.append(self)
+        return original_close(self)
+
+    monkeypatch.setattr(DirStore, "close", observe_close)
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = Executor(
+        SubProcessConfig(spool_directory=spool),
+        core=CoreOptions(repo=definition, return_objects=False),
+    )
+    try:
+        future = executor.submit(_add, 4)
+        assert future.result(timeout=10) == 5
+        future.cleanup(timeout=5)
+        assert store not in closed
+        assert closed
+    finally:
+        executor.close(cancel=True, timeout=5)
+
+
 def test_core_executor_rejects_invalid_callbacks_before_store_preparation(tmp_path, monkeypatch):
     """Invalid core controls fail before a Repo export or generic acceptance."""
     repo = Repo(DirStore(tmp_path / "store", query_index="none"))
