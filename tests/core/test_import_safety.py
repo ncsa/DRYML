@@ -33,7 +33,9 @@ _EXPECTED_CORE_EXPORTS = (
     "ObjectRefResultSet", "OccurrenceResultSet", "ReferenceOccurrence",
     "ReferenceQuery", "ReferenceResultSet", "QueryCardinalityError", "QueryDomainError",
     "QueryError", "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember",
-    "StateRefResultSet",
+    "StateRefResultSet", "CoreExecutionError", "CoreExecutionFuture", "CoreExecutionSnapshot",
+    "CoreOptions", "CoreOutcomeEvidence", "CorePublicationEvidence", "CoreRefreshEvidence",
+    "Executor", "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy", "run", "submit",
 )
 
 _EXPORT_MODULES = {
@@ -59,6 +61,7 @@ _EXPORT_MODULES = {
     **dict.fromkeys(("ImportRef", "SourceSpec", "resolve_symbol", "symbol_ref"), "dryml.core.symbol"),
     **dict.fromkeys(("CDefEdge", "CDefNode", "CDefOccurrence", "ConcreteDefinitionGraph", "ConcreteDefinitionGraphCycleError", "ConcreteDefinitionGraphError", "EdgeKind", "iter_direct_cdef_edges"), "dryml.core.cdef_graph"),
     **dict.fromkeys(("Arg", "DefinitionPath", "DefinitionQuery", "DefinitionResultSet", "GraphPathError", "Index", "Key", "Kwarg", "Parameter", "ObjectResultSet", "ObjectRefResultSet", "OccurrenceResultSet", "ReferenceOccurrence", "ReferenceQuery", "ReferenceResultSet", "QueryCardinalityError", "QueryDomainError", "QueryError", "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember", "StateRefResultSet"), "dryml.core.query"),
+    **dict.fromkeys(("CoreExecutionError", "CoreExecutionFuture", "CoreExecutionSnapshot", "CoreOptions", "CoreOutcomeEvidence", "CorePublicationEvidence", "CoreRefreshEvidence", "Executor", "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy", "run", "submit"), "dryml.core.execute"),
 }
 
 

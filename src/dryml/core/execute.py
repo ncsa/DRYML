@@ -1760,8 +1760,16 @@ def _submit_core_call(
             return_objects=return_objects, result_limit_bytes=config.result_limit_bytes,
             done_callbacks=callbacks, one_off=one_off,
         )
-    except BaseException:
-        storage.close()
+    except BaseException as error:
+        cleanup_failed = False
+        try:
+            storage.close()
+        except BaseException:
+            cleanup_failed = True
+        if cleanup_failed:
+            # Preparation remains the primary failure; the owned snapshot's raw
+            # close exception can contain Store-specific diagnostics.
+            raise error from CleanupError("core execution preparation cleanup failed")
         raise
 
 

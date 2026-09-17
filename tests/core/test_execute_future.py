@@ -362,3 +362,61 @@ def test_core_future_cleanup_requires_adaptation_terminality(tmp_path):
         future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=5)
+
+
+def test_core_future_cleanup_and_executor_close_share_one_snapshot_release(tmp_path, monkeypatch):
+    """Concurrent facade cleanup and owner close linearize one recovery-Repo release."""
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    (tmp_path / "spool").mkdir()
+    executor = Executor(
+        SubProcessConfig(spool_directory=tmp_path / "spool"),
+        core=CoreOptions(repo=repo, return_objects=False),
+    )
+    calls = []
+    try:
+        future = executor.submit(_value, 7)
+        assert future.result(timeout=10) == 7
+        original_close = type(future._storage).close
+
+        def observe_close(storage):
+            """Record only this submission's owned snapshot close."""
+            if storage is future._storage:
+                calls.append(storage)
+            return original_close(storage)
+
+        monkeypatch.setattr(type(future._storage), "close", observe_close)
+        barrier = Barrier(3)
+        failures = []
+
+        def cleanup():
+            """Join facade cleanup after all lifecycle contenders are ready."""
+            try:
+                barrier.wait()
+                future.cleanup(timeout=5)
+            except BaseException as error:
+                failures.append(error)
+
+        def close_owner():
+            """Close the owner while other callers reconcile the same future."""
+            try:
+                barrier.wait()
+                executor.close(cancel=True, timeout=5)
+            except BaseException as error:
+                failures.append(error)
+
+        first = Thread(target=cleanup)
+        second = Thread(target=cleanup)
+        owner = Thread(target=close_owner)
+        first.start()
+        second.start()
+        owner.start()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        owner.join(timeout=10)
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert not owner.is_alive()
+        assert failures == []
+        assert calls == [future._storage]
+    finally:
+        executor.close(cancel=True, timeout=5)

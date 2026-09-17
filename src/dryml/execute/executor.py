@@ -45,6 +45,7 @@ class _Submission(Generic[T]):
     backend: Backend
     backend_seen: bool = False
     backend_reconciled: bool = False
+    spool_disposed: bool = False
 
 
 class Executor:
@@ -778,8 +779,12 @@ class Executor:
         if record.backend_seen and not record.backend_reconciled:
             record.backend.reconcile_cleanup(record.future.submission_id, timeout=timeout)
             record.backend_reconciled = True
-        assert self._spooler is not None
-        self._spooler.dispose(record.payload, record.reservation)
+        if not record.spool_disposed:
+            assert self._spooler is not None
+            self._spooler.dispose(record.payload, record.reservation)
+            record.spool_disposed = True
+        if future._has_unobserved_worker_cleanup():
+            return
         with self._condition:
             self._submissions.pop(future, None)
             self._condition.notify_all()
