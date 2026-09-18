@@ -5,7 +5,9 @@ from __future__ import annotations
 import importlib.metadata as metadata
 import os
 import platform
+import site
 import sys
+import sysconfig
 from pathlib import Path
 
 from .records import (
@@ -60,18 +62,52 @@ def _dryml_version() -> str | None:
         return None
 
 
+def _distribution_paths() -> tuple[str, ...]:
+    """Select installation roots, retaining active site-path precedence."""
+
+    roots = [sysconfig.get_path("purelib"), sysconfig.get_path("platlib")]
+    roots.extend(site.getsitepackages())
+    if site.ENABLE_USER_SITE:
+        roots.append(site.getusersitepackages())
+    roots = list(dict.fromkeys(os.path.abspath(path) for path in roots))
+    registered = {os.path.normcase(path) for path in roots}
+    ordered = [
+        os.path.abspath(path) for path in sys.path
+        if isinstance(path, str)
+        and os.path.normcase(os.path.abspath(path)) in registered
+    ]
+    return tuple(dict.fromkeys((*ordered, *roots)))
+
+
 def inspect_current() -> EnvironmentRecord:
     """Inspect the current Python environment without importing package runtimes.
 
-    Installed distributions are read through :mod:`importlib.metadata`; heavy
-    modules such as TensorFlow, Torch, JAX, Ray, or Slurm integrations are never
-    imported by this function.
+    Installed distributions are read through :mod:`importlib.metadata` from
+    interpreter installation roots, including enabled user/system site roots.
+    Transient application and vendored search paths do not change this
+    inventory. Heavy modules such as TensorFlow, Torch, JAX, Ray, or Slurm
+    integrations are never imported by this function.
+
+    Returns:
+        An immutable environment record with interpreter, platform, installed
+        package, and DRYML capability evidence.
+
+    Raises:
+        EnvironmentSerializationError: If observed metadata cannot be encoded
+            within the environment record's value and size limits.
+
+    Side Effects:
+        Reads local installed-distribution metadata and interpreter state.
+        It does not import inspected package runtimes or modify the
+        environment.
     """
 
     distributions: dict[str, PackageRecord] = {}
-    for dist in metadata.distributions():
+    for dist in metadata.distributions(path=_distribution_paths()):
         name = dist.metadata.get("Name") or getattr(dist, "name", None) or "unknown"
         normalized = normalize_distribution_name(name)
+        if normalized in distributions:
+            continue
         distributions[normalized] = PackageRecord(
             name=name,
             normalized_name=normalized,

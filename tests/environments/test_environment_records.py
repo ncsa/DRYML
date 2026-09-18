@@ -1,5 +1,7 @@
 import importlib.metadata as metadata
+import site
 import sys
+import sysconfig
 import types
 
 import pytest
@@ -112,7 +114,7 @@ class FakeDist:
 
 
 def test_inspect_current_uses_importlib_metadata(monkeypatch):
-    monkeypatch.setattr(metadata, "distributions", lambda: [FakeDist()])
+    monkeypatch.setattr(metadata, "distributions", lambda **_: [FakeDist()])
     monkeypatch.setattr(metadata, "version", lambda name: "0.3.0-dev")
     record = introspection.inspect_current()
     assert record.python.version
@@ -120,6 +122,72 @@ def test_inspect_current_uses_importlib_metadata(monkeypatch):
     assert record.distributions["fake-pkg"].version == "1.2.3"
     assert record.dryml.features == ("dryml.environments.v1.1",)
     assert "environment_fragment" not in record.dryml.schema_versions
+
+
+def test_installed_software_evidence_ignores_transient_vendor_paths(
+    monkeypatch, tmp_path,
+):
+    """Vendor path injection does not alter installed-environment evidence."""
+
+    from dryml.environments.selection import software_digest
+
+    installed = tmp_path / "site-packages"
+    vendor = installed / "backend" / "thirdparty_files"
+    distribution = installed / "installed_fixture-1.0.dist-info"
+    distribution.mkdir(parents=True)
+    metadata_path = distribution / "METADATA"
+    metadata_path.write_text(
+        "Name: installed-fixture\nVersion: 1.0\n", encoding="utf-8",
+    )
+    bundled = vendor / "bundled_fixture-2.0.dist-info"
+    bundled.mkdir(parents=True)
+    (bundled / "METADATA").write_text(
+        "Name: bundled-fixture\nVersion: 2.0\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(site, "getsitepackages", lambda: [str(installed)])
+    monkeypatch.setattr(site, "ENABLE_USER_SITE", False)
+    get_path = sysconfig.get_path
+    monkeypatch.setattr(
+        sysconfig, "get_path",
+        lambda name: str(installed)
+        if name in {"purelib", "platlib"} else get_path(name),
+    )
+    monkeypatch.syspath_prepend(str(installed))
+    before = introspection.inspect_current()
+    monkeypatch.syspath_prepend(str(vendor))
+    after = introspection.inspect_current()
+
+    assert "installed-fixture" in after.distributions
+    assert "bundled-fixture" not in after.distributions
+    assert software_digest(before) == software_digest(after)
+
+    metadata_path.write_text(
+        "Name: installed-fixture\nVersion: 1.1\n", encoding="utf-8",
+    )
+    assert software_digest(before) != software_digest(
+        introspection.inspect_current()
+    )
+
+
+@pytest.mark.parametrize("user_enabled", [False, True])
+def test_distribution_paths_retain_enabled_site_precedence(
+    monkeypatch, tmp_path, user_enabled,
+):
+    """Keep inherited and enabled user sites, without nested vendor roots."""
+
+    local = str(tmp_path / "venv-site")
+    inherited = str(tmp_path / "system-site")
+    user = str(tmp_path / "user-site")
+    vendor = str(tmp_path / "system-site" / "backend" / "vendor")
+    monkeypatch.setattr(site, "getsitepackages", lambda: [local, inherited])
+    monkeypatch.setattr(site, "getusersitepackages", lambda: user)
+    monkeypatch.setattr(site, "ENABLE_USER_SITE", user_enabled)
+    monkeypatch.setattr(sysconfig, "get_path", lambda _name: local)
+    monkeypatch.setattr(sys, "path", [vendor, local, user, inherited])
+
+    assert introspection._distribution_paths() == (
+        (local, user, inherited) if user_enabled else (local, inherited)
+    )
 
 
 def test_fresh_record_capability_drop_changes_only_the_fragment_entry():
@@ -157,7 +225,8 @@ def test_fresh_record_capability_drop_changes_only_the_fragment_entry():
 def test_deterministic_fresh_inspection_has_the_reduced_capability_id(monkeypatch):
     """The fresh inspection path emits the pinned reduced-capability record ID."""
 
-    monkeypatch.setattr(metadata, "distributions", lambda: [])
+    monkeypatch.setattr(metadata, "distributions", lambda **_: [])
+    monkeypatch.setattr(introspection, "_distribution_paths", lambda: ())
     monkeypatch.setattr(metadata, "version", lambda name: "0.3.0")
     monkeypatch.setattr(introspection, "_environment_kind", lambda: "system")
     monkeypatch.setattr(introspection, "os", types.SimpleNamespace(name="posix", environ={}))
@@ -188,7 +257,7 @@ def test_deterministic_fresh_inspection_has_the_reduced_capability_id(monkeypatc
 
 def test_inspect_current_does_not_import_heavy_modules(monkeypatch):
     before = {name: sys.modules.get(name) for name in ("tensorflow", "torch", "jax", "ray")}
-    monkeypatch.setattr(metadata, "distributions", lambda: [])
+    monkeypatch.setattr(metadata, "distributions", lambda **_: [])
     record = introspection.inspect_current()
     assert record.kind in {"conda", "venv", "system"}
     for name, module in before.items():

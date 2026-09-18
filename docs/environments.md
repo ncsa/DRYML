@@ -17,6 +17,13 @@ print(info.id)
 
 Inspection uses `importlib.metadata` for installed distributions. It does not import package runtime modules to learn versions.
 
+The distribution inventory follows the interpreter's installation directories,
+including enabled user and inherited system site directories in import-path
+precedence order. Temporary application or backend-vendored `sys.path` entries
+do not change installed-software evidence. This keeps exact-selector checks
+stable when a backend imports its bundled dependencies, while still detecting
+changes to installed distribution versions.
+
 ## Requirements And Reports
 
 Use Python packaging requirement strings for package constraints.
