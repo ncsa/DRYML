@@ -11,6 +11,12 @@ behavior, parameters/types, return values, failure behavior, and relevant side
 effects. Update `docs/` alongside changes to public APIs, persistent formats,
 dispatch, concurrency, recovery, or user-visible behavior.
 
+Durable design learnings and explicitly accepted limitations live in
+`docs/solutions/`. Consult applicable entries before planning related work;
+in particular, the code-shift note under `docs/solutions/architecture-patterns/`
+records deferred long-lived-session, notebook, class-redefinition, and selector
+questions without claiming hot-reload or live-Object migration support.
+
 ## Tests
 
 Use `tests.sh` for DRYML verification. The normal maintained selection is:
