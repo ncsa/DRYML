@@ -159,7 +159,7 @@ jobs:
           export DRYML_TEST_RAY_ADDRESS=127.0.0.1:6379
           export DRYML_TEST_CONDA_PREFIX="$CONDA_PREFIX"
           export DRYML_TEST_VENV_PYTHON="$VENV_PYTHON"
-          ./tests.sh tests/ray/test_core_execute_ray.py tests/ray/test_execute_ray_backend.py tests/ray/test_execute_ray_environments.py tests/core/test_execute_integration.py tests/execute/test_backend_conformance.py tests/execute/test_existing_environments.py --ignore tests/old --ignore tests/dev -x
+          ./tests.sh tests/ray/test_core_execute_ray.py tests/ray/test_execute_ray_backend.py tests/ray/test_execute_ray_environments.py tests/ray/test_dispatch_ray.py tests/core/test_execute_integration.py tests/execute/test_backend_conformance.py tests/execute/test_existing_environments.py --ignore tests/old --ignore tests/dev -x
 
       - name: Stop job-owned Ray test server
         if: always()

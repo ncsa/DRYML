@@ -26,6 +26,8 @@ _EXPECTED_CODE_EXPORTS = [
     "DescriptorTarget",
     "FactRecord",
     "ImportTarget",
+    "InspectionCapture",
+    "InspectionTarget",
     "InvalidKernelError",
     "InvalidTargetError",
     "InvocationOutcome",
@@ -38,10 +40,13 @@ _EXPECTED_CODE_EXPORTS = [
     "SourceInfo",
     "SourceTarget",
     "SourceUnavailableError",
+    "StaticDependencies",
+    "StaticDependenciesKernel",
     "TargetInfo",
     "TraversalKernel",
     "analyze",
     "analyze_callable",
+    "capture_inspection",
     "extract_source",
     "get_source_info",
     "probe",
@@ -50,37 +55,70 @@ _EXPECTED_CODE_EXPORTS = [
 
 _EXPECTED_CODE_MODULE_EXPORTS = {
     "dryml.code.algorithms": [
-        "LexicalDependencies", "LexicalDependency", "LexicalDependencyKernel",
+        "LexicalDependencies",
+        "LexicalDependency",
+        "LexicalDependencyKernel",
         "collect_lexical_dependencies",
     ],
     "dryml.code.analysis": ["AnalysisResult", "InvocationOutcome", "analyze"],
     "dryml.code.ast_tools": [
-        "AccessCollection", "AttrAccess", "MethodCall",
-        "collect_accesses_from_source", "parse_source",
+        "AccessCollection",
+        "AttrAccess",
+        "MethodCall",
+        "collect_accesses_from_source",
+        "parse_source",
     ],
     "dryml.code.callable_info": ["CallableInfo", "analyze_callable"],
     "dryml.code.errors": [
-        "AnalysisErrorCode", "CodeAnalysisError", "InvalidKernelError",
-        "InvalidTargetError", "KernelDependencyError", "KernelExecutionError",
-        "MissingOutputError", "SourceUnavailableError",
+        "AnalysisErrorCode",
+        "CodeAnalysisError",
+        "InvalidKernelError",
+        "InvalidTargetError",
+        "KernelDependencyError",
+        "KernelExecutionError",
+        "MissingOutputError",
+        "SourceUnavailableError",
     ],
     "dryml.code.facts": [
-        "CodeFact", "CodeFacts", "Diagnostic", "FactRecord", "FactScalar",
-        "FactValue", "SourceLocation",
+        "CodeFact",
+        "CodeFacts",
+        "Diagnostic",
+        "FactRecord",
+        "FactScalar",
+        "FactValue",
+        "SourceLocation",
     ],
     "dryml.code.graph": [
-        "ProgramEdge", "ProgramEdgeKind", "ProgramGraph", "ProgramNode",
-        "ProgramNodeKind", "build_program_graph",
+        "ProgramEdge",
+        "ProgramEdgeKind",
+        "ProgramGraph",
+        "ProgramNode",
+        "ProgramNodeKind",
+        "build_program_graph",
     ],
+    "dryml.code.inspection":
+    ["InspectionCapture", "InspectionTarget", "capture_inspection"],
     "dryml.code.kernels": [
-        "AnalysisKernel", "KernelCall", "KernelContext", "KernelMode",
-        "KernelOutcome", "TraversalKernel",
+        "AnalysisKernel",
+        "KernelCall",
+        "KernelContext",
+        "KernelMode",
+        "KernelOutcome",
+        "TraversalKernel",
     ],
     "dryml.code.probe": ["probe"],
     "dryml.code.source": ["SourceInfo", "extract_source", "get_source_info"],
+    "dryml.code.static_dependencies":
+    ["StaticDependencies", "StaticDependenciesKernel"],
     "dryml.code.targets": [
-        "CodeTarget", "CodeTargetInput", "DescriptorKind", "DescriptorTarget",
-        "ImportTarget", "SourceTarget", "TargetInfo", "TargetKind",
+        "CodeTarget",
+        "CodeTargetInput",
+        "DescriptorKind",
+        "DescriptorTarget",
+        "ImportTarget",
+        "SourceTarget",
+        "TargetInfo",
+        "TargetKind",
         "normalize_target",
     ],
     "dryml.code.trace": ["trace"],
@@ -88,56 +126,119 @@ _EXPECTED_CODE_MODULE_EXPORTS = {
 
 _EXPECTED_CODE_DATACLASS_FIELDS = {
     "dryml.code.callable_info.CallableInfo": [
-        "original", "func", "bound_self", "signature", "qualname", "module",
-        "is_bound_method", "is_function", "is_callable_instance",
+        "original",
+        "func",
+        "bound_self",
+        "signature",
+        "qualname",
+        "module",
+        "is_bound_method",
+        "is_function",
+        "is_callable_instance",
     ],
     "dryml.code.source.SourceInfo": ["source", "filename", "start_line"],
-    "dryml.code.ast_tools.AttrAccess": ["root", "chain", "ctx", "lineno", "col_offset"],
-    "dryml.code.ast_tools.MethodCall": ["root", "chain", "lineno", "col_offset"],
+    "dryml.code.ast_tools.AttrAccess":
+    ["root", "chain", "ctx", "lineno", "col_offset"],
+    "dryml.code.ast_tools.MethodCall":
+    ["root", "chain", "lineno", "col_offset"],
     "dryml.code.ast_tools.AccessCollection": ["attr_accesses", "method_calls"],
-    "dryml.code.targets.SourceTarget": ["source", "name", "filename", "start_line"],
+    "dryml.code.targets.SourceTarget":
+    ["source", "name", "filename", "start_line"],
     "dryml.code.targets.ImportTarget": ["path"],
     "dryml.code.targets.DescriptorTarget": ["owner", "name"],
     "dryml.code.targets.TargetInfo": [
-        "kind", "name", "module", "qualname", "owner_module", "owner_qualname",
-        "descriptor_kind", "filename", "start_line", "import_path",
-    ],
-    "dryml.code.targets.CodeTarget": [
-        "info", "original", "callable", "owner", "descriptor", "source",
+        "kind",
+        "name",
+        "module",
+        "qualname",
+        "owner_module",
+        "owner_qualname",
+        "descriptor_kind",
+        "filename",
+        "start_line",
         "import_path",
     ],
+    "dryml.code.targets.CodeTarget": [
+        "info",
+        "original",
+        "callable",
+        "owner",
+        "descriptor",
+        "source",
+        "import_path",
+    ],
+    "dryml.code.inspection.InspectionTarget": ["snapshot", "target_id"],
+    "dryml.code.inspection.InspectionCapture": [
+        "target",
+        "_associations",
+        "_target_index",
+        "_carrier_ids",
+    ],
+    "dryml.code.static_dependencies.StaticDependencies":
+    ["targets", "complete", "diagnostics"],
     "dryml.code.graph.ProgramNode": ["id", "kind", "value", "source"],
     "dryml.code.graph.ProgramEdge": ["source", "target", "kind"],
-    "dryml.code.graph.ProgramGraph": ["target", "nodes", "edges", "diagnostics"],
+    "dryml.code.graph.ProgramGraph":
+    ["target", "nodes", "edges", "diagnostics"],
     "dryml.code.facts.SourceLocation": ["filename", "line", "column"],
     "dryml.code.facts.CodeFact": ["kind", "value", "source"],
     "dryml.code.facts.CodeFacts": ["values"],
-    "dryml.code.facts.FactRecord": ["fact", "producer", "graph_digest", "origin"],
-    "dryml.code.facts.Diagnostic": ["code", "message", "severity", "kernel", "source"],
+    "dryml.code.facts.FactRecord":
+    ["fact", "producer", "graph_digest", "origin"],
+    "dryml.code.facts.Diagnostic":
+    ["code", "message", "severity", "kernel", "source"],
     "dryml.code.kernels.KernelCall": ["kernel", "input"],
     "dryml.code.kernels.KernelOutcome": [
-        "kernel", "graph_digest", "status", "value", "diagnostics", "skipped_for",
+        "kernel",
+        "graph_digest",
+        "status",
+        "value",
+        "diagnostics",
+        "skipped_for",
     ],
     "dryml.code.analysis.InvocationOutcome": ["status", "diagnostic"],
     "dryml.code.analysis.AnalysisResult": [
-        "target", "base_graph", "graph", "outcomes", "facts", "diagnostics", "invocation",
+        "target",
+        "base_graph",
+        "graph",
+        "outcomes",
+        "facts",
+        "diagnostics",
+        "invocation",
     ],
     "dryml.code.algorithms.LexicalDependency": ["name", "source"],
     "dryml.code.algorithms.LexicalDependencies": ["dependencies"],
 }
 
 _EXPECTED_CODE_SIGNATURES = {
-    "dryml.code.callable_info.analyze_callable": "(obj: 'Callable[..., Any]') -> 'CallableInfo'",
-    "dryml.code.source.get_source_info": "(obj: 'object') -> 'SourceInfo | None'",
-    "dryml.code.source.extract_source": "(target: 'CodeTargetInput') -> 'SourceInfo'",
-    "dryml.code.ast_tools.parse_source": "(source: 'str | SourceInfo') -> 'ast.Module'",
-    "dryml.code.ast_tools.collect_accesses_from_source": "(source: 'str | SourceInfo') -> 'AccessCollection'",
-    "dryml.code.targets.normalize_target": "(target: 'CodeTargetInput') -> 'CodeTarget'",
-    "dryml.code.graph.build_program_graph": "(target: 'CodeTargetInput') -> 'ProgramGraph'",
-    "dryml.code.analysis.analyze": "(target: 'CodeTargetInput', calls: 'Iterable[KernelCall[Any, Any]]') -> 'AnalysisResult'",
-    "dryml.code.probe.probe": "(target: 'CodeTargetInput', calls: 'Iterable[KernelCall[Any, Any]]') -> 'AnalysisResult'",
-    "dryml.code.trace.trace": "(target: 'CodeTargetInput', calls: 'Iterable[KernelCall[Any, Any]]', *, args: 'tuple[Any, ...]' = (), kwargs: 'Mapping[str, Any] | None' = None, max_events: 'int' = 100000) -> 'AnalysisResult'",
-    "dryml.code.algorithms.collect_lexical_dependencies": "(target: 'CodeTargetInput') -> 'LexicalDependencies'",
+    "dryml.code.callable_info.analyze_callable":
+    "(obj: 'Callable[..., Any]') -> 'CallableInfo'",
+    "dryml.code.source.get_source_info":
+    "(obj: 'object') -> 'SourceInfo | None'",
+    "dryml.code.source.extract_source":
+    "(target: 'CodeTargetInput') -> 'SourceInfo'",
+    "dryml.code.ast_tools.parse_source":
+    "(source: 'str | SourceInfo') -> 'ast.Module'",
+    "dryml.code.ast_tools.collect_accesses_from_source":
+    "(source: 'str | SourceInfo') -> 'AccessCollection'",
+    "dryml.code.targets.normalize_target":
+    "(target: 'CodeTargetInput') -> 'CodeTarget | InspectionTarget'",
+    "dryml.code.inspection.capture_inspection":
+    "(target: 'CodeTargetInput') -> 'InspectionCapture'",
+    "dryml.code.graph.build_program_graph":
+    "(target: 'CodeTargetInput') -> 'ProgramGraph'",
+    "dryml.code.analysis.analyze":
+    "(target: 'CodeTargetInput', calls: "
+    "'Iterable[KernelCall[Any, Any]]') -> 'AnalysisResult'",
+    "dryml.code.probe.probe":
+    "(target: 'CodeTargetInput', calls: "
+    "'Iterable[KernelCall[Any, Any]]') -> 'AnalysisResult'",
+    "dryml.code.trace.trace":
+    "(target: 'CodeTargetInput', calls: 'Iterable[KernelCall[Any, Any]]', "
+    "*, args: 'tuple[Any, ...]' = (), kwargs: 'Mapping[str, Any] | None' = "
+    "None, max_events: 'int' = 100000) -> 'AnalysisResult'",
+    "dryml.code.algorithms.collect_lexical_dependencies":
+    "(target: 'CodeTargetInput') -> 'LexicalDependencies'",
 }
 
 _EXPECTED_ROOT_EXPORTS = {
@@ -170,6 +271,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "context",
     "core",
     "definition_mode",
+    "dispatch",
     "env",
     "environments",
     "execute",
@@ -241,34 +343,100 @@ _EXPECTED_REQUIREMENT_EXPORTS = {
 }
 
 _EXPECTED_ENVIRONMENT_EXPORTS = {
-    "COMPATIBILITY_REPORT_SCHEMA_VERSION", "ENVIRONMENT_LOCK_REF_SCHEMA_VERSION",
-    "ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION", "ENVIRONMENT_RECORD_SCHEMA_VERSION",
-    "ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION", "ENVIRONMENT_SPEC_SCHEMA_VERSION",
-    "CompatibilityIssue", "CompatibilityReport", "CondaEnvironmentSpec",
-    "ContainerEnvironmentSpec", "CurrentEnvironmentSpec", "DrymlEnvironmentError",
-    "DrymlRuntimeRecord", "EnvironmentCompatibilityError",
-    "EnvironmentFeatureUnavailable", "EnvironmentInternTable", "EnvironmentLockRef",
-    "EnvironmentProbeError", "EnvironmentRecord", "EnvironmentRegistry",
-    "EnvironmentRegistryEntry", "EnvironmentRegistryError", "EnvironmentRequirement",
-    "EnvironmentRequirementError", "EnvironmentSerializationError", "EnvironmentSpecError",
-    "EnvironmentProbeResult", "PackageRecord", "PlatformRecord", "PythonExecutableSpec",
-    "PythonRecord", "coerce_policy", "current", "inspect_current",
-    "malformed_report", "marker_environment_from_record", "normalize_distribution_name",
-    "normalize_requirement_string", "probe", "probe_conda", "probe_current",
-    "probe_python", "req", "requirements_for", "requirements_for_method", "reset_current",
-    "set_current", "spec_from_data", "unavailable_report", "use",
+    "COMPATIBILITY_REPORT_SCHEMA_VERSION",
+    "ENVIRONMENT_LOCK_REF_SCHEMA_VERSION",
+    "ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION",
+    "ENVIRONMENT_RECORD_SCHEMA_VERSION",
+    "ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION",
+    "ENVIRONMENT_SPEC_SCHEMA_VERSION",
+    "CompatibilityIssue",
+    "CompatibilityReport",
+    "CondaEnvironmentSpec",
+    "ContainerEnvironmentSpec",
+    "CurrentEnvironmentSpec",
+    "DrymlEnvironmentError",
+    "DrymlRuntimeRecord",
+    "EnvironmentCompatibilityError",
+    "EnvironmentFeatureUnavailable",
+    "EnvironmentInternTable",
+    "EnvironmentLockRef",
+    "EnvironmentProbeError",
+    "EnvironmentRecord",
+    "EnvironmentRegistry",
+    "EnvironmentRegistryEntry",
+    "EnvironmentRegistryError",
+    "EnvironmentRequirement",
+    "EnvironmentRequirementError",
+    "EnvironmentRequirementsKernel",
+    "EnvironmentSerializationError",
+    "EnvironmentSpecError",
+    "EnvironmentProbeResult",
+    "PackageRecord",
+    "PlatformRecord",
+    "PythonExecutableSpec",
+    "PythonRecord",
+    "coerce_policy",
+    "current",
+    "inspect_current",
+    "malformed_report",
+    "marker_environment_from_record",
+    "normalize_distribution_name",
+    "normalize_requirement_string",
+    "probe",
+    "probe_conda",
+    "probe_current",
+    "probe_python",
+    "req",
+    "requirements_for",
+    "requirements_for_method",
+    "reset_current",
+    "ResolvedEnvironmentSelection",
+    "compare_selection",
+    "resolve_environment_spec",
+    "set_current",
+    "software_digest",
+    "spec_from_data",
+    "unavailable_report",
+    "use",
 }
 
 _EXPECTED_WORLD_EXPORTS = {
-    "CountConstraint", "LocalResourceInventory", "ProcessAllocation", "ProcessSpec",
-    "ResourceRequirement", "ResourceSpec", "ResourceValidationError", "RoleRequirement",
-    "RoleSpec", "WorldAllocation", "WorldCompatibilityError", "WorldCompatibilityIssue",
-    "WorldCompatibilityReport", "WorldError", "WorldRequirement", "WorldRequirementError",
-    "WorldSpec", "WorldSpecValidationError", "WorldSynthesisDiagnostic",
-    "WorldSynthesisResult", "assign_local_world", "canonical_byte_size",
-    "check_allocation_satisfies_requirement", "check_world_spec_satisfies_requirement",
-    "current", "local_inventory", "parse_byte_size", "req", "requirements_for",
-    "requirements_for_method", "reset_current", "set_current", "synthesize", "use",
+    "CountConstraint",
+    "LocalResourceInventory",
+    "ProcessAllocation",
+    "ProcessSpec",
+    "ResourceRequirement",
+    "ResourceSpec",
+    "ResourceValidationError",
+    "RoleRequirement",
+    "RoleSpec",
+    "WorldAllocation",
+    "WorldCompatibilityError",
+    "WorldCompatibilityIssue",
+    "WorldCompatibilityReport",
+    "WorldError",
+    "WorldRequirement",
+    "WorldRequirementError",
+    "WorldRequirementsKernel",
+    "WorldSpec",
+    "WorldSpecValidationError",
+    "WorldSynthesisDiagnostic",
+    "WorldSynthesisResult",
+    "assign_local_world",
+    "canonical_byte_size",
+    "check_allocation_satisfies_requirement",
+    "check_selected_process_satisfies_requirement",
+    "check_world_spec_satisfies_requirement",
+    "current",
+    "local_inventory",
+    "parse_byte_size",
+    "req",
+    "requirements_for",
+    "requirements_for_method",
+    "reset_current",
+    "set_current",
+    "synthesize",
+    "use",
 }
 
 _RETIRED_ENVIRONMENT_SURFACE = {
@@ -328,6 +496,28 @@ _EXPECTED_EXECUTE_EXPORTS = {
 _EXPECTED_EXECUTE_SPECIALIZATIONS = {
     "dryml.execute.subprocess": {"SubProcessBackend", "SubProcessConfig", "SubProcessFuture"},
     "dryml.execute.ray": {"RayBackend", "RayBackendConfig", "RayFuture"},
+}
+
+_EXPECTED_DISPATCH_EXPORTS = {
+    "BackendChoice", "DispatchCoverageWarning", "DispatchError",
+    "DispatchReport", "DispatchView", "InProcess", "ProbeOptions",
+    "backends", "explain", "register_backend", "run",
+    "set_execute_backend_default", "set_probe_default",
+    "set_worker_environment_default", "set_worker_python_default",
+    "set_worker_world_default", "submit", "unregister_backend",
+    "with_options",
+}
+
+_EXPECTED_DISPATCH_DATACLASS_FIELDS = {
+    "ProbeOptions": [
+        "placement", "backend", "environment", "world", "environment_spec",
+        "execution_timeout", "max_targets", "max_depth",
+    ],
+    "DispatchReport": [
+        "workload_placement", "workload_backend", "supported_methods",
+        "probe_placement", "probe_backend", "probe_reason", "coverage",
+        "environment", "world", "eligible", "diagnostics", "warnings",
+    ],
 }
 
 _EXPECTED_CORE_EXECUTE_EXPORTS = {
@@ -944,10 +1134,26 @@ print(json.dumps({
         for name, exports in data["specializations"].items()
     } == _EXPECTED_EXECUTE_SPECIALIZATIONS
     assert data["parameters"] == {
-        "run": ["fn", "args", "backend", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"],
-        "submit": ["fn", "args", "backend", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"],
-        "Executor.run": ["self", "fn", "args", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"],
-        "Executor.submit": ["self", "fn", "args", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"],
+        "run": [
+            "fn", "args", "backend", "kwargs", "environment",
+            "environment_spec", "world", "execution_timeout", "stream_output",
+            "done_callbacks", "output", "worker_setup"
+        ],
+        "submit": [
+            "fn", "args", "backend", "kwargs", "environment",
+            "environment_spec", "world", "execution_timeout", "stream_output",
+            "done_callbacks", "output", "worker_setup"
+        ],
+        "Executor.run": [
+            "self", "fn", "args", "kwargs", "environment", "environment_spec",
+            "world", "execution_timeout", "stream_output", "done_callbacks",
+            "output", "worker_setup"
+        ],
+        "Executor.submit": [
+            "self", "fn", "args", "kwargs", "environment", "environment_spec",
+            "world", "execution_timeout", "stream_output", "done_callbacks",
+            "output", "worker_setup"
+        ],
     }
     assert not data["ray_loaded"]
     assert data["subprocess_result"] == 10
@@ -965,6 +1171,145 @@ def test_source_execute_surface_matches_installed_manifest() -> None:
     assert set(execute.__all__) == _EXPECTED_EXECUTE_EXPORTS
     assert set(subprocess_execute.__all__) == _EXPECTED_EXECUTE_SPECIALIZATIONS["dryml.execute.subprocess"]
     assert set(ray_execute.__all__) == _EXPECTED_EXECUTE_SPECIALIZATIONS["dryml.execute.ray"]
+
+
+def test_installed_dispatch_surface_is_lazy_and_matches_the_public_contract(
+    installed_python: Path,
+) -> None:
+    """Require the installed Dispatch facade to expose only its public API."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import dataclasses
+import inspect
+import json
+import sys
+
+import dryml.dispatch as dispatch
+
+print(json.dumps({
+    "exports": sorted(dispatch.__all__),
+    "fields": {
+        name: [
+            field.name for field in dataclasses.fields(getattr(dispatch, name))
+        ]
+        for name in ("ProbeOptions", "DispatchReport")
+    },
+    "signatures": {
+        name: str(inspect.signature(getattr(dispatch, name)))
+        for name in ("explain", "run", "submit", "with_options")
+    },
+    "heavy": sorted(
+        name
+        for name in ("ray", "tensorflow", "torch", "jax", "jaxlib")
+        if name in sys.modules
+    ),
+}))
+""",
+    )
+    data = json.loads(result.stdout)
+    assert set(data["exports"]) == _EXPECTED_DISPATCH_EXPORTS
+    assert data["fields"] == _EXPECTED_DISPATCH_DATACLASS_FIELDS
+    assert data["signatures"] == {
+        "explain": ("(fn: 'Any', /, *args: 'Any', **kwargs: 'Any') -> "
+                    "'DispatchReport'"),
+        "run":
+        "(fn: 'Any', /, *args: 'Any', **kwargs: 'Any') -> 'Any'",
+        "submit":
+        "(fn: 'Any', /, *args: 'Any', **kwargs: 'Any') -> 'Any'",
+        "with_options":
+        ("(*, env: \"EnvironmentRequirement | None | Literal['inherit']\" "
+         "= 'inherit', world: \"WorldRequirement | None | "
+         "Literal['inherit']\" = 'inherit', python: \"EnvironmentSpec | "
+         "None | Literal['inherit']\" = 'inherit', backend: \"BackendConfig "
+         "| InProcess | str | None | Literal['inherit']\" = 'inherit', "
+         "core: \"object | None | Literal['inherit']\" = 'inherit', probe: "
+         "\"ProbeOptions | Literal['inherit']\" = 'inherit', _parent: "
+         "'DispatchView | None' = None) -> 'DispatchView'"),
+    }
+    assert data["heavy"] == []
+
+
+def test_source_dispatch_surface_matches_installed_manifest() -> None:
+    """Keep source Dispatch exports and value shapes aligned with the wheel."""
+
+    import dryml.dispatch as dispatch
+
+    assert set(dispatch.__all__) == _EXPECTED_DISPATCH_EXPORTS
+    assert {
+        name: [
+            field.name for field in dataclasses.fields(getattr(dispatch, name))
+        ]
+        for name in _EXPECTED_DISPATCH_DATACLASS_FIELDS
+    } == _EXPECTED_DISPATCH_DATACLASS_FIELDS
+
+
+def test_installed_generic_and_core_execute_paths_expose_environment_spec(
+    installed_python: Path,
+) -> None:
+    """Require generic/core Execute paths to retain one exact pin control."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import inspect
+import json
+
+import dryml.core.execute as core_execute
+import dryml.execute as execute
+
+targets = (
+    execute.submit, execute.run, execute.Executor.submit, execute.Executor.run,
+    execute.Executor.with_options, execute.Executor.discover,
+    core_execute.submit, core_execute.run, core_execute.Executor.submit,
+    core_execute.Executor.run, core_execute.Executor.with_options,
+    core_execute.Executor.discover,
+)
+from dryml.core.execute import ExecutorView as CoreExecutorView
+from dryml.execute.executor import ExecutorView
+from dryml.execute.models import SubmittedCall
+
+constructors = (ExecutorView, CoreExecutorView, SubmittedCall)
+print(json.dumps({
+    "operations": [
+        "environment_spec" in inspect.signature(target).parameters
+        for target in targets
+    ],
+    "constructors": {
+        constructor.__module__ + "." + constructor.__qualname__: [
+            (parameter.name, parameter.default is None)
+            for parameter in inspect.signature(constructor).parameters.values()
+        ]
+        for constructor in constructors
+    },
+}))
+""",
+    )
+    assert json.loads(result.stdout) == {
+        "operations": [True] * 12,
+        "constructors": {
+            "dryml.execute.executor.ExecutorView": [
+                ["executor", False], ["environment", False], ["world", False],
+                ["execution_timeout", False], ["stream_output", False],
+                ["done_callbacks", False], ["output", False],
+                ["worker_setup", False], ["environment_spec", True],
+            ],
+            "dryml.core.execute.ExecutorView": [
+                ["executor", False], ["core", False], ["environment", False],
+                ["world", False], ["execution_timeout", False],
+                ["stream_output", False], ["done_callbacks", False],
+                ["output", False], ["environment_spec", True],
+            ],
+            "dryml.execute.models.SubmittedCall": [
+                ["submission_id", False], ["admission_deadline", False],
+                ["payload", False], ["environment", False], ["world", False],
+                ["execution_timeout", False], ["stream_output", False],
+                ["output", False], ["worker_setup", True],
+                ["environment_spec", True],
+            ],
+        },
+    }
 
 
 def test_installed_core_execute_surface_stays_in_the_core_namespace(

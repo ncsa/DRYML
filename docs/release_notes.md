@@ -2,6 +2,28 @@
 
 ## 0.3.0.dev2 (unreleased)
 
+`dryml.dispatch` adds an explicit configuration-first facade for bounded static
+environment/world declaration discovery and one selected execution route. Process
+defaults and immutable views can select an Execute backend or `InProcess()`;
+there is no implicit route, backend fallback, resource growth, worker thread,
+environment creation, package installation, Ray deployment, retry, resume, or
+lost-response reconciliation. `submit` returns the existing core future only for
+an Execute route, while in-process `run` admits fresh held-generation evidence
+then directly calls the original synchronous callable once. Coroutine, generator,
+and async-generator roots reject before probing; lazy values returned from a
+synchronous root are data and are not driven by Dispatch.
+
+Discovery uses shared generic static dependency, environment, and world kernels
+for inline and isolated probes. Incomplete but valid static coverage issues a
+visible warning for `run`/`submit`; conflicts, malformed results, timeout/crash,
+cleanup failure, target drift, and hard admission failures stop work. Reports and
+probe envelopes are bounded, redacted, ephemeral observations rather than Store
+records or admission tickets. Existing `EnvironmentSpec` selection now flows
+through generic/core Execute and Dispatch as an exact point-in-time pin; an
+unavailable or mismatched selected environment never falls back. Historical
+source/loaded-code drift and post-admission external environment mutation remain
+accepted limitations, not hot-reload or environment-locking guarantees.
+
 `dryml.execute` now provides generic trusted-callable execution with explicit
 `Executor`/one-off backend configuration, common `ExecutionFuture` and bounded
 output APIs, local subprocess execution, and an optional existing same-host Ray

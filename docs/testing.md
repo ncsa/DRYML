@@ -4,7 +4,8 @@ DRYML tests are organized by feature category and by speed tier.
 
 Maintained categories include `formats`, `annotations`, `environments`,
 `worlds`, `runtime`, `session`, `core`, `locking`, `managed`, `package`, `data`, `execute`, `models`,
-`ray`, `tf`, `torch`, `jax`, and `multi_framework`. Speed tiers are applied
+`ray`, `tf`, `torch`, `jax`, and `multi_framework`. `dispatch` is a maintained
+medium category. Speed tiers are applied
 automatically from `tests/test_tiers.json` by the DRYML pytest timing plugin.
 
 ## Daily Commands
@@ -34,10 +35,10 @@ Run the full suite with coverage:
 ```
 
 The default `./tests.sh` behavior remains a full run with coverage. Internally,
-full runs execute process-global session/runtime/orchestrator tests in a fresh
-phase, other smoke/medium files in a second phase, and heavy files last. This
-keeps intentional late-import and terminal-publication tests isolated while
-combining coverage through `pytest-cov` append mode.
+full runs execute process-sensitive session/runtime/orchestrator/dispatch tests
+in a fresh phase, other smoke/medium files in a second phase, and heavy files
+last. This keeps intentional late-import and terminal-publication tests
+isolated while combining coverage through `pytest-cov` append mode.
 
 ## Speed Tiers
 
@@ -101,7 +102,11 @@ Run a profiling pass:
 ./tests.sh profile --ignore tests/old --ignore tests/dev -x tests
 ```
 
-This runs in two phases, writes `tests/.test-timings-medium.json` and `tests/.test-timings-heavy.json`, prints timing summaries, and merges both timing files into `tests/test_tiers.json` node-tier overrides for tests that passed.
+This runs process-sensitive, other smoke/medium, and heavy phases. It writes
+`tests/.test-timings-process-state.json`, `tests/.test-timings-medium.json`,
+and `tests/.test-timings-heavy.json`, prints timing summaries, and merges all
+three timing files into `tests/test_tiers.json` node-tier overrides for tests
+that passed.
 
 When only newly added tests need node-tier timings, run:
 
@@ -172,8 +177,10 @@ ephemeral Conda coordinator and a venv derived from that same interpreter. It
 builds DRYML once, installs that artifact with `dill` and
 `ray[default]==2.56.0` into both existing test targets, starts a job-owned
 single-node 4-CPU/0-GPU Ray fixture, and enables the real Ray and
-existing-environment Execute tests. Its final cleanup stops only the fixture it
-started. This CI preparation does not change the product contract: normal DRYML
+existing-environment Execute tests. The enabled selection also covers Dispatch
+local-probe/Ray-workload, Ray-probe/local-workload, Ray-probe/in-process,
+same-config independent ownership, and exact Conda/venv pin identity. Its final
+cleanup stops only the fixture it started. This CI preparation does not change the product contract: normal DRYML
 runtime and tests require caller-supplied existing environments and an existing
 Ray address, and never provision them.
 
@@ -182,11 +189,10 @@ framework-reduced, does not install Ray, and supplies common/subprocess/package
 coverage. It is not native Windows Ray or GPU evidence. Workflow configuration
 becomes evidence only after the remote job passes for the pushed child revision.
 
-U8 local evidence before this closeout was 266 passed and 4 skipped deterministic
-tests, plus 16 passed enabled real cases for CPU, Conda direct/`conda run`,
-exact-prefix venv, Ray logical memory, cancellation, and world admission. That
-evidence does not replace the pending remote CI job, Windows/minimum-runtime
-matrix results, or final installed-artifact and maintained-suite closeout.
+Enabled existing-target Ray coverage is opt-in. Do not describe it as passed until
+the caller-provided Ray server, Conda prefix, and venv Python have run the exact
+selection successfully. That evidence remains separate from the framework-reduced
+matrix, Windows/GPU support, and final maintained-suite closeout.
 
 ## Context Bootstrap
 

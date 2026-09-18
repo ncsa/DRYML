@@ -12,7 +12,7 @@ partition_process_state_tests() {
     ordinary_selected=()
     local path
 
-    # Session/runtime tests require a fresh interpreter so earlier optional
+    # Process-sensitive tests require a fresh interpreter so earlier optional
     # framework imports cannot invalidate their intentional mode transitions.
     for path in "${paths[@]}"; do
         [[ "$path" == ./tests/session/* ]] && process_state_selected+=("$path")
@@ -24,8 +24,11 @@ partition_process_state_tests() {
         [[ "$path" == ./tests/core/test_orchestrator_* ]] && process_state_selected+=("$path")
     done
     for path in "${paths[@]}"; do
+        [[ "$path" == ./tests/dispatch/* ]] && process_state_selected+=("$path")
+    done
+    for path in "${paths[@]}"; do
         case "$path" in
-            ./tests/session/*|./tests/runtime/*|./tests/core/test_orchestrator_*) ;;
+            ./tests/session/*|./tests/runtime/*|./tests/core/test_orchestrator_*|./tests/dispatch/*) ;;
             *) ordinary_selected+=("$path") ;;
         esac
     done

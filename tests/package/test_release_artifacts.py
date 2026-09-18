@@ -17,6 +17,7 @@ _REQUIRED_MODULES = {
     "dryml/core/cdef_identity.py",
     "dryml/core/execute.py",
     "dryml/core/execute_codec.py",
+    "dryml/core/_callable_inspection.py",
     "dryml/core/materialization.py",
     "dryml/core/reference_values.py",
     "dryml/core/repo.py",
@@ -31,7 +32,10 @@ _REQUIRED_MODULES = {
     "dryml/requirements/errors.py",
     "dryml/requirements/model.py",
     "dryml/environments/__init__.py",
+    "dryml/environments/kernel.py",
+    "dryml/environments/selection.py",
     "dryml/worlds/__init__.py",
+    "dryml/worlds/kernel.py",
     "dryml/runtime/__init__.py",
     "dryml/runtime/activation.py",
     "dryml/session/__init__.py",
@@ -52,9 +56,11 @@ _REQUIRED_MODULES = {
     "dryml/code/errors.py",
     "dryml/code/facts.py",
     "dryml/code/graph.py",
+    "dryml/code/inspection.py",
     "dryml/code/kernels.py",
     "dryml/code/probe.py",
     "dryml/code/source.py",
+    "dryml/code/static_dependencies.py",
     "dryml/code/targets.py",
     "dryml/code/trace.py",
     "dryml/code/algorithms/__init__.py",
@@ -86,6 +92,15 @@ _REQUIRED_MODULES = {
     "dryml/execute/output.py",
     "dryml/execute/ray.py",
     "dryml/execute/subprocess.py",
+    "dryml/dispatch/__init__.py",
+    "dryml/dispatch/_admission.py",
+    "dryml/dispatch/_preflight.py",
+    "dryml/dispatch/_probe.py",
+    "dryml/dispatch/_probe_protocol.py",
+    "dryml/dispatch/_state.py",
+    "dryml/dispatch/api.py",
+    "dryml/dispatch/errors.py",
+    "dryml/dispatch/models.py",
 }
 
 _RETIRED_CODE_MODULES = {
@@ -177,6 +192,15 @@ def test_wheel_contains_port_modules_without_retired_core(
     assert code_modules == {
         name for name in _REQUIRED_MODULES if name.startswith("dryml/code/")
     }
+    dispatch_modules = {
+        name
+        for name in names
+        if name.startswith("dryml/dispatch/") and name.endswith(".py")
+    }
+    assert dispatch_modules == {
+        name
+        for name in _REQUIRED_MODULES if name.startswith("dryml/dispatch/")
+    }
     annotation_modules = {
         name
         for name in names
@@ -225,6 +249,15 @@ def test_sdist_contains_port_modules_without_retired_core(
     }
     assert code_modules == {
         name for name in _REQUIRED_MODULES if name.startswith("dryml/code/")
+    }
+    dispatch_modules = {
+        name.removeprefix("src/")
+        for name in names
+        if name.startswith("src/dryml/dispatch/") and name.endswith(".py")
+    }
+    assert dispatch_modules == {
+        name
+        for name in _REQUIRED_MODULES if name.startswith("dryml/dispatch/")
     }
     annotation_modules = {
         name.removeprefix("src/")

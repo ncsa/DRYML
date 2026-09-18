@@ -28,8 +28,9 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 20. [Advisory Locking](locking.md)
 21. [Managed Operations](managed_operations.md)
 22. [Generic Execute](execute.md)
-23. [Testing Workflow](testing.md)
-24. [Release Notes](release_notes.md)
+23. [Dispatch](dispatch.md)
+24. [Testing Workflow](testing.md)
+25. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -60,7 +61,10 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - `dryml.execute` runs trusted ordinary callables through an explicit local
   subprocess or existing same-host Ray backend without Store transport or
   environment/cluster provisioning; `dryml.core.execute` is its separate
-  core-aware adapter namespace and is intentionally not promoted to `dryml`.
+   core-aware adapter namespace and is intentionally not promoted to `dryml`.
+- `dryml.dispatch` combines bounded declaration discovery with one explicit
+  Execute or direct in-process route; it has no automatic backend fallback,
+  environment provisioning, reservation, retry, or resume behavior.
 - Tests are grouped by feature category and automatically bucketed into smoke, medium, and heavy speed tiers.
 
 ## Documentation Status
