@@ -21,7 +21,7 @@ from dryml.execute.config import BackendConfig
 from dryml.execute.errors import BackendUnavailableError
 from dryml.execute.models import EnvironmentCandidate
 from dryml.execute.subprocess import SubProcessConfig
-from dryml.worlds import ProcessAllocation
+from dryml.worlds import ProcessAllocation, WorldRequirement
 from dryml.worlds import req as world_req
 
 
@@ -302,6 +302,33 @@ def test_explain_accepts_affirmative_selected_backend_evidence() -> None:
 
     assert report.eligible
     assert backend.discoveries[0][0] is not None
+    assert backend.closed == 1
+
+
+@pytest.mark.parametrize("require_world", [False, True])
+def test_exact_pin_does_not_require_unrequested_resource_evidence(
+    require_world: bool,
+) -> None:
+    """Incomplete resource inventory only blocks a requested world check."""
+
+    backend = DiscoveryBackend()
+    discover = backend.discover
+
+    def incomplete_resources(**kwargs):
+        snapshot = discover(**kwargs)
+        snapshot.complete = False
+        return snapshot
+
+    backend.discover = incomplete_resources
+    view = dispatch.with_options(
+        backend=DiscoveryConfig(backend=backend),
+        python=CurrentEnvironmentSpec(),
+        world=(WorldRequirement({"main": {}}) if require_world else None),
+    )
+
+    report = view.explain(lambda: None)
+
+    assert report.eligible is not require_world
     assert backend.closed == 1
 
 

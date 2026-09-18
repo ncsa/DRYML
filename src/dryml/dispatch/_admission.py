@@ -182,15 +182,17 @@ def _check_discovery(
     world: WorldRequirement | None,
     selection: ResolvedEnvironmentSelection | None,
 ) -> CompatibilityOutcome:
-    """Require complete affirmative owner evidence from discovery."""
+    """Require affirmative discovery evidence for every requested domain."""
 
     # Discovery still proves that the selected backend can be observed when no
     # hard requirement needs owner evidence. Its optional inventory may be
     # incomplete without making an unconstrained workload incompatible.
     if environment is None and world is None and selection is None:
         return CompatibilityOutcome(True)
-    if not getattr(snapshot, "complete", False) or getattr(
-        snapshot, "issues", ()
+    # Resource inventory can be incomplete on a supported platform even when
+    # an exact interpreter supplies all requested software evidence.
+    if getattr(snapshot, "issues", ()) or (
+        world is not None and not getattr(snapshot, "complete", False)
     ):
         return CompatibilityOutcome(
             False, ("dispatch.backend_discovery_incomplete",)
