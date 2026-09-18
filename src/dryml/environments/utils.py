@@ -97,6 +97,17 @@ def dryml_source_root() -> str:
     return str(Path(__file__).resolve().parents[2])
 
 
+def _minimal_launch_environment() -> dict[str, str]:
+    """Return platform-required child variables without coordinator state."""
+
+    environment = {"PATH": os.defpath}
+    if os.name == "nt":
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC"):
+            if key in os.environ:
+                environment[key] = os.environ[key]
+    return environment
+
+
 def build_probe_env(
     *,
     base: Mapping[str, str] | None,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import subprocess
 import sys
 
@@ -16,6 +17,7 @@ _CALLS: list[str] = []
 _FINISHED: list[bool] = []
 _FIRST_GLOBAL = 1
 _SECOND_GLOBAL = 2
+_TRACE_CONTEXTS: list[object] = []
 
 
 class StaticFact(AnalysisKernel[None, CodeFact]):
@@ -58,6 +60,21 @@ class TraceDependent(AnalysisKernel[None, int]):
         """Return a value only when the trace producer succeeds."""
 
         _CALLS.append("dependent")
+        return 1
+
+
+class TraceContextTarget(AnalysisKernel[None, int]):
+    """Observe the exact canonical target supplied to a static trace kernel."""
+
+    input_type = type(None)
+    output_type = int
+
+    def run(self, graph: object, value: None, context: object) -> int:
+        """
+        Record the scheduler context target without inspecting live handles.
+        """
+
+        _TRACE_CONTEXTS.append(context.target)  # type: ignore[union-attr]
         return 1
 
 
@@ -177,6 +194,36 @@ def test_static_analysis_and_probe_never_invoke_trace_target() -> None:
 
     assert analyze(forbidden, ()).invocation is None
     assert probe(forbidden, ()).invocation is None
+
+
+def test_trace_static_context_uses_its_canonical_normalized_target(
+        ) -> None:
+    """
+    Trace static kernels receive the same normalized target that built its
+    graph.
+    """
+
+    module = importlib.import_module("dryml.code.trace")
+    normalized = module.normalize_target(_target)
+    graph = module.build_program_graph(normalized)
+    calls = (KernelCall(TraceContextTarget(), None), )
+    snapshots = module._snapshot_calls(calls)
+    declarations = {
+        snapshot.kernel_type: (snapshot.mode, snapshot.output_type)
+        for snapshot in snapshots
+    }
+    artifacts: dict[tuple[object, str], object] = {}
+    _TRACE_CONTEXTS.clear()
+    module._run_static(
+        snapshots,
+        normalized,
+        graph,
+        graph.digest,
+        artifacts,
+        declarations,
+    )
+
+    assert _TRACE_CONTEXTS == [normalized]
 
 
 @pytest.mark.parametrize(

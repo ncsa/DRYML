@@ -150,16 +150,20 @@ def test_import_target_bypasses_module_subclass_descriptors() -> None:
     assert invoked == []
 
 
-def test_normalize_target_rejects_sourceless_functions() -> None:
-    """Interactive and dynamically compiled functions are outside the whitelist."""
+def test_normalize_target_admits_sourceless_functions_with_no_static_source(
+) -> None:
+    """
+    Identified sourceless functions retain direct identity and incomplete
+    source evidence.
+    """
 
     namespace: dict[str, object] = {}
     exec(compile("def generated():\n    return 1\n", "<generated>", "exec"), namespace)
 
-    with pytest.raises(InvalidTargetError) as error:
-        normalize_target(namespace["generated"])  # type: ignore[arg-type]
+    target = normalize_target(namespace["generated"])  # type: ignore[arg-type]
 
-    assert error.value.code == "target.invalid"
+    assert target.info.kind == "function"
+    assert target.source is None
 
 
 @pytest.mark.parametrize("path", ["", "math:", ":sqrt", "math:<locals>.sqrt", "math:sin..real"])

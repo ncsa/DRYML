@@ -12,9 +12,11 @@ import math
 from dataclasses import dataclass
 from typing import Literal, TypeAlias, get_args
 
-from .ast_tools import _flatten_attr, parse_source
+from .ast_tools import _flatten_attr
 from .errors import CodeAnalysisError
 from .facts import Diagnostic, FactValue, SourceLocation
+from .inspection import InspectionTarget
+from .source import _bounded_parse
 from .targets import CodeTargetInput, TargetInfo, _TARGET_KINDS, normalize_target
 
 
@@ -569,6 +571,31 @@ def build_program_graph(target: CodeTargetInput) -> ProgramGraph:
     normalized = normalize_target(target)
     root_value = _target_value(normalized.info)
     root = ProgramNode(_node_id("target", root_value, None, 0), "target", root_value)
+    if type(normalized) is InspectionTarget:
+        record = normalized.snapshot.record(normalized.target_id)
+        occurrences: dict[str, int] = {}
+        calls: list[ProgramNode] = []
+        for call in record.calls:
+            root_id = call.target_id or "?"
+            value = (("chain", ()), ("root", root_id))
+            occurrence = occurrences.get(root_id, 0)
+            occurrences[root_id] = occurrence + 1
+            calls.append(
+                ProgramNode(
+                    _node_id("static_call", value, None, occurrence),
+                    "static_call", value,
+                )
+            )
+        return ProgramGraph(
+            normalized.info,
+            (root, ) + tuple(calls),
+            tuple(
+                ProgramEdge(root.id, call.id, "containment")
+                for call in calls),
+            (Diagnostic("source.unavailable",
+                        "source is unavailable",
+                        severity="warning"), ) if record.incomplete else (),
+        )
     if normalized.source is None:
         return ProgramGraph(
             normalized.info,
@@ -577,7 +604,18 @@ def build_program_graph(target: CodeTargetInput) -> ProgramGraph:
             (Diagnostic("source.unavailable", "source is unavailable", severity="warning"),),
         )
     source = normalized.source
-    tree = parse_source(source)
+    tree, limited = _bounded_parse(source.source, source.filename)
+    if limited:
+        return ProgramGraph(
+            normalized.info,
+            (root, ),
+            (),
+            (Diagnostic("source.unavailable",
+                        "source is unavailable",
+                        severity="warning"), ),
+        )
+    if tree is None:
+        raise CodeAnalysisError("source is invalid", code="source.invalid")
     line_offset = source.start_line - 1 if source.start_line is not None else 0
     drafts: list[tuple[int, ProgramNodeKind, FactValue, SourceLocation | None]] = [(0, "target", root_value, None)]
     draft_edges: list[tuple[int, int, ProgramEdgeKind]] = []

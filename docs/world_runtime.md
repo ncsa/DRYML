@@ -57,6 +57,23 @@ for example `roles["trainer.gpu"].resources.named["license.v2"]`. This syntax
 applies only to diagnostics; world declaration and resource-name contracts are
 unchanged.
 
+### Scheduled Code Collection
+
+`WorldRequirementsKernel()` is a lazily exported, no-argument `dryml.code`
+analysis kernel. Submit it with `KernelCall(WorldRequirementsKernel(), None)`
+and `KernelCall(StaticDependenciesKernel(), None)`. The ordinary scheduler calls
+its `run` method with the canonical live or detached target; it resolves targets
+through the required static dependency output and invokes the existing world
+combiner once. The result is the normal `RequirementResult[WorldRequirement]`,
+including its existing empty, compatible, and source-attributed conflict forms.
+
+Live collection preserves class/MRO and selected-method rules: class declarations
+precede the one normal-MRO-selected method, and unrelated siblings are excluded.
+It never binds arbitrary descriptors or reads instance state. Coordinator-only
+private factories can bind transportable owner-codec declaration views to one
+inspection snapshot. Views have a closed target-to-occurrence mapping and reject
+missing, malformed, oversized, invalid-source, or wrong-snapshot content.
+
 Omitted flattened constraints are unconstrained, so an omitted constraint such
 as a replica count is not invented by `cpus=2`. Supplying `roles=` selects the complete multi-role form and
 rejects simultaneous flattened fields rather than silently merging grammars.
@@ -112,6 +129,24 @@ checks fresh inventory dimensions, and atomically commits one immutable
 generation. An admitted operation holds a generation lease, so an incompatible
 transition receives `PublicationBusyError`. Uncertain irreversible effects or
 failed rollback publish terminal failure and require process restart.
+
+`check_selected_process_satisfies_requirement(role, process, requirement)`
+compares a valued hard world requirement with explicit role and
+`ProcessAllocation` evidence supplied by the session-generation owner. It is
+intentionally not a full-world checker: it rejects missing, wrong, or additional
+required roles; replica constraints that do not admit exactly one selected process;
+unsupported topology and named/device constraints; and insufficient or unknown
+CPU, memory, accelerator, or per-accelerator-memory evidence. `role` and
+`process` must be absent together, and absence is accepted only when no effective
+world requirement exists. The checker neither imports Session nor converts host
+inventory or a planned world into synthetic selected-process evidence.
+
+Dispatch uses this checker only for explicit in-process execution under a held
+Session generation. A requested worker world or host inventory is not selected
+process evidence, and a valued world requirement therefore fails local admission
+without a matching role-qualified allocation. Backend-hosted Dispatch hands its
+independent worker requirement to Execute; it does not reserve, widen, or grow
+the configured request.
 
 ## Execution Worker Activation
 

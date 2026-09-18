@@ -22,3 +22,25 @@ print(json.dumps(sorted(name for name in sys.modules if name in forbidden)))
     completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == []
+
+
+def test_world_kernel_is_lazy_and_loads_no_inverse_domain() -> None:
+    """
+    The public kernel is lazy while its explicit import remains
+    environment-free.
+    """
+
+    script = """
+import json
+import sys
+import dryml.worlds as worlds
+assert "dryml.code" not in sys.modules
+assert "dryml.environments" not in sys.modules
+assert worlds.WorldRequirementsKernel.__name__ == "WorldRequirementsKernel"
+print(json.dumps("dryml.environments" in sys.modules))
+"""
+    completed = subprocess.run([sys.executable, "-c", script],
+                               capture_output=True,
+                               text=True)
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) is False

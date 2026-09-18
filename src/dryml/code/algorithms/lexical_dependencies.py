@@ -6,6 +6,7 @@ import builtins
 from dataclasses import dataclass
 
 from ..analysis import analyze
+from ..errors import SourceUnavailableError
 from ..facts import FactValue, SourceLocation
 from ..graph import ProgramGraph, ProgramNode, _source_sort_key as _source_key
 from ..kernels import KernelCall, KernelContext, TraversalKernel
@@ -631,6 +632,11 @@ def collect_lexical_dependencies(target: CodeTargetInput) -> LexicalDependencies
         resolves lexical names, searches caller frames, or imports dependencies.
     """
 
+    from ..inspection import InspectionTarget
+    from ..targets import normalize_target
+
+    if type(normalize_target(target)) is InspectionTarget:
+        raise SourceUnavailableError()
     return analyze(target, (KernelCall(LexicalDependencyKernel(), None),)).require(LexicalDependencyKernel)
 
 

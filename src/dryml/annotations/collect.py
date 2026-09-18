@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from .attachment import (
+    _raw_annotations,
     _has_static_descriptor_protocol,
     _is_class,
     _native_descriptor_value,
@@ -16,6 +17,30 @@ from .attachment import (
 )
 from .errors import AnnotationValidationError
 from .model import AnnotatedMember, Annotation, _validate_key
+
+
+class _RawAnnotationBudget:
+    """Private whole-collection ceiling checked before carrier validation."""
+
+    def __init__(self, limit: int) -> None:
+        """Create a budget with one exact positive attachment limit."""
+
+        self.limit = limit
+        self.count = 0
+        self.seen: set[int] = set()
+
+    def reserve(self, target: Any) -> None:
+        """Account for one direct raw tuple without iterating its carriers."""
+
+        identifier = id(target)
+        if identifier in self.seen:
+            return
+        values = _raw_annotations(target)
+        if self.count + len(values) > self.limit:
+            raise AnnotationValidationError(
+                "annotation collection exceeds raw attachment limit")
+        self.seen.add(identifier)
+        self.count += len(values)
 
 
 def collect_annotations(target: Any, *, key: str | None = None) -> tuple[Annotation, ...]:
@@ -41,10 +66,7 @@ def collect_annotations(target: Any, *, key: str | None = None) -> tuple[Annotat
             statically by the attachment boundary.
     """
 
-    if _is_class(target):
-        return annotations_for_class(target, key=key)
-    _validate_filter_key(key)
-    return _filter(_target_annotations(target), key)
+    return _collect_annotations(target, key=key)
 
 
 def annotations_for_class(cls: type, *, key: str | None = None) -> tuple[Annotation, ...]:
@@ -65,16 +87,7 @@ def annotations_for_class(cls: type, *, key: str | None = None) -> tuple[Annotat
             the native static attachment boundary.
     """
 
-    if not _is_class(cls):
-        raise AnnotationValidationError("annotations_for_class() requires a class")
-    _validate_filter_key(key)
-    values = (
-        annotation
-        for base in reversed(_type_mro(cls))
-        if base is not object
-        for annotation in own_annotations(base)
-    )
-    return _filter(_dedupe(values), key)
+    return _annotations_for_class(cls, key=key)
 
 
 def annotations_for_method(cls: type, method_name: str, *, key: str | None = None) -> tuple[Annotation, ...]:
@@ -101,19 +114,7 @@ def annotations_for_method(cls: type, method_name: str, *, key: str | None = Non
             descriptor is unsafe.
     """
 
-    if not _is_class(cls):
-        raise AnnotationValidationError("annotations_for_method() requires a class")
-    if type(method_name) is not str:
-        raise AnnotationValidationError("method name must be a string")
-    _validate_filter_key(key)
-    for base in _type_mro(cls):
-        namespace = _type_dict(base)
-        if method_name in namespace:
-            descriptor = namespace[method_name]
-            break
-    else:
-        raise AnnotationValidationError("method is not declared on the supplied class")
-    return _filter(_dedupe((*annotations_for_class(cls), *_target_annotations(descriptor))), key)
+    return _annotations_for_method(cls, method_name, key=key)
 
 
 def annotations_for_members(
@@ -190,12 +191,121 @@ def annotations_for_members(
 def _target_annotations(target: Any) -> tuple[Annotation, ...]:
     """Collect one direct target and known descriptor function without binding."""
 
-    values: list[Annotation] = list(own_annotations(target))
-    descriptor_type = _known_descriptor_type(target)
-    if descriptor_type is not None:
-        function = _native_descriptor_value(descriptor_type, "__func__", target)
-        values.extend(own_annotations(function))
+    values: list[Annotation] = []
+    for source in _annotation_targets(target):
+        values.extend(own_annotations(source))
     return _dedupe(values)
+
+
+def _annotation_targets(target: Any) -> tuple[Any, ...]:
+    """Return direct annotation carriers without reading their metadata."""
+
+    descriptor_type = _known_descriptor_type(target)
+    if descriptor_type is None:
+        return (target, )
+    return (target,
+            _native_descriptor_value(descriptor_type, "__func__", target))
+
+
+def _class_annotation_targets(cls: type) -> tuple[type, ...]:
+    """
+    Return class declaration carriers in the established reversed-C3 order.
+    """
+
+    if not _is_class(cls):
+        raise AnnotationValidationError(
+            "annotations_for_class() requires a class")
+    return tuple(base for base in reversed(_type_mro(cls))
+                 if base is not object)
+
+
+def _method_annotation_targets(cls: type, method_name: str) -> tuple[Any, ...]:
+    """
+    Return class and selected-member carriers without binding descriptors.
+    """
+
+    if not _is_class(cls):
+        raise AnnotationValidationError(
+            "annotations_for_method() requires a class")
+    if type(method_name) is not str:
+        raise AnnotationValidationError("method name must be a string")
+    for base in _type_mro(cls):
+        namespace = _type_dict(base)
+        if method_name in namespace:
+            return (*_class_annotation_targets(cls),
+                    *_annotation_targets(namespace[method_name]))
+    raise AnnotationValidationError(
+        "method is not declared on the supplied class")
+
+
+def _reserve_annotation_targets(
+    targets: Iterable[Any], budget: _RawAnnotationBudget,
+) -> None:
+    """Reserve every unique raw attachment tuple before carrier validation."""
+
+    for target in targets:
+        budget.reserve(target)
+
+
+def _collect_annotations(
+    target: Any,
+    *,
+    key: str | None = None,
+    budget: _RawAnnotationBudget | None = None,
+) -> tuple[Annotation, ...]:
+    """Collect one target using an optional already-reserved private budget."""
+
+    if _is_class(target):
+        return _annotations_for_class(target, key=key, budget=budget)
+    _validate_filter_key(key)
+    targets = _annotation_targets(target)
+    if budget is not None:
+        _reserve_annotation_targets(targets, budget)
+    return _filter(
+        _dedupe(annotation for source in targets
+                for annotation in own_annotations(source)), key)
+
+
+def _annotations_for_class(
+    cls: type,
+    *,
+    key: str | None = None,
+    budget: _RawAnnotationBudget | None = None,
+) -> tuple[Annotation, ...]:
+    """
+    Collect class entries with an optional capture-wide raw attachment budget.
+    """
+
+    targets = _class_annotation_targets(cls)
+    _validate_filter_key(key)
+    if budget is not None:
+        _reserve_annotation_targets(targets, budget)
+    return _filter(
+        _dedupe(annotation for source in targets
+                for annotation in own_annotations(source)), key)
+
+
+def _annotations_for_method(
+    cls: type,
+    method_name: str,
+    *,
+    key: str | None = None,
+    budget: _RawAnnotationBudget | None = None,
+) -> tuple[Annotation, ...]:
+    """Collect selected-method entries with an optional capture-wide budget."""
+
+    if not _is_class(cls):
+        raise AnnotationValidationError(
+            "annotations_for_method() requires a class")
+    if type(method_name) is not str:
+        raise AnnotationValidationError("method name must be a string")
+    _validate_filter_key(key)
+    targets = _method_annotation_targets(cls, method_name)
+    if budget is not None:
+        _reserve_annotation_targets(targets, budget)
+    return _filter(
+        _dedupe(annotation for source in targets
+                for annotation in own_annotations(source)), key)
 
 
 def _is_member_target(target: Any) -> bool:

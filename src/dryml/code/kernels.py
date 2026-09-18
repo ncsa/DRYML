@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar
 
 from .errors import MissingOutputError
 from .facts import CodeFact, CodeFacts, Diagnostic, FactRecord
 from .graph import ProgramGraph, ProgramNode
 from .targets import TargetKind
+
+if TYPE_CHECKING:
+    from .inspection import InspectionTarget
+    from .targets import CodeTarget
 
 
 InputT = TypeVar("InputT")
@@ -256,21 +260,29 @@ class KernelContext:
 
     def __init__(
         self,
+        target: "CodeTarget | InspectionTarget",
         graph: ProgramGraph,
         dependencies: dict[type[AnalysisKernel[Any, Any]], KernelOutcome[Any]],
         dependency_facts: tuple[FactRecord, ...],
     ) -> None:
-        """Create an internal dependency-scoped context for one execution.
+        """
+        Create an internal dependency-scoped context for one execution.
 
-        Args:
-            graph: Immutable graph bound to the current execution.
-            dependencies: Direct successful producer outcomes keyed by class.
-            dependency_facts: Transitive dependency facts in producer order.
+                Args:
+                    target: Canonical live or snapshot-backed target that built
+                    ``graph``.
+                    graph: Immutable graph bound to the current execution.
+                    dependencies: Direct successful producer outcomes keyed by
+                    class.
+                    dependency_facts: Transitive dependency facts in producer
+                    order.
 
-        Side Effects:
-            Retains opaque dependency outputs only during consumer execution.
+                Side Effects:
+                    Retains opaque dependency outputs only during consumer
+                    execution.
         """
 
+        self._target = target
         self._graph = graph
         self._dependencies = dependencies
         self._dependency_facts = dependency_facts
@@ -287,6 +299,23 @@ class KernelContext:
         """
 
         return self._graph
+
+    @property
+    def target(self) -> "CodeTarget | InspectionTarget":
+        """
+        Return the canonical target used to construct this context's graph.
+
+                Returns:
+                    The exact live or detached target admitted by this analysis
+                    invocation.
+
+                Side Effects:
+                    None. Borrowed live handles remain request-local and must
+                    not be
+                    serialized or mutated by kernels.
+        """
+
+        return self._target
 
     def require(self, kernel_type: type[AnalysisKernel[Any, OutputU]]) -> OutputU:
         """Return one declared successful direct dependency artifact.

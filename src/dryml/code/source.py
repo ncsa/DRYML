@@ -17,6 +17,11 @@ if TYPE_CHECKING:
     from .targets import CodeTargetInput
 
 
+_MAX_SOURCE_BYTES = 1_048_576
+_MAX_AST_NODES = 100_000
+_MAX_AST_DEPTH = 128
+
+
 @dataclass(frozen=True, slots=True)
 class SourceInfo:
     """Request-local source text and its original source-file coordinates.
@@ -53,9 +58,56 @@ def _read_file(filename: object) -> str | None:
     if type(filename) is not str or not filename or not os.path.isfile(filename):
         return None
     try:
-        return Path(filename).read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+        with Path(filename).open("rb") as source_file:
+            raw = source_file.read(_MAX_SOURCE_BYTES + 1)
+    except OSError:
         return None
+    if len(raw) > _MAX_SOURCE_BYTES:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeError:
+        return None
+
+
+def _source_within_bounds(source: str) -> bool:
+    """
+    Return whether text fits the source byte ceiling without one large
+    encoding.
+    """
+
+    size = 0
+    for offset in range(0, len(source), 8_192):
+        size += len(source[offset:offset + 8_192].encode("utf-8"))
+        if size > _MAX_SOURCE_BYTES:
+            return False
+    return True
+
+
+def _bounded_parse(
+        source: str,
+        filename: str | None = None) -> tuple[ast.Module | None, bool]:
+    """
+    Parse bounded source and distinguish syntax failure from resource
+    exhaustion.
+    """
+
+    if not _source_within_bounds(source):
+        return None, True
+    try:
+        tree = ast.parse(source, filename=filename or "<unknown>")
+    except (MemoryError, RecursionError, SyntaxError, ValueError):
+        return None, False
+    stack: list[tuple[ast.AST, int]] = [(tree, 0)]
+    count = 0
+    while stack:
+        node, depth = stack.pop()
+        count += 1
+        if count > _MAX_AST_NODES or depth > _MAX_AST_DEPTH:
+            return None, True
+        stack.extend(
+            (child, depth + 1) for child in ast.iter_child_nodes(node))
+    return tree, False
 
 
 def _node_start(node: ast.AST) -> int:
@@ -93,9 +145,8 @@ def _source_from_file(obj: object) -> SourceInfo | None:
     text = _read_file(filename)
     if text is None:
         return None
-    try:
-        tree = ast.parse(text, filename=filename)
-    except SyntaxError:
+    tree, _ = _bounded_parse(text, filename)
+    if tree is None:
         return None
     candidates = [
         node
@@ -156,8 +207,11 @@ def extract_source(target: CodeTargetInput) -> SourceInfo:
     """
 
     from .targets import normalize_target
+    from .inspection import InspectionTarget
 
     normalized = normalize_target(target)
+    if type(normalized) is InspectionTarget:
+        raise SourceUnavailableError()
     if normalized.source is not None:
         return normalized.source
     subject = normalized.callable if normalized.callable is not None else normalized.original

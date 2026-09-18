@@ -123,6 +123,15 @@ matching and shadow evidence are evaluated after filtering. Invalid filter keys,
 missing members, unsupported targets, and malformed direct metadata raise the
 generic annotation errors instead of returning partial results.
 
+Code-inspection owners may use the private bounded collection seam while forming
+a detached inspection request. That seam reserves every unique direct attachment
+tuple before validating or iterating carriers and limits the request to 4,096 raw
+attachments. The public collector defaults are unchanged: they retain their
+existing unbounded-by-this-capture behavior. The capture-only ceiling is applied
+across all discovered targets, so repeated visits to one class or copied wrapper
+annotation carrier do not consume the raw budget again; semantic owners still
+deduplicate by annotation identity after collection.
+
 ## Ownership And Clean Break
 
 The kernel does not serialize or persist attached entries, create annotation

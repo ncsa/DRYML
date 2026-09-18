@@ -9,7 +9,7 @@ transport, or a registry of globally installed analyzers.
 
 `analyze()` and `probe()` accept a Python function, bound Python method,
 admitted callable instance, class, `DescriptorTarget`, `ImportTarget`,
-`SourceTarget`, or an already normalized `CodeTarget`. Static analysis does not
+`SourceTarget`, `InspectionTarget`, or an already normalized `CodeTarget`. Static analysis does not
 invoke target bodies, class constructors, dynamic attribute hooks, arbitrary
 descriptors, signature hooks, wrapper hooks, or implicit module imports.
 
@@ -31,6 +31,40 @@ than raw filesystem paths.
 All imported modules, supplied target values, kernel classes, and invoked
 callables are trusted inputs. This API is a correctness boundary for ordinary
 callers, not a sandbox or safe-deserialization facility.
+
+`capture_inspection()` makes a bounded, source-free `InspectionCapture` from a
+live target. Its `InspectionTarget` is a genuine static input with immutable
+symbolic call facts and no callable, receiver, source text, or local handle.
+The capture's borrowed live associations and code-identity guard remain in the
+coordinator process. `InspectionTarget` is rejected by `extract_source()` and
+lexical source collection with `SourceUnavailableError`, and by `trace()` and
+recapture with `InvalidTargetError`.
+
+Framework owners can use the private typed `InspectionOwnerFacts` bridge in the
+capture implementation. It adds approved roots to the same bounded candidate
+closure and identity guard, without authorizing generic decorator unwrapping,
+metadata guessing, or a merged second snapshot. Owner-plumbing roots can retain
+their declarations without implementation-body call edges, while ordinary
+wrappers continue to use their actual bodies.
+
+Capture reads at most 1 MiB from one source file and 8 MiB across its candidate
+closure, admits ASTs of at most 100,000 nodes and depth 128, examines at most
+256 MRO entries, records at most 16,384 call/binding facts, retains at most
+4,096 targets, and permits at most 4,096 raw declaration occurrences in the
+owner projection. Exhaustion is source-free incomplete coverage with known targets
+preserved, never a successful empty result. Snapshot records omit source paths,
+source text, signatures, and executable handles. The local drift guard rechecks
+captured code, relevant global/closure bindings, and proof-relevant class/MRO
+members; it does not claim to solve historical source-to-loaded-code drift.
+
+Ordinary `analyze()` and `probe()` admission applies the same 1 MiB source and
+100,000-node/depth-128 AST ceilings before constructing a source graph. A safe
+source or AST limit leaves the known root graph with a `source.unavailable`
+warning; `StaticDependenciesKernel` then reports incomplete coverage rather
+than an empty or complete result. Malformed bounded source remains a typed
+`source.invalid` failure. An explicit `ImportTarget` still imports only its
+requested module before statically selecting a qualified member; the bounded
+source rule does not add implicit imports or user-code reconstruction.
 
 ## Public Type Contracts
 
@@ -68,8 +102,23 @@ DAG before execution, preserves submission-order outcomes, and exposes only
 declared successful dependency artifacts through `KernelContext.require()` and
 `KernelContext.facts()`.
 
-`AnalysisResult` reports succeeded, failed, and skipped kernel outcomes. A
-failed or skipped output is unavailable to `require()` and raises
+`KernelContext.target` is the canonical live `CodeTarget` or snapshot-backed
+`InspectionTarget` admitted for that graph. `StaticDependenciesKernel` resolves
+the same bounded direct-call facts for either form and returns root-first
+`StaticDependencies`; unresolved edges, cycles, unavailable source, and limits
+remain visible as incomplete coverage rather than inferred callees.
+It resolves direct globals, closures, loaded-module paths, and one unambiguously
+dominating local alias. Function-local shadowing, parameters, imports,
+deletions, rebinding, conditional aliases, callbacks, and arbitrary containers
+remain unresolved. A `self.member()` edge requires a slots-only ordinary
+receiver layout and a statically identified non-shadowable raw member; receiver
+state is never read. Class calls retain the class and conservatively inspect
+ordinary Python `__new__`/`__init__` bodies. Custom metaclass paths and opaque
+construction remain incomplete rather than assumed to forward normally.
+
+`AnalysisResult` reports succeeded, failed, and skipped kernel outcomes. Its
+`complete` property is also false when graph evidence reports unavailable
+source. A failed or skipped output is unavailable to `require()` and raises
 `MissingOutputError`; `output()` returns `None` for both absence and a valid
 `None` output. Structural target, source, graph, declaration, dependency, and
 trace-admission errors raise a typed `CodeAnalysisError`. Errors after graph

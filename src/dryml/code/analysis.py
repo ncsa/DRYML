@@ -89,7 +89,9 @@ class AnalysisResult:
 
         Returns:
             ``True`` only if all outcomes and any invocation succeeded and no
-            returned diagnostic has error severity.
+            returned diagnostic has error severity. A ``source.unavailable``
+            diagnostic also makes the result incomplete even when its severity
+            is only ``"warning"``.
 
         Side Effects:
             None.
@@ -98,7 +100,11 @@ class AnalysisResult:
         return (
             all(outcome.status == "succeeded" for outcome in self.outcomes)
             and (self.invocation is None or self.invocation.status == "succeeded")
-            and not any(diagnostic.severity == "error" for diagnostic in self.diagnostics)
+            and not any(
+                diagnostic.severity == "error"
+                or diagnostic.code == "source.unavailable"
+                for diagnostic in self.diagnostics
+            )
         )
 
     def output(self, kernel_type: type[AnalysisKernel[Any, OutputU]]) -> OutputU | None:
@@ -278,6 +284,7 @@ def _dependency_closure(
 
 def _context_for(
     snapshot: _Snapshot,
+    target: Any,
     graph: ProgramGraph,
     graph_digest: str,
     snapshots: tuple[_Snapshot, ...],
@@ -294,6 +301,7 @@ def _context_for(
         if item.kernel_type in closure
     )
     return KernelContext(
+        target,
         graph,
         {required: artifacts[(required, graph_digest)] for required in snapshot.requires},
         _records_for_outcomes(dependency_outcomes, declarations),
@@ -332,6 +340,7 @@ def _outcome_for_value(snapshot: _Snapshot, graph_digest: str, value: Any) -> Ke
 
 def _run_unfused(
     snapshot: _Snapshot,
+    target: Any,
     graph: ProgramGraph,
     graph_digest: str,
     snapshots: tuple[_Snapshot, ...],
@@ -345,7 +354,8 @@ def _run_unfused(
         value = snapshot.kernel.run(
             graph,
             snapshot.input,
-            _context_for(snapshot, graph, graph_digest, snapshots, ordered, artifacts, declarations),
+            _context_for(snapshot, target, graph, graph_digest, snapshots,
+                         ordered, artifacts, declarations),
         )
     except Exception:
         return _failure_outcome(snapshot, graph_digest)
@@ -425,6 +435,7 @@ def _fused_batch(
 
 def _run_fused(
     batch: tuple[_Snapshot, ...],
+    target: Any,
     graph: ProgramGraph,
     graph_digest: str,
     snapshots: tuple[_Snapshot, ...],
@@ -440,7 +451,9 @@ def _run_fused(
     """
 
     contexts = {
-        snapshot.kernel_type: _context_for(snapshot, graph, graph_digest, snapshots, ordered, artifacts, declarations)
+        snapshot.kernel_type:
+        _context_for(snapshot, target, graph, graph_digest, snapshots, ordered,
+                     artifacts, declarations)
         for snapshot in batch
     }
     states: dict[type[AnalysisKernel[Any, Any]], Any] = {}
@@ -517,14 +530,28 @@ def _analyze(
         batch = _fused_batch(ready, graph, graph_digest, snapshots, artifacts) if fuse_traversals else ()
         if batch:
             for kernel_type, outcome in _run_fused(
-                batch, graph, graph_digest, snapshots, ordered, artifacts, declarations,
+                    batch,
+                    normalized,
+                    graph,
+                    graph_digest,
+                    snapshots,
+                    ordered,
+                    artifacts,
+                    declarations,
             ).items():
                 artifacts[(kernel_type, graph_digest)] = outcome
             for item in batch:
                 pending.remove(item)
             continue
         artifacts[(snapshot.kernel_type, graph_digest)] = _run_unfused(
-            snapshot, graph, graph_digest, snapshots, ordered, artifacts, declarations,
+            snapshot,
+            normalized,
+            graph,
+            graph_digest,
+            snapshots,
+            ordered,
+            artifacts,
+            declarations,
         )
         pending.remove(snapshot)
     submission_outcomes = tuple(artifacts[(snapshot.kernel_type, graph_digest)] for snapshot in snapshots)

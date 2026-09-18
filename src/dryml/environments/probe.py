@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -105,8 +106,39 @@ def _failure_result(
     )
 
 
-def probe(spec: EnvironmentSpec | None = None, *, timeout: float | None = 30.0) -> EnvironmentProbeResult:
-    """Probe an environment spec and return a structured result."""
+def probe(
+    spec: EnvironmentSpec | None = None,
+    *,
+    timeout: float | None = 30.0,
+) -> EnvironmentProbeResult:
+    """Probe an environment spec and return a structured result.
+
+    Args:
+        spec: Current, Python-executable, Conda, or container selector. When
+            omitted, probes the current environment.
+        timeout: Maximum seconds to wait for an external probe process.
+
+    Returns:
+        A successful environment record or a structured probe failure.
+
+    Side Effects:
+        External selectors may start one probe process. Current selectors only
+        inspect the current process.
+    """
+
+    return _probe_with_base_env(spec, timeout=timeout, base_env=None)
+
+
+def _probe_with_base_env(
+    spec: EnvironmentSpec | None = None,
+    *,
+    timeout: float | None = 30.0,
+    base_env: Mapping[str, str] | None,
+) -> EnvironmentProbeResult:
+    """Probe one selector with a caller-owned child-process base environment.
+
+    This private selection seam is not part of the public probe API.
+    """
 
     spec = spec or CurrentEnvironmentSpec()
     if isinstance(spec, CurrentEnvironmentSpec):
@@ -117,7 +149,7 @@ def probe(spec: EnvironmentSpec | None = None, *, timeout: float | None = 30.0) 
             spec.probe_command(),
             timeout=timeout,
             env=build_probe_env(
-                base=None,
+                base=base_env,
                 overrides=spec.env,
                 pythonpath_policy=spec.pythonpath_policy,
                 extra_pythonpath=spec.extra_pythonpath,
@@ -133,7 +165,7 @@ def probe(spec: EnvironmentSpec | None = None, *, timeout: float | None = 30.0) 
             cmd,
             timeout=timeout,
             env=build_probe_env(
-                base=None,
+                base=base_env,
                 overrides=spec.env,
                 pythonpath_policy=spec.pythonpath_policy,
                 extra_pythonpath=spec.extra_pythonpath,

@@ -114,7 +114,41 @@ Package requirements accept normalized names, version specifiers, and record-eva
 
 Hard declarations are not defaults, candidate selection, automatic enforcement, runtime/session state, or dispatch behavior. Consumers explicitly call `check(...)` with environment evidence and may pass its resulting report to the shared admission barrier when they need fail-closed admission. They do not infer constraints from code, run probes, or install packages.
 
+### Scheduled Code Collection
+
+`EnvironmentRequirementsKernel()` is a no-argument `dryml.code` analysis kernel.
+Submit it with `KernelCall(EnvironmentRequirementsKernel(), None)` and the required
+`KernelCall(StaticDependenciesKernel(), None)`. Its `run` method receives the
+canonical scheduler target and combines declarations from resolver-order targets
+once through the existing environment combiner. Its output is the ordinary
+`RequirementResult[EnvironmentRequirement]`: empty results, compatible values,
+and source-attributed conflicts retain their existing meanings.
+
+The kernel never calls a workload, binds a descriptor, reads instance state, or
+selects an environment. It is lazily exported, so importing `dryml.environments`
+does not import `dryml.code`. Coordinator-only private factories may bind a
+validated detached inspection declaration view for the same scheduler path.
+Those views are tied to one snapshot identity, contain a closed target-to-
+occurrence table, use environment value codecs for transport, and reject missing,
+malformed, oversized, or wrong-snapshot data rather than treating it as empty.
+
 The retired fragment, additive, and override declaration forms are not supported and have no compatibility decoder or migration path. Fresh inspected records no longer advertise the former `environment_fragment` schema capability; this changes fresh record IDs while leaving the environment-record schema itself at v1.1.
+
+`EnvironmentSpec` selection is separate from an `EnvironmentRequirement`. Direct
+Execute, core Execute, and Dispatch can pass the same selector as an exact
+existing-environment pin. `CurrentEnvironmentSpec` records the submitting process;
+`PythonExecutableSpec` keeps the requested executable spelling; and a named Conda
+selector resolves once to exactly one existing prefix. Unsupported or mismatched
+pins fail before payload delivery and never become candidate fallback or package
+provisioning. Identity is checked at admission time only; external environment
+mutation after authorization is not monitored.
+
+Exact selection probes and named Conda inventory use a minimal child environment:
+the platform launch variables, selector-declared values, and `PYTHONPATH` only
+when its declared policy permits inheritance. Ambient coordinator variables are
+not passed to these children. `ResolvedEnvironmentSelection` retains its private
+launch evidence for authorization but its public `repr` intentionally omits
+selector, environment, record, and filesystem values.
 
 ## What This Does Not Change
 

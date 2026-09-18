@@ -20,10 +20,16 @@ from .errors import (
 )
 from .facts import CodeFact, CodeFacts, Diagnostic, FactRecord
 from .graph import ProgramGraph
+from .inspection import (
+    InspectionCapture,
+    InspectionTarget,
+    capture_inspection,
+)
 from .kernels import AnalysisKernel, KernelCall, KernelOutcome, TraversalKernel
 from .probe import probe
 from .trace import trace
 from .source import SourceInfo, extract_source, get_source_info
+from .static_dependencies import StaticDependencies, StaticDependenciesKernel
 from .targets import (
     CodeTarget,
     CodeTargetInput,
@@ -48,6 +54,8 @@ __all__ = [
     "DescriptorTarget",
     "FactRecord",
     "ImportTarget",
+    "InspectionCapture",
+    "InspectionTarget",
     "InvalidKernelError",
     "InvalidTargetError",
     "InvocationOutcome",
@@ -60,10 +68,13 @@ __all__ = [
     "SourceInfo",
     "SourceTarget",
     "SourceUnavailableError",
+    "StaticDependencies",
+    "StaticDependenciesKernel",
     "TargetInfo",
     "TraversalKernel",
     "analyze",
     "analyze_callable",
+    "capture_inspection",
     "extract_source",
     "get_source_info",
     "probe",

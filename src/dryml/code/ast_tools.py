@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .errors import SourceUnavailableError
-from .source import SourceInfo
+from .source import SourceInfo, _bounded_parse
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,10 +160,10 @@ def parse_source(source: str | SourceInfo) -> ast.Module:
     text = source.source if type(source) is SourceInfo else source
     if type(text) is not str:
         raise SourceUnavailableError("source is invalid", code="source.invalid")
-    try:
-        return ast.parse(text)
-    except (SyntaxError, ValueError, TypeError):
+    tree, _ = _bounded_parse(text)
+    if tree is None:
         raise SourceUnavailableError("source is invalid", code="source.invalid") from None
+    return tree
 
 
 def collect_accesses_from_source(source: str | SourceInfo) -> AccessCollection:

@@ -43,7 +43,7 @@ def test_analyze_callable_preserves_supported_callable_metadata() -> None:
     callable_instance = analyze_callable(instance)
 
     assert function.func is plain
-    assert function.signature == inspect.signature(plain)
+    assert str(function.signature) == "(value, *, flag='x')"
     assert function.is_function
     assert method.bound_self.__class__ is MethodOwner
     assert method.is_bound_method
@@ -52,25 +52,67 @@ def test_analyze_callable_preserves_supported_callable_metadata() -> None:
     assert callable_instance.is_callable_instance
 
 
-def test_analyze_callable_does_not_follow_custom_wrappers_or_signatures() -> None:
-    """User-controlled signature and wrapper protocols are rejected statically."""
+def test_analyze_callable_ignores_custom_wrappers_and_signatures() -> None:
+    """
+    Wrapper metadata is neither an admission failure nor signature authority.
+    """
 
     def wrapped() -> None:
         """Supply a local function for metadata mutation."""
 
     wrapped.__wrapped__ = object()  # type: ignore[attr-defined]
-    with pytest.raises(InvalidTargetError, match="unsupported callable") as wrapped_error:
-        analyze_callable(wrapped)
+    wrapped_info = analyze_callable(wrapped)
 
     def signed() -> None:
         """Supply a local function for metadata mutation."""
 
     signed.__signature__ = inspect.Signature()  # type: ignore[attr-defined]
-    with pytest.raises(InvalidTargetError, match="unsupported callable") as signature_error:
-        analyze_callable(signed)
+    signed_info = analyze_callable(signed)
 
-    assert wrapped_error.value.code == "target.invalid"
-    assert signature_error.value.code == "target.invalid"
+    assert str(wrapped_info.signature) == "()"
+    assert str(signed_info.signature) == "()"
+
+
+def test_analyze_callable_uses_native_parameter_order_and_omits_annotations(
+        ) -> None:
+    """
+    Native slots preserve every parameter kind without evaluating metadata.
+    """
+
+    evaluated: list[bool] = []
+
+    def marker() -> type[int]:
+        """Fail if passive signature extraction evaluates an annotation."""
+
+        evaluated.append(True)
+        raise AssertionError("annotation was evaluated")
+
+    def subject(
+        first: marker(),
+        /,
+        second: marker() = 2,
+        *args: marker(),
+        keyword: marker() = 3,
+        **kwargs: marker(),
+    ) -> marker():
+        """Exercise all native parameter kinds and default slots."""
+
+    subject.__signature__ = inspect.Signature()  # type: ignore[attr-defined]
+    signature = analyze_callable(subject).signature
+
+    assert tuple(parameter.kind
+                 for parameter in signature.parameters.values()) == (
+                     inspect.Parameter.POSITIONAL_ONLY,
+                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                     inspect.Parameter.VAR_POSITIONAL,
+                     inspect.Parameter.KEYWORD_ONLY,
+                     inspect.Parameter.VAR_KEYWORD,
+                 )
+    assert str(signature) == "(first, /, second=2, *args, keyword=3, **kwargs)"
+    assert all(parameter.annotation is inspect.Parameter.empty
+               for parameter in signature.parameters.values())
+    assert signature.return_annotation is inspect.Signature.empty
+    assert evaluated == []
 
 
 def test_analyze_callable_rejects_dynamic_lookup_without_invoking_it() -> None:
@@ -103,8 +145,8 @@ def test_analyze_callable_rejects_deferred_annotations_without_evaluation() -> N
     )
     exec(code, namespace)
 
-    with pytest.raises(InvalidTargetError, match="unsupported callable"):
-        analyze_callable(namespace["subject"])  # type: ignore[arg-type]
+    info = analyze_callable(namespace["subject"])  # type: ignore[arg-type]
+    assert str(info.signature) == "(value)"
     assert evaluated == []
 
 
@@ -126,6 +168,7 @@ def test_analyze_callable_accepts_stringized_deferred_annotations() -> None:
 
     info = analyze_callable(namespace["subject"])  # type: ignore[arg-type]
 
-    assert info.signature.parameters["value"].annotation == "marker()"
-    assert info.signature.return_annotation == "int"
+    assert info.signature.parameters[
+        "value"].annotation is inspect.Parameter.empty
+    assert info.signature.return_annotation is inspect.Signature.empty
     assert evaluated == []

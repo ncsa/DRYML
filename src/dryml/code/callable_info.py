@@ -29,32 +29,68 @@ def _module_namespace(module: types.ModuleType) -> dict[str, object]:
 
 
 def _function_metadata(func: types.FunctionType) -> tuple[str | None, str | None]:
-    """Read non-evaluating Python-function provenance after hook rejection."""
-
-    namespace = _function_slot(func, "__dict__")
-    if "__signature__" in namespace or "__wrapped__" in namespace:  # type: ignore[operator]
-        raise InvalidTargetError("unsupported callable")
-    annotate_slot = types.FunctionType.__dict__.get("__annotate__")
-    if annotate_slot is not None:
-        annotate = annotate_slot.__get__(func, types.FunctionType)
-        if annotate is not None:
-            if type(annotate) is not types.FunctionType:
-                raise InvalidTargetError("unsupported callable")
-            annotate_code = _function_slot(annotate, "__code__")
-            if (
-                annotate_code.co_name != "__annotate__"  # type: ignore[union-attr]
-                or annotate_code.co_names  # type: ignore[union-attr]
-                or annotate_code.co_freevars  # type: ignore[union-attr]
-            ):
-                raise InvalidTargetError("unsupported callable")
-    annotations = _function_slot(func, "__annotations__")
-    if type(annotations) is not dict:
-        raise InvalidTargetError("unsupported callable")
+    """
+    Read native provenance without consulting wrapper or annotation hooks.
+    """
     raw_module = _function_slot(func, "__module__")
     raw_qualname = _function_slot(func, "__qualname__")
     module = raw_module if type(raw_module) is str else None
     qualname = raw_qualname if type(raw_qualname) is str else None
     return qualname, module
+
+
+def _native_signature(func: types.FunctionType) -> inspect.Signature:
+    """Derive a signature from native code/default slots without annotations.
+
+    ``inspect.signature`` consults user-controlled ``__signature__`` even when
+    wrapper following is disabled. Static admission instead needs only native
+    parameter/default evidence and intentionally omits annotations.
+    """
+
+    code = _function_slot(func, "__code__")
+    defaults = _function_slot(func, "__defaults__")
+    keyword_defaults = _function_slot(func, "__kwdefaults__")
+    if (
+        type(code) is not types.CodeType
+        or defaults is not None and type(defaults) is not tuple
+        or keyword_defaults is not None and type(keyword_defaults) is not dict
+    ):
+        raise InvalidTargetError("unsupported callable")
+    positional = code.co_argcount
+    positional_only = getattr(code, "co_posonlyargcount", 0)
+    names = code.co_varnames
+    values = defaults if type(defaults) is tuple else ()
+    parameters: list[inspect.Parameter] = []
+    required = positional - len(values)
+    for index in range(positional):
+        kind = (inspect.Parameter.POSITIONAL_ONLY if index < positional_only
+                else inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        default = inspect.Parameter.empty if index < required else values[
+            index - required]
+        parameters.append(
+            inspect.Parameter(names[index], kind, default=default))
+    keyword_offset = positional
+    keyword = keyword_defaults if type(keyword_defaults) is dict else {}
+    if code.co_flags & inspect.CO_VARARGS:
+        parameters.append(
+            inspect.Parameter(
+                names[keyword_offset + code.co_kwonlyargcount],
+                inspect.Parameter.VAR_POSITIONAL,
+            ))
+    for index in range(code.co_kwonlyargcount):
+        name = names[keyword_offset + index]
+        parameters.append(
+            inspect.Parameter(name,
+                              inspect.Parameter.KEYWORD_ONLY,
+                              default=keyword.get(name,
+                                                  inspect.Parameter.empty)))
+    offset = keyword_offset + code.co_kwonlyargcount
+    if code.co_flags & inspect.CO_VARARGS:
+        offset += 1
+    if code.co_flags & inspect.CO_VARKEYWORDS:
+        parameters.append(
+            inspect.Parameter(names[offset], inspect.Parameter.VAR_KEYWORD))
+    return inspect.Signature(parameters)
 
 
 def _raw_call_descriptor(cls: type) -> object | None:
@@ -135,7 +171,7 @@ def analyze_callable(obj: Callable[..., Any]) -> CallableInfo:
             original=obj,
             func=obj,
             bound_self=None,
-            signature=inspect.signature(obj, follow_wrapped=False, eval_str=False),
+            signature=_native_signature(obj),
             qualname=qualname,
             module=module,
             is_bound_method=False,
@@ -150,7 +186,7 @@ def analyze_callable(obj: Callable[..., Any]) -> CallableInfo:
             original=obj,
             func=func,
             bound_self=obj.__self__,
-            signature=inspect.signature(func, follow_wrapped=False, eval_str=False),
+            signature=_native_signature(func),
             qualname=qualname,
             module=module,
             is_bound_method=True,
@@ -168,7 +204,7 @@ def analyze_callable(obj: Callable[..., Any]) -> CallableInfo:
         original=obj,
         func=func,
         bound_self=obj,
-        signature=inspect.signature(func, follow_wrapped=False, eval_str=False),
+        signature=_native_signature(func),
         qualname=qualname,
         module=module,
         is_bound_method=False,

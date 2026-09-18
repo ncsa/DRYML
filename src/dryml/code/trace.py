@@ -24,10 +24,11 @@ from .analysis import (
     _snapshot_calls,
     _validate_admission,
 )
-from .errors import CodeAnalysisError
+from .errors import CodeAnalysisError, InvalidTargetError
 from .facts import Diagnostic, SourceLocation
 from .graph import ProgramEdge, ProgramGraph, ProgramNode, _encode, _node_id, _pack, _source_value, build_program_graph
 from .kernels import AnalysisKernel, KernelCall, KernelContext, KernelOutcome, _records_for_outcomes
+from .inspection import InspectionTarget
 from .targets import CodeTargetInput, normalize_target
 
 
@@ -62,6 +63,8 @@ def _validate_max_events(max_events: int) -> None:
 def _live_target(target: CodeTargetInput) -> types.FunctionType | types.MethodType:
     """Admit only a direct synchronous Python function or bound Python method."""
 
+    if type(target) is InspectionTarget:
+        raise InvalidTargetError("inspection targets are not executable")
     if type(target) is types.FunctionType:
         function = target
     elif type(target) is types.MethodType and type(target.__func__) is types.FunctionType:
@@ -223,6 +226,7 @@ def _binding(snapshot: _Snapshot, base_digest: str, trace_digest: str) -> str:
 
 def _context_for_trace(
     snapshot: _Snapshot,
+    target: object,
     snapshots: tuple[_Snapshot, ...],
     artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]],
     trace_graph: ProgramGraph,
@@ -243,11 +247,13 @@ def _context_for_trace(
         required: artifacts[(required, _binding(by_type[required], base_digest, trace_digest))]
         for required in snapshot.requires
     }
-    return KernelContext(trace_graph, dependencies, _records_for_outcomes(outcomes, declarations))
+    return KernelContext(target, trace_graph, dependencies,
+                         _records_for_outcomes(outcomes, declarations))
 
 
 def _run_static(
     snapshots: tuple[_Snapshot, ...],
+    target: object,
     base_graph: ProgramGraph,
     base_digest: str,
     artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]],
@@ -267,7 +273,14 @@ def _run_static(
             artifacts[(snapshot.kernel_type, base_digest)] = KernelOutcome(snapshot.kernel_type, base_digest, "skipped", None, skipped_for=unavailable)
         else:
             artifacts[(snapshot.kernel_type, base_digest)] = _run_unfused(
-                snapshot, base_graph, base_digest, static, ordered, artifacts, declarations,
+                snapshot,
+                target,
+                base_graph,
+                base_digest,
+                static,
+                ordered,
+                artifacts,
+                declarations,
             )
         pending.remove(snapshot)
 
@@ -281,6 +294,7 @@ def _trace_failure(snapshot: _Snapshot, digest: str, code: str) -> KernelOutcome
 
 def _run_trace_kernels(
     snapshots: tuple[_Snapshot, ...],
+    target: object,
     trace_graph: ProgramGraph,
     base_digest: str,
     trace_digest: str,
@@ -316,6 +330,7 @@ def _run_trace_kernels(
                     snapshot.input,
                     _context_for_trace(
                         snapshot,
+                        target,
                         snapshots,
                         artifacts,
                         trace_graph,
@@ -377,7 +392,8 @@ def trace(
     declarations = {snapshot.kernel_type: (snapshot.mode, snapshot.output_type) for snapshot in snapshots}
     artifacts: dict[tuple[type[AnalysisKernel[Any, Any]], str], KernelOutcome[Any]] = {}
     base_digest = base_graph.digest
-    _run_static(snapshots, base_graph, base_digest, artifacts, declarations)
+    _run_static(snapshots, normalized, base_graph, base_digest, artifacts,
+                declarations)
 
     events: list[_TraceEvent] = []
     code_ids: dict[tuple[types.CodeType, str | None], tuple[str, str, int]] = {}
@@ -463,6 +479,7 @@ def trace(
     trace_failure = "trace.limit" if overflow else "trace.invocation" if invocation_failed or callback_failed else None
     _run_trace_kernels(
         snapshots,
+        normalized,
         trace_graph,
         base_digest,
         trace_digest,

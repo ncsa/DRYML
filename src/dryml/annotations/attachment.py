@@ -18,6 +18,22 @@ _TYPE_NAME = type.__dict__["__name__"]
 _TYPE_SETATTR = type.__dict__["__setattr__"]
 
 
+def _raw_annotations(target: Any) -> tuple[object, ...]:
+    """
+    Return one direct raw tuple after validating only its container shape.
+
+        This private seam lets bounded multi-target collectors account for
+        every raw
+        attachment before validating or iterating individual carriers.
+    """
+
+    values = _target_dict(target).get(ANNOTATION_ATTR, ())
+    if type(values) is not tuple:
+        raise AnnotationValidationError(
+            "annotation target contains malformed direct annotation metadata")
+    return values
+
+
 def own_annotations(target: Any) -> tuple[Annotation, ...]:
     """Return annotations attached directly to one supported live target.
 
@@ -38,8 +54,8 @@ def own_annotations(target: Any) -> tuple[Annotation, ...]:
             entries.
     """
 
-    values = _target_dict(target).get(ANNOTATION_ATTR, ())
-    if type(values) is not tuple or any(type(item) is not Annotation for item in values):
+    values = _raw_annotations(target)
+    if any(type(item) is not Annotation for item in values):
         raise AnnotationValidationError("annotation target contains malformed direct annotation metadata")
     return values
 

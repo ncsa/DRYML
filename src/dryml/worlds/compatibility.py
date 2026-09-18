@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._diagnostics import WorldPath, path, render_path
-from .allocation import WorldAllocation
+from .allocation import ProcessAllocation, WorldAllocation
 from .resources import CountConstraint
 from .specs import WorldRequirement, WorldSpec
 
@@ -83,6 +83,114 @@ def check_allocation_satisfies_requirement(allocation: WorldAllocation, requirem
     return WorldCompatibilityReport(tuple(issues))
 
 
+def check_selected_process_satisfies_requirement(
+        role: str | None, process: ProcessAllocation | None,
+        requirement: WorldRequirement | None,
+) -> WorldCompatibilityReport:
+    """
+    Check one selected current-process allocation against a hard requirement.
+
+        Args:
+            role: Selected role name, or ``None`` when no process is selected.
+            process: Exact selected-process allocation, or ``None`` when
+            absent.
+            requirement: A valued effective world requirement, or ``None`` when
+            no
+                declaration was collected.
+
+        Returns:
+            A compatibility report based solely on the selected role and exact
+            process
+            evidence.  An absent requirement is compatible; a valued
+            requirement with
+            no allocation receives an ``allocation_missing`` issue.
+
+        Raises:
+            TypeError: If role/process evidence is malformed or only one is
+            absent.
+
+        Side Effects:
+            None. This checker does not import Session, inspect host inventory,
+            create
+            a synthetic full-world allocation, reserve resources, or change
+            runtime.
+    """
+
+    if requirement is not None and not isinstance(requirement,
+                                                  WorldRequirement):
+        raise TypeError("requirement must be a WorldRequirement or None")
+    if role is not None and (not isinstance(role, str) or not role):
+        raise TypeError("role must be a non-empty string or None")
+    if process is not None and not isinstance(process, ProcessAllocation):
+        raise TypeError("process must be a ProcessAllocation or None")
+    if (role is None) != (process is None):
+        raise TypeError("role and process must be provided together")
+    if requirement is None:
+        return WorldCompatibilityReport()
+    if role is None:
+        return WorldCompatibilityReport((_issue(
+            "allocation_missing", path("allocation"),
+            "a valued world requirement requires selected-process evidence"),
+                                         ))
+    issues: list[WorldCompatibilityIssue] = []
+    selected_role = role
+    selected = process
+    role = requirement.roles.get(selected_role)
+    if role is None:
+        issues.append(
+            _issue("selected_role_unexpected", path("roles", selected_role),
+                   "selected process role is not declared by the requirement"))
+    for name in requirement.roles:
+        if name != selected_role:
+            issues.append(
+                _issue("missing_role", path("roles", name),
+                       "required role has no selected-process evidence"))
+    if role is None:
+        return WorldCompatibilityReport(tuple(issues))
+    _constraint(issues, role.replicas, 1,
+                path("roles", selected_role, "replicas"))
+    base = path("roles", selected_role, "resources")
+    _constraint(issues, role.resources.cpus, len(selected.cpus),
+                path(*base, "cpus"))
+    if selected.memory is None and _is_constrained(role.resources.memory):
+        issues.append(
+            _issue("memory_missing", path(*base, "memory"),
+                   "memory evidence is required for a hard constraint"))
+    else:
+        _constraint(issues, role.resources.memory, selected.memory or 0,
+                    path(*base, "memory"))
+    for kind, constraint in role.resources.accelerators.items():
+        assigned = selected.accelerators.get(kind, ())
+        _constraint(issues, constraint, len(assigned),
+                    path(*base, "accelerators", kind))
+    for kind, constraint in role.resources.accelerator_memory.items():
+        assigned = selected.accelerators.get(kind, ())
+        values = selected.accelerator_memory.get(kind)
+        if values is None or not assigned:
+            issues.append(
+                _issue(
+                    "accelerator_memory_missing",
+                    path(*base, "accelerator_memory", kind),
+                    "accelerator memory requires exact assigned-device "
+                    "evidence"
+                ))
+            continue
+        for device in assigned:
+            if device not in values:
+                issues.append(
+                    _issue(
+                        "accelerator_memory_missing",
+                        path(*base, "accelerator_memory", kind, str(device)),
+                        "assigned accelerator has no memory evidence"))
+            else:
+                _constraint(
+                    issues, constraint, values[device],
+                    path(*base, "accelerator_memory", kind, str(device)))
+    _unsupported_resources(issues, role, base)
+    _topology(issues, role.topology, path("roles", selected_role, "topology"))
+    return WorldCompatibilityReport(tuple(issues))
+
+
 def _resource_constraints(issues: list[WorldCompatibilityIssue], role: Any, resources: Any, path_value: WorldPath) -> None:
     for kind, constraint in role.resources.accelerators.items():
         _constraint(issues, constraint, resources.accelerators.get(kind, 0), path(*path_value, "accelerators", kind))
@@ -110,6 +218,12 @@ def _topology(issues: list[WorldCompatibilityIssue], topology: Any, path_value: 
 def _constraint(issues: list[WorldCompatibilityIssue], constraint: CountConstraint, actual: int, path_value: WorldPath) -> None:
     if not constraint.satisfied_by(actual):
         issues.append(_issue("constraint_unsatisfied", path_value, "hard resource constraint is not satisfied", constraint.to_data(), actual))
+
+
+def _is_constrained(constraint: CountConstraint) -> bool:
+    """Return whether a hard count range needs concrete evidence."""
+
+    return constraint.min is not None or constraint.max is not None
 
 
 def _issue(code: str, path_value: WorldPath, message: str, expected: Any = None, observed: Any = None) -> WorldCompatibilityIssue:

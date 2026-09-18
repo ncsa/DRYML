@@ -50,6 +50,46 @@ assert "dryml.worlds" not in sys.modules
     )
 
 
+def test_environment_kernel_is_lazy_and_loads_no_inverse_domain():
+    run_probe("""
+import sys
+import dryml.environments as envs
+assert "dryml.code" not in sys.modules
+assert "dryml.worlds" not in sys.modules
+assert envs.EnvironmentRequirementsKernel.__name__"""
+              ''' == "EnvironmentRequirementsKernel"
+assert "dryml.code" in sys.modules
+assert "dryml.worlds" not in sys.modules
+        ''')
+
+
+def test_selection_first_preserves_the_public_probe_callable():
+    run_probe(
+        """
+import sys
+import dryml.environments as envs
+selection = envs.resolve_environment_spec(
+    envs.PythonExecutableSpec(sys.executable)
+)
+assert selection.command
+assert callable(envs.probe)
+assert envs.probe(envs.CurrentEnvironmentSpec()).ok
+        """
+    )
+
+
+def test_sibling_exports_load_before_the_public_probe_callable():
+    run_probe(
+        """
+import dryml.environments as envs
+assert callable(envs.resolve_environment_spec)
+assert callable(envs.compare_selection)
+assert callable(envs.probe)
+assert envs.probe(envs.CurrentEnvironmentSpec()).ok
+        """
+    )
+
+
 def test_top_level_dryml_submodules_are_lazy_but_accessible():
     run_probe(
         """
