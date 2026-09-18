@@ -7,6 +7,43 @@ from dryml.execute.output import ExecutionOutput
 from .test_executor import FakeBackend, config
 
 
+def test_executor_view_constructor_preserves_legacy_shapes_and_optional_selector():  # noqa: E501
+    """Generic views retain prior positional and keyword construction forms."""
+    from dryml.environments import CurrentEnvironmentSpec
+    from dryml.execute.executor import ExecutorView
+
+    parent = object()
+    legacy_positional = ExecutorView(
+        parent, None, None, None, False, (), None, None,
+    )
+    legacy_keyword = ExecutorView(
+        executor=parent,
+        environment=None,
+        world=None,
+        execution_timeout=None,
+        stream_output=False,
+        done_callbacks=(),
+        output=None,
+        worker_setup=None,
+    )
+    selector = CurrentEnvironmentSpec()
+    selected = ExecutorView(
+        executor=parent,
+        environment=None,
+        world=None,
+        execution_timeout=None,
+        stream_output=False,
+        done_callbacks=(),
+        output=None,
+        worker_setup=None,
+        environment_spec=selector,
+    )
+
+    assert legacy_positional.environment_spec is None
+    assert legacy_keyword.environment_spec is None
+    assert selected.environment_spec is selector
+
+
 def test_view_forwards_all_workload_keywords_without_control_collisions(tmp_path):
     """View keywords remain ordinary workload arguments, including control-shaped names."""
     from dryml.execute.executor import Executor

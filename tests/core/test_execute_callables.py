@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
-import pytest
 
 from dryml.core import ObjectRef, Repo, Serializable, function
 from dryml.core.execute import ExecutionContext, SharedDirStoreStrategy, invoke_prepared_call, worker_context
-from dryml.core.execute_codec import CoreCallCodecError
 from dryml.core.signatures import Ref
 from dryml.core.store.dir import DirStore
 from dryml.execute import Executor
@@ -229,3 +228,24 @@ def test_fresh_subprocess_transports_every_callable_owner_and_shared_capture_gra
     assert _subprocess_invoke(SlotCallableInstance(older), (older,), repo, spool) == (14, True)
     assert _subprocess_invoke(_reference_only, (older.object,), repo, spool) == older.object.digest()
     assert calls == []
+
+
+def test_copied_function_wrapper_metadata_rebuilds_its_established_owner(
+        tmp_path):
+    """
+    Ordinary wrappers retain their body while captured function owners rebuild.
+    """
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    spool = tmp_path / "spool"
+    spool.mkdir()
+
+    @functools.wraps(decorated)
+    def copied(value):
+        """
+        Forward through the wrapped function without becoming its raw target.
+        """
+
+        return decorated(value)
+
+    assert _subprocess_invoke(copied, (5,), repo, spool) == 6

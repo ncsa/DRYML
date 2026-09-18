@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Callable, ContextManager, Generic, Literal, Ty
 
 from dryml.environments import CompatibilityReport, EnvironmentRecord, EnvironmentRequirement
 from dryml.environments.specs import EnvironmentSpec
+from dryml.environments.selection import ResolvedEnvironmentSelection
 from dryml.formats import CanonicalJSONError, canonical_json_bytes, deep_freeze_json
 from dryml.worlds import LocalResourceInventory, WorldAllocation, WorldCompatibilityReport, WorldRequirement, WorldSpec
 
@@ -318,21 +319,27 @@ class OutputSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class SubmittedCall(Generic[T]):
-    """Hold accepted coordinator metadata without the live callable graph.
+    """
+    Hold accepted coordinator metadata without the live callable graph.
 
-    Attributes:
-        submission_id: Coordinator-unique accepted submission identifier.
-        admission_deadline: Monotonic deadline for backend admission.
-        payload: Validated private invocation spool descriptor.
-        environment: Optional owner-defined environment requirement.
-        world: Optional owner-defined world requirement.
-        execution_timeout: Optional post-GO workload deadline.
-        stream_output: Whether accepted output mirrors live best-effort.
-        output: Bound caller-owned output holder.
-        worker_setup: Optional detached pre-deserialization worker setup control.
+        Attributes:
+            submission_id: Coordinator-unique accepted submission identifier.
+            admission_deadline: Monotonic deadline for backend admission.
+            payload: Validated private invocation spool descriptor.
+            environment: Optional owner-defined environment requirement.
+            world: Optional owner-defined world requirement.
+            execution_timeout: Optional post-GO workload deadline.
+            stream_output: Whether accepted output mirrors live best-effort.
+            output: Bound caller-owned output holder.
+            worker_setup: Optional detached pre-deserialization worker setup
+            control.
+            environment_spec: Optional resolved exact environment identity
+            independent of
+                software requirements.
 
-    Side Effects:
-        None. Backends receive this transport record, not a live callable object.
+        Side Effects:
+            None. Backends receive this transport record, not a live callable
+            object.
     """
 
     submission_id: str
@@ -344,6 +351,7 @@ class SubmittedCall(Generic[T]):
     stream_output: bool
     output: "ExecutionOutput"
     worker_setup: WorkerSetup | None = None
+    environment_spec: ResolvedEnvironmentSelection | None = None
 
 
 @dataclass(frozen=True, slots=True)

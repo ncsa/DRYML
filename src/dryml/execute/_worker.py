@@ -105,7 +105,11 @@ def _run(descriptor: BootstrapDescriptor, *, worker_id: str | None = None, nativ
                 return
             if OwnerEnvelopeType.ALLOCATION in envelopes:
                 allocation = WorldAllocation.from_data(_json(envelopes[OwnerEnvelopeType.ALLOCATION], descriptor.owner_envelope_limit_bytes))
-        record = inspect_current() if environment is not None else None
+        # Exact selections require fresh identity evidence even with no
+        # software requirement; the coordinator compares it before GO and
+        # payload transfer.
+        record = (inspect_current() if environment is not None
+                  or OwnerEnvelopeType.SELECTION in envelopes else None)
         if allocation is not None:
             allocation = _apply_allocation(allocation, environment_id=None if record is None else record.semantic_id)
         os.chdir(cwd)
@@ -123,7 +127,7 @@ def _run(descriptor: BootstrapDescriptor, *, worker_id: str | None = None, nativ
         ready = encode_control(FrameState.READY, descriptor.correlation, {"pid": os.getpid(), "ready": True, "worker_id": worker_id}, header_limit=descriptor.control_header_limit_bytes)
         _send(connection, send_lock, ready)
         conversation.accept(ready)
-        if environment is not None:
+        if environment is not None or OwnerEnvelopeType.SELECTION in envelopes:
             assert record is not None
             record_data = canonical_json_bytes(record.to_data(), max_depth=32, max_nodes=65536, max_entries=4096, max_string=descriptor.owner_envelope_limit_bytes, max_int_bits=64)
             evidence = encode_owner_envelope(FrameState.READY, descriptor.correlation, OwnerEnvelopeType.ENVIRONMENT, record_data, header_limit=descriptor.control_header_limit_bytes, owner_limit=descriptor.owner_envelope_limit_bytes)

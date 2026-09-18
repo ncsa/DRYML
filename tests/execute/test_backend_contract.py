@@ -22,7 +22,13 @@ class FakeBackend(Backend):
         self.call = call
         self.future = future
 
-    def discover(self, *, environment=None, world=None, timeout):
+    def discover(self,
+                 *,
+                 environment=None,
+                 environment_spec=None,
+                 world=None,
+                 timeout):
+        self.discovery = (environment, environment_spec, world, timeout)
         return None
 
     def resources(self, *, timeout):
@@ -45,6 +51,43 @@ def test_new_backend_contract_is_additive_and_create_future_is_inert():
     assert not hasattr(backend, "started")
     assert isinstance(Backend.__abstractmethods__, frozenset)
     assert SubmittedCall.__dataclass_fields__["payload"].name == "payload"
+
+
+def test_submitted_call_constructor_preserves_legacy_shapes_and_optional_selector():  # noqa: E501
+    """
+    Submitted calls retain prior positional and keyword construction forms.
+    """
+    payload = object()
+    output = object()
+    legacy_positional = SubmittedCall(
+        "submission", 1.0, payload, None, None, None, False, output,
+    )
+    legacy_keyword = SubmittedCall(
+        submission_id="submission",
+        admission_deadline=1.0,
+        payload=payload,
+        environment=None,
+        world=None,
+        execution_timeout=None,
+        stream_output=False,
+        output=output,
+    )
+    selection = object()
+    selected = SubmittedCall(
+        submission_id="submission",
+        admission_deadline=1.0,
+        payload=payload,
+        environment=None,
+        world=None,
+        execution_timeout=None,
+        stream_output=False,
+        output=output,
+        environment_spec=selection,
+    )
+
+    assert legacy_positional.environment_spec is None
+    assert legacy_keyword.environment_spec is None
+    assert selected.environment_spec is selection
 
 
 def test_resource_value_mappings_are_defensively_frozen():

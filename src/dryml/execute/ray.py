@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import secrets
 import socket
 import sys
@@ -18,12 +19,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Condition, Event, Lock, RLock, Thread
+from types import SimpleNamespace
 from typing import Any, TypeVar
 
 import dill
 
 from dryml.environments import EnvironmentRecord, EnvironmentRequirement
 from dryml.environments.specs import CondaEnvironmentSpec, CurrentEnvironmentSpec, PythonExecutableSpec
+from dryml.environments.selection import (ResolvedEnvironmentSelection,
+                                          compare_selection)
+from dryml.environments.utils import build_probe_env
 from dryml.formats import canonical_json_bytes, canonical_json_load_bytes
 
 from ._protocol import (
@@ -734,25 +739,40 @@ class RayBackend(Backend):
                 self._launching.pop(call.submission_id, None)
             raise
 
-    def discover(self, *, environment: EnvironmentRequirement | None = None, world: Any = None, timeout: float) -> DiscoverySnapshot:
-        """Return bounded existing-environment and native-resource observations.
+    def discover(self,
+                 *,
+                 environment: EnvironmentRequirement | None = None,
+                 environment_spec: ResolvedEnvironmentSelection | None = None,
+                 world: Any = None,
+                 timeout: float) -> DiscoverySnapshot:
+        """
+        Return bounded existing-environment and native-resource observations.
 
-        Args:
-            environment: Optional environment requirement for candidate evidence.
-            world: Optional supported one-role world requirement for plans.
-            timeout: Positive total observation budget in seconds.
+                Args:
+                    environment: Optional environment requirement for candidate
+                    evidence.
+                    environment_spec: Optional frozen exact selector used as
+                    the sole
+                        candidate without inventory traversal.
+                    world: Optional supported one-role world requirement for
+                    plans.
+                    timeout: Positive total observation budget in seconds.
 
-        Returns:
-            A non-reserving Ray discovery snapshot, possibly incomplete.
+                Returns:
+                    A non-reserving Ray discovery snapshot, possibly
+                    incomplete.
 
-        Raises:
-            TimeoutError: If the supplied budget has elapsed.
-            BackendUnavailableError: If the existing Ray connection cannot observe
-                its resources.
+                Raises:
+                    TimeoutError: If the supplied budget has elapsed.
+                    BackendUnavailableError: If the existing Ray connection
+                    cannot observe
+                        its resources.
 
-        Side Effects:
-            May perform bounded candidate probes and Ray capacity reads; it does
-            not provision a server, reserve capacity, or invoke workload code.
+                Side Effects:
+                    May perform bounded candidate probes and Ray capacity
+                    reads; it does
+                    not provision a server, reserve capacity, or invoke
+                    workload code.
         """
         if timeout <= 0:
             raise TimeoutError("Ray discovery timeout elapsed")
@@ -762,25 +782,70 @@ class RayBackend(Backend):
         candidates: list[EnvironmentCandidate] = []
         plans: list[FeasiblePlan] = []
         inventory_complete = True
-        if environment is not None or self._config.automatic_environment_discovery or self._config.environment_candidates or self._config.environment_search_roots:
-            discovered = discover_candidates(self._config, cwd=self._config.working_directory, interpreter=Path(sys.executable), deadline=deadline)
+        if environment_spec is not None:
+            candidate, runtime = self._select_environment(
+                SimpleNamespace(
+                    environment_spec=environment_spec,
+                    environment=environment,
+                )
+            )
+            # Validate runtime controls during discovery as well as submission
+            # so a snapshot never claims a selector this backend will reject.
+            self._runtime_environment(runtime, candidate, environment_spec)
+            assert candidate is not None
+            candidates.append(candidate)
+            if world is not None:
+                decision = _logical_plan(
+                    environment,
+                    world,
+                    candidate.record,
+                    resources.total,
+                    deadline,
+                )
+                if decision.go and decision.world is not None:
+                    plans.append(
+                        FeasiblePlan(candidate.key, decision.world, None,
+                                     decision.report))
+        elif (environment is not None
+              or self._config.automatic_environment_discovery
+              or self._config.environment_candidates
+              or self._config.environment_search_roots):
+            discovered = discover_candidates(
+                self._config, cwd=self._config.working_directory,
+                interpreter=Path(sys.executable), deadline=deadline)
             inventory_complete = discovered.complete
             issues.extend(discovered.issues)
             for spec in discovered.specs:
                 if time.monotonic() >= deadline:
-                    issues.append(ExecutionIssue("discovery_timeout", "Ray environment discovery exceeded its deadline"))
+                    issues.append(ExecutionIssue(
+                        "discovery_timeout",
+                        "Ray environment discovery exceeded its deadline"))
                     break
-                candidate = probe_candidate(spec, interpreter=Path(sys.executable), timeout=max(0.001, deadline - time.monotonic()), output_limit=self._config.owner_envelope_limit_bytes, deadline=deadline, termination_timeout=self._config.termination_timeout, read_chunk_bytes=self._config.process_read_chunk_bytes, poll_interval=self._config.process_poll_interval)
+                candidate = probe_candidate(
+                    spec, interpreter=Path(sys.executable),
+                    timeout=max(0.001, deadline - time.monotonic()),
+                    output_limit=self._config.owner_envelope_limit_bytes,
+                    deadline=deadline,
+                    termination_timeout=self._config.termination_timeout,
+                    read_chunk_bytes=self._config.process_read_chunk_bytes,
+                    poll_interval=self._config.process_poll_interval)
                 candidates.append(candidate)
                 if world is not None and candidate.record is not None:
                     decision = _logical_plan(environment, world, candidate.record, resources.total, deadline)
                     if decision.go and decision.world is not None:
-                        plans.append(FeasiblePlan(candidate.key, decision.world, None, decision.report))
-        if world is not None and environment is None:
+                        plans.append(FeasiblePlan(
+                            candidate.key, decision.world, None,
+                            decision.report))
+        if (world is not None and environment is None
+                and environment_spec is None):
             decision = _logical_plan(None, world, None, resources.total, deadline)
             if decision.go and decision.world is not None:
                 plans.append(FeasiblePlan(None, decision.world, None, decision.report))
-        return DiscoverySnapshot(datetime.now(timezone.utc), tuple(candidates), resources, tuple(plans), resources.complete and inventory_complete and not issues, tuple(issues))
+        return DiscoverySnapshot(
+            datetime.now(timezone.utc), tuple(candidates), resources,
+            tuple(plans),
+            resources.complete and inventory_complete and not issues,
+            tuple(issues))
 
     def resources(self, *, timeout: float) -> ResourceSnapshot:
         """Observe native Ray capacity and subtract only unrepresented reservations.
@@ -960,7 +1025,8 @@ class RayBackend(Backend):
             encoded = encode_bootstrap_descriptor(descriptor)
             options = {"scheduling_strategy": connection.sdk.node_affinity(connection.node_id, soft=False)}
             options.update(_native_options(call.world))
-            effective_runtime_env = self._runtime_environment(runtime_env, candidate)
+            effective_runtime_env = self._runtime_environment(
+                runtime_env, candidate, call.environment_spec)
             if effective_runtime_env:
                 options["runtime_env"] = effective_runtime_env
             run = _Run(future, None, reservation, listener=listener)
@@ -1056,6 +1122,12 @@ class RayBackend(Backend):
         owners: list[tuple[OwnerEnvelopeType, bytes]] = []
         if call.environment is not None:
             owners.append((OwnerEnvelopeType.ENVIRONMENT, _owner_json(call.environment.to_data(), self._config.owner_envelope_limit_bytes)))
+        if call.environment_spec is not None:
+            owners.append(
+                (OwnerEnvelopeType.SELECTION,
+                 _owner_json(
+                     {"selector_id": call.environment_spec.spec.semantic_id},
+                     self._config.owner_envelope_limit_bytes)))
         if call.world is not None:
             owners.append((OwnerEnvelopeType.WORLD, _owner_json(call.world.to_data(), self._config.owner_envelope_limit_bytes)))
         prepare = encode_control(FrameState.PREPARE, descriptor.correlation, {"cwd": str(self._config.working_directory), "deadline": call.admission_deadline, "owners": [kind.value for kind, _ in owners]}, header_limit=self._config.control_header_limit_bytes)
@@ -1071,12 +1143,19 @@ class RayBackend(Backend):
         if ready_data["ready"] is not True or ready_data["pid"] != pid or ready_data["worker_id"] != worker_id:
             raise AdmissionError("Ray worker readiness evidence is invalid")
         record: EnvironmentRecord | None = None
-        if call.environment is not None:
+        if call.environment is not None or call.environment_spec is not None:
             evidence = reader.read()
             conversation.accept_frame(evidence)
             if evidence.owner is not OwnerEnvelopeType.ENVIRONMENT:
                 raise AdmissionError("Ray worker omitted environment evidence")
             record = EnvironmentRecord.from_data(_json(evidence.payload, self._config.owner_envelope_limit_bytes))
+        if call.environment_spec is not None:
+            selection_report = compare_selection(call.environment_spec, record)
+            if not selection_report.ok:
+                raise AdmissionError(
+                    "Ray worker identity does not match the selected "
+                    "environment",
+                    report=selection_report)
         observed_world, controls = _logical_world(call.world, native)
         decision = _admit_observed_logical(
             environment=call.environment, world=call.world, record=record,
@@ -1447,8 +1526,26 @@ class RayBackend(Backend):
                 run.terminal_event.set()
             return True
 
-    def _select_environment(self, call: SubmittedCall[T]) -> tuple[EnvironmentCandidate | None, Mapping[str, str] | None]:
+    def _select_environment(
+            self, call: SubmittedCall[T],
+    ) -> tuple[EnvironmentCandidate | None, Mapping[str, str] | None]:
         """Select only pre-existing Conda or experimental venv runtime forms."""
+        if call.environment_spec is not None:
+            selection = call.environment_spec
+            candidate = self._selection_candidate(selection)
+            if isinstance(selection.spec, CondaEnvironmentSpec):
+                if (selection.spec.launch_mode != "direct"
+                        or not selection.resolved_prefix):
+                    raise AdmissionError(
+                        "Ray does not support the selected Conda launcher form"
+                    )
+                return candidate, {"conda": selection.resolved_prefix}
+            if isinstance(selection.spec, PythonExecutableSpec):
+                return candidate, {"py_executable": selection.command[0]}
+            if isinstance(selection.spec, CurrentEnvironmentSpec):
+                return candidate, {"py_executable": selection.command[0]}
+            raise AdmissionError(
+                "Ray does not support the selected environment form")
         if call.environment is None:
             return None, None
         deadline = call.admission_deadline
@@ -1466,7 +1563,27 @@ class RayBackend(Backend):
                 return candidate, None
         raise AdmissionError("no existing Ray runtime satisfies the supplied environment requirement")
 
-    def _runtime_environment(self, selector: Mapping[str, str] | None, candidate: EnvironmentCandidate | None) -> dict[str, object]:
+    @staticmethod
+    def _selection_candidate(
+            selection: ResolvedEnvironmentSelection) -> EnvironmentCandidate:
+        """
+        Return a frozen exact selector observation without inventory traversal.
+        """
+        return EnvironmentCandidate(
+            f"selected:{selection.spec.semantic_id}",
+            selection.spec,
+            selection.record,
+            None,
+            True,
+            (),
+        )
+
+    def _runtime_environment(
+        self,
+        selector: Mapping[str, str] | None,
+        candidate: EnvironmentCandidate | None,
+        selection: ResolvedEnvironmentSelection | None = None,
+    ) -> dict[str, object]:
         """Merge selected runtime form with explicit worker overrides without ambient state.
 
         Candidate selector fields such as Conda names and Python executables remain
@@ -1475,8 +1592,19 @@ class RayBackend(Backend):
         """
         runtime_env: dict[str, object] = dict(selector or {})
         worker_env: dict[str, str] = {}
-        if candidate is not None and isinstance(candidate.spec, (CondaEnvironmentSpec, PythonExecutableSpec)):
+        if selection is not None:
+            worker_env.update(selection.launch_env)
+        elif candidate is not None and isinstance(
+                candidate.spec, (CondaEnvironmentSpec, PythonExecutableSpec)):
+            selected = build_probe_env(
+                base=os.environ,
+                overrides=candidate.spec.env,
+                pythonpath_policy=candidate.spec.pythonpath_policy,
+                extra_pythonpath=candidate.spec.extra_pythonpath,
+            )
             worker_env.update(candidate.spec.env)
+            if "PYTHONPATH" in selected:
+                worker_env["PYTHONPATH"] = selected["PYTHONPATH"]
         worker_env.update(self._config.env_vars)
         if worker_env:
             runtime_env["env_vars"] = worker_env

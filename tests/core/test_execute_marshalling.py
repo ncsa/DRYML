@@ -278,6 +278,30 @@ def test_unsupported_targets_and_unsaved_objects_fail_before_body_invocation(tmp
     assert calls == []
 
 
+def test_unknown_callable_modality_is_rejected_without_invoking_call(tmp_path):
+    """
+    Core Execute admits callable instances only with statically known sync
+    roots.
+    """
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    calls = []
+
+    class DeferredCallable:
+        @property
+        def __call__(self):
+            calls.append("property")
+            return lambda: None
+
+    with pytest.raises(CoreCallCodecError, match="async or generator"):
+        SharedDirStoreStrategy().prepare(
+            DeferredCallable(), (), {}, repo=repo, control_store=None,
+            update_args=False,
+        )
+
+    assert calls == []
+
+
 def test_slots_captures_lower_saved_objects_and_reject_live_repo_globals(tmp_path):
     """Structural capture walks slots and globals instead of falling back to dill."""
     repo = Repo(DirStore(tmp_path / "state"))

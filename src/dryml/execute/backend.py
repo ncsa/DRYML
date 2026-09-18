@@ -9,6 +9,7 @@ from .future import ExecutionFuture
 
 if TYPE_CHECKING:
     from dryml.environments import EnvironmentRequirement
+    from dryml.environments.selection import ResolvedEnvironmentSelection
     from dryml.worlds import WorldRequirement
 
     from .models import DiscoverySnapshot, ResourceSnapshot, SubmittedCall
@@ -106,30 +107,43 @@ class Backend(ABC):
         self,
         *,
         environment: "EnvironmentRequirement | None" = None,
+        environment_spec: "ResolvedEnvironmentSelection | None" = None,
         world: "WorldRequirement | None" = None,
         timeout: float,
     ) -> "DiscoverySnapshot":
-        """Return a bounded discovery snapshot without invoking workload code.
+        """
+        Return a bounded discovery snapshot without invoking workload code.
 
-        Args:
-            environment: Optional environment requirement used for candidate and
-                feasible-plan evidence.
-            world: Optional world requirement used for feasible-plan evidence.
-            timeout: Positive maximum observation time in seconds.
+                Args:
+                    environment: Optional environment requirement used for
+                    candidate and
+                        feasible-plan evidence.
+                    environment_spec: Optional frozen exact selector. Backends
+                    inspect only
+                        this selected target and must not enumerate fallback
+                        candidates.
+                    world: Optional world requirement used for feasible-plan
+                    evidence.
+                    timeout: Positive maximum observation time in seconds.
 
-        Returns:
-            A non-reserving bounded discovery snapshot, possibly incomplete.
+                Returns:
+                    A non-reserving bounded discovery snapshot, possibly
+                    incomplete.
 
-        Raises:
-            TypeError: If a requirement or timeout has an invalid type.
-            ValueError: If ``timeout`` is not finite and positive.
-            TimeoutError: If initialization or observation exceeds ``timeout``.
-            BackendUnavailableError: If the selected backend cannot observe its
-                existing target.
+                Raises:
+                    TypeError: If a requirement or timeout has an invalid type.
+                    ValueError: If ``timeout`` is not finite and positive.
+                    TimeoutError: If initialization or observation exceeds
+                    ``timeout``.
+                    BackendUnavailableError: If the selected backend cannot
+                    observe its
+                        existing target.
 
-        Side Effects:
-            May initialize the backend and perform bounded probe or service I/O;
-            it never launches submitted workload code or reserves capacity.
+                Side Effects:
+                    May initialize the backend and perform bounded probe or
+                    service I/O;
+                    it never launches submitted workload code or reserves
+                    capacity.
         """
 
     @abstractmethod

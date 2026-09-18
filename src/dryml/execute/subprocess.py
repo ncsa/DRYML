@@ -27,6 +27,9 @@ import dill
 
 from dryml.environments import EnvironmentRecord, EnvironmentRequirement
 from dryml.environments.specs import CondaEnvironmentSpec, CurrentEnvironmentSpec, PythonExecutableSpec
+from dryml.environments.selection import (ResolvedEnvironmentSelection,
+                                          compare_selection)
+from dryml.environments.utils import build_probe_env
 from dryml.formats import canonical_json_bytes, canonical_json_load_bytes
 from dryml.worlds import LocalResourceInventory, WorldAllocation
 
@@ -267,24 +270,38 @@ class SubProcessBackend(Backend):
                 self._launching.pop(call.submission_id, None)
             raise
 
-    def discover(self, *, environment: EnvironmentRequirement | None = None, world: Any = None, timeout: float) -> DiscoverySnapshot:
-        """Return fresh bounded local candidates and resource observations without reservation.
+    def discover(self,
+                 *,
+                 environment: EnvironmentRequirement | None = None,
+                 environment_spec: ResolvedEnvironmentSelection | None = None,
+                 world: Any = None,
+                 timeout: float) -> DiscoverySnapshot:
+        """
+        Return fresh bounded local candidates and resource observations without
+        reservation.
 
-        Args:
-            environment: Optional environment requirement for candidate evidence.
-            world: Optional world requirement for feasibility evidence.
-            timeout: Positive total probe budget in seconds.
+                Args:
+                    environment: Optional environment requirement for candidate
+                    evidence.
+                    environment_spec: Optional frozen exact selector used as
+                    the sole
+                        candidate without inventory traversal.
+                    world: Optional world requirement for feasibility evidence.
+                    timeout: Positive total probe budget in seconds.
 
-        Returns:
-            A non-reserving local discovery snapshot, possibly incomplete.
+                Returns:
+                    A non-reserving local discovery snapshot, possibly
+                    incomplete.
 
-        Raises:
-            TimeoutError: If bounded discovery exceeds ``timeout``.
-            ExecutionError: If required backend observation cannot complete.
+                Raises:
+                    TimeoutError: If bounded discovery exceeds ``timeout``.
+                    ExecutionError: If required backend observation cannot
+                    complete.
 
-        Side Effects:
-            Runs bounded local inventory/environment probes but never launches a
-            submitted workload or reserves its capacity.
+                Side Effects:
+                    Runs bounded local inventory/environment probes but never
+                    launches a
+                    submitted workload or reserves its capacity.
         """
         deadline = time.monotonic() + timeout
         resources = self._resource_inventory(deadline)
@@ -293,22 +310,55 @@ class SubProcessBackend(Backend):
         issues: list[ExecutionIssue] = []
         plans: list[FeasiblePlan] = []
         inventory_complete = True
+        # An exact selector has already been resolved by Execute. It is the
+        # sole candidate and must not trigger candidate or Conda inventory
+        # enumeration.
+        if environment_spec is not None:
+            candidates.append(self._selection_candidate(environment_spec))
         # Discovery is the sole API that lists allowed environments without a
         # requirement; ordinary unconstrained submission must not scan them.
-        if environment is not None or self._config.automatic_environment_discovery or self._config.environment_candidates or self._config.environment_search_roots:
-            discovered = discover_candidates(self._config, cwd=self._config.working_directory, interpreter=self._python(), deadline=deadline)
+        elif (environment is not None
+              or self._config.automatic_environment_discovery
+              or self._config.environment_candidates
+              or self._config.environment_search_roots):
+            discovered = discover_candidates(
+                self._config, cwd=self._config.working_directory,
+                interpreter=self._python(), deadline=deadline)
             inventory_complete = discovered.complete
             issues.extend(discovered.issues)
             for spec in discovered.specs:
                 if time.monotonic() >= deadline:
-                    issues.append(ExecutionIssue("discovery_timeout", "environment discovery exceeded its bounded deadline"))
+                    issues.append(ExecutionIssue(
+                        "discovery_timeout",
+                        "environment discovery exceeded its bounded deadline"))
                     break
-                candidate = probe_candidate(spec, interpreter=self._python(), timeout=max(0.001, deadline - time.monotonic()), output_limit=self._config.owner_envelope_limit_bytes, deadline=deadline, termination_timeout=self._config.termination_timeout, read_chunk_bytes=self._config.process_read_chunk_bytes, poll_interval=self._config.process_poll_interval)
+                candidate = probe_candidate(
+                    spec, interpreter=self._python(),
+                    timeout=max(0.001, deadline - time.monotonic()),
+                    output_limit=self._config.owner_envelope_limit_bytes,
+                    deadline=deadline,
+                    termination_timeout=self._config.termination_timeout,
+                    read_chunk_bytes=self._config.process_read_chunk_bytes,
+                    poll_interval=self._config.process_poll_interval)
                 candidates.append(candidate)
                 if world is not None and inventory is not None and candidate.record is not None:
                     decision = plan_admission(environment=environment, world=world, record=candidate.record, inventory=inventory, deadline=deadline)
                     if decision.feasible and decision.world is not None:
-                        plans.append(FeasiblePlan(candidate.key, decision.world, decision.allocation, decision.report))
+                        plans.append(FeasiblePlan(
+                            candidate.key, decision.world, decision.allocation,
+                            decision.report))
+        if (environment_spec is not None and world is not None
+                and inventory is not None):
+            candidate = candidates[0]
+            decision = plan_admission(environment=environment,
+                                      world=world,
+                                      record=candidate.record,
+                                      inventory=inventory,
+                                      deadline=deadline)
+            if decision.feasible and decision.world is not None:
+                plans.append(
+                    FeasiblePlan(candidate.key, decision.world,
+                                 decision.allocation, decision.report))
         if world is not None and environment is None and inventory is not None:
             decision = plan_admission(world=world, inventory=inventory, deadline=deadline)
             if decision.feasible and decision.world is not None:
@@ -450,7 +500,12 @@ class SubProcessBackend(Backend):
             correlation = Correlation(call.submission_id, 0, 1)
             descriptor = BootstrapDescriptor(correlation, secrets.token_hex(32), "127.0.0.1", listener.getsockname()[1], self._config.control_header_limit_bytes, self._config.owner_envelope_limit_bytes, self._config.admission_message_limit_bytes, self._config.invocation_limit_bytes, self._config.result_limit_bytes, self._config.output_frame_limit_bytes, self._config.output_final_timeout)
             encoded_descriptor = base64.urlsafe_b64encode(encode_bootstrap_descriptor(descriptor)).decode("ascii")
-            process = self._launch(executable, encoded_descriptor, candidate)
+            process = self._launch(
+                executable,
+                encoded_descriptor,
+                candidate,
+                getattr(call, "environment_spec", None),
+            )
             # Only a direct pre-GO bootstrap can use root exit proof. A wrapper
             # such as conda run may already have created a separate worker.
             owner = OwnedProcess(process, root_termination_sufficient=os.name == "nt" and len(executable) == 1)
@@ -483,7 +538,10 @@ class SubProcessBackend(Backend):
                 if run is not None and run.issued and run.payload_transfer_started:
                     future._publish_uncertain(ExecutionUncertainError("subprocess failed after payload transfer began"))
                 else:
-                    future._publish_exception(exc if isinstance(exc, ExecutionError) else ExecutionError("subprocess execution failed"))
+                    future._publish_exception(exc if isinstance(
+                        exc, ExecutionError
+                    ) else ExecutionError(
+                        f"subprocess execution failed ({type(exc).__name__})"))
         finally:
             with self._lock:
                 launched = self._launching.get(call.submission_id)
@@ -512,6 +570,12 @@ class SubProcessBackend(Backend):
         owner_data: list[tuple[OwnerEnvelopeType, bytes]] = []
         if call.environment is not None:
             owner_data.append((OwnerEnvelopeType.ENVIRONMENT, _owner_json(call.environment.to_data(), self._config.owner_envelope_limit_bytes)))
+        if call.environment_spec is not None:
+            owner_data.append(
+                (OwnerEnvelopeType.SELECTION,
+                 _owner_json(
+                     {"selector_id": call.environment_spec.spec.semantic_id},
+                     self._config.owner_envelope_limit_bytes)))
         if call.world is not None:
             owner_data.append((OwnerEnvelopeType.WORLD, _owner_json(call.world.to_data(), self._config.owner_envelope_limit_bytes)))
             assert run.reservation is not None and run.reservation.allocation is not None
@@ -534,7 +598,7 @@ class SubProcessBackend(Backend):
             self._send_stop(run, descriptor)
             raise AdmissionError("admission deadline exceeded")
         record: EnvironmentRecord | None = None
-        if call.environment is not None:
+        if call.environment is not None or call.environment_spec is not None:
             owner_frame = reader.read()
             conversation.accept_frame(owner_frame)
             if owner_frame.owner is not OwnerEnvelopeType.ENVIRONMENT:
@@ -548,6 +612,12 @@ class SubProcessBackend(Backend):
             allocation = WorldAllocation.from_data(_json(owner_frame.payload, self._config.owner_envelope_limit_bytes))
         else:
             allocation = None
+        if call.environment_spec is not None:
+            selection_report = compare_selection(call.environment_spec, record)
+            if not selection_report.ok:
+                raise AdmissionError(
+                    "worker identity does not match the selected environment",
+                    report=selection_report)
         decision = admit(
             environment=call.environment, world=call.world, record=record,
             allocation=allocation, deadline=call.admission_deadline,
@@ -755,6 +825,10 @@ class SubProcessBackend(Backend):
 
     def _select_environment(self, call: SubmittedCall[T]) -> tuple[list[str], EnvironmentCandidate | None]:
         """Select a launchable existing environment only when one was requested."""
+        if call.environment_spec is not None:
+            return list(
+                call.environment_spec.command), self._selection_candidate(
+                    call.environment_spec)
         if call.environment is None:
             return [str(self._python())], None
         deadline = call.admission_deadline
@@ -769,6 +843,21 @@ class SubProcessBackend(Backend):
             if decision.go:
                 return self._command_interpreter(spec), candidate
         raise AdmissionError("no launchable environment satisfies the supplied requirement")
+
+    @staticmethod
+    def _selection_candidate(
+            selection: ResolvedEnvironmentSelection) -> EnvironmentCandidate:
+        """
+        Build the one frozen exact candidate without discovery or reprobe.
+        """
+        return EnvironmentCandidate(
+            f"selected:{selection.spec.semantic_id}",
+            selection.spec,
+            selection.record,
+            None,
+            True,
+            (),
+        )
 
     def _reserve(self, call: SubmittedCall[T], future: SubProcessFuture[T]) -> Reservation | None:
         """Acquire one bounded shared-authority charge before native launch.
@@ -830,13 +919,31 @@ class SubProcessBackend(Backend):
             return [spec.conda_executable, "run", "-p" if spec.prefix else "-n", spec.prefix or spec.name or "", "--no-capture-output", "--", "python"]
         raise AdmissionError("selected environment launch form is unsupported for subprocess execution")
 
-    def _launch(self, runtime: list[str], descriptor: str, candidate: EnvironmentCandidate | None) -> subprocess.Popen[bytes]:
+    def _launch(
+        self,
+        runtime: list[str],
+        descriptor: str,
+        candidate: EnvironmentCandidate | None,
+        selection: ResolvedEnvironmentSelection | None,
+    ) -> subprocess.Popen[bytes]:
         """Create an owned worker process using a minimal explicit environment."""
         command = [*runtime, "-m", "dryml.execute._worker", "--bootstrap", descriptor]
         overrides: dict[str, str] = dict(self._config.env_vars)
-        if candidate is not None and isinstance(candidate.spec, (PythonExecutableSpec, CondaEnvironmentSpec)):
+        if selection is not None:
+            for key, value in selection.launch_env.items():
+                overrides.setdefault(key, value)
+        elif candidate is not None and isinstance(
+                candidate.spec, (PythonExecutableSpec, CondaEnvironmentSpec)):
+            selected = build_probe_env(
+                base=os.environ,
+                overrides=candidate.spec.env,
+                pythonpath_policy=candidate.spec.pythonpath_policy,
+                extra_pythonpath=candidate.spec.extra_pythonpath,
+            )
             for key, value in candidate.spec.env.items():
                 overrides.setdefault(key, value)
+            if "PYTHONPATH" in selected:
+                overrides.setdefault("PYTHONPATH", selected["PYTHONPATH"])
         return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=self._config.working_directory, env=minimal_environment(overrides), start_new_session=(os.name == "posix"), creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0)
 
     def _request_cancel(self, run: _Run) -> bool:

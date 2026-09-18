@@ -49,10 +49,22 @@ def test_common_public_api_is_exact_and_specializations_remain_separate():
 def test_control_bearing_signatures_keep_workload_kwargs_separate():
     """Root helpers require explicit configuration and reserve only controls."""
     expected = {
-        execute.run: ("fn", "args", "backend", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"),
-        execute.submit: ("fn", "args", "backend", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"),
-        execute.Executor.run: ("self", "fn", "args", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"),
-        execute.Executor.submit: ("self", "fn", "args", "kwargs", "environment", "world", "execution_timeout", "stream_output", "done_callbacks", "output", "worker_setup"),
+        execute.run:
+        ("fn", "args", "backend", "kwargs", "environment", "environment_spec",
+         "world", "execution_timeout", "stream_output", "done_callbacks",
+         "output", "worker_setup"),
+        execute.submit:
+        ("fn", "args", "backend", "kwargs", "environment", "environment_spec",
+         "world", "execution_timeout", "stream_output", "done_callbacks",
+         "output", "worker_setup"),
+        execute.Executor.run:
+        ("self", "fn", "args", "kwargs", "environment", "environment_spec",
+         "world", "execution_timeout", "stream_output", "done_callbacks",
+         "output", "worker_setup"),
+        execute.Executor.submit:
+        ("self", "fn", "args", "kwargs", "environment", "environment_spec",
+         "world", "execution_timeout", "stream_output", "done_callbacks",
+         "output", "worker_setup"),
     }
     for function, parameters in expected.items():
         signature = inspect.signature(function)

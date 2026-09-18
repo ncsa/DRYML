@@ -1520,7 +1520,10 @@ def function(target: Callable[..., Any]) -> Callable[..., Any]:
         target keywords as controls.
     """
 
+    from ._callable_inspection import _FunctionInvocationOwner
+
     plan = compile_signature(target)
+    owner = _FunctionInvocationOwner(target)
 
     @functools.wraps(target)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -1533,6 +1536,10 @@ def function(target: Callable[..., Any]) -> Callable[..., Any]:
     # Execute transports the original callable and asks this owner to establish
     # exactly one local boundary; the compiled caller plan never crosses workers.
     wrapped.__dryml_execute_raw_target__ = target
+    # The identity-bound owner is the authoritative passive relationship for
+    # transport/inspection.  The legacy raw-target field remains metadata only.
+    owner.wrapper = wrapped
+    wrapped.__dryml_function_invocation_owner__ = owner
     return wrapped
 
 

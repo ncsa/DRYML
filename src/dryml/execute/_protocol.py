@@ -21,10 +21,10 @@ from typing import BinaryIO
 from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_json_load_bytes, json_ready
 
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 # This is deliberately a protocol identity, rather than a package version: a
 # selected interpreter must execute the same worker implementation contract.
-WORKER_PROTOCOL_ID = "dryml.execute.worker.v2"
+WORKER_PROTOCOL_ID = "dryml.execute.worker.v3"
 _HEADER_LENGTH_BYTES = 4
 _PAYLOAD_LENGTH_BYTES = 8
 _MAX_HEADER_LENGTH = (1 << (_HEADER_LENGTH_BYTES * 8)) - 1
@@ -72,6 +72,7 @@ class OwnerEnvelopeType(str, Enum):
     ALLOCATION = "allocation"
     CONTROLS = "controls"
     SETUP = "setup"
+    SELECTION = "selection"
 
 
 _STATE_TYPES = {

@@ -3,18 +3,31 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from time import monotonic
 from types import SimpleNamespace
 
 import pytest
 
-from dryml.execute._protocol import BootstrapDescriptor, Correlation, FrameState, FrameType, ProtocolConversation, decode_exact_frame, encode_control, encode_frame
+import dryml.execute.ray as ray_module
+from dryml.execute._protocol import (
+    BootstrapDescriptor, Correlation, FrameState, FrameType, OwnerEnvelopeType,
+    ProtocolConversation, decode_exact_frame, encode_control, encode_frame,
+    encode_owner_envelope,
+)
+from dryml.execute.errors import AdmissionError
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.admission import _admit_observed_logical
-from dryml.execute.models import EnvironmentCandidate, WorkerSetup
-from dryml.execute.ray import RayBackendConfig, RayFuture, _logical_world, _native_error, _native_options, _requested_amounts, _resource_amounts
+from dryml.execute.models import (EnvironmentCandidate, ResourceAmounts,
+                                  WorkerSetup)
+from dryml.execute.ray import (RayBackendConfig, RayFuture, _logical_world,
+                               _native_error, _native_options,
+                               _requested_amounts, _resource_amounts)
 from dryml.environments.specs import PythonExecutableSpec
-from dryml.formats import canonical_json_load_bytes
+from dryml.environments import CondaEnvironmentSpec, CurrentEnvironmentSpec
+from dryml.environments.records import EnvironmentRecord, PythonRecord
+from dryml.environments.selection import resolve_environment_spec
+from dryml.formats import canonical_json_bytes, canonical_json_load_bytes
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
 
 
@@ -93,6 +106,86 @@ def test_ray_runtime_environment_merges_candidate_then_explicit_overrides():
     }
 
 
+def test_ray_runtime_environment_honors_selector_pythonpath_policy():
+    """
+    Ray receives selector PYTHONPATH controls instead of silently dropping
+    them.
+    """
+    candidate = EnvironmentCandidate(
+        "candidate",
+        PythonExecutableSpec("/existing/python",
+                             pythonpath_policy="explicit",
+                             extra_pythonpath=("/one", "/two")),
+        None,
+        None,
+        True,
+        (),
+    )
+    backend = RayBackendConfig().create_backend()
+
+    runtime = backend._runtime_environment(
+        {"py_executable": "/existing/python"}, candidate)
+
+    assert runtime["env_vars"] == {"PYTHONPATH": "/one:/two"}
+
+
+def test_ray_exact_current_pin_stays_lazy_and_conda_run_fails_before_submission(  # noqa: E501
+):
+    """
+    Ray admits supported pinned forms or rejects launcher semantics without SDK
+    work.
+    """
+    backend = RayBackendConfig().create_backend()
+    current = resolve_environment_spec(CurrentEnvironmentSpec())
+
+    candidate, runtime = backend._select_environment(
+        SimpleNamespace(environment_spec=current, environment=None))
+    assert candidate.record == current.record
+    assert runtime == {"py_executable": current.command[0]}
+
+    conda_run = replace(
+        current,
+        spec=CondaEnvironmentSpec(prefix="/existing", launch_mode="conda-run"),
+        command=("conda", "run", "-p", "/existing", "--no-capture-output",
+                 "--", "python"),
+        resolved_prefix="/existing",
+    )
+    with pytest.raises(Exception, match="launcher form"):
+        backend._select_environment(
+            SimpleNamespace(environment_spec=conda_run, environment=None))
+
+
+def test_ray_exact_pin_world_plan_is_keyed_to_its_selected_candidate(
+        monkeypatch):
+    """
+    Keep exact selector and logical-world feasibility evidence associated.
+    """
+    selection = resolve_environment_spec(CurrentEnvironmentSpec())
+    backend = RayBackendConfig(
+        automatic_environment_discovery=False,
+    ).create_backend()
+    resources = SimpleNamespace(
+        total=ResourceAmounts(1, None, {}, {}), complete=True,
+    )
+    world = WorldRequirement({
+        "main": RoleRequirement(
+            resources=ResourceRequirement(cpus=CountConstraint(1, 1)),
+        ),
+    })
+    monkeypatch.setattr(backend, "_resources_until",
+                        lambda _deadline: resources)
+
+    selected = backend.discover(
+        environment_spec=selection, world=world, timeout=1,
+    )
+    unpinned = backend.discover(world=world, timeout=1)
+
+    assert [plan.environment_key for plan in selected.plans] == [
+        selected.environments[0].key,
+    ]
+    assert [plan.environment_key for plan in unpinned.plans] == [None]
+
+
 def test_ray_resource_observation_preserves_unknown_dimensions():
     """Native observations never manufacture memory, CPU, or device identifiers."""
     amounts = _resource_amounts({"CPU": 2.0, "GPU": 1.0})
@@ -158,6 +251,167 @@ class _SetupReader:
             return next(self.frames)
         except StopIteration as exc:
             raise EOFError from exc
+
+
+class _HandshakeAuthority:
+    """
+    Reject unexpected grant confirmation before a failed exact-pin handshake.
+    """
+
+    def __init__(self):
+        self.confirmations = 0
+
+    def confirm_grant(self, *args, **kwargs):
+        """Record an invalid post-rejection grant attempt."""
+        del args, kwargs
+        self.confirmations += 1
+        raise AssertionError("selection mismatch must not confirm a Ray grant")
+
+
+class _UnreadPayload:
+    """
+    Fail if a rejected Ray handshake tries to open invocation payload bytes.
+    """
+
+    def __init__(self):
+        self.reads = 0
+
+    @property
+    def path(self):
+        """Reject any pre-authorization payload-path access."""
+        self.reads += 1
+        raise AssertionError("selection mismatch must not read the payload")
+
+
+class _HandshakeSocket(_SetupSocket):
+    """Reuse the frame recorder for a handshake that must stop before GO."""
+
+
+def _handshake_hello(descriptor):
+    """Create one valid fake-Ray HELLO for pre-payload mismatch tests."""
+    return decode_exact_frame(encode_control(
+        FrameState.HELLO, descriptor.correlation,
+        {
+            "token": descriptor.rendezvous_token,
+            "protocol": ray_module.WORKER_PROTOCOL_ID,
+            "dill": ray_module.dill.__version__,
+            "implementation": sys.implementation.name,
+            "python": list(sys.version_info[:2]),
+            "pid": 1234,
+            "worker_id": "ray:worker",
+            "native": {
+                "node_id": "node",
+                "worker_id": "worker",
+                "task_id": "task",
+                "ray": ray_module._RAY_VERSION,
+                "python": list(sys.version_info[:3]),
+                "process_create_time": 1.0,
+                "assigned_resources": {},
+                "accelerator_ids": {},
+            },
+        }, header_limit=65_536,
+    ), header_limit=65_536, payload_limit=65_536)
+
+
+@pytest.mark.parametrize(
+    "mismatch", ("missing", "executable", "prefix", "base_prefix", "software"))
+def test_fake_ray_selection_handshake_rejects_before_go_payload_or_grant(
+        monkeypatch, mismatch):
+    """
+    Reject absent or incompatible exact-pin evidence without authorizing work.
+    """
+    selection = resolve_environment_spec(CurrentEnvironmentSpec())
+    backend = RayBackendConfig().create_backend()
+    descriptor = BootstrapDescriptor(
+        Correlation("ray-pin-reject", 0, 1), "token", "127.0.0.1", 43123,
+        65_536, 1_000_000, 1_000_000, 1_000_000, 1_000_000, 65_536,
+    )
+    hello = _handshake_hello(descriptor)
+    ready = decode_exact_frame(encode_control(
+        FrameState.READY, descriptor.correlation,
+        {"ready": True, "pid": 1234, "worker_id": "ray:worker"},
+        header_limit=65_536,
+    ), header_limit=65_536, payload_limit=65_536)
+    observed: EnvironmentRecord | None = selection.record
+    if mismatch == "executable":
+        observed = replace(observed,
+                           python=replace(observed.python,
+                                          executable="/wrong/python"))
+    elif mismatch == "prefix":
+        observed = replace(observed,
+                           python=replace(observed.python,
+                                          prefix="/wrong/prefix"))
+    elif mismatch == "base_prefix":
+        observed = replace(observed,
+                           python=replace(observed.python,
+                                          base_prefix="/wrong/base"))
+    elif mismatch == "software":
+        observed = replace(observed,
+                           python=PythonRecord(
+                               version="0.0.0",
+                               implementation=observed.python.implementation,
+                               executable=observed.python.executable,
+                               prefix=observed.python.prefix,
+                               base_prefix=observed.python.base_prefix,
+                           ))
+    if mismatch == "missing":
+        evidence = decode_exact_frame(encode_owner_envelope(
+            FrameState.READY, descriptor.correlation, OwnerEnvelopeType.WORLD,
+            b"{}", header_limit=65_536, owner_limit=1_000_000,
+        ), header_limit=65_536, payload_limit=1_000_000)
+    else:
+        assert observed is not None
+        evidence = decode_exact_frame(encode_owner_envelope(
+            FrameState.READY, descriptor.correlation,
+            OwnerEnvelopeType.ENVIRONMENT,
+            canonical_json_bytes(
+                observed.to_data(), max_entries=65_536, max_nodes=65_536,
+            ), header_limit=65_536,
+            owner_limit=1_000_000,
+        ), header_limit=65_536, payload_limit=1_000_000)
+
+    class Reader:
+        """
+        Supply only the worker's readiness and environment-evidence frames.
+        """
+
+        def __init__(self, *_args, **_kwargs):
+            self.frames = iter((ready, evidence))
+
+        def read(self):
+            """Return exactly one ordered fake worker frame."""
+            return next(self.frames)
+
+    socket = _HandshakeSocket()
+    output = ExecutionOutput()
+    future = RayFuture("ray-pin-reject", output=output, termination_timeout=5)
+    run = ray_module._Run(future, socket, SimpleNamespace())
+    authority = _HandshakeAuthority()
+    backend._authority = authority
+    payload = _UnreadPayload()
+    call = SimpleNamespace(
+        environment=None, environment_spec=selection, world=None,
+        admission_deadline=monotonic() + 5, payload=payload,
+    )
+    conversation = backend._conversation(descriptor)
+    conversation.accept_frame(hello)
+    monkeypatch.setattr(ray_module, "SocketFrameReader", Reader)
+
+    with pytest.raises(AdmissionError):
+        backend._handshake(
+            call, future, run, descriptor, None,
+            SimpleNamespace(node_id="node"), hello, conversation,
+        )
+
+    sent = [
+        decode_exact_frame(frame, header_limit=65_536, payload_limit=1_000_000)
+        for frame in socket.frames
+    ]
+    assert all(frame.state not in {FrameState.GO, FrameState.PAYLOAD}
+               for frame in sent)
+    assert payload.reads == 0
+    assert authority.confirmations == 0
+    assert not run.issued
 
 
 def _setup_conversation(correlation):

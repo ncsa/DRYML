@@ -85,6 +85,20 @@ credentials, and direct local paths. Diagnostics are bounded. This release does
 not claim exhaustive redaction of third-party exceptions or that semantic IDs
 make weak declared secrets safe.
 
+`session.snapshot_for_generation(generation)` projects the exact immutable
+`SessionGeneration` already held by a publication lease. It does not call
+`publication.current()`, reread the host, or synthesize a newer session view.
+Admission owners use this seam while holding their lease so the evidence they
+check is tied to the same generation that remains protected through their final
+operation.
+
+Dispatch's explicit `InProcess()` route uses this projection while holding the
+publication lease through final requirement checks and one synchronous direct
+call. It does not reconfigure Session, manufacture an allocation from host
+inventory, or extend the lease to later consumption of returned lazy data.
+An incompatible concurrent publication receives `PublicationBusyError` through
+the runtime owner.
+
 ## Scope
 
 This session facade configures only the current process. It does not publish

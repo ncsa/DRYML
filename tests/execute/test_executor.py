@@ -70,8 +70,14 @@ class FakeBackend(Backend):
         except BaseException as exc:
             future._publish_exception(exc)
 
-    def discover(self, *, environment=None, world=None, timeout: float):
-        raise AssertionError("U4 owns discovery")
+    def discover(self,
+                 *,
+                 environment=None,
+                 environment_spec=None,
+                 world=None,
+                 timeout: float):
+        self.discovery = (environment, environment_spec, world, timeout)
+        return self.discovery
 
     def resources(self, *, timeout: float):
         raise AssertionError("U4 owns resource inspection")
@@ -125,6 +131,71 @@ def test_executor_accepts_one_precreated_concrete_future_and_runs_descriptor(tmp
     assert backend.calls[0][1] is future
     assert not hasattr(backend.calls[0][0], "fn")
     executor.close()
+
+
+def test_discover_forwards_one_resolved_exact_selector_without_backend_enumeration(  # noqa: E501
+        tmp_path):
+    """
+    Generic discovery gives the backend one frozen selection rather than a raw
+    spec.
+    """
+    from dryml.environments import CurrentEnvironmentSpec
+    from dryml.execute.executor import Executor
+
+    backend = FakeBackend()
+    executor = Executor(config(tmp_path, backend))
+    try:
+        result = executor.discover(environment_spec=CurrentEnvironmentSpec())
+        assert result[1] is not None
+        assert result[1].spec == CurrentEnvironmentSpec()
+    finally:
+        executor.close()
+
+
+def test_view_keeps_current_selector_inert_until_each_submission(
+        tmp_path, monkeypatch):
+    """A view captures no Current evidence until its individual call begins."""
+    from dryml.environments import CurrentEnvironmentSpec
+    from dryml.execute import executor as executor_module
+    from dryml.execute.executor import Executor
+
+    backend = FakeBackend()
+    executor = Executor(config(tmp_path, backend))
+    resolved = []
+    original = executor_module.resolve_environment_spec
+
+    def observe(spec):
+        """Record each operation-local selector resolution."""
+        resolved.append(spec)
+        return original(spec)
+
+    monkeypatch.setattr(executor_module, "resolve_environment_spec", observe)
+    try:
+        view = executor.with_options(environment_spec=CurrentEnvironmentSpec())
+        assert resolved == []
+        assert view.run(lambda: 1) == 1
+        assert resolved == [CurrentEnvironmentSpec()]
+    finally:
+        executor.close()
+
+
+def test_unpinned_discovery_keeps_the_legacy_backend_call_shape(tmp_path):
+    """Existing backend discover methods need no unused selector keyword."""
+    from dryml.execute.executor import Executor
+
+    class LegacyDiscoveryBackend(FakeBackend):
+        """Model a pre-selector backend implementation."""
+
+        def discover(self, *, environment=None, world=None, timeout):
+            self.discovery = (environment, world, timeout)
+            return self.discovery
+
+    backend = LegacyDiscoveryBackend()
+    executor = Executor(config(tmp_path, backend))
+    try:
+        assert executor.discover()[0:2] == (None, None)
+    finally:
+        executor.close()
 
 
 def test_invalid_controls_reject_before_quota_serialization_or_future_factory(tmp_path):

@@ -58,7 +58,8 @@ with Executor(SubProcessConfig()) as executor:
     assert output.snapshot().complete
 ```
 
-`Executor.submit(fn, /, *args, kwargs=None, environment=None, world=None,
+`Executor.submit(fn, /, *args, kwargs=None, environment=None,
+environment_spec=None, world=None,
 execution_timeout="inherit", stream_output=None, done_callbacks=(), output=None,
 worker_setup=None)`
 copies controls, serializes exactly one callable/argument graph to an
@@ -68,12 +69,40 @@ separate from Execute controls. Invalid controls, requirements, preflight
 serialization, spool capacity, or an executor closing fail synchronously.
 Accepted asynchronous failures are published by the future.
 
+`environment_spec` is an independent exact existing-environment pin, not an
+`EnvironmentRequirement` and not a preference. `CurrentEnvironmentSpec` freezes
+the submitting coordinator's interpreter, prefix, base prefix, and stable
+Python/DRYML/distribution evidence at call entry. `PythonExecutableSpec` preserves
+its supplied executable spelling, including a venv symlink. A named
+`CondaEnvironmentSpec` resolves once to exactly one existing prefix; zero or
+ambiguous matches fail. A supplied selector overrides `SubProcessConfig`'s
+`python_executable` and candidate search, including when `environment` is `None`.
+Unsupported container or backend launcher forms fail before payload transfer;
+Execute never provisions software or falls back to another environment.
+
 `Executor.run` has the same keyword-only controls and returns `future.result()`.
 It does not close the reusable executor. `Executor.with_options(...)` returns
 an `ExecutorView` retaining the parent executor. A view has the same `run(fn,
 /, *args, **kwargs)` and `submit(fn, /, *args, **kwargs)` workload boundary, so
 control-named workload keywords remain ordinary workload data. The view never
 owns a second backend, quota, future set, or close operation.
+
+`with_options(environment_spec=...)` retains the typed selector without I/O. Each
+later `run` or `submit` resolves it once at that operation's entry, so a
+`CurrentEnvironmentSpec` observes the then-current coordinator environment rather
+than the environment at view construction. `Executor.discover(environment_spec=...)`
+uses one independent resolution, reports only that frozen target, and remains
+non-reserving. Generic and core module-level
+`submit`/`run`, reusable `submit`/`run`, views, and `discover` accept the same
+control. Core Execute forwards it to generic Execute and has no separate selector
+implementation.
+
+Selector environment variables and `pythonpath_policy` are frozen with the
+operation and applied to subprocess launches. Ray passes an exact selected Python
+path through its supported `py_executable` runtime control and verifies fresh
+worker identity before payload transfer. Ray rejects unsupported launcher forms,
+including `conda-run`, during discovery and submission rather than reporting them
+as viable or dropping their launch controls.
 
 `WorkerSetup(factory="module:qualname", data={...})` is an optional immutable
 generic control for a trusted worker-local context manager. The factory identifier
@@ -86,7 +115,7 @@ encoding; an exit failure preserves an already encoded result or workload error,
 but leaves the Future cleanup state incomplete and `cleanup()` raises rather than
 claiming that unobserved worker teardown was reconciled.
 
-The generic private worker protocol is version 2. After admission and `GO`,
+The generic private worker protocol is version 3. After admission and `GO`,
 setup-bearing calls send `SETUP` and wait for `SETUP_READY` before `PAYLOAD`.
 Bounded `OUTPUT` may arrive during setup, invocation, and teardown; terminal
 outcomes and final output fences complete the exchange. An incompatible worker fails before `GO`;
@@ -151,7 +180,7 @@ output limits, polling, and cleanup budgets are forwarded to the worker setup,
 invocation, outcome, and recovery path without a core-local override.
 
 `Executor.submit(fn, /, *args, kwargs=None, core=None, environment=None,
-world=None, execution_timeout="inherit", stream_output=None,
+environment_spec=None, world=None, execution_timeout="inherit", stream_output=None,
 done_callbacks=(), output=None)` returns `CoreExecutionFuture`, not the generic
 byte Future. Per-call core options are resolved over executor options and the
 submission caller's session once before callable preparation; the Store table,
@@ -268,7 +297,7 @@ the future's cleanup completes. One-off automatic cleanup uses the configured
 bounded attempts and retry interval. A cleanup failure preserves the future and
 its result/error for explicit recovery rather than reporting cleanup as complete.
 
-`Executor.discover(environment=None, world=None, timeout=None)` returns a
+`Executor.discover(environment=None, environment_spec=None, world=None, timeout=None)` returns a
 non-reserving `DiscoverySnapshot`; `resources(timeout=None)` returns a bounded
 backend-scoped `ResourceSnapshot`. `close(cancel=False, timeout=None)` first
 stops acceptance, then reconciles accepted work, spools, backend handles, and
@@ -451,7 +480,7 @@ Invocation and result data remain in the submission child until qualified future
 cleanup; the caller-owned spool parent, current directory, existing
 environments, and Ray deployment are preserved.
 
-The coordinator validates private protocol v2 and executes only after the worker
+The coordinator validates private protocol v3 and executes only after the worker
 handshake/admission evidence and GO gate. Setup-bearing calls add `SETUP`,
 setup-time `OUTPUT`, and `SETUP_READY` before `PAYLOAD`; `RESULT` is forbidden
 before payload transfer. A setup `ERROR` cannot resume with readiness or payload,
@@ -466,6 +495,12 @@ implementation has no worker disk spool.
 caller-owned directories, a borrowed Ray driver, and the server itself are not
 cleaned. `ExecutionUncertainError`, failed/cancelled outcomes, missing final
 fences, mismatch, or incomplete cleanup are never presented as successful work.
+
+For an exact pin, the fresh worker reports executable, prefix, base prefix, and
+stable software evidence before `GO`, even if no software requirement was supplied.
+A mismatch rejects before callable payload transfer. This is point-in-time
+admission: external environment or package mutation after authorization is an
+accepted limitation and is not monitored for the operation's lifetime.
 
 ## Testing And CI
 
@@ -483,6 +518,12 @@ fixture before pytest, installs the built DRYML artifact plus `dill` and pinned
 Ray into both targets, exports the integration inputs, runs the real Ray and
 existing-environment tests, then stops only that job-owned cluster. This is
 developer test-fixture setup, not a runtime feature.
+
+Dispatch can use this same existing-target API independently for declaration
+probes and workloads. A Ray probe does not move a local or in-process workload,
+and matching Ray configuration values still create separate probe and workload
+owners. The dedicated CI fixture may exercise those paths; ordinary tests and
+product calls require the caller to provide every target.
 
 The lightweight Ubuntu/Windows Python 3.10-3.14 matrix remains framework-reduced
 and exercises common, subprocess, package, and documentation coverage without a

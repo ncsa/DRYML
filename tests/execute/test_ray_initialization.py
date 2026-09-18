@@ -837,7 +837,10 @@ def test_native_submission_exception_is_redacted_and_retained_as_uncertain():
     reservation = authority.reserve(future.submission_id, ResourceAmounts(1.0, None, {}, {}), generation=connection.generation, attempt="0", total=ResourceAmounts(1.0, None, {}, {}))
     assert reservation is not None
     backend._reserve = lambda call: reservation
-    call = SimpleNamespace(submission_id=future.submission_id, admission_deadline=monotonic() + 1, world=None, environment=None)
+    call = SimpleNamespace(
+        submission_id=future.submission_id, admission_deadline=monotonic() + 1,
+        world=None, environment=None, environment_spec=None,
+    )
 
     backend._run(call, future)
     with pytest.raises(ExecutionUncertainError) as failure:

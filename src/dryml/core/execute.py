@@ -27,6 +27,8 @@ from dryml.execute import Executor as _GenericExecutor
 from dryml.execute import submit as _generic_submit
 from dryml.execute.errors import CleanupError, ExecutionError
 from dryml.execute.models import ExecutionIssue, ExecutionSnapshot, WorkerSetupContext
+from dryml.environments import EnvironmentRequirement
+from dryml.environments.specs import EnvironmentSpec
 from dryml.formats import make_envelope, semantic_id, validate_envelope
 from dryml.runtime import (
     ExecutionGrant,
@@ -34,7 +36,9 @@ from dryml.runtime import (
     RuntimeMode,
     activation_scope,
     active_runtime,
+    publication,
 )
+from dryml.worlds import WorldRequirement
 
 from dryml.formats import deep_freeze_json
 from .repo import Repo
@@ -863,6 +867,22 @@ class _EffectiveCoreOptions:
     update_args: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _FrozenCoreControls:
+    """
+    Inert call-entry core controls retained until guarded preparation.
+
+        This package-private value is captured before an external probe can
+        run. It
+        retains only resolved option values and the entry orchestration floor;
+        it does
+        not export, open, or otherwise touch selected Store authority.
+    """
+
+    effective: _EffectiveCoreOptions
+    call_entry_orchestrator: bool
+
+
 def _resolve_field(name: str, call: CoreOptions | None, executor: CoreOptions | None, terminal: Any) -> Any:
     """Resolve one option field without collapsing explicit ``None`` into inheritance."""
     for options in (call, executor):
@@ -915,6 +935,33 @@ def resolve_core_options(
             resolved.return_objects is True or resolved.update_args):
         raise ValueError("orchestration mode prohibits live result materialization and argument updates")
     return resolved
+
+
+def _capture_frozen_core_controls(
+        core: CoreOptions | None, *, executor_core: CoreOptions | None,
+) -> _FrozenCoreControls:
+    """Capture ambient core controls before external preflight work.
+
+    Args:
+        core: Inert per-call overrides, if any.
+        executor_core: Inert reusable defaults below ``core``, if any.
+
+    Returns:
+        A package-private call-entry snapshot suitable for
+        :func:`_prepare_frozen_core_submission`.
+
+    Raises:
+        TypeError, ValueError: If effective options are invalid at call entry.
+
+    Side Effects:
+        Reads immutable session/runtime controls once. It never exports, opens,
+        saves, closes, or otherwise accesses a Repo or Store.
+    """
+
+    return _FrozenCoreControls(
+        resolve_core_options(core, executor=executor_core),
+        active_runtime().mode is RuntimeMode.ORCHESTRATOR,
+    )
 
 
 def _store_identity(path: str) -> tuple[int, int]:
@@ -976,6 +1023,8 @@ def _freeze_shared_storage(repo: Repo, control_store: DirStore | None) -> _Froze
     definition and never observes the caller's handles.
     """
     with repo._configuration_lock:
+        if repo._closing or repo._closed:
+            raise ValueError("shared Store authority is unavailable")
         definition = repo.to_definition()
         source_stores = _definition_store_table(definition, tuple(repo.stores))
         setup = _freeze_storage_setup(_shared_storage_setup(definition, control_store))
@@ -1029,6 +1078,72 @@ class _PreparedSharedStorage:
         if not self._closed:
             self.recovery_repo.close(flush=False)
             self._closed = True
+
+
+@dataclass(slots=True)
+class _FrozenCoreSubmission:
+    """
+    One owned, validated core payload awaiting generic backend acceptance.
+
+        Args:
+            storage: Owned recovery reconstruction and frozen storage
+            descriptors.
+            prepared: Detached invocation bytes and update descriptors.
+            recovery: Coordinator-only caller-object associations.
+            effective: Call-entry resolved core controls.
+            result_limit_bytes: Frozen generic result budget after setup
+            overhead.
+            return_objects: Call-entry result policy after the orchestration
+            floor.
+            call_entry_orchestrator: Whether the caller entered under the
+            strict floor.
+
+        This package-internal value is the only handoff between guarded core
+        payload
+        preparation and backend submission.  Its owner must either transfer it
+        to a
+        ``CoreExecutionFuture`` or call :meth:`close` after a failed
+        acceptance.
+    """
+
+    storage: _PreparedSharedStorage
+    prepared: PreparedCoreCall
+    recovery: _CoreRecovery
+    effective: _EffectiveCoreOptions
+    result_limit_bytes: int
+    return_objects: bool
+    call_entry_orchestrator: bool
+    _state: str = field(default="pending", init=False, repr=False)
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False)
+
+    def close(self) -> None:
+        """
+        Release only preparation-owned recovery resources after non-acceptance.
+        """
+
+        with self._lock:
+            if self._state in {"accepted", "closed"}:
+                return
+            self.storage.close()
+            self._state = "closed"
+
+    def _begin_acceptance(self) -> None:
+        """Claim this payload for exactly one backend acceptance attempt."""
+
+        with self._lock:
+            if self._state != "pending":
+                raise RuntimeError(
+                    "frozen core submission has already been consumed")
+            self._state = "submitting"
+
+    def _accepted(self) -> None:
+        """Transfer recovery ownership to the returned core future."""
+
+        with self._lock:
+            if self._state != "submitting":
+                raise RuntimeError(
+                    "frozen core submission acceptance state is invalid")
+            self._state = "accepted"
 
 
 def prepare_shared_storage(
@@ -1834,26 +1949,113 @@ class CoreExecutionFuture:
             pass
 
 
-def _submit_core_call(
-        submitter: Callable[..., ExecutionFuture[bytes]], config: BackendConfig,
-        executor_core: CoreOptions | None, fn: Callable[..., Any], args: tuple[Any, ...],
-        *, kwargs: Mapping[str, Any] | None, core: CoreOptions | None,
-        environment: Any, world: Any, execution_timeout: Any, stream_output: bool | None,
-        done_callbacks: Sequence[CoreCallback], output: ExecutionOutput | None,
-        one_off: bool,
-) -> CoreExecutionFuture:
-    """Freeze and submit one core call through a public generic submission function."""
+def _validate_core_validators(
+    validators: Sequence[Callable[[],
+                                  None]]) -> tuple[Callable[[], None], ...]:
+    """
+    Validate and freeze coordinator preflight callbacks without invoking them.
+    """
+
+    frozen = tuple(validators)
+    if not all(callable(validator) for validator in frozen):
+        raise TypeError("core preparation validators must be callable")
+    return frozen
+
+
+def _run_core_validators(validators: Sequence[Callable[[], None]]) -> None:
+    """
+    Run one frozen validator sequence at a caller-defined preparation fence.
+    """
+
+    for validator in validators:
+        validator()
+
+
+def _check_orchestration_floor(
+        effective: _EffectiveCoreOptions, *, call_entry_orchestrator: bool,
+) -> None:
+    """
+    Preserve call-entry restrictions and reject later stricter core controls.
+    """
+
+    current_orchestrator = active_runtime().mode is RuntimeMode.ORCHESTRATOR
+    if current_orchestrator and (effective.return_objects is True
+                                 or effective.update_args):
+        raise ValueError(
+            "orchestration mode prohibits live result materialization and "
+            "argument updates"
+        )
+    if call_entry_orchestrator and effective.return_objects is True:
+        raise ValueError(
+            "call entered under the orchestration result-materialization floor"
+        )
+
+
+def _prepare_frozen_core_submission(
+    config: BackendConfig,
+    executor_core: CoreOptions | None,
+    fn: Callable[..., Any],
+    args: tuple[Any, ...],
+    *,
+    kwargs: Mapping[str, Any] | None,
+    core: CoreOptions | None,
+    validators: Sequence[Callable[[], None]] = (),
+    frozen_controls: _FrozenCoreControls | None = None,
+) -> _FrozenCoreSubmission:
+    """
+    Freeze core controls and prepare a discardable payload before backend
+    acceptance.
+
+        Args:
+            config: Generic backend configuration whose transport budgets are
+            frozen.
+            executor_core: Reusable core defaults beneath ``core``.
+            fn: Exact callable to encode.
+            args: Positional workload values.
+            kwargs: Optional string-keyed workload mapping.
+            core: Per-call inert core overrides.
+            validators: Coordinator-owned drift guards run before preparation,
+            after
+                serialization, and by the paired acceptance helper.
+            frozen_controls: Optional call-entry control capture. When
+            supplied,
+                preparation never rereads ambient session or runtime controls.
+
+        Returns:
+            One owned frozen submission.  Callers must pass it to
+            :func:`_submit_frozen_core_submission` or close it on abandonment.
+
+        Raises:
+            TypeError, ValueError, CoreCallCodecError: For malformed controls,
+                unavailable borrowed storage, guard failure, or transport
+                preparation.
+
+        Side Effects:
+            Exports only the selected call-entry Repo and opens a fresh owned
+            recovery
+            Repo.  A failed guard or serialization releases that owned
+            reconstruction;
+            caller-owned Repo and Store handles are never closed.
+    """
+
     if kwargs is not None and not isinstance(kwargs, Mapping):
         raise TypeError("kwargs must be a mapping or None")
     call_kwargs = {} if kwargs is None else dict(kwargs)
     if not all(isinstance(key, str) for key in call_kwargs):
         raise TypeError("kwargs keys must be strings")
-    if not isinstance(done_callbacks, Sequence):
-        raise TypeError("done_callbacks must be a finite sequence")
-    callbacks = tuple(done_callbacks)
-    if not all(callable(callback) for callback in callbacks):
-        raise TypeError("done_callbacks entries must be callable")
-    effective = resolve_core_options(core, executor=executor_core)
+    frozen_validators = _validate_core_validators(validators)
+    if frozen_controls is None:
+        frozen_controls = _capture_frozen_core_controls(
+            core, executor_core=executor_core)
+    elif type(frozen_controls) is not _FrozenCoreControls:
+        raise TypeError(
+            "frozen_controls must be a _FrozenCoreControls or None")
+    effective = frozen_controls.effective
+    call_entry_orchestrator = frozen_controls.call_entry_orchestrator
+    _run_core_validators(frozen_validators)
+    with publication.lease():
+        _check_orchestration_floor(
+            effective, call_entry_orchestrator=call_entry_orchestrator)
     storage = prepare_shared_storage(_effective=effective)
     try:
         from dryml.execute._worker import setup_result_bytes_limit
@@ -1870,33 +2072,200 @@ def _submit_core_call(
             invocation_limit_bytes=config.invocation_limit_bytes,
         )
         recovery = strategy.bind_recovery(prepared, args=args, kwargs=call_kwargs)
-        # ``auto`` is resolved at acceptance, not in the generic callback thread.
+        _run_core_validators(frozen_validators)
+        with publication.lease():
+            _check_orchestration_floor(
+                effective, call_entry_orchestrator=call_entry_orchestrator)
+        # ``auto`` remains constrained by the call-entry floor even after a
+        # later relaxation, so delayed preparation cannot widen caller
+        # authority.
         return_objects = effective.return_objects is True or (
-            effective.return_objects == "auto" and active_runtime().mode is not RuntimeMode.ORCHESTRATOR
+            effective.return_objects == "auto" and not call_entry_orchestrator
         )
-        backend_future = submitter(
-            _invoke_prepared_outcome, prepared.invocation,
-            config.invocation_limit_bytes, core_result_limit, effective.update_args,
-            kwargs=None, environment=environment, world=world,
-            execution_timeout=execution_timeout, stream_output=stream_output,
-            output=output, worker_setup=prepared.worker_setup(effective.runtime, cache=effective.cache),
-        )
-        return CoreExecutionFuture(
-            backend_future, prepared_storage=storage, prepared=prepared, recovery=recovery,
-            return_objects=return_objects, result_limit_bytes=core_result_limit,
-            done_callbacks=callbacks, one_off=one_off,
+        return _FrozenCoreSubmission(
+            storage, prepared, recovery, effective, core_result_limit,
+            return_objects, call_entry_orchestrator,
         )
     except BaseException as error:
-        cleanup_failed = False
+        cleanup_failure = None
         try:
             storage.close()
         except BaseException:
-            cleanup_failed = True
-        if cleanup_failed:
-            # Preparation remains the primary failure; the owned snapshot's raw
-            # close exception can contain Store-specific diagnostics.
-            raise error from CleanupError("core execution preparation cleanup failed")
+            cleanup_failure = CleanupError(
+                "core execution preparation cleanup failed")
+        if cleanup_failure is not None:
+            raise error from cleanup_failure
         raise
+
+
+def _submit_frozen_core_submission(
+        submitter: Callable[..., ExecutionFuture[bytes]],
+        config: BackendConfig,
+        frozen: _FrozenCoreSubmission,
+        *,
+        environment: EnvironmentRequirement | None,
+        environment_spec: EnvironmentSpec | None,
+        world: WorldRequirement | None,
+        execution_timeout: Any,
+        stream_output: bool | None,
+        done_callbacks: Sequence[CoreCallback],
+        output: ExecutionOutput | None,
+        one_off: bool,
+        validators: Sequence[Callable[[], None]] = (),
+) -> CoreExecutionFuture:
+    """
+    Validate and accept one frozen core payload through an existing backend
+    owner.
+
+        Args:
+            submitter: Generic backend submission owner.
+            config: Frozen backend configuration used during preparation.
+            frozen: Submission returned by
+            :func:`_prepare_frozen_core_submission`.
+            environment: Optional typed worker software requirement.
+            environment_spec: Optional exact existing worker selector.
+            world: Optional typed worker world requirement.
+            execution_timeout: Generic workload deadline control.
+            stream_output: Generic live-output control.
+            done_callbacks: Core future callbacks.
+            output: Generic output holder.
+            one_off: Whether accepted future cleanup also owns generic one-off
+            cleanup.
+            validators: Same coordinator-owned drift guards used for
+            preparation.
+
+        Returns:
+            The existing CoreExecutionFuture after generic backend acceptance.
+
+        Raises:
+            Exception: Propagates guard or generic acceptance failures after
+            releasing
+                only the frozen submission's owned recovery resources.
+
+        Side Effects:
+            Rechecks the current orchestration floor under a short publication
+            lease.
+            On rejection before acceptance it closes only ``frozen.storage``.
+    """
+
+    if not isinstance(frozen, _FrozenCoreSubmission):
+        raise TypeError("frozen must be a _FrozenCoreSubmission")
+    backend_future: ExecutionFuture[bytes] | None = None
+    try:
+        callbacks = tuple(done_callbacks)
+        if not all(callable(callback) for callback in callbacks):
+            raise TypeError("done_callbacks entries must be callable")
+        frozen_validators = _validate_core_validators(validators)
+        frozen._begin_acceptance()
+        _run_core_validators(frozen_validators)
+        with publication.lease():
+            _check_orchestration_floor(
+                frozen.effective,
+                call_entry_orchestrator=frozen.call_entry_orchestrator,
+            )
+            _check_borrowed_core_storage(frozen)
+            backend_future = submitter(
+                _invoke_prepared_outcome,
+                frozen.prepared.invocation,
+                config.invocation_limit_bytes,
+                frozen.result_limit_bytes,
+                frozen.effective.update_args,
+                kwargs=None,
+                environment=environment,
+                environment_spec=environment_spec,
+                world=world,
+                execution_timeout=execution_timeout,
+                stream_output=stream_output,
+                output=output,
+                worker_setup=frozen.prepared.worker_setup(
+                    frozen.effective.runtime, cache=frozen.effective.cache),
+            )
+            future = CoreExecutionFuture(
+                backend_future,
+                prepared_storage=frozen.storage,
+                prepared=frozen.prepared,
+                recovery=frozen.recovery,
+                return_objects=frozen.return_objects,
+                result_limit_bytes=frozen.result_limit_bytes,
+                done_callbacks=callbacks,
+                one_off=one_off,
+            )
+            frozen._accepted()
+            return future
+    except BaseException as error:
+        if backend_future is not None:
+            # Generic acceptance already occurred. Do not discard its retryable
+            # lifecycle handle if facade construction cannot retain it.
+            try:
+                frozen.close()
+            except BaseException as cleanup_error:
+                raise CleanupError(
+                    "core execution acceptance cleanup failed",
+                    execution=backend_future,
+                ) from cleanup_error
+            raise CleanupError(
+                "core execution acceptance could not retain the backend "
+                "future",
+                execution=backend_future,
+            ) from error
+        try:
+            frozen.close()
+        except BaseException as cleanup_error:
+            raise CleanupError(
+                "core execution acceptance cleanup failed", execution=frozen,
+            ) from cleanup_error
+        raise
+
+
+def _check_borrowed_core_storage(frozen: _FrozenCoreSubmission) -> None:
+    """
+    Reject a borrowed Repo closed after preparation but before acceptance.
+    """
+
+    repo = frozen.effective.repo
+    if isinstance(repo, Repo):
+        with repo._configuration_lock:
+            if repo._closing or repo._closed:
+                raise ValueError("shared Store authority is unavailable")
+
+
+def _submit_core_call(
+    submitter: Callable[..., ExecutionFuture[bytes]],
+    config: BackendConfig,
+    executor_core: CoreOptions | None,
+    fn: Callable[..., Any],
+    args: tuple[Any, ...],
+    *,
+    kwargs: Mapping[str, Any] | None,
+    core: CoreOptions | None,
+    environment: EnvironmentRequirement | None,
+    environment_spec: EnvironmentSpec | None = None,
+    world: WorldRequirement | None,
+    execution_timeout: Any,
+    stream_output: bool | None,
+    done_callbacks: Sequence[CoreCallback],
+    output: ExecutionOutput | None,
+    one_off: bool,
+) -> CoreExecutionFuture:
+    """
+    Prepare then submit one core call through the guarded frozen-owner seam.
+    """
+
+    if not isinstance(done_callbacks, Sequence):
+        raise TypeError("done_callbacks must be a finite sequence")
+    if not all(callable(callback) for callback in done_callbacks):
+        raise TypeError("done_callbacks entries must be callable")
+    controls = _capture_frozen_core_controls(core, executor_core=executor_core)
+    frozen = _prepare_frozen_core_submission(
+        config, executor_core, fn, args, kwargs=kwargs, core=core,
+        frozen_controls=controls,
+    )
+    return _submit_frozen_core_submission(
+        submitter, config, frozen, environment=environment,
+        environment_spec=environment_spec, world=world,
+        execution_timeout=execution_timeout, stream_output=stream_output,
+        done_callbacks=done_callbacks, output=output, one_off=one_off,
+    )
 
 
 class Executor:
@@ -1954,121 +2323,235 @@ class Executor:
         self.close()
 
     def submit(
-            self, fn: Callable[..., Any], /, *args: Any, kwargs: Mapping[str, Any] | None = None,
-            core: CoreOptions | None = None, environment: Any = None, world: Any = None,
-            execution_timeout: float | None | Literal["inherit"] = "inherit",
-            stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
-            output: ExecutionOutput | None = None,
+        self,
+        fn: Callable[..., Any],
+        /,
+        *args: Any,
+        kwargs: Mapping[str, Any] | None = None,
+        core: CoreOptions | None = None,
+        environment: EnvironmentRequirement | None = None,
+        environment_spec: EnvironmentSpec | None = None,
+        world: WorldRequirement | None = None,
+        execution_timeout: float | None | Literal["inherit"] = "inherit",
+        stream_output: bool | None = None,
+        done_callbacks: Sequence[CoreCallback] = (),
+        output: ExecutionOutput | None = None,
     ) -> CoreExecutionFuture:
-        """Prepare and submit one core-aware call through the owned generic executor.
+        """
+        Prepare and submit one core-aware call through the owned generic
+        executor.
 
-        Args:
-            fn: Trusted synchronous core-aware callable.
-            args: Positional workload values.
-            kwargs: Optional string-keyed workload mapping.
-            core: Per-call inert core overrides.
-            environment: Generic environment requirement or selection.
-            world: Generic world requirement or selection.
-            execution_timeout: Inherited, disabled, or positive workload deadline.
-            stream_output: Optional generic live-output override.
-            done_callbacks: Core-future callbacks.
-            output: Optional caller-owned generic output holder.
+                Args:
+                    fn: Trusted synchronous core-aware callable.
+                    args: Positional workload values.
+                    kwargs: Optional string-keyed workload mapping.
+                    core: Per-call inert core overrides.
+                    environment: Optional typed software requirement,
+                    independent of a pin.
+                    environment_spec: Optional existing exact selector resolved
+                    once when
+                        this submission begins; failure never falls back to a
+                        candidate.
+                    world: Optional typed world requirement.
+                    execution_timeout: Inherited, disabled, or positive
+                    workload deadline.
+                    stream_output: Optional generic live-output override.
+                    done_callbacks: Core-future callbacks.
+                    output: Optional caller-owned generic output holder.
 
-        Returns:
-            A CoreExecutionFuture with the one recovered result/evidence outcome.
+                Returns:
+                    A CoreExecutionFuture with the one recovered
+                    result/evidence outcome.
 
-        Raises:
-            TypeError: If controls or workload mapping are invalid.
-            ValueError: If frozen storage, materialization floor, or call graph is
-                unsupported before generic acceptance.
+                Raises:
+                    TypeError: If controls or workload mapping are invalid.
+                    ValueError: If frozen storage, materialization floor, or
+                    call graph is
+                        unsupported before generic acceptance.
 
-        Side Effects:
-            Exports eligible live Repo authority once, opens an owned recovery Repo,
-            and submits exactly one generic worker call. Accepted asynchronous
-            failures remain on the returned future; caller handles are borrowed.
+                Side Effects:
+                    Exports eligible live Repo authority once, opens an owned
+                    recovery Repo,
+                    and submits exactly one generic worker call. Accepted
+                    asynchronous
+                    failures remain on the returned future; caller handles are
+                    borrowed.
         """
         future = _submit_core_call(
-            self._generic.submit, self._config, self._core, fn, args, kwargs=kwargs,
-            core=core, environment=environment, world=world,
-            execution_timeout=execution_timeout, stream_output=stream_output,
-            done_callbacks=done_callbacks, output=output, one_off=False,
+            self._generic.submit,
+            self._config,
+            self._core,
+            fn,
+            args,
+            kwargs=kwargs,
+            core=core,
+            environment=environment,
+            environment_spec=environment_spec,
+            world=world,
+            execution_timeout=execution_timeout,
+            stream_output=stream_output,
+            done_callbacks=done_callbacks,
+            output=output,
+            one_off=False,
         )
         with self._condition:
             self._futures.add(future)
         return future
 
     def run(
-            self, fn: Callable[..., Any], /, *args: Any, kwargs: Mapping[str, Any] | None = None,
-            core: CoreOptions | None = None, environment: Any = None, world: Any = None,
-            execution_timeout: float | None | Literal["inherit"] = "inherit",
-            stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
-            output: ExecutionOutput | None = None,
+        self,
+        fn: Callable[..., Any],
+        /,
+        *args: Any,
+        kwargs: Mapping[str, Any] | None = None,
+        core: CoreOptions | None = None,
+        environment: EnvironmentRequirement | None = None,
+        environment_spec: EnvironmentSpec | None = None,
+        world: WorldRequirement | None = None,
+        execution_timeout: float | None | Literal["inherit"] = "inherit",
+        stream_output: bool | None = None,
+        done_callbacks: Sequence[CoreCallback] = (),
+        output: ExecutionOutput | None = None,
     ) -> Any:
-        """Submit one call and return its recovered result without closing this executor.
+        """
+        Submit one call and return its recovered result without closing this
+        executor.
 
-        Args:
-            fn: Trusted synchronous core-aware callable.
-            args: Positional workload values.
-            kwargs: Optional string-keyed workload mapping.
-            core: Per-call inert core overrides.
-            environment: Generic environment requirement or selection.
-            world: Generic world requirement or selection.
-            execution_timeout: Inherited, disabled, or positive workload deadline.
-            stream_output: Optional generic live-output override.
-            done_callbacks: Core-future callbacks.
-            output: Optional caller-owned generic output holder.
+                Args:
+                    fn: Trusted synchronous core-aware callable.
+                    args: Positional workload values.
+                    kwargs: Optional string-keyed workload mapping.
+                    core: Per-call inert core overrides.
+                    environment: Optional typed software requirement,
+                    independent of a pin.
+                    environment_spec: Optional existing exact selector resolved
+                    once when
+                        this call begins; failure never falls back to a
+                        candidate.
+                    world: Optional typed world requirement.
+                    execution_timeout: Inherited, disabled, or positive
+                    workload deadline.
+                    stream_output: Optional generic live-output override.
+                    done_callbacks: Core-future callbacks.
+                    output: Optional caller-owned generic output holder.
 
-        Returns:
-            The recovered core result.
+                Returns:
+                    The recovered core result.
 
-        Raises:
-            BaseException: Validation, backend, publication, or recovery failure.
+                Raises:
+                    BaseException: Validation, backend, publication, or
+                    recovery failure.
 
-        Side Effects:
-            Has submit's ownership effects but does not close this reusable executor.
+                Side Effects:
+                    Has submit's ownership effects but does not close this
+                    reusable executor.
         """
         return self.submit(
-            fn, *args, kwargs=kwargs, core=core, environment=environment, world=world,
-            execution_timeout=execution_timeout, stream_output=stream_output,
-            done_callbacks=done_callbacks, output=output,
+            fn,
+            *args,
+            kwargs=kwargs,
+            core=core,
+            environment=environment,
+            environment_spec=environment_spec,
+            world=world,
+            execution_timeout=execution_timeout,
+            stream_output=stream_output,
+            done_callbacks=done_callbacks,
+            output=output,
         ).result()
 
     def with_options(
-            self, *, core: CoreOptions | None = None, environment: Any = None, world: Any = None,
-            execution_timeout: float | None | Literal["inherit"] = "inherit",
-            stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
-            output: ExecutionOutput | None = None,
+        self,
+        *,
+        core: CoreOptions | None = None,
+        environment: EnvironmentRequirement | None = None,
+        environment_spec: EnvironmentSpec | None = None,
+        world: WorldRequirement | None = None,
+        execution_timeout: float | None | Literal["inherit"] = "inherit",
+        stream_output: bool | None = None,
+        done_callbacks: Sequence[CoreCallback] = (),
+        output: ExecutionOutput | None = None,
     ) -> "ExecutorView":
-        """Return a non-owning view whose call keywords remain workload data.
+        """
+        Return a non-owning view whose call keywords remain workload data.
 
-        Args:
-            core: Reusable core overrides for calls through the view.
-            environment: Generic environment requirement or selection.
-            world: Generic world requirement or selection.
-            execution_timeout: Inherited, disabled, or positive workload deadline.
-            stream_output: Optional generic live-output override.
-            done_callbacks: Core-future callbacks.
-            output: Optional caller-owned generic output holder.
+                Args:
+                    core: Reusable core overrides for calls through the view.
+                    environment: Optional typed software requirement bound to
+                    later calls.
+                    environment_spec: Optional exact selector retained inertly
+                    and resolved
+                        separately when each view call begins.
+                    world: Optional typed world requirement bound to later
+                    calls.
+                    execution_timeout: Inherited, disabled, or positive
+                    workload deadline.
+                    stream_output: Optional generic live-output override.
+                    done_callbacks: Core-future callbacks.
+                    output: Optional caller-owned generic output holder.
 
-        Returns:
-            A lightweight view retaining this executor.
+                Returns:
+                    A lightweight view retaining this executor.
 
-        Raises:
-            TypeError: If ``core`` is not CoreOptions or None.
+                Raises:
+                    TypeError: If ``core`` is not CoreOptions or None.
 
-        Side Effects:
-            None. The view owns no backend, future set, or storage resource.
+                Side Effects:
+                    None. The view owns no backend, future set, or storage
+                    resource.
         """
         if core is not None and not isinstance(core, CoreOptions):
             raise TypeError("core must be CoreOptions or None")
         return ExecutorView(
-            self, core, environment, world, execution_timeout, stream_output,
-            tuple(done_callbacks), output,
+            executor=self,
+            core=core,
+            environment=environment,
+            world=world,
+            execution_timeout=execution_timeout,
+            stream_output=stream_output,
+            done_callbacks=tuple(done_callbacks),
+            output=output,
+            environment_spec=environment_spec,
         )
 
-    def discover(self, *, environment: Any = None, world: Any = None, timeout: float | None = None) -> Any:
-        """Delegate a bounded non-reserving discovery query to the generic backend."""
-        return self._generic.discover(environment=environment, world=world, timeout=timeout)
+    def discover(
+        self,
+        *,
+        environment: EnvironmentRequirement | None = None,
+        environment_spec: EnvironmentSpec | None = None,
+        world: WorldRequirement | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        """
+        Delegate a bounded non-reserving generic query with an exact pin
+        option.
+
+                Args:
+                    environment: Optional typed software requirement.
+                    environment_spec: Optional exact selector resolved for this
+                    discovery
+                        only; unsupported or mismatched targets are not
+                        reported viable.
+                    world: Optional typed world requirement.
+                    timeout: Optional positive query timeout.
+
+                Returns:
+                    The generic non-reserving discovery snapshot.
+
+                Raises:
+                    TypeError, ValueError, TimeoutError, ExecutionError:
+                    Forwarded generic
+                        validation, bounded-observation, or backend failures.
+
+                Side Effects:
+                    May initialize and query the selected generic backend but
+                    neither
+                    submits workload code nor creates an environment.
+        """
+        return self._generic.discover(environment=environment,
+                                      environment_spec=environment_spec,
+                                      world=world,
+                                      timeout=timeout)
 
     def resources(self, *, timeout: float | None = None) -> Any:
         """Delegate bounded resource inspection to the owned generic backend."""
@@ -2123,35 +2606,44 @@ class Executor:
 
 @dataclass(frozen=True, slots=True)
 class ExecutorView:
-    """Bind core/generic controls to one parent without owning another backend.
+    """
+    Bind core/generic controls to one parent without owning another backend.
 
-    Args:
-        executor: Parent core executor that owns backend and future lifetime.
-        core: Frozen reusable core overrides.
-        environment: Frozen generic environment requirement or selection.
-        world: Frozen generic world requirement or selection.
-        execution_timeout: Frozen generic workload deadline control.
-        stream_output: Frozen generic live-output control.
-        done_callbacks: Frozen core-future callback sequence.
-        output: Optional caller-owned generic output holder.
+        Args:
+            executor: Parent core executor that owns backend and future
+            lifetime.
+            core: Frozen reusable core overrides.
+            environment: Frozen generic environment requirement or selection.
+            world: Frozen generic world requirement or selection.
+            execution_timeout: Frozen generic workload deadline control.
+            stream_output: Frozen generic live-output control.
+            done_callbacks: Frozen core-future callback sequence.
+            output: Optional caller-owned generic output holder.
+            environment_spec: Optional exact selector forwarded by every call
+            and
+                resolved independently for each submission.
 
-    Every keyword received by :meth:`submit` or :meth:`run` is workload data;
-    controls are fixed when this value is created. The view borrows its parent and
-    cannot start, close, or allocate a second backend.
+        Every keyword received by :meth:`submit` or :meth:`run` is workload
+        data;
+        controls are fixed when this value is created. The view borrows its
+        parent and
+        cannot start, close, or allocate a second backend.
 
-    Side Effects:
-        Construction retains the parent reference only and does not start work or
-        acquire storage.
+        Side Effects:
+            Construction retains the parent reference only and does not start
+            work or
+            acquire storage.
     """
 
     executor: Executor
     core: CoreOptions | None
-    environment: Any
-    world: Any
+    environment: EnvironmentRequirement | None
+    world: WorldRequirement | None
     execution_timeout: float | None | Literal["inherit"]
     stream_output: bool | None
     done_callbacks: tuple[CoreCallback, ...]
     output: ExecutionOutput | None
+    environment_spec: EnvironmentSpec | None = None
 
     def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> CoreExecutionFuture:
         """Submit workload data with bound controls; no keyword is interpreted as a control.
@@ -2171,9 +2663,16 @@ class ExecutorView:
             Delegates to the parent; this view owns no submission resource.
         """
         return self.executor.submit(
-            fn, *args, kwargs=kwargs, core=self.core, environment=self.environment,
-            world=self.world, execution_timeout=self.execution_timeout,
-            stream_output=self.stream_output, done_callbacks=self.done_callbacks,
+            fn,
+            *args,
+            kwargs=kwargs,
+            core=self.core,
+            environment=self.environment,
+            environment_spec=self.environment_spec,
+            world=self.world,
+            execution_timeout=self.execution_timeout,
+            stream_output=self.stream_output,
+            done_callbacks=self.done_callbacks,
             output=self.output,
         )
 
@@ -2198,88 +2697,140 @@ class ExecutorView:
 
 
 def submit(
-        fn: Callable[..., Any], /, *args: Any, backend: BackendConfig,
-        kwargs: Mapping[str, Any] | None = None, core: CoreOptions | None = None,
-        environment: Any = None, world: Any = None,
-        execution_timeout: float | None | Literal["inherit"] = "inherit",
-        stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
-        output: ExecutionOutput | None = None,
+    fn: Callable[..., Any],
+    /,
+    *args: Any,
+    backend: BackendConfig,
+    kwargs: Mapping[str, Any] | None = None,
+    core: CoreOptions | None = None,
+    environment: EnvironmentRequirement | None = None,
+    environment_spec: EnvironmentSpec | None = None,
+    world: WorldRequirement | None = None,
+    execution_timeout: float | None | Literal["inherit"] = "inherit",
+    stream_output: bool | None = None,
+    done_callbacks: Sequence[CoreCallback] = (),
+    output: ExecutionOutput | None = None,
 ) -> CoreExecutionFuture:
-    """Submit one explicit-backend core call with generic one-off ownership.
+    """
+    Submit one explicit-backend core call with generic one-off ownership.
 
-    Args:
-        fn: Trusted synchronous core-aware callable.
-        args: Positional workload values.
-        backend: Required explicit generic backend configuration.
-        kwargs: Optional string-keyed workload mapping.
-        core: Per-call inert core overrides.
-        environment: Generic environment requirement or selection.
-        world: Generic world requirement or selection.
-        execution_timeout: Inherited, disabled, or positive workload deadline.
-        stream_output: Optional generic live-output override.
-        done_callbacks: Core-future callbacks.
-        output: Optional caller-owned generic output holder.
+        Args:
+            fn: Trusted synchronous core-aware callable.
+            args: Positional workload values.
+            backend: Required explicit generic backend configuration.
+            kwargs: Optional string-keyed workload mapping.
+            core: Per-call inert core overrides.
+            environment: Optional typed software requirement.
+            environment_spec: Optional exact selector resolved once at
+            submission entry;
+                an unavailable or incompatible pin never falls back to
+                candidates.
+            world: Optional typed world requirement.
+            execution_timeout: Inherited, disabled, or positive workload
+            deadline.
+            stream_output: Optional generic live-output override.
+            done_callbacks: Core-future callbacks.
+            output: Optional caller-owned generic output holder.
 
-    Returns:
-        A CoreExecutionFuture retaining the one-off owner's recovered outcome.
+        Returns:
+            A CoreExecutionFuture retaining the one-off owner's recovered
+            outcome.
 
-    Raises:
-        TypeError: If ``backend`` or controls are invalid.
-        ValueError: If core preparation rejects the call before acceptance.
+        Raises:
+            TypeError: If ``backend`` or controls are invalid.
+            ValueError: If core preparation rejects the call before acceptance.
 
-    Side Effects:
-        Creates a hidden generic one-off owner following its bounded cleanup policy.
-        The returned facade owns only its recovery Repo and never closes
-        caller-borrowed Repo or Store handles.
+        Side Effects:
+            Creates a hidden generic one-off owner following its bounded
+            cleanup policy.
+            The returned facade owns only its recovery Repo and never closes
+            caller-borrowed Repo or Store handles.
     """
     if not isinstance(backend, BackendConfig):
         raise TypeError("backend must be a BackendConfig")
     return _submit_core_call(
-        lambda *call_args, **controls: _generic_submit(*call_args, backend=backend, **controls),
-        backend, None, fn, args, kwargs=kwargs, core=core, environment=environment,
-        world=world, execution_timeout=execution_timeout, stream_output=stream_output,
-        done_callbacks=done_callbacks, output=output, one_off=True,
+        lambda *call_args, **controls: _generic_submit(
+            *call_args, backend=backend, **controls),
+        backend,
+        None,
+        fn,
+        args,
+        kwargs=kwargs,
+        core=core,
+        environment=environment,
+        environment_spec=environment_spec,
+        world=world,
+        execution_timeout=execution_timeout,
+        stream_output=stream_output,
+        done_callbacks=done_callbacks,
+        output=output,
+        one_off=True,
     )
 
 
 def run(
-        fn: Callable[..., Any], /, *args: Any, backend: BackendConfig,
-        kwargs: Mapping[str, Any] | None = None, core: CoreOptions | None = None,
-        environment: Any = None, world: Any = None,
-        execution_timeout: float | None | Literal["inherit"] = "inherit",
-        stream_output: bool | None = None, done_callbacks: Sequence[CoreCallback] = (),
-        output: ExecutionOutput | None = None,
+    fn: Callable[..., Any],
+    /,
+    *args: Any,
+    backend: BackendConfig,
+    kwargs: Mapping[str, Any] | None = None,
+    core: CoreOptions | None = None,
+    environment: EnvironmentRequirement | None = None,
+    environment_spec: EnvironmentSpec | None = None,
+    world: WorldRequirement | None = None,
+    execution_timeout: float | None | Literal["inherit"] = "inherit",
+    stream_output: bool | None = None,
+    done_callbacks: Sequence[CoreCallback] = (),
+    output: ExecutionOutput | None = None,
 ) -> Any:
-    """Run one explicit-backend core call and reconcile its hidden owner.
+    """
+    Run one explicit-backend core call and reconcile its hidden owner.
 
-    Args:
-        fn: Trusted synchronous core-aware callable.
-        args: Positional workload values.
-        backend: Required explicit generic backend configuration.
-        kwargs: Optional string-keyed workload mapping.
-        core: Per-call inert core overrides.
-        environment: Generic environment requirement or selection.
-        world: Generic world requirement or selection.
-        execution_timeout: Inherited, disabled, or positive workload deadline.
-        stream_output: Optional generic live-output override.
-        done_callbacks: Core-future callbacks.
-        output: Optional caller-owned generic output holder.
+        Args:
+            fn: Trusted synchronous core-aware callable.
+            args: Positional workload values.
+            backend: Required explicit generic backend configuration.
+            kwargs: Optional string-keyed workload mapping.
+            core: Per-call inert core overrides.
+            environment: Optional typed software requirement.
+            environment_spec: Optional exact selector resolved once at
+            submission entry;
+                an unavailable or incompatible pin never falls back to
+                candidates.
+            world: Optional typed world requirement.
+            execution_timeout: Inherited, disabled, or positive workload
+            deadline.
+            stream_output: Optional generic live-output override.
+            done_callbacks: Core-future callbacks.
+            output: Optional caller-owned generic output holder.
 
-    Returns:
-        The recovered core result after one-off cleanup completes.
+        Returns:
+            The recovered core result after one-off cleanup completes.
 
-    Raises:
-        BaseException: The adapted workload failure, with cleanup chained when
-            both fail, or CleanupError after a successful result cannot clean up.
+        Raises:
+            BaseException: The adapted workload failure, with cleanup chained
+            when
+                both fail, or CleanupError after a successful result cannot
+                clean up.
 
-    Side Effects:
-        Creates and reconciles a hidden one-off owner. It never closes caller
-        Repo or Store handles.
+        Side Effects:
+            Creates and reconciles a hidden one-off owner. It never closes
+            caller
+            Repo or Store handles.
     """
     future = submit(
-        fn, *args, backend=backend, kwargs=kwargs, core=core, environment=environment,
-        world=world, execution_timeout=execution_timeout, stream_output=stream_output,
-        done_callbacks=done_callbacks, output=output,
+        fn,
+        *args,
+        backend=backend,
+        kwargs=kwargs,
+        core=core,
+        environment=environment,
+        environment_spec=environment_spec,
+        world=world,
+        execution_timeout=execution_timeout,
+        stream_output=stream_output,
+        done_callbacks=done_callbacks,
+        output=output,
     )
     try:
         result = future.result()

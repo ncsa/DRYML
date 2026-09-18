@@ -20,6 +20,9 @@ from types import TracebackType
 from typing import Any, Generic, Literal, TypeVar
 
 from dryml.environments import EnvironmentRequirement
+from dryml.environments.selection import (ResolvedEnvironmentSelection,
+                                          resolve_environment_spec)
+from dryml.environments.specs import EnvironmentSpec
 from dryml.worlds import WorldRequirement
 
 from ._spooling import PayloadSpooler, SpoolBudget, SpoolLease, SpoolReservation, deserialize_result, validate_result
@@ -173,6 +176,7 @@ class Executor:
         *args: Any,
         kwargs: Mapping[str, Any] | None = None,
         environment: EnvironmentRequirement | None = None,
+        environment_spec: EnvironmentSpec | None = None,
         world: WorldRequirement | None = None,
         execution_timeout: float | None | Literal["inherit"] = "inherit",
         stream_output: bool | None = None,
@@ -180,40 +184,57 @@ class Executor:
         output: ExecutionOutput | None = None,
         worker_setup: WorkerSetup | None = None,
     ) -> ExecutionFuture[T]:
-        """Preflight and asynchronously dispatch one immutable callable snapshot.
+        """
+        Preflight and asynchronously dispatch one immutable callable snapshot.
 
-        Args:
-            fn: Supported callable root to snapshot once with ``args`` and
-                ``kwargs``.
-            args: Ordinary positional workload arguments.
-            kwargs: Ordinary workload keyword mapping, separate from controls.
-            environment: Optional owner-defined environment requirement.
-            world: Optional owner-defined world requirement.
-            execution_timeout: ``"inherit"`` for config default, ``None`` to
-                disable a workload deadline, or a finite positive override.
-            stream_output: Optional per-call live-output override.
-            done_callbacks: Finite coordinator callbacks copied before preflight.
-            output: Optional single-use retained output owner.
-            worker_setup: Optional inert factory/data control entered before worker
-                payload deserialization.
+                Args:
+                    fn: Supported callable root to snapshot once with ``args``
+                    and
+                        ``kwargs``.
+                    args: Ordinary positional workload arguments.
+                    kwargs: Ordinary workload keyword mapping, separate from
+                    controls.
+                    environment: Optional owner-defined environment
+                    requirement.
+                    environment_spec: Optional exact existing worker selector.
+                    It is frozen
+                        once here and never becomes candidate-search fallback.
+                    world: Optional owner-defined world requirement.
+                    execution_timeout: ``"inherit"`` for config default,
+                    ``None`` to
+                        disable a workload deadline, or a finite positive
+                        override.
+                    stream_output: Optional per-call live-output override.
+                    done_callbacks: Finite coordinator callbacks copied before
+                    preflight.
+                    output: Optional single-use retained output owner.
+                    worker_setup: Optional inert factory/data control entered
+                    before worker
+                        payload deserialization.
 
-        Returns:
-            The exact concrete Future created by the selected backend.
+                Returns:
+                    The exact concrete Future created by the selected backend.
 
-        Raises:
-            TypeError: If controls, callbacks, output, or workload keywords are
-                malformed.
-            ValueError: If an execution timeout is invalid or spool storage is
-                unusable before acceptance.
-            RuntimeError: If closure linearized before acceptance.
-            ExecutionError: If quota lease/capacity or backend Future identity is
-                invalid. Accepted asynchronous failures are published on Future.
+                Raises:
+                    TypeError: If controls, callbacks, output, or workload
+                    keywords are
+                        malformed.
+                    ValueError: If an execution timeout is invalid or spool
+                    storage is
+                        unusable before acceptance.
+                    RuntimeError: If closure linearized before acceptance.
+                    ExecutionError: If quota lease/capacity or backend Future
+                    identity is
+                        invalid. Accepted asynchronous failures are published
+                        on Future.
 
-        Side Effects:
-            Serializes one callable/argument graph and creates only an
-            execution-owned spool child after an all-or-nothing reservation.
+                Side Effects:
+                    Serializes one callable/argument graph and creates only an
+                    execution-owned spool child after an all-or-nothing
+                    reservation.
         """
         self._validate_requirements(environment, world)
+        selection = self._resolve_environment_spec(environment_spec)
         call_kwargs, callbacks, effective_timeout, effective_stream, output_owner, setup = self._validate_controls(
             kwargs, execution_timeout, stream_output, done_callbacks, output, worker_setup
         )
@@ -239,6 +260,7 @@ class Executor:
                 admission_deadline=time.monotonic() + self._config.admission_timeout,
                 payload=payload,
                 environment=environment,
+                environment_spec=selection,
                 world=world,
                 execution_timeout=effective_timeout,
                 stream_output=effective_stream,
@@ -294,6 +316,7 @@ class Executor:
         *args: Any,
         kwargs: Mapping[str, Any] | None = None,
         environment: EnvironmentRequirement | None = None,
+        environment_spec: EnvironmentSpec | None = None,
         world: WorldRequirement | None = None,
         execution_timeout: float | None | Literal["inherit"] = "inherit",
         stream_output: bool | None = None,
@@ -301,33 +324,50 @@ class Executor:
         output: ExecutionOutput | None = None,
         worker_setup: WorkerSetup | None = None,
     ) -> T:
-        """Submit one call and return its ordinary result without closing this executor.
+        """
+        Submit one call and return its ordinary result without closing this
+        executor.
 
-        Args:
-            fn: Supported workload callable.
-            args: Ordinary positional workload arguments.
-            kwargs: Ordinary workload keyword mapping.
-            environment: Optional owner-defined environment requirement.
-            world: Optional owner-defined world requirement.
-            execution_timeout: Workload deadline control.
-            stream_output: Optional live-output override.
-            done_callbacks: Copied coordinator completion callbacks.
-            output: Optional single-use retained output owner.
-            worker_setup: Optional inert setup bound before workload keywords.
+                Args:
+                    fn: Supported workload callable.
+                    args: Ordinary positional workload arguments.
+                    kwargs: Ordinary workload keyword mapping.
+                    environment: Optional owner-defined environment
+                    requirement.
+                    environment_spec: Optional exact existing selector resolved
+                    once at
+                        this call's entry; incompatible pins never trigger
+                        fallback.
+                    world: Optional owner-defined world requirement.
+                    execution_timeout: Workload deadline control.
+                    stream_output: Optional live-output override.
+                    done_callbacks: Copied coordinator completion callbacks.
+                    output: Optional single-use retained output owner.
+                    worker_setup: Optional inert setup bound before workload
+                    keywords.
 
-        Returns:
-            The workload's result.
+                Returns:
+                    The workload's result.
 
-        Raises:
-            BaseException: Synchronous submission errors or the Future outcome.
+                Raises:
+                    BaseException: Synchronous submission errors or the Future
+                    outcome.
 
-        Side Effects:
-            Leaves the accepted Future and its cleanup under this reusable owner.
+                Side Effects:
+                    Leaves the accepted Future and its cleanup under this
+                    reusable owner.
         """
         return self.submit(
-            fn, *args, kwargs=kwargs, environment=environment, world=world,
-            execution_timeout=execution_timeout, stream_output=stream_output,
-            done_callbacks=done_callbacks, output=output,
+            fn,
+            *args,
+            kwargs=kwargs,
+            environment=environment,
+            environment_spec=environment_spec,
+            world=world,
+            execution_timeout=execution_timeout,
+            stream_output=stream_output,
+            done_callbacks=done_callbacks,
+            output=output,
             worker_setup=worker_setup,
         ).result()
 
@@ -335,6 +375,7 @@ class Executor:
         self,
         *,
         environment: EnvironmentRequirement | None = None,
+        environment_spec: EnvironmentSpec | None = None,
         world: WorldRequirement | None = None,
         execution_timeout: float | None | Literal["inherit"] = "inherit",
         stream_output: bool | None = None,
@@ -342,68 +383,110 @@ class Executor:
         output: ExecutionOutput | None = None,
         worker_setup: WorkerSetup | None = None,
     ) -> "ExecutorView":
-        """Bind immutable execution controls without initializing or reserving work.
+        """
+        Bind immutable execution controls without initializing or reserving
+        work.
 
-        Args:
-            environment: Optional typed environment requirement bound to each view
-                submission.
-            world: Optional typed world requirement bound to each view submission.
-            execution_timeout: ``"inherit"`` for the config default, ``None`` to
-                disable a deadline, or a finite positive seconds override.
-            stream_output: Optional live-output override for view submissions.
-            done_callbacks: Finite callbacks copied for each submitted Future.
-            output: Optional single-use retained output holder bound on submit.
-            worker_setup: Optional inert worker setup bound to every view call.
+                Args:
+                    environment: Optional typed environment requirement bound
+                    to each view
+                        submission.
+                    environment_spec: Optional exact selector retained inertly
+                    by this view
+                        and resolved once when each later call begins.
+                    world: Optional typed world requirement bound to each view
+                    submission.
+                    execution_timeout: ``"inherit"`` for the config default,
+                    ``None`` to
+                        disable a deadline, or a finite positive seconds
+                        override.
+                    stream_output: Optional live-output override for view
+                    submissions.
+                    done_callbacks: Finite callbacks copied for each submitted
+                    Future.
+                    output: Optional single-use retained output holder bound on
+                    submit.
+                    worker_setup: Optional inert worker setup bound to every
+                    view call.
 
-        Returns:
-            A parent-retaining view whose call keywords are always workload values.
+                Returns:
+                    A parent-retaining view whose call keywords are always
+                    workload values.
 
-        Raises:
-            TypeError: If control callbacks/output have invalid types.
-            ValueError: If the bound execution timeout is invalid.
+                Raises:
+                    TypeError: If control callbacks/output have invalid types.
+                    ValueError: If the bound execution timeout is invalid.
 
-        Side Effects:
-            Copies callback registrations only; it does not create backend or spool
-            resources. Later view submissions retain the parent lifecycle.
+                Side Effects:
+                    Copies callback registrations only; it does not create
+                    backend or spool
+                    resources. Later view submissions retain the parent
+                    lifecycle.
         """
         _, callbacks, effective_timeout, effective_stream, _, setup = self._validate_controls(
             {}, execution_timeout, stream_output, done_callbacks, output, worker_setup
         )
         self._validate_requirements(environment, world)
-        return ExecutorView(self, environment, world, effective_timeout, effective_stream, callbacks, output, setup)
+        self._validate_environment_spec(environment_spec)
+        return ExecutorView(
+            executor=self,
+            environment=environment,
+            world=world,
+            execution_timeout=effective_timeout,
+            stream_output=effective_stream,
+            done_callbacks=callbacks,
+            output=output,
+            worker_setup=setup,
+            environment_spec=environment_spec,
+        )
 
     def discover(
         self,
         *,
         environment: EnvironmentRequirement | None = None,
+        environment_spec: EnvironmentSpec | None = None,
         world: WorldRequirement | None = None,
         timeout: float | None = None,
     ) -> DiscoverySnapshot:
-        """Delegate a bounded discovery query after lazy backend initialization.
+        """
+        Delegate a bounded discovery query after lazy backend initialization.
 
-        Args:
-            environment: Optional typed environment requirement for candidates and
-                feasibility evidence.
-            world: Optional typed world requirement for feasibility evidence.
-            timeout: Optional positive query bound in seconds; ``None`` uses
-                ``discovery_timeout``.
+                Args:
+                    environment: Optional typed environment requirement for
+                    candidates and
+                        feasibility evidence.
+                    environment_spec: Optional exact selector for the sole
+                    discovered
+                        candidate; it bypasses candidate enumeration.
+                    world: Optional typed world requirement for feasibility
+                    evidence.
+                    timeout: Optional positive query bound in seconds; ``None``
+                    uses
+                        ``discovery_timeout``.
 
-        Returns:
-            A non-reserving, possibly incomplete backend discovery snapshot.
+                Returns:
+                    A non-reserving, possibly incomplete backend discovery
+                    snapshot.
 
-        Raises:
-            RuntimeError: If closure has begun.
-            TypeError: If requirements or ``timeout`` have invalid types.
-            ValueError: If ``timeout`` is not finite and positive.
-            TimeoutError: If backend initialization or discovery exceeds the bound.
-            ExecutionError: If the selected backend cannot complete discovery.
+                Raises:
+                    RuntimeError: If closure has begun.
+                    TypeError: If requirements or ``timeout`` have invalid
+                    types.
+                    ValueError: If ``timeout`` is not finite and positive.
+                    TimeoutError: If backend initialization or discovery
+                    exceeds the bound.
+                    ExecutionError: If the selected backend cannot complete
+                    discovery.
 
-        Side Effects:
-            Lazily starts the backend and may perform bounded discovery I/O. It
-            does not create a spool, reserve capacity, or invoke workload code.
+                Side Effects:
+                    Lazily starts the backend and may perform bounded discovery
+                    I/O. It
+                    does not create a spool, reserve capacity, or invoke
+                    workload code.
         """
         budget = self._config.discovery_timeout if timeout is None else self._positive_duration("timeout", timeout)
         self._validate_requirements(environment, world)
+        selection = self._resolve_environment_spec(environment_spec)
         deadline = time.monotonic() + budget
         self._require_queryable()
         self._register_query()
@@ -412,7 +495,16 @@ class Executor:
             remaining = self._remaining(deadline)
             if remaining is not None and remaining <= 0:
                 raise TimeoutError("discovery initialization exceeded timeout")
-            return backend.discover(environment=environment, world=world, timeout=remaining or budget)
+            controls: dict[str, Any] = {
+                "environment": environment,
+                "world": world,
+                "timeout": remaining or budget,
+            }
+            # Preserve the established unpinned Backend.discover call shape for
+            # existing backend implementations.
+            if selection is not None:
+                controls["environment_spec"] = selection
+            return backend.discover(**controls)
         finally:
             self._unregister_query()
 
@@ -961,6 +1053,38 @@ class Executor:
             raise TypeError("world must be a WorldRequirement or None")
 
     @staticmethod
+    def _resolve_environment_spec(
+        spec: EnvironmentSpec | ResolvedEnvironmentSelection | None
+    ) -> ResolvedEnvironmentSelection | None:
+        """
+        Resolve one optional exact selector before any payload preflight.
+
+                ``None`` deliberately retains the prior unpinned execution
+                path. A supplied
+                selector is resolved exactly once for the operation and cannot
+                fall back to
+                configured candidates or the backend's default interpreter.
+        """
+        if spec is None:
+            return None
+        if isinstance(spec, ResolvedEnvironmentSelection):
+            return spec
+        if not isinstance(spec, EnvironmentSpec):
+            raise TypeError(
+                "environment_spec must be an EnvironmentSpec or None")
+        return resolve_environment_spec(spec)
+
+    @staticmethod
+    def _validate_environment_spec(spec: EnvironmentSpec | None) -> None:
+        """
+        Validate one inert view selector without resolving or observing it.
+        """
+
+        if spec is not None and not isinstance(spec, EnvironmentSpec):
+            raise TypeError(
+                "environment_spec must be an EnvironmentSpec or None")
+
+    @staticmethod
     def _capture_temp_parent(cwd: Path) -> Path:
         """Choose a stable platform temporary parent without probing it at construction."""
         names = ("TMPDIR", "TEMP", "TMP", "LOCALAPPDATA", "USERPROFILE") if os.name == "nt" else ("TMPDIR",)
@@ -996,6 +1120,7 @@ class ExecutorView:
     done_callbacks: tuple[Callable[[ExecutionFuture[Any]], None], ...]
     output: ExecutionOutput | None
     worker_setup: WorkerSetup | None
+    environment_spec: EnvironmentSpec | None = None
 
     def submit(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> ExecutionFuture[T]:
         """Submit one workload with bound controls and unmodified workload keywords.
@@ -1024,6 +1149,7 @@ class ExecutorView:
             *args,
             kwargs=kwargs,
             environment=self.environment,
+            environment_spec=self.environment_spec,
             world=self.world,
             execution_timeout=self.execution_timeout,
             stream_output=self.stream_output,
@@ -1180,6 +1306,7 @@ def submit(
     backend: BackendConfig,
     kwargs: Mapping[str, Any] | None = None,
     environment: EnvironmentRequirement | None = None,
+    environment_spec: EnvironmentSpec | None = None,
     world: WorldRequirement | None = None,
     execution_timeout: float | None | Literal["inherit"] = "inherit",
     stream_output: bool | None = None,
@@ -1187,12 +1314,39 @@ def submit(
     output: ExecutionOutput | None = None,
     worker_setup: WorkerSetup | None = None,
 ) -> ExecutionFuture[T]:
-    """Submit one explicit-backend call while retaining a hidden owner through cleanup.
+    """
+    Submit one explicit-backend call while retaining a hidden owner through
+    cleanup.
 
-    Args and failures, including ``worker_setup``, match :meth:`Executor.submit`;
-    ``backend`` is mandatory and no ambient backend is selected. The returned
-    Future's ``cleanup`` reconciles this call and then closes the hidden owner
-    without touching reusable callers.
+        Args:
+            fn: Supported workload callable.
+            args: Ordinary positional workload arguments.
+            backend: Required explicit backend configuration.
+            kwargs: Optional workload keyword mapping.
+            environment: Optional owner-defined software requirement.
+            environment_spec: Optional exact existing selector resolved once at
+            call
+                entry; an unsupported or mismatched pin never falls back.
+            world: Optional owner-defined world requirement.
+            execution_timeout: Inherited, disabled, or positive workload
+            deadline.
+            stream_output: Optional live-output override.
+            done_callbacks: Completion callbacks copied before acceptance.
+            output: Optional single-use retained output owner.
+            worker_setup: Optional inert worker-local setup control.
+
+        Returns:
+            The backend's concrete accepted Future.
+
+        Raises:
+            TypeError, ValueError, RuntimeError, ExecutionError: The
+            corresponding
+                :meth:`Executor.submit` validation or preflight failures.
+
+        Side Effects:
+            Creates a hidden one-off executor. Future cleanup reconciles this
+            call and
+            closes that owner without touching reusable callers.
     """
     if not isinstance(backend, BackendConfig):
         raise TypeError("backend must be a BackendConfig")
@@ -1203,6 +1357,7 @@ def submit(
         dict(
             kwargs=kwargs,
             environment=environment,
+            environment_spec=environment_spec,
             world=world,
             execution_timeout=execution_timeout,
             stream_output=stream_output,
@@ -1220,6 +1375,7 @@ def run(
     backend: BackendConfig,
     kwargs: Mapping[str, Any] | None = None,
     environment: EnvironmentRequirement | None = None,
+    environment_spec: EnvironmentSpec | None = None,
     world: WorldRequirement | None = None,
     execution_timeout: float | None | Literal["inherit"] = "inherit",
     stream_output: bool | None = None,
@@ -1227,17 +1383,40 @@ def run(
     output: ExecutionOutput | None = None,
     worker_setup: WorkerSetup | None = None,
 ) -> T:
-    """Run one explicit-backend call, then perform bounded hidden-owner cleanup.
+    """
+    Run one explicit-backend call, then perform bounded hidden-owner cleanup.
 
-    ``worker_setup`` follows :meth:`submit` and enters only in the admitted
-    worker. Returns the ordinary workload value. A cleanup-only failure raises
-    :class:`CleanupError` retaining the Future; if both work and cleanup fail, the
-    workload exception remains primary and chains that recovery error as cause.
+        Args are identical to :func:`submit`, including an ``environment_spec``
+        that
+        resolves once at call entry and never falls back. ``worker_setup``
+        enters only
+        in the admitted worker.
+
+        Returns:
+            The ordinary workload value after hidden-owner cleanup completes.
+
+        Raises:
+            BaseException: Submission or workload failures. A cleanup-only
+            failure
+                raises :class:`CleanupError` retaining the Future; if both
+                fail, the
+                workload exception stays primary with cleanup as its cause.
+
+        Side Effects:
+            Creates and reconciles a hidden one-off executor.
     """
     future = submit(
-        fn, *args, backend=backend, kwargs=kwargs, environment=environment,
-        world=world, execution_timeout=execution_timeout, stream_output=stream_output,
-        done_callbacks=done_callbacks, output=output,
+        fn,
+        *args,
+        backend=backend,
+        kwargs=kwargs,
+        environment=environment,
+        environment_spec=environment_spec,
+        world=world,
+        execution_timeout=execution_timeout,
+        stream_output=stream_output,
+        done_callbacks=done_callbacks,
+        output=output,
         worker_setup=worker_setup,
     )
     try:

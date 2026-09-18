@@ -22,6 +22,9 @@ from dryml.execute.executor import Executor
 from dryml.execute.models import WorkerSetup
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.subprocess import SubProcessConfig, SubProcessFuture
+from dryml.environments import CurrentEnvironmentSpec
+from dryml.environments import CompatibilityIssue
+from dryml.environments.compatibility import report_from_issues
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
 
 
@@ -61,6 +64,57 @@ def _hold_affinity(marker_directory: str, name: str) -> list[int]:
     while not release.exists():
         sleep(0.01)
     return affinity
+
+
+def test_exact_current_pin_requires_fresh_identity_without_candidate_search(
+        tmp_path, monkeypatch):
+    """
+    A pin overrides config Python and reaches the worker without a requirement.
+    """
+    monkeypatch.setattr(
+        subprocess_module,
+        "discover_candidates",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pinned call must not enumerate candidates")),
+    )
+    executor = Executor(SubProcessConfig(
+        spool_directory=tmp_path,
+        python_executable=Path("/definitely/not/the-selected-python"),
+        automatic_environment_discovery=False,
+    ))
+    try:
+        assert executor.run(_add,
+                            2,
+                            3,
+                            environment_spec=CurrentEnvironmentSpec()) == 5
+    finally:
+        executor.close(cancel=True, timeout=5)
+
+
+def test_exact_pin_identity_mismatch_without_requirement_withholds_payload(
+        tmp_path, monkeypatch):
+    """
+    A fresh pre-GO identity mismatch cannot deserialize or invoke the workload.
+    """
+    marker = tmp_path / "invoked"
+    monkeypatch.setattr(
+        subprocess_module,
+        "compare_selection",
+        lambda *_args: report_from_issues((CompatibilityIssue(
+            "selection_identity_mismatch", "error", "mismatch"), ),
+                                          policy="strict"),
+    )
+    executor = Executor(SubProcessConfig(spool_directory=tmp_path))
+    try:
+        future = executor.submit(_write_sentinel,
+                                 str(marker),
+                                 environment_spec=CurrentEnvironmentSpec())
+        with pytest.raises(AdmissionError, match="identity"):
+            future.result(timeout=10)
+        future.cleanup(timeout=5)
+        assert not marker.exists()
+    finally:
+        executor.close(cancel=True, timeout=5)
 
 
 def test_affinity_marker_is_visible_only_after_payload_write(tmp_path, monkeypatch):

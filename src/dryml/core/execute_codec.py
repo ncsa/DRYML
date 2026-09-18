@@ -29,6 +29,7 @@ from .repo import Repo
 from .store.store import Store
 from .signatures import ReferenceSelection, SignatureError, compile_signature
 from .symbol import ImportRef
+from ._callable_inspection import describe_callable
 
 
 _VERSION = 1
@@ -323,6 +324,16 @@ class _Encoder:
         if inspect.ismethod(value):
             return {"tag": "bound_method", "function": self.value(value.__func__, f"{path}.function", depth + 1), "receiver": self.value(value.__self__, f"{path}.receiver", depth + 1)}
         if inspect.isfunction(value):
+            description = describe_callable(value)
+            if description.owner == "function":
+                return {
+                    "tag": "function_owner",
+                    "target": self.value(
+                        description.raw_target,
+                        f"{path}.function_target",
+                        depth + 1,
+                    ),
+                }
             closure = inspect.getclosurevars(value)
             missing = _missing_global_names(value, closure.unbound)
             if missing:
@@ -413,6 +424,7 @@ class _Decoder:
             "frozenset": {"tag", "items"}, "dict": {"tag", "items"},
             "path": {"tag", "kind", "value"},
             "bound_method": {"tag", "function", "receiver"},
+            "function_owner": {"tag", "target"},
             "function": {"tag", "code", "name", "defaults", "kwdefaults", "annotations", "captures", "freevars"},
             "class": {"tag", "name", "bases", "namespace"},
             "instance": {"tag", "type", "fields"},
@@ -445,6 +457,8 @@ class _Decoder:
                 references.append(node["target"])
             elif tag == "bound_method":
                 references.extend((node["function"], node["receiver"]))
+            elif tag == "function_owner":
+                references.append(node["target"])
             elif tag == "function":
                 references.extend((node["defaults"], node["kwdefaults"], node["annotations"], *node["captures"].values()))
                 if not isinstance(node["freevars"], list) or not all(isinstance(name, str) for name in node["freevars"]):
@@ -546,6 +560,10 @@ class _Decoder:
             return DefLink.finalized(kind, self.value(node.get("target"), f"{path}.target"))
         if tag == "bound_method":
             return types.MethodType(self.value(node.get("function"), f"{path}.function"), self.value(node.get("receiver"), f"{path}.receiver"))
+        if tag == "function_owner":
+            from .signatures import function
+
+            return function(self.value(node.get("target"), f"{path}.target"))
         if tag == "function":
             captures = node.get("captures")
             freevars = node.get("freevars")
@@ -667,14 +685,10 @@ def encode_invocation(
     """Encode one detached call graph without activating annotations or saving input state."""
     if not callable(fn) or not isinstance(args, tuple) or not isinstance(kwargs, Mapping) or not all(isinstance(key, str) for key in kwargs):
         raise CoreCallCodecError("core execution transport requires a callable, tuple arguments, and string keyword mapping")
-    target = getattr(fn, "__dryml_execute_raw_target__", None)
-    owner = "function" if target is not None else getattr(fn, "__dryml_execute_owner__", "ordinary")
-    if target is None:
-        target = fn
-    annotation_target = target.__func__ if inspect.ismethod(target) else target
-    if not inspect.isfunction(annotation_target) and not inspect.ismethod(annotation_target):
-        annotation_target = getattr(annotation_target, "__call__", annotation_target)
-    if inspect.iscoroutinefunction(annotation_target) or inspect.isgeneratorfunction(annotation_target) or inspect.isasyncgenfunction(annotation_target):
+    description = describe_callable(fn)
+    target = description.raw_target
+    owner = description.owner
+    if description.native_modality != "sync":
         raise CoreCallCodecError("core execution transport rejected async or generator target")
     encoder = _Encoder(limit_bytes=limit_bytes)
     if not isinstance(update_targets, tuple):

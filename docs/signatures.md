@@ -157,6 +157,42 @@ different replica. Execute does not auto-save inputs: only its core result owner
 may publish a returned live Object or explicitly delivered update root after the
 owner's raw-return seam.
 
+Dispatch uses this ownership description only for passive static capture. It
+preserves the supplied wrapper or bound receiver as the eventual invocation root:
+the description may expose a proven `@function` raw target and declaration
+carriers, but it does not authorize generic `__wrapped__` or `__signature__`
+unwrapping. On an explicit in-process Dispatch route, the admitted original
+callable runs once and returns or raises directly. On an Execute route, core
+retains the same one-owner delivery/invocation/return-normalization boundary.
+
+### Passive Callable Ownership
+
+`dryml.core._callable_inspection.describe_callable(...)` is the package-internal
+bridge from core invocation ownership to later static capture. It reports the
+submitted callable, the exact raw target core Execute will invoke for a supported
+`@function` relationship, ordered passive declaration carriers, and native root
+modality. It does not import `dryml.code`, activate annotations, select a Method
+implementation, invoke a constructor or descriptor, or call the target.
+
+Only the identity-bound relationship installed by `@function`, confirmed against
+the wrapper's closed-over target, authorizes its raw target. Nested established
+function owners retain every declaration carrier once and resolve to their actual
+invocation root. `__wrapped__`, `__signature__`, and copied
+`__dryml_execute_raw_target__` metadata do not authorize unwrapping. An ordinary
+synchronous wrapper that merely names an async or generator callable therefore
+remains a synchronous ordinary root; conversely, an established owned raw target
+with coroutine, generator, or async-generator code flags remains visibly
+unsupported to an execution-policy consumer. Wrapper and raw declaration carriers
+remain distinct occurrences so consumers can retain applicable declarations from
+both layers without treating copied metadata as authority.
+
+Inspection reads exact native function, bound-method, and class slots only. It
+does not use callable-instance `__class__`, metaclass dictionary/MRO hooks, marker
+equality, descriptors, or custom `__call__` lookup. Core Execute admits an
+ordinary callable instance only when its native `__call__` root is synchronously
+known; unknown, coroutine, generator, and async-generator roots fail before
+transport or invocation.
+
 ## Migration
 
 | Retired spelling | Replacement or rationale |

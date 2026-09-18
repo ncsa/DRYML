@@ -10,6 +10,7 @@ from dryml.environments import EnvironmentRequirement, inspect_current
 from dryml.formats import deep_freeze_json
 from dryml.runtime import EffectPlan, NoAllocation, RuntimeAllocationView, RuntimeMode, RuntimeState, build_control_plan, build_device_visibility_plan, publication, validate_framework_transition
 from dryml.runtime.errors import PublicationError
+from dryml.runtime.publication import SessionGeneration
 from dryml.worlds import LocalResourceInventory, ProcessAllocation, ResourceSpec, WorldAllocation, WorldSpec, assign_local_world, local_inventory
 
 from .configuration import _controls, _normalize_environment, _normalize_resources, normalize_configuration, select_world_allocation
@@ -49,6 +50,34 @@ def current() -> SessionSnapshot:
     """
 
     return _snapshot(publication.current())
+
+
+@_session_operation("session.snapshot_for_generation")
+def snapshot_for_generation(generation: SessionGeneration) -> SessionSnapshot:
+    """
+    Project one already-held publication generation without observing current
+    state.
+
+        Args:
+            generation: Exact healthy or failed generation yielded by
+                ``publication.lease()`` or otherwise retained by its owner.
+
+        Returns:
+            The immutable redacted session projection for exactly
+            ``generation``.
+
+        Raises:
+            TypeError: If ``generation`` is not a published SessionGeneration.
+
+        Side Effects:
+            None. This function does not read publication current state,
+            observe the
+            host, inspect inventory, or activate a runtime.
+    """
+
+    if not isinstance(generation, SessionGeneration):
+        raise TypeError("generation must be a SessionGeneration")
+    return _snapshot(generation)
 
 
 @_session_operation("session.mode")
@@ -455,4 +484,7 @@ def _check_current_environment(configuration: SessionConfiguration) -> None:
         )
 
 
-__all__ = ["allocate_world", "configure", "current", "enforce_requirements", "manage", "mode", "require_env", "reset", "set_mode"]
+__all__ = [
+    "allocate_world", "configure", "current", "enforce_requirements", "manage",
+    "mode", "require_env", "reset", "set_mode", "snapshot_for_generation"
+]
