@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,7 +17,6 @@ from dryml.dispatch import InProcess, ProbeOptions
 from dryml.environments.specs import CondaEnvironmentSpec, PythonExecutableSpec
 from dryml.execute.ray import RayBackendConfig
 from dryml.execute.errors import AdmissionError
-from dryml.execute.errors import ExecutionError
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.managed import managed_operation
 from dryml.worlds import (CountConstraint, ResourceRequirement,
@@ -35,14 +36,6 @@ def _worker_identity() -> tuple[str, str]:
     import sys
 
     return sys.prefix, sys.executable
-
-
-def _must_not_run() -> None:
-    """Fail if an unavailable selected probe falls back to local work."""
-
-    raise AssertionError(
-        "an unavailable selected probe must not run the workload"
-    )
 
 
 class _RayCounter(Serializable):
@@ -246,16 +239,55 @@ def test_dispatch_ray_workload_recovers_a_bound_object_from_shared_store(
 def test_dispatch_unavailable_selected_ray_probe_never_falls_back(
     tmp_path: Path,
 ) -> None:
-    """Reject an unavailable supplied probe before local work starts."""
+    """Reject unavailable probing without leaking native SDK initialization."""
 
     local_spool = tmp_path / "local"
     local_spool.mkdir()
-    view = dispatch.with_options(
-        backend=SubProcessConfig(spool_directory=local_spool),
+    (tmp_path / "missing").mkdir()
+    # Native Ray initialization may outlive a caller's bounded wait. Keep this
+    # deliberately unreachable endpoint outside the shared test interpreter.
+    script = """
+from pathlib import Path
+import sys
+import dryml.dispatch as dispatch
+from dryml.execute.errors import ExecutionError
+from dryml.execute.ray import RayBackendConfig
+from dryml.execute.subprocess import SubProcessConfig
+
+def must_not_run():
+    raise AssertionError("unavailable probe must not fall back")
+
+root = Path(sys.argv[1])
+view = dispatch.with_options(
+    backend=SubProcessConfig(spool_directory=root / "local"),
+    probe=dispatch.ProbeOptions(
+        placement="execute",
+        backend=RayBackendConfig(
+            address="127.0.0.1:1", spool_directory=root / "missing",
+            connect_timeout=1, admission_timeout=3, termination_timeout=1,
+            automatic_environment_discovery=False,
+        ),
+    ),
+)
+try:
+    view.run(must_not_run)
+except ExecutionError:
+    print("unavailable-probe-rejected")
+else:
+    raise AssertionError("unavailable probe was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "unavailable-probe-rejected" in result.stdout.splitlines()
+
+    usable = dispatch.with_options(
+        backend=InProcess(),
         probe=ProbeOptions(
             placement="execute",
-            backend=_ray_config(tmp_path / "missing", address="127.0.0.1:1"),
+            backend=_ray_config(tmp_path / "usable"),
         ),
     )
-    with pytest.raises(ExecutionError):
-        view.run(_must_not_run)
+    assert usable.run(_scalar, 3) == 4
