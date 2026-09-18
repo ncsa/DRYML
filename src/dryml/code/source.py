@@ -65,7 +65,7 @@ def _read_file(filename: object) -> str | None:
     if len(raw) > _MAX_SOURCE_BYTES:
         return None
     try:
-        return raw.decode("utf-8")
+        return raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeError:
         return None
 
@@ -173,8 +173,9 @@ def get_source_info(obj: object) -> SourceInfo | None:
         obj: Candidate Python function or class.
 
     Returns:
-        Request-local source information, or ``None`` when the target is not an
-        admitted file-backed source subject.
+        Request-local source information with universal newlines normalized to
+        LF, or ``None`` when the target is not an admitted file-backed
+        source subject.
 
     Raises:
         None.

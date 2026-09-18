@@ -622,7 +622,7 @@ def _function_source(function: types.FunctionType,
     if len(raw) > min(_MAX_SOURCE_BYTES, remaining):
         return None, 0, True
     try:
-        text = raw.decode("utf-8")
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError:
         return None, len(raw), True
     tree = _bounded_tree(text)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import replace
 from time import monotonic
@@ -126,7 +127,9 @@ def test_ray_runtime_environment_honors_selector_pythonpath_policy():
     runtime = backend._runtime_environment(
         {"py_executable": "/existing/python"}, candidate)
 
-    assert runtime["env_vars"] == {"PYTHONPATH": "/one:/two"}
+    assert runtime["env_vars"] == {
+        "PYTHONPATH": os.pathsep.join(("/one", "/two")),
+    }
 
 
 def test_ray_exact_current_pin_stays_lazy_and_conda_run_fails_before_submission(  # noqa: E501

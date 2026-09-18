@@ -12,6 +12,7 @@ from dryml.code import (
     InvalidTargetError,
     KernelCall,
     SourceUnavailableError,
+    StaticDependenciesKernel,
     capture_inspection,
     extract_source,
     probe,
@@ -36,6 +37,41 @@ def _root() -> None:
     """Provide a file-backed root for passive projection."""
 
     _helper()
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_capture_nested_file_source_with_universal_newlines(
+    tmp_path, newline: str,
+) -> None:
+    """Native file newlines preserve nested call discovery and drift guards."""
+
+    source = (
+        "def helper():\n"
+        "    return None\n\n"
+        "def outer():\n"
+        "    def subject():\n"
+        '        """Nested invocation body."""\n\n'
+        "        helper()\n"
+        "    return subject\n"
+    )
+    path = tmp_path / "newline_subject.py"
+    path.write_bytes(source.replace("\n", newline).encode("utf-8"))
+    namespace = {}
+    exec(compile(source, str(path), "exec"), namespace)
+    subject = namespace["outer"]()
+
+    capture = capture_inspection(subject)
+    dependencies = probe(
+        capture.target, (KernelCall(StaticDependenciesKernel(), None),),
+    ).require(StaticDependenciesKernel)
+    assert dependencies.complete
+    assert [target.info.name for target in dependencies.targets] == [
+        "subject", "helper",
+    ]
+    assert "\r" not in extract_source(subject).source
+    namespace["helper"] = lambda: None
+    with pytest.raises(InvalidTargetError, match="changed"):
+        capture.validate()
 
 
 class TargetKernel(AnalysisKernel[type, tuple]):
