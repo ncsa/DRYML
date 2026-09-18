@@ -14,6 +14,7 @@ from dryml.core.store.dir import DirStore
 from dryml.dispatch import InProcess, ProbeOptions
 from dryml.environments.specs import CondaEnvironmentSpec, PythonExecutableSpec
 from dryml.execute.ray import RayBackendConfig
+from dryml.execute.errors import AdmissionError
 from dryml.execute.errors import ExecutionError
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.managed import managed_operation
@@ -143,9 +144,15 @@ def test_dispatch_ray_workload_honors_exact_existing_environment_pin(
         report = view.explain(_worker_identity)
         assert report.probe_placement == "in_process"
         assert report.workload_placement == "execute"
-        assert view.run(_worker_identity) == (
-            str(prefix), str(expected),
-        )
+        try:
+            identity = view.run(_worker_identity)
+        except AdmissionError as error:
+            issues = tuple(
+                (issue.code, issue.message)
+                for issue in getattr(error.report, "issues", ())
+            )
+            pytest.fail(f"Exact worker admission failed: {issues}")
+        assert identity == (str(prefix), str(expected))
     finally:
         repo.close(flush=False)
 
