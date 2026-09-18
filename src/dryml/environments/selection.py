@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Thread
 from types import MappingProxyType
@@ -71,7 +71,9 @@ class ResolvedEnvironmentSelection:
     software_digest: str
     record: EnvironmentRecord
     resolved_prefix: str | None = None
-    launch_env: Mapping[str, str] = MappingProxyType({})
+    launch_env: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __repr__(self) -> str:
         """Return a fixed representation that does not disclose launch data."""

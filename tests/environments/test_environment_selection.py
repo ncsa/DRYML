@@ -76,8 +76,9 @@ def test_explicit_python_keeps_symlink_launch_spelling_and_prefix_evidence(
         PythonExecutableSpec("/venv/bin/python")
     )
 
-    assert selection.command == ("/venv/bin/python",)
-    assert selection.expected_executable == "/venv/bin/python"
+    expected = os.path.abspath("/venv/bin/python")
+    assert selection.command == (expected,)
+    assert selection.expected_executable == expected
     assert selection.expected_prefix == observed.python.prefix
 
 
@@ -127,10 +128,10 @@ def test_conda_name_freezes_one_prefix_and_conda_run_form(monkeypatch):
 
     assert selection.resolved_prefix == "/envs/selected"
     assert selection.command[:5] == (
-        "/tools/conda",
+        os.path.abspath("/tools/conda"),
         "run",
         "-p",
-        "/envs/selected",
+        os.path.abspath("/envs/selected"),
         "--no-capture-output",
     )
 
