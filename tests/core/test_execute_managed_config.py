@@ -8,15 +8,18 @@ import dill
 import pytest
 
 from dryml.core import Repo
+from dryml.core.symbol import ImportRef
 from dryml.core.execute_codec import (
     CoreCallCodecError,
+    _outcome,
+    _result_graph,
     decode_outcome,
     encode_invocation,
     invoke_invocation,
 )
 from dryml.core.session import config as core_config
 from dryml.core.store.dir import DirStore
-from dryml.core.store.store import StoreAuthorityError
+from dryml.core.store.store import Store, StoreAuthorityError
 from dryml.core.store.zip import ZipStore
 from dryml.core.object import Pickleable
 from dryml.managed import ManagedConfig, managed_operation
@@ -110,6 +113,24 @@ def _worker_constructed_config():
     return _config_facts(ManagedConfig(rerun=True))
 
 
+def _callback_shape(config):
+    """Expose the public ``None`` versus empty-list callback distinction."""
+
+    return config.callbacks is None, config.callbacks == [], type(config.callbacks) is list
+
+
+def _direct_config_result(config):
+    """Return one config directly to exercise result-graph rejection."""
+
+    return config
+
+
+def _nested_config_result(config):
+    """Return one config nested in ordinary result containers."""
+
+    return {"config": [config]}
+
+
 def test_managed_config_policy_and_callbacks_round_trip_detached_from_caller(tmp_path):
     """A transported config retains the capture-time policy and callback members."""
 
@@ -181,6 +202,136 @@ def test_repeated_config_and_callback_references_preserve_aliases(tmp_path):
 
     assert outcome["success"]
     assert outcome["result"] == (True, True)
+
+
+@pytest.mark.parametrize(
+    ("callbacks", "encoded_callbacks", "expected"),
+    (
+        (None, None, (True, False, False)),
+        ([], [], (False, True, True)),
+    ),
+)
+def test_managed_config_callback_shape_round_trips_exactly(
+        tmp_path, callbacks, encoded_callbacks, expected):
+    """Invocation transport preserves absent callbacks separately from an empty list."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    invocation = encode_invocation(
+        _callback_shape, (ManagedConfig(callbacks=callbacks),), {}, repo=repo,
+    )
+    graph = dill.loads(invocation)
+    callback_nodes = [
+        node["callbacks"] for node in graph["nodes"] if node["tag"] == "managed_config"
+    ]
+    outcome = decode_outcome(invoke_invocation(invocation, repo=repo), repo=repo)
+
+    assert callback_nodes == [encoded_callbacks]
+    assert outcome["success"]
+    assert outcome["result"] == expected
+
+
+@pytest.mark.parametrize("target", (_direct_config_result, _nested_config_result))
+def test_managed_config_results_are_rejected_by_the_result_encoder(target):
+    """Result encoding denies configs at direct and nested locations."""
+
+    with pytest.raises(CoreCallCodecError, match="managed config result"):
+        _result_graph(target(ManagedConfig()), limit_bytes=1_000_000, automatic_references=set())
+
+
+@pytest.mark.parametrize("nested", (False, True))
+def test_managed_config_result_decode_rejects_before_opening_resources(
+        tmp_path, nested, monkeypatch):
+    """A result config is denied during graph validation before any authority opens."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    config = {
+        "tag": "managed_config",
+        "state_repo": {"role": "repo", "definition": repo.to_definition().to_data()},
+        "control_store": {
+            "role": "store", "definition": repo.stores[0].to_definition(),
+        },
+        "rerun": False,
+        "callbacks": [],
+    }
+    graph = {
+        "version": 2,
+        "root": 1 if nested else 0,
+        "nodes": [config] if not nested else [config, {"tag": "list", "items": [0]}],
+    }
+    opened = []
+    monkeypatch.setattr(
+        Repo, "from_definition",
+        classmethod(lambda cls, definition: opened.append((cls, definition))),
+    )
+    monkeypatch.setattr(
+        Store, "from_definition",
+        classmethod(lambda cls, definition: opened.append((cls, definition))),
+    )
+
+    with pytest.raises(CoreCallCodecError, match="managed config result"):
+        decode_outcome(_outcome(
+            True, result=dill.dumps(graph, protocol=5), limit_bytes=1_000_000,
+        ), repo=repo)
+
+    assert opened == []
+
+
+@pytest.mark.parametrize(
+    ("tag", "fields", "reference"),
+    (
+        (
+            "managed_declaration",
+            {"authored": 0, "executable": 0, "owner": 0, "member": "operation", "resumable": True},
+            "authored",
+        ),
+        (
+            "managed_composite",
+            {"declaration": 0, "outer": 0, "owner": 0, "member": "operation"},
+            "declaration",
+        ),
+        (
+            "managed_target",
+            {"receiver": 0, "declaration": 0},
+            "declaration",
+        ),
+        (
+            "managed_composite_target",
+            {"receiver": 0, "composite": 0},
+            "composite",
+        ),
+    ),
+)
+@pytest.mark.parametrize("malformation", ("field", "reference", "type"))
+def test_malformed_managed_graph_nodes_fail_before_import_or_resource_open(
+        tmp_path, tag, fields, reference, malformation, monkeypatch):
+    """Managed node grammar is closed before imports, materialization, or opens occur."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    node = {"tag": tag, **fields}
+    if malformation == "field":
+        node["unexpected"] = None
+    elif malformation == "reference":
+        node[reference] = True
+    graph = {
+        "version": 2,
+        "root": 1,
+        "nodes": [
+            {"tag": "import", "module": "math", "qualname": None},
+            node,
+        ],
+    }
+    monkeypatch.setattr(ImportRef, "resolve", lambda self: pytest.fail("import resolved"))
+    monkeypatch.setattr(
+        Repo, "from_definition",
+        classmethod(lambda cls, definition: pytest.fail("resource opened")),
+    )
+    monkeypatch.setattr(
+        Repo, "materialize_boundary",
+        lambda self, *args, **kwargs: pytest.fail("value materialized"),
+    )
+
+    with pytest.raises(CoreCallCodecError, match="malformed (graph node|graph reference|managed)"):
+        invoke_invocation(dill.dumps(graph, protocol=5), repo=repo)
 
 
 def test_transported_callback_runs_inside_nested_worker_managed_call(tmp_path):

@@ -79,13 +79,16 @@ def _dill_result(value: Any, path: str) -> bytes:
 def _result_graph(value: Any, *, limit_bytes: int,
                   automatic_references: set[int]) -> bytes:
     """Encode an already-published result graph with the call graph grammar."""
-    encoder = _Encoder(limit_bytes=limit_bytes, automatic_references=automatic_references)
+    encoder = _Encoder(
+        limit_bytes=limit_bytes, automatic_references=automatic_references,
+        allow_managed_config=False,
+    )
     return encoder.finish(encoder.value(value, "$.result"))
 
 
 def _load_result_graph(data: bytes, *, repo: Repo, limit_bytes: int) -> tuple[Any, frozenset[int]]:
     """Decode one result graph after its outcome envelope has been validated."""
-    decoder = _Decoder(data, repo=repo, limit_bytes=limit_bytes)
+    decoder = _Decoder(data, repo=repo, limit_bytes=limit_bytes, allow_managed_config=False)
     return decoder.value(decoder.graph["root"], "$.result"), frozenset(decoder.automatic_references)
 
 
@@ -235,16 +238,18 @@ def _class_has_resource(value: type) -> bool:
 
 
 class _Encoder:
-    """Encode one whole call graph while preserving aliases and rejecting cycles."""
+    """Encode one closed graph while preserving aliases and rejecting cycles."""
 
     def __init__(self, *, limit_bytes: int,
-                 automatic_references: set[int] | None = None) -> None:
+                 automatic_references: set[int] | None = None,
+                 allow_managed_config: bool = True) -> None:
         self.nodes: list[dict[str, Any]] = []
         self.memo: dict[int, int] = {}
         self.active: set[int] = set()
         self.limit_bytes = limit_bytes
         self.automatic_references = automatic_references or set()
         self.imported_captures: dict[int, ImportRef] = {}
+        self.allow_managed_config = allow_managed_config
 
     def _capture(self, value: Any, path: str, depth: int) -> int:
         """Import stable DRYML dependencies and capture caller helpers by value."""
@@ -286,6 +291,8 @@ class _Encoder:
         )
 
         if type(value) is ManagedConfig:
+            if not self.allow_managed_config:
+                _fail("managed config result", path)
             return self._managed_config_node(value, path, depth)
         if type(value) is ManagedOperation:
             owner = value._owner
@@ -459,7 +466,7 @@ class _Encoder:
                 for index, callback in enumerate(callbacks)
             ]
         else:
-            callback_nodes = []
+            callback_nodes = None
         return {
             "tag": "managed_config",
             "state_repo": self._managed_config_resource(
@@ -485,7 +492,8 @@ class _Encoder:
 class _Decoder:
     """Decode one validated graph after worker setup, preserving alias identity."""
 
-    def __init__(self, data: bytes, *, repo: Repo, limit_bytes: int) -> None:
+    def __init__(self, data: bytes, *, repo: Repo, limit_bytes: int,
+                 allow_managed_config: bool = True) -> None:
         if not isinstance(data, bytes) or len(data) > limit_bytes:
             raise CoreCallCodecError("core execution transport rejected oversized invocation")
         graph = _load(data, "$")
@@ -498,6 +506,7 @@ class _Decoder:
         self.nodes = graph["nodes"]
         if len(self.nodes) > _MAX_NODES:
             raise CoreCallCodecError("core execution transport rejected oversized call graph")
+        self.allow_managed_config = allow_managed_config
         self._validate_graph()
         self.repo = repo
         self.memo: dict[int, Any] = {}
@@ -543,6 +552,8 @@ class _Decoder:
             if tag == "dict" and (not isinstance(node["items"], list) or any(not isinstance(item, list) or len(item) != 2 for item in node["items"])):
                 _fail("malformed mapping", f"$.node[{index}]")
             if tag == "managed_config":
+                if not self.allow_managed_config:
+                    _fail("managed config result", f"$.node[{index}]")
                 self._validate_managed_config_node(node, f"$.node[{index}]")
             if tag in {"function", "class", "instance"}:
                 mapping = node.get("captures", node.get("namespace", node.get("fields")))
@@ -585,9 +596,37 @@ class _Decoder:
             elif tag == "managed_composite_target":
                 references.extend((node["receiver"], node["composite"]))
             elif tag == "managed_config":
-                references.extend(node["callbacks"])
+                if node["callbacks"] is not None:
+                    references.extend(node["callbacks"])
             if any(isinstance(reference, bool) or not isinstance(reference, int) or not 0 <= reference < len(self.nodes) for reference in references):
                 _fail("malformed graph reference", f"$.node[{index}]")
+            self._validate_managed_node_references(node, f"$.node[{index}]")
+
+    def _validate_managed_node_references(self, node: Mapping[str, Any], path: str) -> None:
+        """Validate managed evidence node kinds before decoding can import or materialize."""
+
+        def require(field: str, tags: set[str], reason: str) -> None:
+            reference = node[field]
+            candidate = self.nodes[reference]
+            if not isinstance(candidate, Mapping) or candidate.get("tag") not in tags:
+                _fail(reason, path)
+
+        tag = node["tag"]
+        if tag == "managed_declaration":
+            require("authored", {"function"}, "malformed managed declaration")
+            require(
+                "executable", {"function", "function_owner"},
+                "malformed managed declaration",
+            )
+            require("owner", {"class", "import"}, "malformed managed declaration")
+        elif tag == "managed_composite":
+            require("declaration", {"managed_declaration"}, "malformed managed composite")
+            require("outer", {"function"}, "malformed managed composite")
+            require("owner", {"class", "import"}, "malformed managed composite")
+        elif tag == "managed_target":
+            require("declaration", {"managed_declaration"}, "malformed managed target")
+        elif tag == "managed_composite_target":
+            require("composite", {"managed_composite"}, "malformed managed target")
 
     @staticmethod
     def _validate_managed_config_resource(
@@ -618,7 +657,13 @@ class _Decoder:
 
     def _validate_managed_config_node(self, node: Mapping[str, Any], path: str) -> None:
         """Validate closed config policy and inert resource roles before decoding."""
-        if type(node["rerun"]) is not bool or not isinstance(node["callbacks"], list) or len(node["callbacks"]) > 64:
+        callbacks = node["callbacks"]
+        if (
+            type(node["rerun"]) is not bool
+            or (callbacks is not None and (
+                type(callbacks) is not list or len(callbacks) > 64
+            ))
+        ):
             _fail("malformed managed config", path)
         self._validate_managed_config_resource(node["state_repo"], f"{path}.state_repo", allow_repo=True)
         self._validate_managed_config_resource(node["control_store"], f"{path}.control_store", allow_repo=False)
@@ -828,7 +873,7 @@ class _Decoder:
                     return Store.from_definition(definition)
                 _fail("malformed managed config resource", path)
 
-            callbacks = [
+            callbacks = None if node["callbacks"] is None else [
                 self.value(index, f"{path}.callback[{position}]")
                 for position, index in enumerate(node["callbacks"])
             ]

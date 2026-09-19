@@ -39,9 +39,11 @@ class ManagedConfig:
 
     Transport:
         Core Execute v2 can capture an exact configuration appearing anywhere in
-        its supported call graph. Capture snapshots this policy and callback-list
-        membership, then workers reopen only direct-DirStore resource descriptors
-        through their active Session resource cache. Unsupported resource types,
+        its supported invocation graph. Capture preserves ``None`` versus an
+        empty callback list, snapshots callback-list membership, then workers
+        reopen only direct-DirStore resource descriptors through their active
+        Session resource cache. Result graphs reject configurations so returned
+        values cannot retain reconstructed resources. Unsupported resource types,
         including ZipStore, remain local-only. Decoding an explicit transported
         configuration opens its selected authority before workload invocation;
         ordinary descriptor data in code remains inert until code requests it.
