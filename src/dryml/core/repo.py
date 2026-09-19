@@ -792,6 +792,14 @@ class Repo:
         with self._configuration_lock:
             if self._closing or self._closed:
                 raise RuntimeError("Cannot change Store configuration after Repo close begins.")
+            from .session import _resource_cache_retains
+
+            if (
+                    _resource_cache_retains(self)
+                    and (not isinstance(store, Store) or not any(existing is store for existing in self.stores))):
+                raise RuntimeError(
+                    "Cannot change Store topology while the Session resource cache retains Repo."
+                )
             # Do not coerce a new specification while managed work has frozen the
             # physical state set: coercion can initialize persistent storage.
             if self._topology_leases and (
@@ -2569,7 +2577,8 @@ class Repo:
 
         Returns:
             A new Repo. Without an active Session resource cache, it owns the
-            Store handles opened for reconstruction; cached handles stay borrowed.
+            Store handles opened for reconstruction; with caching, an equivalent
+            live Repo is reused and a cache-created Repo borrows cached Stores.
 
         Raises:
             TypeError: If ``definition`` is not a RepoDefinition.
@@ -2584,8 +2593,8 @@ class Repo:
             session Repo nor creates missing storage. The returned Repo owns its
             newly opened noncached handles; ``close(flush=False)`` releases them
             without a commit, including after caller-managed failed work. Cached
-            Store handles remain owned by the active cache and are not adopted or
-            closed by this Repo.
+            Repos and Store handles remain leased and owned by the active cache,
+            so callers cannot close them before cache teardown.
         """
 
         from .repo_definition import repo_from_definition

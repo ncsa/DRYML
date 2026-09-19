@@ -204,3 +204,24 @@ def test_close_producing_core_session_transitions_fail_before_selection_changes(
     owned.close(flush=False)
     original.close(flush=False)
     replacement.close(flush=False)
+
+
+def test_temporary_borrowed_selection_does_not_close_the_owned_outer_repo(tmp_path):
+    """A scoped borrowed override restores an owned cached selection unchanged."""
+
+    outer_store = DirStore(tmp_path / "outer", query_index="none")
+    borrowed_store = DirStore(tmp_path / "borrowed", query_index="none")
+    borrowed = Repo(borrowed_store)
+    dryml.configure(repo=outer_store)
+    outer = dryml.status()["repo"]
+    try:
+        with session.resource_cache():
+            with dryml.config(repo=borrowed):
+                assert dryml.status()["repo"] is borrowed
+            assert dryml.status()["repo"] is outer
+            assert not outer._closed
+        outer.close(flush=False)
+    finally:
+        borrowed.close(flush=False)
+        borrowed_store.close()
+        outer_store.close()

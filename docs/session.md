@@ -103,6 +103,14 @@ Core selection changes that would close a leased owned Repo fail before replacin
 the old selection, and a temporary owned `dryml.config(repo=...)` scope is
 rejected before entry when an active cache could prevent safe restoration.
 
+Repos reconstructed through an active cache borrow their shared Stores and are
+leased until outermost exit. Teardown first removes public membership, then
+closes cache-created Repos with `flush=False`, followed by cache-owned Stores.
+It never commits a dirty ZipStore or runs deletion-save work. If deterministic
+Repo or Store cleanup fails, `RepoReconstructionError` retains the failed
+dependency set for explicit idempotent `cleanup()` retry; an ordinary workload
+exception remains primary and keeps that cleanup owner attached.
+
 ## Framework Lifecycle
 
 Managed and orchestrator publication installs mandatory visibility before a

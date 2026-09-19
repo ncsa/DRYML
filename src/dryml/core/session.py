@@ -153,6 +153,14 @@ def _assert_resource_close_allowed(resource: object) -> None:
             raise RuntimeError("Cannot close a resource while the Session resource cache retains it.")
 
 
+def _resource_cache_retains(resource: object) -> bool:
+    """Return whether an active cache holds the exact resource lifetime lease."""
+
+    with _resource_lock:
+        existing = _resource_leases.get(id(resource))
+        return existing is not None and existing[0] is resource
+
+
 def _preflight_session_transition(
         old: "SessionConfig", new: "SessionConfig", *, temporary: bool = False) -> None:
     """Reject a selection change before it can close a cache-leased Repo.
@@ -172,7 +180,7 @@ def _preflight_session_transition(
             raise RuntimeError(
                 "A temporary owned repository cannot safely restore while the Session resource cache is active."
             )
-    if old.repo is not new.repo and old.repo_owned and old.repo is not None:
+    if not temporary and old.repo is not new.repo and old.repo_owned and old.repo is not None:
         _assert_resource_close_allowed(old.repo)
 
 
@@ -200,7 +208,7 @@ def _preflight_repo_input(
             raise RuntimeError(
                 "A temporary owned repository cannot safely restore while the Session resource cache is active."
             )
-    if old.repo_owned and old.repo is not None:
+    if not temporary and old.repo_owned and old.repo is not None:
         _assert_resource_close_allowed(old.repo)
 
 

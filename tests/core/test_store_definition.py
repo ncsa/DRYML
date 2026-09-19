@@ -214,17 +214,21 @@ def test_store_cache_reuses_matching_physical_identity_and_preserves_settings(tm
     different_policy = deepcopy(source)
     different_policy["query_index"] = "memory"
 
+    rebuilt = None
     with session.resource_cache():
         assert Store.from_definition(alias_definition) is directory
         assert DirStore.open_existing(directory.base_dir, query_index="none") is directory
         rebuilt = Repo.from_definition(repo.to_definition())
         assert rebuilt.default_store is directory
-        rebuilt.close(flush=False)
+        with pytest.raises(RuntimeError, match="resource cache"):
+            rebuilt.close(flush=False)
         different = Store.from_definition(different_policy)
         assert different is not directory
         assert Store.from_definition(different_policy) is different
         with pytest.raises(RuntimeError, match="resource cache"):
             different.close()
+
+    assert rebuilt is repo
 
     first = Store.from_definition(source)
     second = Store.from_definition(source)
@@ -258,6 +262,7 @@ def test_cached_zip_hit_keeps_dirty_transaction_and_cache_cleanup_never_commits(
     assert path.read_bytes() == before
     archive.close()
     repo.close(flush=False)
+    dryml.configure(repo=None)
     reopened = ZipStore.open_existing(path)
     try:
         assert reopened.read_definition_record(record.digest) is None

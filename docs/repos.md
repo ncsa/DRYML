@@ -169,6 +169,17 @@ live transaction on a matching request, but remains ineligible for portable expo
 Without this opt-in cache, every existing-authority open returns a fresh
 caller-owned handle.
 
+The cache also matches a Repo by ordered Store keys, default ordering, routing,
+nested JSON configuration, lease duration, and deletion-save setting. Equivalent
+detached requests return one leased Repo; different behavior remains a different
+Repo even when Store handles overlap. Before every lookup the cache rechecks live
+Repo snapshots, so direct configuration, routing, default-order, or nested
+configuration mutation cannot satisfy a stale key. A changed entry that collides
+with a canonical entry remains alive for current holders but is ineligible for
+new matches. Adding a physical Store to a cache-leased Repo is rejected before
+opening or adopting it; reordering existing handles and changing configuration or
+routing remain allowed.
+
 Live reconstruction rejects descriptors that name the same physical Store through
 duplicate, dot-segment, or symlink paths before opening duplicate handles.
 Portable Selector map keys retain their `str` or `int` type, so the keys `1` and

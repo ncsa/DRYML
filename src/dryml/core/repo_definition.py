@@ -43,30 +43,50 @@ class RepoDefinitionError(ValueError):
 
 
 class RepoReconstructionError(RepoDefinitionError):
-    """Report reconstruction cleanup that still owns fresh Store handles.
+    """Report reconstruction cleanup that still owns fresh Repo or Store handles.
 
     Args:
         message: Sanitized reconstruction failure summary.
         cleanup_issues: Sanitized bounded cleanup issue labels.
 
     The original reconstruction failure is retained as ``__cause__``. This
-    error privately owns only fresh reconstruction handles whose non-flushing
-    close failed; it never owns borrowed caller handles. :meth:`cleanup` closes
-    each retained handle at most once per call, serializes concurrent callers,
-    and removes handles that close successfully. If ordinary close failures
-    remain, it re-raises this same error with updated bounded issues. Control
-    flow that derives directly from :class:`BaseException` propagates with this
-    error attached as ``repo_cleanup_error`` so the caller retains ownership for
-    a later retry.
+    error privately owns only fresh reconstruction Repos and Store handles whose
+    non-flushing close failed; it never owns borrowed caller handles. :meth:`cleanup`
+    closes retained Repos before their dependent Stores, serializes concurrent
+    callers, and removes resources that close successfully. If ordinary close
+    failures remain, it re-raises this same error with updated bounded issues.
+    Control flow that derives directly from :class:`BaseException` propagates
+    with this error attached as ``repo_cleanup_error`` so the caller retains
+    ownership for a later retry.
     """
 
     _MAX_CLEANUP_ISSUES = 16
 
-    def __init__(self, message: str, *, _retained_stores=(), cleanup_issues=()):
+    def __init__(
+            self, message: str, *, _retained_repos=(), _retained_stores=(),
+            cleanup_issues=()):
         super().__init__(message)
         self._cleanup_lock = RLock()
-        self._retained_stores = list(_retained_stores)
+        self._retained_repos = []
+        self._retained_stores = []
+        self._cleanup_issues = ()
+        self._retain_cleanup(repos=_retained_repos, stores=_retained_stores)
         self._cleanup_issues = tuple(cleanup_issues[:self._MAX_CLEANUP_ISSUES])
+
+    def _retain_cleanup(self, *, repos=(), stores=(), issues=()) -> None:
+        """Add unique resource dependencies to this error's retry ownership."""
+
+        with self._cleanup_lock:
+            for repo in repos:
+                if not any(existing is repo for existing in self._retained_repos):
+                    self._retained_repos.append(repo)
+            for store in stores:
+                if not any(existing is store for existing in self._retained_stores):
+                    self._retained_stores.append(store)
+            self._cleanup_issues = tuple((
+                *self._cleanup_issues,
+                *tuple(issues),
+            )[:self._MAX_CLEANUP_ISSUES])
 
     @property
     def cleanup_issues(self) -> tuple[str, ...]:
@@ -81,12 +101,13 @@ class RepoReconstructionError(RepoDefinitionError):
             return self._cleanup_issues
 
     def cleanup(self) -> None:
-        """Retry non-flushing close once for every privately retained handle.
+        """Retry non-flushing close once for every privately retained resource.
 
         Side Effects:
-            Closes only this error's fresh reconstruction handles. Successful
-            closes are removed, making cleanup idempotent after all handles
-            close. Concurrent callers are serialized.
+            Closes only this error's fresh reconstruction Repos and Store handles.
+            Repos close before Stores. Successful closes are removed, making
+            cleanup idempotent after all resources close. Concurrent callers are
+            serialized.
 
         Raises:
             RepoReconstructionError: This same error, if a non-control-flow
@@ -97,9 +118,30 @@ class RepoReconstructionError(RepoDefinitionError):
         """
 
         with self._cleanup_lock:
+            repos = tuple(self._retained_repos)
             stores = tuple(self._retained_stores)
             remaining = []
             issues = list(self._cleanup_issues)
+            retained_repos = []
+            for index, repo in enumerate(repos):
+                try:
+                    repo.close(flush=False)
+                except BaseException as error:
+                    retained_repos.append(repo)
+                    if len(issues) < self._MAX_CLEANUP_ISSUES:
+                        issues.append(type(error).__name__)
+                    if not isinstance(error, Exception):
+                        retained_repos.extend(repos[index + 1:])
+                        self._retained_repos = retained_repos
+                        self._retained_stores = list(stores)
+                        self._cleanup_issues = tuple(issues)
+                        error.repo_cleanup_error = self
+                        raise
+            if retained_repos:
+                self._retained_repos = retained_repos
+                self._retained_stores = list(stores)
+                self._cleanup_issues = tuple(issues)
+                raise self
             for index, store in enumerate(stores):
                 try:
                     store.close()
@@ -113,6 +155,7 @@ class RepoReconstructionError(RepoDefinitionError):
                         self._cleanup_issues = tuple(issues)
                         error.repo_cleanup_error = self
                         raise
+            self._retained_repos = []
             self._retained_stores = remaining
             self._cleanup_issues = tuple(issues)
             if remaining:
@@ -1434,8 +1477,10 @@ def repo_from_definition(definition: RepoDefinition):
 
     Reconstruction deliberately resolves live selector operands and opens Stores
     only after all inert grammar and persistent path/type checks have succeeded.
-    The returned Repo owns the fresh Store handles; any failure closes only the
-    handles opened by this call without committing their buffered state.
+    Outside an active Session cache, the returned Repo owns fresh Store handles.
+    With caching, a semantic Repo hit is reused and a completed miss is published
+    atomically with cache-owned borrowed Stores; any failure closes only newly
+    staged misses without committing buffered state.
     """
 
     if not isinstance(definition, RepoDefinition):
@@ -1455,6 +1500,20 @@ def repo_from_definition(definition: RepoDefinition):
     except Exception as error:
         raise RepoDefinitionError("Repo definition reconstruction preflight failed.") from error
 
+    from . import session as core_session
+
+    cache = core_session._current_resource_cache()
+    if cache is not None:
+        key = _repo_cache_key_from_data(data)
+        return cache._acquire_repo(
+            key, lambda: _reconstruct_repo_from_data(data, routing_parts, cache_active=True),
+        )
+    return _reconstruct_repo_from_data(data, routing_parts, cache_active=False)
+
+
+def _reconstruct_repo_from_data(data: Mapping[str, Any], routing_parts, *, cache_active: bool):
+    """Construct one Repo after preflight, borrowing active-cache Store handles."""
+
     from .repo import Repo
     from .store.dir import DirStore
     from .store.zip import ZipStore
@@ -1470,7 +1529,7 @@ def repo_from_definition(definition: RepoDefinition):
             else:
                 store = ZipStore.open_existing(descriptor["path"])
             opened.append(store)
-            if not _resource_cache_retains_store(store):
+            if not cache_active:
                 owned.append(store)
         if routing_parts is None:
             routing = None
@@ -1481,7 +1540,9 @@ def repo_from_definition(definition: RepoDefinition):
                 tuple((selector, opened[index]) for selector, index in zip(selectors, store_indexes)),
                 routing_data["match_mode"], routing_data["graph_mode"],
             )
-        repo = Repo(
+        repo = Repo.__new__(Repo)
+        Repo.__init__(
+            repo,
             opened,
             config=data["settings"]["config"],
             lease_duration=data["settings"]["lease_duration"],
@@ -1493,16 +1554,27 @@ def repo_from_definition(definition: RepoDefinition):
     except BaseException as error:
         issues = []
         cleanup_control_flow = None
+        retained_repos = []
         if repo is not None:
             # This Repo is not returned. Prevent its destructor from publishing
             # cached Objects while reconstruction cleanup unwinds.
+            repo_owned = tuple(repo._owned_stores)
             repo._closing = True
             try:
-                repo._query_index.close()
+                repo.close(flush=False)
             except BaseException as cleanup_error:
+                repo._closing = True
+                retained_repos.append(repo)
                 issues.append(type(cleanup_error).__name__)
                 if not isinstance(cleanup_error, Exception):
                     cleanup_control_flow = cleanup_error
+            # Stores adopted before failure remain under the Repo's one retry
+            # owner. A hook can fail before adoption, leaving only those handles
+            # for this reconstruction path to close directly.
+            owned = [
+                store for store in owned
+                if not any(store is adopted for adopted in repo_owned)
+            ]
         failed_stores = []
         for store in reversed(owned):
             try:
@@ -1515,9 +1587,10 @@ def repo_from_definition(definition: RepoDefinition):
                         and not isinstance(cleanup_error, Exception)):
                     cleanup_control_flow = cleanup_error
         cleanup_error = None
-        if failed_stores:
+        if retained_repos or failed_stores:
             cleanup_error = RepoReconstructionError(
                 "Repo definition reconstruction cleanup requires retry.",
+                _retained_repos=retained_repos,
                 _retained_stores=failed_stores,
                 cleanup_issues=issues,
             )
@@ -1534,6 +1607,71 @@ def repo_from_definition(definition: RepoDefinition):
         if isinstance(error, RepoDefinitionError):
             raise
         raise RepoDefinitionError("Repo definition could not open required Store authority.") from error
+
+
+def _repo_cache_key_from_data(data: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Return the complete current semantic key for one validated Repo request."""
+
+    stores = tuple(_store_cache_key_from_descriptor(store) for store in data["stores"])
+    try:
+        routing = canonical_json_bytes(data["routing"], **_BOUNDS)
+        config = canonical_json_bytes(data["settings"]["config"], **_BOUNDS)
+    except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError):
+        raise RepoDefinitionError("Repo definition cache key is invalid.") from None
+    return (
+        "repo", stores, data["default_store"], routing, config,
+        float(data["settings"]["lease_duration"]),
+        data["settings"]["save_objs_on_deletion"],
+    )
+
+
+def _repo_cache_key_from_repo(repo: Any) -> tuple[Any, ...] | None:
+    """Snapshot a live Repo for matching without exporting buffered Store state.
+
+    The snapshot intentionally uses live physical evidence instead of portable
+    Store export, so a dirty ZipStore can remain the same cache transaction while
+    no longer being eligible for transport.
+    """
+
+    with repo._configuration_lock:
+        if repo._closing or repo._closed:
+            return None
+        try:
+            stores = tuple(repo._normalize_store_handles(repo.stores, reject_physical=True))
+            store_keys = tuple(_store_cache_key_from_store(store) for store in stores)
+            if any(key is None for key in store_keys):
+                return None
+            table = {id(store): index for index, store in enumerate(stores)}
+            if repo._save_routing is None:
+                routing = None
+            else:
+                routes = []
+                for index, (selector, store) in enumerate(repo._save_routing.routes):
+                    if id(store) not in table:
+                        return None
+                    routes.append({
+                        "selector": _SelectorEncoder().selector(
+                            selector, f"$.routing.routes[{index}].selector",
+                        ),
+                        "store": table[id(store)],
+                    })
+                routing = {
+                    "graph_mode": repo._save_routing.graph_mode,
+                    "match_mode": repo._save_routing.match_mode,
+                    "routes": routes,
+                }
+            config = canonical_json_bytes(repo.config, **_BOUNDS)
+            routing_bytes = canonical_json_bytes(routing, **_BOUNDS)
+            lease_duration = float(repo._lease_duration)
+            deletion_save = repo.save_objs_on_deletion
+        except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError, OSError):
+            return None
+    if type(deletion_save) is not bool:
+        return None
+    return (
+        "repo", store_keys, 0 if store_keys else None, routing_bytes, config,
+        lease_duration, deletion_save,
+    )
 
 
 def _reconstruct_routing(data: Mapping[str, Any]):
