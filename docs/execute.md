@@ -126,12 +126,21 @@ encoding, and normal setup exit. It is independent of `admission_timeout` and
 other limits.
 
 The core adapter's `dryml.core.execute:core_worker_setup` is a worker setup
-factory. It publishes runtime controls before reopening a detached `RepoDefinition`,
-then temporarily installs `core.session.config` and `current_context()`. The
-context exposes only the worker's borrowed Repo and optional explicitly selected
-control Store. It is task/thread owned, is unavailable outside that scope, and
-does not modify caller session state. Reconstructed handles close with
-`flush=False`; a control Store shared with the Repo is reopened only once.
+factory. It publishes runtime controls, activates the public Session resource
+cache, then reopens a detached `RepoDefinition` and optional control Store through
+that cache before temporarily installing `core.session.config` and
+`current_context()`. The context exposes only the worker's borrowed Repo and
+optional explicitly selected control Store. It is task/thread owned, is
+unavailable outside that scope, and does not modify caller session state.
+Equivalent reconstruction during the workload reuses setup handles while the
+setup scope is active. On exit, worker/session contexts restore before the cache
+closes cache-owned handles with `flush=False`; runtime activation remains in
+effect until that cleanup is complete. A control Store shared with the Repo uses
+its existing table handle, while a separate direct directory Store is cache-owned
+by the same worker scope. This does not change generic Execute RPC/setup fields
+or make generic Execute responsible for managed-operation policy. The shared
+worker strategy still rejects ZipStore transport even though standalone Session
+caching can locally retain a ZipStore.
 
 `dryml.core.execute.CoreOptions` is an inert reusable core-adapter override.
 At submission preparation, `resolve_core_options()` resolves per-call settings

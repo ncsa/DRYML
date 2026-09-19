@@ -87,6 +87,20 @@ def _control_store_path():
     return None if control_store is None else control_store.base_dir
 
 
+def _worker_cache_snapshot():
+    """Inspect worker setup resources without opening another worker Store."""
+    from dryml import session
+    from dryml.core.execute import current_context
+
+    context = current_context()
+    cache = session.current_resource_cache()
+    return {
+        "cache_active": cache is not None,
+        "repo_cached": cache is not None and context.repo in cache.repos,
+        "repo_store_cached": cache is not None and context.repo.stores[0] in cache.stores,
+    }
+
+
 def _wait_for_release(marker, release):
     """Publish a post-GO marker and wait until cancellation terminates this worker."""
     marker.write_text("running", encoding="ascii")
@@ -276,6 +290,26 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
         control.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=10)
+
+
+def test_real_subprocess_core_setup_exposes_its_session_resource_cache(tmp_path):
+    """A real worker retains setup resources in its active Session cache."""
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(
+        SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False),
+    )
+    try:
+        future = executor.submit(_worker_cache_snapshot)
+        assert future.result(timeout=10) == {
+            "cache_active": True,
+            "repo_cached": True,
+            "repo_store_cached": True,
+        }
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=5)
 
 
 def test_real_subprocess_core_retains_publication_evidence_when_setup_budget_drops_its_result(tmp_path):

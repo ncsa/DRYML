@@ -46,6 +46,7 @@ from .repo_definition import RepoDefinition
 from .execute_codec import CoreCallCodecError
 from .session import config, get_config
 from .store.dir import DirStore
+from .store.store import Store
 from .reference_values import StateRef
 
 
@@ -1325,10 +1326,27 @@ def _require_pristine_session() -> None:
         raise RuntimeError("core worker setup requires a pristine core session")
 
 
-def _control_store(repo: Repo, descriptor: Any) -> tuple[DirStore | None, bool]:
-    """Resolve one explicit optional control Store and whether setup opened it."""
+def _control_store(repo: Repo, descriptor: Any) -> DirStore | None:
+    """Resolve one optional control Store through the active Session cache.
+
+    Args:
+        repo: The already reconstructed worker Repo used by table-index roles.
+        descriptor: The validated detached control-role descriptor, or ``None``.
+
+    Returns:
+        The selected direct directory Store, or ``None`` when no control role was
+        supplied. Explicit Store descriptors reuse a matching active cache entry.
+
+    Raises:
+        ValueError: If a table index is invalid or resolves to a non-directory
+            Store, or if an explicit descriptor resolves to another Store kind.
+
+    Side Effects:
+        May reconstruct an existing Store through the active Session cache. The
+        cache owns any new handle; this helper never closes it.
+    """
     if descriptor is None:
-        return None, False
+        return None
     if set(descriptor) == {"repo_store"}:
         index = descriptor["repo_store"]
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(repo.stores):
@@ -1336,12 +1354,11 @@ def _control_store(repo: Repo, descriptor: Any) -> tuple[DirStore | None, bool]:
         store = repo.stores[index]
         if type(store) is not DirStore:
             raise ValueError("core worker control Store must be a DirStore")
-        return store, False
-    path = Path(descriptor["path"])
-    for store in repo.stores:
-        if type(store) is DirStore and os.path.samefile(path, store.base_dir):
-            return store, False
-    return DirStore.open_existing(path, query_index=descriptor["query_index"]), True
+        return store
+    store = Store.from_definition(descriptor)
+    if type(store) is not DirStore:
+        raise ValueError("core worker control Store must be a DirStore")
+    return store
 
 
 @contextmanager
@@ -1367,23 +1384,24 @@ def core_worker_setup(context: WorkerSetupContext, data: Mapping[str, Any]) -> I
             omit the detached setup payload.
 
     Side Effects:
-        Reconstructs only existing worker-owned Stores after runtime activation,
-        installs temporary core session/context state, and closes acquired handles
-        once in LIFO order with ``flush=False``.
+        Activates the public Session resource cache after runtime activation,
+        reconstructs only existing worker-owned Stores through that cache, and
+        installs temporary core session/context state. Contexts restore before
+        cache teardown, which closes cache-owned handles with ``flush=False``
+        while the runtime remains active.
     """
     if not isinstance(context, WorkerSetupContext) or not isinstance(data, Mapping):
         raise TypeError("core worker setup requires WorkerSetupContext and mapping data")
     spec, definition, role, replica, descriptor, cache = _decode_setup(data)
     _require_pristine_session()
     grant = ExecutionGrant.from_worker_setup(context, role=role, replica=replica)
+    from dryml.session import resource_cache
+
     with ExitStack() as stack:
         stack.enter_context(activation_scope(spec, grant))
+        stack.enter_context(resource_cache())
         repo = Repo.from_definition(definition)
-        stack.callback(repo.close, flush=False)
-        control, opened_control = _control_store(repo, descriptor)
-        if opened_control:
-            assert control is not None
-            stack.callback(control.close)
+        control = _control_store(repo, descriptor)
         stack.enter_context(config(repo=repo, cache=cache))
         stack.enter_context(worker_context(ExecutionContext(repo, control)))
         yield None

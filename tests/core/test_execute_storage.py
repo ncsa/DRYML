@@ -164,8 +164,8 @@ def test_storage_snapshot_rejects_missing_definition_storage_without_creating_it
     assert not missing.exists()
 
 
-def test_storage_snapshot_rejects_zip_definition_before_reconstruction(tmp_path, monkeypatch):
-    """The initial strategy rejects every ZipStore descriptor without opening it."""
+def test_storage_snapshot_rejects_zip_definition_before_shared_worker_setup(tmp_path, monkeypatch):
+    """Local cache support does not make ZipStore eligible for shared worker transport."""
 
     archive = ZipStore(tmp_path / "state.zip")
     archive._archive_dirty = True
