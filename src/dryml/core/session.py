@@ -43,7 +43,6 @@ class _ResourceCacheLease:
 
     cache: object
     owner: tuple[int, int, int | None]
-    depth: int = 1
     active: bool = True
 
 
@@ -109,11 +108,7 @@ def _resource_cache_scope(cache: object):
         active = _current_resource_cache()
         if active is not cache:
             raise RuntimeError("A different Session resource cache is already active.")
-        existing.depth += 1
-        try:
-            yield cache
-        finally:
-            existing.depth -= 1
+        yield cache
         return
 
     lease = _ResourceCacheLease(cache, _resource_owner())

@@ -147,14 +147,8 @@ class ResourceCache:
                             break
                 raise
 
-            for store in stores:
-                self._admit_store_key(store)
+            self._revalidate_store_keys()
             self._register_repo(repo, owned=False)
-
-    def _admit_store_key(self, store: Store) -> None:
-        """Register usable physical/opening evidence without exporting a Store."""
-
-        self._revalidate_store_keys()
 
     def _revalidate_store_keys(self) -> None:
         """Rebuild Store lookup keys from each handle's current valid evidence.
@@ -449,13 +443,6 @@ class ResourceCache:
             finally:
                 self._staged_stores = None
                 self._pending_repo_keys.remove(key)
-
-    def _retains_store(self, store: Store) -> bool:
-        """Return whether this active cache retains the exact Store handle."""
-
-        self._assert_owner()
-        with self._lock:
-            return self._contains(self._stores, store)
 
     def _teardown(self) -> None:
         """Release memberships, then close owned Repos before owned Stores."""

@@ -1769,15 +1769,6 @@ def _open_store_descriptor(definition: Mapping[str, Any]):
     return cache._acquire_store(key, open_fresh)
 
 
-def _resource_cache_retains_store(store: Any) -> bool:
-    """Return whether the active cache retains the Store lifetime for this request."""
-
-    from . import session as core_session
-
-    cache = core_session._current_resource_cache()
-    return cache is not None and cache._retains_store(store)
-
-
 def _validate_live_store_identities(stores: list[Mapping[str, Any]]) -> None:
     """Reject equivalent existing Store destinations before opening any handles."""
 
