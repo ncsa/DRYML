@@ -10,10 +10,16 @@ on trusted same-host Objects and Stores using local filesystem locks.
 
 Decorate an exact synchronous instance method with `@managed_operation`. The
 method must declare a required keyword-only `managed` parameter. Coroutines,
-generators, static/class methods, properties, wrapped targets, and arbitrary
-callables are rejected. `@managed_operation(resumable=True)` permits a compatible
-unfinished attempt to restore its retained Object state before re-entering the
-method body.
+generators, static/class methods, properties, and arbitrary or inconsistent
+callables are rejected. A synchronous `functools.wraps` wrapper chain is supported
+when every layer retains its exact forwarded target in a closure or default and
+exposes consistent signature evidence; every wrapper body still runs at its
+authored position. `@managed_operation` composes with one `@dryml.function` layer
+and one passive annotation layer in any written order without creating a second
+lifecycle or normalization boundary. Copied metadata alone is not declaration
+evidence.
+`@managed_operation(resumable=True)` permits a compatible unfinished attempt to
+restore its retained Object state before re-entering the method body.
 
 ```python
 from dryml import Repo
@@ -102,6 +108,15 @@ returns immutable `ManagedStatus` values such as `not_started`, `running`,
 `interrupted`, `failed`, or `completed`. An interruption request returns immutable
 `InterruptRequestResult` status; it requests a later cooperative safe point and
 does not guarantee another checkpoint.
+
+An ordinary wrapper outside a managed declaration exposes the same bound call,
+`status`, and `request_interrupt` surface before its first call. Its before/after,
+exception, and return-value logic is not bypassed: the inner declaration owns the
+one lifecycle, and the outer wrapper receives its completed result. Conversely, a
+wrapper inside managed runs after managed admission. Opaque wrappers, copied
+DRYML-owner metadata, aliases for one hidden managed declaration, duplicate
+managed layers, and unsupported async/generator forms fail during declaration or
+class finalization rather than silently changing lifecycle ownership.
 
 ## State, Control, And Ownership
 

@@ -11,10 +11,11 @@ import asyncio
 import contextvars
 import functools
 import inspect
+import os
 import threading
 import types
 from collections.abc import Mapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Annotated, Any, Callable, get_args, get_origin, get_type_hints
@@ -173,6 +174,24 @@ class _Controls:
 _ACTIVE_CONTEXT: contextvars.ContextVar[_ContextConfig | None] = contextvars.ContextVar(
     "dryml_signature_context", default=None
 )
+_FUNCTION_DECLARATION_PARTICIPANT = object()
+"""Private identity marker for declarations that own the function boundary."""
+
+
+@dataclass(slots=True)
+class _FunctionHandoffLease:
+    """One mutable, owner-checked handoff shared by copied contexts."""
+
+    owner: object
+    process: int
+    execution: tuple[int, int | None]
+    active: bool = True
+    used: bool = False
+
+
+_FUNCTION_HANDOFF: contextvars.ContextVar[tuple[_FunctionHandoffLease, ...]] = (
+    contextvars.ContextVar("dryml_function_normalization_handoff", default=())
+)
 
 
 def _execution_identity() -> tuple[int, int | None]:
@@ -183,6 +202,46 @@ def _execution_identity() -> tuple[int, int | None]:
     except RuntimeError:
         task = None
     return threading.get_ident(), None if task is None else id(task)
+
+
+@contextmanager
+def function_normalization_handoff(owner: object):
+    """Permit one exact function-owner call to forward without normalization.
+
+    This private managed-composition seam is scoped to the entering thread/task
+    and consumes each owner identity once.  It cannot authorize copied wrapper
+    metadata, a later call, or an unrelated nested ``function`` invocation.
+    """
+
+    lease = _FunctionHandoffLease(owner, os.getpid(), _execution_identity())
+    token = _FUNCTION_HANDOFF.set(_FUNCTION_HANDOFF.get() + (lease,))
+    try:
+        yield
+    finally:
+        # Context copies retain this object.  Mutating it before reset makes every
+        # copied value stale rather than leaving an independently usable tuple.
+        lease.active = False
+        _FUNCTION_HANDOFF.reset(token)
+
+
+def _consume_function_normalization_handoff(owner: object) -> bool:
+    """Consume this task's one allowed owner forwarding identity, if present."""
+
+    current = _FUNCTION_HANDOFF.get()
+    identity = _execution_identity()
+    for lease in current:
+        if (
+            lease.owner is owner
+            and lease.active
+            and not lease.used
+            and lease.process == os.getpid()
+            and lease.execution == identity
+        ):
+            # Do not replace the ContextVar tuple: copies must observe the same
+            # one-shot state and cannot each consume an independent authorization.
+            lease.used = True
+            return True
+    return False
 
 
 def _active_context() -> _ContextConfig | None:
@@ -1520,6 +1579,11 @@ def function(target: Callable[..., Any]) -> Callable[..., Any]:
         target keywords as controls.
     """
 
+    if type(target).__dict__.get("__dryml_function_participant__") is _FUNCTION_DECLARATION_PARTICIPANT:
+        # A declaration that owns its lifecycle opts into this core-owned marker.
+        # Core deliberately does not import managed policy to recognize the seam.
+        return target
+
     from ._callable_inspection import _FunctionInvocationOwner
 
     plan = compile_signature(target)
@@ -1528,7 +1592,7 @@ def function(target: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(target)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         return _invoke_function_with_raw_result(
-            plan, target, args, kwargs, ambient=True,
+            plan, target, args, kwargs, ambient=True, function_owner=owner,
         )
 
     wrapped.__signature__ = plan.signature
@@ -1558,6 +1622,7 @@ def _invoke_function_with_raw_result(
     on_delivered_args: Callable[[tuple[Any, ...], Mapping[str, Any]], None] | None = None,
     extra_mat_roots: tuple[Any, ...] = (),
     on_extra_materialized: Callable[[tuple[Any, ...]], None] | None = None,
+    function_owner: object | None = None,
 ) -> Any:
     """Invoke one function owner once and expose its live result before conversion.
 
@@ -1566,6 +1631,9 @@ def _invoke_function_with_raw_result(
     is reserved for Execute's publication owner and may replace the value that the
     single normal return boundary receives.
     """
+    if function_owner is not None and _consume_function_normalization_handoff(
+            function_owner):
+        return target(*args, **kwargs)
     boundary = (
         plan._prepare_ambient_args(args, kwargs)
         if ambient else plan.prepare_args(

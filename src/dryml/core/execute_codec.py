@@ -281,9 +281,50 @@ class _Encoder:
 
     def _node(self, value: Any, path: str, depth: int) -> dict[str, Any]:
         from dryml.managed.config import ManagedConfig
+        from dryml.managed.descriptor import (
+            ManagedOperation, _BoundComposite, _BoundOperation, _ManagedComposite,
+        )
 
         if type(value) is ManagedConfig:
             return self._managed_config_node(value, path, depth)
+        if type(value) is ManagedOperation:
+            owner = value._owner
+            member = value.member
+            if not isinstance(owner, type) or not isinstance(member, str):
+                _fail("unbound managed declaration", path)
+            return {
+                "tag": "managed_declaration",
+                "authored": self.value(value._target, f"{path}.authored", depth + 1),
+                "executable": self.value(value._executable, f"{path}.executable", depth + 1),
+                "owner": self.value(owner, f"{path}.owner", depth + 1),
+                "member": member,
+                "resumable": value.resumable,
+            }
+        if type(value) is _ManagedComposite:
+            descriptor = value._descriptor
+            owner = descriptor._owner
+            member = descriptor.member
+            if not isinstance(owner, type) or not isinstance(member, str):
+                _fail("unbound managed composite", path)
+            return {
+                "tag": "managed_composite",
+                "declaration": self.value(descriptor, f"{path}.declaration", depth + 1),
+                "outer": self.value(value._outer, f"{path}.outer", depth + 1),
+                "owner": self.value(owner, f"{path}.owner", depth + 1),
+                "member": member,
+            }
+        if type(value) is _BoundOperation:
+            return {
+                "tag": "managed_target",
+                "receiver": self.value(value._instance, f"{path}.receiver", depth + 1),
+                "declaration": self.value(value._descriptor, f"{path}.declaration", depth + 1),
+            }
+        if type(value) is _BoundComposite:
+            return {
+                "tag": "managed_composite_target",
+                "receiver": self.value(value._instance, f"{path}.receiver", depth + 1),
+                "composite": self.value(value._composite, f"{path}.composite", depth + 1),
+            }
         if _is_resource(value):
             _fail("live core resource", path)
         imported_capture = self.imported_captures.get(id(value))
@@ -354,13 +395,6 @@ class _Encoder:
                 "annotations": self.value(value.__annotations__, f"{path}.annotations", depth + 1),
                 "captures": captures, "freevars": list(value.__code__.co_freevars),
             }
-        if getattr(value, "__dryml_execute_owner__", None) == "managed":
-            receiver = getattr(value, "_instance", None)
-            descriptor = getattr(value, "_descriptor", None)
-            member = getattr(descriptor, "member", None)
-            if receiver is None or not isinstance(member, str):
-                _fail("malformed managed target", path)
-            return {"tag": "managed_target", "receiver": self.value(receiver, f"{path}.receiver", depth + 1), "member": member}
         if inspect.isclass(value):
             ref = _import_ref(value)
             if ref is not None and not _class_has_resource(value):
@@ -455,7 +489,10 @@ class _Decoder:
         if not isinstance(data, bytes) or len(data) > limit_bytes:
             raise CoreCallCodecError("core execution transport rejected oversized invocation")
         graph = _load(data, "$")
-        if not isinstance(graph, Mapping) or graph.get("version") != _VERSION or not isinstance(graph.get("nodes"), list):
+        if (
+            not isinstance(graph, Mapping) or set(graph) != {"version", "root", "nodes"}
+            or graph.get("version") != _VERSION or not isinstance(graph.get("nodes"), list)
+        ):
             raise CoreCallCodecError("core execution transport rejected malformed call graph")
         self.graph = graph
         self.nodes = graph["nodes"]
@@ -485,7 +522,10 @@ class _Decoder:
             "function": {"tag", "code", "name", "defaults", "kwdefaults", "annotations", "captures", "freevars"},
             "class": {"tag", "name", "bases", "namespace"},
             "instance": {"tag", "type", "fields"},
-            "managed_target": {"tag", "receiver", "member"},
+            "managed_declaration": {"tag", "authored", "executable", "owner", "member", "resumable"},
+            "managed_composite": {"tag", "declaration", "outer", "owner", "member"},
+            "managed_target": {"tag", "receiver", "declaration"},
+            "managed_composite_target": {"tag", "receiver", "composite"},
             "managed_config": {"tag", "state_repo", "control_store", "rerun", "callbacks"},
         }
         for index, node in enumerate(self.nodes):
@@ -532,10 +572,18 @@ class _Decoder:
                 else:
                     references.append(node["type"])
                 references.extend(node["fields"].values())
-            elif tag == "managed_target":
-                if not isinstance(node["member"], str):
+            elif tag == "managed_declaration":
+                if not isinstance(node["member"], str) or type(node["resumable"]) is not bool:
                     _fail("malformed managed target", f"$.node[{index}]")
-                references.append(node["receiver"])
+                references.extend((node["authored"], node["executable"], node["owner"]))
+            elif tag == "managed_composite":
+                if not isinstance(node["member"], str):
+                    _fail("malformed managed composite", f"$.node[{index}]")
+                references.extend((node["declaration"], node["outer"], node["owner"]))
+            elif tag == "managed_target":
+                references.extend((node["receiver"], node["declaration"]))
+            elif tag == "managed_composite_target":
+                references.extend((node["receiver"], node["composite"]))
             elif tag == "managed_config":
                 references.extend(node["callbacks"])
             if any(isinstance(reference, bool) or not isinstance(reference, int) or not 0 <= reference < len(self.nodes) for reference in references):
@@ -699,14 +747,73 @@ class _Decoder:
                     _fail("malformed instance field", path)
                 setattr(instance, name, self.value(index, f"{path}.field[{position}]"))
             return instance
-        if tag == "managed_target":
+        if tag == "managed_declaration":
+            from dryml.managed.descriptor import ManagedOperation, _ManagedComposite
+
+            authored = self.value(node["authored"], f"{path}.authored")
+            executable = self.value(node["executable"], f"{path}.executable")
+            owner = self.value(node["owner"], f"{path}.owner")
+            if (
+                type(authored) is not types.FunctionType
+                or type(executable) is not types.FunctionType
+                or not isinstance(owner, type)
+            ):
+                _fail("malformed managed declaration", path)
+            try:
+                declaration = ManagedOperation(executable, resumable=node["resumable"])
+                declaration.__set_name__(owner, node["member"])
+            except (TypeError, ValueError) as error:
+                raise CoreCallCodecError(
+                    f"core execution transport rejected malformed managed declaration at {path}"
+                ) from error
+            member_value = owner.__dict__.get(node["member"])
+            related = (
+                type(member_value) is ManagedOperation
+                or type(member_value) is _ManagedComposite
+            )
+            if declaration._target is not authored or not related:
+                _fail("malformed managed declaration", path)
+            return declaration
+        if tag == "managed_composite":
+            from dryml.managed.descriptor import ManagedOperation, _ManagedComposite
+
+            declaration = self.value(node["declaration"], f"{path}.declaration")
+            outer = self.value(node["outer"], f"{path}.outer")
+            owner = self.value(node["owner"], f"{path}.owner")
+            if (
+                type(declaration) is not ManagedOperation
+                or type(outer) is not types.FunctionType
+                or not isinstance(owner, type)
+                or declaration._owner is not owner
+                or declaration.member != node["member"]
+                or type(owner.__dict__.get(node["member"])) is not _ManagedComposite
+            ):
+                _fail("malformed managed composite", path)
+            return _ManagedComposite(declaration, outer)
+        if tag in {"managed_target", "managed_composite_target"}:
             receiver = self.value(node["receiver"], f"{path}.receiver")
             # Managed owns lifecycle admission and currently requires its bound
             # receiver before it can expose the owner seam.
             if isinstance(receiver, (StateRef, ObjectRef)):
                 receiver = self.repo.materialize_boundary((receiver,), reuse_live="never")[0]
-            target = getattr(receiver, node["member"], None)
-            if not callable(target) or getattr(target, "__dryml_execute_owner__", None) != "managed":
+            evidence = self.value(
+                node["declaration"] if tag == "managed_target" else node["composite"],
+                f"{path}.declaration" if tag == "managed_target" else f"{path}.composite",
+            )
+            from dryml.managed.descriptor import ManagedOperation, _BoundComposite, _ManagedComposite
+
+            declaration = evidence if tag == "managed_target" else (
+                evidence._descriptor if type(evidence) is _ManagedComposite else None
+            )
+            if type(declaration) is not ManagedOperation or not isinstance(receiver, declaration._owner):
+                _fail("malformed managed target", path)
+            target = getattr(receiver, declaration.member, None)
+
+            if (
+                not callable(target)
+                or getattr(target, "__dryml_execute_owner__", None) != "managed"
+                or (tag == "managed_composite_target" and type(target) is not _BoundComposite)
+            ):
                 _fail("malformed managed target", path)
             return target
         if tag == "managed_config":

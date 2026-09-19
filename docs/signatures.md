@@ -105,6 +105,15 @@ method, or callable instance, then normalizes its return. `normalize_args` and
 caller. Discovery ambiguity, async/generator targets, unsupported annotations, and
 unavailable authority raise `SignatureError`; helpers never guess a target.
 
+`@function` and `@managed_operation` may appear with one passive annotation
+decorator in any written order on an eligible managed instance method. Managed
+retains argument realization, checkpoint restoration, final publication, and the
+single managed return boundary. A recognized `function` layer inside managed is
+forwarded only through a private, exact-owner, one-shot handoff; it resets on all
+exits, does not authorize copied metadata, and does not suppress boundaries for
+unrelated nested `function` calls. Ordinary synchronous wrappers remain executable
+and are never generically unwrapped.
+
 Use `signature_context(repo=..., cache=..., reuse_live=..., selections=...)` to
 borrow controls without consuming target keywords. Contexts are limited to the
 originating thread and task, invalidate on exit, and do not open or close the

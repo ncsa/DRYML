@@ -117,6 +117,12 @@ tuple. The member collector returns no partial result: unsupported descriptor
 members and malformed direct metadata raise the existing generic annotation
 errors.
 
+Recognized managed/function composition can retain declaration visibility on its
+final descriptor, but this is consumer-owned wrapper preservation rather than
+annotation policy. Attachment and collection still do not inspect lifecycle
+ownership, select execution placement, invoke wrapper code, or interpret managed
+metadata.
+
 All collectors accept `key=` for exact-key filtering. Filtering preserves the
 unfiltered relative order and identity deduplication. For member collection,
 matching and shadow evidence are evaluated after filtering. Invalid filter keys,

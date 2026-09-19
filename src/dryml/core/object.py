@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from threading import Lock
 import inspect
+import types
 
 import uuid
 import time
@@ -60,6 +61,35 @@ def definition_mode(enabled: bool = True, *, concrete: bool = False):
 
 class Dryml(type):
     """Capture Object construction calls and apply the active repository mode."""
+
+    def __new__(mcls, name, bases, namespace, **kwargs):
+        """Finalize statically proven declaration descriptors after class creation.
+
+        The hook is owner-neutral: core only follows a native wrapper's direct
+        ``__wrapped__`` chain and invokes a private protocol supplied by the
+        declaration owner.  It never imports or interprets managed policy.
+        """
+
+        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+        for member_name, member in tuple(cls.__dict__.items()):
+            outer = member
+            candidate = member
+            seen: set[int] = set()
+            while type(candidate) is types.FunctionType and id(candidate) not in seen:
+                seen.add(id(candidate))
+                candidate = candidate.__dict__.get("__wrapped__")
+                if candidate is None:
+                    break
+                hook = type(candidate).__dict__.get(
+                    "__dryml_finalize_hidden_member__"
+                )
+                if hook is not None:
+                    replacement = hook(candidate, cls, member_name, outer)
+                    if replacement is None:
+                        raise TypeError("declaration finalization returned no descriptor")
+                    type.__setattr__(cls, member_name, replacement)
+                    break
+        return cls
 
     def __call__(dryml_cls, /, *args, repo=None, __cdef__=None, **kwargs):
         """Create, describe, concretize, or load an Object construction call.

@@ -137,7 +137,11 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
                 ownership=ownership, control=control, callbacks=options.callbacks,
             )
             try:
-                result = descriptor._target(instance, *call_args, managed=context, **call_kwargs)
+                from .descriptor import _invoke_target
+
+                result = _invoke_target(
+                    descriptor, instance, call_args, context, call_kwargs,
+                )
                 context._raise_if_interrupted()
                 if on_raw_result is not None:
                     result = on_raw_result(result)

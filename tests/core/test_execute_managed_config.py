@@ -284,6 +284,8 @@ def test_unsupported_callback_and_mutated_config_policy_fail_before_invocation(t
     ("graph", "reason"),
     (
         ({"version": 1, "root": 0, "nodes": []}, "malformed call graph"),
+        ({"version": 3, "root": 0, "nodes": []}, "malformed call graph"),
+        ({"version": 2, "root": 0, "nodes": [], "extra": None}, "malformed call graph"),
         ({"version": 2, "root": 0, "nodes": [{"tag": "unknown"}]}, "malformed graph node"),
         ({
             "version": 2, "root": 0,

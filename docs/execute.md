@@ -175,6 +175,10 @@ fields, snapshots the exact `rerun` bool and callback-list membership, and
 preserves repeated config/callback aliases. It transports only detached direct
 `DirStore` descriptors and detached Repo definitions containing direct
 `DirStore`s; ZipStore and arbitrary live resource captures remain rejected.
+The same closed v2 graph represents managed declarations, composites, and bound
+targets with authored function, executable wrapper, member, and recognized owner
+evidence. Nested callbacks may capture a managed declaration or its
+default/closure values without relying on member lookup as graph evidence.
 Explicit config nodes reopen selected existing authority while decoding through
 the active worker Session resource cache. Thus matching config resources reuse
 the worker's handles, while different supported settings remain distinct. A

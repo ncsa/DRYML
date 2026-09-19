@@ -195,12 +195,12 @@ def _known_instance_owner(target: Callable[..., Any]) -> CallableOwner | None:
     """Recognize only the concrete core owners already used by transport."""
 
     classes = _native_mro(type(target))
-    from dryml.managed.descriptor import _BoundOperation
+    from dryml.managed.descriptor import _BoundComposite, _BoundOperation
     from dryml.methods.method import Method
 
     if Method in classes:
         return "method"
-    if _BoundOperation in classes:
+    if _BoundOperation in classes or _BoundComposite in classes:
         return "managed"
     return None
 
