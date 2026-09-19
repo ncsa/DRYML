@@ -109,8 +109,13 @@ def describe_callable(target: Callable[..., Any]) -> CallableDescription:
         )
     owner = _known_instance_owner(target)
     if owner is not None:
-        return CallableDescription(target, target, owner, (target, ),
-                                   _owner_modality(target))
+        return CallableDescription(
+            target,
+            target,
+            owner,
+            _owner_carriers(target, owner),
+            _owner_modality(target),
+        )
     return _ordinary(target)
 
 
@@ -203,6 +208,30 @@ def _known_instance_owner(target: Callable[..., Any]) -> CallableOwner | None:
     if _BoundOperation in classes or _BoundComposite in classes:
         return "managed"
     return None
+
+
+def _owner_carriers(
+        target: Callable[..., Any], owner: CallableOwner,
+) -> tuple[object, ...]:
+    """Return exact declaration carriers for a known invocation owner.
+
+    Managed bound views are temporary call objects, while their descriptor owns
+    the passive declarations that must remain visible to Dispatch inspection.
+    """
+
+    if owner != "managed":
+        return (target,)
+    descriptor = object.__getattribute__(target, "_descriptor")
+    from dryml.managed.descriptor import ManagedOperation
+
+    if type(descriptor) is ManagedOperation:
+        carriers = [target, descriptor, descriptor._target, descriptor._executable]
+        composite = getattr(target, "_composite", None)
+        outer = getattr(composite, "_outer", None)
+        if type(outer) is types.FunctionType:
+            carriers.append(outer)
+        return _unique_carriers(*carriers)
+    return (target,)
 
 
 def _ordinary(target: Callable[..., Any]) -> CallableDescription:

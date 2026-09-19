@@ -3317,12 +3317,16 @@ class Repo:
                 reference_memo = {}
                 for exact in exact_plans.values():
                     reserved = reserved_live.get(exact.state_ref.digest())
-                    results[exact.state_ref.object.digest()] = (
+                    result = (
                         reserved if reserved is not None else execute_exact_state_load_plan(
                             self, exact, reuse_live=plan.reuse_live, cache=plan.cache,
                             _reference_memo=reference_memo,
                         )
                     )
+                    # Every exact aggregate root keeps the StateRef that selected
+                    # it, even when the shared memo preserves aliases across roots.
+                    result._last_state_ref = exact.state_ref
+                    results[exact.state_ref.object.digest()] = result
 
                 cdef_memo = _NodeBindings()
                 for digest, obj in results.items():

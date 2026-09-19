@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextvars
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -210,6 +212,20 @@ def test_execute_omitted_defaults_read_the_invocation_repo_not_the_codec_repo(tm
 
 def test_worker_setup_installs_its_control_default_before_managed_invocation(tmp_path):
     """Worker setup makes its selected control Store available without root injection."""
+
+    result = subprocess.run(
+        [sys.executable, "-c", (
+            "from pathlib import Path; import sys; "
+            "from tests.managed.test_execute_defaults import _check_worker_defaults; "
+            "_check_worker_defaults(Path(sys.argv[1]))"
+        ), str(tmp_path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _check_worker_defaults(tmp_path):
+    """Exercise setup in a pristine process, independent of suite backend imports."""
 
     control = DirStore(tmp_path / "control", query_index="none")
     data = _worker_setup_data(tmp_path, control)

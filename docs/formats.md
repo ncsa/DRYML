@@ -75,6 +75,9 @@ it never creates, repairs, or commits it. A dirty or file-like ZipStore cannot b
 exported, although an already cached dirty path-backed ZipStore can remain one live
 local transaction for a matching open request. Session resource-cache teardown
 discards cache-owned buffered Zip work without committing it.
+See [Repos and Stores](repos.md) for reconstruction ownership and
+[Session](session.md) for cache lifetime; [Generic Execute](execute.md) accepts
+only the narrower direct-DirStore worker transport.
 
 ## Managed Control Formats
 

@@ -99,6 +99,9 @@ execution errors. It does not inspect status, reconcile an operation, retry, or
 rerun a managed method automatically. After such an error, reconnect to the
 chosen state/control authority and use `status()` or make an explicit compatible
 managed call to decide recovery.
+See [Generic Execute](execute.md) for backend lifecycle boundaries,
+[Repos and Stores](repos.md) for borrowed Store authority, and
+[Session](session.md) for the cache scope used during worker reconstruction.
 
 Bound operations also provide
 `status(*, state_repo=None, control_store=None)` and

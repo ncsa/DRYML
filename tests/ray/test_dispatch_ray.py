@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import dryml.dispatch as dispatch
-from dryml.core import Repo, Serializable
+from dryml.core import Repo, Serializable, StateRef
 from dryml.core.execute import CoreOptions
 from dryml.core.store.dir import DirStore
 from dryml.dispatch import InProcess, ProbeOptions
@@ -22,6 +22,15 @@ from dryml.managed import managed_operation
 from dryml.worlds import (CountConstraint, ResourceRequirement,
                           RoleRequirement, WorldRequirement)
 from .conftest import require_ray_integration
+from tests.managed.execution_fixtures import (
+    InnerFunctionWrappedManagedValue,
+    ManagedMatrixValue,
+    MatrixArgument,
+    ORDERS,
+    OuterWrappedManagedValue,
+    matrix_config,
+    nested_managed_advance,
+)
 
 
 def _scalar(value: int = 1) -> int:
@@ -232,6 +241,107 @@ def test_dispatch_ray_workload_recovers_a_bound_object_from_shared_store(
             ),
         )
         assert view.run(counter.add, 4) == 7
+    finally:
+        repo.close(flush=False)
+
+
+@pytest.mark.parametrize("member", tuple(member for member, _ in ORDERS))
+def test_dispatch_ray_runs_every_managed_decorator_order_with_selected_control(
+        tmp_path: Path, member: str) -> None:
+    """Run every A/F/M order through Dispatch on the supplied Ray target."""
+
+    state_store = DirStore(tmp_path / "state", query_index="none")
+    control_store = DirStore(tmp_path / "control", query_index="none")
+    repo = Repo((state_store, control_store))
+    subject = ManagedMatrixValue(repo=repo)
+    argument = MatrixArgument(3, repo=repo)
+    argument_state = repo.save_object(argument, deep_capture=True)
+    repo.save_object(subject, deep_capture=True)
+    operation = getattr(subject, member)
+    try:
+        view = dispatch.with_options(
+            backend=_ray_config(tmp_path / "ray"),
+            core=CoreOptions(
+                repo=repo, control_store=control_store,
+                return_objects=False,
+            ),
+        )
+        assert operation.status(
+            state_repo=repo, control_store=control_store,
+        ).state == "not_started"
+        assert isinstance(view.run(operation, argument_state), StateRef)
+        restored = repo.load_state_ref(
+            operation.status(
+                state_repo=repo, control_store=control_store,
+            ).final_state_ref,
+            reuse_live="never",
+        )
+        assert (restored.calls, restored.value, restored.save_calls) == (1, 3, 2)
+    finally:
+        repo.close(flush=False)
+
+
+@pytest.mark.parametrize(
+    ("subject_type", "events"),
+    (
+        (OuterWrappedManagedValue, ["before", "body", "after"]),
+        (InnerFunctionWrappedManagedValue, ["before", "body", "after"]),
+    ),
+)
+def test_dispatch_ray_preserves_ordinary_managed_wrapper_composition(
+        tmp_path: Path, subject_type, events) -> None:
+    """Dispatch preserves W(M) and M(W(F)) before any direct local call."""
+
+    repo = _repo(tmp_path)
+    control_store = DirStore(tmp_path / "control", query_index="none")
+    subject = subject_type(repo=repo)
+    repo.save_object(subject, deep_capture=True)
+    try:
+        view = dispatch.with_options(
+            backend=_ray_config(tmp_path / "ray"),
+            core=CoreOptions(
+                repo=repo, control_store=control_store,
+                return_objects=False,
+            ),
+        )
+        assert subject.advance.status(
+            state_repo=repo, control_store=control_store,
+        ).state == "not_started"
+        assert view.run(subject.advance, 2) == 12
+        restored = repo.load_state_ref(
+            subject.advance.status(
+                state_repo=repo, control_store=control_store,
+            ).final_state_ref,
+            reuse_live="never",
+        )
+        assert restored.events == events
+    finally:
+        repo.close(flush=False)
+
+
+def test_dispatch_ray_transports_nested_managed_config(
+        tmp_path: Path) -> None:
+    """Pass a nested explicit ManagedConfig through Dispatch to a managed call."""
+
+    repo = _repo(tmp_path)
+    control_store = DirStore(tmp_path / "control", query_index="none")
+    from tests.managed.execution_fixtures import DispatchDiscoveryValue
+
+    subject = DispatchDiscoveryValue(repo=repo)
+    repo.save_object(subject, deep_capture=True)
+    try:
+        view = dispatch.with_options(
+            backend=_ray_config(tmp_path / "ray"),
+            core=CoreOptions(
+                repo=repo, control_store=control_store,
+                return_objects=False,
+            ),
+        )
+        nested_config = {"config": [matrix_config(repo, control_store)]}
+        assert view.run(nested_managed_advance, subject, 3, nested_config) == 3
+        assert subject.advance.status(
+            state_repo=repo, control_store=control_store,
+        ).state == "completed"
     finally:
         repo.close(flush=False)
 

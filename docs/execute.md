@@ -195,6 +195,9 @@ managed targets and managed calls nested inside ordinary transported callables u
 the same managed resolver. Worker failure, cancellation, and lost delivery remain
 ordinary Execute/core errors; the coordinator does not inspect managed status or
 automatically reconcile, retry, resume, or rerun mutation.
+See [Managed Operations](managed_operations.md) for lifecycle recovery,
+[Session](session.md) for resource-cache lifetime, and [Repos and Stores](repos.md)
+for the authoritative state and detached-definition boundaries.
 
 `prepare_shared_storage()` is the core-call storage seam. It exports a live Repo
 exactly once, derives the full worker Store table

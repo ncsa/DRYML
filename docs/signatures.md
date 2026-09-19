@@ -148,6 +148,8 @@ use their owners' narrow raw-result seam: the owner delivers arguments and invok
 once, Execute may publish a live result, and that same owner then performs its one
 declared return normalization. These seams do not make contexts, prepared plans,
 or caller-owned Repo/Store handles portable.
+See [Generic Execute](execute.md) for worker transport and [Managed Operations](managed_operations.md)
+for checkpoint/final-publication ordering.
 
 Core Execute's call description structurally lowers live Objects to their selected
 `StateRef` or CDef authority and uses a single receiving Repo boundary for Mat

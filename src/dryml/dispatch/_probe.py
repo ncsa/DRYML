@@ -164,15 +164,20 @@ def _capture_description(description: object) -> InspectionCapture:
 
     original = description.original  # type: ignore[attr-defined]
     raw_target = description.raw_target  # type: ignore[attr-defined]
-    if description.owner != "function":  # type: ignore[attr-defined]
+    if description.owner not in {"function", "managed"}:  # type: ignore[attr-defined]
         return capture_inspection(original)
     carriers = description.declaration_carriers  # type: ignore[attr-defined]
     related = tuple(carriers)
     if not any(item is raw_target for item in related):
         related += (raw_target,)
-    # Core function wrappers are invocation plumbing. Their declarations remain
-    # visible, while their implementation body cannot create dependency edges.
-    opaque = tuple(item for item in related if item is not raw_target)
+    # Core function wrappers and managed bound views are invocation plumbing.
+    # Their declarations remain visible without treating descriptor bodies as
+    # generic dependency-analysis roots.
+    opaque = (
+        tuple(item for item in related if item is not raw_target)
+        if description.owner == "function"  # type: ignore[attr-defined]
+        else related
+    )
     return _capture_inspection(
         original,
         owner_facts=InspectionOwnerFacts(original, related, opaque),

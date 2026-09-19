@@ -76,6 +76,9 @@ reconstruct a Repo, or change `current_repo`. The selected core Repo and its
 already-connected Stores are registered as borrowed entries when activation
 begins; later core selection changes register the new borrowed Repo without
 removing the old entry.
+See [Repos and Stores](repos.md) for matching/reconstruction rules, [Generic
+Execute](execute.md) for worker activation, and [Managed Operations](managed_operations.md)
+for managed config resource selection.
 
 ```python
 from dryml import session

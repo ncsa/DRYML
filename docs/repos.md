@@ -168,6 +168,9 @@ without commit at scope exit. A dirty cached path-backed ZipStore remains its sa
 live transaction on a matching request, but remains ineligible for portable export.
 Without this opt-in cache, every existing-authority open returns a fresh
 caller-owned handle.
+The [Session](session.md) guide defines cache activation, inspection, and
+thread/task lifetime; [Generic Execute](execute.md) uses that same facility only
+within a worker setup scope.
 
 The cache also matches a Repo by ordered Store keys, default ordering, routing,
 nested JSON configuration, lease duration, and deletion-save setting. Equivalent

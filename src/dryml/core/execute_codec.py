@@ -766,13 +766,12 @@ class _Decoder:
                 raise CoreCallCodecError(
                     f"core execution transport rejected malformed managed declaration at {path}"
                 ) from error
-            member_value = owner.__dict__.get(node["member"])
-            related = (
-                type(member_value) is ManagedOperation
-                or type(member_value) is _ManagedComposite
-            )
-            if declaration._target is not authored or not related:
+            if declaration.author_signature != inspect.signature(authored):
                 _fail("malformed managed declaration", path)
+            # The executable wrapper can reconstruct an equivalent raw function
+            # through a function-owner node. Keep the separately captured authored
+            # function as the declaration identity used for binding and signatures.
+            declaration._target = authored
             return declaration
         if tag == "managed_composite":
             from dryml.managed.descriptor import ManagedOperation, _ManagedComposite
@@ -786,7 +785,6 @@ class _Decoder:
                 or not isinstance(owner, type)
                 or declaration._owner is not owner
                 or declaration.member != node["member"]
-                or type(owner.__dict__.get(node["member"])) is not _ManagedComposite
             ):
                 _fail("malformed managed composite", path)
             return _ManagedComposite(declaration, outer)
@@ -800,22 +798,20 @@ class _Decoder:
                 node["declaration"] if tag == "managed_target" else node["composite"],
                 f"{path}.declaration" if tag == "managed_target" else f"{path}.composite",
             )
-            from dryml.managed.descriptor import ManagedOperation, _BoundComposite, _ManagedComposite
+            from dryml.managed.descriptor import (
+                ManagedOperation, _BoundComposite, _BoundOperation, _ManagedComposite,
+            )
 
             declaration = evidence if tag == "managed_target" else (
                 evidence._descriptor if type(evidence) is _ManagedComposite else None
             )
             if type(declaration) is not ManagedOperation or not isinstance(receiver, declaration._owner):
                 _fail("malformed managed target", path)
-            target = getattr(receiver, declaration.member, None)
-
-            if (
-                not callable(target)
-                or getattr(target, "__dryml_execute_owner__", None) != "managed"
-                or (tag == "managed_composite_target" and type(target) is not _BoundComposite)
-            ):
+            if tag == "managed_target":
+                return _BoundOperation(declaration, receiver)
+            if type(evidence) is not _ManagedComposite:
                 _fail("malformed managed target", path)
-            return target
+            return _BoundComposite(evidence, receiver)
         if tag == "managed_config":
             from dryml.managed import ManagedConfig
 

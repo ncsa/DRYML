@@ -13,8 +13,18 @@ from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef
 from dryml.core.execute import CoreOptions
 from dryml.core.store.dir import DirStore
 from dryml.execute.ray import RayBackendConfig, RayFuture
+from dryml.managed import managed_operation
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
 from .conftest import require_ray_integration
+from tests.managed.execution_fixtures import (
+    InnerFunctionWrappedManagedValue,
+    ManagedMatrixValue,
+    MatrixArgument,
+    ORDERS,
+    OuterWrappedManagedValue,
+    matrix_config,
+    nested_managed_advance,
+)
 
 
 class RayTrainingValue(Serializable):
@@ -188,5 +198,95 @@ def test_existing_ray_core_cancellation_retains_native_evidence_until_cleanup(tm
         future.cleanup(timeout=30)
         assert backend_future.object_ref is None
         assert executor.resources(timeout=10).allocated.cpus == 0.0
+    finally:
+        executor.close(cancel=True, timeout=30)
+
+
+@pytest.mark.parametrize(
+    "member", tuple(member for member, _ in ORDERS),
+)
+def test_existing_ray_core_runs_every_managed_decorator_order_once(
+        tmp_path: Path, member: str):
+    """Exercise all six A/F/M orders with real StateRef materialization on Ray."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    control_store = DirStore(tmp_path / "control", query_index="none")
+    value = ManagedMatrixValue(repo=repo)
+    argument = MatrixArgument(3, repo=repo)
+    argument_state = repo.save_object(argument, deep_capture=True)
+    repo.save_object(value, deep_capture=True)
+    executor = _executor(tmp_path / "ray", repo, control_store)
+    try:
+        operation = getattr(value, member)
+        future = executor.submit(operation, argument_state, world=_one_cpu_world())
+        assert isinstance(future.result(timeout=30), StateRef)
+        future.cleanup(timeout=30)
+        restored = repo.load_state_ref(
+            operation.status(
+                state_repo=repo, control_store=control_store,
+            ).final_state_ref,
+            reuse_live="never",
+        )
+        assert (restored.calls, restored.value, restored.save_calls) == (1, 3, 2)
+    finally:
+        executor.close(cancel=True, timeout=30)
+
+
+@pytest.mark.parametrize(
+    ("subject_type", "events"),
+    (
+        (OuterWrappedManagedValue, ["before", "body", "after"]),
+        (InnerFunctionWrappedManagedValue, ["before", "body", "after"]),
+    ),
+)
+def test_existing_ray_core_preserves_ordinary_managed_wrapper_composition(
+        tmp_path: Path, subject_type, events):
+    """Run W(M) and M(W(F)) before any local call on the supplied Ray target."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    control_store = DirStore(tmp_path / "control", query_index="none")
+    value = subject_type(repo=repo)
+    repo.save_object(value, deep_capture=True)
+    executor = _executor(tmp_path / "ray", repo, control_store)
+    try:
+        assert value.advance.status(
+            state_repo=repo, control_store=control_store,
+        ).state == "not_started"
+        future = executor.submit(value.advance, 2, world=_one_cpu_world())
+        assert future.result(timeout=30) == 12
+        future.cleanup(timeout=30)
+        restored = repo.load_state_ref(
+            value.advance.status(
+                state_repo=repo, control_store=control_store,
+            ).final_state_ref,
+            reuse_live="never",
+        )
+        assert restored.events == events
+    finally:
+        executor.close(cancel=True, timeout=30)
+
+
+def test_existing_ray_core_transports_nested_managed_config(
+        tmp_path: Path) -> None:
+    """Resolve explicit selected authority from a nested ordinary Ray argument."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    control_store = DirStore(tmp_path / "control", query_index="none")
+    from tests.managed.execution_fixtures import DispatchDiscoveryValue
+
+    value = DispatchDiscoveryValue(repo=repo)
+    repo.save_object(value, deep_capture=True)
+    executor = _executor(tmp_path / "ray", repo, control_store)
+    try:
+        nested_config = {"config": [matrix_config(repo, control_store)]}
+        future = executor.submit(
+            nested_managed_advance, value, 3, nested_config,
+            world=_one_cpu_world(),
+        )
+        assert future.result(timeout=30) == 3
+        future.cleanup(timeout=30)
+        assert value.advance.status(
+            state_repo=repo, control_store=control_store,
+        ).state == "completed"
     finally:
         executor.close(cancel=True, timeout=30)

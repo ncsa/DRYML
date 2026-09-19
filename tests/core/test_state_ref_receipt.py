@@ -78,6 +78,21 @@ def test_exact_load_attaches_only_its_requested_root_receipt(tmp_path, reuse_liv
     assert loaded.children.last_state_ref is None
 
 
+def test_aggregate_exact_load_attaches_its_requested_root_receipt(tmp_path):
+    """Aggregate materialization retains the exact StateRef selected for its root."""
+
+    source = Repo(DirStore(tmp_path / "store"))
+    root = ReceiptRoot(ReceiptValue(7, repo=source), repo=source)
+    state = source.save_object(root)
+
+    loaded, = Repo(DirStore(tmp_path / "store")).materialize_boundary(
+        (state,), reuse_live="never",
+    )
+
+    assert loaded.last_state_ref == state
+    assert loaded.children.last_state_ref is None
+
+
 def test_receipt_preserves_equal_child_identity_and_shared_alias_topology(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     first = ReceiptValue(3, repo=repo)

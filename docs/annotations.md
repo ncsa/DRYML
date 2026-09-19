@@ -122,6 +122,9 @@ final descriptor, but this is consumer-owned wrapper preservation rather than
 annotation policy. Attachment and collection still do not inspect lifecycle
 ownership, select execution placement, invoke wrapper code, or interpret managed
 metadata.
+The consuming boundaries are documented by [Managed Operations](managed_operations.md),
+[Signatures](signatures.md), and [Generic Execute](execute.md); this passive kernel
+does not import or depend on any of them.
 
 All collectors accept `key=` for exact-key filtering. Filtering preserves the
 unfiltered relative order and identity deduplication. For member collection,
