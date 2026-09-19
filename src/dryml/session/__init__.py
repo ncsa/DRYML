@@ -7,6 +7,7 @@ pointer: every successful mutation is a generation on runtime publication.
 from .configuration import normalize_configuration, select_world_allocation
 from .errors import SessionConfigurationError
 from .model import SelectedWorldAllocation, SessionConfiguration, SessionSnapshot
+from .resources import ResourceCache, current_resource_cache, resource_cache
 from .state import (allocate_world, configure, current, enforce_requirements,
                     manage, mode, require_env, reset, set_mode,
                     snapshot_for_generation)
@@ -16,14 +17,17 @@ __all__ = [
     "SessionConfiguration",
     "SessionConfigurationError",
     "SessionSnapshot",
+    "ResourceCache",
     "allocate_world",
     "configure",
     "current",
+    "current_resource_cache",
     "enforce_requirements",
     "manage",
     "mode",
     "normalize_configuration",
     "require_env",
+    "resource_cache",
     "reset",
     "select_world_allocation",
     "set_mode",

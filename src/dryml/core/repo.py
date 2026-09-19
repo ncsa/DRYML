@@ -4137,7 +4137,8 @@ class Repo:
 
         Raises:
             RuntimeError: If an active retained save context still depends on this
-                Repo's resources.
+                Repo's resources, or an active Session resource cache retains this
+                Repo.
 
         Side Effects:
             Optionally commits configured Stores, closes Repo-owned query
@@ -4148,6 +4149,9 @@ class Repo:
             skips commits and never triggers deletion-save publication.
         """
 
+        from .session import _assert_resource_close_allowed
+
+        _assert_resource_close_allowed(self)
         with self._configuration_lock:
             if self._save_context_leases:
                 raise RuntimeError("Cannot close Repo while an active save context retains resources.")

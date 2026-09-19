@@ -68,6 +68,41 @@ During orchestration, core status reports the configured mode as
 (`definition`, `concrete`, `selector`, and `space`) remain usable. Public
 `fresh` and `load_or_build` selection fails before context mutation.
 
+## Resource Cache
+
+`session.resource_cache()` opts the current thread/task into one inspectable,
+process-local resource cache. It does not allocate a runtime, open a Store,
+reconstruct a Repo, or change `current_repo`. The selected core Repo and its
+already-connected Stores are registered as borrowed entries when activation
+begins; later core selection changes register the new borrowed Repo without
+removing the old entry.
+
+```python
+from dryml import session
+
+with session.resource_cache() as cache:
+    assert session.current_resource_cache() is cache
+    selected_repos = cache.repos
+    selected_stores = cache.stores
+
+assert session.current_resource_cache() is None
+```
+
+`repos` and `stores` return fresh immutable membership tuples containing the
+actual local handles. Inspection has no I/O or ownership effect: it does not
+scan a Store, reconstruct resources, run work, or permit a caller to close an
+entry. The outermost exit clears membership. Retaining an earlier tuple does not
+extend a cache-owned lifetime or make a resource valid after its owner closes it.
+
+Nested activation in the same thread/task reuses one cache and only the outer
+activation tears it down. Copied task or thread contexts reject cache use rather
+than silently sharing it; independently entered noninherited contexts receive a
+separate cache. While an entry is registered, raw `Repo.close()` and supported
+Store `close()` calls fail. Borrowed resources are never closed by cache teardown.
+Core selection changes that would close a leased owned Repo fail before replacing
+the old selection, and a temporary owned `dryml.config(repo=...)` scope is
+rejected before entry when an active cache could prevent safe restoration.
+
 ## Framework Lifecycle
 
 Managed and orchestrator publication installs mandatory visibility before a

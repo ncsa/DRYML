@@ -383,4 +383,13 @@ class Store(ABC):
         """Commit buffered backend authority; direct Stores implement a no-op."""
 
     def close(self) -> None:
-        """Release backend-local resources."""
+        """Release backend-local resources.
+
+        Raises:
+            RuntimeError: If an active Session resource cache retains this raw
+                Store handle.
+        """
+
+        from ..session import _assert_resource_close_allowed
+
+        _assert_resource_close_allowed(self)

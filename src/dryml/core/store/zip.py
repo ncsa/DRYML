@@ -285,6 +285,10 @@ class ZipStore(DirStore):
         return f"{type(self).__module__}.{type(self).__qualname__}:{self._archive_path}"
 
     def close(self) -> None:
-        """Discard the buffered transaction without publishing it."""
+        """Discard the buffered transaction without publishing it.
+
+        Raises:
+            RuntimeError: If an active Session resource cache retains this Store.
+        """
         super().close()
         self._tmp.cleanup()

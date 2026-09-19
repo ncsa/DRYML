@@ -868,7 +868,12 @@ class DirStore(Store):
         return f"{type(self).__module__}.{type(self).__qualname__}:{self.base_dir}"
 
     def close(self) -> None:
-        """Release this handle's SQLite connections without touching authority."""
+        """Release this handle's SQLite connections without touching authority.
+
+        Raises:
+            RuntimeError: If an active Session resource cache retains this Store.
+        """
+        super().close()
         if self._query_index_instance is not None:
             self._query_index_instance.close()
             self._query_index_instance = None
