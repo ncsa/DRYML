@@ -161,7 +161,19 @@ context getters, use their import reference. Caller-owned helper functions,
 including importable module-level helpers, and closure values remain structurally
 captured with their coordinator globals and defaults. Standard `pathlib` values
 use their public kind and text rather than version-specific private slots.
-Live `Repo` and `Store` captures are rejected. Core values lower to exact CDef,
+Live `Repo` and `Store` captures are rejected except in an exact
+`ManagedConfig` value. Core invocation graph v2 captures those configs wherever
+they occur in supported arguments, containers, defaults, captures, or instance
+fields, snapshots the exact `rerun` bool and callback-list membership, and
+preserves repeated config/callback aliases. It transports only detached direct
+`DirStore` descriptors and detached Repo definitions containing direct
+`DirStore`s; ZipStore and arbitrary live resource captures remain rejected.
+Explicit config nodes reopen selected existing authority while decoding through
+the active worker Session resource cache. Thus matching config resources reuse
+the worker's handles, while different supported settings remain distinct. A
+malformed or unavailable selected resource fails at decode before workload
+invocation; an ordinary descriptor captured only by an untaken code branch is
+not opened until that code requests it. Core values otherwise lower to exact CDef,
 `ObjectRef`, or `StateRef` authority; a selected declaration Store is a pinned
 index in the frozen Store table, never a path. The worker reconstructs one local
 owner boundary: function, Method, and managed owners each deliver/invoke/normalize

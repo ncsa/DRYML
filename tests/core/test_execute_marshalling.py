@@ -351,7 +351,7 @@ def test_malformed_nodes_fail_before_symbol_resolution_without_sensitive_fields(
     repo = Repo(DirStore(tmp_path / "state"))
     secret = "transport-secret-marker"
     payload = dill.dumps({
-        "version": 1, "root": 0,
+        "version": 2, "root": 0,
         "nodes": [{"tag": "import", "module": "math", "qualname": None, "extra": secret}],
     }, protocol=5)
     monkeypatch.setattr(ImportRef, "resolve", lambda self: pytest.fail("symbol resolution ran"))
@@ -365,7 +365,7 @@ def test_malformed_path_kind_fails_with_codec_error(tmp_path):
     """An unhashable path kind is rejected without leaking a raw TypeError."""
     repo = Repo(DirStore(tmp_path / "state"))
     payload = dill.dumps({
-        "version": 1, "root": 0,
+        "version": 2, "root": 0,
         "nodes": [{"tag": "path", "kind": [], "value": "marker"}],
     }, protocol=5)
 

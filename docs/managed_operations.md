@@ -70,6 +70,18 @@ fails before workload execution; choose an independent supported control Store
 explicitly. `rerun` is an exact bool. `callbacks` is `None` or a caller-owned list
 of at most 64 callables; invocation snapshots that list without mutating it.
 
+When a `ManagedConfig` crosses core Execute, it is a detached invocation-graph
+value, not a transferred live Repo or Store. Supported direct-DirStore state and
+control resources are reopened in the worker through its active Session resource
+cache, so matching worker resources are reused and different supported opening
+settings remain distinct. ZipStore and arbitrary live resources remain rejected
+for this transport. Capture snapshots the exact policy and callback membership;
+callbacks execute in the worker after the same publication-and-association
+boundary as local callbacks. An explicit transported config opens selected
+authority during worker decode, so malformed or unavailable authority fails
+before the managed method mutates state. Plain resource descriptors in workload
+code remain inert until that code requests reconstruction.
+
 Bound operations also provide
 `status(*, state_repo=None, control_store=None)` and
 `request_interrupt(*, state_repo=None, control_store=None, expected_attempt_id=None)`.

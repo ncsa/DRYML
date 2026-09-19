@@ -32,7 +32,7 @@ from .symbol import ImportRef
 from ._callable_inspection import describe_callable
 
 
-_VERSION = 1
+_VERSION = 2
 _DEFAULT_LIMIT = 67_108_864
 _MAX_NODES = 65_536
 _MAX_DEPTH = 64
@@ -280,6 +280,10 @@ class _Encoder:
         return index
 
     def _node(self, value: Any, path: str, depth: int) -> dict[str, Any]:
+        from dryml.managed.config import ManagedConfig
+
+        if type(value) is ManagedConfig:
+            return self._managed_config_node(value, path, depth)
         if _is_resource(value):
             _fail("live core resource", path)
         imported_capture = self.imported_captures.get(id(value))
@@ -381,6 +385,59 @@ class _Encoder:
             return {"tag": "atom", "value": value}
         _fail("unsupported ordinary value", path)
 
+    def _managed_config_resource(self, value: Any, path: str, *, allow_repo: bool) -> dict[str, Any] | None:
+        """Detach one supported ManagedConfig authority without retaining its handle."""
+        from .store.dir import DirStore
+
+        if value is None:
+            return None
+        if allow_repo and isinstance(value, Repo):
+            definition = value.to_definition().to_data()
+            role = "repo"
+            descriptors = definition["stores"]
+        elif type(value) is DirStore:
+            definition = value.to_definition()
+            role = "store"
+            descriptors = [definition]
+        else:
+            _fail("unsupported managed config resource", path)
+        if any(descriptor.get("kind") != "dir" for descriptor in descriptors):
+            _fail("unsupported managed config resource", path)
+        return {"role": role, "definition": definition}
+
+    def _managed_config_node(self, value: Any, path: str, depth: int) -> dict[str, Any]:
+        """Snapshot one exact ManagedConfig policy and its callback membership."""
+        if type(value.rerun) is not bool:
+            _fail("malformed managed config", path)
+        callbacks = value.callbacks
+        if callbacks is not None:
+            if type(callbacks) is not list or len(callbacks) > 64:
+                _fail("malformed managed config", path)
+            for callback in callbacks:
+                try:
+                    modality = describe_callable(callback).native_modality
+                except Exception:
+                    _fail("unsupported managed callback", path)
+                if modality != "sync":
+                    _fail("unsupported managed callback", path)
+            callback_nodes = [
+                self.value(callback, f"{path}.callback[{index}]", depth + 1)
+                for index, callback in enumerate(callbacks)
+            ]
+        else:
+            callback_nodes = []
+        return {
+            "tag": "managed_config",
+            "state_repo": self._managed_config_resource(
+                value.state_repo, f"{path}.state_repo", allow_repo=True,
+            ),
+            "control_store": self._managed_config_resource(
+                value.control_store, f"{path}.control_store", allow_repo=False,
+            ),
+            "rerun": value.rerun,
+            "callbacks": callback_nodes,
+        }
+
     def finish(self, root: int) -> bytes:
         try:
             payload = dill.dumps({"version": _VERSION, "root": root, "nodes": self.nodes}, protocol=5)
@@ -429,6 +486,7 @@ class _Decoder:
             "class": {"tag", "name", "bases", "namespace"},
             "instance": {"tag", "type", "fields"},
             "managed_target": {"tag", "receiver", "member"},
+            "managed_config": {"tag", "state_repo", "control_store", "rerun", "callbacks"},
         }
         for index, node in enumerate(self.nodes):
             if not isinstance(node, Mapping) or node.get("tag") not in allowed or set(node) != allowed[node["tag"]]:
@@ -444,6 +502,8 @@ class _Decoder:
                 _fail("malformed path", f"$.node[{index}]")
             if tag == "dict" and (not isinstance(node["items"], list) or any(not isinstance(item, list) or len(item) != 2 for item in node["items"])):
                 _fail("malformed mapping", f"$.node[{index}]")
+            if tag == "managed_config":
+                self._validate_managed_config_node(node, f"$.node[{index}]")
             if tag in {"function", "class", "instance"}:
                 mapping = node.get("captures", node.get("namespace", node.get("fields")))
                 if not isinstance(mapping, Mapping) or not all(isinstance(name, str) for name in mapping):
@@ -476,8 +536,44 @@ class _Decoder:
                 if not isinstance(node["member"], str):
                     _fail("malformed managed target", f"$.node[{index}]")
                 references.append(node["receiver"])
+            elif tag == "managed_config":
+                references.extend(node["callbacks"])
             if any(isinstance(reference, bool) or not isinstance(reference, int) or not 0 <= reference < len(self.nodes) for reference in references):
                 _fail("malformed graph reference", f"$.node[{index}]")
+
+    @staticmethod
+    def _validate_managed_config_resource(
+            value: Any, path: str, *, allow_repo: bool) -> None:
+        """Validate an inert direct-DirStore config role before any resource opens."""
+        from .repo_definition import RepoDefinition, _validate_store_descriptor
+
+        if value is None:
+            return
+        if not isinstance(value, Mapping) or set(value) != {"role", "definition"}:
+            _fail("malformed managed config resource", path)
+        role = value["role"]
+        if role == "repo" and allow_repo:
+            try:
+                definition = RepoDefinition.from_data(value["definition"])
+                descriptors = definition.to_data()["stores"]
+            except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError):
+                _fail("malformed managed config resource", path)
+        elif role == "store":
+            try:
+                descriptors = [_validate_store_descriptor(value["definition"])]
+            except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError):
+                _fail("malformed managed config resource", path)
+        else:
+            _fail("malformed managed config resource", path)
+        if any(descriptor["kind"] != "dir" for descriptor in descriptors):
+            _fail("unsupported managed config resource", path)
+
+    def _validate_managed_config_node(self, node: Mapping[str, Any], path: str) -> None:
+        """Validate closed config policy and inert resource roles before decoding."""
+        if type(node["rerun"]) is not bool or not isinstance(node["callbacks"], list) or len(node["callbacks"]) > 64:
+            _fail("malformed managed config", path)
+        self._validate_managed_config_resource(node["state_repo"], f"{path}.state_repo", allow_repo=True)
+        self._validate_managed_config_resource(node["control_store"], f"{path}.control_store", allow_repo=False)
 
     def value(self, index: Any, path: str = "$") -> Any:
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(self.nodes):
@@ -613,6 +709,37 @@ class _Decoder:
             if not callable(target) or getattr(target, "__dryml_execute_owner__", None) != "managed":
                 _fail("malformed managed target", path)
             return target
+        if tag == "managed_config":
+            from dryml.managed import ManagedConfig
+
+            def decode_resource(value: Any, *, state_repo: bool) -> Any:
+                if value is None:
+                    return None
+                role = value["role"]
+                definition = value["definition"]
+                if role == "repo" and state_repo:
+                    from .repo_definition import RepoDefinition
+
+                    return Repo.from_definition(RepoDefinition.from_data(definition))
+                if role == "store":
+                    return Store.from_definition(definition)
+                _fail("malformed managed config resource", path)
+
+            callbacks = [
+                self.value(index, f"{path}.callback[{position}]")
+                for position, index in enumerate(node["callbacks"])
+            ]
+            try:
+                return ManagedConfig(
+                    state_repo=decode_resource(node["state_repo"], state_repo=True),
+                    control_store=decode_resource(node["control_store"], state_repo=False),
+                    rerun=node["rerun"],
+                    callbacks=callbacks,
+                )
+            except (TypeError, ValueError) as error:
+                raise CoreCallCodecError(
+                    f"core execution transport rejected malformed managed config at {path}"
+                ) from error
         _fail("unknown graph tag", path)
 
 
