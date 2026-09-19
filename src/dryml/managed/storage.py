@@ -212,7 +212,12 @@ def resolve_stores(obj: object, *, state_repo: Repo | Store | None = None,
     else:
         raise ManagedStoreError("invalid_state_repo", "state_repo must be a Repo or Store")
     try:
-        selected_control = repo.default_store if control_store is None else control_store
+        if control_store is None:
+            from .defaults import _current_control_store_default
+
+            selected_control = _current_control_store_default() or repo.default_store
+        else:
+            selected_control = control_store
         if type(selected_control) is not DirStore:
             raise ManagedStoreError("invalid_control_store", "control_store must be an exact DirStore")
         stores = _physical_stores(repo)

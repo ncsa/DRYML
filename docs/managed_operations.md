@@ -51,9 +51,11 @@ Method code receives a private `ManagedContext`, never the configuration itself.
 `ManagedConfig.state_repo` accepts a borrowed `Repo`, an existing borrowed
 `Store`, or `None`. A Store is wrapped in a private one-Store Repo with ordinary
 unconfigured closure behavior; paths and Store lists are not managed inputs.
-`None` uses the configured current Repo and fails when none is configured. The
-selected Repo is retained intact, including its routes and replicas, and is never
-reduced to the Store containing a prior StateRef.
+`None` uses the configured current Repo at the moment the managed method is
+invoked and fails when none is configured. A temporary nested session selection
+therefore applies to an omitted `state_repo`; an explicit `state_repo` always
+wins. The selected Repo is retained intact, including its routes and replicas,
+and is never reduced to the Store containing a prior StateRef.
 
 Ordinary authored arguments and returns use the shared [Signatures](signatures.md)
 boundary. The receiver and injected `managed` control are excluded. Managed binds
@@ -63,12 +65,14 @@ interruption guard and before final publication. Unannotated structural returns
 therefore materialize; use a top-level `Ref[StateRef]`, `Ref[ObjectRef]`, or other
 supported Ref form when returning structural data deliberately.
 
-`control_store` is an optional exact `DirStore`. When omitted, it is resolved
-once from `state_repo.default_store`, not from a matching route or root save
-destination. An absent, unwritable, ZipStore, or otherwise unsupported default
-fails before workload execution; choose an independent supported control Store
-explicitly. `rerun` is an exact bool. `callbacks` is `None` or a caller-owned list
-of at most 64 callables; invocation snapshots that list without mutating it.
+`control_store` is an optional exact `DirStore`. When omitted, an Execute worker
+uses its setup-selected control Store; otherwise it resolves once from the
+effective `state_repo.default_store`, not from a matching route or root save
+destination. Explicit `control_store` always wins. An absent, unwritable,
+ZipStore, or otherwise unsupported effective default fails before workload
+execution; choose an independent supported control Store explicitly. `rerun` is
+an exact bool. `callbacks` is `None` or a caller-owned list of at most 64
+callables; invocation snapshots that list without mutating it.
 
 When a `ManagedConfig` crosses core Execute, it is a detached invocation-graph
 value, not a transferred live Repo or Store. Supported direct-DirStore state and
@@ -77,10 +81,18 @@ cache, so matching worker resources are reused and different supported opening
 settings remain distinct. ZipStore and arbitrary live resources remain rejected
 for this transport. Capture snapshots the exact policy and callback membership;
 callbacks execute in the worker after the same publication-and-association
-boundary as local callbacks. An explicit transported config opens selected
-authority during worker decode, so malformed or unavailable authority fails
-before the managed method mutates state. Plain resource descriptors in workload
-code remain inert until that code requests reconstruction.
+boundary as local callbacks. Explicit config fields retain precedence over worker
+defaults, while omitted fields use the invocation-time current Repo and the
+worker control default described above. An explicit transported config opens
+selected authority during worker decode, so malformed or unavailable authority
+fails before the managed method mutates state. Plain resource descriptors in
+workload code remain inert until that code requests reconstruction.
+
+Execute reports worker loss, cancellation, and lost delivery through its ordinary
+execution errors. It does not inspect status, reconcile an operation, retry, or
+rerun a managed method automatically. After such an error, reconnect to the
+chosen state/control authority and use `status()` or make an explicit compatible
+managed call to decide recovery.
 
 Bound operations also provide
 `status(*, state_repo=None, control_store=None)` and

@@ -132,6 +132,13 @@ that cache before temporarily installing `core.session.config` and
 `current_context()`. The context exposes only the worker's borrowed Repo and
 optional explicitly selected control Store. It is task/thread owned, is
 unavailable outside that scope, and does not modify caller session state.
+When setup has an explicit control Store, core also installs a private
+task/thread-owned managed control default before invocation decoding. Managed
+methods still resolve an omitted `state_repo` from invocation-time `current_repo`,
+so a supported nested session override is honored; an explicit config state or
+control field wins. Without a setup control role, omitted control falls back to
+the effective state Repo's default Store. This private default expires with setup
+and cannot be retained by copied task or thread contexts.
 Equivalent reconstruction during the workload reuses setup handles while the
 setup scope is active. On exit, worker/session contexts restore before the cache
 closes cache-owned handles with `flush=False`; runtime activation remains in
@@ -178,6 +185,12 @@ not opened until that code requests it. Core values otherwise lower to exact CDe
 index in the frozen Store table, never a path. The worker reconstructs one local
 owner boundary: function, Method, and managed owners each deliver/invoke/normalize
 once rather than gaining a second generic signature boundary.
+
+Core Execute does not inject a root `ManagedConfig` into a managed target. Direct
+managed targets and managed calls nested inside ordinary transported callables use
+the same managed resolver. Worker failure, cancellation, and lost delivery remain
+ordinary Execute/core errors; the coordinator does not inspect managed status or
+automatically reconcile, retry, resume, or rerun mutation.
 
 `prepare_shared_storage()` is the core-call storage seam. It exports a live Repo
 exactly once, derives the full worker Store table

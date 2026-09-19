@@ -455,17 +455,23 @@ class SharedDirStoreStrategy:
         if repo is None:
             raise ValueError("SharedDirStoreStrategy requires worker Repo authority")
         from .execute_codec import invoke_invocation
-        from dryml.managed import ManagedConfig
-        try:
-            control_store = current_context().control_store
-        except RuntimeError:
-            control_store = None
-        return invoke_invocation(
-            invocation, repo=repo, invocation_limit_bytes=invocation_limit_bytes,
-            result_limit_bytes=result_limit_bytes or invocation_limit_bytes,
-            managed_config=ManagedConfig(state_repo=repo, control_store=control_store),
-            update_args=update_args,
-        )
+
+        def invoke() -> bytes:
+            """Run the decoded graph with the established invocation selection."""
+
+            return invoke_invocation(
+                invocation, repo=repo, invocation_limit_bytes=invocation_limit_bytes,
+                result_limit_bytes=result_limit_bytes or invocation_limit_bytes,
+                update_args=update_args,
+            )
+
+        # Core worker setup normally establishes this selection. Direct strategy
+        # invocation remains a supported local test/seam and needs the same baseline
+        # only when its caller has not already selected a Repo.
+        if get_config().repo is None:
+            with config(repo=repo):
+                return invoke()
+        return invoke()
 
     def recover(
             self, result: bytes, prepared: PreparedCoreCall, *, repo: Repo | None,
@@ -1403,6 +1409,10 @@ def core_worker_setup(context: WorkerSetupContext, data: Mapping[str, Any]) -> I
         repo = Repo.from_definition(definition)
         control = _control_store(repo, descriptor)
         stack.enter_context(config(repo=repo, cache=cache))
+        if control is not None:
+            from dryml.managed.defaults import _control_store_defaults
+
+            stack.enter_context(_control_store_defaults(control))
         stack.enter_context(worker_context(ExecutionContext(repo, control)))
         yield None
 

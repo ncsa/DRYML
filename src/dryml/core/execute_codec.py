@@ -1219,8 +1219,7 @@ class _ResultPublisher:
 
 
 def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = _DEFAULT_LIMIT,
-                       result_limit_bytes: int = _DEFAULT_LIMIT, managed_config: Any = None,
-                       update_args: bool = False) -> bytes:
+                        result_limit_bytes: int = _DEFAULT_LIMIT, update_args: bool = False) -> bytes:
     """Invoke once, publish selected state, and return a tagged portable outcome.
 
     Result publication happens at each owner's raw-return seam, before its one
@@ -1276,8 +1275,7 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
                 raise CoreCallCodecError("core execution transport rejected missing owner invocation seam")
             if owner == "managed":
                 publisher = _ResultPublisher(repo, [], result_limit_bytes=result_limit_bytes)
-                result = invoke(args, kwargs, repo=repo, on_raw_result=publisher.raw_result,
-                                 managed_config=managed_config)
+                result = invoke(args, kwargs, repo=repo, on_raw_result=publisher.raw_result)
             else:
                 publisher = _ResultPublisher(repo, [], result_limit_bytes=result_limit_bytes)
                 result = invoke(args, kwargs, repo=repo, on_raw_result=publisher.raw_result)
