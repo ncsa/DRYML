@@ -73,7 +73,7 @@ def test_descriptor_is_inert_on_class_access_and_records_stable_member_identity(
             return value
 
     class Child(Base):
-        train = Base.__dict__["train"]
+        pass
 
     assert Base.train is Base.__dict__["train"]
     assert Child.train is Base.__dict__["train"]
@@ -89,6 +89,19 @@ def test_descriptor_is_inert_on_class_access_and_records_stable_member_identity(
     # U6 owns lifecycle execution; this declaration-only test must not assume an
     # unavailable placeholder instead of the real Store-backed behavior.
     assert calls == []
+
+
+def test_descriptor_rejects_same_member_reuse_by_an_unrelated_owner():
+    """A copied declaration cannot retain stale owner evidence for transport."""
+
+    class First:
+        @managed_operation()
+        def operation(self, *, managed):
+            """Provide one source declaration that must remain single-owner."""
+
+    with pytest.raises(ManagedDeclarationError, match="multiple owners"):
+        class Second:
+            operation = First.__dict__["operation"]
 
 
 def test_descriptor_rejects_different_member_names_and_preserves_passive_annotations():

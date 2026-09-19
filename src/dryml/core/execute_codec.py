@@ -748,7 +748,7 @@ class _Decoder:
                 setattr(instance, name, self.value(index, f"{path}.field[{position}]"))
             return instance
         if tag == "managed_declaration":
-            from dryml.managed.descriptor import ManagedOperation, _ManagedComposite
+            from dryml.managed.descriptor import ManagedOperation
 
             authored = self.value(node["authored"], f"{path}.authored")
             executable = self.value(node["executable"], f"{path}.executable")
@@ -1376,12 +1376,8 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
             invoke = getattr(target, "__dryml_execute_invoke__", None)
             if not callable(invoke):
                 raise CoreCallCodecError("core execution transport rejected missing owner invocation seam")
-            if owner == "managed":
-                publisher = _ResultPublisher(repo, [], result_limit_bytes=result_limit_bytes)
-                result = invoke(args, kwargs, repo=repo, on_raw_result=publisher.raw_result)
-            else:
-                publisher = _ResultPublisher(repo, [], result_limit_bytes=result_limit_bytes)
-                result = invoke(args, kwargs, repo=repo, on_raw_result=publisher.raw_result)
+            publisher = _ResultPublisher(repo, [], result_limit_bytes=result_limit_bytes)
+            result = invoke(args, kwargs, repo=repo, on_raw_result=publisher.raw_result)
         else:
             plan = compile_signature(target)
             call_args, call_kwargs = plan.prepare_args(

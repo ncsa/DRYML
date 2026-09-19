@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import subprocess
 import sys
@@ -168,6 +169,37 @@ def test_worker_control_default_is_owner_bound_and_expires_after_setup(tmp_path)
     assert observed == [True]
     with pytest.raises(RuntimeError, match="inactive"):
         copied.run(_current_control_store_default)
+
+
+def test_worker_control_default_rejects_a_copied_asyncio_child_task(tmp_path):
+    """A child task cannot inherit its parent's worker control authority."""
+
+    control = DirStore(tmp_path / "control")
+
+    async def verify_child() -> None:
+        with pytest.raises(RuntimeError, match="different thread or task"):
+            _current_control_store_default()
+
+    async def verify_parent() -> None:
+        with _control_store_defaults(control):
+            await asyncio.create_task(verify_child())
+            assert _current_control_store_default() is control
+
+    asyncio.run(verify_parent())
+
+
+def test_worker_control_default_allows_same_store_nesting_only(tmp_path):
+    """Nested setup scopes share one exact Store and reject different authority."""
+
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+
+    with _control_store_defaults(first):
+        with _control_store_defaults(first):
+            assert _current_control_store_default() is first
+        with pytest.raises(RuntimeError, match="different managed worker control default"):
+            with _control_store_defaults(second):
+                pass
 
 
 def test_ordinary_managed_named_keyword_remains_callable_data(tmp_path):

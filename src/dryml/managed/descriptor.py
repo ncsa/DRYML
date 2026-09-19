@@ -57,8 +57,9 @@ class ManagedOperation:
             native signature.
 
     Side Effects:
-        Copies passive direct annotations from ``target``. Class binding records a
-        stable member name but starts no lifecycle and never invokes ``target``.
+        Copies passive direct annotations from ``target``. Class binding records
+        one stable owner/member pair and rejects reuse by another owner or member;
+        it starts no lifecycle and never invokes ``target``.
     """
 
     from dryml.core.signatures import _FUNCTION_DECLARATION_PARTICIPANT
@@ -199,13 +200,13 @@ class ManagedOperation:
         return self._signature_plan
 
     def __set_name__(self, owner: type, name: str) -> None:
-        """Record one stable member name and reject multi-name descriptor reuse."""
+        """Record one stable binding and reject reuse by another owner or name."""
 
         if self._member is None:
             self._member = name
             self._owner = owner
-        elif self._member != name:
-            raise ManagedDeclarationError(message="a managed descriptor cannot use multiple member names")
+        elif self._member != name or self._owner is not owner:
+            raise ManagedDeclarationError(message="a managed descriptor cannot use multiple member names or multiple owners")
 
     def __call__(self, instance: object, *args: object,
                  managed: ManagedConfig | None = None, **kwargs: object) -> object:
@@ -364,10 +365,12 @@ class _BoundOperation:
         """
         from .runtime import invoke
 
+        ordinary_kwargs = dict(kwargs)
+        managed = ordinary_kwargs.pop("managed", None)
         return invoke(
             self._descriptor, self._instance, tuple(args),
-            None,
-            dict(kwargs), on_raw_result=on_raw_result,
+            managed,
+            ordinary_kwargs, on_raw_result=on_raw_result,
         )
 
     def status(self, *, state_repo: object = None, control_store: object = None) -> object:

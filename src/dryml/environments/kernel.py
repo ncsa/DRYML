@@ -130,8 +130,6 @@ def _declarations_for_targets(
         ] = []
         seen: set[int] = set()
         for source in target_sources:
-            from dryml.annotations import own_annotations
-
             for annotation in own_annotations(source):
                 if annotation.key != ENVIRONMENT_REQUIREMENT_KEY:
                     continue

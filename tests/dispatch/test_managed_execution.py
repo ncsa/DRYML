@@ -9,11 +9,12 @@ import pytest
 import dryml.dispatch as dispatch
 from dryml.core import Repo, StateRef
 from dryml.core.execute import CoreOptions
+from dryml.core.object import Pickleable
 from dryml.core.session import config as core_config
 from dryml.core.store.dir import DirStore
 from dryml.environments.specs import PythonExecutableSpec
 from dryml.execute.subprocess import SubProcessConfig
-from dryml.managed import ManagedConfig
+from dryml.managed import ManagedConfig, managed_operation
 from tests.managed.execution_fixtures import (
     ConflictingManagedDiscoveryValue,
     DispatchDiscoveryValue,
@@ -25,6 +26,31 @@ from tests.managed.execution_fixtures import (
     matrix_config,
     declared_managed_call,
 )
+
+
+class DispatchExplicitConfigValue(Pickleable):
+    """Non-composite receiver used to verify Dispatch config transport."""
+
+    def __init__(self) -> None:
+        """Initialize the state and callback observations for each invocation."""
+
+        self.value = 0
+        self.checkpoint_callbacks = 0
+
+    @managed_operation()
+    def advance(self, *, managed) -> int:
+        """Advance once and create a callback-visible checkpoint."""
+
+        self.value += 1
+        managed.checkpoint()
+        return self.value
+
+
+def _count_dispatch_checkpoint(value, context) -> None:
+    """Record worker checkpoint callback delivery on the restored receiver."""
+
+    del context
+    value.checkpoint_callbacks += 1
 
 
 @pytest.fixture(autouse=True)
@@ -114,6 +140,40 @@ def test_dispatch_rejects_conflicting_managed_declarations_before_run(
 
     assert "dispatch.requirements_conflict" in raised.value.report.diagnostics
     assert subject.calls == 0
+
+
+def test_dispatch_subprocess_retains_explicit_direct_managed_config(tmp_path):
+    """Dispatch forwards direct state, control, callback, and rerun policy to workers."""
+
+    state_store = DirStore(tmp_path / "state", query_index="none")
+    control_store = DirStore(tmp_path / "control", query_index="none")
+    repo = Repo((state_store, control_store))
+    subject = DispatchExplicitConfigValue(repo=repo)
+    repo.save_object(subject, deep_capture=True)
+    initial = ManagedConfig(
+        state_repo=repo, control_store=control_store,
+        callbacks=[_count_dispatch_checkpoint],
+    )
+    assert subject.advance(managed=initial) == 1
+    rerun = ManagedConfig(
+        state_repo=repo, control_store=control_store, rerun=True,
+        callbacks=[_count_dispatch_checkpoint],
+    )
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    view = dispatch.with_options(
+        backend=SubProcessConfig(spool_directory=spool),
+        core=CoreOptions(repo=repo, control_store=control_store, return_objects=False),
+        python=PythonExecutableSpec(sys.executable),
+    )
+
+    assert view.run(subject.advance, managed=rerun) == 2
+
+    status = subject.advance.status(state_repo=repo, control_store=control_store)
+    restored = repo.load_state_ref(status.final_state_ref, reuse_live="never")
+    assert (status.state, restored.value, restored.checkpoint_callbacks) == (
+        "completed", 2, 2,
+    )
 
 
 @pytest.mark.parametrize("placement", ("in_process", "subprocess"))

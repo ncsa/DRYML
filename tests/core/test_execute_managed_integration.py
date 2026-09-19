@@ -9,7 +9,7 @@ import pytest
 from dryml.core import Executor as CoreExecutor
 from dryml.core import Repo, StateRef, function, signatures
 from dryml.core.execute import CoreOptions
-from dryml.core.execute_codec import decode_outcome, encode_invocation, invoke_invocation
+from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
 from dryml.execute.subprocess import SubProcessConfig
@@ -85,6 +85,35 @@ class DefaultCapturedWrapperValue(Pickleable):
 
         self.value += value
         return self.value
+
+
+class DirectConfigValue(Pickleable):
+    """Non-composite managed receiver used to prove direct config transport."""
+
+    def __init__(self) -> None:
+        """Initialize state and callback observations for each fresh attempt."""
+
+        self.value = 0
+        self.checkpoint_callbacks = 0
+
+    @managed_operation()
+    def advance(self, *, managed) -> int:
+        """Advance once and create the callback-visible checkpoint."""
+
+        self.value += 1
+        managed.checkpoint()
+        return self.value
+
+
+def _count_checkpoint_callback(value, context) -> None:
+    """Record callback delivery on the checkpointed managed receiver."""
+
+    del context
+    value.checkpoint_callbacks += 1
+
+
+class InheritedDirectConfigValue(DirectConfigValue):
+    """Child fixture retaining its base class's normal inherited declaration."""
 
 
 def test_accepted_composite_uses_captured_wrapper_after_class_mutation(tmp_path):
@@ -262,6 +291,75 @@ def test_ordinary_wrappers_run_in_authored_order_on_first_subprocess_call(
     )
     assert restored.events == persisted_events
     assert restored.value == 2
+
+
+@pytest.mark.parametrize("placement", ("codec", "subprocess"))
+@pytest.mark.parametrize("subject_type", (DirectConfigValue, InheritedDirectConfigValue))
+def test_direct_bound_operation_transports_explicit_managed_config(
+        tmp_path, placement: str, subject_type: type[DirectConfigValue]) -> None:
+    """Direct bound worker calls retain explicit authority, callbacks, and rerun."""
+
+    state_store = DirStore(tmp_path / "state", query_index="none")
+    control_store = DirStore(tmp_path / "control", query_index="none")
+    repo = Repo((state_store, control_store))
+    subject = subject_type(repo=repo)
+    repo.save_object(subject, deep_capture=True)
+    initial = ManagedConfig(
+        state_repo=repo, control_store=control_store,
+        callbacks=[_count_checkpoint_callback],
+    )
+    assert subject.advance(managed=initial) == 1
+    rerun = ManagedConfig(
+        state_repo=repo, control_store=control_store, rerun=True,
+        callbacks=[_count_checkpoint_callback],
+    )
+
+    if placement == "codec":
+        outcome = decode_outcome(
+            invoke_invocation(
+                encode_invocation(subject.advance, (), {"managed": rerun}, repo=repo),
+                repo=repo,
+            ),
+            repo=repo,
+        )
+        assert outcome["success"]
+        assert outcome["result"] == 2
+    else:
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        executor = CoreExecutor(
+            SubProcessConfig(spool_directory=spool),
+            core=CoreOptions(
+                repo=repo, control_store=control_store, return_objects=False,
+            ),
+        )
+        try:
+            future = executor.submit(subject.advance, kwargs={"managed": rerun})
+            assert future.result(timeout=15) == 2
+            future.cleanup(timeout=5)
+        finally:
+            executor.close(cancel=True, timeout=10)
+
+    status = subject.advance.status(state_repo=repo, control_store=control_store)
+    restored = repo.load_state_ref(status.final_state_ref, reuse_live="never")
+    assert status.state == "completed"
+    assert (restored.value, restored.checkpoint_callbacks) == (2, 2)
+
+
+def test_direct_bound_operation_rejects_malformed_config_before_mutation(tmp_path) -> None:
+    """Invalid explicit policy is rejected during capture before a worker can mutate."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    subject = DirectConfigValue(repo=repo)
+    repo.save_object(subject, deep_capture=True)
+    malformed = ManagedConfig(state_repo=repo)
+    object.__setattr__(malformed, "rerun", 1)
+
+    with pytest.raises(CoreCallCodecError, match="malformed managed config"):
+        encode_invocation(subject.advance, (), {"managed": malformed}, repo=repo)
+
+    assert subject.value == 0
+    assert subject.advance.status(state_repo=repo).state == "not_started"
 
 
 def test_unrelated_nested_function_keeps_its_own_normalization_boundary(
