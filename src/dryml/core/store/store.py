@@ -10,7 +10,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Iterable
+from collections.abc import Mapping
+from typing import Any, Iterable
 
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport, ValidationReport
 from .records import (
@@ -73,6 +74,54 @@ class Store(ABC):
     def preflight_publication(self, operation: str, *, local_state: bool = False) -> None:
         """Validate writable publication semantics before a caller invokes hooks."""
         self.publication_capabilities.require_writable(operation, local_state=local_state)
+
+    def to_definition(self) -> dict[str, Any]:
+        """Export a detached portable existing-Store descriptor.
+
+        Returns:
+            A detached mapping naming this Store's supported backend, persistent
+            location, and opening settings.
+
+        Raises:
+            RepoDefinitionError: If this Store is unsupported, has nonportable
+            settings, or is a dirty/file-like Zip transaction.
+
+        Side Effects:
+            None. Export neither saves data nor commits buffered authority.
+        """
+
+        from ..repo_definition import definition_from_store
+
+        return definition_from_store(self)
+
+    @classmethod
+    def from_definition(cls, definition: Mapping[str, Any]) -> "Store":
+        """Open existing Store authority from one detached portable descriptor.
+
+        Args:
+            definition: Mapping emitted by :meth:`to_definition` for a supported
+                existing DirStore or path-backed ZipStore.
+
+        Returns:
+            A concrete Store. With an active Session resource cache, a matching
+            valid handle can be returned; otherwise the caller owns a fresh handle.
+
+        Raises:
+            TypeError: If ``definition`` is not a mapping.
+            RepoDefinitionError: If the descriptor is malformed or unsupported.
+            StoreAuthorityError: If existing authority is unavailable, malformed,
+                or incompatible.
+
+        Side Effects:
+            Opens only existing authority and may register a cache-owned handle.
+            It never creates, repairs, commits, or materializes Store contents.
+        """
+
+        if not isinstance(definition, Mapping):
+            raise TypeError("Store definition must be a mapping.")
+        from ..repo_definition import _open_store_descriptor
+
+        return _open_store_descriptor(definition)
 
     def writer_lock(self):
         """Return a context manager serializing cooperating Store writers.

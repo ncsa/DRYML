@@ -1095,14 +1095,7 @@ def _validate_data(data: Any) -> dict[str, Any]:
         raise _error("$.stores", "must be a list")
     stores = set()
     for index, store in enumerate(record["stores"]):
-        store = _exact_keys(store, {"kind", "path", "query_index"} if isinstance(store, Mapping) and store.get("kind") == "dir" else {"kind", "path"}, f"$.stores[{index}]")
-        if store["kind"] == "dir":
-            if store["query_index"] not in {"auto", "sqlite", "memory", "none"}:
-                raise _error(f"$.stores[{index}]", "query policy is invalid")
-        elif store["kind"] != "zip":
-            raise _error(f"$.stores[{index}]", "store kind is unsupported")
-        if not isinstance(store["path"], str) or not os.path.isabs(store["path"]):
-            raise _error(f"$.stores[{index}]", "store path must be absolute")
+        store = _validate_store_descriptor(store, f"$.stores[{index}]")
         key = (store["kind"], store["path"])
         if key in stores: raise _error("$.stores", "stores must be distinct")
         stores.add(key)
@@ -1136,6 +1129,41 @@ def _validate_data(data: Any) -> dict[str, Any]:
     if type(settings["save_objs_on_deletion"]) is not bool:
         raise _error("$.settings.save_objs_on_deletion", "must be bool")
     return json.loads(_bounded_json_bytes(record, "$"))
+
+
+def _validate_store_descriptor(value: Any, path: str = "$") -> dict[str, Any]:
+    """Validate and detach one closed portable existing-Store descriptor.
+
+    Args:
+        value: Mapping describing a supported existing ``DirStore`` or path-backed
+            ``ZipStore``.
+        path: Sanitized descriptor location used only in validation diagnostics.
+
+    Returns:
+        A detached JSON-compatible descriptor.
+
+    Raises:
+        RepoDefinitionError: If the descriptor's kind, fields, settings, or path
+            is unsupported. This function never opens or creates Store authority.
+    """
+
+    record = _exact_keys(
+        value,
+        {"kind", "path", "query_index"}
+        if isinstance(value, Mapping) and value.get("kind") == "dir"
+        else {"kind", "path"},
+        path,
+    )
+    if record["kind"] == "dir":
+        if (
+                not isinstance(record["query_index"], str)
+                or record["query_index"] not in {"auto", "sqlite", "memory", "none"}):
+            raise _error(path, "query policy is invalid")
+    elif record["kind"] != "zip":
+        raise _error(path, "store kind is unsupported")
+    if not isinstance(record["path"], str) or not os.path.isabs(record["path"]):
+        raise _error(path, "store path must be absolute")
+    return json.loads(_bounded_json_bytes(record, path))
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -1430,17 +1458,20 @@ def repo_from_definition(definition: RepoDefinition):
     from .repo import Repo
     from .store.dir import DirStore
     from .store.zip import ZipStore
-
     opened = []
+    owned = []
     repo = None
     try:
         for descriptor in data["stores"]:
             if descriptor["kind"] == "dir":
-                opened.append(DirStore.open_existing(
+                store = DirStore.open_existing(
                     descriptor["path"], query_index=descriptor["query_index"],
-                ))
+                )
             else:
-                opened.append(ZipStore.open_existing(descriptor["path"]))
+                store = ZipStore.open_existing(descriptor["path"])
+            opened.append(store)
+            if not _resource_cache_retains_store(store):
+                owned.append(store)
         if routing_parts is None:
             routing = None
         else:
@@ -1457,7 +1488,7 @@ def repo_from_definition(definition: RepoDefinition):
             save_routing=routing,
         )
         repo.save_objs_on_deletion = data["settings"]["save_objs_on_deletion"]
-        repo._adopt_owned_stores(opened)
+        repo._adopt_owned_stores(owned)
         return repo
     except BaseException as error:
         issues = []
@@ -1473,7 +1504,7 @@ def repo_from_definition(definition: RepoDefinition):
                 if not isinstance(cleanup_error, Exception):
                     cleanup_control_flow = cleanup_error
         failed_stores = []
-        for store in reversed(opened):
+        for store in reversed(owned):
             try:
                 store.close()
             except BaseException as cleanup_error:
@@ -1516,14 +1547,97 @@ def _reconstruct_routing(data: Mapping[str, Any]):
 def _preflight_store_descriptors(stores: list[Mapping[str, Any]]) -> None:
     """Validate every required persistent path/type before opening any Store."""
 
+    for descriptor in stores:
+        _preflight_store_descriptor(descriptor)
+
+
+def _preflight_store_descriptor(descriptor: Mapping[str, Any]) -> None:
+    """Validate existing authority for one already-validated Store descriptor."""
+
     from .store.dir import DirStore
     from .store.zip import ZipStore
 
-    for descriptor in stores:
+    if descriptor["kind"] == "dir":
+        DirStore._validate_existing_root(descriptor["path"])
+    else:
+        ZipStore._validate_existing_archive(descriptor["path"])
+
+
+def _store_cache_key_from_descriptor(descriptor: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Return the physical identity and opening settings for an existing request."""
+
+    _preflight_store_descriptor(descriptor)
+    try:
+        evidence = os.stat(descriptor["path"])
+    except OSError as error:
+        raise RepoDefinitionError("Store definition could not inspect required authority.") from error
+    if descriptor["kind"] == "dir":
+        return ("dir", evidence.st_dev, evidence.st_ino, descriptor["query_index"])
+    return ("zip", evidence.st_dev, evidence.st_ino)
+
+
+def _store_cache_key_from_store(store: Any) -> tuple[Any, ...] | None:
+    """Return live Store cache evidence without exporting or committing buffers."""
+
+    from .store.dir import DirStore
+    from .store.zip import ZipStore
+
+    if type(store) is DirStore:
+        if not isinstance(store.query_index_policy, str) or store._query_index_config is not None:
+            return None
+        try:
+            evidence = os.stat(store.base_dir)
+        except OSError:
+            return None
+        if (evidence.st_dev, evidence.st_ino) != getattr(store, "_authority_evidence", None):
+            return None
+        return ("dir", evidence.st_dev, evidence.st_ino, store.query_index_policy)
+    if type(store) is ZipStore and store.archive_path is not None:
+        if getattr(store, "_closed_handle", False):
+            return None
+        try:
+            evidence = os.stat(store.archive_path)
+        except OSError:
+            return None
+        if (evidence.st_dev, evidence.st_ino) != getattr(store, "_archive_evidence", None):
+            return None
+        return ("zip", evidence.st_dev, evidence.st_ino)
+    return None
+
+
+def _open_store_descriptor(definition: Mapping[str, Any]):
+    """Open one existing Store descriptor through the active Session cache, if any."""
+
+    descriptor = _validate_store_descriptor(definition)
+    key = _store_cache_key_from_descriptor(descriptor)
+
+    def open_fresh():
+        from .store.dir import DirStore
+        from .store.zip import ZipStore
+
         if descriptor["kind"] == "dir":
-            DirStore._validate_existing_root(descriptor["path"])
-        else:
-            ZipStore._validate_existing_archive(descriptor["path"])
+            return DirStore(
+                descriptor["path"], query_index=descriptor["query_index"], _existing_only=True,
+            )
+        return ZipStore(
+            descriptor["path"], _existing_only=True, _authority_prevalidated=True,
+        )
+
+    from . import session as core_session
+
+    cache = core_session._current_resource_cache()
+    if cache is None:
+        return open_fresh()
+    return cache._acquire_store(key, open_fresh)
+
+
+def _resource_cache_retains_store(store: Any) -> bool:
+    """Return whether the active cache retains the Store lifetime for this request."""
+
+    from . import session as core_session
+
+    cache = core_session._current_resource_cache()
+    return cache is not None and cache._retains_store(store)
 
 
 def _validate_live_store_identities(stores: list[Mapping[str, Any]]) -> None:
@@ -1555,9 +1669,6 @@ def _duplicate_free_mapping(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def definition_from_repo(repo: Any) -> RepoDefinition:
     """Capture one Repo configuration snapshot without traversing Store data."""
 
-    from .store.dir import DirStore
-    from .store.zip import ZipStore
-
     with repo._configuration_lock:
         if repo._closing or repo._closed:
             raise RepoDefinitionError("Repo definition cannot be exported after close begins.")
@@ -1582,29 +1693,7 @@ def definition_from_repo(repo: Any) -> RepoDefinition:
         stores = []
         table: dict[int, int] = {}
         for index, store in enumerate(stores_snapshot):
-            if type(store) is ZipStore:
-                with store.transaction_fence():
-                    path = store.archive_path
-                    if (
-                        store._archive_dirty
-                        or path is None
-                        or not os.path.isfile(path)
-                        or os.path.getsize(path) == 0
-                    ):
-                        raise RepoDefinitionError(
-                            "Repo definition store configuration has no clean committed archive."
-                        )
-                descriptor = {"kind": "zip", "path": os.path.abspath(path)}
-            elif type(store) is DirStore:
-                if not isinstance(store.query_index_policy, str) or store._query_index_config is not None:
-                    raise RepoDefinitionError("Repo definition query policy is not portable.")
-                descriptor = {
-                    "kind": "dir",
-                    "path": os.path.abspath(store.base_dir),
-                    "query_index": store.query_index_policy,
-                }
-            else:
-                raise RepoDefinitionError("Repo definition store type is not portable.")
+            descriptor = definition_from_store(store)
             stores.append(descriptor)
             table[id(store)] = index
         if routing_snapshot is None:
@@ -1642,6 +1731,48 @@ def definition_from_repo(repo: Any) -> RepoDefinition:
     finally:
         with repo._configuration_lock:
             repo._save_context_leases -= 1
+
+
+def definition_from_store(store: Any) -> dict[str, Any]:
+    """Export one Store's detached portable descriptor without committing it.
+
+    Args:
+        store: Supported live ``DirStore`` or clean path-backed ``ZipStore``.
+
+    Returns:
+        A detached closed descriptor containing backend kind, absolute location,
+        and supported opening settings.
+
+    Raises:
+        RepoDefinitionError: If the Store type, opening settings, or archive
+            transaction cannot be transported. This function never saves or commits.
+    """
+
+    from .store.dir import DirStore
+    from .store.zip import ZipStore
+
+    if type(store) is ZipStore:
+        with store.transaction_fence():
+            path = store.archive_path
+            if (
+                store._archive_dirty
+                or path is None
+                or not os.path.isfile(path)
+                or os.path.getsize(path) == 0
+            ):
+                raise RepoDefinitionError(
+                    "Repo definition store configuration has no clean committed archive."
+                )
+        return {"kind": "zip", "path": os.path.abspath(path)}
+    if type(store) is DirStore:
+        if not isinstance(store.query_index_policy, str) or store._query_index_config is not None:
+            raise RepoDefinitionError("Repo definition query policy is not portable.")
+        return {
+            "kind": "dir",
+            "path": os.path.abspath(store.base_dir),
+            "query_index": store.query_index_policy,
+        }
+    raise RepoDefinitionError("Repo definition store type is not portable.")
 
 
 __all__ = ["RepoDefinition", "RepoDefinitionError", "RepoReconstructionError"]

@@ -62,8 +62,19 @@ must have valid current authority; a ZipStore must be a nonempty valid committed
 archive. Missing, inaccessible, wrong-type, malformed, or incompatible authority
 raises `RepoDefinitionError`; reconstruction does not initialize, repair, or
 silently omit storage. On failure it closes only resources it opened. On success
-the returned Repo owns the fresh handles, while directly supplied Store handles
-remain borrowed. Export rejects dirty archives and never commits them.
+the returned Repo owns fresh noncached handles, while directly supplied and active
+Session-cache Store handles remain borrowed. Export rejects dirty archives and
+never commits them.
+
+The same per-Store descriptor grammar is available through `Store.to_definition()`
+and `Store.from_definition()`. It is a detached opening instruction, not a new
+durable Store format or a snapshot of Store contents. Its only supported kinds are
+`dir` with an absolute path and built-in query-index policy, and path-backed `zip`
+with an absolute archive path. Store reconstruction validates existing authority;
+it never creates, repairs, or commits it. A dirty or file-like ZipStore cannot be
+exported, although an already cached dirty path-backed ZipStore can remain one live
+local transaction for a matching open request. Session resource-cache teardown
+discards cache-owned buffered Zip work without committing it.
 
 ## Managed Control Formats
 

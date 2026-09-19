@@ -2562,13 +2562,14 @@ class Repo:
 
     @classmethod
     def from_definition(cls, definition: "RepoDefinition") -> "Repo":
-        """Reconnect a detached configuration using fresh existing Store handles.
+        """Reconnect a detached configuration using existing Store handles.
 
         Args:
             definition: Fully validated inert portable Repo configuration.
 
         Returns:
-            A new Repo that owns the Store handles opened for reconstruction.
+            A new Repo. Without an active Session resource cache, it owns the
+            Store handles opened for reconstruction; cached handles stay borrowed.
 
         Raises:
             TypeError: If ``definition`` is not a RepoDefinition.
@@ -2581,8 +2582,10 @@ class Repo:
         Side Effects:
             Opens only existing supported Store authority. It neither installs a
             session Repo nor creates missing storage. The returned Repo owns its
-            newly opened handles; ``close(flush=False)`` releases them without a
-            commit, including after caller-managed failed work.
+            newly opened noncached handles; ``close(flush=False)`` releases them
+            without a commit, including after caller-managed failed work. Cached
+            Store handles remain owned by the active cache and are not adopted or
+            closed by this Repo.
         """
 
         from .repo_definition import repo_from_definition

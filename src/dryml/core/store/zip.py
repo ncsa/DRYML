@@ -35,7 +35,9 @@ class ZipStore(DirStore):
     make the required replacement guarantee.
     """
 
-    def __init__(self, zip_dest: str | Path | IOBase, *, _existing_only: bool = False):
+    def __init__(
+            self, zip_dest: str | Path | IOBase, *, _existing_only: bool = False,
+            _authority_prevalidated: bool = False):
         self.zip_dest = zip_dest
         self._archive_path_value = (
             None if _is_file_like(zip_dest) else os.path.abspath(os.fspath(zip_dest))
@@ -52,7 +54,8 @@ class ZipStore(DirStore):
             if _existing_only:
                 if self._file_like:
                     raise StoreAuthorityError("Existing-only ZipStore opening requires a path-backed archive.")
-                self._validate_existing_archive(self._archive_path)
+                if not _authority_prevalidated:
+                    self._validate_existing_archive(self._archive_path)
             self._extract_if_present()
             super().__init__(self._tmp.name, query_index="memory", _existing_only=_existing_only)
         except BaseException:
@@ -60,6 +63,8 @@ class ZipStore(DirStore):
             raise
         self._initializing = False
         self._archive_baseline = None if self._file_like else self._archive_identity()
+        self._archive_evidence = None if self._file_like else self._physical_archive_evidence()
+        self._closed_handle = False
 
     @classmethod
     def open_existing(cls, zip_dest: str | Path) -> "ZipStore":
@@ -69,15 +74,22 @@ class ZipStore(DirStore):
             zip_dest: Existing path-backed archive location.
 
         Returns:
-            A fresh buffered handle over the archive's committed authority.
+            A matching Session-cached buffered handle when resource caching is
+            active, otherwise a fresh caller-owned handle over committed authority.
 
         Raises:
             StoreAuthorityError: If the archive is missing, malformed, or lacks
                 current Store authority.
         """
 
-        path = os.path.abspath(os.fspath(zip_dest))
-        return cls(path, _existing_only=True)
+        if cls is not ZipStore:
+            return cls(os.path.abspath(os.fspath(zip_dest)), _existing_only=True)
+
+        from ..repo_definition import _open_store_descriptor
+
+        return _open_store_descriptor({
+            "kind": "zip", "path": os.path.abspath(os.fspath(zip_dest)),
+        })
 
     @property
     def publication_capabilities(self) -> StorePublicationCapabilities:
@@ -242,6 +254,24 @@ class ZipStore(DirStore):
         except FileNotFoundError:
             return None
 
+    def _physical_archive_evidence(self) -> tuple[int, int] | None:
+        """Return the archive inode evidence observed by this transaction.
+
+        Returns:
+            The path-backed archive's device/inode pair, or ``None`` when it is
+            absent or inaccessible.
+
+        Side Effects:
+            None. The value lets resource caching distinguish this transaction's
+            own atomic commit from a replacement made by another handle.
+        """
+
+        try:
+            evidence = os.stat(self._archive_path)
+        except OSError:
+            return None
+        return (evidence.st_dev, evidence.st_ino)
+
     def commit(self) -> None:
         """Atomically publish the complete buffered archive or reject stale bytes."""
         with self.transaction_fence():
@@ -270,6 +300,7 @@ class ZipStore(DirStore):
                         raise ZipStoreConflictError("ZipStore archive changed since open; reopen and reapply the mutation.")
                     os.replace(temporary, destination)
                     self._archive_baseline = staged
+                    self._archive_evidence = self._physical_archive_evidence()
                     self._archive_dirty = False
             except BaseException:
                 try:
@@ -290,5 +321,8 @@ class ZipStore(DirStore):
         Raises:
             RuntimeError: If an active Session resource cache retains this Store.
         """
+        if self._closed_handle:
+            return
         super().close()
         self._tmp.cleanup()
+        self._closed_handle = True

@@ -59,6 +59,8 @@ class DirStore(Store):
         self.query_index = query_index
         self._query_index_instance: SQLiteStoreQueryIndex | None = None
         self._initialize_format(existing_only=_existing_only)
+        evidence = os.stat(self._base_dir)
+        self._authority_evidence = (evidence.st_dev, evidence.st_ino)
 
     @classmethod
     def open_existing(
@@ -73,15 +75,28 @@ class DirStore(Store):
             query_index: Derived-index policy for the fresh handle.
 
         Returns:
-            A new Store handle over the existing current-format authority.
+            A matching Session-cached Store handle when resource caching is active,
+            otherwise a new caller-owned handle over current-format authority.
 
         Raises:
             StoreAuthorityError: If the root or required format record is absent,
                 malformed, or not the required filesystem type.
         """
 
-        cls._validate_existing_root(os.path.abspath(os.fspath(base_dir)))
-        return cls(base_dir, query_index=query_index, _existing_only=True)
+        path = os.path.abspath(os.fspath(base_dir))
+        if cls is not DirStore or not isinstance(query_index, str):
+            # Custom SQLite configuration has no portable descriptor grammar and
+            # retains the established fresh-handle behavior.
+            cls._validate_existing_root(path)
+            return cls(path, query_index=query_index, _existing_only=True)
+
+        from ..repo_definition import _open_store_descriptor
+
+        return _open_store_descriptor({
+            "kind": "dir",
+            "path": path,
+            "query_index": query_index,
+        })
 
     @property
     def base_dir(self) -> str:

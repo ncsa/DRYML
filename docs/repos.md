@@ -138,10 +138,36 @@ do not embed arbitrary supplied values.
 all descriptors, then opens fresh handles only for required existing DirStore or
 path-backed ZipStore authority. Missing, inaccessible, malformed, wrong-type, or
 incompatible storage raises `RepoDefinitionError`; reconstruction never creates
-or repairs replacement storage and never installs a session Repo. The returned
-Repo owns its freshly opened handles. `close(flush=True)` retains normal commit
-behavior, while `close(flush=False)` releases those owned resources without a
-commit. Reconstructed cleanup never closes caller-supplied borrowed handles.
+or repairs replacement storage and never installs a session Repo. Outside a
+resource cache, the returned Repo owns its freshly opened handles.
+`close(flush=True)` retains normal commit behavior, while `close(flush=False)`
+releases owned resources without a commit. Reconstructed cleanup never closes
+caller-supplied borrowed handles.
+
+## Standalone Store Definitions And Resource Reuse
+
+`Store.to_definition()` returns a detached mapping for one supported `DirStore`
+or clean path-backed `ZipStore`: `{"kind": "dir", "path": "/absolute/path",
+"query_index": "auto" | "sqlite" | "memory" | "none"}` or `{"kind": "zip",
+"path": "/absolute/archive.zip"}`. It describes an existing location and opening
+policy only. It has no Store contents, aliases, locks, caches, sessions, or archive
+buffers, and it neither saves nor commits.
+
+`Store.from_definition(mapping)` validates that same closed grammar and opens only
+existing authority. Malformed mappings raise `RepoDefinitionError`; missing or
+malformed authority raises the Store authority error. It never creates or repairs
+storage. Dirty, file-like, missing, and zero-length ZipStores, custom DirStore
+query settings, and custom Store types cannot be exported.
+
+Inside `dryml.session.resource_cache()`, matching `Store.from_definition()`,
+`DirStore.open_existing()`, and Repo reconstruction reuse a process-local Store
+handle when its backend, physical identity, and supported opening settings match.
+DirStore matching includes its filesystem identity and query policy; a different
+query policy opens a distinct handle. Cache-owned reconstruction handles are closed
+without commit at scope exit. A dirty cached path-backed ZipStore remains its same
+live transaction on a matching request, but remains ineligible for portable export.
+Without this opt-in cache, every existing-authority open returns a fresh
+caller-owned handle.
 
 Live reconstruction rejects descriptors that name the same physical Store through
 duplicate, dot-segment, or symlink paths before opening duplicate handles.
