@@ -115,7 +115,7 @@ del _member, _
 
 
 def _recording_wrapper(target):
-    """Retain authored wrapper effects around a managed declaration."""
+    """Retain wrapper effects and optionally mark worker-side finalization."""
 
     @functools.wraps(target)
     def wrapped(self, value, *, managed):
@@ -124,6 +124,11 @@ def _recording_wrapper(target):
             return target(self, value, managed=managed) + 10
         finally:
             self.events.append("after")
+            marker = getattr(self, "wrapper_exit_marker", None)
+            if marker is not None:
+                Path(marker).write_text(
+                    ",".join(self.events), encoding="ascii",
+                )
 
     return wrapped
 

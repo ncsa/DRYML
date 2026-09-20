@@ -1,8 +1,10 @@
 # Stage 8A Verification Record
 
-Stage 8A implementation is locally verified through commit `48b1697` on
-`v0.3-cdef-v2`. The required existing-target Ray qualification remains incomplete;
-this record does not declare the plan's full Definition of Done satisfied.
+Stage 8A implementation was locally verified through commit `48b1697` on
+`v0.3-cdef-v2`. The required same-host Ray qualification has also passed after
+explicitly authorized preparation of local test targets. The execution gates
+recorded below are complete; baseline lint and the existing code-evolution
+limitations remain unchanged.
 
 ## Implemented Scope
 
@@ -84,25 +86,59 @@ the local adversarial fallback ran. No hostile-deserialization or sandbox claim
 was evaluated, and the separately deferred sensitive-data sentinel audit was not
 performed.
 
-## Remaining Qualification
+## Ray Qualification
 
-Real-Ray execution is **not verified**. Ray 2.56.0 is installed and the 28 core
-Execute/Dispatch Ray tests collect, but the required opt-in endpoint and existing
-environment targets were absent:
+Following explicit user authorization, a separate local Ray 2.56.0 cluster was
+started from `big_env` with four logical CPUs, no GPUs, and a 256 MiB object store.
+A disposable venv was created with `python -m venv --system-site-packages` beneath
+`/tmp/dryml/stage8a-ray-qualification/venv`. It has its own interpreter prefix and
+uses the already installed Ray, dill, and current DRYML checkout from `big_env`;
+no system-wide installation or changes to `big_env` were needed.
 
-- `DRYML_EXECUTE_INTEGRATION=1`
-- `DRYML_TEST_RAY_ADDRESS`
-- `DRYML_TEST_CONDA_PREFIX`
-- `DRYML_TEST_VENV_PYTHON`
-
-An absolute `CONDA_EXE` is also required and was available. No cluster or
-replacement environment was provisioned. The 42 heavy-tier skips include these
-28 tests and 14 existing generic Ray tests; skips are not qualification evidence.
-Once caller-supplied same-host targets are configured, run:
+The gate received `DRYML_EXECUTE_INTEGRATION=1`, the new cluster's concrete
+host/port through `DRYML_TEST_RAY_ADDRESS`, the active `big_env` prefix through
+`DRYML_TEST_CONDA_PREFIX`, the disposable venv interpreter through
+`DRYML_TEST_VENV_PYTHON`, and the active absolute `CONDA_EXE`.
 
 ```sh
 ./tests.sh tests/ray/test_core_execute_ray.py tests/ray/test_dispatch_ray.py
 ```
+
+The run used `--no-cov -x -ra` and a JUnit report beneath the disposable task root.
+
+| Gate | Passed | Skipped |
+| --- | ---: | ---: |
+| Core Execute Ray | 12 | 0 |
+| Dispatch Ray | 16 | 0 |
+| Total | 28 | 0 |
+
+This includes exact conda and venv execution pins, all six decorator orders,
+ordinary wrapper composition, nested explicit managed configuration, shared-Store
+result recovery, cancellation, independent probe placement, and unavailable-probe
+failure without fallback. One expected `DispatchCoverageWarning` reports incomplete
+static analysis of the ordinary function that invokes a nested managed call.
+
+The real run exposed three test-fixture problems, not runtime changes:
+
+- The core fixture now creates its required spool directory before submission.
+- Wrapper assertions distinguish the inner managed final snapshot from later
+  outer-wrapper effects. A worker-written marker separately proves `finally`
+  executed, including the effect intentionally absent from that snapshot.
+- The Dispatch matrix pins the active interpreter explicitly because its backend
+  configuration disables automatic environment discovery while its declarations
+  require Python compatibility evidence. It also asserts explain eligibility.
+
+After these test-only changes, 94 local/subprocess composition and Dispatch tests
+passed. The maintained suite was not repeated; its earlier results remain above.
+The 28 previously skipped core/Dispatch Ray cases are now qualified by execution,
+not collection. The other 14 generic Ray cases from that earlier heavy selection
+were not rerun as part of this Stage 8A gate.
+
+The qualification cluster was shut down after each run. The leftover Stage 7 Ray
+cluster was also stopped at the user's request; no Ray native processes remained.
+The disposable venv and qualification artifacts remain beneath `/tmp/dryml`.
+
+## Remaining Limitations
 
 The additional lint check
 `flake8 --select E9,F63,F7,F82 src/dryml tests --exclude tests/old,tests/dev`

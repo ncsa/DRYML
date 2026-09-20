@@ -261,6 +261,7 @@ def test_dispatch_ray_runs_every_managed_decorator_order_with_selected_control(
     try:
         view = dispatch.with_options(
             backend=_ray_config(tmp_path / "ray"),
+            python=PythonExecutableSpec(sys.executable),
             core=CoreOptions(
                 repo=repo, control_store=control_store,
                 return_objects=False,
@@ -269,6 +270,8 @@ def test_dispatch_ray_runs_every_managed_decorator_order_with_selected_control(
         assert operation.status(
             state_repo=repo, control_store=control_store,
         ).state == "not_started"
+        report = view.explain(operation)
+        assert report.eligible, report.diagnostics
         assert isinstance(view.run(operation, argument_state), StateRef)
         restored = repo.load_state_ref(
             operation.status(
@@ -284,7 +287,7 @@ def test_dispatch_ray_runs_every_managed_decorator_order_with_selected_control(
 @pytest.mark.parametrize(
     ("subject_type", "events"),
     (
-        (OuterWrappedManagedValue, ["before", "body", "after"]),
+        (OuterWrappedManagedValue, ["before", "body"]),
         (InnerFunctionWrappedManagedValue, ["before", "body", "after"]),
     ),
 )
@@ -295,6 +298,8 @@ def test_dispatch_ray_preserves_ordinary_managed_wrapper_composition(
     repo = _repo(tmp_path)
     control_store = DirStore(tmp_path / "control", query_index="none")
     subject = subject_type(repo=repo)
+    marker = tmp_path / "wrapper-exit"
+    subject.wrapper_exit_marker = str(marker)
     repo.save_object(subject, deep_capture=True)
     try:
         view = dispatch.with_options(
@@ -308,6 +313,7 @@ def test_dispatch_ray_preserves_ordinary_managed_wrapper_composition(
             state_repo=repo, control_store=control_store,
         ).state == "not_started"
         assert view.run(subject.advance, 2) == 12
+        assert marker.read_text(encoding="ascii") == "before,body,after"
         restored = repo.load_state_ref(
             subject.advance.status(
                 state_repo=repo, control_store=control_store,

@@ -104,7 +104,8 @@ def _wait_for_marker(marker: Path, future, *, timeout: float = 30) -> None:
 
 
 def _executor(tmp_path: Path, repo: Repo, control_store: DirStore) -> CoreExecutor:
-    """Attach only to the caller-supplied Ray endpoint with bounded local spooling."""
+    """Prepare test spooling and attach only to the supplied Ray endpoint."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     return CoreExecutor(
         RayBackendConfig(
             address=require_ray_integration(), spool_directory=tmp_path,
@@ -235,7 +236,7 @@ def test_existing_ray_core_runs_every_managed_decorator_order_once(
 @pytest.mark.parametrize(
     ("subject_type", "events"),
     (
-        (OuterWrappedManagedValue, ["before", "body", "after"]),
+        (OuterWrappedManagedValue, ["before", "body"]),
         (InnerFunctionWrappedManagedValue, ["before", "body", "after"]),
     ),
 )
@@ -246,6 +247,8 @@ def test_existing_ray_core_preserves_ordinary_managed_wrapper_composition(
     repo = Repo(DirStore(tmp_path / "state", query_index="none"))
     control_store = DirStore(tmp_path / "control", query_index="none")
     value = subject_type(repo=repo)
+    marker = tmp_path / "wrapper-exit"
+    value.wrapper_exit_marker = str(marker)
     repo.save_object(value, deep_capture=True)
     executor = _executor(tmp_path / "ray", repo, control_store)
     try:
@@ -254,6 +257,7 @@ def test_existing_ray_core_preserves_ordinary_managed_wrapper_composition(
         ).state == "not_started"
         future = executor.submit(value.advance, 2, world=_one_cpu_world())
         assert future.result(timeout=30) == 12
+        assert marker.read_text(encoding="ascii") == "before,body,after"
         future.cleanup(timeout=30)
         restored = repo.load_state_ref(
             value.advance.status(
