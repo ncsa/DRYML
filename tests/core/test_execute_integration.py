@@ -56,6 +56,19 @@ def _record_then_raise_workload_error(path):
     raise ValueError("workload failed")
 
 
+def _run_child(script, tmp_path):
+    """Run an isolated assertion process with a bounded wait and readable failure output."""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 @contextmanager
 def core_setup_with_cache_close_failure(context, data):
     """Inject configured worker-local cache-close failures around core setup."""
@@ -355,31 +368,50 @@ def test_real_subprocess_core_setup_exposes_its_session_resource_cache(tmp_path)
         executor.close(cancel=True, timeout=5)
 
 
-def test_real_subprocess_core_setup_preserves_generic_cleanup_evidence_after_workload_failure(
-        tmp_path, monkeypatch):
-    """A generic worker preserves its result while reporting an unresolved close."""
-    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
-    spool = tmp_path / "spool"
-    marker = tmp_path / "close-attempts"
-    spool.mkdir()
-    executor = CoreExecutor(
-        SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False),
+def test_real_subprocess_core_setup_reports_unresolved_cache_cleanup_after_workload_failure(tmp_path):
+    """An intentional unresolved close remains isolated to the assertion process."""
+    script = r'''
+from pathlib import Path
+from unittest.mock import patch
+
+from dryml.core import Executor as CoreExecutor, Repo
+from dryml.core.execute import CoreExecutionError, CoreOptions, PreparedCoreCall
+from dryml.core.store.dir import DirStore
+from dryml.execute import WorkerSetup
+from dryml.execute.errors import CleanupError
+from dryml.execute.subprocess import SubProcessConfig
+from tests.core.test_execute_integration import (
+    _raise_workload_error,
+    core_setup_with_cache_close_failure,
+)
+
+root = Path(__import__("sys").argv[1])
+repo = Repo(DirStore(root / "state", query_index="none"))
+spool = root / "spool"
+marker = root / "close-attempts"
+spool.mkdir()
+executor = CoreExecutor(
+    SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False),
+)
+original_worker_setup = PreparedCoreCall.worker_setup
+
+def injected_worker_setup(self, runtime=None, *, cache="weak"):
+    setup = original_worker_setup(self, runtime, cache=cache)
+    return WorkerSetup(
+        factory="tests.core.test_execute_integration:core_setup_with_cache_close_failure",
+        data={"failures": 2, "marker": str(marker), "setup": setup.data},
     )
-    original_worker_setup = PreparedCoreCall.worker_setup
 
-    def injected_worker_setup(self, runtime=None, *, cache="weak"):
-        setup = original_worker_setup(self, runtime, cache=cache)
-        return WorkerSetup(
-            factory="tests.core.test_execute_integration:core_setup_with_cache_close_failure",
-            data={"failures": 2, "marker": str(marker), "setup": setup.data},
-        )
-
-    monkeypatch.setattr(PreparedCoreCall, "worker_setup", injected_worker_setup)
+with patch.object(PreparedCoreCall, "worker_setup", injected_worker_setup):
     try:
         future = executor.submit(_raise_workload_error)
-        with pytest.raises(CoreExecutionError, match="ValueError") as raised:
+        try:
             future.result(timeout=10)
-        assert raised.value.phase == "invoke"
+        except CoreExecutionError as error:
+            assert "ValueError" in str(error)
+            assert error.phase == "invoke"
+        else:
+            raise AssertionError("workload failure was not preserved")
         assert future.backend_future.exception(timeout=0) is None
         assert isinstance(future.backend_future.result(timeout=0), bytes)
         snapshot = future.backend_future.snapshot()
@@ -391,6 +423,8 @@ def test_real_subprocess_core_setup_preserves_generic_cleanup_evidence_after_wor
             executor.close(cancel=True, timeout=5)
         except CleanupError:
             pass
+'''
+    _run_child(script, tmp_path)
 
 
 def test_core_setup_quarantines_a_fresh_process_after_unresolved_cache_close(tmp_path):
