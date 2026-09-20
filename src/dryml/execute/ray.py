@@ -43,6 +43,7 @@ from ._protocol import (
     WORKER_PROTOCOL_ID,
     decode_control,
     decode_setup_terminal,
+    decode_worker_error,
     encode_bootstrap_descriptor,
     encode_control,
     encode_frame_parts,
@@ -1241,9 +1242,16 @@ class RayBackend(Backend):
                     raise ExecutionError("Ray worker setup readiness evidence is invalid")
                 return True
             if frame.state is FrameState.ERROR:
-                run.outcome_validated = True
-                _, remote_type, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                _, remote_type, issues, deadline_elapsed = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
                 future._record_worker_cleanup_issues(issues)
+                if deadline_elapsed:
+                    run.outcome_validated = True
+                    self._expire_deadline(run)
+                    self._drain_setup_failure(call, run, reader, conversation)
+                    return False
+                if not self._claim_outcome(run):
+                    return False
+                run.outcome_validated = True
                 future._publish_exception(RemoteExecutionError(f"remote Ray setup failed ({remote_type})", remote_type=remote_type or "RemoteError"))
                 self._drain_setup_failure(call, run, reader, conversation)
                 return False
@@ -1303,23 +1311,29 @@ class RayBackend(Backend):
                 try:
                     payload = frame.payload
                     if call.worker_setup is not None:
-                        payload, _, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                        payload, _, issues, _ = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
                         assert payload is not None
                         future._record_worker_cleanup_issues(issues)
                     future._publish_result(future._receive_result(payload))
                 except BaseException:
                     future._publish_exception(ExecutionError("Ray worker result could not be decoded"))
             elif frame.state is FrameState.ERROR:
+                if call.worker_setup is not None:
+                    _, remote_type, issues, deadline_elapsed = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                else:
+                    remote_type, deadline_elapsed, issues = decode_worker_error(
+                        frame, limit_bytes=self._config.result_limit_bytes, setup=False,
+                    )
+                future._record_worker_cleanup_issues(issues)
+                if deadline_elapsed:
+                    outcome_seen = True
+                    run.outcome_validated = True
+                    self._expire_deadline(run)
+                    continue
                 if outcome_seen or not self._claim_outcome(run):
                     return
                 outcome_seen = True
                 run.outcome_validated = True
-                if call.worker_setup is not None:
-                    _, remote_type, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
-                    future._record_worker_cleanup_issues(issues)
-                else:
-                    data = _json(frame.payload, self._config.result_limit_bytes)
-                    remote_type = str(data.get("type", "RemoteError"))[:self._config.diagnostic_text_limit_bytes]
                 future._publish_exception(RemoteExecutionError(f"remote Ray execution failed ({remote_type})", remote_type=remote_type))
 
     def _watch_native(self, run: _Run) -> None:
@@ -1432,10 +1446,16 @@ class RayBackend(Backend):
             )
 
     def _request_cancel(self, run: _Run, *, allow_terminal: bool = False) -> bool:
-        """Request cancellation for exactly this task without claiming release early."""
+        """Request exact-task cancellation unless an ordinary claimed outcome won.
+
+        ``allow_terminal`` is reserved for backend cleanup of a native task after
+        a terminal Future; it may cancel despite a prior channel outcome claim.
+        """
         if run.reference is None or run.future.done() and not allow_terminal:
             return False
         with run.lock:
+            if run.outcome_claimed and not allow_terminal:
+                return False
             if run.cancelling:
                 return True
             if run.cancellation_starting:
@@ -1502,9 +1522,16 @@ class RayBackend(Backend):
         event = run.terminal_event
         if event is not None and event.wait(max(0.0, deadline - time.monotonic())):
             return
+        self._expire_deadline(run)
+
+    def _expire_deadline(self, run: _Run) -> bool:
+        """Claim expiry and publish it only after exact native termination proof."""
         with run.lock:
-            if run.outcome_claimed or run.future.done():
-                return
+            if (
+                run.outcome_claimed or run.future.done() or run.deadline_expired
+                or run.cancelling or run.cancellation_starting
+            ):
+                return False
             run.deadline_expired = True
         try:
             accepted = self._request_cancel(run)
@@ -1514,6 +1541,7 @@ class RayBackend(Backend):
             run.future._publish_uncertain(ExecutionUncertainError("Ray execution deadline cancellation could not start"))
             if run.terminal_event is not None:
                 run.terminal_event.set()
+        return accepted
 
     @staticmethod
     def _claim_outcome(run: _Run) -> bool:

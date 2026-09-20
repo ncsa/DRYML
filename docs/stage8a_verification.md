@@ -20,10 +20,13 @@ limitations remain unchanged.
 - Local/subprocess and Dispatch conformance tests, opt-in Ray matrix tests,
   package/import tests, and synchronized public guides.
 
-No durable Store/managed schema, generic backend protocol, or setup v1.1 change
-was introduced. The private invocation graph is v2 with no intermediate reader.
-There is no automatic workload replay, coordinator managed report, whole-call
-resource planner, or multi-host qualification.
+Stage 8A introduced no durable Store/managed schema, generic backend protocol, or
+setup v1.1 change. A subsequent CI-driven correction added a bounded
+pre-invocation deadline marker to the generic worker error terminal and therefore
+bumped that private same-version worker protocol to v4 without a compatibility
+reader. Store and managed schemas, setup v1.1, and the private invocation graph v2
+remain unchanged. There is no automatic workload replay, coordinator managed
+report, whole-call resource planner, or multi-host qualification.
 
 ## Maintained Verification
 
@@ -137,6 +140,24 @@ were not rerun as part of this Stage 8A gate.
 The qualification cluster was shut down after each run. The leftover Stage 7 Ray
 cluster was also stopped at the user's request; no Ray native processes remained.
 The disposable venv and qualification artifacts remain beneath `/tmp/dryml`.
+
+## CI Corrections
+
+The first cross-platform run exposed test portability differences: Python
+3.10/3.11 wrap descriptor-binding errors during class creation, and Windows
+Python 3.13+ rejects rooted paths without a drive as absolute paths. The tests
+now inspect the original declaration error and use platform-absolute fixtures;
+all 49 affected tests passed locally on Python 3.10, 3.11, and 3.12.
+
+A subsequent Windows run exposed a pre-invocation deadline race. Worker-owned
+expiry now carries explicit bounded protocol evidence rather than the same
+type-only payload as a callable's own `TimeoutError`. Both backends preserve
+ordinary error identity and require lifecycle-confirmed termination for deadline
+outcomes. Private protocol v4 rejects older workers before workload admission,
+and a claimed ordinary outcome cannot be overtaken by cancellation during result
+decoding. The correction passed 162 focused protocol, worker, discovery,
+admission, cancellation, and documentation tests, followed by another complete
+28-test real-Ray qualification with no skips.
 
 ## Remaining Limitations
 

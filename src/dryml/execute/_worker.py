@@ -20,7 +20,7 @@ from dryml.environments import EnvironmentRecord, EnvironmentRequirement, inspec
 from dryml.formats import canonical_json_bytes, canonical_json_load_bytes
 from dryml.worlds import ProcessSpec, ResourceSpec, RoleSpec, WorldAllocation, WorldRequirement, WorldSpec
 
-from ._protocol import WORKER_PROTOCOL_ID, BootstrapDescriptor, FrameError, FrameState, FrameType, OwnerEnvelopeType, ProtocolConversation, SocketFrameReader, decode_bootstrap_descriptor, decode_control, decode_owner_envelopes, encode_control, encode_frame, encode_owner_envelope
+from ._protocol import WORKER_PROTOCOL_ID, BootstrapDescriptor, FrameError, FrameState, FrameType, OwnerEnvelopeType, ProtocolConversation, SocketFrameReader, decode_bootstrap_descriptor, decode_control, decode_owner_envelopes, encode_control, encode_frame, encode_owner_envelope, encode_worker_error
 from ._spooling import deserialize_call, serialize_result
 from .admission import _admit_observed_logical, admit
 from .models import WorkerSetupContext
@@ -289,6 +289,7 @@ def _invoke(
     manager: object | None = None
     entered = False
     workload_error: BaseException | None = None
+    deadline_elapsed = False
     try:
         for fd, stream in ((1, "stdout"), (2, "stderr")):
             read_fd, write_fd = os.pipe()
@@ -319,11 +320,15 @@ def _invoke(
                 workload_error = exc
         if workload_error is None:
             try:
-                if payload is None or deadline is not None and time.monotonic() >= deadline:
-                    raise TimeoutError("execution deadline elapsed before payload deserialization")
+                if payload is None:
+                    raise TimeoutError("execution payload is unavailable before deserialization")
+                if deadline is not None and time.monotonic() >= deadline:
+                    deadline_elapsed = True
+                    raise _PreInvocationDeadline("execution deadline elapsed before payload deserialization")
                 fn, args, kwargs = deserialize_call(payload, limit_bytes=descriptor.invocation_limit_bytes)
                 if deadline is not None and time.monotonic() >= deadline:
-                    raise TimeoutError("execution deadline elapsed before invocation")
+                    deadline_elapsed = True
+                    raise _PreInvocationDeadline("execution deadline elapsed before invocation")
                 value = fn(*args, **kwargs)
                 outcome = serialize_result(
                     value,
@@ -346,7 +351,13 @@ def _invoke(
             except BaseException as exc:
                 cleanup_issues.append(type(exc).__name__[:128])
         if workload_error is not None:
-            outcome = canonical_json_bytes({"type": type(workload_error).__name__[:128]}, max_depth=1, max_nodes=2, max_entries=1, max_string=128, max_int_bits=64)
+            outcome = encode_worker_error(
+                None if deadline_elapsed else type(workload_error).__name__[:128],
+                deadline_elapsed=deadline_elapsed,
+                cleanup_types=cleanup_issues,
+                setup=setup is not None,
+                limit_bytes=descriptor.result_limit_bytes,
+            )
             outcome_type = FrameType.ERROR
     finally:
         _flush_standard_streams()
@@ -361,8 +372,12 @@ def _invoke(
             reader.join(max(0.0, finish_at - time.monotonic()))
         if outcome is not None and outcome_type is not None:
             state = FrameState.RESULT if outcome_type is FrameType.RESULT else FrameState.ERROR
-            terminal = outcome if setup is None else _terminal_envelope(outcome_type, outcome, cleanup_issues, descriptor.result_limit_bytes)
+            terminal = outcome if setup is None or outcome_type is FrameType.ERROR else _terminal_envelope(outcome, cleanup_issues, descriptor.result_limit_bytes)
             _send(connection, send_lock, encode_frame(state, outcome_type, descriptor.correlation, terminal, header_limit=descriptor.control_header_limit_bytes))
+
+
+class _PreInvocationDeadline(TimeoutError):
+    """Distinguish worker-owned pre-invocation expiry from callable failures."""
 
 
 def _setup_data(payload: bytes, owner_limit: int, admission_limit: int) -> dict[str, object]:
@@ -410,14 +425,12 @@ def _setup_context(data: Mapping[str, object]) -> WorkerSetupContext:
     )
 
 
-def _terminal_envelope(kind: FrameType, payload: bytes, cleanup_issues: list[str], limit: int) -> bytes:
-    """Encode a setup terminal without letting teardown replace an existing outcome."""
-    data: dict[str, object] = {"cleanup": [{"type": value} for value in cleanup_issues]}
-    if kind is FrameType.RESULT:
-        data["payload"] = base64.b64encode(payload).decode("ascii")
-    else:
-        error = canonical_json_load_bytes(payload, max_depth=1, max_nodes=2, max_entries=1, max_string=128, max_int_bits=64)
-        data["type"] = error["type"] if isinstance(error, Mapping) else "RemoteError"
+def _terminal_envelope(payload: bytes, cleanup_issues: list[str], limit: int) -> bytes:
+    """Encode a setup result without letting teardown replace its value."""
+    data: dict[str, object] = {
+        "cleanup": [{"type": value} for value in cleanup_issues],
+        "payload": base64.b64encode(payload).decode("ascii"),
+    }
     try:
         encoded = canonical_json_bytes(data, max_depth=3, max_nodes=128, max_entries=64, max_string=limit, max_int_bits=64)
     except BaseException as exc:

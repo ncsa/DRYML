@@ -13,9 +13,11 @@ from dryml.execute._protocol import (
     FrameState,
     FrameType,
     OwnerEnvelopeType,
+    PROTOCOL_VERSION,
     ProtocolConversation,
     decode_bootstrap_descriptor,
     decode_control,
+    decode_worker_error,
     decode_exact_frame,
     decode_frame,
     decode_owner_envelopes,
@@ -51,6 +53,48 @@ def test_frames_round_trip_closed_control_and_identity_triple():
         encode_frame(FrameState.HELLO, FrameType.RESULT, _correlation(), b"result", header_limit=512)
     with pytest.raises(FrameError, match="trailing"):
         decode_exact_frame(encoded + b"x", header_limit=512, payload_limit=512)
+
+
+@pytest.mark.parametrize("setup", (False, True))
+def test_worker_deadline_error_is_closed_and_distinct_from_user_timeout(setup):
+    """Only the private marker, not a remote type name, denotes worker expiry."""
+    cleanup = b'"cleanup":[],' if setup else b""
+    deadline = b"{" + cleanup + b'"deadline":"pre-invocation"}'
+    timeout = b"{" + cleanup + b'"type":"TimeoutError"}'
+
+    deadline_frame = decode_exact_frame(
+        encode_frame(FrameState.ERROR, FrameType.ERROR, _correlation(), deadline, header_limit=512),
+        header_limit=512,
+        payload_limit=512,
+    )
+    timeout_frame = decode_exact_frame(
+        encode_frame(FrameState.ERROR, FrameType.ERROR, _correlation(), timeout, header_limit=512),
+        header_limit=512,
+        payload_limit=512,
+    )
+
+    assert decode_worker_error(deadline_frame, limit_bytes=512, setup=setup) == (None, True, ())
+    assert decode_worker_error(timeout_frame, limit_bytes=512, setup=setup) == ("TimeoutError", False, ())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b'{"deadline":"pre-invocation","type":"TimeoutError"}',
+        b'{"deadline":true}',
+        b'{"deadline":"expired"}',
+        b'{"cleanup":[],"deadline":"pre-invocation"}',
+    ),
+)
+def test_worker_deadline_error_rejects_malformed_or_wrong_variant_fields(payload):
+    """Deadline evidence has one exact ordinary-terminal shape."""
+    frame = decode_exact_frame(
+        encode_frame(FrameState.ERROR, FrameType.ERROR, _correlation(), payload, header_limit=512),
+        header_limit=512,
+        payload_limit=512,
+    )
+    with pytest.raises(FrameError):
+        decode_worker_error(frame, limit_bytes=512, setup=False)
 
 
 def test_short_reads_malformed_headers_and_controls_fail_closed_without_hidden_cap():
@@ -213,13 +257,13 @@ def test_output_streams_require_contiguous_sequences_and_closed_fences():
         conversation.accept(encode_frame(FrameState.OUTPUT, FrameType.OUTPUT, _correlation(), b"late", header_limit=512, stream="stdout", sequence=1))
 
 
-def test_decode_rejects_boolean_version_and_non_ascii_digest_as_frame_errors():
+def test_decode_rejects_old_or_boolean_version_and_non_ascii_digest_as_frame_errors():
     """Metadata scalar types are strict and diagnostics never leak raw HMAC errors."""
     encoded = encode_control(FrameState.HELLO, _correlation(), {"ready": True}, header_limit=512)
     header_size = int.from_bytes(encoded[:4], "big")
     header = canonical_json_load_bytes(encoded[4:4 + header_size])
     payload = encoded[4 + header_size:]
-    for key, value in (("version", True), ("digest", "é" * 64)):
+    for key, value in (("version", True), ("version", PROTOCOL_VERSION - 1), ("digest", "é" * 64)):
         altered = dict(header)
         altered[key] = value
         altered_header = canonical_json_bytes(altered)

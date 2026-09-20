@@ -44,6 +44,7 @@ from ._protocol import (
     OwnerEnvelopeType,
     ProtocolConversation,
     decode_setup_terminal,
+    decode_worker_error,
     decode_control,
     SocketFrameReader,
     encode_bootstrap_descriptor,
@@ -699,8 +700,14 @@ class SubProcessBackend(Backend):
                     raise ExecutionError("worker setup readiness evidence is invalid")
                 return True
             if frame.state is FrameState.ERROR:
-                _, remote_type, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                _, remote_type, issues, deadline_elapsed = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
                 future._record_worker_cleanup_issues(issues)
+                if deadline_elapsed:
+                    self._expire_deadline(run)
+                    self._drain_setup_failure(call, run, reader, conversation)
+                    return False
+                if not self._claim_outcome(run):
+                    return False
                 future._publish_exception(RemoteExecutionError(f"remote subprocess setup failed ({remote_type})", remote_type=remote_type or "RemoteError"))
                 run.qualified_terminal = True
                 self._drain_setup_failure(call, run, reader, conversation)
@@ -793,7 +800,7 @@ class SubProcessBackend(Backend):
                 try:
                     payload = frame.payload
                     if call.worker_setup is not None:
-                        payload, _, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                        payload, _, issues, _ = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
                         assert payload is not None
                         future._record_worker_cleanup_issues(issues)
                     value = self._receive_result(future, payload)
@@ -804,15 +811,20 @@ class SubProcessBackend(Backend):
                 run.qualified_terminal = True
                 continue
             if frame.state is FrameState.ERROR:
+                if call.worker_setup is not None:
+                    _, remote_type, issues, deadline_elapsed = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                else:
+                    remote_type, deadline_elapsed, issues = decode_worker_error(
+                        frame, limit_bytes=self._config.result_limit_bytes, setup=False,
+                    )
+                future._record_worker_cleanup_issues(issues)
+                if deadline_elapsed:
+                    outcome_seen = True
+                    self._expire_deadline(run)
+                    continue
                 if outcome_seen or not self._claim_outcome(run):
                     return
                 outcome_seen = True
-                if call.worker_setup is not None:
-                    _, remote_type, issues = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
-                    future._record_worker_cleanup_issues(issues)
-                else:
-                    detail = _json(frame.payload, self._config.result_limit_bytes)
-                    remote_type = str(detail.get("type", "RemoteError"))[:128]
                 future._publish_exception(RemoteExecutionError(f"remote subprocess execution failed ({remote_type})", remote_type=remote_type))
                 run.qualified_terminal = True
                 continue
@@ -947,10 +959,12 @@ class SubProcessBackend(Backend):
         return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=self._config.working_directory, env=minimal_environment(overrides), start_new_session=(os.name == "posix"), creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0)
 
     def _request_cancel(self, run: _Run) -> bool:
-        """Request and escalate owned-group termination without claiming success early."""
+        """Request owned-group termination unless a validated outcome already won."""
         if run.future.done():
             return False
         with run.lock:
+            if run.outcome_claimed:
+                return False
             run.cancelling = True
         Thread(target=self._cancel_run, args=(run,), name="dryml-execute-cancel", daemon=True).start()
         return True
@@ -973,12 +987,17 @@ class SubProcessBackend(Backend):
         event = run.terminal_event
         if event is not None and event.wait(max(0.0, deadline - time.monotonic())):
             return
+        self._expire_deadline(run)
+
+    def _expire_deadline(self, run: _Run) -> bool:
+        """Claim expiry and publish it only after owned-group termination proof."""
         with run.lock:
-            if run.outcome_claimed or run.future.done():
-                return
+            if run.outcome_claimed or run.future.done() or run.deadline_expired or run.cancelling:
+                return False
             run.deadline_expired = True
             run.cancelling = True
         self._cancel_run(run, deadline_error=True)
+        return True
 
     def _send_stop(self, run: _Run, descriptor: BootstrapDescriptor) -> None:
         """Best-effort STOP closes an unpermitted worker without sending payload bytes."""

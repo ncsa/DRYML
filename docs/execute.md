@@ -115,7 +115,7 @@ encoding; an exit failure preserves an already encoded result or workload error,
 but leaves the Future cleanup state incomplete and `cleanup()` raises rather than
 claiming that unobserved worker teardown was reconciled.
 
-The generic private worker protocol is version 3. After admission and `GO`,
+The generic private worker protocol is version 4. After admission and `GO`,
 setup-bearing calls send `SETUP` and wait for `SETUP_READY` before `PAYLOAD`.
 Bounded `OUTPUT` may arrive during setup, invocation, and teardown; terminal
 outcomes and final output fences complete the exchange. An incompatible worker fails before `GO`;
@@ -124,6 +124,20 @@ post-`GO` `execution_timeout` covers setup, payload transfer, invocation, outcom
 encoding, and normal setup exit. It is independent of `admission_timeout` and
 `output_final_timeout`; the configuration matrix below gives their defaults and
 other limits.
+
+If the worker observes that deadline at either explicit check immediately before
+payload deserialization or callable invocation, its private bounded `ERROR`
+terminal carries a closed pre-invocation deadline marker. The marker is distinct
+from the remote exception type field and is preserved inside setup-bearing
+terminals together with setup cleanup evidence. A callable-raised `TimeoutError`
+therefore remains an ordinary `RemoteExecutionError`, even if the wall clock has
+expired by the time the coordinator receives it. The first validated ordinary
+result/error or deadline/cancellation claim wins. A deadline marker does not by
+itself prove completion: subprocess reports `ExecutionDeadlineExceeded` only
+after owned-group termination is confirmed, Ray only after its native task or
+worker lifetime is qualified, and either backend reports uncertainty when that
+lifecycle evidence cannot be obtained. Output final fences remain independent
+and are drained under their existing bound.
 
 The core adapter's `dryml.core.execute:core_worker_setup` is a worker setup
 factory. It publishes runtime controls, activates the public Session resource
@@ -372,8 +386,10 @@ capture incomplete without rewriting a validated workload result.
 evidence. `AdmissionError` reports rejected environment, world, or backend
 admission; `BackendUnavailableError` reports an unavailable selected backend;
 and `RemoteExecutionError` reports a bounded worker type without reconstructing
-its exception class. `ExecutionDeadlineExceeded` means owned termination after a
-workload deadline was confirmed. `ExecutionUncertainError` means available
+its exception class. This includes a user callable's own `TimeoutError`.
+`ExecutionDeadlineExceeded` means the worker or coordinator observed the
+execution deadline and owned termination was then confirmed; a worker marker
+alone is insufficient. `ExecutionUncertainError` means available
 evidence cannot safely classify success. `CleanupError` retains the recoverable
 future when backend/spool cleanup is incomplete.
 
@@ -528,7 +544,7 @@ Invocation and result data remain in the submission child until qualified future
 cleanup; the caller-owned spool parent, current directory, existing
 environments, and Ray deployment are preserved.
 
-The coordinator validates private protocol v3 and executes only after the worker
+The coordinator validates private protocol v4 and executes only after the worker
 handshake/admission evidence and GO gate. Setup-bearing calls add `SETUP`,
 setup-time `OUTPUT`, and `SETUP_READY` before `PAYLOAD`; `RESULT` is forbidden
 before payload transfer. A setup `ERROR` cannot resume with readiness or payload,

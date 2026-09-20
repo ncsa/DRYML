@@ -9,7 +9,8 @@ from pathlib import Path
 
 from dryml.environments.specs import CondaEnvironmentSpec, CurrentEnvironmentSpec, PythonExecutableSpec
 from dryml.execute.config import BackendConfig
-from dryml.execute.discovery import CandidateInventory, discover_candidates, identity, probe_candidate
+from dryml.execute.discovery import CandidateInventory, _bootstrap_command, discover_candidates, identity, probe_candidate
+from dryml.execute._protocol import PROTOCOL_VERSION
 from dryml.execute.models import ExecutionIssue, ResourceAmounts, ResourceSnapshot
 from dryml.execute.ray import RayBackendConfig
 from dryml.execute.subprocess import SubProcessConfig
@@ -20,6 +21,14 @@ class Config(BackendConfig):
 
     def create_backend(self):
         raise AssertionError
+
+
+def test_bootstrap_probe_uses_the_canonical_protocol_version():
+    """Selected runtimes must prove the coordinator's current private grammar."""
+    command = _bootstrap_command(CurrentEnvironmentSpec(), Path(sys.executable))
+
+    assert PROTOCOL_VERSION == 4
+    assert command[-1].endswith(f"assert PROTOCOL_VERSION == {PROTOCOL_VERSION}")
 
 
 def test_candidate_order_and_automatic_discovery_switch(tmp_path: Path):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import replace
+from threading import Event, Lock
 from time import monotonic
 from types import SimpleNamespace
 
@@ -290,13 +291,13 @@ class _HandshakeSocket(_SetupSocket):
     """Reuse the frame recorder for a handshake that must stop before GO."""
 
 
-def _handshake_hello(descriptor):
+def _handshake_hello(descriptor, *, protocol=None):
     """Create one valid fake-Ray HELLO for pre-payload mismatch tests."""
     return decode_exact_frame(encode_control(
         FrameState.HELLO, descriptor.correlation,
         {
             "token": descriptor.rendezvous_token,
-            "protocol": ray_module.WORKER_PROTOCOL_ID,
+            "protocol": ray_module.WORKER_PROTOCOL_ID if protocol is None else protocol,
             "dill": ray_module.dill.__version__,
             "implementation": sys.implementation.name,
             "python": list(sys.version_info[:2]),
@@ -314,6 +315,29 @@ def _handshake_hello(descriptor):
             },
         }, header_limit=65_536,
     ), header_limit=65_536, payload_limit=65_536)
+
+
+def test_fake_ray_rejects_old_v3_worker_before_go_or_payload():
+    """An old Ray worker identity cannot receive owner controls or workload bytes."""
+    backend = RayBackendConfig().create_backend()
+    descriptor = BootstrapDescriptor(
+        Correlation("old-v3-ray", 0, 1), "token", "127.0.0.1", 43123,
+        65_536, 1_000_000, 1_000_000, 1_000_000, 1_000_000, 65_536,
+    )
+    hello = _handshake_hello(descriptor, protocol="dryml.execute.worker.v3")
+    socket = _HandshakeSocket()
+    future = RayFuture("old-v3-ray", output=ExecutionOutput(), termination_timeout=1)
+    run = ray_module._Run(future, socket, SimpleNamespace())
+    conversation = backend._conversation(descriptor)
+    conversation.accept_frame(hello)
+
+    with pytest.raises(AdmissionError, match="runtime is incompatible"):
+        backend._handshake(
+            SimpleNamespace(), future, run, descriptor, None,
+            SimpleNamespace(node_id="node"), hello, conversation,
+        )
+
+    assert socket.frames == []
 
 
 @pytest.mark.parametrize(
@@ -463,7 +487,12 @@ def test_fake_ray_setup_failure_publishes_validated_terminal_before_withholding_
     output = ExecutionOutput()
     output._bind("ray-failure", output_limit_bytes=512, live_output_queue_limit_bytes=512, stream_output=False, start_live=False)
     future = RayFuture("ray-failure", output=output, termination_timeout=5)
-    run = SimpleNamespace(connection=socket, native_node_id="node", native_task_id="task", worker_id="ray:worker", outcome_validated=False)
+    run = SimpleNamespace(
+        connection=socket, native_node_id="node", native_task_id="task",
+        worker_id="ray:worker", outcome_validated=False, lock=Lock(),
+        deadline_expired=False, outcome_claimed=False, cancelling=False,
+        cancellation_starting=False, terminal_event=Event(),
+    )
     publish_exception = future._publish_exception
 
     def assert_validated_before_terminal(error):

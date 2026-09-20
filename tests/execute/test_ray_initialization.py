@@ -11,12 +11,12 @@ import pytest
 
 from dryml.execute import ray as ray_module
 from dryml.execute.accounting import Reservation, ResourceAuthority
-from dryml.execute.errors import BackendUnavailableError, CleanupError, ExecutionError, ExecutionUncertainError
+from dryml.execute.errors import BackendUnavailableError, CleanupError, ExecutionDeadlineExceeded, ExecutionError, ExecutionUncertainError, RemoteExecutionError
 from dryml.execute.models import ResourceAmounts
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.ray import RayBackendConfig, RayFuture
 from dryml.execute.subprocess import SubProcessBackend, SubProcessConfig
-from dryml.execute._protocol import BootstrapDescriptor, Correlation, FrameState, decode_control, encode_control
+from dryml.execute._protocol import BootstrapDescriptor, Correlation, FrameState, FrameType, decode_control, decode_exact_frame, encode_control, encode_frame, encode_worker_error
 
 
 def test_address_normalization_failure_does_not_chain_sdk_details(monkeypatch):
@@ -756,6 +756,132 @@ def test_ray_deadline_claim_order_is_stable_without_result_deserialization():
     backend._deadline_watch(second_run, monotonic())
     assert second_run.deadline_expired
     assert not backend._claim_outcome(second_run)
+
+
+def test_ray_cancel_rejects_validated_outcome_claim_before_publication(monkeypatch):
+    """Ordinary native cancellation cannot overtake a claimed paused result."""
+    class CancelSDK:
+        calls = 0
+
+        def cancel(self, reference):
+            type(self).calls += 1
+
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    backend._connection = ray_module._Connection(
+        "127.0.0.1:6379", None, 256, sdk=CancelSDK(),
+    )
+    future = RayFuture("claimed-ray-result", output=ExecutionOutput(), termination_timeout=1)
+    assert future._begin_admission()
+    assert future._authorize(deadline=monotonic() + 1)
+    run = ray_module._Run(
+        future, None,
+        Reservation(future.submission_id, "generation", "0", ResourceAmounts(1.0, None, {}, {})),
+        reference=object(), terminal_event=Event(),
+    )
+    started = []
+
+    class UnexpectedThread:
+        def __init__(self, *args, **kwargs):
+            started.append((args, kwargs))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(ray_module, "Thread", UnexpectedThread)
+    assert backend._claim_outcome(run)
+
+    assert not backend._request_cancel(run)
+    assert CancelSDK.calls == 0
+    assert started == []
+    assert future._publish_result("preserved")
+    assert future.result(timeout=0) == "preserved"
+    assert backend._request_cancel(run, allow_terminal=True)
+    assert CancelSDK.calls == 1
+    assert len(started) == 1
+
+
+class _TerminalReader:
+    """Deliver one generated channel terminal and then close."""
+
+    def __init__(self, frame):
+        self.frame = frame
+
+    def read(self):
+        if self.frame is None:
+            raise EOFError
+        frame, self.frame = self.frame, None
+        return frame
+
+
+def _ray_error_frame(*, deadline=False, setup=False, cleanup=()):
+    """Build one closed generated Ray worker error terminal."""
+    correlation = Correlation("ray-deadline-receiver", 0, 1)
+    payload = encode_worker_error(
+        None if deadline else "TimeoutError",
+        deadline_elapsed=deadline,
+        cleanup_types=cleanup,
+        setup=setup,
+        limit_bytes=4096,
+    )
+    return decode_exact_frame(
+        encode_frame(FrameState.ERROR, FrameType.ERROR, correlation, payload, header_limit=1024),
+        header_limit=1024,
+        payload_limit=4096,
+    )
+
+
+def _receive_ray_error(monkeypatch, frame, *, setup=False, backend=None):
+    """Route one generated terminal through the dependency-free Ray receiver."""
+    backend = backend or RayBackendConfig(address="127.0.0.1:6379").create_backend()
+    output = ExecutionOutput()
+    future = RayFuture("ray-deadline-receiver", output=output, termination_timeout=1)
+    assert future._begin_admission()
+    assert future._authorize(deadline=float("inf"))
+    run = ray_module._Run(
+        future, SimpleNamespace(),
+        Reservation(future.submission_id, "generation", "0", ResourceAmounts(1.0, None, {}, {})),
+        reference=object(), terminal_event=Event(), issued=True,
+    )
+    monkeypatch.setattr(ray_module, "SocketFrameReader", lambda *args, **kwargs: _TerminalReader(frame))
+    call = SimpleNamespace(output=output, worker_setup=object() if setup else None)
+    descriptor = SimpleNamespace(control_header_limit_bytes=1024)
+    conversation = SimpleNamespace(accept_frame=lambda value: value)
+    backend._receive_active(call, future, run, descriptor, conversation)
+    return backend, future, run
+
+
+@pytest.mark.parametrize("setup", (False, True))
+def test_ray_receiver_routes_worker_deadline_marker_to_native_reconciliation(monkeypatch, setup):
+    """Both terminal variants defer expiry publication to native stop proof."""
+    cleanup = ("RuntimeError",) if setup else ()
+    frame = _ray_error_frame(deadline=True, setup=setup, cleanup=cleanup)
+    backend = RayBackendConfig(address="127.0.0.1:6379").create_backend()
+
+    def confirm(run):
+        run.cancelling = True
+        run.termination_qualified = True
+        run.future._expire(ExecutionDeadlineExceeded("execution deadline exceeded"))
+        return True
+
+    monkeypatch.setattr(backend, "_request_cancel", confirm)
+    _, future, run = _receive_ray_error(monkeypatch, frame, setup=setup, backend=backend)
+
+    with pytest.raises(ExecutionDeadlineExceeded):
+        future.result(timeout=0)
+    assert run.deadline_expired and run.outcome_validated and not run.outcome_claimed
+    if setup:
+        assert future.snapshot().cleanup_issues[-1].message == "RuntimeError"
+
+
+def test_ray_callable_timeout_error_remains_remote_after_later_deadline(monkeypatch):
+    """The remote type name cannot forge native deadline reconciliation."""
+    backend, future, run = _receive_ray_error(monkeypatch, _ray_error_frame())
+    backend._deadline_watch(run, 0.0)
+
+    with pytest.raises(RemoteExecutionError) as failure:
+        future.result(timeout=0)
+    assert failure.value.remote_type == "TimeoutError"
+    assert run.outcome_claimed and not run.deadline_expired
 
 
 def test_ray_deadline_monitor_wakes_when_a_terminal_event_is_signalled():

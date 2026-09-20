@@ -206,7 +206,7 @@ def test_execute_docs_link_and_preserve_implemented_boundaries() -> None:
         "lambdas", "nested functions", "closures", "importable unbound builtins",
         "Stateful bound methods", "callable instances", "fixed generic transport error",
         "type-specific core phrases", "generic byte-oriented execution layer",
-            "version 3", "SETUP_READY", "execution_timeout", "CoreOptions",
+        "version 4", "SETUP_READY", "execution_timeout", "CoreOptions",
         "pinned index in the frozen Store table", "@function", "managed-operation",
         "AutoRef", "version-local worker/coordinator", "cross-version RPC",
         "maximal roots", "neither rolls back", "nor replays the workload",

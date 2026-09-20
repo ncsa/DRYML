@@ -17,6 +17,7 @@ from dryml.environments.utils import build_probe_env
 from dryml.formats import semantic_id
 
 from ._process import minimal_environment, run_bounded
+from ._protocol import PROTOCOL_VERSION
 from .config import BackendConfig
 from .models import EnvironmentCandidate, ExecutionIssue
 
@@ -249,7 +250,7 @@ def _execute_eligibility(record: EnvironmentRecord) -> ExecutionIssue | None:
 def _bootstrap_command(spec: EnvironmentSpec, interpreter: Path) -> list[str]:
     """Return the selected runtime's bounded Execute bootstrap import probe."""
     check = ("import dill; from dryml.execute._protocol import "
-             "PROTOCOL_VERSION; assert PROTOCOL_VERSION == 3")
+             f"PROTOCOL_VERSION; assert PROTOCOL_VERSION == {PROTOCOL_VERSION}")
     if isinstance(spec, CurrentEnvironmentSpec):
         return [str(interpreter), "-c", check]
     if isinstance(spec, PythonExecutableSpec):

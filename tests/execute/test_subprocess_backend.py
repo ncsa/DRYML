@@ -16,6 +16,7 @@ import pytest
 
 from dryml.execute import executor as executor_module
 from dryml.execute import subprocess as subprocess_module
+from dryml.execute._protocol import BootstrapDescriptor, Correlation, FrameState, decode_exact_frame, encode_control
 from dryml.execute.accounting import ResourceAuthority
 from dryml.execute.errors import AdmissionError, CleanupError, ExecutionUncertainError
 from dryml.execute.executor import Executor
@@ -51,6 +52,46 @@ def _emit_and_return(value: str) -> str:
     os.write(1, b"worker stdout\n")
     os.write(2, b"worker stderr\n")
     return value
+
+
+def test_subprocess_rejects_old_v3_worker_before_go_or_payload():
+    """An old worker identity cannot cross the local authorization gate."""
+    backend = SubProcessConfig().create_backend()
+    correlation = Correlation("old-v3-subprocess", 0, 1)
+    descriptor = BootstrapDescriptor(
+        correlation, "token", "127.0.0.1", 43123,
+        1024, 1024, 4096, 4096, 4096, 1024,
+    )
+    hello = decode_exact_frame(
+        encode_control(
+            FrameState.HELLO,
+            correlation,
+            {
+                "dill": subprocess_module.dill.__version__,
+                "implementation": sys.implementation.name,
+                "pid": 123,
+                "protocol": "dryml.execute.worker.v3",
+                "python": list(sys.version_info[:2]),
+                "token": descriptor.rendezvous_token,
+                "worker_id": "subprocess:old-worker",
+            },
+            header_limit=1024,
+        ),
+        header_limit=1024,
+        payload_limit=4096,
+    )
+    connection = SimpleNamespace(frames=[])
+    run = SimpleNamespace(connection=connection)
+    future = SubProcessFuture("old-v3-subprocess", output=ExecutionOutput(), termination_timeout=1)
+    conversation = backend._conversation(descriptor)
+    conversation.accept_frame(hello)
+
+    with pytest.raises(AdmissionError, match="bootstrap identity is incompatible"):
+        backend._handshake(
+            SimpleNamespace(), future, run, descriptor, None, hello, conversation,
+        )
+
+    assert connection.frames == []
 
 
 def _hold_affinity(marker_directory: str, name: str) -> list[int]:
@@ -458,8 +499,6 @@ def test_real_constrained_workers_are_disjoint_and_release_queued_demand(tmp_pat
 
 def test_rejected_go_never_deserializes_payload_at_actual_worker_boundary(tmp_path: Path, monkeypatch):
     """A worker receiving STOP instead of GO never runs a trusted reduction hook."""
-    from dryml.execute._protocol import FrameState, decode_exact_frame, encode_control
-
     executor = Executor(SubProcessConfig(spool_directory=tmp_path))
     executor.start()
     backend = executor._backend

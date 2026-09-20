@@ -21,15 +21,16 @@ from typing import BinaryIO
 from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_json_load_bytes, json_ready
 
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 # This is deliberately a protocol identity, rather than a package version: a
 # selected interpreter must execute the same worker implementation contract.
-WORKER_PROTOCOL_ID = "dryml.execute.worker.v3"
+WORKER_PROTOCOL_ID = "dryml.execute.worker.v4"
 _HEADER_LENGTH_BYTES = 4
 _PAYLOAD_LENGTH_BYTES = 8
 _MAX_HEADER_LENGTH = (1 << (_HEADER_LENGTH_BYTES * 8)) - 1
 _MAX_PAYLOAD_LENGTH = (1 << (_PAYLOAD_LENGTH_BYTES * 8)) - 1
 _IDENTITY = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
+_PRE_INVOCATION_DEADLINE = "pre-invocation"
 
 
 class FrameError(ValueError):
@@ -445,18 +446,110 @@ def decode_control(frame: Frame, *, limit_bytes: int, required_keys: set[str]) -
     return json_ready(control, max_depth=8, max_nodes=1024, max_entries=64, max_string=limit_bytes, max_int_bits=64)
 
 
-def decode_setup_terminal(frame: Frame, *, limit_bytes: int) -> tuple[bytes | None, str | None, tuple[str, ...]]:
+def encode_worker_error(
+    error_type: str | None,
+    *,
+    deadline_elapsed: bool,
+    cleanup_types: Iterable[str] = (),
+    setup: bool,
+    limit_bytes: int,
+) -> bytes:
+    """Encode one closed type-only worker error or pre-invocation deadline marker.
+
+    The deadline variant is selected only by worker control flow, never by an
+    exception class name. Setup terminals additionally retain bounded cleanup
+    type names; exception values and tracebacks are never transported.
+    """
+    _validate_limit("worker error limit", limit_bytes, _MAX_PAYLOAD_LENGTH)
+    cleanup = tuple(cleanup_types)
+    if any(not isinstance(value, str) or len(value) > 128 for value in cleanup):
+        raise FrameError("worker cleanup type is invalid")
+    if deadline_elapsed:
+        if error_type is not None:
+            raise FrameError("worker deadline error cannot include a remote type")
+        data: dict[str, object] = {"deadline": _PRE_INVOCATION_DEADLINE}
+    else:
+        if not isinstance(error_type, str) or len(error_type) > 128:
+            raise FrameError("worker error type is invalid")
+        data = {"type": error_type}
+    if setup:
+        data["cleanup"] = [{"type": value} for value in cleanup]
+    elif cleanup:
+        raise FrameError("ordinary worker errors cannot include cleanup evidence")
+    try:
+        encoded = canonical_json_bytes(data, max_depth=3, max_nodes=128, max_entries=64, max_string=limit_bytes, max_int_bits=64)
+    except CanonicalJSONError as exc:
+        raise FrameError("worker error is not canonical") from exc
+    if len(encoded) > limit_bytes:
+        raise FrameError("worker error exceeds configured result limit")
+    return encoded
+
+
+def decode_worker_error(
+    frame: Frame,
+    *,
+    limit_bytes: int,
+    setup: bool,
+) -> tuple[str | None, bool, tuple[str, ...]]:
+    """Decode a closed worker error without inferring deadlines from type names.
+
+    Returns:
+        ``(remote_type, deadline_elapsed, cleanup_types)``. Exactly one of a
+        remote type or the private pre-invocation deadline marker is present.
+
+    Raises:
+        FrameError: If the frame or selected ordinary/setup payload variant is
+        malformed, oversized, or contains extra fields.
+    """
+    if frame.state is not FrameState.ERROR or frame.frame_type is not FrameType.ERROR:
+        raise FrameError("frame is not a worker error")
+    _validate_limit("worker error limit", limit_bytes, _MAX_PAYLOAD_LENGTH)
+    if len(frame.payload) > limit_bytes:
+        raise FrameError("worker error exceeds configured result limit")
+    try:
+        value = canonical_json_load_bytes(frame.payload, max_depth=3, max_nodes=128, max_entries=64, max_string=limit_bytes, max_int_bits=64)
+    except CanonicalJSONError as exc:
+        raise FrameError("worker error is not canonical") from exc
+    if not isinstance(value, Mapping):
+        raise FrameError("worker error has an invalid shape")
+    cleanup_types: tuple[str, ...] = ()
+    variant = dict(value)
+    if setup:
+        cleanup = variant.pop("cleanup", None)
+        if not isinstance(cleanup, tuple) or any(
+            not isinstance(issue, Mapping)
+            or set(issue) != {"type"}
+            or not isinstance(issue["type"], str)
+            or len(issue["type"]) > 128
+            for issue in cleanup
+        ):
+            raise FrameError("setup terminal cleanup evidence is invalid")
+        cleanup_types = tuple(issue["type"] for issue in cleanup)
+    if set(variant) == {"deadline"} and variant["deadline"] == _PRE_INVOCATION_DEADLINE:
+        return None, True, cleanup_types
+    if set(variant) == {"type"} and isinstance(variant["type"], str) and len(variant["type"]) <= 128:
+        return variant["type"], False, cleanup_types
+    raise FrameError("worker error has an invalid shape")
+
+
+def decode_setup_terminal(frame: Frame, *, limit_bytes: int) -> tuple[bytes | None, str | None, tuple[str, ...], bool]:
     """Decode a setup-bearing terminal while retaining result bytes and cleanup facts.
 
     Returns:
-        ``(result_bytes, error_type, cleanup_types)``. Exactly one of result bytes
-        and error type is present; cleanup types are bounded safe type names.
+        ``(result_bytes, error_type, cleanup_types, deadline_elapsed)``. A result,
+        remote error type, or private deadline marker is present; cleanup types
+        are bounded safe type names.
 
     Raises:
         FrameError: If the terminal payload is not the closed setup envelope.
     """
     if frame.state not in {FrameState.RESULT, FrameState.ERROR} or frame.frame_type not in {FrameType.RESULT, FrameType.ERROR}:
         raise FrameError("frame is not a setup terminal")
+    if frame.frame_type is FrameType.ERROR:
+        remote_type, deadline_elapsed, cleanup_types = decode_worker_error(
+            frame, limit_bytes=limit_bytes, setup=True,
+        )
+        return None, remote_type, cleanup_types, deadline_elapsed
     try:
         value = canonical_json_load_bytes(frame.payload, max_depth=3, max_nodes=128, max_entries=64, max_string=limit_bytes, max_int_bits=64)
     except CanonicalJSONError as exc:
@@ -466,17 +559,13 @@ def decode_setup_terminal(frame: Frame, *, limit_bytes: int) -> tuple[bytes | No
     cleanup = value.get("cleanup")
     if not isinstance(cleanup, tuple) or any(not isinstance(issue, Mapping) or set(issue) != {"type"} or not isinstance(issue["type"], str) or len(issue["type"]) > 128 for issue in cleanup):
         raise FrameError("setup terminal cleanup evidence is invalid")
-    if frame.frame_type is FrameType.RESULT:
-        if set(value) != {"cleanup", "payload"} or not isinstance(value["payload"], str):
-            raise FrameError("setup result terminal has an invalid shape")
-        try:
-            payload = base64.b64decode(value["payload"].encode("ascii"), validate=True)
-        except (UnicodeEncodeError, ValueError) as exc:
-            raise FrameError("setup result terminal payload is invalid") from exc
-        return payload, None, tuple(issue["type"] for issue in cleanup)
-    if set(value) != {"cleanup", "type"} or not isinstance(value["type"], str) or len(value["type"]) > 128:
-        raise FrameError("setup error terminal has an invalid shape")
-    return None, value["type"], tuple(issue["type"] for issue in cleanup)
+    if set(value) != {"cleanup", "payload"} or not isinstance(value["payload"], str):
+        raise FrameError("setup result terminal has an invalid shape")
+    try:
+        payload = base64.b64decode(value["payload"].encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise FrameError("setup result terminal payload is invalid") from exc
+    return payload, None, tuple(issue["type"] for issue in cleanup), False
 
 
 def encode_owner_envelope(state: FrameState, correlation: Correlation, owner: OwnerEnvelopeType, envelope: bytes, *, header_limit: int, owner_limit: int) -> bytes:
@@ -746,4 +835,4 @@ class ProtocolConversation:
             self._terminal = True
 
 
-__all__ = ["BootstrapDescriptor", "Correlation", "Frame", "FrameError", "FrameState", "FrameType", "OwnerEnvelopeType", "PROTOCOL_VERSION", "ProtocolConversation", "decode_bootstrap_descriptor", "decode_control", "decode_exact_frame", "decode_frame", "decode_owner_envelopes", "decode_setup_terminal", "encode_bootstrap_descriptor", "encode_control", "encode_frame", "encode_frame_parts", "encode_owner_envelope"]
+__all__ = ["BootstrapDescriptor", "Correlation", "Frame", "FrameError", "FrameState", "FrameType", "OwnerEnvelopeType", "PROTOCOL_VERSION", "ProtocolConversation", "decode_bootstrap_descriptor", "decode_control", "decode_exact_frame", "decode_frame", "decode_owner_envelopes", "decode_setup_terminal", "decode_worker_error", "encode_bootstrap_descriptor", "encode_control", "encode_frame", "encode_frame_parts", "encode_owner_envelope", "encode_worker_error"]
