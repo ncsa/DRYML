@@ -1,5 +1,7 @@
 """Tests for world collection through the generic code scheduler."""
 
+import pytest
+
 from dryml.code import (
     KernelCall,
     StaticDependenciesKernel,
@@ -7,6 +9,7 @@ from dryml.code import (
     probe,
 )
 from dryml.worlds import WorldRequirementsKernel, req
+from tests.managed.execution_fixtures import ManagedWorldMatrixValue, ORDERS
 
 
 def test_world_kernel_collects_live_resolved_targets() -> None:
@@ -32,6 +35,25 @@ def test_world_kernel_collects_live_resolved_targets() -> None:
     assert requirements.has_value
     assert requirements.value.roles["main"].resources.cpus.min == 1
     assert requirements.value.roles["main"].resources.memory.min == 1024**3
+
+
+@pytest.mark.parametrize(("member", "written_order"), ORDERS)
+def test_world_kernel_collects_managed_direct_carrier_declarations(
+        member, written_order) -> None:
+    """Each A/F/M order retains its nonempty descriptor world declaration."""
+
+    del written_order
+    result = probe(
+        getattr(ManagedWorldMatrixValue(), member)._descriptor,
+        (
+            KernelCall(StaticDependenciesKernel(), None),
+            KernelCall(WorldRequirementsKernel(), None),
+        ),
+    )
+
+    requirements = result.require(WorldRequirementsKernel)
+    assert requirements.has_value
+    assert requirements.value.roles["main"].resources.cpus.min == 1
 
 
 def test_world_kernel_snapshot_matches_live_selected_method_collection() -> (

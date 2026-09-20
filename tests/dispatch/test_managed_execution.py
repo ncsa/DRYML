@@ -12,14 +12,18 @@ from dryml.core.execute import CoreOptions
 from dryml.core.object import Pickleable
 from dryml.core.session import config as core_config
 from dryml.core.store.dir import DirStore
+from dryml.dispatch import ProbeOptions
+from dryml.dispatch._probe import run_probe
 from dryml.environments.specs import PythonExecutableSpec
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.managed import ManagedConfig, managed_operation
 from tests.managed.execution_fixtures import (
     ConflictingManagedDiscoveryValue,
+    ConflictingManagedWorldDiscoveryValue,
     DispatchDiscoveryValue,
     InnerFunctionWrappedManagedValue,
     ManagedMatrixValue,
+    ManagedWorldMatrixValue,
     MatrixArgument,
     ORDERS,
     OuterWrappedManagedValue,
@@ -127,6 +131,43 @@ def test_dispatch_explains_complete_nonempty_declarations_for_managed_orders(
     )
 
 
+@pytest.mark.parametrize(("member", "written_order"), ORDERS)
+def test_dispatch_explains_managed_direct_world_declarations(
+        member, written_order):
+    """Every A/F/M descriptor carrier retains its nonempty world requirement."""
+
+    del written_order
+    report = dispatch.with_options(backend=dispatch.InProcess()).explain(
+        getattr(ManagedWorldMatrixValue(), member),
+    )
+
+    assert report.probe_placement == "in_process"
+    assert report.world is not None
+    assert report.world.value is not None
+    assert report.world.value.roles["main"].resources.cpus.min == 1
+
+
+@pytest.mark.parametrize(("member", "written_order"), ORDERS)
+@pytest.mark.parametrize("placement", ("in_process", "execute"))
+def test_dispatch_probe_placements_preserve_managed_world_declarations(
+        member, written_order, placement):
+    """Both probe placements retain nonempty direct A/F/M world declarations."""
+
+    del written_order
+    options = ProbeOptions(placement=placement)
+    if placement == "execute":
+        options = ProbeOptions(
+            placement=placement, backend=SubProcessConfig(),
+        )
+    result = run_probe(
+        getattr(ManagedWorldMatrixValue(), member), options=options,
+    )
+
+    assert result.placement == placement
+    assert result.world.value is not None
+    assert result.world.value.roles["main"].resources.cpus.min == 1
+
+
 def test_dispatch_rejects_conflicting_managed_declarations_before_run(
         tmp_path):
     """A bound managed carrier conflict stops Dispatch before lifecycle mutation."""
@@ -137,6 +178,21 @@ def test_dispatch_rejects_conflicting_managed_declarations_before_run(
     view = dispatch.with_options(backend=dispatch.InProcess())
     with pytest.raises(dispatch.DispatchError) as raised:
         view.run(subject.advance, managed=matrix_config(repo, control_store))
+
+    assert "dispatch.requirements_conflict" in raised.value.report.diagnostics
+    assert subject.calls == 0
+
+
+def test_dispatch_rejects_conflicting_managed_world_declarations_before_run(
+        tmp_path):
+    """A managed world conflict stops Dispatch before lifecycle mutation."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    subject = ConflictingManagedWorldDiscoveryValue(repo=repo)
+    view = dispatch.with_options(backend=dispatch.InProcess())
+
+    with pytest.raises(dispatch.DispatchError) as raised:
+        view.run(subject.advance)
 
     assert "dispatch.requirements_conflict" in raised.value.report.diagnostics
     assert subject.calls == 0

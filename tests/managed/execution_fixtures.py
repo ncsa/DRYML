@@ -12,6 +12,7 @@ from dryml.core.signatures import Mat, Ref
 from dryml.core.reference_values import StateRef
 from dryml.environments import req as environment_req
 from dryml.managed import ManagedConfig, managed_operation
+from dryml.worlds import req as world_req
 
 
 ORDERS = (
@@ -95,6 +96,24 @@ class ManagedMatrixValue(Pickleable):
     operation_mfa = _matrix_method(("M", "F", "A"))
 
 
+class ManagedWorldMatrixValue(Pickleable):
+    """Managed A/F/M matrix with requirements on descriptor carriers."""
+
+    operation_afm = _matrix_method(("A", "F", "M"))
+    operation_amf = _matrix_method(("A", "M", "F"))
+    operation_fam = _matrix_method(("F", "A", "M"))
+    operation_fma = _matrix_method(("F", "M", "A"))
+    operation_maf = _matrix_method(("M", "A", "F"))
+    operation_mfa = _matrix_method(("M", "F", "A"))
+
+
+for _member, _ in ORDERS:
+    world_req(
+        cpus=1, source="managed-execution-world-matrix",
+    )(getattr(ManagedWorldMatrixValue(), _member)._descriptor)
+del _member, _
+
+
 def _recording_wrapper(target):
     """Retain authored wrapper effects around a managed declaration."""
 
@@ -175,6 +194,29 @@ class ConflictingManagedDiscoveryValue(Pickleable):
     @managed_operation()
     @environment_req(python=">=4", source="managed-conflict-left")
     @environment_req(python="<3", source="managed-conflict-right")
+    def advance(self, *, managed) -> None:
+        """Mutate only if Dispatch incorrectly admits the conflicting call."""
+
+        self.calls += 1
+
+
+class ConflictingManagedWorldDiscoveryValue(Pickleable):
+    """Managed fixture with incompatible passive world declarations."""
+
+    def __init__(self) -> None:
+        """Initialize the mutation counter used to prove preflight rejection."""
+
+        self.calls = 0
+
+    @world_req(
+        cpus={"min": None, "max": 1},
+        source="managed-world-conflict-left",
+    )
+    @world_req(
+        cpus={"min": 2, "max": None},
+        source="managed-world-conflict-right",
+    )
+    @managed_operation()
     def advance(self, *, managed) -> None:
         """Mutate only if Dispatch incorrectly admits the conflicting call."""
 

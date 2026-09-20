@@ -11,6 +11,8 @@ from dryml.annotations.collect import (
     _method_annotation_targets,
     _reserve_annotation_targets,
 )
+from dryml.annotations import own_annotations
+from dryml.annotations.errors import UnsupportedAnnotationTargetError
 from dryml.code import AnalysisKernel, StaticDependencies
 from dryml.code.inspection import InspectionCapture, InspectionTarget
 from dryml.code.kernels import KernelContext
@@ -77,6 +79,16 @@ def _source_from_data(data: object) -> RequirementSource:
 def _annotation_targets(target: CodeTarget) -> tuple[object, ...]:
     """Return static annotation carriers for one normalized live target."""
 
+    if (
+        target.info.kind == "callable_instance"
+        and target.original is not None
+    ):
+        try:
+            own_annotations(target.original)
+        except UnsupportedAnnotationTargetError:
+            pass
+        else:
+            return (target.original,)
     if target.owner is not None and target.info.kind in (
         "bound_method",
         "callable_instance",
@@ -106,8 +118,6 @@ def _declarations_for_targets(
     budget = _RawAnnotationBudget(_MAX_RAW_ATTACHMENTS)
     for target_sources in sources:
         _reserve_annotation_targets(target_sources, budget)
-    from dryml.annotations import own_annotations
-
     result: list[
         tuple[tuple[int, RequirementDeclaration[WorldRequirement]], ...]
     ] = []
