@@ -99,9 +99,15 @@ def test_descriptor_rejects_same_member_reuse_by_an_unrelated_owner():
         def operation(self, *, managed):
             """Provide one source declaration that must remain single-owner."""
 
-    with pytest.raises(ManagedDeclarationError, match="multiple owners"):
+    with pytest.raises((ManagedDeclarationError, RuntimeError)) as caught:
         class Second:
             operation = First.__dict__["operation"]
+
+    error = caught.value
+    if not isinstance(error, ManagedDeclarationError):
+        error = error.__cause__
+    assert isinstance(error, ManagedDeclarationError)
+    assert "multiple owners" in str(error)
 
 
 def test_descriptor_rejects_different_member_names_and_preserves_passive_annotations():

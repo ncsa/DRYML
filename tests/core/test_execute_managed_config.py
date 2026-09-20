@@ -478,7 +478,10 @@ def test_malformed_config_resource_fails_before_opening_any_store(tmp_path, monk
         "version": 2, "root": 0,
         "nodes": [{
             "tag": "managed_config",
-            "state_repo": {"role": "store", "definition": {"kind": "zip", "path": "/missing"}},
+            "state_repo": {
+                "role": "store",
+                "definition": {"kind": "zip", "path": str(tmp_path / "missing.zip")},
+            },
             "control_store": None, "rerun": True, "callbacks": [],
         }],
     }
