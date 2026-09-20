@@ -90,6 +90,9 @@ CacheMode: TypeAlias = Literal["none", "weak", "strong"]
 ReturnObjects: TypeAlias = bool | Literal["auto"]
 _INHERIT = "inherit"
 _MISSING = object()
+_worker_cleanup_quarantine_lock = RLock()
+_worker_cleanup_quarantine_pid: int | None = None
+_worker_cleanup_quarantine: list[Any] = []
 
 
 @dataclass(frozen=True, slots=True)
@@ -1367,6 +1370,90 @@ def _control_store(repo: Repo, descriptor: Any) -> DirStore | None:
     return store
 
 
+def _quarantine_worker_cleanup(cleanup: Any) -> None:
+    """Retain one unresolved worker cleanup owner until this process exits.
+
+    ``RepoReconstructionError`` owns fresh handles that a generic worker reduces
+    to type-only cleanup evidence. Retaining that owner is therefore necessary
+    until the one-shot worker exits. PID reset prevents inherited registry state
+    from becoming a lease in a forked process.
+    """
+    global _worker_cleanup_quarantine_pid
+
+    from .repo_definition import RepoReconstructionError
+
+    if not isinstance(cleanup, RepoReconstructionError):
+        return
+    pid = os.getpid()
+    with _worker_cleanup_quarantine_lock:
+        if _worker_cleanup_quarantine_pid != pid:
+            _worker_cleanup_quarantine_pid = pid
+            _worker_cleanup_quarantine.clear()
+        if not any(owner is cleanup for owner in _worker_cleanup_quarantine):
+            _worker_cleanup_quarantine.append(cleanup)
+
+
+def _require_no_worker_cleanup_quarantine() -> None:
+    """Reject core setup after an unresolved close in this worker process.
+
+    A quarantined process must exit or restart. Reusing it could reconstruct a
+    new core context while the previous failed close still owns live handles;
+    this guard never retries or replays a workload.
+    """
+    global _worker_cleanup_quarantine_pid
+
+    pid = os.getpid()
+    with _worker_cleanup_quarantine_lock:
+        if _worker_cleanup_quarantine_pid != pid:
+            _worker_cleanup_quarantine_pid = pid
+            _worker_cleanup_quarantine.clear()
+        if _worker_cleanup_quarantine:
+            raise RuntimeError(
+                "core worker setup is quarantined after unresolved resource cleanup; "
+                "the process must exit or restart"
+            )
+
+
+@contextmanager
+def _worker_resource_cache() -> Iterator[None]:
+    """Retry failed worker cache cleanup while its runtime remains active.
+
+    The public cache preserves a workload failure by attaching its private retry
+    owner instead of replacing that failure. Core setup is the last boundary
+    where that owner remains reachable and worker activation is still active, so
+    it retries only the retained resource close before generic Execute reduces
+    the workload failure to its sanitized type. If that retry fails, the owner
+    remains strongly retained for the worker process lifetime and later setup is
+    rejected; the workload is never retried.
+    """
+    from dryml.session import resource_cache
+    from .repo_definition import RepoReconstructionError
+
+    try:
+        with resource_cache():
+            yield
+    except BaseException as primary:
+        cleanup = primary if isinstance(primary, RepoReconstructionError) else getattr(
+            primary, "repo_cleanup_error", None,
+        )
+        if isinstance(cleanup, RepoReconstructionError):
+            try:
+                cleanup.cleanup()
+            except BaseException:
+                # Generic Execute preserves the workload failure and records this
+                # setup-exit failure as independent cleanup evidence. Retain the
+                # retry owner because that evidence serializes only its type.
+                _quarantine_worker_cleanup(cleanup)
+                raise
+            if cleanup is primary:
+                workload = cleanup.__context__
+                if isinstance(workload, BaseException):
+                    raise workload from None
+                return
+            delattr(primary, "repo_cleanup_error")
+        raise
+
+
 @contextmanager
 def core_worker_setup(context: WorkerSetupContext, data: Mapping[str, Any]) -> Iterator[None]:
     """Establish worker runtime, Repo/session, and task-owned core context.
@@ -1386,8 +1473,12 @@ def core_worker_setup(context: WorkerSetupContext, data: Mapping[str, Any]) -> I
         ValueError: If the closed setup envelope, nested owner envelopes, or
             control Store descriptor is malformed.
         RuntimeError: If inherited session state, activation, Store
-            reconstruction, or control Store setup fails. Errors intentionally
+            reconstruction, control Store setup, or a prior unresolved worker
+            cleanup prevents setup. A quarantined worker process must exit or
+            restart; setup never retries the prior workload. Errors intentionally
             omit the detached setup payload.
+        RepoReconstructionError: If a workload failure and cache teardown both
+            fail and an in-runtime resource-close retry remains unresolved.
 
     Side Effects:
         Activates the public Session resource cache after runtime activation,
@@ -1399,13 +1490,13 @@ def core_worker_setup(context: WorkerSetupContext, data: Mapping[str, Any]) -> I
     if not isinstance(context, WorkerSetupContext) or not isinstance(data, Mapping):
         raise TypeError("core worker setup requires WorkerSetupContext and mapping data")
     spec, definition, role, replica, descriptor, cache = _decode_setup(data)
+    _require_no_worker_cleanup_quarantine()
     _require_pristine_session()
     grant = ExecutionGrant.from_worker_setup(context, role=role, replica=replica)
-    from dryml.session import resource_cache
 
     with ExitStack() as stack:
         stack.enter_context(activation_scope(spec, grant))
-        stack.enter_context(resource_cache())
+        stack.enter_context(_worker_resource_cache())
         repo = Repo.from_definition(definition)
         control = _control_store(repo, descriptor)
         stack.enter_context(config(repo=repo, cache=cache))

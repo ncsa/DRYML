@@ -520,6 +520,65 @@ def test_cache_retry_owner_deduplicates_shared_store_dependencies(tmp_path, monk
         store.close()
 
 
+@pytest.mark.parametrize("primary", (ValueError, KeyboardInterrupt))
+def test_cache_retry_owner_preserves_dependencies_across_repeated_failures(
+        tmp_path, monkeypatch, primary):
+    """Retained Repo cleanup retries without closing dependencies or saving state early."""
+    source, handles, definition = _definition(tmp_path, "source")
+    original_repo_close = Repo.close
+    original_store_close = DirStore.close
+    rebuilt = None
+    repo_close_attempts = 0
+    store_close_attempts = 0
+    saved = []
+
+    def fail_rebuilt_repo_close(self, *args, **kwargs):
+        nonlocal repo_close_attempts
+        if self is rebuilt:
+            repo_close_attempts += 1
+            if repo_close_attempts <= 2:
+                raise OSError("repo close failed")
+        return original_repo_close(self, *args, **kwargs)
+
+    def count_rebuilt_store_close(self):
+        nonlocal store_close_attempts
+        if rebuilt is not None and self is rebuilt.default_store:
+            store_close_attempts += 1
+        return original_store_close(self)
+
+    try:
+        with monkeypatch.context() as patched:
+            patched.setattr(Repo, "close", fail_rebuilt_repo_close)
+            patched.setattr(DirStore, "close", count_rebuilt_store_close)
+            with pytest.raises(primary) as raised:
+                with session.resource_cache():
+                    rebuilt = Repo.from_definition(definition)
+                    rebuilt.save_objs_on_deletion = True
+                    rebuilt.save = lambda value: saved.append(value)
+                    raise primary("workload interrupted")
+
+            cleanup = raised.value.repo_cleanup_error
+            assert isinstance(cleanup, RepoReconstructionError)
+            assert cleanup._retained_repos == [rebuilt]
+            assert cleanup._retained_stores == [rebuilt.default_store]
+            assert store_close_attempts == 0
+            assert saved == []
+            with pytest.raises(RepoReconstructionError) as retry:
+                cleanup.cleanup()
+            assert retry.value is cleanup
+            assert cleanup._retained_repos == [rebuilt]
+            assert cleanup._retained_stores == [rebuilt.default_store]
+            assert store_close_attempts == 0
+            assert saved == []
+            assert cleanup.cleanup() is None
+            assert store_close_attempts == 1
+            assert saved == []
+    finally:
+        source.close(flush=False)
+        for handle in handles:
+            handle.close()
+
+
 def test_cache_repo_cleanup_discards_dirty_zip_without_deletion_save(tmp_path, monkeypatch):
     """Non-flushing cache teardown neither commits buffered state nor invokes deletion save."""
 

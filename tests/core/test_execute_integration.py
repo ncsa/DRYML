@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,7 +16,7 @@ from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef, function
 from dryml.core.execute import CoreExecutionError, CoreOptions, PreparedCoreCall
 from dryml.core.store.dir import DirStore
 from dryml.execute import Executor, ExecutionOutput, WorkerSetup
-from dryml.execute.errors import RemoteExecutionError
+from dryml.execute.errors import CleanupError, RemoteExecutionError
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.managed import managed_operation
 from dryml.methods import Method
@@ -39,6 +41,47 @@ def _payload_marker(path):
 def _generic_value():
     """Return one ordinary value after the setup output flood is drained."""
     return "delivered"
+
+
+def _raise_workload_error():
+    """Raise the workload failure preserved across worker setup teardown."""
+    raise ValueError("workload failed")
+
+
+def _record_then_raise_workload_error(path):
+    """Record one invocation before raising the workload failure."""
+    marker = Path(path)
+    count = int(marker.read_text(encoding="ascii")) if marker.exists() else 0
+    marker.write_text(str(count + 1), encoding="ascii")
+    raise ValueError("workload failed")
+
+
+@contextmanager
+def core_setup_with_cache_close_failure(context, data):
+    """Inject configured worker-local cache-close failures around core setup."""
+    from dryml.core.execute import core_worker_setup
+    from dryml.runtime import active_runtime
+
+    setup = data["setup"]
+    marker = Path(data["marker"])
+    failures = data["failures"]
+    original_close = DirStore.close
+    attempts = 0
+
+    def fail_twice(self):
+        nonlocal attempts
+        attempts += 1
+        marker.write_text(f"{attempts}:{active_runtime().mode.value}", encoding="ascii")
+        if attempts <= failures:
+            raise OSError("injected worker cache close failure")
+        return original_close(self)
+
+    DirStore.close = fail_twice
+    try:
+        with core_worker_setup(context, setup):
+            yield
+    finally:
+        DirStore.close = original_close
 
 
 class TrainingValue(Serializable):
@@ -307,6 +350,243 @@ def test_real_subprocess_core_setup_exposes_its_session_resource_cache(tmp_path)
             "repo_cached": True,
             "repo_store_cached": True,
         }
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=5)
+
+
+def test_real_subprocess_core_setup_preserves_generic_cleanup_evidence_after_workload_failure(
+        tmp_path, monkeypatch):
+    """A generic worker preserves its result while reporting an unresolved close."""
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    spool = tmp_path / "spool"
+    marker = tmp_path / "close-attempts"
+    spool.mkdir()
+    executor = CoreExecutor(
+        SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False),
+    )
+    original_worker_setup = PreparedCoreCall.worker_setup
+
+    def injected_worker_setup(self, runtime=None, *, cache="weak"):
+        setup = original_worker_setup(self, runtime, cache=cache)
+        return WorkerSetup(
+            factory="tests.core.test_execute_integration:core_setup_with_cache_close_failure",
+            data={"failures": 2, "marker": str(marker), "setup": setup.data},
+        )
+
+    monkeypatch.setattr(PreparedCoreCall, "worker_setup", injected_worker_setup)
+    try:
+        future = executor.submit(_raise_workload_error)
+        with pytest.raises(CoreExecutionError, match="ValueError") as raised:
+            future.result(timeout=10)
+        assert raised.value.phase == "invoke"
+        assert future.backend_future.exception(timeout=0) is None
+        assert isinstance(future.backend_future.result(timeout=0), bytes)
+        snapshot = future.backend_future.snapshot()
+        assert snapshot.cleanup_issues[-1].code == "worker_setup_exit_failed"
+        assert snapshot.cleanup_issues[-1].message == "RepoReconstructionError"
+        assert marker.read_text(encoding="ascii") == "2:inline"
+    finally:
+        try:
+            executor.close(cancel=True, timeout=5)
+        except CleanupError:
+            pass
+
+
+def test_core_setup_quarantines_a_fresh_process_after_unresolved_cache_close(tmp_path):
+    """An unresolved owner survives GC and blocks a second setup in one interpreter."""
+    script = r'''
+import gc
+from pathlib import Path
+
+import dryml.core.execute as execute_module
+from dryml.core import Repo
+from dryml.core.execute import core_worker_setup
+from dryml.core.store.dir import DirStore
+from dryml.execute.models import WorkerSetupContext
+from dryml.formats import make_envelope, semantic_id
+from dryml.runtime import RuntimeContextSpec, RuntimeMode
+
+root = Path(__import__("sys").argv[1])
+store = DirStore(root / "state", query_index="none")
+source = Repo(store)
+definition = source.to_definition().to_data()
+source.close(flush=False)
+store.close()
+payload = {
+    "runtime": RuntimeContextSpec(RuntimeMode.INLINE).to_data(),
+    "repo": definition,
+    "role": "main",
+    "replica": 0,
+    "control_store": None,
+}
+data = make_envelope(
+    schema="dryml.core.execute.v1.1", kind="worker_setup", prefix="core_setup",
+    payload=payload,
+    semantic_id=semantic_id(
+        "core_setup", "dryml.core.execute.v1.1", "worker_setup", payload,
+        max_depth=64, max_nodes=65_536, max_entries=65_536,
+    ),
+    max_depth=64, max_nodes=65_536, max_entries=65_536,
+)
+context = WorkerSetupContext(
+    submission_id="quarantine", backend="subprocess", environment=None,
+    allocation=None, native_grant={"kind": "subprocess"},
+)
+original_close = DirStore.close
+attempts = 0
+
+def fail_close(self):
+    global attempts
+    attempts += 1
+    raise OSError("injected cache close failure")
+
+DirStore.close = fail_close
+try:
+    try:
+        with core_worker_setup(context, data):
+            raise KeyboardInterrupt("interrupted workload")
+    except BaseException as error:
+        primary = error.__context__
+        assert isinstance(primary, KeyboardInterrupt)
+        owner = primary.repo_cleanup_error
+        owner_id = id(owner)
+    else:
+        raise AssertionError("unresolved cleanup did not escape setup")
+    assert attempts == 2
+    assert [id(item) for item in execute_module._worker_cleanup_quarantine] == [owner_id]
+    del primary, owner
+    gc.collect()
+    assert [id(item) for item in execute_module._worker_cleanup_quarantine] == [owner_id]
+
+    opened = []
+    original_reconstruct = Repo.from_definition.__func__
+
+    def reject_reconstruction(cls, value):
+        opened.append(value)
+        return original_reconstruct(cls, value)
+
+    Repo.from_definition = classmethod(reject_reconstruction)
+    try:
+        with core_worker_setup(context, data):
+            pass
+    except RuntimeError as error:
+        assert "process must exit or restart" in str(error)
+    else:
+        raise AssertionError("quarantined worker accepted another setup")
+    assert opened == []
+finally:
+    DirStore.close = original_close
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)], capture_output=True,
+        text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_core_setup_does_not_quarantine_after_a_successful_cache_close_retry(tmp_path):
+    """One failed close that succeeds in-runtime leaves a pristine reusable process."""
+    script = r'''
+from pathlib import Path
+
+import dryml.core.execute as execute_module
+from dryml.core import Repo
+from dryml.core.execute import core_worker_setup
+from dryml.core.store.dir import DirStore
+from dryml.execute.models import WorkerSetupContext
+from dryml.formats import make_envelope, semantic_id
+from dryml.runtime import RuntimeContextSpec, RuntimeMode
+
+root = Path(__import__("sys").argv[1])
+store = DirStore(root / "state", query_index="none")
+source = Repo(store)
+definition = source.to_definition().to_data()
+source.close(flush=False)
+store.close()
+payload = {
+    "runtime": RuntimeContextSpec(RuntimeMode.INLINE).to_data(),
+    "repo": definition,
+    "role": "main",
+    "replica": 0,
+    "control_store": None,
+}
+data = make_envelope(
+    schema="dryml.core.execute.v1.1", kind="worker_setup", prefix="core_setup",
+    payload=payload,
+    semantic_id=semantic_id(
+        "core_setup", "dryml.core.execute.v1.1", "worker_setup", payload,
+        max_depth=64, max_nodes=65_536, max_entries=65_536,
+    ),
+    max_depth=64, max_nodes=65_536, max_entries=65_536,
+)
+context = WorkerSetupContext(
+    submission_id="retry", backend="subprocess", environment=None,
+    allocation=None, native_grant={"kind": "subprocess"},
+)
+original_close = DirStore.close
+attempts = 0
+
+def fail_once(self):
+    global attempts
+    attempts += 1
+    if attempts == 1:
+        raise OSError("injected cache close failure")
+    return original_close(self)
+
+DirStore.close = fail_once
+try:
+    try:
+        with core_worker_setup(context, data):
+            raise ValueError("workload failed")
+    except ValueError as error:
+        assert str(error) == "workload failed"
+    else:
+        raise AssertionError("workload failure was not preserved")
+    assert attempts == 2
+    assert execute_module._worker_cleanup_quarantine == []
+    with core_worker_setup(context, data):
+        pass
+    assert attempts == 3
+finally:
+    DirStore.close = original_close
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)], capture_output=True,
+        text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_real_subprocess_core_retries_cache_close_without_replaying_workload(tmp_path, monkeypatch):
+    """A successful worker close retry preserves one workload failure and no issue."""
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    spool = tmp_path / "spool"
+    close_marker = tmp_path / "close-attempts"
+    workload_marker = tmp_path / "workload-attempts"
+    spool.mkdir()
+    executor = CoreExecutor(
+        SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False),
+    )
+    original_worker_setup = PreparedCoreCall.worker_setup
+
+    def injected_worker_setup(self, runtime=None, *, cache="weak"):
+        setup = original_worker_setup(self, runtime, cache=cache)
+        return WorkerSetup(
+            factory="tests.core.test_execute_integration:core_setup_with_cache_close_failure",
+            data={"failures": 1, "marker": str(close_marker), "setup": setup.data},
+        )
+
+    monkeypatch.setattr(PreparedCoreCall, "worker_setup", injected_worker_setup)
+    try:
+        future = executor.submit(_record_then_raise_workload_error, str(workload_marker))
+        with pytest.raises(CoreExecutionError, match="ValueError") as raised:
+            future.result(timeout=10)
+        assert raised.value.phase == "invoke"
+        assert future.backend_future.exception(timeout=0) is None
+        assert future.backend_future.snapshot().cleanup_issues == ()
+        assert workload_marker.read_text(encoding="ascii") == "1"
+        assert close_marker.read_text(encoding="ascii") == "2:inline"
         future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=5)

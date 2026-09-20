@@ -142,7 +142,11 @@ and cannot be retained by copied task or thread contexts.
 Equivalent reconstruction during the workload reuses setup handles while the
 setup scope is active. On exit, worker/session contexts restore before the cache
 closes cache-owned handles with `flush=False`; runtime activation remains in
-effect until that cleanup is complete. A control Store shared with the Repo uses
+effect through cleanup and one resource-close retry. If closure still fails, the
+worker reports `worker_setup_exit_failed` without replacing a workload failure.
+It retains the failed cleanup owner until process exit and rejects further core
+setup in that process with exit/restart guidance. Current subprocess and Ray
+workers are one-shot; no workload is retried. A control Store shared with the Repo uses
 its existing table handle, while a separate direct directory Store is cache-owned
 by the same worker scope. This does not change generic Execute RPC/setup fields
 or make generic Execute responsible for managed-operation policy. The shared
