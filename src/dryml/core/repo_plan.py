@@ -1098,6 +1098,10 @@ def build_routed_save_plan(repo, plan: SavePlan, context, *, store=None) -> Rout
 _CODEC_RE = re.compile(r"^[A-Za-z0-9]{1,32}$")
 
 
+class _SourceSelectionError(ValueError):
+    """Reject an invalid source selector before any destination publication."""
+
+
 def _validate_codecs(actions: Iterable[SaveAction]) -> None:
     """Validate every selected developer codec before any serializer runs."""
     for action in actions:
@@ -1231,7 +1235,8 @@ def _prepare_snapshot_local_state(obj: Object, definition: ConcreteDefinition, s
 
 def execute_routed_save_plan(
         repo, routed: RoutedSavePlan, *, deep_capture: bool = False,
-        report_stores: bool = False, late_publications=(), snapshot_observer=None):
+        report_stores: bool = False, late_publications=(), snapshot_observer=None,
+        annotations=None, source_store=None, source_stores=None):
     """Publish one routed graph through complete v3 snapshot directories.
 
     Payload bytes remain private staging until ``Store.publish_snapshot`` atomically
@@ -1240,13 +1245,30 @@ def execute_routed_save_plan(
     the directory read-back succeeds.
     """
 
-    from .metadata import LineageMetadata, SnapshotCapture
+    from .metadata import LineageMetadata, SaveAnnotations, SnapshotCapture
     from .reference_values import StateRef
-    from .repo import RepoSaveError
+    from .repo import MetadataConflictError, RepoSaveError
     from .snapshot_capture import capture_snapshot
     from .store.records import DefinitionRecord
 
     plan, context = routed.plan, routed.context
+    if annotations is not None and not isinstance(annotations, SaveAnnotations):
+        raise TypeError("annotations must be a SaveAnnotations or None.")
+    if source_store is not None:
+        if not isinstance(source_store, Store) or not any(
+                candidate is source_store for candidate in context.stores):
+            raise ValueError("source_store must be an already-connected Store handle.")
+    if source_stores is not None and not isinstance(source_stores, Mapping):
+        raise TypeError("source_stores must be a mapping or None.")
+    if source_stores is not None:
+        for reference, selected in source_stores.items():
+            if not isinstance(reference, StateRef) or not isinstance(selected, Store):
+                raise TypeError("source_stores must map StateRefs to connected Store handles.")
+            if not any(candidate is selected for candidate in context.stores):
+                raise ValueError("source_stores must contain only connected Store handles.")
+            candidate = selected.read_snapshot_metadata(reference.digest())
+            if candidate is None or candidate.state_ref != reference:
+                raise KeyError(reference.digest())
     _validate_codecs(plan.actions)
     claims = repo._preflight_routed_claims(plan, routed)
     destinations = _unique_stores(
@@ -1284,20 +1306,18 @@ def execute_routed_save_plan(
     seed_sources = {}
     embedded_snapshots = {}
     for outer, embedded in _embedded_state_refs(plan.binding.roots[0].definition):
-        snapshot_sources = None
-        snapshot_metadata = None
-        for path in embedded.states:
-            full_path = outer.join(path)
-            for candidate in context.stores:
-                try:
-                    source = candidate.open_local_state(embedded, path)
-                except Exception:
-                    continue
-                seed_sources[full_path] = source
-                break
-            else:
-                continue
-        for candidate in context.stores:
+        selected_embedded_source = (
+            source_stores.get(embedded) if source_stores is not None else None
+        )
+        embedded_candidates = (
+            (selected_embedded_source,) if selected_embedded_source is not None
+            else tuple(
+                candidate for candidate in (source_store, *context.stores)
+                if candidate is not None
+            )
+        )
+        matches = []
+        for candidate in embedded_candidates:
             try:
                 sources = {
                     path: candidate.open_local_state(embedded, path)
@@ -1307,10 +1327,15 @@ def execute_routed_save_plan(
             except Exception:
                 continue
             if metadata is not None:
-                snapshot_sources = sources
-                snapshot_metadata = metadata
-                break
-        if snapshot_sources is not None:
+                matches.append((sources, metadata))
+        if matches:
+            snapshot_sources, snapshot_metadata = matches[0]
+            if any(metadata != snapshot_metadata for _, metadata in matches[1:]):
+                raise MetadataConflictError(
+                    "Connected Stores disagree about embedded snapshot evidence."
+                )
+            for path, source in snapshot_sources.items():
+                seed_sources[outer.join(path)] = source
             embedded_snapshots[embedded.digest()] = (
                 embedded, snapshot_sources, snapshot_metadata,
             )
@@ -1329,20 +1354,43 @@ def execute_routed_save_plan(
             path: source.manifest.state_hash for path, source in source_by_path.items()
         })
         ledger.set_state_ref(state_ref)
-        # Existing complete evidence wins before any environment observation.
+        if source_stores is not None:
+            expected_sources = {
+                state_ref,
+                *(embedded for _, embedded in _embedded_state_refs(
+                    plan.binding.roots[0].definition
+                )),
+            }
+            if any(reference not in expected_sources for reference in source_stores):
+                raise _SourceSelectionError(
+                    "source_stores contains a StateRef outside the saved snapshot closure."
+                )
+        # Existing complete evidence wins before any environment observation. A
+        # source selection is authority input, independent of destination routes.
+        selected_sources = {}
+        if source_stores is not None:
+            for reference, selected in source_stores.items():
+                candidate = selected.read_snapshot_metadata(reference.digest())
+                selected_sources[reference] = selected
+        mapped_root = selected_sources.get(state_ref)
+        if source_store is not None and mapped_root is not None and mapped_root is not source_store:
+            raise ValueError("source_store and source_stores select different root Stores.")
+        selected_root = source_store or mapped_root
         evidence = None
-        for store in (*routed.root_destinations, *context.stores):
-            reader = getattr(store, "read_snapshot_metadata", None)
-            if reader is None:
-                continue
-            candidate = reader(state_ref.digest())
-            if candidate is None:
-                continue
-            if candidate.state_ref != state_ref:
-                raise RepoSaveError("StateRef digest collision has incompatible snapshot authority.")
-            if evidence is not None and evidence != candidate:
-                raise RepoSaveError("Connected Stores disagree about snapshot evidence.")
-            evidence = candidate
+        if selected_root is not None:
+            evidence = selected_root.read_snapshot_metadata(state_ref.digest())
+            if evidence is None or evidence.state_ref != state_ref:
+                raise KeyError(state_ref.digest())
+        else:
+            for store in context.stores:
+                candidate = store.read_snapshot_metadata(state_ref.digest())
+                if candidate is None:
+                    continue
+                if candidate.state_ref != state_ref:
+                    raise RepoSaveError("StateRef digest collision has incompatible snapshot authority.")
+                if evidence is not None and evidence != candidate:
+                    raise MetadataConflictError("Connected Stores disagree about snapshot evidence.")
+                evidence = candidate
         if evidence is None:
             evidence = capture_snapshot(plan, observer=snapshot_observer)
 
@@ -1426,10 +1474,17 @@ def execute_routed_save_plan(
                             ),
                     ):
                         raise RepoSaveError("Definition publication did not survive read-back.")
-                    store.publish_snapshot(
+                    published_metadata = store.publish_snapshot(
                         projection, evidence=snapshot_evidence,
+                        annotations=annotations if not action.path else None,
                         local_states=selected_sources, children=children,
                     )
+                    # The first root installation is the capture winner for later
+                    # replicas. They copy its immutable captured mappings instead
+                    # of rereading their own current annotations.
+                    if not action.path:
+                        evidence = published_metadata
+                        snapshot_evidence = published_metadata
                     if not ledger.confirm(
                             state_index,
                             lambda store=store, projection=projection, selected_sources=selected_sources: all(
@@ -1500,10 +1555,12 @@ def execute_routed_save_plan(
 def _raise_publication_failure(error: BaseException, report: StoreReport) -> None:
     """Raise a save failure without losing interruption identity or evidence."""
 
-    from .repo import RepoSaveError
+    from .repo import MetadataConflictError, RepoSaveError
 
     if isinstance(error, (KeyboardInterrupt, SystemExit)):
         error.report = report
+        raise error
+    if isinstance(error, (MetadataConflictError, _SourceSelectionError)):
         raise error
     if isinstance(error, RepoSaveError):
         if error.report is None:

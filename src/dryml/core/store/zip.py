@@ -222,12 +222,59 @@ class ZipStore(DirStore):
 
         return locked()
 
-    def publish_snapshot(self, reference, *, evidence, local_states, children=None):
-        """Publish a v3 snapshot in this extraction and mark the archive dirty."""
+    def delete_metadata(self, target) -> bool:
+        """Remove current metadata and retain the buffered archive dirty marker.
+
+        Args:
+            target: Exact ObjectRef or StateRef attachment scope.
+
+        Returns:
+            ``True`` when a mapping was removed, otherwise ``False``.
+
+        Raises:
+            TypeError: If ``target`` is unsupported.
+            StoreCapabilityError: If the archive is file-like or cannot publish.
+
+        Side Effects:
+            Serializes this handle's transaction, changes only extracted current
+            metadata, and marks the archive dirty when a mapping was removed. The
+            mutation reaches the archive only at a normal commit boundary.
+        """
+
+        with self.transaction_fence():
+            result = super().delete_metadata(target)
+            if result:
+                self._archive_dirty = True
+            return result
+
+    def publish_snapshot(self, reference, *, evidence, annotations=None, local_states, children=None):
+        """Publish a v3 snapshot in this extraction and mark the archive dirty.
+
+        Args:
+            reference: Exact StateRef to install.
+            evidence: Fresh or copied snapshot metadata evidence.
+            annotations: Optional current-metadata replacements for root scopes.
+            local_states: Mapping of local paths to validated payload sources.
+            children: Optional child snapshot projections.
+
+        Returns:
+            Detached SnapshotMetadata for the installed or equal existing snapshot.
+
+        Raises:
+            TypeError: If inputs are unsupported.
+            StoreAuthorityError: If snapshot authority is inconsistent.
+            StoreCapabilityError: If the archive cannot publish safely.
+
+        Side Effects:
+            Serializes same-handle publication, modifies only the extraction, and
+            marks the transaction dirty. Archive replacement is deferred to
+            ``commit()``; current annotations retain Store-local LWW behavior.
+        """
 
         with self.transaction_fence():
             result = super().publish_snapshot(
-                reference, evidence=evidence, local_states=local_states, children=children,
+                reference, evidence=evidence, annotations=annotations,
+                local_states=local_states, children=children,
             )
             self._archive_dirty = True
             return result

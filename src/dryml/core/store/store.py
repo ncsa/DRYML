@@ -278,13 +278,192 @@ class Store(ABC):
 
     @abstractmethod
     def get_snapshot_directory(self, target) -> object:
-        """Return the complete snapshot directory for one exact StateRef."""
+        """Return a borrowed directory for one complete exact StateRef snapshot.
 
-        raise NotImplementedError("This Store does not expose snapshot directories.")
+        Args:
+            target: Exact StateRef whose complete snapshot association is required.
+
+        Returns:
+            Backend-native directory handle or path for ``target``. A buffered
+            backend may return an extraction path valid only while it remains open.
+
+        Raises:
+            TypeError: If ``target`` has an unsupported type.
+            KeyError: If no complete matching snapshot exists.
+            StoreAuthorityError: If matching authority is malformed or incomplete.
+            StoreCapabilityError: If the backend cannot expose directories.
+
+        Side Effects:
+            Validates snapshot metadata association without materializing Objects
+            or opening payload bytes. The returned location is borrowed immutable
+            authority and must not be modified by callers.
+        """
+
+        raise StoreCapabilityError("This Store does not expose snapshot directories.")
+
+    def read_metadata(self, target):
+        """Return the current mapping for one exact reference, if present.
+
+        Args:
+            target: Exact ObjectRef or StateRef attachment scope already validated
+                by the caller as held in this Store.
+
+        Returns:
+            A detached current mapping, or ``None`` for an absent attachment.
+
+        Raises:
+            TypeError: If the target is unsupported.
+            StoreAuthorityError: If a present record is malformed or names another
+                exact target.
+            StoreCapabilityError: If the backend has no current-metadata reader.
+
+        Side Effects:
+            Never opens Stores, materializes Objects, reads payload files, or
+            changes authority. Repo owns cross-Store consistency checks.
+        """
+
+        raise StoreCapabilityError("This Store does not expose current metadata.")
+
+    def write_metadata(self, target, values) -> None:
+        """Atomically replace one current metadata mapping.
+
+        Args:
+            target: Exact ObjectRef or StateRef attachment scope held by this Store.
+            values: Valid complete metadata mapping replacing the prior mapping.
+
+        Returns:
+            ``None`` after the backend accepts the replacement.
+
+        Raises:
+            TypeError: If target or values have unsupported types.
+            ValueError: If values violate the metadata codec bounds.
+            StoreAuthorityError: If the write cannot name valid target authority.
+            StoreCapabilityError: If atomic current-metadata mutation is unsupported.
+
+        Side Effects:
+            Implementations preserve whole-map last-writer-wins semantics under
+            their writer fence. Unsupported mutation fails before changing
+            authority; no captured snapshot metadata is rewritten.
+        """
+
+        raise StoreCapabilityError("This Store does not support current metadata mutation.")
+
+    def delete_metadata(self, target) -> bool:
+        """Atomically remove one current metadata mapping and report its presence.
+
+        Args:
+            target: Exact ObjectRef or StateRef attachment scope held by this Store.
+
+        Returns:
+            ``True`` when a mapping was removed, otherwise ``False``.
+
+        Raises:
+            TypeError: If the target is unsupported.
+            StoreCapabilityError: If current-metadata mutation is unsupported.
+
+        Side Effects:
+            Runs under the backend writer fence and removes no snapshot, payload,
+            lineage, or reference authority.
+        """
+
+        raise StoreCapabilityError("This Store does not support current metadata mutation.")
+
+    def read_lineage_metadata(self, target):
+        """Return immutable lineage evidence for one exact ObjectRef, if present.
+
+        Args:
+            target: Exact ObjectRef lineage scope held by this Store.
+
+        Returns:
+            Detached LineageMetadata, or ``None`` when no sidecar fact exists.
+
+        Raises:
+            TypeError: If the target is unsupported.
+            StoreAuthorityError: If a present lineage record is malformed or names
+                a different ObjectRef.
+            StoreCapabilityError: If lineage metadata is unsupported.
+
+        Side Effects:
+            Reads descriptive authority only; it does not inspect payloads,
+            materialize Objects, or synthesize unknown facts.
+        """
+
+        raise StoreCapabilityError("This Store does not expose lineage metadata.")
+
+    def write_lineage_metadata(self, value):
+        """Install one immutable lineage fact without replacing conflicting evidence.
+
+        Args:
+            value: Valid LineageMetadata for one exact ObjectRef.
+
+        Returns:
+            The installed or equal preexisting lineage value.
+
+        Raises:
+            TypeError: If ``value`` is unsupported.
+            ValueError: If lineage fields are invalid.
+            StoreAuthorityError: If unequal immutable lineage evidence exists.
+            StoreCapabilityError: If lineage publication is unsupported.
+
+        Side Effects:
+            Publishes at most once under the backend writer fence. It never alters
+            current annotations, snapshot captures, or payload authority.
+        """
+
+        raise StoreCapabilityError("This Store does not support lineage metadata publication.")
 
     @abstractmethod
-    def publish_snapshot(self, reference, *, evidence, local_states, children=None):
-        """Atomically publish one complete snapshot-local authority directory."""
+    def publish_snapshot(self, reference, *, evidence, annotations=None, local_states, children=None):
+        """Atomically publish one complete snapshot-local authority directory.
+
+        Args:
+            reference: Exact StateRef to install.
+            evidence: SnapshotCapture for fresh capture or matching immutable
+                SnapshotMetadata copied from completed authority.
+            annotations: Optional SaveAnnotations whole-map replacements applied to
+                current root metadata after snapshot installation.
+            local_states: Mapping from local StateRef paths to validated
+                backend-owned LocalStateSource handles.
+            children: Optional mapping from child projection paths to exact StateRefs.
+
+        Returns:
+            Detached immutable SnapshotMetadata installed for ``reference``.
+
+        Raises:
+            TypeError: If inputs have unsupported types.
+            StoreAuthorityError: If state, placement, metadata, source, or existing
+                immutable snapshot authority is inconsistent.
+            StoreCapabilityError: If the backend cannot provide atomic composite
+                publication.
+
+        Side Effects:
+            Installs a complete immutable snapshot association under writer
+            serialization. Explicit annotations update only current mappings with
+            local LWW behavior; they never replace captured metadata. Source handles
+            remain borrowed or are consumed according to backend staging rules.
+        """
+
+    def read_snapshot_metadata(self, digest: str):
+        """Return captured metadata for one complete snapshot digest.
+
+        Args:
+            digest: Exact StateRef digest naming the requested snapshot.
+
+        Returns:
+            Detached immutable SnapshotMetadata, or ``None`` when the snapshot is
+            absent.
+
+        Raises:
+            TypeError: If ``digest`` is unsupported.
+            StoreAuthorityError: If matching snapshot authority is malformed.
+            StoreCapabilityError: If the backend cannot read captured metadata.
+
+        Side Effects:
+            Reads metadata association only; it does not open payload bytes,
+            materialize Objects, or modify Store authority.
+        """
+
+        raise StoreCapabilityError("This Store does not expose snapshot metadata.")
 
     def iter_state_ref_records(self) -> Iterable[StateRefRecord]:
         """Yield complete immutable StateRef records for authority scans."""

@@ -394,6 +394,20 @@ class DirStore(Store):
     def _claim_path(self, digest: str) -> str:
         return self._digest_path(os.path.join(self.base_dir, "claims"), digest)
 
+    def _metadata_path(self, target) -> str:
+        from ..reference_values import ObjectRef, StateRef
+
+        if isinstance(target, ObjectRef):
+            scope = "object"
+        elif isinstance(target, StateRef):
+            scope = "state"
+        else:
+            raise TypeError("metadata target must be an ObjectRef or StateRef.")
+        return self._digest_path(os.path.join(self.base_dir, "metadata", scope), target.digest())
+
+    def _lineage_path(self, digest: str) -> str:
+        return self._digest_path(os.path.join(self.base_dir, "lineage"), digest)
+
     @property
     def _staging_root(self) -> str:
         return os.path.join(self.base_dir, ".staging")
@@ -626,6 +640,8 @@ class DirStore(Store):
                 raise StoreAuthorityError("snapshot metadata is not a regular file.")
             with open(path, "rb") as source:
                 return canonical_json_load_bytes(source.read(), max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
+        except FileNotFoundError:
+            return None
         except StoreAuthorityError:
             raise
         except Exception as error:
@@ -637,6 +653,149 @@ class DirStore(Store):
 
         payload = canonical_json_bytes(value, max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
         Path(path).write_bytes(payload)
+
+    def read_metadata(self, target):
+        """Return detached current metadata for one exact reference target.
+
+        Args:
+            target: Exact ObjectRef or StateRef attachment scope.
+
+        Returns:
+            Detached mapping, or ``None`` when no current mapping exists.
+
+        Raises:
+            TypeError: If ``target`` is unsupported.
+            StoreAuthorityError: If a present metadata record is malformed.
+
+        Side Effects:
+            Reads only the direct metadata sidecar, not snapshot payloads or
+            derived indexes. The result has no open-handle lifetime.
+        """
+
+        from ..metadata import decode_current_annotations
+
+        record = self._read_json(self._metadata_path(target))
+        return None if record is None else decode_current_annotations(record, target)
+
+    def write_metadata(self, target, values) -> None:
+        """Atomically replace one direct current metadata mapping.
+
+        Args:
+            target: Exact ObjectRef or StateRef attachment scope.
+            values: Valid complete metadata mapping to install.
+
+        Returns:
+            ``None``.
+
+        Raises:
+            TypeError: If inputs are unsupported.
+            ValueError: If metadata values violate codec bounds.
+            StoreCapabilityError: If this filesystem cannot provide publication.
+
+        Side Effects:
+            Serializes cooperating writers and atomically replaces one sidecar.
+            It does not alter snapshots, lineage metadata, or payload files.
+        """
+
+        from dryml.formats import canonical_json_bytes
+        from ..metadata import encode_current_annotations
+
+        record = encode_current_annotations(target, values)
+        payload = canonical_json_bytes(
+            record, max_depth=64, max_nodes=131072, max_entries=65536,
+            max_string=4096, max_int_bits=4096,
+        )
+        self.preflight_publication("write current metadata")
+        with self.writer_lock():
+            self._atomic_write(self._metadata_path(target), payload)
+
+    def delete_metadata(self, target) -> bool:
+        """Atomically remove one direct current mapping.
+
+        Args:
+            target: Exact ObjectRef or StateRef attachment scope.
+
+        Returns:
+            ``True`` when the sidecar existed and was removed, otherwise ``False``.
+
+        Raises:
+            TypeError: If ``target`` is unsupported.
+            StoreCapabilityError: If this filesystem cannot provide publication.
+
+        Side Effects:
+            Serializes cooperating writers and preserves all target, snapshot,
+            lineage, and payload authority.
+        """
+
+        self.preflight_publication("delete current metadata")
+        path = self._metadata_path(target)
+        with self.writer_lock():
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                return False
+            return True
+
+    def read_lineage_metadata(self, target):
+        """Read detached immutable lineage evidence without treating absence as corruption.
+
+        Args:
+            target: Exact ObjectRef whose lineage fact is requested.
+
+        Returns:
+            LineageMetadata, or ``None`` when the direct sidecar is absent.
+
+        Raises:
+            TypeError: If ``target`` is unsupported.
+            StoreAuthorityError: If a present sidecar is malformed.
+
+        Side Effects:
+            Reads only the direct lineage sidecar; snapshot and payload authority
+            remain unchanged.
+        """
+
+        from ..metadata import decode_lineage_metadata
+
+        record = self._read_json(self._lineage_path(target.digest()))
+        return None if record is None else decode_lineage_metadata(record, target)
+
+    def write_lineage_metadata(self, value):
+        """Install one immutable direct lineage fact.
+
+        Args:
+            value: Valid LineageMetadata to install.
+
+        Returns:
+            The installed fact, or an equal existing fact.
+
+        Raises:
+            TypeError: If ``value`` is unsupported.
+            ValueError: If its lineage fields are invalid.
+            StoreAuthorityError: If unequal evidence already exists.
+
+        Side Effects:
+            Serializes cooperating writers and writes at most once. It does not
+            change current annotations, snapshot captures, or payload files.
+        """
+
+        from dryml.formats import canonical_json_bytes
+        from ..metadata import encode_lineage_metadata
+
+        record = encode_lineage_metadata(value)
+        payload = canonical_json_bytes(
+            record, max_depth=64, max_nodes=131072, max_entries=65536,
+            max_string=4096, max_int_bits=4096,
+        )
+        self.preflight_publication("write lineage metadata")
+        path = self._lineage_path(value.object_ref.digest())
+        with self.writer_lock():
+            existing = self.read_lineage_metadata(value.object_ref)
+            if existing is not None:
+                if existing != value:
+                    raise StoreAuthorityError("lineage write-once authority conflicts with existing evidence.")
+                return existing
+            self._atomic_write(path, payload)
+            return value
 
     def _read_snapshot(
             self, digest: str, *, payloads: bool = False,
@@ -739,7 +898,23 @@ class DirStore(Store):
         return None if snapshot is None else snapshot[0]
 
     def get_snapshot_directory(self, target):
-        """Return the validated exact snapshot directory without reading payload bytes."""
+        """Return the validated direct directory for one exact snapshot.
+
+        Args:
+            target: Exact StateRef to locate.
+
+        Returns:
+            Persistent absolute Path for the complete snapshot directory.
+
+        Raises:
+            TypeError: If ``target`` is not a StateRef.
+            KeyError: If the snapshot is absent.
+            StoreAuthorityError: If its association is malformed or incompatible.
+
+        Side Effects:
+            Validates metadata and placement records without opening payload bytes,
+            materializing Objects, or changing authority.
+        """
 
         from ..reference_values import StateRef
 
@@ -753,7 +928,21 @@ class DirStore(Store):
         return Path(self._snapshot_path(target.digest()))
 
     def read_snapshot_metadata(self, digest: str):
-        """Return validated immutable captured metadata for one complete snapshot."""
+        """Return captured metadata for one validated complete snapshot.
+
+        Args:
+            digest: Exact StateRef digest naming the snapshot directory.
+
+        Returns:
+            Detached SnapshotMetadata, or ``None`` when the directory is absent.
+
+        Raises:
+            StoreAuthorityError: If the snapshot association is malformed.
+
+        Side Effects:
+            Reads metadata association without opening payload bytes or changing
+            Store authority.
+        """
 
         snapshot = self._read_snapshot(digest)
         return None if snapshot is None else snapshot[1]
@@ -828,10 +1017,34 @@ class DirStore(Store):
         assert snapshot is not None
         return LocalStateSource(self, os.path.join(self._snapshot_path(reference.digest()), snapshot[2][path]), manifest)
 
-    def publish_snapshot(self, reference, *, evidence, local_states, children=None):
-        """Install a complete v3 snapshot directory atomically under the writer fence."""
+    def publish_snapshot(self, reference, *, evidence, annotations=None, local_states, children=None):
+        """Install a complete v3 snapshot directory under the writer fence.
 
-        from ..metadata import SnapshotCapture, SnapshotMetadata, encode_snapshot_metadata
+        Args:
+            reference: Exact StateRef to install.
+            evidence: Fresh SnapshotCapture or matching copied SnapshotMetadata.
+            annotations: Optional SaveAnnotations current-map replacements for root
+                ObjectRef and StateRef scopes.
+            local_states: Mapping of locally owned paths to validated sources.
+            children: Optional mapping of child projection paths to StateRefs.
+
+        Returns:
+            Detached SnapshotMetadata for the installed or equal existing snapshot.
+
+        Raises:
+            TypeError: If publication inputs are unsupported.
+            StoreAuthorityError: If records, sources, coverage, or immutable
+                existing snapshot evidence conflict.
+            StoreCapabilityError: If direct publication guarantees are unavailable.
+
+        Side Effects:
+            Atomically installs a complete immutable directory. Explicit
+            annotations are applied as current LWW sidecars after installation;
+            existing captured annotations are never refreshed. Cooperating writers
+            are serialized and staging is removed after success or failure.
+        """
+
+        from ..metadata import SaveAnnotations, SnapshotCapture, SnapshotMetadata, encode_snapshot_metadata
         from ..reference_values import StateRef
         from ..utils.graph.path import GraphPath
         from dryml.records import GenericRecord, encode_record
@@ -840,13 +1053,9 @@ class DirStore(Store):
             children = {}
         if not isinstance(reference, StateRef) or not isinstance(local_states, dict) or not isinstance(children, Mapping):
             raise TypeError("snapshot publication requires a StateRef, local-state mapping, and child projection mapping.")
+        if annotations is not None and not isinstance(annotations, SaveAnnotations):
+            raise TypeError("annotations must be a SaveAnnotations or None.")
         self.preflight_publication("publish snapshot", local_state=True)
-        if isinstance(evidence, SnapshotCapture):
-            metadata = SnapshotMetadata(reference, evidence.lineages, evidence.saved_at, evidence.environment, evidence.environment_status, evidence.requirements, evidence.requirements_status, evidence.requirements_coverage, evidence.diagnostics)
-        elif isinstance(evidence, SnapshotMetadata) and evidence.state_ref == reference:
-            metadata = evidence
-        else:
-            raise StoreAuthorityError("snapshot evidence does not match its StateRef.")
         covered = set(local_states)
         child_entries = []
         for path, child in children.items():
@@ -880,20 +1089,46 @@ class DirStore(Store):
                     shutil.copytree(os.fspath(source.handle), destination)
                 self._validate_local_state_dir(destination, source.manifest)
                 placement_entries.append({"path": path.to_data(), "state_hash": source.manifest.state_hash, "directory": relative})
-            Path(stage, "state-ref.record").write_bytes(StateRefRecord(reference).to_bytes())
-            placement = encode_record(GenericRecord("dryml.core.snapshot_placement", 1, {"state_ref_digest": reference.digest(), "local": placement_entries, "children": child_entries}))
-            metadata_record = encode_snapshot_metadata(metadata)
-            association = encode_record(GenericRecord("dryml.core.snapshot", 1, {"state_ref_digest": reference.digest(), "placement_id": placement["id"], "metadata_id": metadata_record["id"]}))
-            self._write_json(os.path.join(stage, "placement.json"), placement)
-            self._write_json(os.path.join(stage, "metadata.json"), metadata_record)
-            self._write_json(os.path.join(stage, "snapshot.json"), association)
-            self._read_snapshot_from_directory(stage, reference, payloads=True)
             target = self._snapshot_path(reference.digest())
             with self.writer_lock():
+                if isinstance(evidence, SnapshotCapture):
+                    object_values = self.read_metadata(reference.object)
+                    state_values = self.read_metadata(reference)
+                    if annotations is not None:
+                        if annotations.object is not None:
+                            object_values = annotations.object
+                        if annotations.state is not None:
+                            state_values = annotations.state
+                    metadata = SnapshotMetadata(
+                        reference, evidence.lineages, evidence.saved_at,
+                        evidence.environment, evidence.environment_status,
+                        evidence.requirements, evidence.requirements_status,
+                        evidence.requirements_coverage, evidence.diagnostics,
+                        object_values, state_values,
+                    )
+                elif isinstance(evidence, SnapshotMetadata) and evidence.state_ref == reference:
+                    metadata = evidence
+                else:
+                    raise StoreAuthorityError("snapshot evidence does not match its StateRef.")
+                Path(stage, "state-ref.record").write_bytes(StateRefRecord(reference).to_bytes())
+                placement = encode_record(GenericRecord("dryml.core.snapshot_placement", 1, {"state_ref_digest": reference.digest(), "local": placement_entries, "children": child_entries}))
+                metadata_record = encode_snapshot_metadata(metadata)
+                association = encode_record(GenericRecord("dryml.core.snapshot", 1, {"state_ref_digest": reference.digest(), "placement_id": placement["id"], "metadata_id": metadata_record["id"]}))
+                self._write_json(os.path.join(stage, "placement.json"), placement)
+                self._write_json(os.path.join(stage, "metadata.json"), metadata_record)
+                self._write_json(os.path.join(stage, "snapshot.json"), association)
+                self._read_snapshot_from_directory(stage, reference, payloads=True)
                 existing = self._read_snapshot(reference.digest())
                 if existing is not None:
-                    if existing[0].state_ref != reference or existing[1] != metadata:
+                    if existing[0].state_ref != reference:
                         raise StoreAuthorityError("snapshot write-once authority conflicts with existing evidence.")
+                    if isinstance(evidence, SnapshotMetadata) and existing[1] != metadata:
+                        raise StoreAuthorityError("snapshot write-once authority conflicts with existing evidence.")
+                    if annotations is not None:
+                        if annotations.object is not None:
+                            self.write_metadata(reference.object, annotations.object)
+                        if annotations.state is not None:
+                            self.write_metadata(reference, annotations.state)
                     return existing[1]
                 self.mark_query_index_dirty()
                 os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -901,6 +1136,11 @@ class DirStore(Store):
                 installed = self._read_snapshot(reference.digest(), payloads=True)
                 if installed is None:
                     raise StoreAuthorityError("snapshot install did not survive read-back.")
+                if annotations is not None:
+                    if annotations.object is not None:
+                        self.write_metadata(reference.object, annotations.object)
+                    if annotations.state is not None:
+                        self.write_metadata(reference, annotations.state)
                 return installed[1]
         finally:
             if os.path.isdir(stage):

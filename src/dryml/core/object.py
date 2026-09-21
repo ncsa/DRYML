@@ -393,7 +393,8 @@ class Object(metaclass=Dryml):
             deep_capture: bool = False,
             match_mode: str | None = None,
             graph_mode: str | None = None,
-            report_stores: bool = False):
+            report_stores: bool = False,
+            source_store=None, source_stores=None, annotations=None):
         """Publish this graph as an immutable exact StateRef.
 
         Args:
@@ -408,6 +409,12 @@ class Object(metaclass=Dryml):
             graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
                 override local to this save.
             report_stores: Whether to also return the selected Store report.
+            source_store: Optional connected Store selecting existing complete root
+                capture evidence independently of destination routing.
+            source_stores: Optional mapping from exact root or embedded StateRefs
+                to connected complete source Stores.
+            annotations: Optional SaveAnnotations whole-map replacements for the
+                root current ObjectRef and/or StateRef mappings.
 
         Returns:
             The published ``StateRef``, or it paired with a ``StoreReport``.
@@ -419,12 +426,15 @@ class Object(metaclass=Dryml):
                 because cross-Store saves are not transactional.
             TypeError: If a supplied mode has the wrong type.
             ValueError: If a supplied mode is unsupported.
+            MetadataConflictError: If completed source or destination snapshot
+                evidence conflicts before publication.
 
         Side Effects:
             Publishes immutable StateRef authority and installs that StateRef as
             this top-level object's last-state receipt before later derived-index,
             main-reference, or alias updates. A later update failure propagates
-            while the completed receipt remains available.
+            while the completed receipt remains available. Explicit annotations use
+            Store-local LWW current updates and never rewrite captured annotations.
 
         Concurrency:
             The delegated Repo save retains one configuration snapshot and keeps
@@ -439,6 +449,8 @@ class Object(metaclass=Dryml):
                 self, repo=repo, main=main, store=store, alias=alias,
                 deep_capture=deep_capture, match_mode=match_mode,
                 graph_mode=graph_mode,
+                source_store=source_store, source_stores=source_stores,
+                annotations=annotations,
                 report_stores=report_stores,
             )
 

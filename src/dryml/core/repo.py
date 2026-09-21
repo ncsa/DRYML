@@ -522,6 +522,10 @@ class RepoLoadError(Exception):
     pass
 
 
+class MetadataConflictError(RepoLoadError):
+    """Raised when selected Stores disagree about metadata for one exact target."""
+
+
 class RepoGraphError(Exception):
     pass
 
@@ -1448,6 +1452,269 @@ class Repo:
         candidates[0].preflight_publication(operation)
         return candidates[0]
 
+    def _connected_metadata_store(self, store: Store) -> Store:
+        """Require one already-connected Store without opening or registering it."""
+
+        if not isinstance(store, Store):
+            raise TypeError("Metadata Store selection must be a connected Store handle.")
+        if not any(candidate is store for candidate in self.stores):
+            raise ValueError("Metadata Store selection must be a connected Store handle.")
+        return store
+
+    @staticmethod
+    def _metadata_target(target):
+        """Validate one metadata attachment target without touching live Objects."""
+
+        from .reference_values import ObjectRef, StateRef
+
+        if not isinstance(target, (ObjectRef, StateRef)):
+            raise TypeError("metadata target must be an ObjectRef or StateRef.")
+        return target
+
+    def _metadata_holds_target(self, store: Store, target) -> bool:
+        """Return whether one Store holds the exact metadata target authority.
+
+        A complete snapshot retains the exact ObjectRefs for its materializing
+        descendants. Those projections remain metadata holders even when they
+        have no separate declaration or child snapshot record. Ref-only paths
+        never occur in ``ObjectRef.objects`` and cannot satisfy this check.
+        """
+
+        from .reference_values import ObjectRef
+
+        if isinstance(target, ObjectRef):
+            if self._reference_authoritative_in(store, target):
+                return True
+            for record in store.iter_state_ref_records():
+                for path in record.state_ref.object.objects:
+                    if record.state_ref.object.at(path) == target:
+                        return True
+            return False
+        record = store.read_state_ref_record(target.digest())
+        if record is None:
+            return False
+        if record.state_ref != target:
+            raise StoreAuthorityError("StateRef digest collision has incompatible authority.")
+        return True
+
+    def _metadata_holders(self, target, *, store=None) -> tuple[Store, ...]:
+        """Select connected target-holding Stores without treating nonholders as votes."""
+
+        selected = (
+            (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
+        )
+        holders = tuple(candidate for candidate in selected if self._metadata_holds_target(candidate, target))
+        if not holders:
+            raise KeyError(target.digest())
+        return holders
+
+    def get_metadata(self, target, *, store=None):
+        """Return one detached current mapping for an exact ObjectRef or StateRef.
+
+        Args:
+            target: Exact ObjectRef or StateRef attachment scope.
+            store: Optional already-connected Store restricting the authority cut.
+
+        Returns:
+            A detached whole mapping, or ``None`` when the known target has no
+            current mapping in the selected Store(s).
+
+        Raises:
+            KeyError: If no selected Store holds ``target``.
+            MetadataConflictError: If selected target-holding Stores differ,
+            including absent versus present mappings.
+            StoreAuthorityError: If target or metadata authority is malformed.
+
+        This is metadata-only inspection: it never materializes Objects, opens a
+        Store, reads a payload, or runs environment observation.
+        """
+
+        target = self._metadata_target(target)
+        values = [candidate.read_metadata(target) for candidate in self._metadata_holders(target, store=store)]
+        first = values[0]
+        if any(value != first for value in values[1:]):
+            raise MetadataConflictError("Selected Stores disagree about current metadata.")
+        return first
+
+    def _metadata_mutation_store(self, target, store, operation: str) -> Store:
+        """Choose one writable target holder for a local LWW metadata mutation."""
+
+        holders = self._metadata_holders(target, store=store)
+        if store is not None:
+            selected = holders[0]
+            selected.preflight_publication(operation)
+            return selected
+        writable = tuple(
+            candidate for candidate in holders if candidate.publication_capabilities.writable
+        )
+        if len(writable) != 1:
+            raise RepoSaveError(
+                f"{operation} requires an explicit Store or exactly one writable target-holding Repo Store."
+            )
+        writable[0].preflight_publication(operation)
+        return writable[0]
+
+    def set_metadata(self, target, values, *, store=None) -> None:
+        """Atomically replace one selected current metadata mapping.
+
+        Args:
+            target: Exact ObjectRef or StateRef attachment scope.
+            values: Complete bounded metadata mapping that replaces any current
+                mapping in the selected Store.
+            store: Optional connected target-holding Store. It is required when
+                more than one writable connected Store holds ``target``.
+
+        Returns:
+            ``None`` after atomic replacement succeeds.
+
+        Raises:
+            TypeError: If the target, Store, or mapping has an unsupported type.
+            ValueError: If values violate metadata bounds or ``store`` is not
+                connected.
+            KeyError: If no selected Store holds ``target``.
+            RepoSaveError: If destination selection is ambiguous.
+            StoreAuthorityError: If target authority is malformed.
+            StoreCapabilityError: If the selected backend cannot mutate metadata.
+
+        Side Effects:
+            Validates and detaches ``values`` before mutation, then replaces one
+            whole mapping under the selected Store's writer fence. Other Stores,
+            captured snapshot annotations, payloads, and reference identity remain
+            unchanged.
+        """
+
+        from .metadata import encode_metadata_mapping
+
+        target = self._metadata_target(target)
+        # Validate and detach before selection can mutate authority.
+        detached = encode_metadata_mapping(values)
+        from .metadata import decode_metadata_mapping
+
+        selected = self._metadata_mutation_store(target, store, "write current metadata")
+        selected.write_metadata(target, decode_metadata_mapping(detached))
+
+    def delete_metadata(self, target, *, store=None) -> bool:
+        """Atomically remove one selected current mapping and return prior presence.
+
+        Args:
+            target: Exact ObjectRef or StateRef attachment scope.
+            store: Optional connected target-holding Store. It is required when
+                more than one writable connected Store holds ``target``.
+
+        Returns:
+            ``True`` when a current mapping was removed, otherwise ``False``.
+
+        Raises:
+            TypeError: If the target or Store has an unsupported type.
+            ValueError: If ``store`` is not connected.
+            KeyError: If no selected Store holds ``target``.
+            RepoSaveError: If destination selection is ambiguous.
+            StoreAuthorityError: If target authority is malformed.
+            StoreCapabilityError: If the selected backend cannot mutate metadata.
+
+        Side Effects:
+            Removes only current metadata in the selected Store under its writer
+            fence. The target, captured snapshot copies, payloads, lifecycle facts,
+            and other Stores remain unchanged.
+        """
+
+        target = self._metadata_target(target)
+        selected = self._metadata_mutation_store(target, store, "delete current metadata")
+        return selected.delete_metadata(target)
+
+    def get_lineage_metadata(self, target, *, store=None):
+        """Return immutable creation evidence or a valid unknown marker.
+
+        Args:
+            target: Exact ObjectRef lineage scope.
+            store: Optional connected Store restricting the authority cut.
+
+        Returns:
+            Detached LineageMetadata. A valid target with no creation evidence
+            returns an explicit unknown marker rather than an inferred timestamp.
+
+        Raises:
+            TypeError: If ``target`` is not an ObjectRef or ``store`` has an
+                unsupported type.
+            ValueError: If ``store`` is not connected.
+            KeyError: If no selected Store holds ``target``.
+            MetadataConflictError: If selected Stores contain different facts.
+            StoreAuthorityError: If present lineage or snapshot authority is
+                malformed.
+
+        Side Effects:
+            Reads lineage sidecars and snapshot metadata only. It does not load
+            payloads, materialize Objects, run probes, or modify authority.
+        """
+
+        from .metadata import LineageMetadata
+        from .reference_values import ObjectRef
+
+        if not isinstance(target, ObjectRef):
+            raise TypeError("lineage metadata target must be an ObjectRef.")
+        values = []
+        for candidate in self._metadata_holders(target, store=store):
+            value = candidate.read_lineage_metadata(target)
+            if value is None:
+                # U3 snapshot directories are already authoritative lineage
+                # carriers; a separate lineage sidecar is optional acceleration.
+                for state_record in candidate.iter_state_ref_records():
+                    snapshot = candidate.read_snapshot_metadata(state_record.digest)
+                    if snapshot is None:
+                        continue
+                    value = next(
+                        (fact for fact in snapshot.lineages.values() if fact.object_ref == target),
+                        None,
+                    )
+                    if value is not None:
+                        break
+            values.append(value)
+        present = [value for value in values if value is not None]
+        if present and any(value != present[0] for value in present[1:]):
+            raise MetadataConflictError("Selected Stores disagree about lineage metadata.")
+        return LineageMetadata(target, "unknown", None) if not present else present[0]
+
+    def get_snapshot_metadata(self, target, *, store=None):
+        """Return detached write-once captured metadata for one exact StateRef.
+
+        Args:
+            target: Exact StateRef whose complete captured evidence is required.
+            store: Optional connected Store restricting the authority cut.
+
+        Returns:
+            Detached immutable SnapshotMetadata from the complete snapshot
+            association. Later current-metadata edits are never merged into it.
+
+        Raises:
+            TypeError: If ``target`` is not a StateRef or ``store`` has an
+                unsupported type.
+            ValueError: If ``store`` is not connected.
+            KeyError: If no selected Store holds ``target``.
+            MetadataConflictError: If selected Stores contain different captured
+                evidence.
+            StoreAuthorityError: If matching snapshot authority is malformed or
+                incomplete.
+
+        Side Effects:
+            Validates metadata association without opening payload bytes,
+            materializing Objects, running probes, or modifying Store authority.
+        """
+
+        from .reference_values import StateRef
+
+        if not isinstance(target, StateRef):
+            raise TypeError("snapshot metadata target must be a StateRef.")
+        values = []
+        for candidate in self._metadata_holders(target, store=store):
+            value = candidate.read_snapshot_metadata(target.digest())
+            if value is None or value.state_ref != target:
+                raise StoreAuthorityError("StateRef authority lacks complete captured metadata.")
+            values.append(value)
+        first = values[0]
+        if any(value != first for value in values[1:]):
+            raise MetadataConflictError("Selected Stores disagree about snapshot metadata.")
+        return first
+
     def get_snapshot_directory(self, target, *, store=None):
         """Locate one exact complete v3 snapshot directory in connected Stores.
 
@@ -1469,7 +1736,7 @@ class Repo:
 
         if not isinstance(target, StateRef):
             raise TypeError("target must be a StateRef.")
-        candidates = self.stores if store is None else (self._ensure_store(store),)
+        candidates = self.stores if store is None else (self._connected_metadata_store(store),)
         matches = []
         for candidate in candidates:
             try:
@@ -2426,7 +2693,9 @@ class Repo:
                 if item is not lease
             )
 
-    def fork_object_ref(self, reference, *, store=None, namespace=None):
+    def fork_object_ref(
+            self, reference, *, store=None, namespace=None,
+            copy_annotations: bool = False, source_store=None):
         """Rekey a non-empty ObjectRef and register a state-free declaration.
 
         Args:
@@ -2461,13 +2730,23 @@ class Repo:
 
         if not isinstance(reference, ObjectRef) or not reference.objects:
             raise ValueError("fork_object_ref requires a non-empty ObjectRef.")
+        if not isinstance(copy_annotations, bool):
+            raise TypeError("copy_annotations must be a bool.")
         selected = self._selected_writable_store(store, "fork ObjectRef")
         fork, _ = _fork_rekey_reference(
             reference, namespace, record_candidate=self._record_lineage_candidate,
         )
-        return self._register_declaration(fork, selected, allow_preallocated=True)
+        fork = self._register_declaration(fork, selected, allow_preallocated=True)
+        if copy_annotations:
+            source = None if source_store is None else self._connected_metadata_store(source_store)
+            values = self.get_metadata(reference, store=source)
+            if values is not None:
+                self.set_metadata(fork, values, store=selected)
+        return fork
 
-    def fork_state_ref(self, state_ref, *, store=None, namespace=None):
+    def fork_state_ref(
+            self, state_ref, *, store=None, namespace=None, copy_annotations=(),
+            source_store=None, source_stores=None):
         """Rekey verified state authority and publish only after closure staging.
 
         Args:
@@ -2500,13 +2779,20 @@ class Repo:
             target must provide writable composite snapshot publication semantics.
         """
         from .reference_values import StateRef
-        from .metadata import LineageMetadata, SnapshotCapture
+        from .metadata import LineageMetadata, SaveAnnotations, SnapshotCapture
         from .repo_plan import _embedded_state_refs
         from .store.records import DefinitionRecord
         from .utils.graph.path import GraphPath
 
         if not isinstance(state_ref, StateRef) or not state_ref.object.objects:
             raise ValueError("fork_state_ref requires a non-empty StateRef.")
+        if not isinstance(copy_annotations, tuple) or any(
+                scope not in {"object", "state"} for scope in copy_annotations):
+            raise TypeError("copy_annotations must be a tuple containing 'object' and/or 'state'.")
+        if source_store is not None:
+            source_store = self._connected_metadata_store(source_store)
+        if source_stores is not None and not isinstance(source_stores, Mapping):
+            raise TypeError("source_stores must be a mapping or None.")
         selected = self._selected_writable_store(store, "fork StateRef")
         # Validate the root and every materializing exact seed before allocating
         # new identities. A non-federated fork must carry this complete closure.
@@ -2536,7 +2822,14 @@ class Repo:
         metadata = {}
         for reference in references:
             matches = []
-            for candidate in self.stores:
+            selected_source = (
+                source_stores.get(reference) if source_stores is not None else None
+            ) or source_store
+            candidates = (
+                (self._connected_metadata_store(selected_source),)
+                if selected_source is not None else self.stores
+            )
+            for candidate in candidates:
                 try:
                     payloads = {
                         path: candidate.open_local_state(reference, path)
@@ -2551,13 +2844,24 @@ class Repo:
                 raise RepoLoadError("Fork source lacks one complete snapshot-local payload closure.")
             first = matches[0]
             if any(item[2] != first[2] for item in matches[1:]):
-                raise RepoLoadError("Fork source snapshots disagree about captured evidence.")
+                raise MetadataConflictError("Fork source snapshots disagree about captured evidence.")
             sources[reference.digest()] = first[1]
             metadata[reference.digest()] = first[2]
         fork, forked_references = _fork_rekey_reference(
             state_ref, namespace, record_candidate=self._record_lineage_candidate,
         )
         staged = []
+        copy_source = source_store
+        if copy_source is None and source_stores is not None:
+            copy_source = source_stores.get(state_ref)
+            if copy_source is not None:
+                copy_source = self._connected_metadata_store(copy_source)
+        copied_annotations = SaveAnnotations(
+            object=(self.get_metadata(state_ref.object, store=copy_source)
+                    if "object" in copy_annotations else None),
+            state=(self.get_metadata(state_ref, store=copy_source)
+                   if "state" in copy_annotations else None),
+        ) if copy_annotations else None
         try:
             for reference in references:
                 target = forked_references[reference.digest()]
@@ -2593,7 +2897,9 @@ class Repo:
                         DefinitionRecord(target.object.at(path).definition), stored_root=False,
                     )
                 selected.publish_snapshot(
-                    target, evidence=evidence, local_states=payloads, children={},
+                    target, evidence=evidence,
+                    annotations=copied_annotations if target == fork else None,
+                    local_states=payloads, children={},
                 )
                 selected.write_definition_record(
                     DefinitionRecord(target.definition), stored_root=(target == fork),
@@ -2807,6 +3113,9 @@ class Repo:
             match_mode: str | None = None,
             graph_mode: str | None = None,
             report_stores: bool = False,
+            source_store=None,
+            source_stores=None,
+            annotations=None,
             _capture_memo: set[object] | None = None,
             reservation=None,
             _save_context=None,
@@ -2929,6 +3238,8 @@ class Repo:
                         report_stores=True,
                         late_publications=tuple(late_publications),
                         snapshot_observer=_snapshot_observer,
+                        annotations=annotations, source_store=source_store,
+                        source_stores=source_stores,
                     )
                 except BaseException:
                     for pending_lease in reversed(
@@ -2993,7 +3304,8 @@ class Repo:
             deep_capture: bool = False,
             match_mode: str | None = None,
             graph_mode: str | None = None,
-            report_stores: bool = False):
+            report_stores: bool = False,
+            source_store=None, source_stores=None, annotations=None):
         """Publish one object graph and flush its Repo.
 
         Args:
@@ -3039,6 +3351,8 @@ class Repo:
                     obj, main=main, store=selected_store, alias=alias,
                     deep_capture=deep_capture, match_mode=match_mode,
                     graph_mode=graph_mode,
+                    source_store=source_store, source_stores=source_stores,
+                    annotations=annotations,
                     report_stores=True, _save_context=context,
                     _commit_stores=context.stores,
                 )
@@ -4562,7 +4876,8 @@ def save_object(
         deep_capture: bool = False,
         match_mode: str | None = None,
         graph_mode: str | None = None,
-        report_stores: bool = False):
+        report_stores: bool = False,
+        source_store=None, source_stores=None, annotations=None):
     """Publish one Object graph through its current immutable StateRef boundary.
 
     Args:
@@ -4577,6 +4892,12 @@ def save_object(
         graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
             override local to this save.
         report_stores: Whether to return a StoreReport with the StateRef.
+        source_store: Optional connected Store selecting existing complete root
+            capture evidence independently of destination routing.
+        source_stores: Optional mapping from exact root or embedded StateRefs to
+            connected complete source Stores.
+        annotations: Optional SaveAnnotations whole-map replacements for root
+            current ObjectRef and/or StateRef metadata.
 
     Returns:
         The complete StateRef, or ``(StateRef, StoreReport)`` when requested.
@@ -4586,12 +4907,16 @@ def save_object(
             cannot complete.
         StoreAuthorityError: If the selected Store rejects authoritative writes.
         TypeError: If a supplied mode has the wrong type.
-        ValueError: If a supplied mode is unsupported.
+        ValueError: If source selection or a supplied mode is unsupported.
+        MetadataConflictError: If completed source or destination snapshot evidence
+            conflicts before publication.
 
     Side Effects:
         Publishes immutable graph state and installs the completed StateRef as
         ``obj.last_state_ref`` before derived index, main, or alias work. Later
-        failures propagate without clearing that valid receipt.
+        failures propagate without clearing that valid receipt. Explicit
+        annotations use Store-local current-metadata LWW updates and never mutate
+        a preexisting captured snapshot view.
 
     Lifetime and Concurrency:
         A supplied Repo/Store remains borrowed. When this convenience creates a
@@ -4618,6 +4943,8 @@ def save_object(
                     obj, main=main, store=selected_store, alias=alias,
                     deep_capture=deep_capture, match_mode=match_mode,
                     graph_mode=graph_mode,
+                    source_store=source_store, source_stores=source_stores,
+                    annotations=annotations,
                     report_stores=True, _save_context=context,
                     _commit_stores=context.stores if temporary_repo else (),
                 )

@@ -489,6 +489,12 @@ def read_snapshot_metadata(directory: str | Path) -> SnapshotMetadata:
         ValueError: If required metadata siblings, record associations, or target
             identities are malformed. Payload manifests and bytes are intentionally
             not opened by this metadata-only reader.
+
+    Side Effects:
+        Reads only the required snapshot metadata siblings. ``directory`` is a
+        borrowed Store location: a ZipStore extraction path remains usable only
+        while its owning Store stays open. This function never opens a Store,
+        materializes an Object, validates payload bytes, or changes authority.
     """
 
     from dryml.formats import canonical_json_load_bytes
