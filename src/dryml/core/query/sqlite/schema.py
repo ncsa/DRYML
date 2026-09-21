@@ -12,7 +12,7 @@ from ..model import CANONICAL_QUERY_SEMANTICS_VERSION, FINGERPRINT_SCHEMA_VERSIO
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
-SQLITE_QUERY_INDEX_SCHEMA_VERSION = 6
+SQLITE_QUERY_INDEX_SCHEMA_VERSION = 7
 IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported"]
 
 
@@ -153,6 +153,22 @@ DDL = (
     """,
     "CREATE INDEX IF NOT EXISTS reference_object_ids_by_object ON reference_object_ids(object_id_blob)",
     "CREATE INDEX IF NOT EXISTS reference_object_ids_by_state ON reference_object_ids(state_hash) WHERE state_hash IS NOT NULL",
+    """
+    CREATE TABLE IF NOT EXISTS metadata_records (
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('current', 'lineage', 'snapshot')),
+        source_record_id TEXT NOT NULL,
+        scope TEXT NOT NULL CHECK (scope IN ('object', 'state', 'lineage', 'snapshot')),
+        reference_kind TEXT NOT NULL CHECK (reference_kind IN ('object', 'state')),
+        reference_digest TEXT NOT NULL,
+        present INTEGER NOT NULL CHECK (present IN (0, 1)),
+        projection_blob BLOB,
+        PRIMARY KEY (
+            source_kind, source_record_id, scope,
+            reference_kind, reference_digest
+        )
+    ) WITHOUT ROWID
+    """,
+    "CREATE INDEX IF NOT EXISTS metadata_records_by_reference ON metadata_records(reference_kind, reference_digest, scope)",
 )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 import os
@@ -390,10 +391,9 @@ class SQLiteStoreQueryIndex:
             raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with iter_definition_records().")
         compatibility = self._assert_sidecar_rebuildable()
 
-        dirty_markers = self._dirty_markers()
         generation_seed = self._replacement_generation_seed()
         try:
-            roots = self._preflight_store_roots()
+            roots, reference_rows, metadata_rows, dirty_markers = self._capture_authority_cut()
         except Exception:
             self._mark_dirty()
             raise
@@ -418,7 +418,12 @@ class SQLiteStoreQueryIndex:
                     print(f"DRYML query index rebuild progress: {scanned}/{len(roots)} roots", file=sys.stderr, flush=True)
                 graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
                 replacement._register_stored_roots(graph, cdefs, require_ready=False)
-            replacement._register_reference_authority(require_ready=False)
+            replacement._register_reference_rows(
+                reference_rows, require_ready=False, replace=True,
+            )
+            replacement._register_metadata_rows(
+                metadata_rows, require_ready=False, replace=True,
+            )
             replacement.close()
             self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
             replacement._validate_rebuild_before_ready(roots=roots)
@@ -472,6 +477,33 @@ class SQLiteStoreQueryIndex:
             add(definition)
         return tuple(roots)
 
+    def _capture_authority_cut(self):
+        """Capture rebuild inputs and dirty tokens under one Store read fence.
+
+        Returns:
+            ``(roots, reference_rows, metadata_rows, dirty_markers)`` detached
+            from a stable Store authority cut. Metadata rows retain source record
+            IDs and scope, including current authoritative absence.
+
+        Raises:
+            QueryIndexUnavailable: If the owning Store cannot supply a stable
+            authority fence.
+            QueryIndexError: If validated Store authority cannot be projected.
+
+        Side Effects:
+            Briefly acquires the Store reader fence. It does not open payloads,
+            materialize Objects, run collectors, or mutate Store authority.
+        """
+
+        if self.store is None:
+            raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store.")
+        with self.store.authority_read_fence():
+            roots = self._preflight_store_roots()
+            reference_rows = tuple(_reference_authority_rows(self.store))
+            metadata_rows = tuple(_metadata_authority_rows(self.store))
+            dirty_markers = self._dirty_markers()
+        return roots, reference_rows, metadata_rows, dirty_markers
+
     def _register_reference_authority(self, *, require_ready: bool) -> None:
         """Cache immutable reference facts while leaving Store records authoritative.
 
@@ -485,6 +517,43 @@ class SQLiteStoreQueryIndex:
             require_ready=require_ready,
             replace=True,
         )
+
+    def _register_metadata_rows(self, rows, *, require_ready: bool, replace: bool) -> None:
+        """Register advisory metadata projections from detached Store authority.
+
+        Args:
+            rows: Complete ``metadata_records`` rows including source record IDs.
+            require_ready: Require an active ready sidecar for incremental writes.
+            replace: Replace all metadata projections when rebuilding a sidecar.
+
+        Raises:
+            QueryIndexError: If the SQLite sidecar cannot accept the projection.
+
+        Side Effects:
+            Changes only the derived SQLite sidecar. Query terminals still inspect
+            Store metadata authority and do not evaluate predicates from these rows.
+        """
+
+        def operation(con):
+            validate_schema(
+                con,
+                store_key=self.source_key,
+                canonical_version=self.canonical_version,
+                require_ready=require_ready,
+            )
+            if replace:
+                con.execute("DELETE FROM metadata_records")
+            con.executemany(
+                """
+                INSERT OR REPLACE INTO metadata_records (
+                    source_kind, source_record_id, scope, reference_kind,
+                    reference_digest, present, projection_blob
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        self._run_write_transaction(operation)
 
     def _register_reference_rows(
             self, rows, *, require_ready: bool, replace: bool) -> None:
@@ -654,7 +723,6 @@ class SQLiteStoreQueryIndex:
             Mutates the SQLite sidecar and clears captured publication markers
             according to the documented deferred dirty-marker policy.
         """
-        dirty_markers = self._dirty_markers()
         result = self.register_stored_roots(graph, roots)
         rows = tuple(
             row
@@ -665,10 +733,15 @@ class SQLiteStoreQueryIndex:
             self._register_reference_rows(
                 rows, require_ready=True, replace=False
             )
-        self._clear_dirty(
-            dirty_markers, roots=tuple(roots), clear_unscoped=True,
-            clear_scoped=True,
-        )
+        if self.store is not None:
+            with self.store.authority_read_fence():
+                metadata_rows = tuple(_metadata_authority_rows(self.store))
+                dirty_markers = self._dirty_markers()
+            self._register_metadata_rows(metadata_rows, require_ready=True, replace=True)
+            self._clear_dirty(
+                dirty_markers, roots=tuple(roots), clear_unscoped=True,
+                clear_scoped=True,
+            )
         return result
 
     def _register_stored_roots(self, graph, roots, *, require_ready: bool):
@@ -914,6 +987,7 @@ class SQLiteStoreQueryIndex:
             clear_unscoped: bool = False,
             clear_scoped: bool = False) -> None:
         root_keys = {self._root_marker_key(root) for root in roots}
+        removed = False
         for marker in markers:
             try:
                 mutation = marker.read_text(encoding="utf-8").strip()
@@ -930,8 +1004,11 @@ class SQLiteStoreQueryIndex:
                 continue
             try:
                 marker.unlink()
+                removed = True
             except FileNotFoundError:
                 pass
+        if removed and self.dirty_path is not None:
+            _fsync_directory(self.dirty_path.parent)
 
     def _mark_dirty(self) -> None:
         if self.dirty_path is None:
@@ -940,6 +1017,9 @@ class SQLiteStoreQueryIndex:
         marker_path = self.dirty_path.with_name(f"{self.dirty_path.name}.{uuid4().hex}")
         with open(marker_path, "x", encoding="utf-8") as file:
             file.write("dirty\n")
+            file.flush()
+            os.fsync(file.fileno())
+        _fsync_directory(marker_path.parent)
 
     def _replacement_generation_seed(self) -> int:
         current = -1
@@ -984,6 +1064,7 @@ class SQLiteStoreQueryIndex:
         self._validate_decodable_rows(con, issues)
         self._validate_stored_roots(con, issues)
         self._validate_reference_rows(con, issues)
+        self._validate_metadata_rows(con, issues)
         self._validate_store_roots(con, issues, roots=roots)
         errors = tuple(issue for issue in issues if issue.severity == "error")
         if errors:
@@ -1103,6 +1184,50 @@ class SQLiteStoreQueryIndex:
                 _CODEC.decode_graph_path(path_blob)
             except Exception as exc:
                 issues.append(ValidationIssue("error", "Reference row failed to decode.", repr(exc)))
+
+    def _validate_metadata_rows(self, con, issues: list[ValidationIssue]) -> None:
+        """Validate advisory metadata identities before staged activation."""
+
+        from dryml.formats import canonical_json_load_bytes
+
+        rows = con.execute(
+            """
+            SELECT source_kind, source_record_id, scope, reference_kind,
+                   reference_digest, present, projection_blob
+            FROM metadata_records
+            """
+        )
+        for source_kind, source_id, scope, reference_kind, digest, present, blob in rows:
+            if source_kind == "current":
+                valid_shape = scope in {"object", "state"} and reference_kind == scope
+            elif source_kind == "snapshot":
+                valid_shape = (
+                    (scope == "snapshot" and reference_kind == "state")
+                    or (scope == "lineage" and reference_kind == "object")
+                )
+            else:
+                valid_shape = (
+                    source_kind == "lineage" and scope == "lineage"
+                    and reference_kind == "object"
+                )
+            if not valid_shape:
+                issues.append(ValidationIssue("error", "Metadata row has invalid source/scope association.", digest))
+            if present:
+                if not source_id or blob is None:
+                    issues.append(ValidationIssue("error", "Present metadata row lacks source record data.", digest))
+                    continue
+                try:
+                    envelope = canonical_json_load_bytes(
+                        blob, max_depth=64, max_nodes=131072,
+                        max_entries=65536, max_string=4096,
+                        max_int_bits=4096,
+                    )
+                    if envelope.get("id") != source_id:
+                        raise ValueError("source record ID mismatch")
+                except Exception as exc:
+                    issues.append(ValidationIssue("error", "Metadata projection failed to decode.", repr(exc)))
+            elif source_kind != "current" or source_id or blob is not None:
+                issues.append(ValidationIssue("error", "Absent metadata row has invalid source data.", digest))
 
     @contextmanager
     def _build_claim(self, *, force: bool = False):
@@ -1254,6 +1379,7 @@ class SQLiteStoreQueryIndex:
         # close barrier; Windows requires that pooled handle closed as well.
         SQLiteConnectionManager._close_current_thread_for_path(self.path)
         os.replace(replacement_path, self.path)
+        _fsync_directory(self.path.parent)
 
     @staticmethod
     def _checkpoint_and_cleanup_sidecars(
@@ -2506,12 +2632,91 @@ def _state_reference_authority_rows(state):
         )
 
 
+def _metadata_authority_rows(store):
+    """Yield metadata projections from separate complete snapshot/current authority.
+
+    The projection is intentionally opaque canonical record data. SQLite retains
+    source record IDs, target identity, and scope for rebuild diagnostics, but it
+    never becomes predicate authority or reconstructs current mappings from a
+    snapshot's captured annotations.
+    """
+
+    if not all(hasattr(store, name) for name in (
+            "_metadata_path", "_lineage_path", "_read_json")):
+        return
+
+    from dryml.formats import canonical_json_bytes
+    from ...reference_values import ObjectRef, StateRef
+
+    def record_blob(record):
+        if not isinstance(record, Mapping) or not isinstance(record.get("id"), str):
+            raise QueryIndexError("Metadata authority record has no valid record ID.")
+        return record["id"], canonical_json_bytes(
+            record, max_depth=64, max_nodes=131072, max_entries=65536,
+            max_string=4096, max_int_bits=4096,
+        )
+
+    object_targets: set[ObjectRef] = set()
+    state_targets: set[StateRef] = set()
+    for record in store.iter_declaration_records():
+        object_targets.add(record.object_ref)
+    for record in store.iter_state_ref_records():
+        state = record.state_ref
+        state_targets.add(state)
+        object_targets.update(state.object.at(path) for path in state.object.objects)
+        metadata = store.read_snapshot_metadata(record.digest)
+        if metadata is None or metadata.state_ref != state:
+            raise QueryIndexError("Complete StateRef lacks matching captured metadata.")
+        # Read the validated source envelope only after complete-directory checks.
+        directory = store.get_snapshot_directory(state)
+        from dryml.formats import canonical_json_load_bytes
+        envelope = canonical_json_load_bytes(
+            (directory / "metadata.json").read_bytes(), max_depth=64,
+            max_nodes=131072, max_entries=65536, max_string=4096,
+            max_int_bits=4096,
+        )
+        record_id, blob = record_blob(envelope)
+        yield ("snapshot", record_id, "snapshot", "state", state.digest(), 1, blob)
+        for lineage in metadata.lineages.values():
+            yield (
+                "snapshot", record_id, "lineage", "object",
+                lineage.object_ref.digest(), 1, blob,
+            )
+
+    for target in sorted(object_targets, key=lambda value: value.digest()):
+        path = store._metadata_path(target)
+        envelope = store._read_json(path)
+        if envelope is None:
+            yield ("current", "", "object", "object", target.digest(), 0, None)
+        else:
+            # The Store reader performs the target and typed-value validation.
+            store.read_metadata(target)
+            record_id, blob = record_blob(envelope)
+            yield ("current", record_id, "object", "object", target.digest(), 1, blob)
+        lineage_path = store._lineage_path(target.digest())
+        lineage = store._read_json(lineage_path)
+        if lineage is not None:
+            store.read_lineage_metadata(target)
+            lineage_id, lineage_blob = record_blob(lineage)
+            yield ("lineage", lineage_id, "lineage", "object", target.digest(), 1, lineage_blob)
+
+    for target in sorted(state_targets, key=lambda value: value.digest()):
+        envelope = store._read_json(store._metadata_path(target))
+        if envelope is None:
+            yield ("current", "", "state", "state", target.digest(), 0, None)
+            continue
+        store.read_metadata(target)
+        record_id, blob = record_blob(envelope)
+        yield ("current", record_id, "state", "state", target.digest(), 1, blob)
+
+
 def _row_counts(con) -> dict[str, int]:
     return {
         table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         for table in (
             "definitions", "feature_tokens", "postings", "definition_edges",
             "stored_roots", "reference_records", "reference_object_ids",
+            "metadata_records",
         )
     }
 
@@ -2522,5 +2727,20 @@ def _empty_row_counts() -> dict[str, int]:
         for table in (
             "definitions", "feature_tokens", "postings", "definition_edges",
             "stored_roots", "reference_records", "reference_object_ids",
+            "metadata_records",
         )
     }
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist one derived-sidecar directory entry or fail closed."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise QueryIndexError("SQLite query-index directory persistence failed.") from exc

@@ -19,7 +19,7 @@ from .records import (
     MainRefRecord, ObjectAliasRecord, StateAliasRecord, StateRefRecord,
     StoredRootRecord, StoreFormatRecord, StoreRecordError,
 )
-from .store import LocalStateSource, Store, StoreAuthorityError, StorePublicationCapabilities
+from .store import LocalStateSource, Store, StoreAuthorityError, StoreCapabilityError, StorePublicationCapabilities
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
 from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from ..query.sqlite.index import SQLiteStoreQueryIndex
@@ -176,6 +176,7 @@ class DirStore(Store):
                 target.flush()
                 os.fsync(target.fileno())
             os.replace(temporary_path, marker_path)
+            self._fsync_directory(self.dryml_dir)
         except BaseException:
             try:
                 os.unlink(temporary_path)
@@ -196,11 +197,15 @@ class DirStore(Store):
 
     def clear_query_index_dirty(self) -> None:
         """Remove derived dirty markers without modifying DefinitionRecords."""
+        removed = False
         for marker in self._query_index_dirty_markers():
             try:
                 os.unlink(marker)
+                removed = True
             except FileNotFoundError:
                 pass
+        if removed:
+            self._fsync_directory(self.dryml_dir)
 
     def query_index_is_dirty(self) -> bool:
         """Return whether a published definition may not be represented by SQLite."""
@@ -356,7 +361,7 @@ class DirStore(Store):
 
     def _atomic_write(self, path: str, payload: bytes) -> None:
         parent = os.path.dirname(path)
-        os.makedirs(parent, exist_ok=True)
+        self._makedirs_durable(parent)
         fd, temporary = tempfile.mkstemp(prefix=".store-", dir=parent)
         try:
             with os.fdopen(fd, "wb") as target:
@@ -366,12 +371,99 @@ class DirStore(Store):
                 target.flush()
                 os.fsync(target.fileno())
             os.replace(temporary, path)
+            self._fsync_directory(parent)
         except BaseException:
             try:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
             raise
+
+    @staticmethod
+    def _fsync_directory(path: str) -> None:
+        """Persist a directory entry or fail before claiming durable publication.
+
+        Args:
+            path: Existing directory containing a newly replaced or removed entry.
+
+        Raises:
+            StoreCapabilityError: If the active filesystem cannot fsync directory
+                metadata required for the direct Store durability contract.
+
+        Side Effects:
+            Flushes filesystem metadata for ``path``. It does not read or alter
+            Store authority.
+        """
+
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as error:
+            raise StoreCapabilityError(
+                "DirStore requires directory fsync support for durable publication."
+            ) from error
+        try:
+            os.fsync(fd)
+        except OSError as error:
+            raise StoreCapabilityError(
+                "DirStore filesystem cannot persist directory entries."
+            ) from error
+        finally:
+            os.close(fd)
+
+    def _makedirs_durable(self, path: str) -> None:
+        """Create a directory chain and persist every new parent entry.
+
+        Args:
+            path: Directory that must exist before authority publication.
+
+        Raises:
+            StoreCapabilityError: If a new directory entry cannot be persisted.
+
+        Side Effects:
+            Creates missing directories and fsyncs each containing directory.
+        """
+
+        missing = []
+        current = os.path.abspath(path)
+        while not os.path.exists(current):
+            missing.append(current)
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        os.makedirs(path, exist_ok=True)
+        for directory in reversed(missing):
+            self._fsync_directory(os.path.dirname(directory))
+
+    def _fsync_tree(self, root: str) -> None:
+        """Persist staged files and directories before snapshot activation.
+
+        Args:
+            root: Complete staged snapshot directory.
+
+        Raises:
+            StoreCapabilityError: If staged content or directory metadata cannot
+                be flushed before the final atomic directory replacement.
+
+        Side Effects:
+            Flushes every regular staged file and directory from leaves to root.
+        """
+
+        for directory, _dirs, files in os.walk(root, topdown=False):
+            for name in files:
+                path = os.path.join(directory, name)
+                try:
+                    fd = os.open(path, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                except OSError as error:
+                    raise StoreCapabilityError(
+                        "DirStore cannot persist staged snapshot content."
+                    ) from error
+            self._fsync_directory(directory)
 
     @staticmethod
     def _digest_path(directory: str, digest: str) -> str:
@@ -707,6 +799,9 @@ class DirStore(Store):
         )
         self.preflight_publication("write current metadata")
         with self.writer_lock():
+            # The derived index must become observably stale before authority can
+            # expose a new whole mapping.
+            self.mark_query_index_dirty()
             self._atomic_write(self._metadata_path(target), payload)
 
     def delete_metadata(self, target) -> bool:
@@ -731,7 +826,14 @@ class DirStore(Store):
         path = self._metadata_path(target)
         with self.writer_lock():
             try:
+                os.stat(path)
+            except FileNotFoundError:
+                return False
+            try:
+                # Absence is indexed metadata too, so invalidate before removal.
+                self.mark_query_index_dirty()
                 os.unlink(path)
+                self._fsync_directory(os.path.dirname(path))
             except FileNotFoundError:
                 return False
             return True
@@ -794,6 +896,7 @@ class DirStore(Store):
                 if existing != value:
                     raise StoreAuthorityError("lineage write-once authority conflicts with existing evidence.")
                 return existing
+            self.mark_query_index_dirty()
             self._atomic_write(path, payload)
             return value
 
@@ -1131,8 +1234,10 @@ class DirStore(Store):
                             self.write_metadata(reference, annotations.state)
                     return existing[1]
                 self.mark_query_index_dirty()
-                os.makedirs(os.path.dirname(target), exist_ok=True)
+                self._makedirs_durable(os.path.dirname(target))
+                self._fsync_tree(stage)
                 os.replace(stage, target)
+                self._fsync_directory(os.path.dirname(target))
                 installed = self._read_snapshot(reference.digest(), payloads=True)
                 if installed is None:
                     raise StoreAuthorityError("snapshot install did not survive read-back.")

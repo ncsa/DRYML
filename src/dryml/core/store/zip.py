@@ -339,7 +339,19 @@ class ZipStore(DirStore):
         return (evidence.st_dev, evidence.st_ino)
 
     def commit(self) -> None:
-        """Atomically publish the complete buffered archive or reject stale bytes."""
+        """Atomically publish the complete buffered archive or reject stale bytes.
+
+        Raises:
+            StoreAuthorityError: If the buffered archive cannot be validated or
+                the destination changed since this transaction opened.
+            StoreCapabilityError: If archive or parent-directory durability cannot
+                be established before reporting commit completion.
+
+        Side Effects:
+            Replaces the path-backed archive only when this transaction is dirty,
+            then persists the replacement's parent directory. File-like archives
+            retain their existing unsupported publication behavior.
+        """
         with self.transaction_fence():
             if not self._archive_dirty:
                 return
@@ -360,11 +372,14 @@ class ZipStore(DirStore):
                 with zipfile.ZipFile(temporary, "r") as archive:
                     if archive.testzip() is not None:
                         raise StoreAuthorityError("Buffered ZipStore archive validation failed.")
+                with open(temporary, "rb") as staged_file:
+                    os.fsync(staged_file.fileno())
                 staged = self._archive_identity(temporary)
                 with interprocess_lock(self._archive_lock_path):
                     if self._archive_identity() != self._archive_baseline:
                         raise ZipStoreConflictError("ZipStore archive changed since open; reopen and reapply the mutation.")
                     os.replace(temporary, destination)
+                    self._fsync_directory(directory)
                     self._archive_baseline = staged
                     self._archive_evidence = self._physical_archive_evidence()
                     self._archive_dirty = False

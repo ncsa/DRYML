@@ -495,6 +495,10 @@ class ReferenceQuery:
     def _scan(self):
         if self._metadata is None:
             return self._scan_authority()
+        # Refresh before taking the query's detached authority cut. Rebuild owns
+        # its own short capture fence and performs staged SQLite work after
+        # releasing it, so queries do not hold Store writers through replacement.
+        self._refresh_derived_metadata_rows()
         # Metadata selection must observe one detached authority cut. Group only
         # genuinely shared lock domains; distinct ZipStore transactions against
         # one archive deliberately retain independent transaction fences.
@@ -600,6 +604,17 @@ class ReferenceQuery:
                     )
                 )
         requires_state = self._metadata is not None and self._metadata_requires_state()
+        if self._metadata is not None and not requires_state:
+            # Current-object and lineage metadata can attach to any materializing
+            # closed subtree retained by a completed aggregate reference. Keep
+            # this metadata-only so legacy structural queries continue returning
+            # their established aggregate projections.
+            for reference in set(roots):
+                occurrences.extend(
+                    ReferenceOccurrence(reference, path, reference.at(path))
+                    for path in reference.objects
+                    if path
+                )
         root_values = [] if requires_state else [
             ref for ref in roots if self._matches_object(ref, alias_reference_objects)
         ]
@@ -664,6 +679,38 @@ class ReferenceQuery:
                     index.rebuild(force=True)
                 else:
                     index.refresh("auto")
+
+    def _refresh_derived_metadata_rows(self) -> None:
+        """Refresh advisory metadata rows without changing authority semantics.
+
+        A ready SQLite sidecar may capture and rebuild from its own short Store
+        authority cut. Any missing, dirty, corrupt, incompatible, or unavailable
+        derived state is ignored here: the following separately fenced scan
+        evaluates the complete U5 authority oracle unchanged.
+        """
+
+        from .model import QueryIndexError, QueryIndexUnavailable
+        from ..store.dir import DirStore
+
+        seen = set()
+        for store in self._stores():
+            # ZipStore exposes a transient extracted DirStore but retains its own
+            # buffered transaction semantics. U6 metadata projections are only
+            # direct-DirStore acceleration; archive queries stay index-free.
+            if type(store) is not DirStore:
+                continue
+            key = store.catalog_key()
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                index = store.open_query_index()
+                if index is not None:
+                    index.refresh("auto")
+            except (OSError, QueryIndexError, QueryIndexUnavailable):
+                # Derived state is advisory. Do not turn a recoverable sidecar
+                # failure into a metadata result/error change.
+                continue
 
     def _candidate_sources(self, store):
         """Return derived candidates for filters that safely narrow authority."""
