@@ -203,6 +203,18 @@ class ZipStore(DirStore):
     def transaction_fence(self):
         """Serialize same-handle buffered mutations and archive commits.
 
+        Returns:
+            A reentrant context manager covering this handle's extracted
+            transaction state.
+
+        Raises:
+            RuntimeError: If the inherited lock implementation cannot acquire its
+                required transaction state.
+
+        Side Effects:
+            Acquires this handle's in-process transaction lock until context exit.
+            It does not read, commit, or modify archive contents by itself.
+
         The fence is reentrant so inherited record methods may retain their
         writer lock while a graph save spans staging, installation, and commit.
         Separate handles still use the archive baseline conflict check.
@@ -210,6 +222,24 @@ class ZipStore(DirStore):
 
         with self._transaction_lock:
             yield
+
+    def authority_fence_key(self) -> str:
+        """Return this live transaction's distinct metadata-read fence key.
+
+        Returns:
+            A stable key for this ZipStore handle's buffered authority view.
+
+        Raises:
+            StoreCapabilityError: If inherited Store capability validation fails.
+
+        Side Effects:
+            None. The key does not read, commit, or modify the archive.
+
+        Distinct open handles can hold buffered views with the same archive path
+        but different baselines. They must therefore be fenced independently.
+        """
+
+        return f"{super().authority_fence_key()}:transaction:{id(self)}"
 
     def writer_lock(self):
         """Acquire the transaction fence before the inherited Store writer lock."""

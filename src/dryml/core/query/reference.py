@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -213,7 +214,7 @@ class ReferenceQuery:
     over immutable Definition, Declaration, StateRef, and alias records.
     """
 
-    def __init__(self, repo, *, definition=None, object_id=None, namespace=None, object_ref=None, contains=None, alias=None, path=None, state_hash=None):
+    def __init__(self, repo, *, definition=None, object_id=None, namespace=None, object_ref=None, contains=None, alias=None, path=None, state_hash=None, metadata=None, store=None):
         """Create an immutable reference-query builder.
 
         Args:
@@ -226,6 +227,10 @@ class ReferenceQuery:
             alias: Optional Store-local object or state alias constraint.
             path: Optional typed occurrence-path constraint.
             state_hash: Optional exact local-state hash constraint.
+            metadata: Optional typed metadata predicate evaluated from Store
+                authority after structural/reference candidate selection.
+            store: Optional connected Store restricting both candidates and
+                metadata authority to one Store.
 
         Side Effects:
             None until a terminal is evaluated. Terminals may rebuild derived
@@ -240,6 +245,8 @@ class ReferenceQuery:
         self._alias = alias
         self._path = path
         self._state_hash = state_hash
+        self._metadata = metadata
+        self._store = store
 
     def references(self) -> "ReferenceQuery":
         """Return this query, allowing uniform fluent use from Repo and DefinitionQuery."""
@@ -380,6 +387,51 @@ class ReferenceQuery:
             raise TypeError("state_hash filter requires a state hash string.")
         return self._replace(state_hash=value)
 
+    def where(self, predicate) -> "ReferenceQuery":
+        """Conjoin one typed metadata predicate with this authority query.
+
+        Args:
+            predicate: MetadataPredicate built with ``field()``, for example
+                ``field("object", "team").eq("vision")``.
+
+        Returns:
+            A refined immutable query. Repeated calls retain every condition.
+
+        Raises:
+            TypeError: If ``predicate`` is not a MetadataPredicate.
+            ValueError: If predicate data exceeds construction bounds.
+
+        Side Effects:
+            None. This validates and composes detached predicates; Store authority
+            is read only when a terminal executes.
+        """
+
+        from .metadata import _require_predicate
+
+        # Revalidate bounds before a caller-provided subtype reaches a terminal.
+        predicate = _require_predicate(predicate)
+        return self._replace(metadata=predicate if self._metadata is None else self._metadata & predicate)
+
+    def in_store(self, store) -> "ReferenceQuery":
+        """Restrict reference and metadata authority to one connected Store.
+
+        Args:
+            store: Exact Store handle already connected to this query's Repo.
+
+        Returns:
+            A refined immutable query scoped to ``store``.
+
+        Raises:
+            ValueError: If ``store`` is not a connected Store handle.
+
+        Side Effects:
+            None. This records a connected handle for later terminal evaluation.
+        """
+
+        if not any(candidate is store for candidate in self.repo.stores):
+            raise ValueError("in_store() requires a connected Store handle.")
+        return self._replace(store=store)
+
     def object_refs(self) -> ObjectRefResultSet:
         """Return matching complete aggregate ObjectRefs in canonical order.
 
@@ -435,12 +487,30 @@ class ReferenceQuery:
             "definition": self._definition, "object_id": self._object_id,
             "namespace": self._namespace, "object_ref": self._object_ref,
             "contains": self._contains, "alias": self._alias, "path": self._path, "state_hash": self._state_hash,
+            "metadata": self._metadata, "store": self._store,
         }
         data.update(values)
         return ReferenceQuery(self.repo, **data)
 
     def _scan(self):
-        self._refresh_derived_reference_rows()
+        if self._metadata is None:
+            return self._scan_authority()
+        # Metadata selection must observe one detached authority cut. Group only
+        # genuinely shared lock domains; distinct ZipStore transactions against
+        # one archive deliberately retain independent transaction fences.
+        groups = {}
+        for store in self._stores():
+            groups.setdefault(store.authority_fence_key(), []).append(store)
+        with ExitStack() as fences:
+            for key in sorted(groups):
+                fences.enter_context(groups[key][0].authority_read_fence())
+            return self._scan_authority()
+
+    def _scan_authority(self):
+        """Scan selected Store authority while any required metadata fences hold."""
+
+        if self._metadata is None:
+            self._refresh_derived_reference_rows()
         roots: list[ObjectRef] = []
         states: list[StateRef] = []
         occurrences: list[ReferenceOccurrence] = []
@@ -448,7 +518,7 @@ class ReferenceQuery:
         authority_by_id: dict[ObjectId, ObjectRef] = {}
         authority_sources: dict[ObjectId, list[str]] = {}
 
-        for store in self.repo.stores:
+        for store in self._stores():
             candidates = self._candidate_sources(store)
             declarations_by_digest = {}
             states_by_digest = {}
@@ -529,21 +599,38 @@ class ReferenceQuery:
                         reference.definition, owner=reference
                     )
                 )
-        root_values = [ref for ref in roots if self._matches_object(ref, alias_reference_objects)]
+        requires_state = self._metadata is not None and self._metadata_requires_state()
+        root_values = [] if requires_state else [
+            ref for ref in roots if self._matches_object(ref, alias_reference_objects)
+        ]
         state_values = [state for state in states if self._matches_state(state, alias_objects, alias_states)]
-        allowed = set(root_values) | set(state_values)
-        occurrences = [item for item in occurrences if (
-            (item.value in allowed and self._matches_occurrence(item))
-            or self._matches_embedded(item)
-        )]
-        root_values.extend(
-            item.value for item in occurrences
-            if isinstance(item.value, ObjectRef) and self._matches_object(item.value, alias_reference_objects)
-        )
-        state_values.extend(
-            item.value for item in occurrences
-            if isinstance(item.value, StateRef) and self._matches_state(item.value, alias_objects, alias_states)
-        )
+        allowed = set(root_values) | set(state_values) | {state.object for state in state_values}
+        if requires_state:
+            # State/snapshot predicates select complete StateRefs. ObjectRef
+            # projections are derived below, rather than retaining unrelated
+            # declaration or owning-object occurrences.
+            occurrences = [
+                item for item in occurrences
+                if isinstance(item.value, StateRef)
+                and item.value in state_values
+                and self._matches_occurrence(item)
+            ]
+        else:
+            occurrences = [item for item in occurrences if (
+                (item.value in allowed and self._matches_occurrence(item))
+                or self._matches_embedded(item)
+            )]
+        if not requires_state:
+            root_values.extend(
+                item.value for item in occurrences
+                if isinstance(item.value, ObjectRef) and self._matches_object(item.value, alias_reference_objects)
+            )
+        root_values.extend(state.object for state in state_values)
+        if not requires_state:
+            state_values.extend(
+                item.value for item in occurrences
+                if isinstance(item.value, StateRef) and self._matches_state(item.value, alias_objects, alias_states)
+            )
         if self._path is not None:
             # A path identifies reference occurrences, so value projections must
             # be derived from those occurrences rather than unrelated root refs.
@@ -566,7 +653,7 @@ class ReferenceQuery:
         """
 
         seen = set()
-        for store in self.repo.stores:
+        for store in self._stores():
             key = store.catalog_key()
             if key in seen:
                 continue
@@ -580,6 +667,10 @@ class ReferenceQuery:
 
     def _candidate_sources(self, store):
         """Return derived candidates for filters that safely narrow authority."""
+        if self._metadata is not None:
+            # U5 metadata predicates deliberately establish their answer from a
+            # complete Store authority scan, independent of derived index state.
+            return None
         index = store.open_query_index()
         if index is None:
             return None
@@ -597,9 +688,28 @@ class ReferenceQuery:
         # silently hide a reference.
         return candidates or None
 
+    def _stores(self):
+        """Return the authority sources selected for this immutable query."""
+
+        return self.repo.stores if self._store is None else (self._store,)
+
     def _alias_targets(self, roots):
         objects: set[ObjectRef] = set()
         states: set[StateRef] = set()
+        if self._store is not None:
+            record = self._store.read_object_alias(self._alias)
+            if record is not None:
+                objects.add(record.object_ref)
+            for ref in set(roots):
+                record = self._store.read_state_alias(ref.digest(), self._alias)
+                if record is None:
+                    continue
+                state = self._store.read_state_ref_record(record.state_ref_digest)
+                if state is None or state.state_ref.object != ref:
+                    from ..repo import RepoLoadError
+                    raise RepoLoadError("State alias points to missing or incompatible StateRef authority.")
+                states.add(state.state_ref)
+            return objects, states
         try:
             objects.add(self.repo.get_alias(self._alias))
         except KeyError:
@@ -611,7 +721,7 @@ class ReferenceQuery:
                 continue
         return objects, states
 
-    def _matches_object(self, ref, alias_objects) -> bool:
+    def _matches_object(self, ref, alias_objects, *, include_metadata: bool = True) -> bool:
         if self._object_id is not None and self._object_id not in ref.objects.values():
             return False
         if self._namespace is not None and not any(item.namespace[:len(self._namespace)] == self._namespace for item in ref.objects.values()):
@@ -625,14 +735,18 @@ class ReferenceQuery:
             return False
         if alias_objects is not None and ref not in alias_objects:
             return False
+        if include_metadata and self._metadata is not None and not self._matches_metadata(ref):
+            return False
         return True
 
     def _matches_state(self, state, alias_objects, alias_states) -> bool:
-        if not self._matches_object(state.object, None):
+        if not self._matches_object(state.object, None, include_metadata=False):
             return False
         if self._state_hash is not None and self._state_hash not in state.states.values():
             return False
-        return alias_states is None or state in alias_states or state.object in alias_objects
+        if alias_states is not None and state not in alias_states and state.object not in alias_objects:
+            return False
+        return self._metadata is None or self._matches_metadata(state)
 
     def _matches_occurrence(self, item) -> bool:
         return self._path is None or item.path == self._path
@@ -643,6 +757,20 @@ class ReferenceQuery:
         if isinstance(item.value, StateRef):
             return self._matches_state(item.value, None, None)
         return self._matches_object(item.value, None)
+
+    def _matches_metadata(self, reference) -> bool:
+        """Evaluate metadata only after the existing reference constraints match."""
+
+        from .metadata import evaluate_metadata_predicate
+
+        return evaluate_metadata_predicate(self._metadata, reference, self.repo, store=self._store)
+
+    def _metadata_requires_state(self) -> bool:
+        """Return whether the current metadata expression selects StateRefs only."""
+
+        from .metadata import predicate_requires_state
+
+        return predicate_requires_state(self._metadata)
 
 
 __all__ = ["ObjectRefResultSet", "ReferenceOccurrence", "ReferenceQuery", "ReferenceResultSet", "StateRefResultSet"]

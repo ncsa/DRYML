@@ -1669,10 +1669,11 @@ class Repo:
                     if value is not None:
                         break
             values.append(value)
-        present = [value for value in values if value is not None]
-        if present and any(value != present[0] for value in present[1:]):
+        # A holder with no lineage record is valid unknown creation evidence;
+        # it must still conflict with a different holder's known fact.
+        if any(value != values[0] for value in values[1:]):
             raise MetadataConflictError("Selected Stores disagree about lineage metadata.")
-        return LineageMetadata(target, "unknown", None) if not present else present[0]
+        return LineageMetadata(target, "unknown", None) if values[0] is None else values[0]
 
     def get_snapshot_metadata(self, target, *, store=None):
         """Return detached write-once captured metadata for one exact StateRef.
@@ -4284,11 +4285,13 @@ class Repo:
 
         Returns:
             A ReferenceQuery over immutable Definition, Declaration, StateRef,
-            and alias authority in connected Stores.
+            alias, and typed metadata authority in connected Stores.
 
         Side Effects:
             None until a terminal is evaluated. Evaluation never materializes an
-            Object or opens local-state payloads.
+            Object or opens local-state payloads. Typed metadata predicates added
+            with ``where()`` are evaluated from current, lineage, and captured
+            Store authority rather than derived query indexes.
         """
 
         from .query.reference import ReferenceQuery

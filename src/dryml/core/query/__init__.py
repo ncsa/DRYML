@@ -11,6 +11,7 @@ from .model import (
     QueryWouldScanError,
 )
 from .lowering import CandidateRelation, LoweredEdgeStep, LoweredGraphPlan, ScanPolicy
+from .metadata import MetadataField, MetadataPredicate, field
 from .query import DefinitionQuery
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet, QueryBackedDefinitionResultSet
 from .reference import ObjectRefResultSet, ReferenceOccurrence, ReferenceQuery, ReferenceResultSet, StateRefResultSet
@@ -29,6 +30,8 @@ __all__ = [
     "Parameter",
     "LoweredEdgeStep",
     "LoweredGraphPlan",
+    "MetadataField",
+    "MetadataPredicate",
     "ObjectResultSet",
     "ObjectRefResultSet",
     "OccurrenceResultSet",
@@ -49,5 +52,6 @@ __all__ = [
     "ScanPolicy",
     "SetMember",
     "StateRefResultSet",
+    "field",
     "normalize_path",
 ]

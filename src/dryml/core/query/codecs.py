@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 
 from ..definition import ConcreteDefinition
@@ -15,6 +16,8 @@ FEATURE_CODEC_VERSION = 3
 PATH_CODEC_VERSION = GRAPH_PATH_SCHEMA_VERSION
 QUERY_INDEX_CODEC_VERSION = 5
 REFERENCE_CODEC_VERSION = 1
+METADATA_QUERY_CODEC_VERSION = 1
+_MAX_METADATA_QUERY_BYTES = 131_072
 
 
 class QueryCodecError(ValueError):
@@ -34,6 +37,7 @@ class QueryIndexCodec:
     feature_version = FEATURE_CODEC_VERSION
     path_version = PATH_CODEC_VERSION
     reference_version = REFERENCE_CODEC_VERSION
+    metadata_query_version = METADATA_QUERY_CODEC_VERSION
 
     def encode_cdef(self, cdef: ConcreteDefinition) -> bytes:
         """Encode a concrete definition for persistent query-index storage."""
@@ -79,6 +83,44 @@ class QueryIndexCodec:
         """Decode a canonical lightweight reference value from an index row."""
 
         return decode_reference(blob)
+
+    def encode_metadata_predicate(self, value) -> bytes:
+        """Encode a bounded metadata predicate without display parsing.
+
+        Args:
+            value: MetadataPredicate to encode.
+
+        Returns:
+            Versioned query codec bytes.
+
+        Raises:
+            TypeError: If ``value`` is not a MetadataPredicate.
+            QueryCodecError: If predicate data violates canonical query bounds.
+
+        Side Effects:
+            None. Encoding reads only detached predicate data.
+        """
+
+        return encode_metadata_predicate(value)
+
+    def decode_metadata_predicate(self, blob: bytes):
+        """Decode one bounded metadata predicate from a query codec envelope.
+
+        Args:
+            blob: Versioned metadata-predicate codec bytes.
+
+        Returns:
+            A validated MetadataPredicate.
+
+        Raises:
+            QueryCodecError: If the envelope or predicate data is malformed,
+                unsupported, noncanonical, or oversized.
+
+        Side Effects:
+            None. Decoding validates only the supplied bytes.
+        """
+
+        return decode_metadata_predicate(blob)
 
 
 def encode_cdef(cdef: ConcreteDefinition) -> bytes:
@@ -159,6 +201,77 @@ def decode_reference(blob: bytes) -> ObjectId | ObjectRef | StateRef:
         return decoder(value["value"])
     except Exception as exc:
         raise QueryCodecError("Decoded reference value is invalid.") from exc
+
+
+def encode_metadata_predicate(value) -> bytes:
+    """Encode one immutable metadata predicate in the query codec envelope.
+
+    Args:
+        value: MetadataPredicate to encode.
+
+    Returns:
+        Versioned query codec bytes.
+
+    Raises:
+        TypeError: If ``value`` is not a MetadataPredicate.
+        QueryCodecError: If predicate data violates canonical query bounds.
+
+    Side Effects:
+        None. Encoding reads only detached predicate data.
+    """
+
+    from .metadata import MetadataPredicate
+
+    if not isinstance(value, MetadataPredicate):
+        raise TypeError(f"encode_metadata_predicate expected MetadataPredicate, got {type(value).__name__}.")
+    from .metadata import _canonical_bytes
+
+    blob = _canonical_bytes({
+        "kind": "metadata-predicate",
+        "version": METADATA_QUERY_CODEC_VERSION,
+        "payload": value.to_data(),
+    })
+    if len(blob) > _MAX_METADATA_QUERY_BYTES:
+        raise QueryCodecError("Metadata predicate codec data exceeds size bound.")
+    return blob
+
+
+def decode_metadata_predicate(blob: bytes):
+    """Decode one immutable metadata predicate from query codec bytes.
+
+    Args:
+        blob: Versioned metadata-predicate codec envelope.
+
+    Returns:
+        A validated MetadataPredicate.
+
+    Raises:
+        QueryCodecError: If the envelope or predicate data is malformed,
+            unsupported, noncanonical, or oversized.
+
+    Side Effects:
+        None. Decoding validates only the supplied bytes.
+    """
+
+    from .metadata import MetadataPredicate, _canonical_bytes
+
+    if not isinstance(blob, bytes):
+        raise TypeError(f"codec blob must be bytes, got {type(blob).__name__}.")
+    if len(blob) > _MAX_METADATA_QUERY_BYTES:
+        raise QueryCodecError("Metadata predicate codec data exceeds size bound.")
+    try:
+        envelope = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise QueryCodecError("Could not decode metadata predicate codec data.") from exc
+    if not isinstance(envelope, dict) or set(envelope) != {"kind", "version", "payload"}:
+        raise QueryCodecError("Metadata predicate codec envelope is malformed.")
+    if envelope["kind"] != "metadata-predicate":
+        raise QueryCodecError("Expected a metadata-predicate codec envelope.")
+    if type(envelope["version"]) is not int or envelope["version"] != METADATA_QUERY_CODEC_VERSION:
+        raise QueryCodecError("Unsupported metadata predicate codec version.")
+    if _canonical_bytes(envelope) != blob:
+        raise QueryCodecError("Metadata predicate codec data is noncanonical.")
+    return MetadataPredicate.from_data(envelope["payload"])
 
 
 def digest_blob(blob: bytes) -> bytes:

@@ -139,6 +139,28 @@ class DefinitionQuery:
 
         return ReferenceQuery(self.repo, definition=self.selector)
 
+    def where(self, predicate):
+        """Conjoin a typed metadata predicate with this query's references.
+
+        Args:
+            predicate: A :class:`MetadataPredicate` constructed with
+                :func:`dryml.core.query.field`.
+
+        Returns:
+            An immutable ReferenceQuery with this query's structural selector and
+            the supplied metadata constraint.
+
+        Raises:
+            TypeError: If ``predicate`` is not a MetadataPredicate.
+            ValueError: If predicate construction bounds are invalid.
+
+        Side Effects:
+            None until a ReferenceQuery terminal runs; that terminal never
+            materializes Objects or opens state payloads.
+        """
+
+        return self.references().where(predicate)
+
     def categorical(
             self,
             *,
