@@ -90,6 +90,32 @@ def test_declared_identity_propagates_its_candidate_into_live_realization(tmp_pa
     )
 
 
+def test_declaration_lineage_fact_survives_reopening_before_construction(tmp_path, monkeypatch):
+    created_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    monkeypatch.setattr("dryml.core.snapshot_capture.current_utc_time", lambda: created_at)
+    store = DirStore(tmp_path / "store")
+    declared = Repo(store).declare_object(LineageLeaf("declared").definition)
+
+    reopened = Repo(DirStore(store.base_dir))
+
+    assert reopened.get_lineage_metadata(declared).created_at == created_at
+
+
+def test_declaration_lineage_failure_withholds_discoverable_authority(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    monkeypatch.setattr(
+        store, "write_lineage_metadata",
+        lambda _lineage: (_ for _ in ()).throw(OSError("lineage publication failed")),
+    )
+
+    with pytest.raises(OSError, match="lineage publication"):
+        repo.declare_object(LineageLeaf("declared").definition)
+
+    assert tuple(store.iter_declaration_records()) == ()
+    assert tuple(store.iter_stored_root_records()) == ()
+
+
 def test_failed_initialization_does_not_create_a_lineage_candidate(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
 

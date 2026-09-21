@@ -304,7 +304,7 @@ def test_claim_control_flow_preserves_generation_evidence(
 
     report = raised.value.report
     claim_publication = next(item for item in report.publications if item.phase == "claim")
-    assert claim_publication.status == "unattempted"
+    assert claim_publication.status == ("completed" if after else "failed")
     assert store.read_claim_record(reference.digest()).status == (
         "completed" if after else "available"
     )

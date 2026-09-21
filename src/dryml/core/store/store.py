@@ -413,7 +413,9 @@ class Store(ABC):
         raise StoreCapabilityError("This Store does not support lineage metadata publication.")
 
     @abstractmethod
-    def publish_snapshot(self, reference, *, evidence, annotations=None, local_states, children=None):
+    def publish_snapshot(
+            self, reference, *, evidence, annotations=None, local_states,
+            children=None, _before_annotation_write=None):
         """Atomically publish one complete snapshot-local authority directory.
 
         Args:
@@ -425,6 +427,8 @@ class Store(ABC):
             local_states: Mapping from local StateRef paths to validated
                 backend-owned LocalStateSource handles.
             children: Optional mapping from child projection paths to exact StateRefs.
+            _before_annotation_write: Internal callback receiving ``"object"`` or
+                ``"state"`` immediately before that explicit current write begins.
 
         Returns:
             Detached immutable SnapshotMetadata installed for ``reference``.

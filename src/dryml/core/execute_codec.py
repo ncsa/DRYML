@@ -1310,6 +1310,16 @@ class _ResultPublisher:
                 paths.append(GraphPath())
             return tuple(paths)
 
+        def publication_boundaries(state, snapshot_path):
+            """Yield every conservatively reserved phase/path ledger entry."""
+
+            for phase in phases:
+                if phase != "lineage":
+                    yield snapshot_path, phase
+            projection = state if not snapshot_path else state.at(snapshot_path)
+            for lineage_path in dict.fromkeys((GraphPath(), *projection.object.objects)):
+                yield snapshot_path.join(lineage_path), "lineage"
+
         publications = [
             {"state": state.to_data(), "store": store_index, "phase": phase,
              "status": "completed", "path": str(path)}
@@ -1318,9 +1328,9 @@ class _ResultPublisher:
             # A stateless projection still produces snapshot, membership, index,
             # and commit report work. Reserve it so the post-publication fallback
             # cannot drop durable evidence merely because it has no payload path.
-            for path in snapshot_paths(root)
+            for snapshot_path in snapshot_paths(root)
             for store_index in range(len(self.repo.stores))
-            for phase in phases
+            for path, phase in publication_boundaries(state, snapshot_path)
         ]
         # The ordinary result can be dropped after publication, but durable
         # evidence cannot. Reserve exactly the fallback outcome before saving.

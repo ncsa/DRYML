@@ -368,6 +368,32 @@ def test_failed_zip_commit_keeps_previous_complete_archive_bytes(tmp_path, monke
         reopened.close()
 
 
+def test_zip_parent_fsync_failure_preserves_complete_reopenable_replacement(tmp_path, monkeypatch):
+    """A post-replace barrier error never exposes a torn archive or false clean state."""
+
+    path = tmp_path / "store.zip"
+    store = ZipStore(path)
+    record = _record("replacement")
+    store.write_definition_record(record)
+    original = store._fsync_directory
+
+    def fail_parent(path):
+        if Path(path) == Path(store.archive_path).parent:
+            raise OSError("archive parent fsync failed")
+        return original(path)
+
+    monkeypatch.setattr(store, "_fsync_directory", fail_parent)
+    with pytest.raises(OSError, match="archive parent fsync"):
+        store.commit()
+    assert store._archive_dirty
+
+    reopened = ZipStore.open_existing(path)
+    try:
+        assert reopened.read_definition_record(record.digest) == record
+    finally:
+        reopened.close()
+
+
 def test_stale_zip_writer_cannot_replace_newer_direct_definition_authority(tmp_path):
     path = tmp_path / "store.zip"
     first = ZipStore(path)
@@ -580,6 +606,48 @@ def test_zip_close_discards_uncommitted_buffer_and_cleans_extraction(tmp_path):
 
     assert not extracted.exists()
     assert not path.exists()
+
+
+def test_zip_close_invalidates_borrowed_snapshot_paths(tmp_path):
+    """Borrowed archive extraction paths expire with their owning transaction."""
+
+    path = tmp_path / "store.zip"
+    store = ZipStore(path)
+    state = Repo(store).save_object(ZipPayloadObject(repo=Repo(store)))
+    store.commit()
+    borrowed = store.get_snapshot_directory(state)
+
+    store.close()
+
+    assert not Path(borrowed).exists()
+
+
+def test_closed_dirty_zip_cannot_replace_committed_archive(tmp_path):
+    """A discarded transaction cannot later publish an empty extraction."""
+
+    path = tmp_path / "store.zip"
+    writer = ZipStore(path)
+    committed = _record("committed")
+    writer.write_definition_record(committed)
+    writer.commit()
+    writer.close()
+    before = path.read_bytes()
+    stale = ZipStore.open_existing(path)
+    stale.write_definition_record(_record("discarded"))
+    stale.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        stale.commit()
+    with pytest.raises(RuntimeError, match="closed"):
+        tuple(stale.iter_definition_records())
+    with pytest.raises(RuntimeError, match="closed"):
+        stale.write_definition_record(_record("late"))
+    assert path.read_bytes() == before
+    reopened = ZipStore.open_existing(path)
+    try:
+        assert tuple(reopened.iter_definition_records()) == (committed,)
+    finally:
+        reopened.close()
 
 
 def test_zip_export_store_is_retired_from_the_public_archive_surface():

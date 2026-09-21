@@ -18,7 +18,7 @@ from .definition import ConcreteDefinition
 from .object import Object, Serializable
 from .policies import RepoGraphOptions
 from .selector import Selector
-from .store.store import Store
+from .store.store import Store, StoreCapabilityError
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 from .utils.graph.path import Parameter
@@ -322,13 +322,15 @@ class RoutedSavePlan:
     graph_mode: str
 
 
-# Publication boundary labels for SavePublication: definition/state/snapshot
-# identify immutable authority, membership promotes a stored root, claim records
+# Publication boundary labels for SavePublication: definition/lineage/state/
+# snapshot identify immutable authority, current-metadata phases identify their
+# separate LWW records, membership promotes a stored root, claim records
 # construction completion, alias/main update mutable names, index updates derived
 # query state, and commit flushes a buffered backend transaction.
 PublicationPhase: TypeAlias = Literal[
-    "definition", "state", "snapshot", "membership", "claim",
-    "alias", "main", "index", "commit",
+    "definition", "lineage", "state", "snapshot", "object_metadata",
+    "state_metadata", "membership", "claim", "alias", "main", "index",
+    "commit",
 ]
 # Publication outcome labels for SavePublication: completed is read-back proof,
 # failed is a negative read-back, unattempted has no attempted boundary, and
@@ -337,8 +339,9 @@ PublicationStatus: TypeAlias = Literal[
     "completed", "failed", "unattempted", "uncertain",
 ]
 PUBLICATION_PHASES = frozenset({
-    "definition", "state", "snapshot", "membership", "claim",
-    "alias", "main", "index", "commit",
+    "definition", "lineage", "state", "snapshot", "object_metadata",
+    "state_metadata", "membership", "claim", "alias", "main", "index",
+    "commit",
 })
 PUBLICATION_STATUSES = frozenset({
     "completed", "failed", "unattempted", "uncertain",
@@ -1199,6 +1202,29 @@ def _has_completed_claim(store, lease, state_ref) -> bool:
     )
 
 
+def _has_complete_local_states(store, state_ref, sources) -> bool:
+    """Return whether an exact snapshot retains every selected local payload."""
+
+    record = store.read_state_ref_record(state_ref.digest())
+    if record is None or record.state_ref != state_ref:
+        return False
+    return all(
+        store.validate_local_state(state_ref, path).state_hash
+        == source.manifest.state_hash
+        for path, source in sources.items()
+    )
+
+
+def _supports_annotation_phase_callback(store) -> bool:
+    """Return whether this Store override implements exact annotation callbacks."""
+
+    return bool(getattr(
+        type(store).publish_snapshot,
+        "_dryml_annotation_phase_callback",
+        False,
+    ))
+
+
 def _prepare_snapshot_local_state(obj: Object, definition: ConcreteDefinition, store: Store, path: GraphPath):
     """Serialize one payload into owned staging without publishing shared authority."""
 
@@ -1270,12 +1296,20 @@ def execute_routed_save_plan(
             if candidate is None or candidate.state_ref != reference:
                 raise KeyError(reference.digest())
     _validate_codecs(plan.actions)
-    claims = repo._preflight_routed_claims(plan, routed)
     destinations = _unique_stores(
         store for values in routed.destinations.values() for store in values
     )
     for store in destinations:
         store.preflight_publication("routed snapshot save", local_state=True)
+        if (
+                any(candidate is store for candidate in routed.root_destinations)
+                and annotations is not None
+                and (annotations.object is not None or annotations.state is not None)
+                and not _supports_annotation_phase_callback(store)):
+            raise StoreCapabilityError(
+                "Save-time annotations require exact publication phase callbacks."
+            )
+    claims = repo._preflight_routed_claims(plan, routed)
     ledger = _PublicationLedger(routed.root_destinations)
     source_by_path = {}
     state_stores = {action.path: [] for action in plan.actions}
@@ -1294,6 +1328,25 @@ def execute_routed_save_plan(
                 phase: ledger.plan(store, action.path, action.obj, None, phase)
                 for phase in ("definition", "state", "snapshot", "membership")
             }
+            projection_object = (
+                plan.object_ref if not action.path else plan.object_ref.at(action.path)
+            )
+            indexes["lineage"] = {
+                path: ledger.plan(
+                    store, action.path.join(path), action.obj, None, "lineage",
+                    object_id=(projection_object if not path else projection_object.at(path)).object_id,
+                )
+                for path in dict.fromkeys((GraphPath(), *projection_object.objects))
+            }
+            if not action.path and annotations is not None:
+                if annotations.object is not None:
+                    indexes["object_metadata"] = ledger.plan(
+                        store, action.path, action.obj, None, "object_metadata",
+                    )
+                if annotations.state is not None:
+                    indexes["state_metadata"] = ledger.plan(
+                        store, action.path, action.obj, None, "state_metadata",
+                    )
             lease = claims_by_path.get(action.path)
             if lease is not None and store is lease.store:
                 indexes["claim"] = ledger.plan(store, action.path, action.obj, None, "claim")
@@ -1377,20 +1430,21 @@ def execute_routed_save_plan(
             raise ValueError("source_store and source_stores select different root Stores.")
         selected_root = source_store or mapped_root
         evidence = None
-        if selected_root is not None:
-            evidence = selected_root.read_snapshot_metadata(state_ref.digest())
-            if evidence is None or evidence.state_ref != state_ref:
-                raise KeyError(state_ref.digest())
-        else:
-            for store in context.stores:
-                candidate = store.read_snapshot_metadata(state_ref.digest())
-                if candidate is None:
-                    continue
-                if candidate.state_ref != state_ref:
-                    raise RepoSaveError("StateRef digest collision has incompatible snapshot authority.")
-                if evidence is not None and evidence != candidate:
-                    raise MetadataConflictError("Connected Stores disagree about snapshot evidence.")
-                evidence = candidate
+        with repo._authority_read_fences(context.stores):
+            if selected_root is not None:
+                evidence = selected_root.read_snapshot_metadata(state_ref.digest())
+                if evidence is None or evidence.state_ref != state_ref:
+                    raise KeyError(state_ref.digest())
+            else:
+                for store in context.stores:
+                    candidate = store.read_snapshot_metadata(state_ref.digest())
+                    if candidate is None:
+                        continue
+                    if candidate.state_ref != state_ref:
+                        raise RepoSaveError("StateRef digest collision has incompatible snapshot authority.")
+                    if evidence is not None and evidence != candidate:
+                        raise MetadataConflictError("Connected Stores disagree about snapshot evidence.")
+                    evidence = candidate
         if evidence is None:
             evidence = capture_snapshot(plan, observer=snapshot_observer)
 
@@ -1456,14 +1510,19 @@ def execute_routed_save_plan(
                 state_index = indexes["state"]
                 snapshot_index = indexes["snapshot"]
                 membership_index = indexes["membership"]
+                lineage_indexes = indexes["lineage"]
+                object_metadata_index = indexes.get("object_metadata")
+                state_metadata_index = indexes.get("state_metadata")
                 claim_index = indexes.get("claim")
                 lease = claims_by_path.get(action.path)
                 record = DefinitionRecord(projection.definition)
+                attempted = set()
                 definition_records = tuple(
                     DefinitionRecord(node.definition)
                     for node in ConcreteDefinitionGraph.from_root(projection.definition).nodes()
                 )
                 try:
+                    attempted.add(definition_index)
                     for definition_record in definition_records:
                         store.write_definition_record(definition_record, stored_root=False)
                     if not ledger.confirm(
@@ -1474,11 +1533,66 @@ def execute_routed_save_plan(
                             ),
                     ):
                         raise RepoSaveError("Definition publication did not survive read-back.")
+                    if isinstance(snapshot_evidence, SnapshotCapture):
+                        resolved_lineages = {
+                            path: (
+                                existing
+                                if lineage.creation_status == "unknown"
+                                and (existing := store.read_lineage_metadata(lineage.object_ref)) is not None
+                                else lineage
+                            )
+                            for path, lineage in snapshot_evidence.lineages.items()
+                        }
+                        snapshot_evidence = SnapshotCapture(
+                            resolved_lineages, snapshot_evidence.saved_at,
+                            snapshot_evidence.environment, snapshot_evidence.environment_status,
+                            snapshot_evidence.requirements, snapshot_evidence.requirements_status,
+                            snapshot_evidence.requirements_coverage, snapshot_evidence.diagnostics,
+                        )
+                    for path, lineage in snapshot_evidence.lineages.items():
+                        lineage_index = lineage_indexes[path]
+                        attempted.add(lineage_index)
+                        store.write_lineage_metadata(lineage)
+                        if not ledger.confirm(
+                            lineage_index,
+                            lambda store=store, lineage=lineage:
+                            store.read_lineage_metadata(lineage.object_ref) == lineage,
+                        ):
+                            raise RepoSaveError("Lineage publication did not survive read-back.")
+                    attempted.update((state_index, snapshot_index))
+
+                    def begin_annotation_write(scope):
+                        attempted.add(
+                            object_metadata_index if scope == "object"
+                            else state_metadata_index
+                        )
+
+                    publication_arguments = {
+                        "evidence": snapshot_evidence,
+                        "annotations": annotations if not action.path else None,
+                        "local_states": selected_sources,
+                        "children": children,
+                    }
+                    if _supports_annotation_phase_callback(store):
+                        publication_arguments["_before_annotation_write"] = begin_annotation_write
                     published_metadata = store.publish_snapshot(
-                        projection, evidence=snapshot_evidence,
-                        annotations=annotations if not action.path else None,
-                        local_states=selected_sources, children=children,
+                        projection, **publication_arguments,
                     )
+                    if annotations is not None and not action.path:
+                        if annotations.object is not None:
+                            if not ledger.confirm(
+                                    object_metadata_index,
+                                    lambda store=store, projection=projection, annotations=annotations:
+                                    store.read_metadata(projection.object) == annotations.object,
+                            ):
+                                raise RepoSaveError("Object metadata publication did not survive read-back.")
+                        if annotations.state is not None:
+                            if not ledger.confirm(
+                                    state_metadata_index,
+                                    lambda store=store, projection=projection, annotations=annotations:
+                                    store.read_metadata(projection) == annotations.state,
+                            ):
+                                raise RepoSaveError("State metadata publication did not survive read-back.")
                     # The first root installation is the capture winner for later
                     # replicas. They copy its immutable captured mappings instead
                     # of rereading their own current annotations.
@@ -1487,18 +1601,16 @@ def execute_routed_save_plan(
                         snapshot_evidence = published_metadata
                     if not ledger.confirm(
                             state_index,
-                            lambda store=store, projection=projection, selected_sources=selected_sources: all(
-                                store.validate_local_state(projection, path).state_hash
-                                == source.manifest.state_hash
-                                for path, source in selected_sources.items()
-                            ),
+                            lambda store=store, projection=projection, selected_sources=selected_sources:
+                            _has_complete_local_states(store, projection, selected_sources),
                     ):
                         raise RepoSaveError("Snapshot payload publication did not survive read-back.")
                     if not ledger.confirm(
                             snapshot_index,
                             lambda store=store, projection=projection: store.read_state_ref_record(projection.digest()) is not None,
-                    ):
-                        raise RepoSaveError("Snapshot publication did not survive read-back.")
+                        ):
+                            raise RepoSaveError("Snapshot publication did not survive read-back.")
+                    attempted.add(membership_index)
                     store.write_definition_record(record, stored_root=True)
                     if not ledger.confirm(
                             membership_index,
@@ -1506,6 +1618,7 @@ def execute_routed_save_plan(
                     ):
                         raise RepoSaveError("Snapshot membership did not survive read-back.")
                     if lease is not None and store is lease.store:
+                        attempted.add(claim_index)
                         repo._mark_initial_state_ref_complete(projection, store, lease)
                         if not ledger.confirm(
                                 claim_index,
@@ -1515,7 +1628,58 @@ def execute_routed_save_plan(
                             raise RepoSaveError("Initial snapshot claim did not survive read-back.")
                         repo._clear_completed_routed_claim(plan, lease)
                 except BaseException as error:
-                    ledger.failed(snapshot_index, lambda store=store, projection=projection: store.read_state_ref_record(projection.digest()) is not None)
+                    if definition_index in attempted:
+                        ledger.failed(
+                            definition_index,
+                            lambda store=store, records=definition_records: all(
+                                store.read_definition_record(item.digest) is not None
+                                for item in records
+                            ),
+                        )
+                    for path, lineage_index in lineage_indexes.items():
+                        if lineage_index in attempted:
+                            lineage = snapshot_evidence.lineages[path]
+                            ledger.failed(
+                                lineage_index,
+                                lambda store=store, lineage=lineage:
+                                store.read_lineage_metadata(lineage.object_ref) == lineage,
+                            )
+                    if state_index in attempted:
+                        ledger.failed(
+                            state_index,
+                            lambda store=store, projection=projection, selected_sources=selected_sources:
+                            _has_complete_local_states(store, projection, selected_sources),
+                        )
+                    if snapshot_index in attempted:
+                        ledger.failed(
+                            snapshot_index,
+                            lambda store=store, projection=projection:
+                            store.read_state_ref_record(projection.digest()) is not None,
+                        )
+                    if object_metadata_index in attempted:
+                        ledger.failed(
+                            object_metadata_index,
+                            lambda store=store, projection=projection, annotations=annotations:
+                            store.read_metadata(projection.object) == annotations.object,
+                        )
+                    if state_metadata_index in attempted:
+                        ledger.failed(
+                            state_metadata_index,
+                            lambda store=store, projection=projection, annotations=annotations:
+                            store.read_metadata(projection) == annotations.state,
+                        )
+                    if membership_index in attempted:
+                        ledger.failed(
+                            membership_index,
+                            lambda store=store, record=record:
+                            store.read_stored_root_record(record.digest) is not None,
+                        )
+                    if claim_index in attempted:
+                        ledger.failed(
+                            claim_index,
+                            lambda store=store, lease=lease, projection=projection:
+                            _has_completed_claim(store, lease, projection),
+                        )
                     _raise_publication_failure(error, ledger.report(state_stores, (), snapshots))
                 for path in selected_sources:
                     state_stores.setdefault(action.path.join(path), []).append(store)

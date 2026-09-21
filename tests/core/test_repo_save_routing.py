@@ -12,7 +12,7 @@ import pytest
 from dryml.core import Object, Repo, SaveRouting, Selector, Serializable, save_object
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
-from dryml.core.repo import RepoSaveError
+from dryml.core.repo import RepoLoadError, RepoSaveError
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord, StoredRootRecord
 
@@ -291,6 +291,9 @@ def test_per_object_routing_projects_a_child_state_ref_without_copying_its_paylo
         child_snapshot.state_ref, reuse_live="never",
     ).value == 3
     assert list(Repo(child_store).query(child_state.definition).stored().defs()) == [child_state.definition]
+
+    with pytest.raises(RepoLoadError):
+        Repo(parent_store).load_state_ref(state, reuse_live="never")
 
 
 def test_routed_membership_readback_targets_one_root_in_a_growing_catalogue(tmp_path):

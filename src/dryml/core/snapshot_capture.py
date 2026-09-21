@@ -144,6 +144,16 @@ def capture_snapshot(
         opens Stores, reads payloads, or publishes evidence.
     """
 
+    return _capture_snapshot_evidence(
+        capture_lineages(plan), _materializing_classes(plan),
+        observer=observer, clock=clock,
+    )
+
+
+def _capture_snapshot_evidence(
+        lineages, classes, *, observer=None, clock=current_utc_time) -> SnapshotCapture:
+    """Capture fresh process evidence for already-selected lineage and classes."""
+
     if observer is None:
         from dryml.environments.introspection import inspect_current
 
@@ -162,9 +172,9 @@ def capture_snapshot(
         environment_status = "known"
         environment_diagnostics = ()
 
-    requirements = _requirements_for_classes(_materializing_classes(plan))
+    requirements = _requirements_for_classes(tuple(classes))
     return SnapshotCapture(
-        capture_lineages(plan),
+        lineages,
         clock(),
         environment,
         environment_status,

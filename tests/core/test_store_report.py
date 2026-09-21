@@ -2,7 +2,7 @@ import pytest
 from pathlib import Path
 
 from dryml.core import (
-    Repo, SavePublication, SaveRouting, SavedSnapshot, Selector, Serializable,
+    Repo, SaveAnnotations, SavePublication, SaveRouting, SavedSnapshot, Selector, Serializable,
     StoreReport,
 )
 from dryml.core.repo import RepoSaveError, save_object
@@ -248,7 +248,7 @@ def test_state_install_error_after_authority_reports_the_confirmed_local_store(t
 
     report = raised.value.report
     state = next(item for item in report.publications if item.phase == "state")
-    assert state.status == "unattempted"
+    assert state.status == "completed"
     assert store.validate_local_state(state.state_ref, state.path)
 
 
@@ -274,7 +274,7 @@ def test_post_membership_error_retains_completed_snapshot_and_new_receipt(tmp_pa
 
     report = raised.value.report
     membership = next(item for item in report.publications if item.phase == "membership")
-    assert membership.status == "unattempted"
+    assert membership.status == "completed"
     assert store.read_state_ref_record(membership.state_ref.digest()).state_ref == membership.state_ref
     assert obj.last_state_ref == old
     assert Repo(store).load_state_ref(membership.state_ref, reuse_live="never").value == 2
@@ -330,7 +330,10 @@ def test_index_failure_delays_all_requested_names(tmp_path, monkeypatch):
     )
 
     with pytest.raises(RepoSaveError, match="publication") as raised:
-        repo.save_object(obj, main=True, alias="latest", deep_capture=True)
+        repo.save_object(
+            obj, main=True, alias="latest", deep_capture=True,
+            annotations=SaveAnnotations(object={"project": "retained"}, state={"score": 1}),
+        )
 
     report = raised.value.report
     assert all(
@@ -340,6 +343,10 @@ def test_index_failure_delays_all_requested_names(tmp_path, monkeypatch):
     )
     assert store.read_main_ref() is None
     assert store.read_object_alias("latest") is None
+    state = next(item.state_ref for item in report.publications if item.phase == "snapshot")
+    assert store.read_metadata(state.object) == {"project": "retained"}
+    assert store.read_metadata(state) == {"score": 1}
+    assert store.query_index_is_dirty()
 
 
 @pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
@@ -432,11 +439,7 @@ def test_routed_control_flow_boundaries_preserve_identity_and_ledger(
 
     report = raised.value.report
     publication = next(item for item in report.publications if item.phase == boundary)
-    # These v3 composite boundaries have no completed ledger evidence until
-    # their read-back succeeds. Later index/name boundaries retain their
-    # direct operation evidence as before.
-    expected = (
-        "unattempted" if boundary in {"definition", "state", "membership"}
-        else expected_after if after else "failed"
-    )
+    # Every entered boundary is classified by direct read-back, including
+    # composite v3 authority boundaries interrupted around their operation.
+    expected = expected_after if after else "failed"
     assert publication.status == expected

@@ -1,6 +1,8 @@
 import pytest
 
+import dryml.environments as envs
 from dryml.core import Object, Repo, Serializable, object_namespace
+from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import ClaimRecord
 
@@ -16,6 +18,17 @@ class ForkValue(Serializable):
 class SeedWrapper(Object):
     def __init__(self, child):
         self.child = child
+
+
+def _environment(version):
+    """Return deterministic fork provenance for one synthetic process."""
+
+    return envs.EnvironmentRecord(
+        python=envs.PythonRecord(version, "CPython"),
+        platform=envs.PlatformRecord("Linux", "1", "v", "x86_64", "Linux-x86_64"),
+        distributions={},
+        dryml=envs.DrymlRuntimeRecord(),
+    )
 
 
 def test_object_and_state_forks_rekey_ids_and_preserve_source_namespace(tmp_path):
@@ -81,6 +94,28 @@ def test_fork_copies_verified_snapshot_local_payloads(tmp_path):
     assert source.validate_local_state(state, ())
 
 
+def test_state_fork_captures_its_own_environment_instead_of_relabeling_source(
+        tmp_path, monkeypatch):
+    source = DirStore(tmp_path / "source")
+    target = DirStore(tmp_path / "target")
+    repo = Repo([source, target])
+    observed = [_environment("3.12.1")]
+    monkeypatch.setattr(
+        "dryml.environments.introspection.inspect_current", lambda: observed[0],
+    )
+    state = repo.save_object(ForkValue(1, repo=repo), store=source)
+    source_evidence = source.read_snapshot_metadata(state.digest())
+    observed[0] = _environment("3.12.2")
+
+    fork = repo.fork_state_ref(state, store=target, source_store=source)
+    fork_evidence = target.read_snapshot_metadata(fork.digest())
+
+    assert source_evidence.environment == _environment("3.12.1")
+    assert fork_evidence.environment == _environment("3.12.2")
+    assert fork_evidence.saved_at > source_evidence.saved_at
+    assert fork_evidence.requirements_coverage == "incomplete"
+
+
 def test_fork_failure_before_final_boundaries_leaves_no_new_authority(tmp_path, monkeypatch):
     source = DirStore(tmp_path / "source")
     target = DirStore(tmp_path / "target")
@@ -92,9 +127,14 @@ def test_fork_failure_before_final_boundaries_leaves_no_new_authority(tmp_path, 
         "publish_snapshot",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("final boundary failed")),
     )
-    with pytest.raises(OSError, match="final boundary failed"):
+    with pytest.raises(RepoSaveError, match="publication") as raised:
         repo.fork_state_ref(state, store=target)
 
+    phases = {item.phase: item.status for item in raised.value.report.publications}
+    assert phases == {
+        "definition": "completed", "lineage": "completed", "state": "failed",
+        "snapshot": "failed", "membership": "unattempted",
+    }
     assert tuple(target.iter_state_ref_records()) == ()
     assert tuple(target.iter_declaration_records()) == ()
 
@@ -111,9 +151,14 @@ def test_interruption_after_state_fork_boundary_leaves_complete_discoverable_aut
         raise KeyboardInterrupt("interrupted after final boundary")
 
     monkeypatch.setattr(target, "publish_snapshot", install_then_interrupt)
-    with pytest.raises(KeyboardInterrupt, match="interrupted after final boundary"):
+    with pytest.raises(KeyboardInterrupt, match="interrupted after final boundary") as raised:
         repo.fork_state_ref(state, store=target)
 
+    phases = {item.phase: item.status for item in raised.value.report.publications}
+    assert phases == {
+        "definition": "completed", "lineage": "completed", "state": "completed",
+        "snapshot": "completed", "membership": "unattempted",
+    }
     records = tuple(target.iter_state_ref_records())
     assert len(records) == 1
     fork = records[0].state_ref
@@ -132,7 +177,11 @@ def test_object_fork_failure_before_declaration_leaves_no_declaration_authority(
         "write_declaration_record",
         lambda record: (_ for _ in ()).throw(OSError("declaration boundary failed")),
     )
-    with pytest.raises(OSError, match="declaration boundary failed"):
+    with pytest.raises(RepoSaveError, match="publication") as raised:
         repo.fork_object_ref(state.object, store=target)
 
+    phases = {item.phase: item.status for item in raised.value.report.publications}
+    assert phases == {
+        "definition": "completed", "lineage": "completed", "membership": "unattempted",
+    }
     assert tuple(target.iter_declaration_records()) == ()

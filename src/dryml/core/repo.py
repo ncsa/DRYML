@@ -1497,6 +1497,18 @@ class Repo:
             raise StoreAuthorityError("StateRef digest collision has incompatible authority.")
         return True
 
+    @contextmanager
+    def _authority_read_fences(self, stores=None):
+        """Hold each distinct selected Store authority domain in stable order."""
+
+        groups = {}
+        for store in self.stores if stores is None else stores:
+            groups.setdefault(store.authority_fence_key(), store)
+        with ExitStack() as fences:
+            for key in sorted(groups):
+                fences.enter_context(groups[key].authority_read_fence())
+            yield
+
     def _metadata_holders(self, target, *, store=None) -> tuple[Store, ...]:
         """Select connected target-holding Stores without treating nonholders as votes."""
 
@@ -1507,6 +1519,18 @@ class Repo:
         if not holders:
             raise KeyError(target.digest())
         return holders
+
+    def _get_metadata_unfenced(self, target, *, store=None):
+        """Read one current mapping while the caller holds authority fences."""
+
+        values = [
+            candidate.read_metadata(target)
+            for candidate in self._metadata_holders(target, store=store)
+        ]
+        first = values[0]
+        if any(value != first for value in values[1:]):
+            raise MetadataConflictError("Selected Stores disagree about current metadata.")
+        return first
 
     def get_metadata(self, target, *, store=None):
         """Return one detached current mapping for an exact ObjectRef or StateRef.
@@ -1530,11 +1554,11 @@ class Repo:
         """
 
         target = self._metadata_target(target)
-        values = [candidate.read_metadata(target) for candidate in self._metadata_holders(target, store=store)]
-        first = values[0]
-        if any(value != first for value in values[1:]):
-            raise MetadataConflictError("Selected Stores disagree about current metadata.")
-        return first
+        selected = (
+            (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
+        )
+        with self._authority_read_fences(selected):
+            return self._get_metadata_unfenced(target, store=store)
 
     def _metadata_mutation_store(self, target, store, operation: str) -> Store:
         """Choose one writable target holder for a local LWW metadata mutation."""
@@ -1652,23 +1676,27 @@ class Repo:
 
         if not isinstance(target, ObjectRef):
             raise TypeError("lineage metadata target must be an ObjectRef.")
+        selected = (
+            (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
+        )
         values = []
-        for candidate in self._metadata_holders(target, store=store):
-            value = candidate.read_lineage_metadata(target)
-            if value is None:
-                # U3 snapshot directories are already authoritative lineage
-                # carriers; a separate lineage sidecar is optional acceleration.
-                for state_record in candidate.iter_state_ref_records():
-                    snapshot = candidate.read_snapshot_metadata(state_record.digest)
-                    if snapshot is None:
-                        continue
-                    value = next(
-                        (fact for fact in snapshot.lineages.values() if fact.object_ref == target),
-                        None,
-                    )
-                    if value is not None:
-                        break
-            values.append(value)
+        with self._authority_read_fences(selected):
+            for candidate in self._metadata_holders(target, store=store):
+                value = candidate.read_lineage_metadata(target)
+                if value is None:
+                    # U3 snapshot directories are already authoritative lineage
+                    # carriers; a separate lineage sidecar is optional acceleration.
+                    for state_record in candidate.iter_state_ref_records():
+                        snapshot = candidate.read_snapshot_metadata(state_record.digest)
+                        if snapshot is None:
+                            continue
+                        value = next(
+                            (fact for fact in snapshot.lineages.values() if fact.object_ref == target),
+                            None,
+                        )
+                        if value is not None:
+                            break
+                values.append(value)
         # A holder with no lineage record is valid unknown creation evidence;
         # it must still conflict with a different holder's known fact.
         if any(value != values[0] for value in values[1:]):
@@ -1705,12 +1733,16 @@ class Repo:
 
         if not isinstance(target, StateRef):
             raise TypeError("snapshot metadata target must be a StateRef.")
+        selected = (
+            (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
+        )
         values = []
-        for candidate in self._metadata_holders(target, store=store):
-            value = candidate.read_snapshot_metadata(target.digest())
-            if value is None or value.state_ref != target:
-                raise StoreAuthorityError("StateRef authority lacks complete captured metadata.")
-            values.append(value)
+        with self._authority_read_fences(selected):
+            for candidate in self._metadata_holders(target, store=store):
+                value = candidate.read_snapshot_metadata(target.digest())
+                if value is None or value.state_ref != target:
+                    raise StoreAuthorityError("StateRef authority lacks complete captured metadata.")
+                values.append(value)
         first = values[0]
         if any(value != first for value in values[1:]):
             raise MetadataConflictError("Selected Stores disagree about snapshot metadata.")
@@ -1739,12 +1771,13 @@ class Repo:
             raise TypeError("target must be a StateRef.")
         candidates = self.stores if store is None else (self._connected_metadata_store(store),)
         matches = []
-        for candidate in candidates:
-            try:
-                directory = candidate.get_snapshot_directory(target)
-            except KeyError:
-                continue
-            matches.append(directory)
+        with self._authority_read_fences(candidates):
+            for candidate in candidates:
+                try:
+                    directory = candidate.get_snapshot_directory(target)
+                except KeyError:
+                    continue
+                matches.append(directory)
         if not matches:
             raise KeyError(target.digest())
         if store is None and len(matches) != 1:
@@ -2250,16 +2283,32 @@ class Repo:
         self._lineage_candidates.setdefault(object_id, created_at)
         return self._lineage_candidates[object_id]
 
-    def _register_declaration(self, reference, store, *, allow_preallocated: bool = False):
+    def _register_declaration(
+            self, reference, store, *, allow_preallocated: bool = False,
+            _before_phase=None):
         """Publish Definition, available claim, then declaration under one fence."""
+        from .metadata import LineageMetadata
         from .reference_values import ObjectRef
         from .store.records import ClaimRecord, DeclarationRecord, DefinitionRecord
+        from .utils.graph.path import GraphPath
 
         if not isinstance(reference, ObjectRef) or not reference.objects:
             raise ValueError("Declarations require a complete non-empty ObjectRef.")
         store.preflight_publication("declare ObjectRef")
+        lineages = {
+            path: LineageMetadata(
+                reference if not path else reference.at(path),
+                "known" if self._lineage_candidates.get(object_id) is not None else "unknown",
+                self._lineage_candidates.get(object_id),
+            )
+            for path, object_id in reference.objects.items()
+        }
+        if GraphPath() not in lineages:
+            lineages[GraphPath()] = LineageMetadata(reference, "unknown", None)
         with store.writer_lock():
             self._assert_compatible_object_ids(reference)
+            if _before_phase is not None:
+                _before_phase("definition", GraphPath())
             definition_record = store.write_definition_record(
                 DefinitionRecord(reference.definition), stored_root=False
             )
@@ -2270,6 +2319,12 @@ class Repo:
                     raise RepoLoadError("Declaration digest collision has incompatible ObjectRef authority.")
                 if claim is None:
                     raise RepoLoadError("Declaration exists without ClaimRecord; Store authority is corrupt.")
+                for path, lineage in lineages.items():
+                    if _before_phase is not None:
+                        _before_phase("lineage", path)
+                    store.write_lineage_metadata(lineage)
+                if _before_phase is not None:
+                    _before_phase("membership", GraphPath())
                 store.write_definition_record(definition_record, stored_root=True)
                 return reference
             # An interrupted claim without a declaration is not authority. Its
@@ -2278,7 +2333,13 @@ class Repo:
                 store.write_claim_record(ClaimRecord(reference.digest(), 0, "available"))
             elif claim.status != "available":
                 raise RepoLoadError("Unregistered ObjectRef claim is not available for recovery.")
+            for path, lineage in lineages.items():
+                if _before_phase is not None:
+                    _before_phase("lineage", path)
+                store.write_lineage_metadata(lineage)
             store.write_declaration_record(DeclarationRecord(reference))
+            if _before_phase is not None:
+                _before_phase("membership", GraphPath())
             store.write_definition_record(definition_record, stored_root=True)
         return reference
 
@@ -2705,6 +2766,10 @@ class Repo:
                 ambiguous.
             namespace: Replacement namespace for every new ObjectId, or ``None``
                 to preserve each source namespace independent of active scopes.
+            copy_annotations: Whether to copy the selected source's current
+                object mapping by value after fork authority is complete.
+            source_store: Optional connected source Store used to disambiguate
+                current metadata when annotation copying is requested.
 
         Returns:
             A graph-isomorphic ObjectRef with fresh nonces and a new available
@@ -2714,10 +2779,13 @@ class Repo:
             ValueError: If the reference is empty or namespace validation fails.
             TypeError: If the reference has an unsupported type.
             RepoLoadError: If existing identity authority conflicts.
+            RepoSaveError: If publication fails, with a partial StoreReport that
+                classifies completed definition, lineage, membership, and current
+                metadata boundaries.
 
         Side Effects:
-            Allocates IDs and publishes the fork declaration only after the
-            selected Store can install its DefinitionRecord and claim.
+            Allocates IDs, publishes the fork declaration, persists its new
+            lineage facts, and optionally installs a copied current mapping.
 
         Concurrency:
             Registration runs under one Store writer lock; the fork has no
@@ -2727,22 +2795,117 @@ class Repo:
             The selected Store must provide current writable declaration and claim
             publication semantics.
         """
+        from .metadata import LineageMetadata
         from .reference_values import ObjectRef
+        from .repo_plan import _PublicationLedger, _raise_publication_failure
+        from .store.records import DefinitionRecord
+        from .utils.graph.path import GraphPath
 
         if not isinstance(reference, ObjectRef) or not reference.objects:
             raise ValueError("fork_object_ref requires a non-empty ObjectRef.")
         if not isinstance(copy_annotations, bool):
             raise TypeError("copy_annotations must be a bool.")
         selected = self._selected_writable_store(store, "fork ObjectRef")
+        source = None if source_store is None else self._connected_metadata_store(source_store)
+        values = None
+        if copy_annotations:
+            candidates = (source,) if source is not None else tuple(self.stores)
+            with self._authority_read_fences(candidates):
+                values = self._get_metadata_unfenced(reference, store=source)
         fork, _ = _fork_rekey_reference(
             reference, namespace, record_candidate=self._record_lineage_candidate,
         )
-        fork = self._register_declaration(fork, selected, allow_preallocated=True)
-        if copy_annotations:
-            source = None if source_store is None else self._connected_metadata_store(source_store)
-            values = self.get_metadata(reference, store=source)
+        ledger = _PublicationLedger((selected,))
+        definition_index = ledger.plan(selected, GraphPath(), None, None, "definition", object_id=fork.object_id)
+        lineage_indexes = {
+            path: ledger.plan(
+                selected, path, None, None, "lineage",
+                object_id=(fork if not path else fork.at(path)).object_id,
+            )
+            for path in dict.fromkeys((GraphPath(), *fork.objects))
+        }
+        membership_index = ledger.plan(selected, GraphPath(), None, None, "membership", object_id=fork.object_id)
+        metadata_index = (
+            ledger.plan(selected, GraphPath(), None, None, "object_metadata", object_id=fork.object_id)
+            if values is not None else None
+        )
+        attempted = set()
+        definition = DefinitionRecord(fork.definition)
+        lineages = {
+            path: LineageMetadata(
+                fork if not path else fork.at(path),
+                "known" if self._lineage_candidates.get(
+                    (fork if not path else fork.at(path)).object_id
+                ) is not None else "unknown",
+                self._lineage_candidates.get((fork if not path else fork.at(path)).object_id),
+            )
+            for path, object_id in fork.objects.items()
+        }
+        if GraphPath() not in lineages:
+            lineages[GraphPath()] = LineageMetadata(fork, "unknown", None)
+
+        def begin_phase(phase, path):
+            attempted.add(
+                lineage_indexes[path] if phase == "lineage"
+                else definition_index if phase == "definition"
+                else membership_index
+            )
+
+        try:
+            fork = self._register_declaration(
+                fork, selected, allow_preallocated=True, _before_phase=begin_phase,
+            )
+            if not ledger.confirm(
+                    definition_index,
+                    lambda: selected.read_definition_record(definition.digest) is not None,
+            ):
+                raise RepoSaveError("Fork definition publication did not survive read-back.")
+            if not ledger.confirm(
+                    membership_index,
+                    lambda: selected.read_stored_root_record(definition.digest) is not None,
+            ):
+                raise RepoSaveError("Fork membership publication did not survive read-back.")
+            for path, lineage_index in lineage_indexes.items():
+                lineage = lineages[path]
+                if not ledger.confirm(
+                        lineage_index,
+                        lambda lineage=lineage:
+                        selected.read_lineage_metadata(lineage.object_ref) == lineage,
+                ):
+                    raise RepoSaveError("Fork lineage publication did not survive read-back.")
             if values is not None:
+                attempted.add(metadata_index)
                 self.set_metadata(fork, values, store=selected)
+                if not ledger.confirm(
+                        metadata_index,
+                        lambda: selected.read_metadata(fork) == values,
+                ):
+                    raise RepoSaveError("Fork metadata publication did not survive read-back.")
+        except BaseException as error:
+            if definition_index in attempted:
+                ledger.failed(
+                    definition_index,
+                    lambda: selected.read_definition_record(definition.digest) is not None,
+                )
+            if membership_index in attempted:
+                ledger.failed(
+                    membership_index,
+                    lambda: selected.read_stored_root_record(definition.digest) is not None,
+                )
+            for path, lineage_index in lineage_indexes.items():
+                if lineage_index in attempted:
+                    lineage = lineages[path]
+                    ledger.failed(
+                        lineage_index,
+                        lambda lineage=lineage:
+                        selected.read_lineage_metadata(lineage.object_ref) == lineage,
+                    )
+            if metadata_index in attempted:
+                ledger.failed(
+                    metadata_index,
+                    lambda: selected.read_metadata(fork) == values,
+                )
+            _raise_publication_failure(error, ledger.report({}, ()))
         return fork
 
     def fork_state_ref(
@@ -2755,6 +2918,12 @@ class Repo:
             store: Explicit writable target Store when Repo Stores are ambiguous.
             namespace: Replacement namespace for all newly allocated IDs, or
                 ``None`` to preserve source namespaces despite active scopes.
+            copy_annotations: Tuple selecting ``"object"`` and/or ``"state"``
+                current mappings to copy by value.
+            source_store: Optional connected Store selecting root snapshot and
+                current metadata authority.
+            source_stores: Optional exact StateRef-to-Store mapping selecting
+                source authority throughout an embedded snapshot closure.
 
         Returns:
             New exact StateRef with fresh ObjectIds and the source local-state
@@ -2765,23 +2934,31 @@ class Repo:
             RepoLoadError: If the root or materializing seed authority/local state
                 is missing, conflicting, or fails verification.
             StoreAuthorityError: If target publication or copying fails.
+            RepoSaveError: If publication fails after target work begins, with a
+                partial StoreReport for every planned fork boundary.
 
         Side Effects:
-            Verifies every local state before allocating fork authority. A
-            The target receives complete snapshot-local payloads, DefinitionRecords,
-            and embedded seed snapshots before the root snapshot boundary.
+            Verifies every local state before allocating fork authority. The
+            target receives complete snapshot-local payloads, DefinitionRecords,
+            lineage facts, and embedded seed snapshots before root membership.
 
         Concurrency:
-            Final record publication is serialized by the target Store writer
-            lock. Pre-boundary failure leaves no fork StateRef authority.
+            Source records and requested current mappings are captured under one
+            ordered authority cut. Final publication is serialized by the target
+            Store writer lock; completed immutable work survives later failure.
 
         Store Requirements:
             Source Stores must remain connected for closure verification. The
             target must provide writable composite snapshot publication semantics.
         """
         from .reference_values import StateRef
-        from .metadata import LineageMetadata, SaveAnnotations, SnapshotCapture
-        from .repo_plan import _embedded_state_refs
+        from .metadata import LineageMetadata, SaveAnnotations
+        from .repo_plan import (
+            SavedSnapshot, _PublicationLedger, _embedded_state_refs,
+            _has_complete_local_states, _raise_publication_failure,
+            _supports_annotation_phase_callback,
+        )
+        from .snapshot_capture import _capture_snapshot_evidence
         from .store.records import DefinitionRecord
         from .utils.graph.path import GraphPath
 
@@ -2818,51 +2995,87 @@ class Repo:
             for _, seed in _embedded_state_refs(reference.definition):
                 collect(seed)
 
-        collect(state_ref)
         sources = {}
-        metadata = {}
-        for reference in references:
-            matches = []
-            selected_source = (
-                source_stores.get(reference) if source_stores is not None else None
-            ) or source_store
-            candidates = (
-                (self._connected_metadata_store(selected_source),)
-                if selected_source is not None else self.stores
+        with self._authority_read_fences():
+            collect(state_ref)
+            for reference in references:
+                matches = []
+                selected_source = (
+                    source_stores.get(reference) if source_stores is not None else None
+                ) or source_store
+                candidates = (
+                    (self._connected_metadata_store(selected_source),)
+                    if selected_source is not None else self.stores
+                )
+                for candidate in candidates:
+                    try:
+                        payloads = {
+                            path: candidate.open_local_state(reference, path)
+                            for path in reference.states
+                        }
+                        captured = candidate.read_snapshot_metadata(reference.digest())
+                    except Exception:
+                        continue
+                    if captured is not None:
+                        matches.append((candidate, payloads, captured))
+                if not matches:
+                    raise RepoLoadError("Fork source lacks one complete snapshot-local payload closure.")
+                first = matches[0]
+                if any(item[2] != first[2] for item in matches[1:]):
+                    raise MetadataConflictError("Fork source snapshots disagree about captured evidence.")
+                sources[reference.digest()] = first[1]
+            copy_source = source_store
+            if copy_source is None and source_stores is not None:
+                copy_source = source_stores.get(state_ref)
+                if copy_source is not None:
+                    copy_source = self._connected_metadata_store(copy_source)
+            copied_annotations = SaveAnnotations(
+                object=(self._get_metadata_unfenced(state_ref.object, store=copy_source)
+                        if "object" in copy_annotations else None),
+                state=(self._get_metadata_unfenced(state_ref, store=copy_source)
+                       if "state" in copy_annotations else None),
+            ) if copy_annotations else None
+        if (
+                copied_annotations is not None
+                and (copied_annotations.object is not None or copied_annotations.state is not None)
+                and not _supports_annotation_phase_callback(selected)):
+            raise StoreCapabilityError(
+                "Fork annotation copies require exact publication phase callbacks."
             )
-            for candidate in candidates:
-                try:
-                    payloads = {
-                        path: candidate.open_local_state(reference, path)
-                        for path in reference.states
-                    }
-                    captured = candidate.read_snapshot_metadata(reference.digest())
-                except Exception:
-                    continue
-                if captured is not None:
-                    matches.append((candidate, payloads, captured))
-            if not matches:
-                raise RepoLoadError("Fork source lacks one complete snapshot-local payload closure.")
-            first = matches[0]
-            if any(item[2] != first[2] for item in matches[1:]):
-                raise MetadataConflictError("Fork source snapshots disagree about captured evidence.")
-            sources[reference.digest()] = first[1]
-            metadata[reference.digest()] = first[2]
         fork, forked_references = _fork_rekey_reference(
             state_ref, namespace, record_candidate=self._record_lineage_candidate,
         )
+        ledger = _PublicationLedger((selected,))
+        publication_indexes = {}
+        for reference in references:
+            target = forked_references[reference.digest()]
+            indexes = {
+                phase: ledger.plan(selected, GraphPath(), None, target, phase, object_id=target.object_id)
+                for phase in ("definition", "state", "snapshot")
+            }
+            indexes["lineage"] = {
+                path: ledger.plan(
+                    selected, path, None, target, "lineage",
+                    object_id=(target.object if not path else target.object.at(path)).object_id,
+                )
+                for path in dict.fromkeys((GraphPath(), *target.object.objects))
+            }
+            if target == fork:
+                indexes["membership"] = ledger.plan(
+                    selected, GraphPath(), None, target, "membership", object_id=target.object_id,
+                )
+                if copied_annotations is not None:
+                    if copied_annotations.object is not None:
+                        indexes["object_metadata"] = ledger.plan(
+                            selected, GraphPath(), None, target, "object_metadata", object_id=target.object_id,
+                        )
+                    if copied_annotations.state is not None:
+                        indexes["state_metadata"] = ledger.plan(
+                            selected, GraphPath(), None, target, "state_metadata", object_id=target.object_id,
+                        )
+            publication_indexes[target.digest()] = indexes
         staged = []
-        copy_source = source_store
-        if copy_source is None and source_stores is not None:
-            copy_source = source_stores.get(state_ref)
-            if copy_source is not None:
-                copy_source = self._connected_metadata_store(copy_source)
-        copied_annotations = SaveAnnotations(
-            object=(self.get_metadata(state_ref.object, store=copy_source)
-                    if "object" in copy_annotations else None),
-            state=(self.get_metadata(state_ref, store=copy_source)
-                   if "state" in copy_annotations else None),
-        ) if copy_annotations else None
+        snapshots = []
         try:
             for reference in references:
                 target = forked_references[reference.digest()]
@@ -2873,7 +3086,6 @@ class Repo:
                     for path, source in sources[reference.digest()].items()
                 }
                 staged.extend(payloads.values())
-                source_metadata = metadata[reference.digest()]
                 lineages = {
                     path: LineageMetadata(
                         target.object if not path else target.object.at(path),
@@ -2887,24 +3099,137 @@ class Repo:
                     "known" if self._lineage_candidates.get(target.object.object_id) is not None else "unknown",
                     self._lineage_candidates.get(target.object.object_id),
                 )
-                evidence = SnapshotCapture(
-                    lineages, source_metadata.saved_at, source_metadata.environment,
-                    source_metadata.environment_status, source_metadata.requirements,
-                    source_metadata.requirements_status,
-                    source_metadata.requirements_coverage, source_metadata.diagnostics,
+                evidence = _capture_snapshot_evidence(
+                    lineages, (None,),
                 )
-                for path in payloads:
-                    selected.write_definition_record(
-                        DefinitionRecord(target.object.at(path).definition), stored_root=False,
+                indexes = publication_indexes[target.digest()]
+                attempted = set()
+                definitions = tuple(
+                    DefinitionRecord(node.definition)
+                    for node in ConcreteDefinitionGraph.from_root(target.definition).nodes()
+                )
+                try:
+                    attempted.add(indexes["definition"])
+                    for definition in definitions:
+                        selected.write_definition_record(definition, stored_root=False)
+                    if not ledger.confirm(
+                            indexes["definition"],
+                            lambda definitions=definitions: all(
+                                selected.read_definition_record(item.digest) is not None
+                                for item in definitions
+                            ),
+                    ):
+                        raise RepoSaveError("Fork definition publication did not survive read-back.")
+                    for path, lineage in evidence.lineages.items():
+                        lineage_index = indexes["lineage"][path]
+                        attempted.add(lineage_index)
+                        selected.write_lineage_metadata(lineage)
+                        if not ledger.confirm(
+                                lineage_index,
+                                lambda lineage=lineage:
+                                selected.read_lineage_metadata(lineage.object_ref) == lineage,
+                        ):
+                            raise RepoSaveError("Fork lineage publication did not survive read-back.")
+                    attempted.update((indexes["state"], indexes["snapshot"]))
+
+                    def begin_annotation_write(scope):
+                        attempted.add(indexes[f"{scope}_metadata"])
+
+                    publication_arguments = {
+                        "evidence": evidence,
+                        "annotations": copied_annotations if target == fork else None,
+                        "local_states": payloads,
+                        "children": {},
+                    }
+                    if _supports_annotation_phase_callback(selected):
+                        publication_arguments["_before_annotation_write"] = begin_annotation_write
+                    selected.publish_snapshot(target, **publication_arguments)
+                    if not ledger.confirm(
+                            indexes["state"],
+                            lambda target=target, payloads=payloads:
+                            _has_complete_local_states(selected, target, payloads),
+                    ):
+                        raise RepoSaveError("Fork payload publication did not survive read-back.")
+                    if not ledger.confirm(
+                            indexes["snapshot"],
+                            lambda target=target:
+                            selected.read_state_ref_record(target.digest()) is not None,
+                    ):
+                        raise RepoSaveError("Fork snapshot publication did not survive read-back.")
+                    if "object_metadata" in indexes and not ledger.confirm(
+                            indexes["object_metadata"],
+                            lambda target=target: selected.read_metadata(target.object)
+                            == copied_annotations.object,
+                    ):
+                        raise RepoSaveError("Fork object metadata did not survive read-back.")
+                    if "state_metadata" in indexes and not ledger.confirm(
+                            indexes["state_metadata"],
+                            lambda target=target: selected.read_metadata(target)
+                            == copied_annotations.state,
+                    ):
+                        raise RepoSaveError("Fork state metadata did not survive read-back.")
+                    if "membership" in indexes:
+                        attempted.add(indexes["membership"])
+                        root_definition = DefinitionRecord(target.definition)
+                        selected.write_definition_record(root_definition, stored_root=True)
+                        if not ledger.confirm(
+                                indexes["membership"],
+                                lambda root_definition=root_definition:
+                                selected.read_stored_root_record(root_definition.digest) is not None,
+                        ):
+                            raise RepoSaveError("Fork membership did not survive read-back.")
+                    snapshots.append(SavedSnapshot(target, (selected,), (selected,)))
+                except BaseException as error:
+                    if indexes["definition"] in attempted:
+                        ledger.failed(
+                            indexes["definition"],
+                            lambda definitions=definitions: all(
+                                selected.read_definition_record(item.digest) is not None
+                                for item in definitions
+                            ),
+                        )
+                    for path, lineage_index in indexes["lineage"].items():
+                        if lineage_index in attempted:
+                            lineage = evidence.lineages[path]
+                            ledger.failed(
+                                lineage_index,
+                                lambda lineage=lineage:
+                                selected.read_lineage_metadata(lineage.object_ref) == lineage,
+                            )
+                    if indexes["state"] in attempted:
+                        ledger.failed(
+                            indexes["state"],
+                            lambda target=target, payloads=payloads:
+                            _has_complete_local_states(selected, target, payloads),
+                        )
+                    if indexes["snapshot"] in attempted:
+                        ledger.failed(
+                            indexes["snapshot"],
+                            lambda target=target:
+                            selected.read_state_ref_record(target.digest()) is not None,
+                        )
+                    if indexes.get("object_metadata") in attempted:
+                        ledger.failed(
+                            indexes["object_metadata"],
+                            lambda target=target: selected.read_metadata(target.object)
+                            == copied_annotations.object,
+                        )
+                    if indexes.get("state_metadata") in attempted:
+                        ledger.failed(
+                            indexes["state_metadata"],
+                            lambda target=target: selected.read_metadata(target)
+                            == copied_annotations.state,
+                        )
+                    if indexes.get("membership") in attempted:
+                        root_definition = DefinitionRecord(target.definition)
+                        ledger.failed(
+                            indexes["membership"],
+                            lambda root_definition=root_definition:
+                            selected.read_stored_root_record(root_definition.digest) is not None,
+                        )
+                    _raise_publication_failure(
+                        error, ledger.report({}, (), snapshots),
                     )
-                selected.publish_snapshot(
-                    target, evidence=evidence,
-                    annotations=copied_annotations if target == fork else None,
-                    local_states=payloads, children={},
-                )
-                selected.write_definition_record(
-                    DefinitionRecord(target.definition), stored_root=(target == fork),
-                )
         finally:
             for source in staged:
                 source.store.discard_local_state_staging(source.handle)

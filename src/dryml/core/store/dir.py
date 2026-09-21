@@ -1120,7 +1120,9 @@ class DirStore(Store):
         assert snapshot is not None
         return LocalStateSource(self, os.path.join(self._snapshot_path(reference.digest()), snapshot[2][path]), manifest)
 
-    def publish_snapshot(self, reference, *, evidence, annotations=None, local_states, children=None):
+    def publish_snapshot(
+            self, reference, *, evidence, annotations=None, local_states,
+            children=None, _before_annotation_write=None):
         """Install a complete v3 snapshot directory under the writer fence.
 
         Args:
@@ -1130,6 +1132,8 @@ class DirStore(Store):
                 ObjectRef and StateRef scopes.
             local_states: Mapping of locally owned paths to validated sources.
             children: Optional mapping of child projection paths to StateRefs.
+            _before_annotation_write: Internal phase callback invoked immediately
+                before each requested current-metadata write.
 
         Returns:
             Detached SnapshotMetadata for the installed or equal existing snapshot.
@@ -1229,8 +1233,12 @@ class DirStore(Store):
                         raise StoreAuthorityError("snapshot write-once authority conflicts with existing evidence.")
                     if annotations is not None:
                         if annotations.object is not None:
+                            if _before_annotation_write is not None:
+                                _before_annotation_write("object")
                             self.write_metadata(reference.object, annotations.object)
                         if annotations.state is not None:
+                            if _before_annotation_write is not None:
+                                _before_annotation_write("state")
                             self.write_metadata(reference, annotations.state)
                     return existing[1]
                 self.mark_query_index_dirty()
@@ -1243,8 +1251,12 @@ class DirStore(Store):
                     raise StoreAuthorityError("snapshot install did not survive read-back.")
                 if annotations is not None:
                     if annotations.object is not None:
+                        if _before_annotation_write is not None:
+                            _before_annotation_write("object")
                         self.write_metadata(reference.object, annotations.object)
                     if annotations.state is not None:
+                        if _before_annotation_write is not None:
+                            _before_annotation_write("state")
                         self.write_metadata(reference, annotations.state)
                 return installed[1]
         finally:
@@ -1385,3 +1397,6 @@ class DirStore(Store):
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.base_dir!r})"
+
+
+DirStore.publish_snapshot._dryml_annotation_phase_callback = True

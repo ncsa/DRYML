@@ -179,6 +179,7 @@ class ZipStore(DirStore):
             raise StoreAuthorityError("ZipStore archive is malformed.") from error
 
     def _atomic_write(self, path: str, payload: bytes) -> None:
+        self._assert_open()
         with self.transaction_fence():
             super()._atomic_write(path, payload)
             if not self._initializing:
@@ -187,12 +188,14 @@ class ZipStore(DirStore):
     def mark_query_index_dirty(self, cdef=None) -> str | None:
         """Fence derived dirty-marker publication with this archive transaction."""
 
+        self._assert_open()
         with self.transaction_fence():
             return super().mark_query_index_dirty(cdef)
 
     def clear_query_index_dirty(self) -> None:
         """Persist derived-marker removal rather than losing it after a commit."""
 
+        self._assert_open()
         with self.transaction_fence():
             had_markers = self.query_index_is_dirty()
             super().clear_query_index_dirty()
@@ -239,6 +242,7 @@ class ZipStore(DirStore):
         but different baselines. They must therefore be fenced independently.
         """
 
+        self._assert_open()
         return f"{super().authority_fence_key()}:transaction:{id(self)}"
 
     def writer_lock(self):
@@ -246,6 +250,7 @@ class ZipStore(DirStore):
 
         @contextmanager
         def locked():
+            self._assert_open()
             with self.transaction_fence():
                 with super(ZipStore, self).writer_lock():
                     yield
@@ -271,13 +276,16 @@ class ZipStore(DirStore):
             mutation reaches the archive only at a normal commit boundary.
         """
 
+        self._assert_open()
         with self.transaction_fence():
             result = super().delete_metadata(target)
             if result:
                 self._archive_dirty = True
             return result
 
-    def publish_snapshot(self, reference, *, evidence, annotations=None, local_states, children=None):
+    def publish_snapshot(
+            self, reference, *, evidence, annotations=None, local_states,
+            children=None, _before_annotation_write=None):
         """Publish a v3 snapshot in this extraction and mark the archive dirty.
 
         Args:
@@ -286,6 +294,8 @@ class ZipStore(DirStore):
             annotations: Optional current-metadata replacements for root scopes.
             local_states: Mapping of local paths to validated payload sources.
             children: Optional child snapshot projections.
+            _before_annotation_write: Internal phase callback invoked immediately
+                before each requested current-metadata write.
 
         Returns:
             Detached SnapshotMetadata for the installed or equal existing snapshot.
@@ -301,10 +311,12 @@ class ZipStore(DirStore):
             ``commit()``; current annotations retain Store-local LWW behavior.
         """
 
+        self._assert_open()
         with self.transaction_fence():
             result = super().publish_snapshot(
                 reference, evidence=evidence, annotations=annotations,
                 local_states=local_states, children=children,
+                _before_annotation_write=_before_annotation_write,
             )
             self._archive_dirty = True
             return result
@@ -353,6 +365,7 @@ class ZipStore(DirStore):
             retain their existing unsupported publication behavior.
         """
         with self.transaction_fence():
+            self._assert_open()
             if not self._archive_dirty:
                 return
             self.preflight_publication("commit ZipStore")
@@ -390,6 +403,191 @@ class ZipStore(DirStore):
                     pass
                 raise
 
+    def _assert_open(self) -> None:
+        """Reject authority access after this buffered transaction is discarded."""
+
+        if getattr(self, "_closed_handle", False):
+            raise RuntimeError("ZipStore transaction is closed.")
+
+    def preflight_publication(self, operation: str, *, local_state: bool = False) -> None:
+        """Validate inherited publication capabilities on an open transaction.
+
+        Args:
+            operation: Human-readable operation used in capability failures.
+            local_state: Whether local payload publication is required.
+
+        Returns:
+            ``None`` when publication is supported.
+
+        Raises:
+            RuntimeError: If this transaction is closed.
+            StoreCapabilityError: If inherited capabilities are insufficient.
+
+        Side Effects:
+            None.
+        """
+
+        self._assert_open()
+        super().preflight_publication(operation, local_state=local_state)
+
+    def _read_file(self, path, record_type):
+        """Read one record only while this extracted transaction remains live."""
+
+        self._assert_open()
+        return super()._read_file(path, record_type)
+
+    def _read_json(self, path):
+        """Read one JSON sidecar only while this transaction remains live."""
+
+        self._assert_open()
+        return super()._read_json(path)
+
+    def _read_snapshot(self, digest, *, payloads=False, directory=None):
+        """Read one snapshot only while this transaction remains live."""
+
+        self._assert_open()
+        return super()._read_snapshot(digest, payloads=payloads, directory=directory)
+
+    def _query_index_dirty_markers(self):
+        """Read dirty tokens only while this transaction remains live."""
+
+        self._assert_open()
+        return super()._query_index_dirty_markers()
+
+    def open_query_index(self):
+        """Return the inherited memory index for an open transaction.
+
+        Returns:
+            The transaction-local query index, or ``None`` when disabled.
+
+        Raises:
+            RuntimeError: If this transaction is closed.
+
+        Side Effects:
+            May initialize the inherited transaction-local derived index.
+        """
+
+        self._assert_open()
+        return super().open_query_index()
+
+    def query_index_status(self):
+        """Return inherited derived-index status for an open transaction.
+
+        Returns:
+            Current backend-neutral query-index status.
+
+        Raises:
+            RuntimeError: If this transaction is closed.
+
+        Side Effects:
+            None.
+        """
+
+        self._assert_open()
+        return super().query_index_status()
+
+    def iter_definition_records(self):
+        """Return validated definitions from an open transaction.
+
+        Returns:
+            Deterministically ordered immutable definition records.
+
+        Raises:
+            RuntimeError: If this transaction is closed.
+            StoreAuthorityError: If retained authority is malformed.
+
+        Side Effects:
+            None.
+        """
+
+        self._assert_open()
+        return super().iter_definition_records()
+
+    def iter_stored_root_records(self):
+        """Return validated stored-root memberships from an open transaction.
+
+        Returns:
+            Deterministically ordered stored-root records.
+
+        Raises:
+            RuntimeError: If this transaction is closed.
+            StoreAuthorityError: If retained authority is malformed.
+
+        Side Effects:
+            None.
+        """
+
+        self._assert_open()
+        return super().iter_stored_root_records()
+
+    def iter_state_ref_records(self):
+        """Return validated StateRef records from an open transaction.
+
+        Returns:
+            Deterministically ordered exact snapshot records.
+
+        Raises:
+            RuntimeError: If this transaction is closed.
+            StoreAuthorityError: If retained authority is malformed.
+
+        Side Effects:
+            None.
+        """
+
+        self._assert_open()
+        return super().iter_state_ref_records()
+
+    def iter_declaration_records(self):
+        """Return validated declarations from an open transaction.
+
+        Returns:
+            Deterministically ordered declaration records.
+
+        Raises:
+            RuntimeError: If this transaction is closed.
+            StoreAuthorityError: If retained authority is malformed.
+
+        Side Effects:
+            None.
+        """
+
+        self._assert_open()
+        return super().iter_declaration_records()
+
+    def iter_object_alias_records(self):
+        """Return validated object aliases from an open transaction.
+
+        Returns:
+            Deterministically ordered object-alias records.
+
+        Raises:
+            RuntimeError: If this transaction is closed.
+            StoreAuthorityError: If retained authority is malformed.
+
+        Side Effects:
+            None.
+        """
+
+        self._assert_open()
+        return super().iter_object_alias_records()
+
+    def iter_state_alias_records(self):
+        """Return validated state aliases from an open transaction.
+
+        Returns:
+            Deterministically ordered state-alias records.
+
+        Raises:
+            RuntimeError: If this transaction is closed.
+            StoreAuthorityError: If retained authority is malformed.
+
+        Side Effects:
+            None.
+        """
+
+        self._assert_open()
+        return super().iter_state_alias_records()
+
     def catalog_key(self) -> str:
         """Return a stable archive identity without leaking extraction paths."""
         if self._file_like:
@@ -397,13 +595,24 @@ class ZipStore(DirStore):
         return f"{type(self).__module__}.{type(self).__qualname__}:{self._archive_path}"
 
     def close(self) -> None:
-        """Discard the buffered transaction without publishing it.
+        """Discard the buffered transaction and invalidate borrowed paths.
 
         Raises:
             RuntimeError: If an active Session resource cache retains this Store.
+
+        Returns:
+            ``None``. Repeated close calls are no-ops.
+
+        Side Effects:
+            Acquires the transaction fence, removes the extracted directory, and
+            invalidates snapshot and payload paths borrowed from this handle.
         """
-        if self._closed_handle:
-            return
-        super().close()
-        self._tmp.cleanup()
-        self._closed_handle = True
+        with self.transaction_fence():
+            if self._closed_handle:
+                return
+            super().close()
+            self._tmp.cleanup()
+            self._closed_handle = True
+
+
+ZipStore.publish_snapshot._dryml_annotation_phase_callback = True
