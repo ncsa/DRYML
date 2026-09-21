@@ -634,6 +634,12 @@ def attach_runtime_binding(
         if object_id is None:
             object_id = ObjectId()
             bound._object_id = object_id
+            created_at = repo._record_lineage_candidate(object_id)
+        else:
+            created_at = repo._lineage_candidates.get(object_id)
+        from .snapshot_capture import install_lineage_fact
+
+        install_lineage_fact(bound, object_id, created_at)
         path = GraphPath() if node.definition is cdef else graph.primary_path(cdef, node.definition)
         object_ids[path] = object_id
 
@@ -708,12 +714,14 @@ def _collect_imported_object_ids(value: Any, path: GraphPath, out: dict) -> None
         _collect_imported_object_ids(edge.value, path.child(edge.segment), out)
 
 
-def apply_exact_reference_identity(obj: Object, reference) -> None:
+def apply_exact_reference_identity(obj: Object, reference, *, lineage_facts=None) -> None:
     """Rebind a completed materialized subtree to supplied exact ObjectIds.
 
     Args:
         obj: Freshly materialized root for ``reference.definition``.
         reference: ObjectRef whose topology and ObjectIds are authoritative.
+        lineage_facts: Optional primary-path or ObjectId-keyed known/unknown
+            creation facts. Omitted facts are explicitly restored as unknown.
 
     Raises:
         ValueError: If a reference path does not resolve to the expected live
@@ -724,7 +732,9 @@ def apply_exact_reference_identity(obj: Object, reference) -> None:
         completed. State restoration remains the later exact-load boundary.
     """
 
+    from .metadata import LineageMetadata
     from .reference_values import ObjectRef
+    from .snapshot_capture import install_lineage_fact
 
     if not isinstance(reference, ObjectRef):
         raise TypeError("Exact runtime materialization requires an ObjectRef.")
@@ -735,6 +745,15 @@ def apply_exact_reference_identity(obj: Object, reference) -> None:
         if not isinstance(bound, Object):
             raise ValueError(f"Exact ObjectRef path {path!s} did not resolve to an Object.")
         bound._object_id = object_id
+        fact = None
+        if lineage_facts is not None:
+            if path in lineage_facts:
+                fact = lineage_facts[path]
+            elif object_id in lineage_facts:
+                fact = lineage_facts[object_id]
+        if isinstance(fact, LineageMetadata):
+            fact = fact.created_at
+        install_lineage_fact(bound, object_id, fact)
         try:
             bound._object_ref = reference.at(path)
         except ValueError:

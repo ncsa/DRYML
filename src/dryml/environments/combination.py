@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 import re
 
 from packaging.requirements import Requirement
@@ -27,6 +28,16 @@ _MAX_PATHS = 1024
 _MAX_OCCURRENCES = 4096
 _MAX_BYTES = 1024 * 1024
 _SENSITIVE_SEGMENT = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|credential)")
+
+
+@dataclass(frozen=True, slots=True)
+class _CollectedRequirements:
+    """Private aggregate collection outcome consumed by core snapshot capture."""
+
+    value: EnvironmentRequirement | None
+    status: str
+    coverage: str
+    diagnostics: tuple[tuple[str, str], ...]
 
 
 def _hard_package_valid(requirement: str) -> bool:
@@ -259,6 +270,62 @@ def requirements_for_method(owner: type | object, method_name: str) -> Requireme
         return combine_requirements(declarations, combiner=_EnvironmentCombiner())
     except Exception:
         raise EnvironmentRequirementError("environment method requirement collection or combination failed") from None
+
+
+def _requirements_for_classes(classes: tuple[object, ...]) -> _CollectedRequirements:
+    """Combine declarations from live materializing classes once under one budget.
+
+    Invalid class associations and ordinary static-collection failures preserve
+    successful class results but mark coverage incomplete. Aggregate malformed or
+    over-limit declarations are unavailable rather than silently truncated.
+    """
+
+    declarations = []
+    diagnostics = []
+    inspected = 0
+    seen = set()
+    for cls in classes:
+        if not isinstance(cls, type) or id(cls) in seen:
+            if not isinstance(cls, type):
+                diagnostics.append(("dryml.environments.requirement_collection_unavailable", "environment requirement collection unavailable"))
+            continue
+        seen.add(id(cls))
+        try:
+            declarations.extend(
+                collect_declarations(
+                    cls,
+                    key=ENVIRONMENT_REQUIREMENT_KEY,
+                    value_type=EnvironmentRequirement,
+                )
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            diagnostics.append(("dryml.environments.requirement_collection_unavailable", "environment requirement collection unavailable"))
+        else:
+            inspected += 1
+    coverage = "complete" if not diagnostics else "incomplete"
+    if not inspected:
+        return _CollectedRequirements(None, "unavailable", "incomplete", tuple(diagnostics[:64]))
+    try:
+        result = combine_requirements(declarations, combiner=_EnvironmentCombiner())
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        return _CollectedRequirements(
+            None,
+            "unavailable",
+            "incomplete",
+            tuple((*diagnostics, ("dryml.environments.requirement_collection_unavailable", "environment requirement collection unavailable"))[:64]),
+        )
+    if result.has_value:
+        return _CollectedRequirements(result.value, "value", coverage, tuple(diagnostics[:64]))
+    if result.report.ok:
+        return _CollectedRequirements(None, "empty", coverage, tuple(diagnostics[:64]))
+    conflict_diagnostics = tuple(
+        (issue.code, issue.message) for issue in result.report.issues[:64 - len(diagnostics)]
+    )
+    return _CollectedRequirements(None, "conflict", coverage, tuple((*diagnostics, *conflict_diagnostics)[:64]))
 
 
 def merge_environment_requirements(left: EnvironmentRequirement, right: EnvironmentRequirement, *, sources: tuple[str, ...] = ()) -> EnvironmentRequirement:

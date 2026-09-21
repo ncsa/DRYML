@@ -63,7 +63,7 @@ def _unique_objects(objects):
     return tuple(unique)
 
 
-def _fork_rekey_reference(reference, namespace):
+def _fork_rekey_reference(reference, namespace, *, record_candidate=None):
     """Rekey an exact reference graph, including materializing embedded refs.
 
     The CDef codec is used as the immutable graph reconstruction boundary.  A
@@ -85,6 +85,8 @@ def _fork_rekey_reference(reference, namespace):
                 old.namespace if namespace is None else namespace, uuid4()
             )
             replacements[old] = result
+            if record_candidate is not None:
+                record_candidate(result)
         return result
 
     def transform_value(data):
@@ -649,6 +651,8 @@ class Repo:
         self._owned_stores: list[Store] = []
         self.alias_index = {}
         self._aliases_dirty = False
+        # U2 keeps allocation facts process-local until U3 adds Store authority.
+        self._lineage_candidates = {}
         # Compatibility facade and live cache overlay. Store-owned indexes handle
         # persistent sources; this aggregate remains the memory backend and cache
         # source for existing APIs and `known()` cache federation.
@@ -1205,6 +1209,27 @@ class Repo:
                 return
             self.weak_obj_cache.add(obj.__cdef__, obj)
             self._query_catalog.register_cached(obj.__cdef__)
+
+    def _cache_exact_graph(self, root: Object, cache: CachePolicy) -> None:
+        """Publish an exact graph to the requested cache after identity rebinding.
+
+        Exact ObjectRef construction first replaces provisional ObjectIds and
+        lineage facts. This helper preserves normal cache behavior without
+        exposing a provisional fact table to cache consumers.
+        """
+        if cache == "none":
+            return
+        if cache not in {"weak", "strong"}:
+            raise ValueError(f"Unknown cache policy: {cache!r}")
+        objects = _unique_objects(
+            value for value in getattr(root, "_runtime_projection", {}).values()
+            if isinstance(value, Object)
+        )
+        for obj in objects:
+            if cache == "strong":
+                self.cache_strong(obj)
+            else:
+                self.cache_weak(obj)
 
     # --- helpers you already have ---
     def _cached_candidates(self, cdef) -> tuple[Object, ...]:
@@ -1895,13 +1920,32 @@ class Repo:
             if key[0] == "object-id":
                 objects[path] = key[1]
             else:
-                objects[path] = ObjectId(namespace)
+                object_id = ObjectId(namespace)
+                self._record_lineage_candidate(object_id)
+                objects[path] = object_id
                 allocated += 1
         if not objects:
             raise ValueError("Cannot declare an all-ephemeral graph; build its CDef normally.")
         if not allocated:
             raise ValueError("Declaration has no new durable lineage; build its CDef normally.")
         return ObjectRef(cdef, objects)
+
+    def _record_lineage_candidate(self, object_id, created_at=None):
+        """Retain one process-local creation fact for a newly allocated ObjectId.
+
+        U2 deliberately records candidates only. U3 owns immutable Store
+        publication and reopening, so this helper neither reads nor writes Store
+        authority.
+        """
+        from .reference_values import ObjectId
+        from .snapshot_capture import current_utc_time
+
+        if not isinstance(object_id, ObjectId):
+            raise TypeError("lineage candidates require an ObjectId")
+        if created_at is None:
+            created_at = current_utc_time()
+        self._lineage_candidates.setdefault(object_id, created_at)
+        return self._lineage_candidates[object_id]
 
     def _register_declaration(self, reference, store, *, allow_preallocated: bool = False):
         """Publish Definition, available claim, then declaration under one fence."""
@@ -2209,10 +2253,13 @@ class Repo:
                 }
             )
             try:
-                obj = self._load_structural(reference.definition)
+                obj = self._load_structural(reference.definition, cache="none")
             finally:
                 _active_object_ref_builds.reset(token)
-            apply_exact_reference_identity(obj, reference)
+            apply_exact_reference_identity(
+                obj, reference, lineage_facts=self._lineage_candidates,
+            )
+            self._cache_exact_graph(obj, "weak")
             obj._store_affinity = selected
             obj._claim_lease = lease
             obj._claim_leases = tuple(acquired)
@@ -2380,7 +2427,9 @@ class Repo:
         if not isinstance(reference, ObjectRef) or not reference.objects:
             raise ValueError("fork_object_ref requires a non-empty ObjectRef.")
         selected = self._selected_writable_store(store, "fork ObjectRef")
-        fork, _ = _fork_rekey_reference(reference, namespace)
+        fork, _ = _fork_rekey_reference(
+            reference, namespace, record_candidate=self._record_lineage_candidate,
+        )
         return self._register_declaration(fork, selected, allow_preallocated=True)
 
     def fork_state_ref(self, state_ref, *, store=None, namespace=None, federated: bool = False):
@@ -2457,7 +2506,9 @@ class Repo:
                 if source is None:
                     raise RepoLoadError(f"Fork source lacks verified local state at {path!s}.")
                 sources.append((reference, path, definition, state_hash, source))
-        fork, forked_references = _fork_rekey_reference(state_ref, namespace)
+        fork, forked_references = _fork_rekey_reference(
+            state_ref, namespace, record_candidate=self._record_lineage_candidate,
+        )
         with selected.writer_lock():
             # DefinitionRecords are graph-aware, but every local-state entry is
             # independently verified against its node definition before copying.
@@ -3352,14 +3403,17 @@ class Repo:
                     })
                     try:
                         obj = self._materialize_cdef(
-                            reference.definition, cache=plan.cache, memo=cdef_memo,
+                            reference.definition, cache="none", memo=cdef_memo,
                         )
                     finally:
                         _active_object_ref_results.reset(results_token)
                         _active_object_ref_builds.reset(token)
                     from .repo_plan import apply_exact_reference_identity
 
-                    apply_exact_reference_identity(obj, reference)
+                    apply_exact_reference_identity(
+                        obj, reference, lineage_facts=self._lineage_candidates,
+                    )
+                    self._cache_exact_graph(obj, plan.cache)
                     obj._store_affinity = lease.store
                     obj._claim_lease = lease
                     obj._claim_leases = tuple(leases[item.digest()] for item in claim_order)
@@ -3529,9 +3583,12 @@ class Repo:
                 scope.add_claim_cleanup(abandon_realized_claims)
             return realized
         realized = self._materialize_cdef(
-            reference.definition, cache=cache, memo=memo, path=path
+            reference.definition, cache="none", memo=memo, path=path
         )
-        apply_exact_reference_identity(realized, reference)
+        apply_exact_reference_identity(
+            realized, reference, lineage_facts=self._lineage_candidates,
+        )
+        self._cache_exact_graph(realized, cache)
         return realized
 
 
