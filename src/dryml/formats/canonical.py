@@ -37,6 +37,7 @@ def deep_freeze_json(
     """
 
     nodes = [0]
+    active: set[int] = set()
 
     def freeze(item: Any, depth: int) -> FrozenJson:
         nodes[0] += 1
@@ -45,6 +46,9 @@ def deep_freeze_json(
         if depth > max_depth:
             raise CanonicalJSONError("canonical JSON exceeds depth bound", context={"limit": max_depth})
         if isinstance(item, Mapping):
+            identity = id(item)
+            if identity in active:
+                raise CanonicalJSONError("canonical JSON cannot contain cyclic containers")
             if len(item) > max_entries:
                 raise CanonicalJSONError("canonical JSON mapping exceeds entry bound", context={"limit": max_entries})
             keys = []
@@ -53,11 +57,22 @@ def deep_freeze_json(
                     raise CanonicalJSONError("canonical JSON mapping keys must be strings", context={"type": type(key).__name__})
                 check_string(key, max_string)
                 keys.append(key)
-            return MappingProxyType({key: freeze(item[key], depth + 1) for key in sorted(keys)})
+            active.add(identity)
+            try:
+                return MappingProxyType({key: freeze(item[key], depth + 1) for key in sorted(keys)})
+            finally:
+                active.remove(identity)
         if isinstance(item, Sequence) and not isinstance(item, str | bytes | bytearray):
+            identity = id(item)
+            if identity in active:
+                raise CanonicalJSONError("canonical JSON cannot contain cyclic containers")
             if len(item) > max_entries:
                 raise CanonicalJSONError("canonical JSON sequence exceeds entry bound", context={"limit": max_entries})
-            return tuple(freeze(child, depth + 1) for child in item)
+            active.add(identity)
+            try:
+                return tuple(freeze(child, depth + 1) for child in item)
+            finally:
+                active.remove(identity)
         if isinstance(item, str):
             check_string(item, max_string)
             return item
