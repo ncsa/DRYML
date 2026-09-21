@@ -23,8 +23,8 @@ class ManagedContext:
 
     def __init__(self, token, *, control_store, operation_id: str,
                  attempt_id: str, owner_id: str, is_resuming: bool,
-                 checkpoint_state_ref: StateRef | None, obj, state_repo,
-                 ownership, control, callbacks) -> None:
+                  checkpoint_state_ref: StateRef | None, obj, state_repo,
+                  ownership, control, callbacks, snapshot_observer) -> None:
         """Initialize private runtime authority; callers receive no construction API."""
 
         if token is not _CONTEXT_TOKEN:
@@ -40,6 +40,7 @@ class ManagedContext:
         self._ownership = ownership
         self._control = control
         self._callbacks = callbacks
+        self._snapshot_observer = snapshot_observer
         self._pid = os.getpid()
         self._thread_id = get_ident()
         self._active = True
@@ -160,6 +161,7 @@ class ManagedContext:
                 publish_managed_state = _publish_managed_state()
                 state_ref, report = publish_managed_state(
                     self._state_repo, self._obj, reservation=self._ownership.reservation,
+                    snapshot_observer=self._snapshot_observer,
                 )
                 validate_state_ref = _validate_state_ref()
                 validate_state_ref(self._state_repo, state_ref)

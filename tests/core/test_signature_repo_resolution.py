@@ -24,7 +24,7 @@ from dryml.core.signatures import (
     signature_context,
 )
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import ClaimRecord, DeclarationRecord, DefinitionRecord, StateRefRecord
+from dryml.core.store.records import ClaimRecord, DeclarationRecord, DefinitionRecord
 from dryml.core.store.store import StoreCapabilityError
 
 
@@ -89,6 +89,16 @@ def _replicate_declaration(store: DirStore, reference: ObjectRef, claim: ClaimRe
     store.write_declaration_record(DeclarationRecord(reference))
 
 
+def _replicate_snapshot(source: DirStore, target: DirStore, state: StateRef) -> None:
+    """Publish a complete borrowed-source snapshot replica without v2 authority."""
+
+    target.publish_snapshot(
+        state,
+        evidence=source.read_snapshot_metadata(state.digest()),
+        local_states={path: source.open_local_state(state, path) for path in state.states},
+    )
+
+
 def test_automatic_and_exact_live_projections_do_not_query_snapshots(tmp_path):
     """Automatic Ref uses local graph/receipt facts while exact live views stay local."""
 
@@ -132,17 +142,16 @@ def test_state_selection_deduplicates_replicas_and_rejects_ambiguity(tmp_path):
     repo = Repo(first)
     reference, live, state = _stateful_reference(repo)
     _replicate_declaration(second, reference, first.read_claim_record(reference.digest()))
-    second.write_state_ref_record(StateRefRecord(state))
+    _replicate_snapshot(first, second, state)
     replicas = Repo((first, second))
 
     assert _plan(Ref[StateRef]).prepare_args((reference,), {}, repo=replicas).authority["value"] == state
     with signature_context(repo=replicas):
         with pytest.raises(SignatureError, match="authority is unavailable"):
             _plan(Ref[StateRef]).prepare_args((reference,), {})
-    second_state = StateRef(
-        reference, {path: "pkl-" + "b" * 64 for path in reference.objects}
-    )
-    second.write_state_ref_record(StateRefRecord(second_state))
+    live.value = 2
+    second_state = repo.save_object(live, deep_capture=True)
+    _replicate_snapshot(first, second, second_state)
     with pytest.raises(SignatureError, match="ambiguous"):
         _plan(Ref[ObjectRef | StateRef]).prepare_args((reference,), {}, repo=replicas)
     with pytest.raises(SignatureError, match="ambiguous"):
@@ -328,7 +337,7 @@ def test_state_only_and_store_failures_are_not_treated_as_absence(tmp_path, monk
     repo = Repo(store)
     reference, _, state = _stateful_reference(repo)
     state_only = DirStore(tmp_path / "state-only")
-    state_only.write_state_ref_record(StateRefRecord(state))
+    _replicate_snapshot(store, state_only, state)
     assert _plan(Ref[StateRef]).prepare_args((reference,), {}, repo=Repo(state_only)).authority["value"] == state
 
     read_claim_record = store.read_claim_record

@@ -43,10 +43,9 @@ def test_exact_preflight_reports_every_missing_local_state_before_construction(t
     first = PreflightValue(1, repo=repo)
     second = PreflightValue(2, repo=repo)
     state = repo.save_object(PreflightPair(first, second, repo=repo))
-    for path, state_hash in state.states.items():
-        definition = state.object.at(path).definition
-        local_state = source._local_state_path(definition.graph_hash(), state_hash)
-        Path(local_state, "data", "value").unlink()
+    payloads = [source.open_local_state(state, path).handle for path in state.states]
+    for payload in payloads:
+        Path(payload, "data", "value").unlink()
     PreflightValue.constructions = 0
 
     with pytest.raises(RepoLoadError) as error:
@@ -65,8 +64,7 @@ def test_exact_preflight_fails_before_live_candidate_reservation(tmp_path):
     saved = PreflightValue(1, repo=repo)
     state = repo.save_object(saved)
     path, state_hash = next(iter(state.states.items()))
-    definition = state.object.at(path).definition
-    Path(source._local_state_path(definition.graph_hash(), state_hash), "data", "value").unlink()
+    Path(source.open_local_state(state, path).handle, "data", "value").unlink()
 
     class ReservationProbe:
         attempts = 0

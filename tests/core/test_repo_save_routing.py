@@ -196,8 +196,6 @@ def test_retained_context_isolated_from_configuration_and_source_changes(tmp_pat
     first = DirStore(tmp_path / "first")
     second = DirStore(tmp_path / "second")
     repo = Repo(first, save_routing="per-object")
-    monkeypatch.setattr(first, "validate_local_state", lambda *_: "first-source")
-    monkeypatch.setattr(second, "validate_local_state", lambda *_: "second-source")
 
     ready = threading.Event()
     release = threading.Event()
@@ -209,7 +207,6 @@ def test_retained_context_isolated_from_configuration_and_source_changes(tmp_pat
             assert release.wait(timeout=5)
             observed.extend((
                 context.default_store,
-                context.find_local_state(Routed().definition, "pkl-" + "a" * 64),
                 repo._select_save_destinations(context, Routed()),
             ))
 
@@ -222,7 +219,7 @@ def test_retained_context_isolated_from_configuration_and_source_changes(tmp_pat
     worker.join(timeout=5)
 
     assert not worker.is_alive()
-    assert observed == [first, first, (first,)]
+    assert observed == [first, (first,)]
 
 
 def test_save_context_lease_blocks_repo_close(tmp_path):
@@ -283,15 +280,11 @@ def test_per_object_routing_projects_a_child_state_ref_without_copying_its_paylo
     child_path = next(iter(root.object_ref.objects))
     child_state = state.at(child_path)
 
-    assert child_store.validate_local_state(
-        child_state.definition, child_state.states[next(iter(child_state.states))]
-    )
+    assert child_store.validate_local_state(child_state, ())
     assert parent_store.read_state_ref_record(state.digest()).state_ref == state
     assert child_store.read_state_ref_record(child_state.digest()).state_ref == child_state
     with pytest.raises(Exception):
-        parent_store.validate_local_state(
-            child_state.definition, child_state.states[next(iter(child_state.states))]
-        )
+        parent_store.validate_local_state(child_state, ())
     assert Repo([parent_store, child_store]).load_state_ref(child_state, reuse_live="never").value == 3
     child_snapshot = next(snapshot for snapshot in report.snapshots if snapshot.state_ref == child_state)
     assert Repo(list(child_snapshot.required_stores)).load_state_ref(
@@ -513,8 +506,7 @@ def test_per_object_routing_projects_distinct_stateless_children_by_live_identit
     )
     assert all(
         leaf_store.validate_local_state(
-            branch_state.object.at(next(iter(branch_state.states))).definition,
-            branch_state.states[next(iter(branch_state.states))],
+            branch_state.at(next(iter(branch_state.states))), (),
         )
         for branch_state in branch_states
     )
@@ -582,9 +574,9 @@ def test_seed_payload_routes_by_its_definition_not_the_stateful_root(tmp_path):
     seed_definition = state.object.at(seed_path).definition
     seed_hash = state.states[seed_path]
 
-    leaf_store.validate_local_state(seed_definition, seed_hash)
+    leaf_store.validate_local_state(state.at(seed_path), ())
     with pytest.raises(Exception):
-        root_store.validate_local_state(seed_definition, seed_hash)
+        root_store.validate_local_state(state.at(seed_path), ())
 
 
 def test_ref_only_import_does_not_create_a_routed_seed_payload(tmp_path):
@@ -606,6 +598,4 @@ def test_ref_only_import_does_not_create_a_routed_seed_payload(tmp_path):
 
     assert len(state.object.objects) == 1
     with pytest.raises(Exception):
-        leaf_store.validate_local_state(
-            imported.definition, next(iter(imported.states.values()))
-        )
+        leaf_store.validate_local_state(imported, ())

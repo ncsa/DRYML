@@ -160,10 +160,10 @@ class StoreFormatRecord(_Record):
     """The sole Store-wide format gate for current direct-layout authority."""
 
     schema: ClassVar[str] = "store-format"
-    format_version: int = 2
+    format_version: int = 3
 
     def __post_init__(self) -> None:
-        if self.format_version != 2:
+        if self.format_version != 3:
             raise StoreRecordError(f"Unsupported Store format version {self.format_version!r}.")
 
     def to_data(self) -> dict[str, Any]:

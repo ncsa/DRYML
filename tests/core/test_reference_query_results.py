@@ -32,7 +32,7 @@ def test_reference_occurrences_retain_complete_owner_and_typed_path(tmp_path):
 
 
 def test_reference_values_dedupe_identical_store_replicas(tmp_path):
-    from dryml.core.store.records import DefinitionRecord, StateRefRecord
+    from dryml.core.store.records import DefinitionRecord
 
     first_store = DirStore(tmp_path / "first")
     repo = Repo(first_store)
@@ -41,7 +41,14 @@ def test_reference_values_dedupe_identical_store_replicas(tmp_path):
     second_store.write_definition_record(
         DefinitionRecord(state.definition), stored_root=False
     )
-    second_store.write_state_ref_record(StateRefRecord(state))
+    second_store.publish_snapshot(
+        state,
+        evidence=first_store.read_snapshot_metadata(state.digest()),
+        local_states={
+            path: first_store.open_local_state(state, path)
+            for path in state.states
+        },
+    )
     repo.add_store(second_store)
 
     assert list(repo.references().object_id(state.object_id).object_refs()) == [state.object]

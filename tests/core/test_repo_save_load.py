@@ -79,7 +79,7 @@ def test_public_save_returns_state_ref_and_publishes_local_state(tmp_path):
     assert store.read_state_ref_record(state.digest()).state_ref == state
     path, state_hash = next(iter(state.states.items()))
     assert path in state.object.objects
-    assert store.validate_local_state(obj.definition, state_hash)
+    assert store.validate_local_state(state, path).state_hash == state_hash
 
 
 def test_save_publishes_state_ref_before_main_and_object_alias(tmp_path, monkeypatch):
@@ -87,11 +87,11 @@ def test_save_publishes_state_ref_before_main_and_object_alias(tmp_path, monkeyp
     repo = Repo(store)
     obj = SaveLoadValue(10, repo=repo)
     calls = []
-    write_state_ref = store.write_state_ref_record
+    publish_snapshot = store.publish_snapshot
     write_main = store.write_main_ref
     write_alias = store.write_object_alias
 
-    monkeypatch.setattr(store, "write_state_ref_record", lambda record: (calls.append("state"), write_state_ref(record))[1])
+    monkeypatch.setattr(store, "publish_snapshot", lambda *args, **kwargs: (calls.append("state"), publish_snapshot(*args, **kwargs))[1])
     monkeypatch.setattr(store, "write_main_ref", lambda record: (calls.append("main"), write_main(record))[1])
     monkeypatch.setattr(store, "write_object_alias", lambda record: (calls.append("alias"), write_alias(record))[1])
 
@@ -136,18 +136,18 @@ def test_explicit_store_save_copies_reusable_state_into_its_closure(tmp_path):
     copied_state, copied_report = repo.save_object(root, store=copied, report_stores=True)
     copied_path = next(path for path, object_id in copied_state.object.objects.items() if object_id == child.object_id)
     assert copied_report.required_stores == (copied,)
-    assert copied.validate_local_state(child.definition, copied_state.states[copied_path])
+    assert copied.validate_local_state(copied_state, copied_path)
 
 def test_failed_local_state_save_never_publishes_a_state_ref(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     obj = FailingSave(repo=repo)
 
-    with pytest.raises(RepoSaveError, match="local state publication"):
+    with pytest.raises(RepoSaveError, match="snapshot-local state preparation"):
         repo.save_object(obj)
 
     assert obj._last_state_hash is None
-    assert not (tmp_path / "store" / "state-refs").exists()
+    assert not (tmp_path / "store" / "snapshots").exists()
     staging = tmp_path / "store" / ".staging"
     assert not staging.exists() or not any(staging.iterdir())
 

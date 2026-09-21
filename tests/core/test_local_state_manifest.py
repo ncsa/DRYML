@@ -27,14 +27,15 @@ def _stage(store, record, payload=b"payload"):
     return stage, manifest
 
 
-def test_local_state_install_validates_manifest_and_direct_path(tmp_path):
+def test_local_state_preparation_validates_manifest_and_owned_staging(tmp_path):
     store = DirStore(tmp_path / "store")
     record = DefinitionRecord(ManifestObject().definition)
     stage, manifest = _stage(store, record)
 
-    store.install_local_state(stage, manifest)
+    source = store.prepare_local_state(stage, manifest)
 
-    assert Path(store.open_local_state(record.graph_hash, manifest.state_hash)).is_dir()
+    assert source.manifest == manifest
+    assert Path(source.handle).is_dir()
 
 
 def test_empty_data_root_is_a_valid_complete_local_state(tmp_path):
@@ -46,9 +47,9 @@ def test_empty_data_root_is_a_valid_complete_local_state(tmp_path):
     (stage / "def.pkl").write_bytes(definition_bytes)
     (stage / "manifest.record").write_bytes(manifest.to_bytes())
 
-    store.install_local_state(stage, manifest)
+    source = store.prepare_local_state(stage, manifest)
 
-    assert Path(store.open_local_state(record.graph_hash, manifest.state_hash)).is_dir()
+    assert Path(source.handle).is_dir()
 
 
 def test_manifest_rejects_empty_nested_directories_and_extra_files(tmp_path):
@@ -58,7 +59,7 @@ def test_manifest_rejects_empty_nested_directories_and_extra_files(tmp_path):
     (stage / "data" / "empty").mkdir()
 
     with pytest.raises(StoreAuthorityError, match="empty nested"):
-        store.install_local_state(stage, manifest)
+        store.prepare_local_state(stage, manifest)
 
     with pytest.raises(StoreRecordError, match="codec"):
         LocalStateManifest("not-valid!", record.graph_hash, record.digest, "0" * 64, ())
@@ -71,7 +72,7 @@ def test_manifest_rejects_symlinked_payload_entries(tmp_path):
     (stage / "data" / "link").symlink_to(stage / "data" / "nested" / "value.bin")
 
     with pytest.raises(StoreAuthorityError, match="unsupported file"):
-        store.install_local_state(stage, manifest)
+        store.prepare_local_state(stage, manifest)
 
 
 def test_manifest_rejects_reencoded_or_modified_definition_bytes(tmp_path):
@@ -85,8 +86,8 @@ def test_manifest_rejects_reencoded_or_modified_definition_bytes(tmp_path):
     prefix = b"DRYML-STORE-RECORD/definition/1\n"
     (stage / "def.pkl").write_bytes(prefix + dill.dumps(dill.loads(encoded[len(prefix):]), protocol=4))
     with pytest.raises(StoreAuthorityError, match="definition file bytes"):
-        store.install_local_state(stage, manifest)
+        store.prepare_local_state(stage, manifest)
 
     (stage / "def.pkl").write_bytes(encoded + b"\n")
     with pytest.raises(StoreAuthorityError, match="definition file bytes"):
-        store.install_local_state(stage, manifest)
+        store.prepare_local_state(stage, manifest)

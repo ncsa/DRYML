@@ -1448,6 +1448,41 @@ class Repo:
         candidates[0].preflight_publication(operation)
         return candidates[0]
 
+    def get_snapshot_directory(self, target, *, store=None):
+        """Locate one exact complete v3 snapshot directory in connected Stores.
+
+        Args:
+            target: Exact :class:`StateRef` to locate.
+            store: Optional connected Store that must hold ``target``.
+
+        Returns:
+            The selected Store's borrowed directory path. ZipStore paths remain
+            valid only while that Store handle stays open.
+
+        Raises:
+            KeyError: If no selected Store holds a complete matching snapshot.
+            RepoLoadError: If more than one connected Store holds it and no Store
+                was selected, or one Store exposes incompatible authority.
+        """
+
+        from .reference_values import StateRef
+
+        if not isinstance(target, StateRef):
+            raise TypeError("target must be a StateRef.")
+        candidates = self.stores if store is None else (self._ensure_store(store),)
+        matches = []
+        for candidate in candidates:
+            try:
+                directory = candidate.get_snapshot_directory(target)
+            except KeyError:
+                continue
+            matches.append(directory)
+        if not matches:
+            raise KeyError(target.digest())
+        if store is None and len(matches) != 1:
+            raise RepoLoadError("Snapshot location is ambiguous across connected Stores; select store explicitly.")
+        return matches[0]
+
     def _reference_authoritative_in(self, store: Store, reference) -> bool:
         """Return whether a complete ObjectRef is authoritative in one Store."""
         declaration = store.read_declaration_record(reference.digest())
@@ -2432,7 +2467,7 @@ class Repo:
         )
         return self._register_declaration(fork, selected, allow_preallocated=True)
 
-    def fork_state_ref(self, state_ref, *, store=None, namespace=None, federated: bool = False):
+    def fork_state_ref(self, state_ref, *, store=None, namespace=None):
         """Rekey verified state authority and publish only after closure staging.
 
         Args:
@@ -2440,8 +2475,6 @@ class Repo:
             store: Explicit writable target Store when Repo Stores are ambiguous.
             namespace: Replacement namespace for all newly allocated IDs, or
                 ``None`` to preserve source namespaces despite active scopes.
-            federated: Whether verified dependency state may remain in connected
-                source Stores instead of being copied into ``store``.
 
         Returns:
             New exact StateRef with fresh ObjectIds and the source local-state
@@ -2455,8 +2488,8 @@ class Repo:
 
         Side Effects:
             Verifies every local state before allocating fork authority. A
-            non-federated target receives verified local states, DefinitionRecords,
-            and embedded seed records before the final StateRef boundary.
+            The target receives complete snapshot-local payloads, DefinitionRecords,
+            and embedded seed snapshots before the root snapshot boundary.
 
         Concurrency:
             Final record publication is serialized by the target Store writer
@@ -2464,12 +2497,13 @@ class Repo:
 
         Store Requirements:
             Source Stores must remain connected for closure verification. The
-            target must provide writable immutable-record and local-state install
-            semantics; federated forks retain their connected source dependencies.
+            target must provide writable composite snapshot publication semantics.
         """
         from .reference_values import StateRef
-        from .store.records import DefinitionRecord, StateRefRecord
-        from .repo_plan import _embedded_state_refs, _find_local_state
+        from .metadata import LineageMetadata, SnapshotCapture
+        from .repo_plan import _embedded_state_refs
+        from .store.records import DefinitionRecord
+        from .utils.graph.path import GraphPath
 
         if not isinstance(state_ref, StateRef) or not state_ref.object.objects:
             raise ValueError("fork_state_ref requires a non-empty StateRef.")
@@ -2498,46 +2532,75 @@ class Repo:
                 collect(seed)
 
         collect(state_ref)
-        sources = []
+        sources = {}
+        metadata = {}
         for reference in references:
-            for path, state_hash in reference.states.items():
-                definition = reference.object.at(path).definition
-                source = _find_local_state(self, definition, state_hash)
-                if source is None:
-                    raise RepoLoadError(f"Fork source lacks verified local state at {path!s}.")
-                sources.append((reference, path, definition, state_hash, source))
+            matches = []
+            for candidate in self.stores:
+                try:
+                    payloads = {
+                        path: candidate.open_local_state(reference, path)
+                        for path in reference.states
+                    }
+                    captured = candidate.read_snapshot_metadata(reference.digest())
+                except Exception:
+                    continue
+                if captured is not None:
+                    matches.append((candidate, payloads, captured))
+            if not matches:
+                raise RepoLoadError("Fork source lacks one complete snapshot-local payload closure.")
+            first = matches[0]
+            if any(item[2] != first[2] for item in matches[1:]):
+                raise RepoLoadError("Fork source snapshots disagree about captured evidence.")
+            sources[reference.digest()] = first[1]
+            metadata[reference.digest()] = first[2]
         fork, forked_references = _fork_rekey_reference(
             state_ref, namespace, record_candidate=self._record_lineage_candidate,
         )
-        with selected.writer_lock():
-            # DefinitionRecords are graph-aware, but every local-state entry is
-            # independently verified against its node definition before copying.
-            for reference, path, definition, state_hash, source in sources:
-                target_definition = forked_references[
-                    reference.digest()
-                ].object.at(path).definition
-                selected.write_definition_record(
-                    DefinitionRecord(target_definition), stored_root=False
+        staged = []
+        try:
+            for reference in references:
+                target = forked_references[reference.digest()]
+                payloads = {
+                    path: selected.prepare_rebound_local_state(
+                        source, target.object.at(path).definition,
+                    )
+                    for path, source in sources[reference.digest()].items()
+                }
+                staged.extend(payloads.values())
+                source_metadata = metadata[reference.digest()]
+                lineages = {
+                    path: LineageMetadata(
+                        target.object if not path else target.object.at(path),
+                        "known" if self._lineage_candidates.get(object_id) is not None else "unknown",
+                        self._lineage_candidates.get(object_id),
+                    )
+                    for path, object_id in target.object.objects.items()
+                }
+                lineages[GraphPath()] = LineageMetadata(
+                    target.object,
+                    "known" if self._lineage_candidates.get(target.object.object_id) is not None else "unknown",
+                    self._lineage_candidates.get(target.object.object_id),
                 )
-                if not target_definition.graph_equal(definition):
-                    selected.rebind_local_state_from(
-                        source, definition, target_definition, state_hash
-                    )
-                elif not federated and source is not selected:
-                    selected.copy_local_state_from(source, definition, state_hash)
-            for seed in forked_references.values():
-                if seed != fork:
+                evidence = SnapshotCapture(
+                    lineages, source_metadata.saved_at, source_metadata.environment,
+                    source_metadata.environment_status, source_metadata.requirements,
+                    source_metadata.requirements_status,
+                    source_metadata.requirements_coverage, source_metadata.diagnostics,
+                )
+                for path in payloads:
                     selected.write_definition_record(
-                        DefinitionRecord(seed.definition), stored_root=False
+                        DefinitionRecord(target.object.at(path).definition), stored_root=False,
                     )
-                    selected.write_state_ref_record(StateRefRecord(seed))
-            selected.write_definition_record(
-                DefinitionRecord(fork.definition), stored_root=False
-            )
-            selected.write_state_ref_record(StateRefRecord(fork))
-            selected.write_definition_record(
-                DefinitionRecord(fork.definition), stored_root=True
-            )
+                selected.publish_snapshot(
+                    target, evidence=evidence, local_states=payloads, children={},
+                )
+                selected.write_definition_record(
+                    DefinitionRecord(target.definition), stored_root=(target == fork),
+                )
+        finally:
+            for source in staged:
+                source.store.discard_local_state_staging(source.handle)
         return fork
 
     def set_config(self, key: str, value: Any) -> None:
@@ -2747,6 +2810,7 @@ class Repo:
             _capture_memo: set[object] | None = None,
             reservation=None,
             _save_context=None,
+            _snapshot_observer=None,
             _commit_stores=()):
         """Publish one live graph as immutable local states and a StateRef.
 
@@ -2864,6 +2928,7 @@ class Repo:
                         deep_capture=deep_capture,
                         report_stores=True,
                         late_publications=tuple(late_publications),
+                        snapshot_observer=_snapshot_observer,
                     )
                 except BaseException:
                     for pending_lease in reversed(
@@ -3813,7 +3878,7 @@ class Repo:
                 codec = action.state_hash.split("-", 1)[0]
                 hooks_started = True
                 target.restore_state_from_dir(
-                    os.path.join(os.fspath(action.payload), "data"), codec=codec
+                    os.path.join(os.fspath(action.payload.handle), "data"), codec=codec
                 )
                 target._last_state_hash = action.state_hash
             obj._last_state_ref = state_ref

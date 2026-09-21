@@ -16,7 +16,6 @@ from dryml.core.store.records import (
     ClaimRecord,
     DeclarationRecord,
     DefinitionRecord,
-    StateRefRecord,
 )
 from dryml.core.utils.graph.path import GraphPath, Parameter
 
@@ -231,15 +230,11 @@ def test_enclosing_snapshot_controls_embedded_object_ref_state(tmp_path):
     child_ref = repo.declare_object(Definition(BoundaryValue, 1).concretize(repo=repo))
     child = repo.build_object_ref(child_ref)
     child.value = 7
-    seed = repo.save_object(child, deep_capture=True)
+    repo.save_object(child, deep_capture=True)
     child.value = 9
-    updated = repo.save_object(child, deep_capture=True)
-    child_path = GraphPath((Parameter("left"),))
-    parent_cdef = Definition(BoundaryPair, seed.object, "parent").concretize(repo=repo)
-    parent_ref = ObjectRef(parent_cdef, {child_path: child_ref.object_id})
-    enclosing = StateRef(parent_ref, {child_path: next(iter(updated.states.values()))})
-    store.write_definition_record(DefinitionRecord(parent_cdef), stored_root=False)
-    store.write_state_ref_record(StateRefRecord(enclosing))
+    enclosing = repo.save_object(
+        BoundaryPair(child, "parent", repo=repo), deep_capture=True,
+    )
 
     loaded = Repo(DirStore(tmp_path / "store")).materialize_boundary(
         (enclosing,), reuse_live="never"

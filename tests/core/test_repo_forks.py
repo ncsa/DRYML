@@ -35,8 +35,7 @@ def test_object_and_state_forks_rekey_ids_and_preserve_source_namespace(tmp_path
     assert state_fork.object_id != state.object_id
     assert state_fork.object_id.namespace == ("source", "run")
     assert target.read_state_ref_record(state_fork.digest()).state_ref == state_fork
-    path, state_hash = next(iter(state_fork.states.items()))
-    assert target.validate_local_state(state_fork.object.at(path).definition, state_hash)
+    assert target.validate_local_state(state_fork, ())
 
 
 def test_state_fork_rekeys_materializing_seed_references_and_copies_their_records(tmp_path):
@@ -63,27 +62,23 @@ def test_state_fork_rekeys_materializing_seed_references_and_copies_their_record
     assert fork in target_records
     assert seeds[0] in target_records
     for reference in target_records:
-        for path, state_hash in reference.states.items():
-            assert target_only.default_store.validate_local_state(
-                reference.object.at(path).definition, state_hash
-            )
+        for path in reference.states:
+            assert target_only.default_store.validate_local_state(reference, path)
     loaded = target_only.load_state_ref(fork, reuse_live="never")
     assert loaded.child.object_id == fork.object.objects[child_path]
 
 
-def test_federated_fork_retains_verified_dependency_state_in_source_store(tmp_path):
+def test_fork_copies_verified_snapshot_local_payloads(tmp_path):
     source = DirStore(tmp_path / "source")
     target = DirStore(tmp_path / "target")
     repo = Repo([source, target])
     state = repo.save_object(ForkValue(1, repo=repo), store=source)
 
-    fork = repo.fork_state_ref(state, store=target, federated=True)
+    fork = repo.fork_state_ref(state, store=target)
 
     assert target.read_state_ref_record(fork.digest()).state_ref == fork
-    path, state_hash = next(iter(fork.states.items()))
-    with pytest.raises(Exception):
-        target.validate_local_state(fork.object.at(path).definition, state_hash)
-    assert source.validate_local_state(fork.object.at(path).definition, state_hash)
+    assert target.validate_local_state(fork, ())
+    assert source.validate_local_state(state, ())
 
 
 def test_fork_failure_before_final_boundaries_leaves_no_new_authority(tmp_path, monkeypatch):
@@ -94,8 +89,8 @@ def test_fork_failure_before_final_boundaries_leaves_no_new_authority(tmp_path, 
 
     monkeypatch.setattr(
         target,
-        "write_state_ref_record",
-        lambda record: (_ for _ in ()).throw(OSError("final boundary failed")),
+        "publish_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("final boundary failed")),
     )
     with pytest.raises(OSError, match="final boundary failed"):
         repo.fork_state_ref(state, store=target)
@@ -109,21 +104,21 @@ def test_interruption_after_state_fork_boundary_leaves_complete_discoverable_aut
     target = DirStore(tmp_path / "target")
     repo = Repo([source, target])
     state = repo.save_object(ForkValue(1, repo=repo), store=source)
-    original = target.write_state_ref_record
+    original = target.publish_snapshot
 
-    def install_then_interrupt(record):
-        original(record)
+    def install_then_interrupt(*args, **kwargs):
+        original(*args, **kwargs)
         raise KeyboardInterrupt("interrupted after final boundary")
 
-    monkeypatch.setattr(target, "write_state_ref_record", install_then_interrupt)
+    monkeypatch.setattr(target, "publish_snapshot", install_then_interrupt)
     with pytest.raises(KeyboardInterrupt, match="interrupted after final boundary"):
         repo.fork_state_ref(state, store=target)
 
     records = tuple(target.iter_state_ref_records())
     assert len(records) == 1
     fork = records[0].state_ref
-    for path, state_hash in fork.states.items():
-        assert target.validate_local_state(fork.object.at(path).definition, state_hash)
+    for path in fork.states:
+        assert target.validate_local_state(fork, path)
 
 
 def test_object_fork_failure_before_declaration_leaves_no_declaration_authority(tmp_path, monkeypatch):

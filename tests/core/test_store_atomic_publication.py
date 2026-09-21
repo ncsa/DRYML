@@ -205,60 +205,34 @@ def test_mutable_reference_replacement_keeps_the_previous_complete_record_on_per
     assert read() == previous
 
 
-def test_install_interruption_after_atomic_directory_move_leaves_complete_new_state(tmp_path, monkeypatch):
+def test_preparation_interruption_leaves_staging_unpublished(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
     record = DefinitionRecord(AtomicRecordObject().definition)
     stage, manifest = _stage(store, record)
-    destination = Path(store.base_dir, "local-state", record.graph_hash[:2], record.graph_hash, manifest.state_hash)
-    original_replace = os.replace
+    original_validate = store._validate_local_state_dir
 
-    def interrupt_after_move(source, target):
-        result = original_replace(source, target)
-        if Path(target) == destination:
-            raise KeyboardInterrupt("injected after local-state install")
-        return result
+    def interrupt_validation(*args, **kwargs):
+        raise KeyboardInterrupt("injected during local-state preparation")
 
-    monkeypatch.setattr(os, "replace", interrupt_after_move)
-    with pytest.raises(KeyboardInterrupt, match="after local-state"):
-        store.install_local_state(stage, manifest)
-
-    assert Path(store.open_local_state(record.graph_hash, manifest.state_hash)).is_dir()
-
-
-def test_interruption_before_direct_local_state_install_leaves_it_unpublished(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store")
-    record = DefinitionRecord(AtomicRecordObject().definition)
-    stage, manifest = _stage(store, record)
-    destination = Path(store.base_dir, "local-state", record.graph_hash[:2], record.graph_hash, manifest.state_hash)
-    original_replace = os.replace
-
-    def interrupt_before_move(source, target):
-        if Path(target) == destination:
-            raise KeyboardInterrupt("injected before local-state install")
-        return original_replace(source, target)
-
-    monkeypatch.setattr(os, "replace", interrupt_before_move)
-    with pytest.raises(KeyboardInterrupt, match="before local-state"):
-        store.install_local_state(stage, manifest)
+    monkeypatch.setattr(store, "_validate_local_state_dir", interrupt_validation)
+    with pytest.raises(KeyboardInterrupt, match="preparation"):
+        store.prepare_local_state(stage, manifest)
 
     assert stage.is_dir()
-    assert not destination.exists()
-    with pytest.raises(StoreAuthorityError, match="missing"):
-        store.open_local_state(record.graph_hash, manifest.state_hash)
+    monkeypatch.setattr(store, "_validate_local_state_dir", original_validate)
 
 
-def test_direct_local_state_is_immutable_and_idempotent_after_full_validation(tmp_path):
+def test_prepared_local_state_remains_private_until_snapshot_publication(tmp_path):
     store = DirStore(tmp_path / "store")
     record = DefinitionRecord(AtomicRecordObject().definition)
     first_stage, manifest = _stage(store, record)
-    store.install_local_state(first_stage, manifest)
-    destination = Path(store.open_local_state(record.graph_hash, manifest.state_hash))
-    before = (destination / "data" / "value.bin").read_bytes()
+    first = store.prepare_local_state(first_stage, manifest)
     second_stage, duplicate = _stage(store, record)
+    second = store.prepare_local_state(second_stage, duplicate)
 
-    assert store.install_local_state(second_stage, duplicate) == manifest
-    assert (destination / "data" / "value.bin").read_bytes() == before
-    assert second_stage.is_dir()
+    assert first.manifest == second.manifest == manifest
+    assert Path(first.handle, "data", "value.bin").read_bytes() == b"state"
+    assert Path(second.handle, "data", "value.bin").read_bytes() == b"state"
 
 
 @pytest.mark.parametrize("mutation", ["malformed", "foreign-manifest", "missing", "extra", "symlink", "special"], ids=str)
@@ -287,45 +261,29 @@ def test_local_state_rejects_non_authoritative_manifest_payload_trees(tmp_path, 
         os.mkfifo(stage / "data" / "pipe")
 
     with pytest.raises(StoreAuthorityError):
-        store.install_local_state(stage, manifest)
-
-    destination = Path(store.base_dir, "local-state", record.graph_hash[:2], record.graph_hash, manifest.state_hash)
-    assert not destination.exists()
+        store.prepare_local_state(stage, manifest)
 
 
-def test_local_state_staging_must_remain_on_the_store_filesystem(tmp_path, monkeypatch):
+def test_local_state_preparation_keeps_owned_staging_private(tmp_path):
     store = DirStore(tmp_path / "store")
     record = DefinitionRecord(AtomicRecordObject().definition)
     stage, manifest = _stage(store, record)
-    original_stat = os.stat
+    source = store.prepare_local_state(stage, manifest)
 
-    class Device:
-        def __init__(self, device):
-            self.st_dev = device
-
-    def different_devices(path, *args, **kwargs):
-        if Path(path) == stage:
-            return Device(1)
-        if Path(path) == Path(store.base_dir):
-            return Device(2)
-        return original_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "stat", different_devices)
-    with pytest.raises(StoreAuthorityError, match="filesystem"):
-        store.install_local_state(stage, manifest)
+    assert Path(source.handle) == stage
+    assert not (Path(store.base_dir) / "snapshots").exists()
 
 
-def test_opened_immutable_local_state_remains_complete_after_a_new_state_install(tmp_path):
+def test_prepared_local_state_remains_complete_while_another_staging_source_is_created(tmp_path):
     store = DirStore(tmp_path / "store")
     record = DefinitionRecord(AtomicRecordObject().definition)
     first_stage, first = _stage(store, record, b"first")
-    store.install_local_state(first_stage, first)
-    stale_handle = Path(store.open_local_state(record.graph_hash, first.state_hash))
+    stale_handle = Path(store.prepare_local_state(first_stage, first).handle)
     second_stage, second = _stage(store, record, b"second")
-    store.install_local_state(second_stage, second)
+    second_source = store.prepare_local_state(second_stage, second)
 
     assert (stale_handle / "data" / "value.bin").read_bytes() == b"first"
-    assert Path(store.open_local_state(record.graph_hash, second.state_hash), "data", "value.bin").read_bytes() == b"second"
+    assert Path(second_source.handle, "data", "value.bin").read_bytes() == b"second"
 
 
 def test_reference_readers_observe_only_complete_old_or_new_records(tmp_path, monkeypatch):
@@ -430,13 +388,12 @@ def test_state_ref_failure_leaves_only_verified_unreferenced_local_state(tmp_pat
     repo = Repo(store)
     obj = AtomicPayloadObject(repo=repo)
 
-    monkeypatch.setattr(store, "write_state_ref_record", lambda record: (_ for _ in ()).throw(OSError("state ref failure")))
+    monkeypatch.setattr(store, "publish_snapshot", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("snapshot failure")))
     with pytest.raises(RepoSaveError, match="publication") as raised:
         obj.save(repo=repo)
     assert isinstance(raised.value.__cause__, OSError)
-    assert "state ref failure" in str(raised.value.__cause__)
+    assert "snapshot failure" in str(raised.value.__cause__)
     assert raised.value.report is not None
 
-    assert not (Path(store.base_dir) / "state-refs").exists()
+    assert not (Path(store.base_dir) / "snapshots").exists()
     assert obj._last_state_hash is not None
-    assert Path(store.validate_local_state(obj.definition, obj._last_state_hash)).is_dir()

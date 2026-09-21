@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core import Definition, Object, Repo, Serializable
+from dryml.core import Definition, Object, Repo, SaveRouting, Selector, Serializable
 from dryml.core.object import Pickleable
 from dryml.core.repo import RepoSaveError
 from dryml.core.utils.general import pickle_load
@@ -116,26 +116,35 @@ def test_receipt_preserves_equal_child_identity_and_shared_alias_topology(tmp_pa
 
 def test_recursive_child_receipt_survives_an_enclosing_root_failure(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
-    repo = Repo(store)
+    repo = Repo(
+        store,
+        save_routing=SaveRouting(
+            (
+                (Selector(ReceiptValue), store),
+                (Selector(ReceiptPendingParent), store),
+            ),
+            graph_mode="per-object",
+        ),
+    )
     child_ref = repo.declare_object(ReceiptValue(5).definition)
     parent_ref = repo.declare_object(
         Definition(ReceiptPendingParent, child_ref).concretize(repo=repo)
     )
     parent = repo.build_object_ref(parent_ref)
     installed = []
-    original = store.write_state_ref_record
+    original = store.publish_snapshot
 
-    def fail_parent_record(record):
-        installed.append(record.state_ref)
+    def fail_parent_snapshot(reference, **kwargs):
+        installed.append(reference)
         if len(installed) == 2:
-            raise OSError("parent record install failed")
-        return original(record)
+            raise OSError("parent snapshot install failed")
+        return original(reference, **kwargs)
 
-    monkeypatch.setattr(store, "write_state_ref_record", fail_parent_record)
+    monkeypatch.setattr(store, "publish_snapshot", fail_parent_snapshot)
     with pytest.raises(RepoSaveError) as raised:
         repo.save_object(parent, deep_capture=True)
 
     assert isinstance(raised.value.__cause__, OSError)
-    assert str(raised.value.__cause__) == "parent record install failed"
+    assert str(raised.value.__cause__) == "parent snapshot install failed"
     assert parent.last_state_ref is None
     assert parent.child.last_state_ref == installed[0]

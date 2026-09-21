@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import math
+from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
@@ -475,6 +476,49 @@ def decode_snapshot_metadata(data: Mapping[str, Any], target: StateRef) -> Snaps
     )
 
 
+def read_snapshot_metadata(directory: str | Path) -> SnapshotMetadata:
+    """Inspect complete snapshot metadata without opening codec payload files.
+
+    Args:
+        directory: Borrowed v3 snapshot directory returned by a Store or Repo.
+
+    Returns:
+        The validated immutable captured metadata for the exact StateRef.
+
+    Raises:
+        ValueError: If required metadata siblings, record associations, or target
+            identities are malformed. Payload manifests and bytes are intentionally
+            not opened by this metadata-only reader.
+    """
+
+    from dryml.formats import canonical_json_load_bytes
+    from dryml.records import decode_record
+    from .store.records import StateRefRecord
+
+    root = Path(directory)
+    try:
+        state = StateRefRecord.from_bytes((root / "state-ref.record").read_bytes())
+        placement = canonical_json_load_bytes((root / "placement.json").read_bytes(), max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
+        metadata = canonical_json_load_bytes((root / "metadata.json").read_bytes(), max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
+        association = canonical_json_load_bytes((root / "snapshot.json").read_bytes(), max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
+        placement_record = decode_record(placement)
+        association_record = decode_record(association)
+        if (placement_record.kind != "dryml.core.snapshot_placement" or placement_record.version != 1
+                or association_record.kind != "dryml.core.snapshot" or association_record.version != 1):
+            raise ValueError("snapshot metadata record kind is unsupported")
+        if association_record.data != {
+            "state_ref_digest": state.digest,
+            "placement_id": placement["id"],
+            "metadata_id": metadata["id"],
+        }:
+            raise ValueError("snapshot metadata association does not match siblings")
+        return decode_snapshot_metadata(metadata, state.state_ref)
+    except Exception as error:
+        if isinstance(error, ValueError):
+            raise
+        raise ValueError("snapshot metadata authority is malformed") from error
+
+
 def _encode_metadata_value(value: Any, depth: int, nodes: list[int], active: set[int]) -> list[Any]:
     nodes[0] += 1
     if nodes[0] > _METADATA_MAX_NODES:
@@ -800,6 +844,7 @@ __all__ = [
     "decode_lineage_metadata",
     "decode_metadata_mapping",
     "decode_snapshot_metadata",
+    "read_snapshot_metadata",
     "encode_current_annotations",
     "encode_lineage_metadata",
     "encode_metadata_mapping",

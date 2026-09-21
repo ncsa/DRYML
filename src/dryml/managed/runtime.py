@@ -90,6 +90,7 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
     try:
         control = ManagedControlStore(stores.control_store, state_repo)
         current = control.reconcile(operation_id)
+        snapshot_observer = _preobserve_snapshot_environment()
         expected_ownership = None if current is None else current.ownership
         with _acquire_state_ownership(state_repo, instance, expected_ownership=expected_ownership) as ownership:
             # State topology, graph reservation, and every lifetime lock are now
@@ -135,6 +136,7 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
                 owner_id=running.owner_id, is_resuming=is_resuming,
                 checkpoint_state_ref=checkpoint, obj=instance, state_repo=state_repo,
                 ownership=ownership, control=control, callbacks=options.callbacks,
+                snapshot_observer=snapshot_observer,
             )
             try:
                 from .descriptor import _invoke_target
@@ -182,6 +184,7 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
             try:
                 final_state, report = publish_managed_state(
                     state_repo, instance, reservation=ownership.reservation,
+                    snapshot_observer=snapshot_observer,
                 )
                 validate_state_ref(state_repo, final_state)
                 _completion_boundary("final_state_published")
@@ -431,6 +434,29 @@ def _validate_attempt_id(attempt_id: str) -> None:
 
 def _completion_boundary(stage: str) -> None:
     """Provide a no-op in-process seam for deterministic final-save crash tests."""
+
+
+def _preobserve_snapshot_environment():
+    """Return one deferred environment observer captured before state ownership.
+
+    Environment inventory can traverse every installed distribution.  Keeping that
+    work outside the managed lifetime locks lets a concurrent request publish while
+    preserving final snapshot capture's existing unavailable-evidence behavior.
+    """
+
+    from dryml.environments.introspection import inspect_current
+
+    try:
+        environment = inspect_current()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as error:
+        def observer(error=error):
+            raise error
+    else:
+        def observer(environment=environment):
+            return environment
+    return observer
 
 
 __all__ = ["invoke", "request_interrupt", "status"]

@@ -8,6 +8,7 @@ import shutil
 import stat
 import tempfile
 from dataclasses import replace
+from collections.abc import Mapping
 from uuid import uuid4
 from pathlib import Path
 from typing import Iterable, Literal
@@ -18,7 +19,7 @@ from .records import (
     MainRefRecord, ObjectAliasRecord, StateAliasRecord, StateRefRecord,
     StoredRootRecord, StoreFormatRecord, StoreRecordError,
 )
-from .store import Store, StoreAuthorityError, StorePublicationCapabilities
+from .store import LocalStateSource, Store, StoreAuthorityError, StorePublicationCapabilities
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
 from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from ..query.sqlite.index import SQLiteStoreQueryIndex
@@ -30,13 +31,14 @@ QueryIndexPolicy = Literal["auto", "sqlite", "memory", "none"]
 class DirStore(Store):
     """Persist current logical authority directly beneath one local filesystem root.
 
-    Immutable records are digest sharded.  Local state lives at
-    ``local-state/<hh>/<graph-hash>/<codec>-<manifest-digest>/``.  All mutable
-    references use a sibling temporary file and atomic replacement while the
-    Store writer lock is held.  The old ``objects/`` generation layout is not a
-    recognized authority format.  Initial root creation and format-gate
-    publication use a derived sibling advisory lock, so simultaneous trusted
-    constructors never mistake a live temporary format file for old authority.
+    Immutable records are digest sharded. Each StateRef is authoritative only as
+    a complete ``snapshots/<hh>/<digest>/`` directory, which contains metadata,
+    placement, and every locally owned payload. All mutable references use a
+    sibling temporary file and atomic replacement while the Store writer lock is
+    held. The old ``objects/`` generation layout is not a recognized authority
+    format. Initial root creation and format-gate publication use a derived
+    sibling advisory lock, so simultaneous trusted constructors never mistake a
+    live temporary format file for old authority.
     """
 
     def __init__(
@@ -381,23 +383,16 @@ class DirStore(Store):
     def _stored_root_path(self, digest: str) -> str:
         return self._digest_path(os.path.join(self.base_dir, "stored-roots"), digest)
 
-    def _state_ref_path(self, digest: str) -> str:
-        return self._digest_path(os.path.join(self.base_dir, "state-refs"), digest)
+    def _snapshot_path(self, digest: str) -> str:
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise StoreAuthorityError("snapshot digest is malformed.")
+        return os.path.join(self.base_dir, "snapshots", digest[:2], digest)
 
     def _declaration_path(self, digest: str) -> str:
         return self._digest_path(os.path.join(self.base_dir, "declarations"), digest)
 
     def _claim_path(self, digest: str) -> str:
         return self._digest_path(os.path.join(self.base_dir, "claims"), digest)
-
-    def _local_state_path(self, graph_hash: str, state_hash: str) -> str:
-        try:
-            codec, digest = state_hash.split("-", 1)
-        except ValueError as error:
-            raise StoreAuthorityError("local state hash must be '<codec>-<digest>'.") from error
-        if len(graph_hash) != 64 or len(digest) != 64 or not codec.isalnum() or not codec:
-            raise StoreAuthorityError("local state graph hash or state hash is malformed.")
-        return os.path.join(self.base_dir, "local-state", graph_hash[:2], graph_hash, state_hash)
 
     @property
     def _staging_root(self) -> str:
@@ -607,166 +602,316 @@ class DirStore(Store):
         except StoreRecordError as error:
             raise StoreAuthorityError(f"local state payload is invalid: {error}") from error
 
-    def install_local_state(self, source_dir: object, manifest: LocalStateManifest) -> LocalStateManifest:
-        """Atomically install a complete same-filesystem immutable local state."""
-        if not isinstance(manifest, LocalStateManifest):
-            raise TypeError("manifest must be a LocalStateManifest.")
-        self.preflight_publication("install local state", local_state=True)
-        source_dir = os.path.abspath(os.fspath(source_dir))
-        if os.stat(source_dir).st_dev != os.stat(self.base_dir).st_dev:
-            raise StoreAuthorityError("local state staging must be on the Store filesystem.")
-        staging_root = os.path.realpath(self._staging_root)
-        if os.path.commonpath((staging_root, os.path.realpath(source_dir))) != staging_root:
-            raise StoreAuthorityError("local state staging must be created by the selected Store.")
-        self._validate_local_state_dir(source_dir, manifest)
-        destination = self._local_state_path(manifest.graph_hash, manifest.state_hash)
-        with interprocess_lock(self._writer_lock_path):
-            if os.path.lexists(destination):
-                try:
-                    self._validate_local_state_dir(destination, manifest)
-                except Exception:
-                    # A partial immutable destination is never authority and may
-                    # only be discarded while the Store writer is serialized.
-                    shutil.rmtree(destination)
-                else:
-                    return manifest
-            os.makedirs(os.path.dirname(destination), exist_ok=True)
-            os.replace(source_dir, destination)
-            try:
-                self._validate_local_state_dir(destination, manifest)
-            except BaseException:
-                # The destination is still incomplete/non-authoritative; remove
-                # it before releasing the writer lock.
-                shutil.rmtree(destination, ignore_errors=True)
-                raise
-        return manifest
-
-    def open_local_state(self, graph_hash: str, state_hash: str) -> str:
-        """Validate and return the direct local-state directory for restoration/copy."""
-        path = self._local_state_path(graph_hash, state_hash)
-        try:
-            manifest = self._read_file(os.path.join(path, "manifest.record"), LocalStateManifest)
-        except StoreAuthorityError:
-            raise
-        if manifest is None or manifest.graph_hash != graph_hash or manifest.state_hash != state_hash:
-            raise StoreAuthorityError("local state directory is missing or does not match its requested identity.")
-        self._validate_local_state_dir(path, manifest)
-        return path
-
-    def validate_local_state(self, definition, state_hash: str) -> str:
-        """Verify one state directory has the requested graph definition and roles."""
-        path = self.open_local_state(definition.graph_hash(), state_hash)
-        stored = self._read_file(os.path.join(path, "def.pkl"), DefinitionRecord)
-        if stored is None or not stored.definition.graph_equal(definition):
-            raise StoreAuthorityError("local state definition does not match the requested graph.")
-        if stored.roles != DefinitionRecord(definition).roles:
-            raise StoreAuthorityError("local state stateful roles do not match the requested graph.")
-        return path
-
-    def copy_local_state_from(self, source: Store, definition, state_hash: str) -> LocalStateManifest:
-        """Copy a source-validated immutable state through target-owned staging."""
-        self.preflight_publication("copy local state", local_state=True)
-        source_path = source.validate_local_state(definition, state_hash)
-        if not isinstance(source_path, (str, os.PathLike)):
-            raise StoreAuthorityError("source Store does not expose a copyable local-state handle.")
-        stage = self.create_local_state_staging()
-        try:
-            shutil.rmtree(stage)
-            shutil.copytree(os.fspath(source_path), stage)
-            manifest = self._read_file(os.path.join(stage, "manifest.record"), LocalStateManifest)
-            if manifest is None:
-                raise StoreAuthorityError("source local state lacks a manifest.")
-            self.install_local_state(stage, manifest)
-            return manifest
-        except BaseException:
-            shutil.rmtree(stage, ignore_errors=True)
-            raise
-
-    def rebind_local_state_from(
-            self, source: Store, source_definition, target_definition,
-            state_hash: str) -> LocalStateManifest:
-        """Copy payload bytes and bind them to rekeyed graph authority.
-
-        Args:
-            source: Store containing the verified source local state.
-            source_definition: Definition currently bound to ``state_hash``.
-            target_definition: Rekeyed definition receiving the same payload.
-            state_hash: Codec-qualified payload identity to preserve.
-
-        Returns:
-            The installed target manifest.
-
-        Raises:
-            StoreAuthorityError: If source authority or payload identity fails.
-
-        Side Effects:
-            Publishes one immutable local-state directory under the target graph.
-        """
-        self.preflight_publication("rebind local state", local_state=True)
-        source_path = source.validate_local_state(source_definition, state_hash)
-        if not isinstance(source_path, (str, os.PathLike)):
-            raise StoreAuthorityError(
-                "source Store does not expose a copyable local-state handle."
-            )
-        stage = self.create_local_state_staging()
-        try:
-            shutil.rmtree(stage)
-            shutil.copytree(os.fspath(source_path), stage)
-            source_manifest = self._read_file(
-                os.path.join(stage, "manifest.record"), LocalStateManifest
-            )
-            if source_manifest is None:
-                raise StoreAuthorityError("source local state lacks a manifest.")
-            definition_record = DefinitionRecord(target_definition)
-            definition_bytes = definition_record.to_bytes()
-            Path(stage, "def.pkl").write_bytes(definition_bytes)
-            manifest = LocalStateManifest(
-                source_manifest.codec,
-                definition_record.graph_hash,
-                definition_record.digest,
-                hashlib.sha256(definition_bytes).hexdigest(),
-                source_manifest.files,
-            )
-            if manifest.state_hash != state_hash:
-                raise StoreAuthorityError(
-                    "rekeyed definition changed local payload state identity."
-                )
-            Path(stage, "manifest.record").write_bytes(manifest.to_bytes())
-            self.install_local_state(stage, manifest)
-            return manifest
-        except BaseException:
-            shutil.rmtree(stage, ignore_errors=True)
-            raise
-
-    def read_state_ref_record(self, digest: str) -> StateRefRecord | None:
-        record = self._read_file(self._state_ref_path(digest), StateRefRecord)
-        if record is not None and record.digest != digest:
-            raise StoreAuthorityError("StateRefRecord digest does not match its direct path.")
-        return record
-
-    def write_state_ref_record(self, record: StateRefRecord) -> StateRefRecord:
-        """Install an immutable StateRefRecord after caller closure preflight."""
-        if not isinstance(record, StateRefRecord):
-            raise TypeError("record must be a StateRefRecord.")
-        path = self._state_ref_path(record.digest)
-        existed = self._read_file(path, StateRefRecord) is not None
-        installed = self._install_immutable(path, record, StateRefRecord)
-        if not existed:
-            self.mark_query_index_dirty()
-        return installed
-
     def iter_state_ref_records(self) -> Iterable[StateRefRecord]:
-        """Yield validated StateRef records in deterministic direct-path order."""
-        root = Path(self.base_dir, "state-refs")
+        """Yield only complete v3 snapshot StateRef authority in digest order."""
+        root = Path(self.base_dir, "snapshots")
         if not root.exists():
             return ()
         records = []
-        for path in sorted(root.glob("*/*.record")):
-            record = self._read_file(os.fspath(path), StateRefRecord)
-            if record is None or path.name != f"{record.digest}.record" or path.parent.name != record.digest[:2]:
-                raise StoreAuthorityError(f"StateRefRecord is stored under an invalid digest path: {path!s}.")
-            records.append(record)
+        for path in sorted(root.glob("*/*")):
+            if not path.is_dir() or path.parent.name != path.name[:2]:
+                raise StoreAuthorityError(f"Snapshot is stored under an invalid digest path: {path!s}.")
+            snapshot = self._read_snapshot(path.name)
+            assert snapshot is not None
+            records.append(snapshot[0])
         return tuple(records)
+
+    @staticmethod
+    def _read_json(path: str):
+        from dryml.formats import canonical_json_load_bytes
+
+        try:
+            mode = os.lstat(path).st_mode
+            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                raise StoreAuthorityError("snapshot metadata is not a regular file.")
+            with open(path, "rb") as source:
+                return canonical_json_load_bytes(source.read(), max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
+        except StoreAuthorityError:
+            raise
+        except Exception as error:
+            raise StoreAuthorityError("snapshot JSON authority is malformed.") from error
+
+    @staticmethod
+    def _write_json(path: str, value) -> None:
+        from dryml.formats import canonical_json_bytes
+
+        payload = canonical_json_bytes(value, max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
+        Path(path).write_bytes(payload)
+
+    def _read_snapshot(
+            self, digest: str, *, payloads: bool = False,
+            directory: str | None = None):
+        """Validate one v3 snapshot association without opening payloads by default."""
+
+        from dryml.core.metadata import decode_snapshot_metadata
+        from dryml.records import decode_record
+        from ..utils.graph.path import GraphPath
+
+        directory = self._snapshot_path(digest) if directory is None else directory
+        try:
+            mode = os.lstat(directory).st_mode
+            if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                raise StoreAuthorityError("snapshot authority is not a real directory.")
+            entries = {entry.name: entry for entry in os.scandir(directory)}
+        except FileNotFoundError:
+            return None
+        except StoreAuthorityError:
+            raise
+        except OSError as error:
+            raise StoreAuthorityError("snapshot authority is inaccessible.") from error
+        required = {"state-ref.record", "placement.json", "metadata.json", "snapshot.json"}
+        if not required.issubset(entries) or any(
+                not entries[name].is_file(follow_symlinks=False) for name in required):
+            raise StoreAuthorityError("snapshot lacks required complete metadata siblings.")
+        record = self._read_file(os.path.join(directory, "state-ref.record"), StateRefRecord)
+        if record is None or record.digest != digest:
+            raise StoreAuthorityError("snapshot StateRef record does not match its directory.")
+        placement_envelope = self._read_json(os.path.join(directory, "placement.json"))
+        metadata_envelope = self._read_json(os.path.join(directory, "metadata.json"))
+        snapshot_envelope = self._read_json(os.path.join(directory, "snapshot.json"))
+        try:
+            placement_record = decode_record(placement_envelope)
+            snapshot_record = decode_record(snapshot_envelope)
+            if placement_record.kind != "dryml.core.snapshot_placement" or placement_record.version != 1:
+                raise ValueError("unsupported placement record")
+            if snapshot_record.kind != "dryml.core.snapshot" or snapshot_record.version != 1:
+                raise ValueError("unsupported snapshot association")
+            placement = placement_record.data
+            association = snapshot_record.data
+            if set(placement) != {"state_ref_digest", "local", "children"} or set(association) != {"state_ref_digest", "placement_id", "metadata_id"}:
+                raise ValueError("snapshot records are not closed")
+            if placement["state_ref_digest"] != digest or association["state_ref_digest"] != digest:
+                raise ValueError("snapshot records target another StateRef")
+            if association["placement_id"] != placement_envelope.get("id") or association["metadata_id"] != metadata_envelope.get("id"):
+                raise ValueError("snapshot association ids do not match sibling records")
+            metadata = decode_snapshot_metadata(metadata_envelope, record.state_ref)
+        except Exception as error:
+            raise StoreAuthorityError("snapshot metadata association is malformed.") from error
+        if metadata.state_ref != record.state_ref:
+            raise StoreAuthorityError("snapshot metadata does not match StateRef authority.")
+        if not isinstance(placement["local"], list) or not isinstance(placement["children"], list):
+            raise StoreAuthorityError("snapshot placement is malformed.")
+        local = {}
+        for item in placement["local"]:
+            if not isinstance(item, dict) or set(item) != {"path", "state_hash", "directory"}:
+                raise StoreAuthorityError("snapshot local placement entry is malformed.")
+            path = GraphPath.from_data(item["path"])
+            if path in local or record.state_ref.states.get(path) != item["state_hash"]:
+                raise StoreAuthorityError("snapshot local placement does not match StateRef states.")
+            directory_name = item["directory"]
+            if not isinstance(directory_name, str) or not directory_name.startswith("local-state/") or ".." in directory_name.split("/"):
+                raise StoreAuthorityError("snapshot local placement directory is malformed.")
+            local[path] = directory_name
+        covered = dict(local)
+        for item in placement["children"]:
+            if not isinstance(item, dict) or set(item) != {"path", "state_ref_digest"}:
+                raise StoreAuthorityError("snapshot child placement entry is malformed.")
+            try:
+                path = GraphPath.from_data(item["path"])
+                child = record.state_ref.at(path)
+            except Exception as error:
+                raise StoreAuthorityError("snapshot child placement path is malformed.") from error
+            if child.digest() != item["state_ref_digest"]:
+                raise StoreAuthorityError("snapshot child placement does not match its projection.")
+            for child_path, state_hash in child.states.items():
+                target_path = path.join(child_path)
+                if target_path in covered or record.state_ref.states.get(target_path) != state_hash:
+                    raise StoreAuthorityError("snapshot placement overlaps or does not match StateRef states.")
+                covered[target_path] = None
+        if set(covered) != set(record.state_ref.states):
+            raise StoreAuthorityError("snapshot placement does not cover every stateful path.")
+        if payloads:
+            for path, relative in local.items():
+                manifest = self._read_file(os.path.join(directory, relative, "manifest.record"), LocalStateManifest)
+                if manifest is None or manifest.state_hash != record.state_ref.states[path]:
+                    raise StoreAuthorityError("snapshot payload manifest does not match placement.")
+                self._validate_local_state_dir(os.path.join(directory, relative), manifest)
+                expected = record.state_ref.object.at(path).definition
+                definition = self._read_file(os.path.join(directory, relative, "def.pkl"), DefinitionRecord)
+                if definition is None or not definition.definition.graph_equal(expected):
+                    raise StoreAuthorityError("snapshot payload definition does not match StateRef path.")
+        return record, metadata, local
+
+    def read_state_ref_record(self, digest: str) -> StateRefRecord | None:
+        """Read one StateRef only when its complete v3 snapshot validates."""
+
+        snapshot = self._read_snapshot(digest)
+        return None if snapshot is None else snapshot[0]
+
+    def get_snapshot_directory(self, target):
+        """Return the validated exact snapshot directory without reading payload bytes."""
+
+        from ..reference_values import StateRef
+
+        if not isinstance(target, StateRef):
+            raise TypeError("target must be a StateRef.")
+        snapshot = self._read_snapshot(target.digest())
+        if snapshot is None:
+            raise KeyError(target.digest())
+        if snapshot[0].state_ref != target:
+            raise StoreAuthorityError("snapshot directory has incompatible StateRef authority.")
+        return Path(self._snapshot_path(target.digest()))
+
+    def read_snapshot_metadata(self, digest: str):
+        """Return validated immutable captured metadata for one complete snapshot."""
+
+        snapshot = self._read_snapshot(digest)
+        return None if snapshot is None else snapshot[1]
+
+    def discard_local_state_staging(self, handle: object) -> None:
+        """Idempotently remove only Store-owned unpublished local-state staging."""
+
+        try:
+            path = os.path.abspath(os.fspath(handle))
+            root = os.path.realpath(self._staging_root)
+            if os.path.commonpath((root, os.path.realpath(path))) != root:
+                raise StoreAuthorityError("local-state staging is not owned by this Store.")
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            return
+
+    def prepare_local_state(self, source: object, manifest: LocalStateManifest) -> LocalStateSource:
+        """Validate owned completed staging before it is copied into a snapshot."""
+
+        path = os.path.abspath(os.fspath(source))
+        root = os.path.realpath(self._staging_root)
+        if os.path.commonpath((root, os.path.realpath(path))) != root:
+            raise StoreAuthorityError("local-state staging must be created by the selected Store.")
+        self._validate_local_state_dir(path, manifest)
+        return LocalStateSource(self, path, manifest)
+
+    def prepare_rebound_local_state(self, source: LocalStateSource, target_definition) -> LocalStateSource:
+        """Copy validated bytes into this Store's staging and bind a fork definition."""
+
+        if not isinstance(source, LocalStateSource):
+            raise TypeError("source must be a LocalStateSource.")
+        stage = self.create_local_state_staging()
+        try:
+            shutil.rmtree(stage)
+            shutil.copytree(os.fspath(source.handle), stage)
+            record = DefinitionRecord(target_definition)
+            definition_bytes = record.to_bytes()
+            Path(stage, "def.pkl").write_bytes(definition_bytes)
+            manifest = LocalStateManifest(source.manifest.codec, record.graph_hash, record.digest, hashlib.sha256(definition_bytes).hexdigest(), source.manifest.files)
+            if manifest.state_hash != source.manifest.state_hash:
+                raise StoreAuthorityError("rebound local state changed its payload identity.")
+            Path(stage, "manifest.record").write_bytes(manifest.to_bytes())
+            return self.prepare_local_state(stage, manifest)
+        except BaseException:
+            self.discard_local_state_staging(stage)
+            raise
+
+    def validate_local_state(self, reference, path) -> LocalStateManifest:
+        """Fully validate one exact snapshot-local payload manifest and bytes."""
+
+        from ..reference_values import StateRef
+        from ..utils.graph.path import normalize_path
+
+        if not isinstance(reference, StateRef):
+            raise TypeError("reference must be a StateRef.")
+        path = normalize_path(path)
+        snapshot = self._read_snapshot(reference.digest(), payloads=True)
+        if snapshot is None or snapshot[0].state_ref != reference:
+            raise KeyError(reference.digest())
+        relative = snapshot[2].get(path)
+        if relative is None:
+            raise KeyError(path)
+        manifest = self._read_file(os.path.join(self._snapshot_path(reference.digest()), relative, "manifest.record"), LocalStateManifest)
+        assert manifest is not None
+        return manifest
+
+    def open_local_state(self, reference, path) -> LocalStateSource:
+        """Open one validated snapshot-local payload source for restoration/copy."""
+
+        manifest = self.validate_local_state(reference, path)
+        snapshot = self._read_snapshot(reference.digest())
+        assert snapshot is not None
+        return LocalStateSource(self, os.path.join(self._snapshot_path(reference.digest()), snapshot[2][path]), manifest)
+
+    def publish_snapshot(self, reference, *, evidence, local_states, children=None):
+        """Install a complete v3 snapshot directory atomically under the writer fence."""
+
+        from ..metadata import SnapshotCapture, SnapshotMetadata, encode_snapshot_metadata
+        from ..reference_values import StateRef
+        from ..utils.graph.path import GraphPath
+        from dryml.records import GenericRecord, encode_record
+
+        if children is None:
+            children = {}
+        if not isinstance(reference, StateRef) or not isinstance(local_states, dict) or not isinstance(children, Mapping):
+            raise TypeError("snapshot publication requires a StateRef, local-state mapping, and child projection mapping.")
+        self.preflight_publication("publish snapshot", local_state=True)
+        if isinstance(evidence, SnapshotCapture):
+            metadata = SnapshotMetadata(reference, evidence.lineages, evidence.saved_at, evidence.environment, evidence.environment_status, evidence.requirements, evidence.requirements_status, evidence.requirements_coverage, evidence.diagnostics)
+        elif isinstance(evidence, SnapshotMetadata) and evidence.state_ref == reference:
+            metadata = evidence
+        else:
+            raise StoreAuthorityError("snapshot evidence does not match its StateRef.")
+        covered = set(local_states)
+        child_entries = []
+        for path, child in children.items():
+            if not isinstance(path, GraphPath) or child != reference.at(path):
+                raise StoreAuthorityError("snapshot child projection does not match its parent StateRef.")
+            for child_path in child.states:
+                target_path = path.join(child_path)
+                if target_path in covered:
+                    raise StoreAuthorityError("snapshot child projection overlaps local payload authority.")
+                covered.add(target_path)
+            child_entries.append({"path": path.to_data(), "state_ref_digest": child.digest()})
+        if covered != set(reference.states):
+            raise StoreAuthorityError("snapshot publication must cover every state path locally or by child projection.")
+        os.makedirs(self._staging_root, exist_ok=True)
+        stage = tempfile.mkdtemp(prefix="snapshot-", dir=self._staging_root)
+        try:
+            placement_entries = []
+            for path, source in sorted(local_states.items(), key=lambda item: str(item[0])):
+                if not isinstance(path, GraphPath) or not isinstance(source, LocalStateSource):
+                    raise TypeError("snapshot local states must map GraphPath to LocalStateSource.")
+                if source.manifest.state_hash != reference.states[path]:
+                    raise StoreAuthorityError("snapshot source does not match StateRef state hash.")
+                target_definition = reference.object.at(path).definition
+                source_definition = self._read_file(os.path.join(os.fspath(source.handle), "def.pkl"), DefinitionRecord)
+                if source_definition is None or not source_definition.definition.graph_equal(target_definition):
+                    raise StoreAuthorityError("snapshot source definition does not match StateRef path.")
+                relative = f"local-state/{source.manifest.graph_hash}/{source.manifest.state_hash}"
+                destination = os.path.join(stage, relative)
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                if not os.path.exists(destination):
+                    shutil.copytree(os.fspath(source.handle), destination)
+                self._validate_local_state_dir(destination, source.manifest)
+                placement_entries.append({"path": path.to_data(), "state_hash": source.manifest.state_hash, "directory": relative})
+            Path(stage, "state-ref.record").write_bytes(StateRefRecord(reference).to_bytes())
+            placement = encode_record(GenericRecord("dryml.core.snapshot_placement", 1, {"state_ref_digest": reference.digest(), "local": placement_entries, "children": child_entries}))
+            metadata_record = encode_snapshot_metadata(metadata)
+            association = encode_record(GenericRecord("dryml.core.snapshot", 1, {"state_ref_digest": reference.digest(), "placement_id": placement["id"], "metadata_id": metadata_record["id"]}))
+            self._write_json(os.path.join(stage, "placement.json"), placement)
+            self._write_json(os.path.join(stage, "metadata.json"), metadata_record)
+            self._write_json(os.path.join(stage, "snapshot.json"), association)
+            self._read_snapshot_from_directory(stage, reference, payloads=True)
+            target = self._snapshot_path(reference.digest())
+            with self.writer_lock():
+                existing = self._read_snapshot(reference.digest())
+                if existing is not None:
+                    if existing[0].state_ref != reference or existing[1] != metadata:
+                        raise StoreAuthorityError("snapshot write-once authority conflicts with existing evidence.")
+                    return existing[1]
+                self.mark_query_index_dirty()
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                os.replace(stage, target)
+                installed = self._read_snapshot(reference.digest(), payloads=True)
+                if installed is None:
+                    raise StoreAuthorityError("snapshot install did not survive read-back.")
+                return installed[1]
+        finally:
+            if os.path.isdir(stage):
+                shutil.rmtree(stage, ignore_errors=True)
+
+    def _read_snapshot_from_directory(self, directory: str, reference, *, payloads: bool):
+        """Validate candidate staging using the same path-independent snapshot checks."""
+
+        return self._read_snapshot(
+            reference.digest(), payloads=payloads, directory=directory,
+        )
 
     def read_declaration_record(self, digest: str) -> DeclarationRecord | None:
         record = self._read_file(self._declaration_path(digest), DeclarationRecord)

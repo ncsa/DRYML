@@ -204,10 +204,7 @@ def test_checkpoint_and_final_preserve_first_match_closure_child_authority(tmp_p
 
     assert Repo(root_store).load_state_ref(checkpoint, reuse_live="never").child.value == 1
     assert Repo(root_store).load_state_ref(final, reuse_live="never").child.value == 2
-    child_state = checkpoint.at(child_path)
-    assert root_store.validate_local_state(
-        child_state.definition, child_state.states[next(iter(child_state.states))],
-    )
+    assert root_store.validate_local_state(checkpoint, child_path).state_hash == checkpoint.states[child_path]
     assert child_store.read_state_ref_record(checkpoint.digest()) is None
 
 
@@ -336,17 +333,17 @@ def test_replica_or_index_failure_never_associates_partial_state(tmp_path, monke
         ),
     )
     value = RoutedValue(repo=repo)
-    original_write = second.write_state_ref_record
+    original_write = second.publish_snapshot
 
-    def fail_second_replica(record):
+    def fail_second_replica(*args, **kwargs):
         raise OSError("second replica failed")
 
-    monkeypatch.setattr(second, "write_state_ref_record", fail_second_replica)
+    monkeypatch.setattr(second, "publish_snapshot", fail_second_replica)
     with pytest.raises(RepoSaveError, match="managed state publication"):
         value.checkpoint_then_finish(managed=ManagedConfig(state_repo=repo))
     assert tuple(first.iter_state_ref_records())
     assert value.checkpoint_then_finish.status(state_repo=repo).checkpoint_state_ref is None
-    monkeypatch.setattr(second, "write_state_ref_record", original_write)
+    monkeypatch.setattr(second, "publish_snapshot", original_write)
 
     indexed_repo = Repo(first)
     indexed = RoutedValue(repo=indexed_repo)
@@ -451,10 +448,10 @@ def test_reopened_nested_payloads_are_validated_once_per_durable_closure(tmp_pat
         reopened.add(id(store))
         return store
 
-    def validate_local_state(self, definition, state_hash):
+    def validate_local_state(self, reference, path):
         if id(self) in reopened:
-            validations.append((definition.graph_hash(), state_hash))
-        return original_validate(self, definition, state_hash)
+            validations.append((reference.digest(), path))
+        return original_validate(self, reference, path)
 
     monkeypatch.setattr(ZipStore, "open_existing", staticmethod(open_existing))
     monkeypatch.setattr(ZipStore, "validate_local_state", validate_local_state)
@@ -495,10 +492,10 @@ def test_reopened_root_closure_rejects_missing_nested_replica_authority(
             return None
         return original_read(self, digest)
 
-    def validate_local_state(self, definition, state_hash):
-        if missing == "payload" and id(self) in reopened and state_hash in child_ref.states.values():
+    def validate_local_state(self, reference, path):
+        if missing == "payload" and id(self) in reopened and reference == child_ref:
             raise FileNotFoundError("nested payload missing")
-        return original_validate(self, definition, state_hash)
+        return original_validate(self, reference, path)
 
     monkeypatch.setattr(ZipStore, "open_existing", staticmethod(open_existing))
     monkeypatch.setattr(ZipStore, "read_state_ref_record", read_state_ref_record)
@@ -549,8 +546,8 @@ def test_dirty_reused_zip_seed_is_required_durable_and_commit_failure_keeps_chec
 
     monkeypatch.setattr(context_module, "_publish_managed_state", capture_publication)
     for name in (
-            "create_local_state_staging", "install_local_state", "copy_local_state_from",
-            "write_state_ref_record", "write_definition_record",
+            "create_local_state_staging", "prepare_local_state", "prepare_rebound_local_state",
+            "publish_snapshot", "write_definition_record",
     ):
         monkeypatch.setattr(dependency, name, no_new_dependency_write)
 
@@ -590,8 +587,8 @@ def test_dirty_reused_zip_seed_is_required_durable_and_commit_failure_keeps_chec
         )
         assert reopened_dependency._archive_dirty
         for name in (
-                "create_local_state_staging", "install_local_state", "copy_local_state_from",
-                "write_state_ref_record", "write_definition_record",
+                "create_local_state_staging", "prepare_local_state", "prepare_rebound_local_state",
+                "publish_snapshot", "write_definition_record",
         ):
             monkeypatch.setattr(reopened_dependency, name, no_new_dependency_write)
         monkeypatch.setattr(
@@ -652,8 +649,8 @@ def test_closure_seed_replica_excludes_dirty_historical_source_from_required_com
 
     monkeypatch.setattr(context_module, "_publish_managed_state", capture_publication)
     for name in (
-            "create_local_state_staging", "install_local_state", "copy_local_state_from",
-            "write_state_ref_record", "write_definition_record",
+            "create_local_state_staging", "prepare_local_state", "prepare_rebound_local_state",
+            "publish_snapshot", "write_definition_record",
     ):
         monkeypatch.setattr(dependency, name, no_new_dependency_write)
 

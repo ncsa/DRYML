@@ -36,7 +36,7 @@ def test_hook_failure_leaves_no_state_ref_or_last_hash(tmp_path):
     repo = Repo(store)
     obj = FailingState(repo=repo)
 
-    with pytest.raises(Exception, match="local state publication"):
+    with pytest.raises(Exception, match="snapshot-local state preparation"):
         obj.save(repo=repo)
 
     assert obj._last_state_hash is None
@@ -66,7 +66,7 @@ def test_alias_replacement_failure_preserves_completed_state_ref(tmp_path, monke
     assert store.read_state_ref_record(obj.last_state_ref.digest()).state_ref == obj.last_state_ref
 
 
-def test_state_ref_record_install_failure_preserves_the_prior_receipt(tmp_path, monkeypatch):
+def test_snapshot_install_failure_preserves_the_prior_receipt(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     obj = GoodState(repo=repo)
@@ -75,13 +75,13 @@ def test_state_ref_record_install_failure_preserves_the_prior_receipt(tmp_path, 
 
     monkeypatch.setattr(
         store,
-        "write_state_ref_record",
-        lambda record: (_ for _ in ()).throw(OSError("state ref install failed")),
+        "publish_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("snapshot install failed")),
     )
     with pytest.raises(RepoSaveError, match="publication") as raised:
         obj.save(repo=repo, deep_capture=True)
     assert isinstance(raised.value.__cause__, OSError)
-    assert "state ref install failed" in str(raised.value.__cause__)
+    assert "snapshot install failed" in str(raised.value.__cause__)
     assert raised.value.report is not None
 
     assert obj.last_state_ref == first
@@ -114,7 +114,7 @@ def test_empty_payload_hook_receives_an_empty_data_root_and_publishes_exact_stat
     state = EmptyState(repo=repo).save(repo=repo)
 
     path = next(iter(state.states))
-    directory = Path(store.open_local_state(state.object.definition.graph_hash(), state.states[path]))
+    directory = Path(store.open_local_state(state, path).handle)
     assert EmptyState.calls == [True]
     assert (directory / "data").is_dir()
     assert not any((directory / "data").iterdir())
@@ -137,18 +137,19 @@ def test_contended_node_fails_before_hooks_and_state_ref_publication(tmp_path):
     assert not (tmp_path / "store" / "state-refs").exists()
 
 
-@pytest.mark.parametrize("failure", ["hook", "install"])
+@pytest.mark.parametrize("failure", ["hook", "snapshot"])
 def test_failed_local_state_publication_cleans_staging_before_state_ref(tmp_path, monkeypatch, failure):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     obj = FailingState(repo=repo) if failure == "hook" else GoodState(repo=repo)
-    if failure == "install":
-        monkeypatch.setattr(store, "install_local_state", lambda source, manifest: (_ for _ in ()).throw(OSError("install failed")))
+    if failure == "snapshot":
+        monkeypatch.setattr(store, "publish_snapshot", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("snapshot install failed")))
 
-    with pytest.raises(Exception, match="local state publication"):
+    expected = "snapshot-local state preparation" if failure == "hook" else "Save publication failed"
+    with pytest.raises(Exception, match=expected):
         obj.save(repo=repo)
 
     staging = Path(store.base_dir, ".staging")
     assert not staging.exists() or not any(staging.iterdir())
     assert not (Path(store.base_dir) / "state-refs").exists()
-    assert obj._last_state_hash is None
+    assert (obj._last_state_hash is None) is (failure == "hook")

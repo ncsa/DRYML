@@ -1,8 +1,8 @@
 """Logical Store authority interface independent from backend paths.
 
-Current Stores persist immutable definition, local-state, declaration, claim,
-and StateRef records plus mutable references.  This module deliberately has no
-object-root or state-generation protocol: graph publication is owned by U5.
+Current Stores persist immutable definitions, declarations, claims, complete
+snapshot directories, and mutable references. Local-state payloads are valid
+only within the snapshot directory that publishes their exact StateRef.
 """
 
 from __future__ import annotations
@@ -63,8 +63,22 @@ class StorePublicationCapabilities:
             raise StoreCapabilityError(f"{operation} requires same-Store local-state staging.")
 
 
+@dataclass(frozen=True, slots=True)
+class LocalStateSource:
+    """Validated local-state bytes borrowed from one open Store.
+
+    ``handle`` is backend-private.  A source prepared from staging is owned by
+    its allocating Store until discarded; a source opened from a snapshot is
+    borrowed immutable authority and cannot be discarded by its consumer.
+    """
+
+    store: "Store"
+    handle: object
+    manifest: LocalStateManifest
+
+
 class Store(ABC):
-    """Backend-neutral authority contract for current logical Store records."""
+    """Backend-neutral authority contract for complete snapshot-local records."""
 
     @property
     @abstractmethod
@@ -230,52 +244,47 @@ class Store(ABC):
         """Create a backend-owned empty staging handle before serializer hooks run."""
 
     @abstractmethod
-    def install_local_state(self, source: object, manifest: LocalStateManifest) -> LocalStateManifest:
-        """Install a complete immutable local state from a backend-defined staging handle."""
+    def discard_local_state_staging(self, handle: object) -> None:
+        """Discard one unconsumed backend-owned local-state staging handle."""
+
+        raise NotImplementedError("This Store does not expose owned local-state staging.")
 
     @abstractmethod
-    def open_local_state(self, graph_hash: str, state_hash: str) -> object:
-        """Return a verified backend-defined local-state handle for consumption."""
+    def prepare_local_state(self, source: object, manifest: LocalStateManifest) -> LocalStateSource:
+        """Validate completed owned staging and return a typed payload source."""
+
+        raise NotImplementedError("This Store does not prepare local-state sources.")
 
     @abstractmethod
-    def validate_local_state(self, definition, state_hash: str) -> object:
-        """Verify a local state against its exact graph definition before reuse."""
+    def prepare_rebound_local_state(self, source: LocalStateSource, target_definition) -> LocalStateSource:
+        """Copy a verified source into owned staging with rebound definition evidence."""
+
+        raise NotImplementedError("This Store does not prepare rebound local state.")
 
     @abstractmethod
-    def copy_local_state_from(self, source: "Store", definition, state_hash: str) -> LocalStateManifest:
-        """Copy one verified immutable local state into this Store's authority."""
+    def open_local_state(self, reference, path) -> LocalStateSource:
+        """Open and fully validate one snapshot-local payload source."""
 
-    def rebind_local_state_from(
-            self, source: "Store", source_definition, target_definition,
-            state_hash: str) -> LocalStateManifest:
-        """Copy payload state under graph-equivalent forked definition authority.
+        raise NotImplementedError("This Store does not expose snapshot-local payloads.")
 
-        Args:
-            source: Store containing the verified source local state.
-            source_definition: Definition currently bound to ``state_hash``.
-            target_definition: Rekeyed definition to bind to the same payload.
-            state_hash: Codec-qualified payload identity to preserve.
+    def validate_local_state(self, reference, path) -> LocalStateManifest:
+        """Validate one snapshot-local payload manifest and return it."""
 
-        Returns:
-            The installed target manifest with the same state hash.
-
-        Raises:
-            NotImplementedError: If the backend cannot copy and rebind payloads.
-
-        Side Effects:
-            May publish an immutable target local-state directory.
-        """
-        raise NotImplementedError(
-            "This Store does not support rebinding local state to forked authority."
-        )
+        raise NotImplementedError("This Store does not validate snapshot-local payloads.")
 
     @abstractmethod
     def read_state_ref_record(self, digest: str) -> StateRefRecord | None:
         """Read one immutable StateRefRecord by digest."""
 
     @abstractmethod
-    def write_state_ref_record(self, record: StateRefRecord) -> StateRefRecord:
-        """Install one immutable StateRefRecord after its closure is available."""
+    def get_snapshot_directory(self, target) -> object:
+        """Return the complete snapshot directory for one exact StateRef."""
+
+        raise NotImplementedError("This Store does not expose snapshot directories.")
+
+    @abstractmethod
+    def publish_snapshot(self, reference, *, evidence, local_states, children=None):
+        """Atomically publish one complete snapshot-local authority directory."""
 
     def iter_state_ref_records(self) -> Iterable[StateRefRecord]:
         """Yield complete immutable StateRef records for authority scans."""

@@ -44,6 +44,7 @@ from dryml.formats import deep_freeze_json
 from .repo import Repo
 from .repo_definition import RepoDefinition
 from .execute_codec import CoreCallCodecError
+from .repo_plan import PUBLICATION_PHASES, PUBLICATION_STATUSES
 from .session import config, get_config
 from .store.dir import DirStore
 from .store.store import Store
@@ -604,14 +605,14 @@ def decode_core_outcome(
 
     outcome = decode_outcome(result, repo=repo, limit_bytes=result_limit_bytes)
     publications = []
-    publication_statuses = {"completed", "failed", "uncertain", "unattempted"}
     for item in outcome["publications"]:
         if not isinstance(item, Mapping) or set(item) != {"state", "store", "phase", "status", "path"}:
             raise CoreCallCodecError("core execution transport rejected malformed publication evidence")
         if (isinstance(item["store"], bool) or not isinstance(item["store"], int)
                 or not 0 <= item["store"] < len(repo.stores)
                 or not all(isinstance(item[name], str) for name in ("phase", "status", "path"))
-                or item["status"] not in publication_statuses):
+                or item["status"] not in PUBLICATION_STATUSES
+                or item["phase"] not in PUBLICATION_PHASES):
             raise CoreCallCodecError("core execution transport rejected malformed publication evidence")
         try:
             state = StateRef.from_data(item["state"])

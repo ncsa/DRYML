@@ -329,9 +329,17 @@ def build_exact_state_load_plan(repo, state_ref) -> ExactStateLoadPlan:
             sources = []
             for store in repo.stores:
                 try:
-                    payload = store.validate_local_state(definition, state_hash)
+                    payload = store.open_local_state(reference, path)
                 except Exception:
-                    continue
+                    # Per-object publication delegates descendants to their
+                    # projected StateRef snapshots. Closure publication keeps
+                    # them local to the enclosing receipt and returns above.
+                    try:
+                        projection = reference.at(path)
+                        payload = store.open_local_state(projection, GraphPath())
+                    except Exception:
+                        continue
+                    locate_record(projection)
                 sources.append((store, payload))
             if not sources:
                 missing.append(f"local state {state_hash} at {path!s}")
@@ -485,7 +493,7 @@ def execute_exact_state_load_plan(
 
             restore_started[0] = True
             obj.restore_state_from_dir(
-                os.path.join(os.fspath(action.payload), "data"), codec=codec
+                os.path.join(os.fspath(action.payload.handle), "data"), codec=codec
             )
         except BaseException as error:
             raise RepoLoadError(

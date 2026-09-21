@@ -222,26 +222,15 @@ class ZipStore(DirStore):
 
         return locked()
 
-    def install_local_state(self, source_dir: object, manifest):
-        """Install local-state authority into this archive's buffered transaction."""
+    def publish_snapshot(self, reference, *, evidence, local_states, children=None):
+        """Publish a v3 snapshot in this extraction and mark the archive dirty."""
+
         with self.transaction_fence():
-            result = super().install_local_state(source_dir, manifest)
+            result = super().publish_snapshot(
+                reference, evidence=evidence, local_states=local_states, children=children,
+            )
             self._archive_dirty = True
             return result
-
-    def copy_local_state_from(self, source, definition, state_hash: str):
-        """Copy immutable payload authority under the same archive transaction fence."""
-
-        with self.transaction_fence():
-            return super().copy_local_state_from(source, definition, state_hash)
-
-    def rebind_local_state_from(self, source, source_definition, target_definition, state_hash: str):
-        """Rebind copied payload authority without racing this handle's commit."""
-
-        with self.transaction_fence():
-            return super().rebind_local_state_from(
-                source, source_definition, target_definition, state_hash,
-            )
 
     def _archive_identity(self, path: str | None = None) -> str | None:
         target = self._archive_path if path is None else path

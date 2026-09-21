@@ -26,9 +26,11 @@ from .links import DefLink
 from .object import Object
 from .reference_values import ObjectRef, StateRef
 from .repo import Repo
+from .repo_plan import PUBLICATION_PHASES
 from .store.store import Store
 from .signatures import ReferenceSelection, SignatureError, compile_signature
 from .symbol import ImportRef
+from .utils.graph.path import GraphPath
 from ._callable_inspection import describe_callable
 
 
@@ -1293,13 +1295,30 @@ class _ResultPublisher:
              "object": root.object_ref.to_data(), "target": target}
             for target, root in self.updates
         ]
-        phases = ("definition", "state", "snapshot", "membership", "index", "main", "alias", "commit")
+        phases = tuple(sorted(PUBLICATION_PHASES))
+
+        def snapshot_paths(root: Object) -> tuple[GraphPath, ...]:
+            """Return every independently reportable runtime snapshot path."""
+
+            paths = []
+            seen = set()
+            for path, value in getattr(root, "_runtime_projection", {}).items():
+                if isinstance(value, Object) and id(value) not in seen:
+                    seen.add(id(value))
+                    paths.append(path)
+            if id(root) not in seen:
+                paths.append(GraphPath())
+            return tuple(paths)
+
         publications = [
             {"state": state.to_data(), "store": store_index, "phase": phase,
              "status": "completed", "path": str(path)}
             for root in roots
             for state in (self._prospective_state(root),)
-            for path in state.states
+            # A stateless projection still produces snapshot, membership, index,
+            # and commit report work. Reserve it so the post-publication fallback
+            # cannot drop durable evidence merely because it has no payload path.
+            for path in snapshot_paths(root)
             for store_index in range(len(self.repo.stores))
             for phase in phases
         ]

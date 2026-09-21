@@ -10,7 +10,6 @@ is the only public archive Store and supplies its buffered path-backed
 transaction.
 """
 
-import hashlib
 from io import BytesIO
 import multiprocessing
 import os
@@ -24,8 +23,8 @@ import dryml.core.store as store_exports
 import dryml.core.store.zip as zip_module
 from dryml.core import Object, Repo, SaveRouting, Serializable, StateRef
 from dryml.core.store.records import (
-    DeclarationRecord, DefinitionRecord, LocalStateManifest, MainRefRecord,
-    ObjectAliasRecord, StateAliasRecord, StateRefRecord,
+    DeclarationRecord, DefinitionRecord, MainRefRecord, ObjectAliasRecord,
+    StateAliasRecord,
 )
 from dryml.core.store.store import StoreAuthorityError, StoreCapabilityError
 from dryml.core.store.zip import ZipStore, ZipStoreConflictError
@@ -51,22 +50,6 @@ def _archive_bytes(path: Path) -> bytes:
 
 def _record(value="record") -> DefinitionRecord:
     return DefinitionRecord(ZipRecordObject(value).definition)
-
-
-def _stage_local_state(store, record: DefinitionRecord, payload: bytes) -> LocalStateManifest:
-    stage = Path(store.create_local_state_staging())
-    data = stage / "data"
-    (data / "payload.bin").write_bytes(payload)
-    definition_bytes = record.to_bytes()
-    manifest = LocalStateManifest(
-        "pkl", record.graph_hash, record.digest,
-        hashlib.sha256(definition_bytes).hexdigest(),
-        (("payload.bin", len(payload), hashlib.sha256(payload).hexdigest()),),
-    )
-    (stage / "def.pkl").write_bytes(definition_bytes)
-    (stage / "manifest.record").write_bytes(manifest.to_bytes())
-    store.install_local_state(stage, manifest)
-    return manifest
 
 
 def _concurrent_direct_record_commit(path: str, value: str, ready, start, results) -> None:
@@ -510,47 +493,42 @@ def test_retired_object_root_archive_fails_at_the_direct_format_gate_without_rew
 
 
 def test_record_and_local_state_identity_do_not_depend_on_archive_staging_paths(tmp_path):
-    obj = ZipPayloadObject("same")
-    record = DefinitionRecord(obj.definition)
-    state = StateRef(obj.object_ref, {next(iter(obj.object_ref.objects)): "pkl-" + "a" * 64})
     manifests = []
+    states = []
     archives = []
     for name in ("first", "second"):
         archive = tmp_path / f"{name}.zip"
         store = ZipStore(archive)
-        manifest = _stage_local_state(store, record, b"same payload")
-        store.write_definition_record(record)
-        store.write_state_ref_record(StateRefRecord(state))
+        repo = Repo(store)
+        state = repo.save_object(ZipPayloadObject("same", repo=repo), deep_capture=True)
+        manifest = store.validate_local_state(state, next(iter(state.states)))
         store.commit()
         store.close()
         manifests.append(manifest)
+        states.append(state)
         archives.append(archive)
 
     assert manifests[0] == manifests[1]
     assert manifests[0].state_hash == manifests[1].state_hash
-    for archive in archives:
+    for archive, state in zip(archives, states):
         reopened = ZipStore(archive)
         try:
-            assert reopened.read_definition_record(record.digest) == record
-            assert reopened.read_state_ref_record(state.digest()) == StateRefRecord(state)
-            assert Path(reopened.open_local_state(record.graph_hash, manifests[0].state_hash), "data", "payload.bin").read_bytes() == b"same payload"
+            assert reopened.read_state_ref_record(state.digest()).state_ref == state
+            assert reopened.validate_local_state(state, next(iter(state.states))) == manifests[0]
         finally:
             reopened.close()
 
 
-def test_direct_records_local_state_and_references_round_trip_through_zip(tmp_path):
+def test_snapshot_and_mutable_references_round_trip_through_zip(tmp_path):
     path = tmp_path / "store.zip"
     store = ZipStore(path)
-    obj = ZipPayloadObject("state")
-    record = DefinitionRecord(obj.definition)
-    manifest = _stage_local_state(store, record, b"state payload")
-    state = StateRef(obj.object_ref, {next(iter(obj.object_ref.objects)): manifest.state_hash})
+    repo = Repo(store)
+    state = repo.save_object(ZipPayloadObject("state", repo=repo), deep_capture=True)
+    record = DefinitionRecord(state.definition)
     declaration = DeclarationRecord(state.object)
     main = MainRefRecord(record.digest)
     object_alias = ObjectAliasRecord("current", state.object)
     state_alias = StateAliasRecord("current", state.object, state.digest())
-    store.write_definition_record(record)
-    store.write_state_ref_record(StateRefRecord(state))
     store.write_declaration_record(declaration)
     store.write_main_ref(main)
     store.write_object_alias(object_alias)
@@ -561,12 +539,13 @@ def test_direct_records_local_state_and_references_round_trip_through_zip(tmp_pa
     reopened = ZipStore(path)
     try:
         assert reopened.read_definition_record(record.digest) == record
-        assert reopened.read_state_ref_record(state.digest()) == StateRefRecord(state)
+        assert reopened.read_state_ref_record(state.digest()).state_ref == state
         assert reopened.read_declaration_record(declaration.digest) == declaration
         assert reopened.read_main_ref() == main
         assert reopened.read_object_alias("current") == object_alias
         assert reopened.read_state_alias(state.object.digest(), "current") == state_alias
-        assert Path(reopened.validate_local_state(record.definition, manifest.state_hash), "data", "payload.bin").read_bytes() == b"state payload"
+        payload = reopened.open_local_state(state, next(iter(state.states)))
+        assert Path(payload.handle, "data", "payload.txt").read_text() == "state"
     finally:
         reopened.close()
 

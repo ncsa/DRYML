@@ -71,7 +71,14 @@ def test_identical_alias_replicas_dedupe_and_conflicts_report_all_targets(tmp_pa
     first_repo = Repo(first)
     second_repo = Repo(second)
     first_state = first_repo.save_object(AliasValue(1, repo=first_repo))
-    second.write_state_ref_record(type(first).read_state_ref_record(first, first_state.digest()))
+    second.publish_snapshot(
+        first_state,
+        evidence=first.read_snapshot_metadata(first_state.digest()),
+        local_states={
+            path: first.open_local_state(first_state, path)
+            for path in first_state.states
+        },
+    )
     # Definition authority is not needed for alias resolution; replicate the
     # exact StateRef and prove equivalent aliases collapse across Stores.
     second_repo.set_alias("shared", first_state.object)

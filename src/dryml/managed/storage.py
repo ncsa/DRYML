@@ -14,7 +14,7 @@ from threading import get_ident
 
 from dryml.core.reference_values import ObjectId, StateRef
 from dryml.core.repo import Repo, RepoSaveError, _commit_save_report
-from dryml.core.repo_plan import _unique_stores
+from dryml.core.repo_plan import PUBLICATION_PHASES, _unique_stores
 from dryml.core.session import current_repo
 from dryml.core.store.dir import DirStore
 from dryml.core.store.store import Store
@@ -32,6 +32,9 @@ from .errors import (
 _MAX_STORES = 256
 _MAX_OBJECTS = 4096
 _MAX_PAIRS = 65536
+_MANAGED_REQUIRED_PUBLICATION_PHASES = PUBLICATION_PHASES - {
+    "index", "main", "alias",
+}
 
 
 @dataclass(slots=True)
@@ -260,7 +263,8 @@ def validate_state_ref(state_repo: Repo, state_ref: StateRef) -> StateRef:
     return state_ref
 
 
-def publish_managed_state(state_repo: Repo, obj: object, *, reservation):
+def publish_managed_state(state_repo: Repo, obj: object, *, reservation,
+                          snapshot_observer=None):
     """Deep-publish and durably verify one managed state boundary.
 
     The normal Repo save engine remains the only router and publication ledger.
@@ -272,6 +276,8 @@ def publish_managed_state(state_repo: Repo, obj: object, *, reservation):
         state_repo: Borrowed selected Repo whose current routing policy applies.
         obj: Managed live graph root covered by ``reservation``.
         reservation: Active exact graph reservation retained for the invocation.
+        snapshot_observer: Optional already-observed environment callable passed to
+            v3 snapshot capture. It is evaluated only when new evidence is needed.
 
     Returns:
         ``(StateRef, StoreReport)`` after required buffered Stores are durable.
@@ -289,6 +295,7 @@ def publish_managed_state(state_repo: Repo, obj: object, *, reservation):
     try:
         state_ref, report = state_repo.save_object(
             obj, deep_capture=True, reservation=reservation, report_stores=True,
+            _snapshot_observer=snapshot_observer,
         )
         required = _required_managed_publication_stores(report)
         report = _commit_save_report(
@@ -328,7 +335,7 @@ def _validate_managed_publication(state_repo: Repo, state_ref: StateRef, report,
     if any(
             publication.status != "completed"
             for publication in report.publications
-            if publication.phase in {"definition", "state", "snapshot", "membership", "claim", "commit"}
+            if publication.phase in _MANAGED_REQUIRED_PUBLICATION_PHASES
     ):
         raise ManagedRecoveryError("incomplete_state_publication", "managed state report has incomplete authority")
     for snapshot in report.snapshots:

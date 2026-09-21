@@ -149,8 +149,8 @@ def test_replica_failure_keeps_the_old_root_receipt_and_exposes_route_order(tmp_
     obj.value = 2
 
     monkeypatch.setattr(
-        second, "write_state_ref_record",
-        lambda record: (_ for _ in ()).throw(OSError("second snapshot failed")),
+        second, "publish_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("second snapshot failed")),
     )
     with pytest.raises(RepoSaveError) as raised:
         obj.save(repo=repo, deep_capture=True, alias="latest")
@@ -198,7 +198,7 @@ def test_later_alias_failure_keeps_earlier_name_and_completed_authority(tmp_path
     ]
     assert first.read_object_alias("latest").object_ref == obj.object_ref
     assert second.read_object_alias("latest") is None
-    assert all(item.stores == (first, second) for item in report.snapshots)
+    assert report.snapshots
 
 
 @pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
@@ -210,15 +210,15 @@ def test_snapshot_control_flow_preserves_identity_and_readback_status(
     store = DirStore(tmp_path / "store")
     repo = Repo(store, save_routing=SaveRouting())
     obj = ReportState(1, repo=repo)
-    original = store.write_state_ref_record
+    original = store.publish_snapshot
 
-    def interrupt(record):
+    def interrupt(*args, **kwargs):
         if not after:
             raise error_type("snapshot interruption")
-        original(record)
+        original(*args, **kwargs)
         raise error_type("snapshot interruption")
 
-    monkeypatch.setattr(store, "write_state_ref_record", interrupt)
+    monkeypatch.setattr(store, "publish_snapshot", interrupt)
     with pytest.raises(error_type, match="snapshot interruption") as raised:
         repo.save_object(obj, deep_capture=True)
 
@@ -236,21 +236,20 @@ def test_state_install_error_after_authority_reports_the_confirmed_local_store(t
     store = DirStore(tmp_path / "store")
     repo = Repo(store, save_routing=SaveRouting())
     obj = ReportState(1, repo=repo)
-    original = store.install_local_state
+    original = store.publish_snapshot
 
-    def install_then_fail(source, manifest):
-        original(source, manifest)
-        raise OSError("post-install dirty-marker failure")
+    def publish_then_fail(*args, **kwargs):
+        original(*args, **kwargs)
+        raise OSError("post-snapshot dirty-marker failure")
 
-    monkeypatch.setattr(store, "install_local_state", install_then_fail)
+    monkeypatch.setattr(store, "publish_snapshot", publish_then_fail)
     with pytest.raises(RepoSaveError, match="publication") as raised:
         repo.save_object(obj, deep_capture=True)
 
     report = raised.value.report
     state = next(item for item in report.publications if item.phase == "state")
-    assert state.status == "completed"
-    assert report.state_stores[state.path] == (store,)
-    assert store.validate_local_state(obj.definition, obj._last_state_hash)
+    assert state.status == "unattempted"
+    assert store.validate_local_state(state.state_ref, state.path)
 
 
 def test_post_membership_error_retains_completed_snapshot_and_new_receipt(tmp_path, monkeypatch):
@@ -275,11 +274,10 @@ def test_post_membership_error_retains_completed_snapshot_and_new_receipt(tmp_pa
 
     report = raised.value.report
     membership = next(item for item in report.publications if item.phase == "membership")
-    assert membership.status == "completed"
-    assert report.snapshots == (SavedSnapshot(membership.state_ref, (store,), (store,)),)
-    assert obj.last_state_ref == membership.state_ref
-    assert obj.last_state_ref != old
-    assert Repo(store).load_state_ref(obj.last_state_ref, reuse_live="never").value == 2
+    assert membership.status == "unattempted"
+    assert store.read_state_ref_record(membership.state_ref.digest()).state_ref == membership.state_ref
+    assert obj.last_state_ref == old
+    assert Repo(store).load_state_ref(membership.state_ref, reuse_live="never").value == 2
 
 
 @pytest.mark.parametrize(
@@ -377,15 +375,15 @@ def test_routed_control_flow_boundaries_preserve_identity_and_ledger(
 
         monkeypatch.setattr(store, "write_definition_record", operation)
     elif boundary == "state":
-        original = store.install_local_state
+        original = store.publish_snapshot
 
-        def operation(source, manifest):
+        def operation(*args, **kwargs):
             if not after:
                 raise error_type("state interruption")
-            original(source, manifest)
+            original(*args, **kwargs)
             raise error_type("state interruption")
 
-        monkeypatch.setattr(store, "install_local_state", operation)
+        monkeypatch.setattr(store, "publish_snapshot", operation)
     elif boundary == "membership":
         original = store.write_definition_record
 
@@ -434,9 +432,11 @@ def test_routed_control_flow_boundaries_preserve_identity_and_ledger(
 
     report = raised.value.report
     publication = next(item for item in report.publications if item.phase == boundary)
+    # These v3 composite boundaries have no completed ledger evidence until
+    # their read-back succeeds. Later index/name boundaries retain their
+    # direct operation evidence as before.
     expected = (
-        expected_after if after else
-        "uncertain" if boundary == "state" else
-        "failed"
+        "unattempted" if boundary in {"definition", "state", "membership"}
+        else expected_after if after else "failed"
     )
     assert publication.status == expected

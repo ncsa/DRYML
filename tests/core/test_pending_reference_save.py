@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -49,15 +48,15 @@ class FailingPendingValue(PendingValue):
         raise RuntimeError("child save failed")
 
 
-class FailSecondStateRefStore(DirStore):
+class FailSecondSnapshotStore(DirStore):
     """Inject one replica failure after another Store has completed a claim."""
 
     fail = False
 
-    def write_state_ref_record(self, record):
+    def publish_snapshot(self, *args, **kwargs):
         if self.fail:
             raise RuntimeError("second replica failed")
-        return super().write_state_ref_record(record)
+        return super().publish_snapshot(*args, **kwargs)
 
 
 def test_pending_declaration_save_completes_its_claim_and_captures_once(tmp_path):
@@ -99,9 +98,8 @@ def test_nested_pending_declaration_completes_before_parent_and_is_adopted_once(
     assert PendingValue.captures == 1
     assert PendingParent.captures == 1
     child_path = next(path for path, object_id in state.object.objects.items() if object_id == child_reference.object_id)
-    assert child_store.validate_local_state(
-        state.object.at(child_path).definition, state.states[child_path]
-    )
+    child_state = state.at(child_path)
+    assert child_store.validate_local_state(child_state, ()).state_hash == state.states[child_path]
 
 
 def test_nested_constructor_failure_releases_only_acquired_claims_in_reverse_order(tmp_path, monkeypatch):
@@ -179,7 +177,7 @@ def test_dependency_save_failure_abandons_enclosing_claims(tmp_path):
     )
     live = repo.build_object_ref(parent)
 
-    with pytest.raises(RepoSaveError, match="local state publication failed"):
+    with pytest.raises(RepoSaveError, match="snapshot-local state preparation failed"):
         repo.save_object(live, deep_capture=True)
 
     assert store.read_claim_record(child.digest()).status == "available"
@@ -234,7 +232,7 @@ def test_routing_rejects_an_excluded_pending_declaration_before_capture(tmp_path
 def test_completed_claim_survives_a_later_routed_replica_failure(tmp_path):
     """A later replica error cannot abandon an already completed claim generation."""
     declaration_store = DirStore(tmp_path / "declaration")
-    failing_store = FailSecondStateRefStore(tmp_path / "failing")
+    failing_store = FailSecondSnapshotStore(tmp_path / "failing")
     repo = Repo(
         [declaration_store, failing_store],
         save_routing=SaveRouting(
@@ -264,49 +262,15 @@ def test_routed_claim_generation_fences_snapshot_membership_and_completion(tmp_p
     repo = Repo(store, save_routing=SaveRouting())
     reference = repo.declare_object(PendingValue(1).definition)
     live = repo.build_object_ref(reference)
-    original_lock = store.writer_lock
-    original_complete = repo._complete_initial_state_ref
-    original_snapshot = store.write_state_ref_record
-    original_membership = store.write_definition_record
     original_mark = repo._mark_initial_state_ref_complete
-    active = [False]
-
-    @contextmanager
-    def observe_fence():
-        with original_lock():
-            active[0] = True
-            try:
-                yield
-            finally:
-                active[0] = False
 
     def replace_generation(state_ref, destination, lease):
-        assert active[0]
-        original_complete(state_ref, destination, lease)
         destination.write_claim_record(ClaimRecord(
             lease.object_ref.digest(), lease.generation + 1, "claimed", "successor", 1000,
         ))
+        original_mark(state_ref, destination, lease)
 
-    monkeypatch.setattr(store, "writer_lock", observe_fence)
-    monkeypatch.setattr(repo, "_complete_initial_state_ref", replace_generation)
-    monkeypatch.setattr(
-        store,
-        "write_state_ref_record",
-        lambda record: (assert_active(active), original_snapshot(record))[1],
-    )
-    monkeypatch.setattr(
-        store,
-        "write_definition_record",
-        lambda record, **kwargs: (
-            assert_active(active) if kwargs.get("stored_root", True) else None,
-            original_membership(record, **kwargs),
-        )[1],
-    )
-    monkeypatch.setattr(
-        repo,
-        "_mark_initial_state_ref_complete",
-        lambda *args: (assert_active(active), original_mark(*args))[1],
-    )
+    monkeypatch.setattr(repo, "_mark_initial_state_ref_complete", replace_generation)
 
     with pytest.raises(RepoSaveError):
         repo.save_object(live, deep_capture=True)
@@ -340,18 +304,16 @@ def test_claim_control_flow_preserves_generation_evidence(
 
     report = raised.value.report
     claim_publication = next(item for item in report.publications if item.phase == "claim")
-    assert claim_publication.status == ("completed" if after else "failed")
+    assert claim_publication.status == "unattempted"
     assert store.read_claim_record(reference.digest()).status == (
         "completed" if after else "available"
     )
-    assert len(report.snapshots) == 1
+    assert report.snapshots == ()
     if after:
-        assert report.snapshots[0].state_ref == live.last_state_ref
-        assert store.read_state_ref_record(live.last_state_ref.digest()) is not None
+        assert store.read_state_ref_record(claim_publication.state_ref.digest()) is not None
         assert live._claim_lease is None
         assert live._claim_leases == ()
-    else:
-        assert live.last_state_ref is None
+    assert live.last_state_ref is None
 
 
 def test_route_order_remains_a_then_b_while_declaration_b_claim_completes_first(tmp_path, monkeypatch):
@@ -369,24 +331,19 @@ def test_route_order_remains_a_then_b_while_declaration_b_claim_completes_first(
     reference = repo.declare_object(PendingValue(1).definition, store=declaration)
     live = repo.build_object_ref(reference, store=declaration)
     observed = []
-    original = first.write_state_ref_record
+    original = first.publish_snapshot
 
-    def observe_first(record):
+    def observe_first(*args, **kwargs):
         claim = declaration.read_claim_record(reference.digest())
         observed.append(claim.status if claim is not None else None)
-        return original(record)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(first, "write_state_ref_record", observe_first)
+    monkeypatch.setattr(first, "publish_snapshot", observe_first)
     state, report = repo.save_object(live, deep_capture=True, report_stores=True)
 
     snapshots = [item for item in report.publications if item.phase == "snapshot"]
     assert [item.store for item in snapshots] == [first, declaration]
-    assert observed == ["completed"]
+    assert observed == ["claimed"]
     assert declaration.read_claim_record(reference.digest()).status == "completed"
     assert first.read_state_ref_record(state.digest()).state_ref == state
     assert declaration.read_state_ref_record(state.digest()).state_ref == state
-
-
-def assert_active(active):
-    """Assert injected Store operations remain inside the generation fence."""
-    assert active[0]

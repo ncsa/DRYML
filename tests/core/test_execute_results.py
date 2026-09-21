@@ -320,8 +320,8 @@ def test_partial_replica_publication_is_a_failed_outcome_with_exact_evidence(tmp
     prepared = strategy.prepare(_state_result, (6,), {}, repo=repo, control_store=None, update_args=False)
     worker = Repo.from_definition(repo.to_definition())
     monkeypatch.setattr(
-        worker.stores[1], "write_state_ref_record",
-        lambda record: (_ for _ in ()).throw(OSError("replica failure")),
+        worker.stores[1], "publish_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("replica failure")),
     )
     try:
         output = strategy.invoke(prepared.invocation, repo=worker, update_args=False)
