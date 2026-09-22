@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 import threading
 
@@ -259,7 +259,7 @@ def test_incremental_metadata_save_does_not_scan_and_preserves_unrelated_tokens(
             _save(repo, "second", object_values={"project": "second"})
         second = raised.value.report.snapshots[0].state_ref
     assert set(store._query_index_dirty_markers()) == unrelated | {unscoped}
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con:
         assert con.execute(
             "SELECT count(*) FROM metadata_records WHERE scope = 'snapshot'"
         ).fetchone() == (2,)
@@ -281,7 +281,7 @@ def test_incremental_metadata_replaces_current_rows_without_losing_snapshots(tmp
     repo.delete_metadata(state.object)
     repo.save_object(value)
     assert not store.query_index_is_dirty()
-    with sqlite3.connect(store.open_query_index().path) as con:
+    with closing(sqlite3.connect(store.open_query_index().path)) as con:
         assert con.execute(
             "SELECT source_record_id, present FROM metadata_records "
             "WHERE source_kind = 'current' AND scope = 'object' AND reference_digest = ?",
