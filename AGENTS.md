@@ -19,15 +19,31 @@ questions without claiming hot-reload or live-Object migration support.
 
 ## Tests
 
-Use `tests.sh` for DRYML verification. The normal maintained selection is:
+Use `tests.sh` for DRYML verification. Start with focused files or directories,
+then expand to the affected subsystem. Put explicit test paths before options
+so the runner selects focused mode, for example:
+
+```bash
+./tests.sh tests/core/test_repo_save_load.py --no-cov -x
+```
+
+Use fail-fast for focused diagnosis, not for collecting related failures across
+a bounded subsystem. A broad-suite failure returns work to focused/subsystem
+verification under the global verification policy, not another full-suite run.
+
+The old and development tiers, `tests/old` and `tests/dev`, are excluded unless
+the user explicitly requests them.
+
+### Final Maintained Verification
+
+After affected subsystem tests pass and all implementation units are integrated,
+run the maintained selection at final closeout:
 
 ```bash
 ./tests.sh --ignore tests/old --ignore tests/dev -x tests
 ```
 
-Run focused files or directories by passing them through `tests.sh`. The old and
-development tiers, `tests/old` and `tests/dev`, are excluded unless the user
-explicitly requests them. `./tests.sh full` is the maintained full selection;
+`./tests.sh full` is the maintained full selection;
 `./tests.sh profile --unknown-only` profiles unclassified test tiers.
 
 ## Source Ownership
