@@ -64,6 +64,10 @@ records byte hashes and semantic expectations. This beta fixture commitment
 covers framework-owned v3 records and associations, not arbitrary author codec
 migration or Python API stability.
 
+Fixture authority is checked out byte-for-byte via `.gitattributes`, without
+line-ending conversion. Git for Windows needs long-path support to check out the
+snapshot directory fixtures; CI enables `core.longpaths` for its Git processes.
+
 ## Repo Definition V1
 
 Repo definition v1 is the inert canonical-JSON envelope

@@ -1,0 +1,3 @@
+# Store fixtures are hash-verified authority, including their text payloads.
+tests/fixtures/store_v3/dir-store/** -text
+tests/fixtures/store_v3/zip-store.zip -text
