@@ -41,7 +41,7 @@ def test_hook_failure_leaves_no_state_ref_or_last_hash(tmp_path):
 
     assert obj._last_state_hash is None
     assert obj.last_state_ref is None
-    assert not (tmp_path / "store" / "state-refs").exists()
+    assert not tuple(store.iter_state_ref_records())
 
 
 def test_alias_replacement_failure_preserves_completed_state_ref(tmp_path, monkeypatch):
@@ -134,7 +134,7 @@ def test_contended_node_fails_before_hooks_and_state_ref_publication(tmp_path):
 
     assert EmptyState.calls == []
     assert obj._last_state_hash is None
-    assert not (tmp_path / "store" / "state-refs").exists()
+    assert not tuple(store.iter_state_ref_records())
 
 
 @pytest.mark.parametrize("failure", ["hook", "snapshot"])
@@ -151,5 +151,5 @@ def test_failed_local_state_publication_cleans_staging_before_state_ref(tmp_path
 
     staging = Path(store.base_dir, ".staging")
     assert not staging.exists() or not any(staging.iterdir())
-    assert not (Path(store.base_dir) / "state-refs").exists()
+    assert not tuple(store.iter_state_ref_records())
     assert (obj._last_state_hash is None) is (failure == "hook")

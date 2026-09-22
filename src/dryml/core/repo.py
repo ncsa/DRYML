@@ -20,7 +20,7 @@ from uuid import uuid4
 from .definition import Definition, ConcreteDefinition
 from .cdef_graph import ConcreteDefinitionGraph
 from .object import Object
-from .store.store import Store, StoreCapabilityError
+from .store.store import Store, StoreAuthorityError, StoreCapabilityError
 from .policies import CachePolicy, LiveReusePolicy, RepoGraphOptions
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
@@ -3460,6 +3460,13 @@ class Repo:
             graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
                 override. Both overrides are local to this save.
             report_stores: Whether to return an ephemeral StoreReport.
+            source_store: Optional connected Store selecting existing complete
+                root evidence and payload authority when copies are ambiguous.
+            source_stores: Optional exact StateRef-to-connected-Store mapping for
+                independently ambiguous routed child sources.
+            annotations: Optional SaveAnnotations whole-map replacements for the
+                root ObjectRef and StateRef. ``None`` at either scope means no
+                explicit current write; an empty mapping is a present value.
             _capture_memo: Private retained capture memo. It is accepted for
                 internal state-operation compatibility and does not alter routing.
             reservation: Optional active exact graph reservation reused by an
@@ -3473,6 +3480,8 @@ class Repo:
             ValueError: If ``alias`` is empty or a supplied mode is unsupported.
             RepoSaveError: If routing, claims, capture, or publication fails.
             StoreAuthorityError: If Store publication rejects authoritative data.
+            MetadataConflictError: If selected complete sources or destination
+                write-once snapshot evidence disagree.
 
         Side Effects:
             Publishes every local state and the enclosing StateRef before main or
@@ -3484,6 +3493,10 @@ class Repo:
             Once that authority is complete, installs the StateRef as ``obj``'s
             read-only last-state receipt before any derived index, main, or alias
             update that may later raise.
+            Captures environment, requirement, lineage, and selected current
+            annotation evidence once for each new snapshot. Explicit annotation
+            mappings then become Store-local whole-map LWW current authority;
+            retries never refresh an already-complete captured view.
 
         Concurrency:
             Retains one routing/default/Store-order view, preserves declaration
@@ -3644,6 +3657,12 @@ class Repo:
             graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
                 override local to this save.
             report_stores: Whether to pair the StateRef with a StoreReport.
+            source_store: Optional connected Store selecting existing complete
+                root evidence and payload authority when copies are ambiguous.
+            source_stores: Optional exact StateRef-to-connected-Store mapping for
+                independently ambiguous routed child sources.
+            annotations: Optional SaveAnnotations whole-map replacements for root
+                ObjectRef and StateRef current mappings.
 
         Returns:
             The immutable StateRef, or ``(StateRef, StoreReport)`` when
@@ -3652,6 +3671,8 @@ class Repo:
         Raises:
             RepoSaveError: If graph bindings, claims, codecs, or hooks fail.
             StoreAuthorityError: If Store preflight or publication fails.
+            MetadataConflictError: If selected sources or immutable destination
+                snapshot evidence disagree.
             TypeError: If a supplied mode has the wrong type.
             ValueError: If no writable target Store can be selected or a mode is unsupported.
 
@@ -3661,6 +3682,9 @@ class Repo:
             every configured Store after successful publication. The completed
             top-level StateRef becomes the live root's last-state receipt before
             any derived index, main-reference, or alias update can fail.
+            Snapshot capture and explicit current-annotation writes have the same
+            semantics as :meth:`save_object`; successful buffered Stores are then
+            committed by this wrapper.
 
         Concurrency:
             Store publication and initial-claim completion use writer locks and
@@ -4357,7 +4381,9 @@ class Repo:
             state_ref,
             *,
             reuse_live: LiveReusePolicy = "matching",
-            cache: CachePolicy = "weak") -> Object:
+            cache: CachePolicy = "weak",
+            source_store=None,
+            source_stores=None) -> Object:
         """Exactly restore one authoritative StateRef after complete preflight.
 
         Args:
@@ -4368,21 +4394,36 @@ class Repo:
                 ``"never"`` always builds fresh.
             cache: Cache tier populated only after the complete realization has
                 succeeded.
+            source_store: Optional connected Store selecting complete root
+                snapshot evidence.
+            source_stores: Optional exact StateRef-to-connected-Store mapping
+                selecting independently routed child snapshot evidence. Every key
+                must be a StateRef in the exact closure and cannot select a root
+                Store different from ``source_store``.
 
         Returns:
             A fully restored root preserving the StateRef's ObjectIds and graph
             topology.
 
         Raises:
-            RepoLoadError: If exact authority preflight, construction, or restore
+            RepoLoadError: If exact authority preflight, including selected
+                snapshot or local payload authority, construction, or restore
                 fails. No fresh partial cache entry is published.
+            MetadataConflictError: If unqualified replicas or a live cached
+                identity disagree with selected captured lineage evidence.
+            TypeError: If ``source_store`` is not a Store, ``source_stores`` is
+                not a mapping, or a mapping key/value is not a StateRef/Store.
+            ValueError: If a selected Store is disconnected, root selectors
+                differ, or a mapping names a StateRef outside the exact closure.
 
         Side Effects:
             May restore a uniquely eligible greedy live Object. A failed greedy
             restore clears its state hash and evicts it from Repo caches.
             A successful top-level exact load installs ``state_ref`` as the
             returned root's last-state receipt; descendants receive no synthetic
-            receipt.
+            receipt. Selected lineage facts are reconciled before construction,
+            payload loading, hooks, or live reuse, and are installed only on new
+            exact identities rather than retimestamping conflicting live objects.
         """
         from dryml.runtime import materialization_admission
         from .materialization import build_exact_state_load_plan, execute_exact_state_load_plan
@@ -4391,12 +4432,17 @@ class Repo:
         if not isinstance(state_ref, StateRef):
             raise TypeError("load_state_ref requires a StateRef.")
         with materialization_admission(operation="repo_load_state_ref"):
-            plan = build_exact_state_load_plan(self, state_ref)
+            plan = build_exact_state_load_plan(
+                self, state_ref, source_store=source_store,
+                source_stores=source_stores,
+            )
             return execute_exact_state_load_plan(
                 self, plan, reuse_live=reuse_live, cache=cache,
             )
 
-    def restore_state_ref_into(self, obj: Object, state_ref, *, reservation=None):
+    def restore_state_ref_into(
+            self, obj: Object, state_ref, *, reservation=None,
+            source_store=None, source_stores=None):
         """Restore an authoritative snapshot into the exact supplied live graph.
 
         Args:
@@ -4404,20 +4450,37 @@ class Repo:
                 must exactly match ``state_ref``.
             state_ref: Complete authoritative StateRef to restore.
             reservation: Optional active reservation returned for this exact graph.
+            source_store: Optional connected Store selecting complete root
+                snapshot evidence.
+            source_stores: Optional exact StateRef-to-connected-Store mapping
+                selecting independently routed child snapshot evidence. Every key
+                must be a StateRef in the exact closure and cannot select a root
+                Store different from ``source_store``.
 
         Returns:
             The requested ``state_ref`` after every local restore hook succeeds.
 
         Raises:
-            RepoLoadError: If authority, topology, paths, IDs, or payloads fail
-                preflight, or if a hook fails. A post-hook failure invalidates all
-                covered live nodes and requires a fresh exact load.
+            RepoLoadError: If authority, including selected snapshot/local payload
+                evidence, topology, paths, IDs, or payloads fail preflight, or if
+                a hook fails. A post-hook failure invalidates all covered live
+                nodes and requires a fresh exact load.
             RepoSaveError: If graph ownership is unavailable or ``reservation``
                 is inactive, foreign, or does not cover the supplied graph.
+            MetadataConflictError: If unqualified replicas or a live cached
+                identity disagree with selected captured lineage evidence,
+                including an uncached supplied target.
+            TypeError: If ``source_store`` is not a Store, ``source_stores`` is
+                not a mapping, or a mapping key/value is not a StateRef/Store.
+            ValueError: If a selected Store is disconnected, root selectors
+                differ, or a mapping names a StateRef outside the exact closure.
 
         Side Effects:
             Runs local hooks dependency-first without candidate search or object
             replacement. Successful completion updates only ``obj.last_state_ref``.
+            Selected lineage facts are validated against every supplied live node
+            before hooks; a node without active evidence receives the selected
+            fact only after all conflicts and locks have been checked.
         """
 
         from .materialization import build_exact_state_load_plan
@@ -4432,7 +4495,10 @@ class Repo:
 
         # Authority validation, retained binding validation, and reservation all
         # complete before the first user restore hook can run.
-        plan = build_exact_state_load_plan(self, state_ref)
+        plan = build_exact_state_load_plan(
+            self, state_ref, source_store=source_store,
+            source_stores=source_stores,
+        )
         _, nodes, object_ids = self._state_graph_evidence(obj)
         if obj.object_ref != state_ref.object:
             raise RepoLoadError("Target object does not carry the requested exact ObjectRef.")
@@ -4461,6 +4527,22 @@ class Repo:
             if set(targets) != set(object_ids):
                 raise RepoLoadError("Target graph has incomplete stateful ObjectId bindings.")
 
+            # The supplied target can be intentionally uncached, so exact-load
+            # preflight cannot rely on the Repo cache scan to protect its active
+            # creation evidence. Check every fact before changing any of them.
+            lineage_updates = []
+            for object_id, target in targets.items():
+                expected = plan.lineage_facts_by_object_id.get(object_id)
+                if expected is None:
+                    continue
+                if getattr(target, "_lineage_fact_object_id", None) == object_id:
+                    if getattr(target, "_lineage_created_at", None) != expected.created_at:
+                        raise MetadataConflictError(
+                            "Target live identity disagrees with selected lineage evidence."
+                        )
+                else:
+                    lineage_updates.append((target, object_id, expected.created_at))
+
             # Existing per-instance exclusion remains meaningful for code outside
             # the graph-token protocol. Acquire every lock before invalidation or
             # hook entry so a failure here leaves the target usable.
@@ -4469,6 +4551,12 @@ class Repo:
                 if lock is None or not lock.acquire(blocking=False):
                     raise RepoLoadError("Target local state is already reserved by save or restore.")
                 locks.append(lock)
+
+            if lineage_updates:
+                from .snapshot_capture import install_lineage_fact
+
+                for target, object_id, created_at in lineage_updates:
+                    install_lineage_fact(target, object_id, created_at)
 
             # A StateRef embeds materializing StateRefs below ordinary CDef graph
             # edges. Keep the full preflight closure, selecting the outer action
@@ -5312,7 +5400,9 @@ def load_object(
             return repo.load_object(cdef, cache=cache)
 
 
-def load_state_ref(state_ref, repo=None, *, reuse_live: LiveReusePolicy = "matching", cache: CachePolicy = "weak") -> Object:
+def load_state_ref(
+        state_ref, repo=None, *, reuse_live: LiveReusePolicy = "matching",
+        cache: CachePolicy = "weak", source_store=None, source_stores=None) -> Object:
     """Exactly load one immutable StateRef through a managed Repo.
 
     Args:
@@ -5320,17 +5410,35 @@ def load_state_ref(state_ref, repo=None, *, reuse_live: LiveReusePolicy = "match
         repo: Explicit Repo or Store-like source containing the full closure.
         reuse_live: Policy for eligible already-live exact nodes.
         cache: Cache tier for the completed realization.
+        source_store: Optional connected Store selecting complete root snapshot
+            evidence.
+        source_stores: Optional exact StateRef-to-connected-Store mapping
+            selecting independently routed child snapshot evidence. Keys must be
+            StateRefs in the exact closure and cannot conflict with
+            ``source_store`` for the root.
 
     Returns:
         A graph restored from the requested exact StateRef.
 
     Raises:
-        RepoLoadError: If exact authority or its local-state closure is missing.
+        RepoLoadError: If exact authority, including selected snapshot/local
+            payload authority, or its local-state closure is missing or corrupt.
+        MetadataConflictError: If unqualified replicas or a live cached identity
+            disagree with selected captured lineage evidence.
+        TypeError: If ``source_store`` is not a Store, ``source_stores`` is not a
+            mapping, or a mapping key/value is not a StateRef/Store.
+        ValueError: If a selected Store is disconnected, root selectors differ,
+            or a mapping names a StateRef outside the exact closure.
 
     Side Effects:
         May construct or reuse live Objects. On success, installs ``state_ref``
         as the returned top-level root's last-state receipt only; descendants do
-        not receive projected or synthetic receipts.
+        not receive projected or synthetic receipts. Selected lineage facts are
+        resolved before materialization and never retimestamp a conflicting live
+        identity.
     """
     with manage_repo(repo=repo) as sub_repo:
-        return sub_repo.load_state_ref(state_ref, reuse_live=reuse_live, cache=cache)
+        return sub_repo.load_state_ref(
+            state_ref, reuse_live=reuse_live, cache=cache,
+            source_store=source_store, source_stores=source_stores,
+        )

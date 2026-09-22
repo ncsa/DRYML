@@ -62,7 +62,7 @@ def test_missing_session_and_incomplete_selected_state_fail_before_mutation(tmp_
     repo = Repo((store,))
     obj = ResolutionValue(repo=repo)
     state = repo.save_object(obj, deep_capture=True)
-    state_path = store._state_ref_path(state.digest())
+    state_path = store.get_snapshot_directory(state) / "state-ref.record"
     # Removing immutable test authority makes the retained live receipt unusable;
     # validation must not silently select an arbitrary Store or materialize it.
     __import__("os").unlink(state_path)

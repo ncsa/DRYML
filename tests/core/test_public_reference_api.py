@@ -29,7 +29,8 @@ def test_public_save_and_load_signatures_exclude_retired_controls():
 
     assert tuple(inspect.signature(Object.save).parameters) == (
         "self", "repo", "main", "store", "alias", "deep_capture",
-        "match_mode", "graph_mode", "report_stores",
+        "match_mode", "graph_mode", "report_stores", "source_store",
+        "source_stores", "annotations",
     )
     assert tuple(inspect.signature(Repo.load_object).parameters) == ("self", "x", "cache")
     assert tuple(inspect.signature(Repo.load).parameters) == ("self", "cdef", "cache")

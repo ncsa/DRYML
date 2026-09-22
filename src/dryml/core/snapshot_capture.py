@@ -1,4 +1,4 @@
-"""In-memory lifecycle and environment evidence capture for future snapshots.
+"""In-memory lifecycle and environment evidence capture for Store snapshots.
 
 This module builds detached :class:`SnapshotCapture` values from already
 materialized save plans. It deliberately owns neither Store access nor snapshot

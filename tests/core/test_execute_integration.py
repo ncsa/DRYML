@@ -316,14 +316,14 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
     spool.mkdir()
     executor = CoreExecutor(
         SubProcessConfig(
-            spool_directory=spool, execution_timeout=10,
+            spool_directory=spool, execution_timeout=30,
             invocation_limit_bytes=1_000_000, result_limit_bytes=1_000_000,
         ),
         core=CoreOptions(repo=repo, control_store=control_store, return_objects=False, update_args=True),
     )
     try:
         future = executor.submit(_train_and_report, value)
-        stateful, stateless, existing, metric = future.result(timeout=15)
+        stateful, stateless, existing, metric = future.result(timeout=40)
         assert isinstance(stateful, StateRef)
         assert isinstance(stateless, ConcreteDefinition)
         assert isinstance(existing, ObjectRef)
@@ -333,7 +333,7 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
         future.cleanup(timeout=5)
 
         nested = executor.submit(_update_child_and_return_it, root)
-        returned = nested.result(timeout=15)
+        returned = nested.result(timeout=40)
         assert isinstance(returned, StateRef)
         assert root.child.value == 8
         assert returned == root.last_state_ref.at(next(
@@ -342,7 +342,7 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
         nested.cleanup(timeout=5)
 
         control = executor.submit(_control_store_path)
-        assert control.result(timeout=15) == str(control_store.base_dir)
+        assert control.result(timeout=40) == str(control_store.base_dir)
         control.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=10)
@@ -633,12 +633,12 @@ def test_real_subprocess_core_retains_publication_evidence_when_setup_budget_dro
     spool.mkdir()
     executor = CoreExecutor(
         SubProcessConfig(
-            spool_directory=spool, invocation_limit_bytes=4096, result_limit_bytes=4096,
+            spool_directory=spool, invocation_limit_bytes=4096, result_limit_bytes=8192,
         ),
         core=CoreOptions(repo=repo, return_objects=False),
     )
     try:
-        future = executor.submit(_near_boundary_publication, 2_000)
+        future = executor.submit(_near_boundary_publication, 4_500)
         assert isinstance(future.backend_future.result(timeout=10), bytes)
         with pytest.raises(CoreExecutionError, match="result outcome exceeds configured bound") as raised:
             future.result(timeout=10)

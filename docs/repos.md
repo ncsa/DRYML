@@ -12,7 +12,8 @@ filesystems and cross-host coordination are unsupported.
 `Repo.save_object()`, `Repo.save()`, `Object.save()`, and module-level
 `save_object()` publish one immutable root `StateRef`. Their shared keywords are
 `main`, `store`, `alias`, `deep_capture`, `match_mode`, `graph_mode`, and
-`report_stores`. The removed ordinary-save `federated` keyword is not accepted.
+`report_stores`, plus metadata `annotations`, `source_store`, and `source_stores`.
+The removed ordinary-save `federated` keyword is not accepted.
 Fork and query federation are separate APIs and retain their own behavior.
 
 `SaveRouting` is an immutable ordered sequence of `(Selector, Store)` bindings.
@@ -47,6 +48,11 @@ Stores for exact recovery, so its Store alone is not necessarily self-contained.
 Each Object is captured once per save; replication publishes the same captured
 state and exact identity rather than recapturing a replica.
 
+`source_store` selects one complete existing root snapshot when replicas are
+ambiguous. `source_stores` maps exact root or routed child StateRefs to their
+selected connected Stores. These options select whole captured records and
+payload authority; DRYML never merges evidence fields from different replicas.
+
 With `graph_mode="closure"`, the root's selected destination set receives a
 complete, independently recoverable closure. Routing of descendants does not add
 external dependencies to those root replicas. An explicit `store=` always wins:
@@ -74,15 +80,18 @@ lists ordered root destinations, `state_stores` records confirmed local-state
 destinations by graph path, and `required_stores` is one ordered sufficient set
 of connected Stores for exact recovery. `snapshots` lists independently confirmed
 root or child StateRefs with their selected snapshot and recovery Stores.
-`publications` is the per-boundary ledger: definition, state, snapshot,
-membership, claim, alias, main, index, and commit work is marked `completed`,
+`publications` is the per-boundary ledger: definition, lineage, state, snapshot,
+object/state metadata, membership, claim, alias, main, index, and commit work is marked `completed`,
 `failed`, `unattempted`, or `uncertain`.
 
 There is no cross-Store transaction. A partial publication raises `RepoSaveError`
 with its immutable partial report after a plan exists. Completed immutable records
 remain available for inspection and recovery; they are not deleted to simulate a
 rollback. Initial declaration claims remain fenced and are reported separately
-from StateRef and membership authority. Root aliases and main references are
+from StateRef and membership authority. Closure saves also complete declared
+descendant claims after enclosing snapshot membership succeeds, in dependency
+order. Their claim entries name the exact descendant StateRef projection; they
+do not imply an independently published child directory. Root aliases and main references are
 written only after every selected root snapshot is complete, in every selected
 root Store; independently published children never inherit root names. Derived
 query-index failure remains visible and does not erase authoritative records.
@@ -116,6 +125,29 @@ State aliases resolve with `resolve_state_selector()` to `StateRef` authority.
 the latter's `federated` option controls its dependency-copy behavior and is not a
 save-routing compatibility spelling. Read-only query federation is also separate
 from routed saving.
+
+## Persistent Metadata
+
+`Repo.get_metadata()`, `set_metadata()`, and `delete_metadata()` read, replace,
+and remove current whole mappings attached independently to exact ObjectRefs and
+StateRefs. Replacements are Store-local atomic LWW writes, not field merges.
+`SaveAnnotations(object=..., state=...)` applies optional current replacements
+during save and captures the publication-time values in a new snapshot. `None`
+means no explicit replacement; `{}` is a present empty mapping.
+
+`Repo.get_snapshot_metadata()` returns immutable write-once save evidence,
+including UTC save time, environment, combined requirement outcome/coverage,
+diagnostics, lineage facts, and captured annotation copies. Repeated saves,
+copies, and later current edits do not refresh this record.
+`Repo.get_lineage_metadata()` returns known creation evidence or explicit unknown;
+it never infers creation from save or filesystem time.
+
+Metadata inspection validates authority without payload reads, materialization,
+probes, or optional framework imports. Multi-Store reads compare all target
+holders and require explicit `store=` selection when facts conflict. Snapshot
+directories and local-state sources returned by a ZipStore are borrowed from its
+extraction and expire when the handle closes. See [Persistent Metadata](metadata.md)
+for scopes, queries, capture, recovery, and sharing guidance.
 
 ## Portable Repo Definitions
 
@@ -234,11 +266,13 @@ or Store. See [Generic Execute](execute.md) for the execution lifecycle.
 ## Store Authority And Lifetime
 
 `DirStore` is the supported directory checkpoint backend. Its immutable
-definitions, local states, StateRefs, declarations, claims, aliases, and main
-references are authoritative. SQLite query indexes, record-reference indexes,
-caches, and dirty markers are derived state and can be rebuilt without replacing
-Store records. New and old incompatible Store formats fail before hydration or
-index activation; there is no fallback reader.
+definitions, complete v3 snapshot directories, snapshot-local states, lineage,
+declarations, claims, aliases, main references, and mutable current metadata are
+authoritative. SQLite query indexes, metadata projections, record-reference
+indexes, caches, and dirty markers are derived state and can be rebuilt without
+replacing Store records. New and old incompatible Store formats fail before
+hydration or index activation; Store v2 is not rewritten and has no fallback
+reader.
 
 Repo borrows supplied Store instances. It owns and closes Store handles it opens
 from paths or file-like inputs, including reconstruction handles. `add_store()`

@@ -185,12 +185,18 @@ class ZipStore(DirStore):
             if not self._initializing:
                 self._archive_dirty = True
 
-    def mark_query_index_dirty(self, cdef=None) -> str | None:
-        """Fence derived dirty-marker publication with this archive transaction."""
+    def mark_query_index_dirty(self, cdef=None, *, metadata_target=None) -> str | None:
+        """Publish a scoped dirty marker within this archive transaction.
+
+        Accepts the definition or exact metadata target documented by DirStore
+        and returns its marker path, or None without SQLite. Raises the same
+        validation/I/O errors, or StoreAuthorityError for a closed/stale archive.
+        Acquires the archive transaction fence before publishing the token.
+        """
 
         self._assert_open()
         with self.transaction_fence():
-            return super().mark_query_index_dirty(cdef)
+            return super().mark_query_index_dirty(cdef, metadata_target=metadata_target)
 
     def clear_query_index_dirty(self) -> None:
         """Persist derived-marker removal rather than losing it after a commit."""

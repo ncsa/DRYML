@@ -1,0 +1,1 @@
+{"contract_version":"1.1","id":"record-v1.1-d6bb5e5a940bb8d8e3bd4b333402bbb31cf526d49977d87131616dafe45d93f7","kind":"dryml.core.current_annotations","payload":{"data":{"target":{"digest":"cb15cff1fd436776a42cd6bac0dab5f0f9dd762af05bf6e573ad0670c5ec363a","scope":"object"},"values":["map",[["current",["str","edited-after-capture"]]]]},"version":1},"schema":"dryml.record.v1.1"}

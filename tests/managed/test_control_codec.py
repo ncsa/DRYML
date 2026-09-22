@@ -128,7 +128,7 @@ def test_completed_current_requires_the_selected_exact_state_closure(tmp_path):
     )
     control = ManagedControlStore(store, repo)
     assert control.create_initial(snapshot) == snapshot
-    os.unlink(store._state_ref_path(state.digest()))
+    (store.get_snapshot_directory(state) / "state-ref.record").unlink()
     with pytest.raises(ManagedRecoveryError, match="StateRef"):
         control.inspect(snapshot.operation_id)
 
@@ -161,6 +161,6 @@ def test_initial_and_reconciled_old_current_require_matching_state_object(tmp_pa
     )
     intent = control_module._PendingIntent(initial.operation_id, 1, control_module._payload_digest(initial.to_bytes()), 2, control_module._payload_digest(proposed.to_bytes()))
     control._write_new(control._pending_path(operation), intent.to_bytes())
-    os.unlink(store._state_ref_path(first.digest()))
+    (store.get_snapshot_directory(first) / "state-ref.record").unlink()
     with pytest.raises(ManagedRecoveryError, match="StateRef"):
         control.reconcile(initial.operation_id)

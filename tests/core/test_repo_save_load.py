@@ -179,7 +179,7 @@ try:
 finally:
     session.reset()
 
-assert not (store_path / "state-refs").exists()
+assert not tuple(repo.default_store.iter_state_ref_records())
 """
     )
 

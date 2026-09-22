@@ -4,6 +4,7 @@ from dryml.core import Definition, Object, ObjectId, ObjectRef, Repo, Serializab
 from dryml.core.query.codecs import decode_reference, encode_reference
 from dryml.core.query.path import GraphPath
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import ObjectAliasRecord
 
 
 class ReferenceIndexValue(Object):
@@ -16,6 +17,21 @@ def test_reference_query_codec_round_trips_complete_values():
     object_ref = ObjectRef(definition, {})
     for value in (ObjectId(("test",)), object_ref):
         assert decode_reference(encode_reference(value)) == value
+
+
+def test_alias_only_authority_supports_query_index_rebuild(tmp_path):
+    """An alias can supply structural authority without a definition record."""
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    reference = ObjectRef(Definition(ReferenceIndexValue, 1).concretize(), {})
+    store.write_object_alias(ObjectAliasRecord("only", reference))
+
+    metadata = store.query_index_record_metadata(reference.definition)
+    assert metadata[0] == reference.digest()
+    assert metadata[1] == "refs/objects/only.record"
+    index = store.open_query_index()
+    index.rebuild(force=True)
+    assert not store.query_index_is_dirty()
+    assert Repo(store).query().stored().one() == reference.definition
 
 
 class IndexedReferenceValue(Serializable):

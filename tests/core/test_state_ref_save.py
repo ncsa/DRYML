@@ -69,7 +69,11 @@ def test_stateful_save_publishes_verified_exact_state_ref(tmp_path):
     assert state.states[next(iter(state.states))] == obj._last_state_hash
     assert store.read_state_ref_record(state.digest()).state_ref == state
     assert obj.last_state_ref == state
-    assert "local-state" in {path.name for path in (tmp_path / "store").iterdir()}
+    snapshot = store.get_snapshot_directory(state)
+    payload = Path(store.open_local_state(state, GraphPath()).handle)
+    assert payload.is_relative_to(snapshot / "local-state")
+    assert (payload / "data" / "value.txt").read_text() == "value"
+    assert not (tmp_path / "store" / "local-state").exists()
 
 
 def test_ephemeral_root_has_topology_but_only_child_state_paths(tmp_path):

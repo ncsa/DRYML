@@ -49,7 +49,7 @@ def test_invalid_codec_fails_before_hook_or_store_mutation(tmp_path):
         obj.save(repo=repo)
 
     assert CodecLeaf.calls == []
-    assert not (tmp_path / "store" / "local-state").exists()
+    assert not (tmp_path / "store" / "snapshots").exists()
 
 
 def test_lightweight_backend_hooks_accept_keyword_only_codec_without_runtime_imports():

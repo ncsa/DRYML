@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tarfile
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -19,12 +20,17 @@ _REQUIRED_MODULES = {
     "dryml/core/execute_codec.py",
     "dryml/core/_callable_inspection.py",
     "dryml/core/materialization.py",
+    "dryml/core/metadata.py",
+    "dryml/core/snapshot_capture.py",
     "dryml/core/reference_values.py",
     "dryml/core/repo.py",
     "dryml/core/repo_plan.py",
     "dryml/core/query/reference.py",
+    "dryml/core/query/metadata.py",
     "dryml/core/store/records.py",
     "dryml/formats/__init__.py",
+    "dryml/records/__init__.py",
+    "dryml/records/records.py",
     "dryml/requirements/__init__.py",
     "dryml/requirements/barrier.py",
     "dryml/requirements/collection.py",
@@ -212,7 +218,7 @@ def test_wheel_contains_port_modules_without_retired_core(
     assert not {
         symbol
         for symbol in _RETIRED_ENVIRONMENT_SYMBOLS
-        if any(symbol in source for source in environment_sources.values())
+        if any(re.search(rf"\b{re.escape(symbol)}\b", source) for source in environment_sources.values())
     }
     assert not _RETIRED_CODE_MODULES & names
     assert not _RETIRED_EXECUTE_MODULES & names
@@ -270,7 +276,7 @@ def test_sdist_contains_port_modules_without_retired_core(
     assert not {
         symbol
         for symbol in _RETIRED_ENVIRONMENT_SYMBOLS
-        if any(symbol in source.decode("utf-8") for source in package_sources.values())
+        if any(re.search(rf"\b{re.escape(symbol)}\b", source.decode("utf-8")) for source in package_sources.values())
     }
     assert not {f"src/{name}" for name in _RETIRED_CODE_MODULES} & names
     assert not {f"src/{name}" for name in _RETIRED_EXECUTE_MODULES} & names

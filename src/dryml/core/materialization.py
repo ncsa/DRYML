@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from .canonical import from_canonical
 from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
@@ -222,27 +222,43 @@ class ExactStateAction:
 
 @dataclass(frozen=True, slots=True)
 class ExactStateLoadPlan:
-    """Definition/reference-only closure evidence required before exact loading."""
+    """Definition/reference-only closure evidence required before exact loading.
+
+    ``lineage_facts`` is keyed by canonical primary graph path. The private
+    ObjectId index retains stateful facts for nested materializing references and
+    live-cache conflict checks. ``lineage_facts_by_reference`` retains every
+    selected snapshot's path facts, including unknown stateless roots.
+    """
 
     state_ref: Any
     actions: tuple[ExactStateAction, ...]
+    lineage_facts: Mapping[Any, Any]
+    lineage_facts_by_object_id: Mapping[Any, Any]
+    lineage_facts_by_reference: Mapping[str, Mapping[Any, Any]]
 
 
-def build_exact_state_load_plan(repo, state_ref) -> ExactStateLoadPlan:
+def build_exact_state_load_plan(
+        repo, state_ref, *, source_store=None, source_stores=None) -> ExactStateLoadPlan:
     """Verify complete StateRef authority without constructing or reserving Objects.
 
     Args:
         repo: Repo containing every Store required by the exact closure.
         state_ref: Requested immutable StateRef value.
+        source_store: Optional connected Store selecting root snapshot evidence.
+        source_stores: Optional mapping selecting independently routed exact
+            StateRef evidence.
 
     Returns:
         A complete plan mapping every local state to a validated Store.
 
     Raises:
-        RepoLoadError: If the requested record, definition closure, embedded
-            materializing StateRefs, or any local payload is unavailable.
+        RepoLoadError: If the requested record, selected capture, definition
+            closure, embedded materializing StateRefs, or any local payload is
+            unavailable.
+        MetadataConflictError: If unqualified complete snapshot evidence or a
+            cached exact identity disagrees about persisted metadata.
     """
-    from .repo import RepoLoadError
+    from .repo import MetadataConflictError, RepoLoadError
     from .cdef_graph import EdgeKind
     from .links import DefLink
     from .store.records import DefinitionRecord
@@ -251,25 +267,130 @@ def build_exact_state_load_plan(repo, state_ref) -> ExactStateLoadPlan:
 
     if not isinstance(state_ref, StateRef):
         raise TypeError("Exact load requires a StateRef.")
+    if source_store is not None:
+        source_store = repo._connected_metadata_store(source_store)
+    if source_stores is not None and not isinstance(source_stores, Mapping):
+        raise TypeError("source_stores must be a mapping or None.")
+    if source_stores is not None:
+        for reference, selected in source_stores.items():
+            if not isinstance(reference, StateRef):
+                raise TypeError("source_stores must map StateRefs to connected Store handles.")
+            repo._connected_metadata_store(selected)
+    mapped_root = source_stores.get(state_ref) if source_stores is not None else None
+    if source_store is not None and mapped_root is not None and mapped_root is not source_store:
+        raise ValueError("source_store and source_stores select different root Stores.")
+
     missing = []
     actions = []
     seen = set()
     definition_seen = set()
+    known_references = {state_ref: state_ref}
+    lineage_facts_by_object_id = {}
+    lineage_facts_by_reference = {}
 
-    def locate_record(reference):
-        records = []
-        for store in repo.stores:
+    def record_lineages(reference, metadata):
+        facts = dict(metadata.lineages)
+        digest = reference.digest()
+        previous_facts = lineage_facts_by_reference.get(digest)
+        if previous_facts is not None and previous_facts != facts:
+            raise MetadataConflictError(
+                "Selected exact snapshots disagree about lineage evidence."
+            )
+        lineage_facts_by_reference[digest] = facts
+        for lineage in facts.values():
+            object_id = lineage.object_ref.object_id
+            # Stateless roots have no ObjectId. Their unknown evidence remains
+            # scoped to its StateRef/path instead of colliding in this index.
+            if object_id is None:
+                continue
+            previous = lineage_facts_by_object_id.get(object_id)
+            if previous is not None and (
+                    previous.creation_status != lineage.creation_status
+                    or previous.created_at != lineage.created_at):
+                raise MetadataConflictError(
+                    "Selected exact snapshots disagree about lineage evidence."
+                )
+            lineage_facts_by_object_id[object_id] = lineage
+
+    def select_snapshot(reference, selected=None):
+        candidates = (selected,) if selected is not None else repo.stores
+        matches = []
+        for store in candidates:
             try:
                 record = store.read_state_ref_record(reference.digest())
             except Exception as error:
                 missing.append(f"StateRef {reference.digest()} in {store!r}: {error}")
                 continue
-            if record is not None and record.state_ref == reference:
-                records.append(store)
-            elif record is not None:
+            if record is not None and record.state_ref != reference:
                 missing.append(f"StateRef {reference.digest()} has incompatible authority in {store!r}")
-        if not records:
-            missing.append(f"authoritative StateRefRecord {reference.digest()}")
+                continue
+            if record is None:
+                continue
+            try:
+                metadata = store.read_snapshot_metadata(reference.digest())
+            except Exception as error:
+                missing.append(f"snapshot metadata {reference.digest()} in {store!r}: {error}")
+                continue
+            if metadata is None or metadata.state_ref != reference:
+                missing.append(f"complete snapshot metadata {reference.digest()} in {store!r}")
+                continue
+            matches.append((store, metadata))
+        if not matches:
+            if selected is not None:
+                missing.append(f"selected source lacks complete snapshot authority {reference.digest()}")
+            else:
+                missing.append(f"authoritative StateRefRecord {reference.digest()}")
+            return None
+        metadata = matches[0][1]
+        if any(candidate != metadata for _, candidate in matches[1:]):
+            raise MetadataConflictError("Connected Stores disagree about snapshot evidence.")
+        return matches[0]
+
+    def locate_payload(reference, path, source):
+        projection = reference.at(path) if path else None
+        if projection is not None:
+            known_references.setdefault(projection, projection)
+            selected = (
+                source_stores.get(projection) if source_stores is not None else None
+            )
+            if selected is not None:
+                candidate = select_snapshot(projection, selected)
+                if candidate is None:
+                    return None
+                selected_store, metadata = candidate
+                record_lineages(projection, metadata)
+                try:
+                    return selected_store, selected_store.open_local_state(projection, GraphPath())
+                except Exception as error:
+                    missing.append(
+                        f"local state {projection.digest()} at {path!s}: {error}"
+                    )
+                    return None
+        try:
+            return source, source.open_local_state(reference, path)
+        except KeyError:
+            # A missing local placement can be delegated to a projected child
+            # snapshot. Any validation failure below is advertised corruption,
+            # not routing absence, and must not fall back to another snapshot.
+            pass
+        except Exception as error:
+            missing.append(f"local state {reference.digest()} at {path!s}: {error}")
+            return None
+        if projection is None:
+            return None
+        selected = (
+            source_stores.get(projection) if source_stores is not None else None
+        )
+        candidate = select_snapshot(projection, selected)
+        if candidate is None:
+            return None
+        selected_store, metadata = candidate
+        record_lineages(projection, metadata)
+        try:
+            return selected_store, selected_store.open_local_state(projection, GraphPath())
+        except Exception as error:
+            missing.append(f"local state {projection.digest()} at {path!s}: {error}")
+            return None
 
     def validate_definition(definition, label):
         expected = DefinitionRecord(definition)
@@ -322,37 +443,55 @@ def build_exact_state_load_plan(repo, state_ref) -> ExactStateLoadPlan:
         if digest in seen:
             return
         seen.add(digest)
-        locate_record(reference)
+        known_references.setdefault(reference, reference)
+        selected = (source_store or mapped_root) if reference == state_ref else (
+            source_stores.get(reference) if source_stores is not None else None
+        )
+        snapshot = select_snapshot(reference, selected)
+        if snapshot is not None:
+            source, metadata = snapshot
+            record_lineages(reference, metadata)
         visit_definition_closure(reference.definition)
         for path, state_hash in reference.states.items():
             definition = reference.object.at(path).definition
-            sources = []
-            for store in repo.stores:
-                try:
-                    payload = store.open_local_state(reference, path)
-                except Exception:
-                    # Per-object publication delegates descendants to their
-                    # projected StateRef snapshots. Closure publication keeps
-                    # them local to the enclosing receipt and returns above.
-                    try:
-                        projection = reference.at(path)
-                        payload = store.open_local_state(projection, GraphPath())
-                    except Exception:
-                        continue
-                    locate_record(projection)
-                sources.append((store, payload))
-            if not sources:
+            located = None if snapshot is None else locate_payload(reference, path, snapshot[0])
+            if located is None:
                 missing.append(f"local state {state_hash} at {path!s}")
             else:
+                payload_store, payload = located
                 actions.append(ExactStateAction(
                     reference, definition, path, reference.object.objects[path], state_hash,
-                    *sources[0],
+                    payload_store, payload,
                 ))
 
-    visit(state_ref)
+    with repo._authority_read_fences():
+        visit(state_ref)
+        if source_stores is not None:
+            unexpected = set(source_stores).difference(known_references)
+            if unexpected:
+                raise ValueError("source_stores contains a StateRef outside the exact StateRef closure.")
     if missing:
         raise RepoLoadError("Exact StateRef preflight is incomplete: " + "; ".join(dict.fromkeys(missing)))
-    return ExactStateLoadPlan(state_ref, tuple(actions))
+    for action in actions:
+        expected = lineage_facts_by_object_id.get(action.object_id)
+        if expected is None:
+            continue
+        for candidate in repo._all_live_candidates():
+            if (
+                    candidate.object_id == action.object_id
+                    and candidate.definition.graph_equal(action.definition)
+                    and getattr(candidate, "_lineage_fact_object_id", None) == action.object_id
+                    and getattr(candidate, "_lineage_created_at", None) != expected.created_at):
+                raise MetadataConflictError(
+                    "Live cached identity disagrees with selected lineage evidence."
+                )
+    return ExactStateLoadPlan(
+        state_ref,
+        tuple(actions),
+        lineage_facts_by_reference.get(state_ref.digest(), {}),
+        lineage_facts_by_object_id,
+        lineage_facts_by_reference,
+    )
 
 
 def execute_exact_state_load_plan(
@@ -567,6 +706,16 @@ def execute_exact_state_load_plan(
                                     )
                                     for child_path, action in child_actions
                                 ),
+                                plan.lineage_facts_by_reference.get(
+                                    child_ref.digest(),
+                                    {
+                                        child_path: plan.lineage_facts_by_object_id[action.object_id]
+                                        for child_path, action in child_actions
+                                        if action.object_id in plan.lineage_facts_by_object_id
+                                    },
+                                ),
+                                plan.lineage_facts_by_object_id,
+                                plan.lineage_facts_by_reference,
                             )
                             return execute_exact_state_load_plan(
                                 repo,
@@ -618,7 +767,9 @@ def execute_exact_state_load_plan(
                 except BaseException as error:
                     raise RepoLoadError(f"Exact construction at {exact_action(cdef, graph).path if action else '$'} failed: {error}") from error
             root = selected[plan.state_ref.definition]
-            apply_exact_reference_identity(root, plan.state_ref.object)
+            apply_exact_reference_identity(
+                root, plan.state_ref.object, lineage_facts=plan.lineage_facts,
+            )
             for obj in completed:
                 if cache == "strong":
                     repo.cache_strong(obj)

@@ -153,21 +153,42 @@ class DirStore(Store):
         )
         return self._query_index_instance
 
-    def mark_query_index_dirty(self, cdef=None) -> str | None:
-        """Publish a durable marker after an authoritative queryable mutation.
+    def mark_query_index_dirty(self, cdef=None, *, metadata_target=None) -> str | None:
+        """Publish a durable marker for an authoritative queryable mutation.
 
         Args:
             cdef: Optional definition whose immutable DefinitionRecord changed.
+            metadata_target: Optional ObjectRef or StateRef whose metadata changed,
+                mutually exclusive with ``cdef``. Omitted targets mark an
+                unscoped mutation requiring full recovery.
 
         Returns:
             The marker path, or ``None`` when this Store has no SQLite sidecar.
+
+        Raises:
+            TypeError: If the metadata target is not an exact reference.
+            ValueError: If both scopes are supplied.
+            OSError: If durable marker publication fails.
+
+        Side Effects:
+            Writes and fsyncs a unique derived token before metadata publication.
         """
+        from ..reference_values import ObjectRef, StateRef
+
+        if metadata_target is not None:
+            if cdef is not None:
+                raise ValueError("Dirty markers require one scope only.")
+            if not isinstance(metadata_target, (ObjectRef, StateRef)):
+                raise TypeError("Metadata dirty targets must be ObjectRef or StateRef.")
         if self._query_index_policy not in {"auto", "sqlite"}:
             return None
         os.makedirs(self.dryml_dir, exist_ok=True)
         key = "dirty"
         if cdef is not None:
             key = DefinitionRecord(cdef).digest
+        elif metadata_target is not None:
+            kind = "state" if isinstance(metadata_target, StateRef) else "object"
+            key = f"metadata:{kind}:{metadata_target.digest()}"
         marker_path = f"{self.query_index_dirty_path}.{uuid4().hex}"
         fd, temporary_path = tempfile.mkstemp(prefix=".query-index-dirty-", dir=self.dryml_dir)
         try:
@@ -664,16 +685,40 @@ class DirStore(Store):
 
         Returns:
             ``(record_digest, relative_path, size, mtime_ns)`` when a
-            graph-equivalent immutable DefinitionRecord exists, otherwise
-            ``None``.
+            graph-equivalent DefinitionRecord or declaration, complete snapshot,
+            or object-alias record supplies root authority, otherwise ``None``.
+
+        Raises:
+            StoreAuthorityError: If a present authority record is invalid.
+            OSError: If a selected authority file cannot be inspected.
+
+        Side Effects:
+            Reads authority and file metadata without modifying it. Falls back
+            to reference enumeration only when the direct definition is absent.
         """
         record = self.read_definition_record(DefinitionRecord(cdef).digest)
-        if record is None or not record.definition.graph_equal(cdef):
-            return None
-        path = self._definition_path(record.digest)
+        if record is not None and record.definition.graph_equal(cdef):
+            path = self._definition_path(record.digest)
+        else:
+            candidates = (
+                (self.iter_declaration_records, lambda item: item.object_ref.definition,
+                 lambda item: self._declaration_path(item.digest)),
+                (self.iter_state_ref_records, lambda item: item.state_ref.definition,
+                 lambda item: os.path.join(self._snapshot_path(item.digest), "state-ref.record")),
+                (self.iter_object_alias_records, lambda item: item.object_ref.definition,
+                 lambda item: self._ref_path("objects", f"{item.alias}.record")),
+            )
+            selected = next((
+                (item, record_path(item))
+                for records, definition, record_path in candidates
+                for item in records() if definition(item).graph_equal(cdef)
+            ), None)
+            if selected is None:
+                return None
+            record, path = selected
         metadata = os.stat(path)
         return (
-            record.digest,
+            record.object_ref.digest() if isinstance(record, ObjectAliasRecord) else record.digest,
             os.path.relpath(path, self.base_dir).replace(os.sep, "/"),
             metadata.st_size,
             metadata.st_mtime_ns,
@@ -801,7 +846,7 @@ class DirStore(Store):
         with self.writer_lock():
             # The derived index must become observably stale before authority can
             # expose a new whole mapping.
-            self.mark_query_index_dirty()
+            self.mark_query_index_dirty(metadata_target=target)
             self._atomic_write(self._metadata_path(target), payload)
 
     def delete_metadata(self, target) -> bool:
@@ -831,7 +876,7 @@ class DirStore(Store):
                 return False
             try:
                 # Absence is indexed metadata too, so invalidate before removal.
-                self.mark_query_index_dirty()
+                self.mark_query_index_dirty(metadata_target=target)
                 os.unlink(path)
                 self._fsync_directory(os.path.dirname(path))
             except FileNotFoundError:
@@ -896,7 +941,7 @@ class DirStore(Store):
                 if existing != value:
                     raise StoreAuthorityError("lineage write-once authority conflicts with existing evidence.")
                 return existing
-            self.mark_query_index_dirty()
+            self.mark_query_index_dirty(metadata_target=value.object_ref)
             self._atomic_write(path, payload)
             return value
 
@@ -1241,7 +1286,7 @@ class DirStore(Store):
                                 _before_annotation_write("state")
                             self.write_metadata(reference, annotations.state)
                     return existing[1]
-                self.mark_query_index_dirty()
+                self.mark_query_index_dirty(metadata_target=reference)
                 self._makedirs_durable(os.path.dirname(target))
                 self._fsync_tree(stage)
                 os.replace(stage, target)

@@ -1,8 +1,8 @@
-"""Core-owned metadata values and codecs for future snapshot authority.
+"""Core-owned metadata values and codecs for Store v3 snapshot authority.
 
 The module is intentionally independent of Store publication. It defines the
 typed user-value codec, immutable lifecycle/capture models, and record-family
-encoders that a later Store boundary can persist atomically.
+encoders consumed by the Store publication boundary.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ _INTEGER = re.compile(r"(?:0|-?[1-9][0-9]*)\Z")
 
 @dataclass(frozen=True, slots=True)
 class SaveAnnotations:
-    """Explicit current-mapping values to capture during a future save.
+    """Explicit current-mapping values to apply and capture during a save.
 
     Args:
         object: Optional current ObjectRef mapping. ``None`` means no explicit

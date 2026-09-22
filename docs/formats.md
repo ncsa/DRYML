@@ -13,22 +13,56 @@ fully bound parameters, and stateful-role bits. `ObjectRef` records add canonica
 primary ObjectId paths. `StateRef` records add exactly matching state-hash paths.
 Private graph node tokens and Store locations are never durable identity.
 
-DirStore format v2 publishes a `store-format.record`, digest-sharded
-DefinitionRecords, explicit `stored-roots/` membership records, StateRef records,
-declarations, claims, aliases, and
-`local-state/<shard>/<graph-hash>/<codec>-<digest>/` directories. Each local state
-has `data/`, `def.pkl`, and an exhaustive v2 `manifest.record`; readers verify
-topology, role bits, manifest entries, and file hashes before state hooks run.
-The state digest covers codec and payload files. The graph hash and definition
-metadata select and authenticate graph-specific storage, allowing an identity fork
+DirStore format v3 publishes a `store-format.record`, digest-sharded
+DefinitionRecords, explicit `stored-roots/` membership records, declarations,
+claims, aliases, lineage/current-metadata records, and complete snapshot
+directories. A snapshot is authoritative only when
+`snapshots/<shard>/<state-ref-digest>/` contains matching `state-ref.record`,
+`placement.json`, `metadata.json`, and `snapshot.json` siblings. Its
+`local-state/<graph-hash>/<codec>-<digest>/` directories contain `data/`,
+`def.pkl`, and an exhaustive `manifest.record`; placement can instead name exact
+routed child StateRef projections. Readers verify association IDs, complete state
+coverage, topology, role bits, manifest entries, and file hashes before state
+hooks run. Metadata-only readers validate the snapshot association without
+opening payload bytes.
 
-Definition, local-state, StateRef, declaration, claim, alias, and main-reference
-records are authoritative. SQLite query indexes, record-reference indexes, caches,
-and dirty markers are derived state. Rebuild may be visible and costly but must not
-replace authoritative Store records. First DirStore creation uses a retained
+The state digest covers codec and payload files. The graph hash and definition
+metadata select and authenticate graph-specific storage while an identity fork
+can preserve validated payload bytes and rebind exact ObjectIds. Claims and
+mutable aliases do not enter CDef, ObjectRef, or StateRef identity.
+
+Snapshot metadata is a `dryml.record.v1.1` envelope with kind
+`dryml.core.snapshot_metadata`; lineage and current annotation records use the
+same generic envelope family. Snapshot capture is immutable and write once.
+ObjectRef/StateRef current mappings are separate atomic whole-map LWW records.
+Environment and requirement values retain their closed v1.1 domain envelopes.
+
+Store format v2 is unsupported. Opening a v2, malformed, incomplete, or mixed
+layout raises an authority error without rewriting it. There is no in-place
+migration, dual reader, or fallback to top-level `state-refs/` or shared
+`local-state/` authority.
+
+Definition, snapshot directory, local-state payload, lineage, current annotation,
+declaration, claim, alias, and main-reference records are authoritative. SQLite
+query indexes, metadata projections, record-reference indexes, caches, and dirty
+markers are derived state. Rebuild may be visible and costly but must not replace
+authoritative Store records. First DirStore creation uses a retained
 sibling bootstrap lock derived from the canonical root; aliases of that root share
 the lock. This coordinates trusted local creation and is not a distributed or
 hostile-race guarantee.
+
+Path-backed ZipStore contains the same v3 tree in one buffered transaction.
+Completing an extracted snapshot does not commit archive authority;
+`ZipStore.commit()` validates and atomically replaces a non-stale archive.
+Borrowed snapshot/payload paths point into the extraction and expire on
+`ZipStore.close()`.
+
+The checked-in `tests/fixtures/store_v3/` directory and committed archive carry
+fixed public synthetic timestamps, identities, environment fields, requirement
+outcomes, annotations, local payloads, and routed-child placement. Its manifest
+records byte hashes and semantic expectations. This beta fixture commitment
+covers framework-owned v3 records and associations, not arbitrary author codec
+migration or Python API stability.
 
 ## Repo Definition V1
 

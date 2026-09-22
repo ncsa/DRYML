@@ -1,6 +1,6 @@
 # Environments
 
-`dryml.environments` describes Python/software environments without changing DRYML object identity, Repo behavior, Store layout, records, sidecars, or materialization semantics.
+`dryml.environments` describes Python/software environments without changing DRYML object identity or materialization semantics. Core Store v3 snapshot metadata may embed these existing environment values, but `dryml.core` owns attachment, publication, query, and persistence policy.
 
 The module is intentionally lightweight. Importing `dryml.environments` does not inspect the host, import optional frameworks, or activate session/runtime controls. Introspection is explicit. Existing probe helpers are separate opt-in tools and are not consumed by `dryml.session`, annotations, world planning, or runtime publication.
 
@@ -159,6 +159,8 @@ selector, environment, record, and filesystem values.
 
 ## What This Does Not Change
 
-This module does not attach environment metadata to `ConcreteDefinition`, `Definition`, or `Object`. It does not add Store `records/` persistence, SQLite record tables, object-load enforcement, dispatch, provider probes, worker handshakes, or class-update tooling.
+This module does not attach environment metadata to `ConcreteDefinition`, `Definition`, or a live `Object`. It does not own Store records, metadata queries, object-load enforcement, dispatch, provider probes, worker handshakes, or class-update tooling. Core snapshot capture embeds an `EnvironmentRecord` and combined `EnvironmentRequirement` as descriptive evidence at save time; see [Persistent Metadata](metadata.md).
 
-Existing object-only Stores remain valid and loadable without environment records.
+Store v3 snapshots always carry an explicit environment/requirement status. Unavailable or incomplete evidence remains valid descriptive metadata and never becomes an admission guarantee.
+
+Sharing a Store can expose retained non-identifying fields such as interpreter prefixes, distribution locations, and environment-name/path details. Snapshot copies retain those fields. DRYML does not filter or redact them automatically.

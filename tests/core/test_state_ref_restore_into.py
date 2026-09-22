@@ -156,9 +156,8 @@ def test_targeted_restore_preflight_failure_leaves_target_valid_and_pickle_paylo
     assert not hasattr(obj, "extra")
     assert obj.value == 1
 
-    path, state_hash = next(iter(state.states.items()))
-    definition = state.object.at(path).definition
-    Path(store._local_state_path(definition.graph_hash(), state_hash), "data", "heavy.pkl").unlink()
+    path = next(iter(state.states))
+    Path(store.open_local_state(state, path).handle, "data", "heavy.pkl").unlink()
     with pytest.raises(RepoLoadError, match="preflight is incomplete"):
         repo.restore_state_ref_into(obj, state)
     assert not obj._restore_failed

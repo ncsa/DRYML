@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import replace
@@ -543,6 +543,12 @@ class SQLiteStoreQueryIndex:
             )
             if replace:
                 con.execute("DELETE FROM metadata_records")
+            else:
+                con.executemany(
+                    "DELETE FROM metadata_records WHERE source_kind = 'current' "
+                    "AND scope = ? AND reference_kind = ? AND reference_digest = ?",
+                    (row[2:5] for row in rows if row[0] == "current"),
+                )
             con.executemany(
                 """
                 INSERT OR REPLACE INTO metadata_records (
@@ -721,27 +727,36 @@ class SQLiteStoreQueryIndex:
 
         Side Effects:
             Mutates the SQLite sidecar and clears captured publication markers
-            according to the documented deferred dirty-marker policy.
+            only for indexed targets. Unrelated and unscoped mutations require
+            a full rebuild rather than being acknowledged by this save. Holds
+            the Store authority fence through metadata projection and token
+            clearing; ordinary clean saves do not scan older snapshots.
         """
-        result = self.register_stored_roots(graph, roots)
-        rows = tuple(
-            row
-            for state_ref in state_refs
-            for row in _state_reference_authority_rows(state_ref)
-        )
-        if rows:
-            self._register_reference_rows(
-                rows, require_ready=True, replace=False
+        roots, state_refs = tuple(roots), tuple(state_refs)
+        fence = self.store.authority_read_fence() if self.store is not None else nullcontext()
+        with fence:
+            result = self.register_stored_roots(graph, roots)
+            rows = tuple(
+                row
+                for state_ref in state_refs
+                for row in _state_reference_authority_rows(state_ref)
             )
-        if self.store is not None:
-            with self.store.authority_read_fence():
-                metadata_rows = tuple(_metadata_authority_rows(self.store))
+            if rows:
+                self._register_reference_rows(
+                    rows, require_ready=True, replace=False
+                )
+            if self.store is not None:
+                metadata_rows = tuple(_metadata_authority_rows(self.store, state_refs=state_refs))
                 dirty_markers = self._dirty_markers()
-            self._register_metadata_rows(metadata_rows, require_ready=True, replace=True)
-            self._clear_dirty(
-                dirty_markers, roots=tuple(roots), clear_unscoped=True,
-                clear_scoped=True,
-            )
+                self._register_metadata_rows(metadata_rows, require_ready=True, replace=False)
+                self._clear_dirty(
+                    dirty_markers, roots=(), metadata_keys={
+                        f"metadata:{row[3]}:{row[4]}"
+                        for row in metadata_rows if row[0] == "current"
+                    },
+                )
+        if self.store is not None and self._is_dirty():
+            self.rebuild()
         return result
 
     def _register_stored_roots(self, graph, roots, *, require_ready: bool):
@@ -844,7 +859,17 @@ class SQLiteStoreQueryIndex:
             )
 
         result = self._run_write_transaction(operation)
-        self._clear_dirty(dirty_markers, roots=roots)
+        indexed_definitions = roots
+        if self.store is not None and hasattr(self.store, "read_stored_root_record"):
+            # Closure-only graph nodes were indexed too, but another stored
+            # root's membership must not be acknowledged by graph hydration.
+            indexed_definitions = (*roots, *(
+                node.definition for node in graph_nodes
+                if self.store.read_stored_root_record(
+                    self._root_marker_key(node.definition),
+                ) is None
+            ))
+        self._clear_dirty(dirty_markers, roots=indexed_definitions)
         return result
 
     def _preflight_graph_nodes(self, graph_nodes, node_hash_blobs, *, require_ready: bool):
@@ -985,7 +1010,8 @@ class SQLiteStoreQueryIndex:
             markers: tuple[Path, ...], *,
             roots: tuple[ConcreteDefinition, ...],
             clear_unscoped: bool = False,
-            clear_scoped: bool = False) -> None:
+            clear_scoped: bool = False,
+            metadata_keys=()) -> None:
         root_keys = {self._root_marker_key(root) for root in roots}
         removed = False
         for marker in markers:
@@ -1000,6 +1026,7 @@ class SQLiteStoreQueryIndex:
             if not (
                     (is_scoped and (clear_scoped or mutation in root_keys))
                     or (clear_unscoped and not is_scoped)
+                    or mutation in metadata_keys
             ):
                 continue
             try:
@@ -2632,13 +2659,15 @@ def _state_reference_authority_rows(state):
         )
 
 
-def _metadata_authority_rows(store):
+def _metadata_authority_rows(store, *, state_refs=None):
     """Yield metadata projections from separate complete snapshot/current authority.
 
     The projection is intentionally opaque canonical record data. SQLite retains
     source record IDs, target identity, and scope for rebuild diagnostics, but it
     never becomes predicate authority or reconstructs current mappings from a
     snapshot's captured annotations.
+    An explicit StateRef iterable limits incremental work to those snapshots;
+    omitted references request the complete rebuild projection.
     """
 
     if not all(hasattr(store, name) for name in (
@@ -2658,13 +2687,15 @@ def _metadata_authority_rows(store):
 
     object_targets: set[ObjectRef] = set()
     state_targets: set[StateRef] = set()
-    for record in store.iter_declaration_records():
-        object_targets.add(record.object_ref)
-    for record in store.iter_state_ref_records():
-        state = record.state_ref
+    if state_refs is None:
+        for record in store.iter_declaration_records():
+            object_targets.add(record.object_ref)
+        state_refs = (record.state_ref for record in store.iter_state_ref_records())
+    for state in state_refs:
         state_targets.add(state)
+        object_targets.add(state.object)
         object_targets.update(state.object.at(path) for path in state.object.objects)
-        metadata = store.read_snapshot_metadata(record.digest)
+        metadata = store.read_snapshot_metadata(state.digest())
         if metadata is None or metadata.state_ref != state:
             raise QueryIndexError("Complete StateRef lacks matching captured metadata.")
         # Read the validated source envelope only after complete-directory checks.

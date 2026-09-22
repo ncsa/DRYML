@@ -16,6 +16,19 @@ from dryml.core.query.sqlite.lowering import SQLiteOptimizerPolicy
 from dryml.core.store.dir import DirStore
 
 
+@pytest.fixture(autouse=True)
+def _fixed_environment(monkeypatch):
+    """Keep structural query batching independent of the host package inventory."""
+    from dryml.environments import EnvironmentRecord, PlatformRecord, PythonRecord
+
+    environment = EnvironmentRecord(
+        python=PythonRecord("3.12.0", "CPython"),
+        platform=PlatformRecord("fixture", "1", "1", "fixture", "fixture"),
+        kind="synthetic",
+    )
+    monkeypatch.setattr("dryml.environments.introspection.inspect_current", lambda: environment)
+
+
 class FederationLeaf(Object):
     def __init__(self, name="leaf"):
         super().__init__()

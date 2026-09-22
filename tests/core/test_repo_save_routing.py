@@ -426,7 +426,7 @@ def test_save_mode_overrides_validate_before_explicit_store_routing(tmp_path, ke
     with pytest.raises(error):
         repo.save_object(RoutedLeaf(14, repo=repo), store=explicit, **{keyword: value})
 
-    assert not (Path(explicit.base_dir) / "state-refs").exists()
+    assert not tuple(explicit.iter_state_ref_records())
 
 
 def test_per_save_modes_do_not_mutate_policy_and_explicit_store_bypasses_routes(tmp_path):

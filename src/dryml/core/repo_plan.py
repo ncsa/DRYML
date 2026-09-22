@@ -1269,6 +1269,9 @@ def execute_routed_save_plan(
     installs the StateRef, placement, captured metadata, and local payload tree.
     The ledger deliberately records snapshot-local payload completion only after
     the directory read-back succeeds.
+    Closure placement completes all retained descendant claims in dependency
+    order after enclosing membership, reporting their exact StateRef projections
+    without requiring independently published child directories.
     """
 
     from .metadata import LineageMetadata, SaveAnnotations, SnapshotCapture
@@ -1319,6 +1322,7 @@ def execute_routed_save_plan(
     root_action = next(action for action in plan.snapshots if not action.path)
     snapshot_actions = plan.snapshots if routed.graph_mode == "per-object" else (root_action,)
     publication_indexes = {}
+    claim_indexes = {}
     # Freeze every possible boundary before serializer hooks run.  StateRef
     # projections do not exist until capture completes, so the ledger fills them
     # in atomically below once the exact root receipt is known.
@@ -1350,7 +1354,13 @@ def execute_routed_save_plan(
             lease = claims_by_path.get(action.path)
             if lease is not None and store is lease.store:
                 indexes["claim"] = ledger.plan(store, action.path, action.obj, None, "claim")
+                claim_indexes[id(lease)] = indexes["claim"]
             publication_indexes[id(store), action.path] = indexes
+    for lease, action in claims:
+        if id(lease) not in claim_indexes:
+            claim_indexes[id(lease)] = ledger.plan(
+                lease.store, action.path, action.obj, None, "claim",
+            )
     for phase, stores in late_publications:
         if phase not in PUBLICATION_PHASES:
             raise ValueError(f"Unsupported late publication phase: {phase!r}.")
@@ -1513,8 +1523,6 @@ def execute_routed_save_plan(
                 lineage_indexes = indexes["lineage"]
                 object_metadata_index = indexes.get("object_metadata")
                 state_metadata_index = indexes.get("state_metadata")
-                claim_index = indexes.get("claim")
-                lease = claims_by_path.get(action.path)
                 record = DefinitionRecord(projection.definition)
                 attempted = set()
                 definition_records = tuple(
@@ -1617,13 +1625,27 @@ def execute_routed_save_plan(
                             lambda store=store, record=record: store.read_stored_root_record(record.digest) is not None,
                     ):
                         raise RepoSaveError("Snapshot membership did not survive read-back.")
-                    if lease is not None and store is lease.store:
+                    claim_work = (
+                        claims if routed.graph_mode == "closure"
+                        else tuple(
+                            (lease, claim_action) for lease, claim_action in claims
+                            if claim_action.path == action.path
+                        )
+                    )
+                    for lease, claim_action in claim_work:
+                        if store is not lease.store:
+                            continue
+                        claim_projection = (
+                            state_ref if not claim_action.path
+                            else state_ref.at(claim_action.path)
+                        )
+                        claim_index = claim_indexes[id(lease)]
                         attempted.add(claim_index)
-                        repo._mark_initial_state_ref_complete(projection, store, lease)
+                        repo._mark_initial_state_ref_complete(claim_projection, store, lease)
                         if not ledger.confirm(
                                 claim_index,
-                                lambda store=store, lease=lease, projection=projection:
-                                _has_completed_claim(store, lease, projection),
+                                lambda store=store, lease=lease, claim_projection=claim_projection:
+                                _has_completed_claim(store, lease, claim_projection),
                         ):
                             raise RepoSaveError("Initial snapshot claim did not survive read-back.")
                         repo._clear_completed_routed_claim(plan, lease)
@@ -1674,11 +1696,18 @@ def execute_routed_save_plan(
                             lambda store=store, record=record:
                             store.read_stored_root_record(record.digest) is not None,
                         )
-                    if claim_index in attempted:
+                    for lease, claim_action in claims:
+                        claim_index = claim_indexes[id(lease)]
+                        claim_projection = (
+                            state_ref if not claim_action.path
+                            else state_ref.at(claim_action.path)
+                        )
+                        if claim_index not in attempted:
+                            continue
                         ledger.failed(
                             claim_index,
-                            lambda store=store, lease=lease, projection=projection:
-                            _has_completed_claim(store, lease, projection),
+                            lambda store=lease.store, lease=lease, claim_projection=claim_projection:
+                            _has_completed_claim(store, lease, claim_projection),
                         )
                     _raise_publication_failure(error, ledger.report(state_stores, (), snapshots))
                 for path in selected_sources:

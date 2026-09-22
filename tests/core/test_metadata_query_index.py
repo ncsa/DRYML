@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+import threading
 
 import pytest
 
 from dryml.core import MetadataConflictError, Object, Repo, SaveAnnotations, Serializable
 from dryml.core.query import QueryError, field
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.query.model import QueryIndexBusy
+from dryml.core.repo import RepoSaveError
 from dryml.core.query.sqlite import sqlite_available
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.graph.path import GraphPath, Parameter
@@ -229,3 +234,135 @@ def test_metadata_sqlite_refresh_cannot_hide_conflicts_or_typed_leaf_errors(tmp_
         Repo([first, second]).references().where(field("object", "value").eq("text")).object_refs()
     with pytest.raises(QueryError, match="ordering"):
         Repo(first).references().where(field("object", "value").lt(2)).object_refs()
+
+
+def test_incremental_metadata_save_does_not_scan_and_preserves_unrelated_tokens(tmp_path, monkeypatch):
+    """A save projects only its targets and cannot acknowledge another mutation."""
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    first = _save(repo, "first", object_values={"project": "before"})
+    index = store.open_query_index()
+    index.rebuild(force=True)
+    store.write_metadata(first.object, {"project": "after"})
+    unrelated = set(store._query_index_dirty_markers())
+    unscoped = store.mark_query_index_dirty()
+
+    def no_scan():
+        pytest.fail("incremental save scanned unrelated authority")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(index, "rebuild", lambda: None)
+        scoped.setattr(store, "iter_state_ref_records", no_scan)
+        scoped.setattr(store, "iter_declaration_records", no_scan)
+        with pytest.raises(RepoSaveError) as raised:
+            _save(repo, "second", object_values={"project": "second"})
+        second = raised.value.report.snapshots[0].state_ref
+    assert set(store._query_index_dirty_markers()) == unrelated | {unscoped}
+    with sqlite3.connect(index.path) as con:
+        assert con.execute(
+            "SELECT count(*) FROM metadata_records WHERE scope = 'snapshot'"
+        ).fetchone() == (2,)
+    assert repo.get_snapshot_metadata(second).captured_object_annotations == {"project": "second"}
+    index.rebuild(force=True)
+    assert not store.query_index_is_dirty()
+    assert repo.references().where(field("object", "project").eq("after")).object_refs().one() == first.object
+
+
+def test_incremental_metadata_replaces_current_rows_without_losing_snapshots(tmp_path):
+    """Updated, absent, and stateless-root mappings have one current projection."""
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    value = MetadataIndexedContainer(MetadataIndexedValue("child", repo=repo), repo=repo)
+    state = repo.save_object(value, annotations=SaveAnnotations(object={"version": 1}))
+    assert not store.query_index_is_dirty()
+    repo.save_object(value, annotations=SaveAnnotations(object={"version": 2}))
+    assert not store.query_index_is_dirty()
+    repo.delete_metadata(state.object)
+    repo.save_object(value)
+    assert not store.query_index_is_dirty()
+    with sqlite3.connect(store.open_query_index().path) as con:
+        assert con.execute(
+            "SELECT source_record_id, present FROM metadata_records "
+            "WHERE source_kind = 'current' AND scope = 'object' AND reference_digest = ?",
+            (state.object.digest(),),
+        ).fetchall() == [("", 0)]
+        assert con.execute(
+            "SELECT count(*) FROM metadata_records WHERE scope = 'snapshot'"
+        ).fetchone() == (1,)
+
+
+def test_incremental_metadata_keeps_token_published_after_capture(tmp_path, monkeypatch):
+    """A mutation after projection cannot be cleared by the older token set."""
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    state = _save(repo, "state", object_values={"project": "before"})
+    index = store.open_query_index()
+    original = index._register_metadata_rows
+
+    def publish_after_capture(*args, **kwargs):
+        original(*args, **kwargs)
+        store.write_metadata(state.object, {"project": "after"})
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(index, "_register_metadata_rows", publish_after_capture)
+        scoped.setattr(index, "rebuild", lambda: None)
+        with pytest.raises(RepoSaveError):
+            _save(repo, "other")
+    assert store.query_index_is_dirty()
+    index.rebuild(force=True)
+    assert not store.query_index_is_dirty()
+    assert repo.references().where(field("object", "project").eq("after")).object_refs().one() == state.object
+
+
+def test_incremental_registration_checks_rebuild_claim_inside_authority_fence(tmp_path, monkeypatch):
+    """An older rebuild cannot replace a newer projection after its token clears."""
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    state = _save(repo, "state", object_values={"project": "before"})
+    index = store.open_query_index()
+    waiting, resume = threading.Event(), threading.Event()
+    errors = []
+    original_fence = store.authority_read_fence
+
+    @contextmanager
+    def pause_registration():
+        if threading.current_thread() is worker:
+            waiting.set()
+            assert resume.wait(10)
+        with original_fence():
+            yield
+
+    def register():
+        try:
+            index.register_saved_graph(
+                ConcreteDefinitionGraph.from_root(state.definition),
+                (state.definition,), (state,),
+            )
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            index._connections.close_current()
+
+    worker = threading.Thread(target=register)
+    monkeypatch.setattr(store, "authority_read_fence", pause_registration)
+    worker.start()
+    try:
+        assert waiting.wait(10)
+        with index._build_claim(force=True) as acquired:
+            assert acquired
+            cut = index._capture_authority_cut()
+            store.write_metadata(state.object, {"project": "after"})
+            resume.set()
+            worker.join(10)
+            assert not worker.is_alive()
+            assert len(errors) == 1 and isinstance(errors[0], QueryIndexBusy)
+            with monkeypatch.context() as scoped:
+                scoped.setattr(index, "_capture_authority_cut", lambda: cut)
+                index._rebuild_owned()
+        assert store.query_index_is_dirty()
+    finally:
+        resume.set()
+        worker.join(10)
+    index.rebuild(force=True)
+    assert not store.query_index_is_dirty()
+    assert repo.references().where(field("object", "project").eq("after")).object_refs().one() == state.object
