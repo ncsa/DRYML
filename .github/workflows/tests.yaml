@@ -19,7 +19,8 @@ jobs:
   lightweight:
     name: Lightweight (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Durable Store publication adds filesystem work on slower Windows runners.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}
     strategy:
       fail-fast: false
       matrix:
