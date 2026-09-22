@@ -26,11 +26,13 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 18. [Artifacts API](artifacts.md)
 19. [Query Index Backend Contracts](query_index_backend_contracts.md)
 20. [Advisory Locking](locking.md)
-21. [Managed Operations](managed_operations.md)
-22. [Generic Execute](execute.md)
-23. [Dispatch](dispatch.md)
-24. [Testing Workflow](testing.md)
-25. [Release Notes](release_notes.md)
+21. [Filesystem Publication](filesystem.md)
+22. [Host Paths](paths.md)
+23. [Managed Operations](managed_operations.md)
+24. [Generic Execute](execute.md)
+25. [Dispatch](dispatch.md)
+26. [Testing Workflow](testing.md)
+27. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -56,6 +58,10 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - Store-owned query indexes accelerate stored and nested queries without changing object identity.
 - `dryml.locking` supplies reusable advisory-lock mechanics without owning Store
   or query-index lifecycle policy.
+- `dryml.filesystem` owns cross-platform local publication and persistence
+  mechanics; Store and query-index callers retain authority and recovery policy.
+- `dryml.paths` supplies lexical absolute paths, host-local real-path keys, and
+  correctly escaped file URIs without defining persistent identity.
 - `dryml.managed` synchronously checkpoints selected Object state and records
   resumable lifecycle control without dispatch or a background execution backend.
 - `dryml.execute` runs trusted ordinary callables through an explicit local

@@ -727,12 +727,13 @@ def test_sqlite_backend_package_import_does_not_import_sqlite3():
 import sys
 
 assert "sqlite3" not in sys.modules
-from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig, open_connection
 from dryml.core.query.sqlite.connection import SQLiteConnectionManager
 from dryml.core.query.sqlite.schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION
 from dryml.core.query.sqlite.utils import wal_runtime_is_known_safe
 
 assert SQLiteQueryIndexConfig is not None
+assert open_connection is not None
 assert SQLiteConnectionManager is not None
 assert SQLITE_QUERY_INDEX_SCHEMA_VERSION == 7
 assert wal_runtime_is_known_safe((3, 51, 3))

@@ -21,6 +21,7 @@ from dryml.core.store.store import Store
 from dryml.core.store.zip import ZipStore
 from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_json_load_bytes
 from dryml.locking import FileLock, LockError, interprocess_lock
+from dryml.paths import local_path_key
 
 from .errors import (
     ManagedConflictError,
@@ -538,14 +539,15 @@ def _state_lock_root(store: Store) -> str:
         archive = store.archive_path
         if archive is None:
             raise ManagedStoreError("unsupported_state_store", "managed ownership requires a path-backed ZipStore")
-        parent = os.path.dirname(os.path.normcase(os.path.realpath(archive))) or "."
+        archive_key = local_path_key(archive)
+        parent = os.path.dirname(archive_key) or "."
         try:
             evidence = os.stat(parent)
         except OSError as error:
             raise ManagedStoreError("state_store_unreadable", "could not inspect a managed ZipStore parent") from error
         if not stat.S_ISDIR(evidence.st_mode):
             raise ManagedStoreError("invalid_state_store", "managed ZipStore parent is not a directory")
-        return f"{os.path.normcase(os.path.realpath(archive))}.dryml-managed"
+        return f"{archive_key}.dryml-managed"
     raise ManagedStoreError("unsupported_state_store", "managed ownership requires a direct DirStore or path-backed ZipStore")
 
 
@@ -559,7 +561,7 @@ def _dir_root(store: DirStore):
     """Validate and return canonical direct-Store root evidence."""
 
     try:
-        root = os.path.normcase(os.path.realpath(store.base_dir))
+        root = local_path_key(store.base_dir)
         evidence = os.stat(root)
     except OSError as error:
         raise ManagedStoreError("state_store_unreadable", "could not inspect a managed state Store root") from error

@@ -17,6 +17,7 @@ import stat
 from threading import RLock
 from uuid import uuid4
 
+from ..paths import local_path_key
 from .definition import Definition, ConcreteDefinition
 from .cdef_graph import ConcreteDefinitionGraph
 from .object import Object
@@ -880,7 +881,7 @@ class Repo:
             archive_path = store.archive_path
             if archive_path is None:
                 return None
-            path = os.path.normcase(os.path.realpath(archive_path))
+            path = local_path_key(archive_path)
             parent = os.path.dirname(path) or "."
             try:
                 evidence = os.stat(parent)
@@ -890,7 +891,7 @@ class Repo:
                 raise ValueError("ZipStore archive parent is not a directory.")
             return ("zip", path)
         if type(store) is DirStore:
-            path = os.path.normcase(os.path.realpath(store.base_dir))
+            path = local_path_key(store.base_dir)
             try:
                 evidence = os.stat(path)
             except OSError as error:

@@ -12,6 +12,7 @@ from threading import RLock
 import zipfile
 from contextlib import contextmanager
 
+from ... import filesystem
 from .dir import DirStore, _REMOVED_ENTRY_PREFIX
 from .records import StoreFormatRecord, StoreRecordError
 from ...locking import interprocess_lock
@@ -419,7 +420,7 @@ class ZipStore(DirStore):
                             path = os.path.join(root, name)
                             relative_parts = Path(os.path.relpath(path, self.base_dir)).parts
                             is_tombstone = (
-                                name.startswith(_REMOVED_ENTRY_PREFIX)
+                                name.startswith((_REMOVED_ENTRY_PREFIX, ".dryml-removed-"))
                                 and relative_parts[0] in {".dryml", "metadata"}
                             )
                             if path == self._writer_lock_path or is_tombstone:
@@ -428,13 +429,16 @@ class ZipStore(DirStore):
                 with zipfile.ZipFile(temporary, "r") as archive:
                     if archive.testzip() is not None:
                         raise StoreAuthorityError("Buffered ZipStore archive validation failed.")
-                with open(temporary, "r+b") as staged_file:
-                    os.fsync(staged_file.fileno())
                 staged = self._archive_identity(temporary)
                 with interprocess_lock(self._archive_lock_path):
                     if self._archive_identity() != self._archive_baseline:
                         raise ZipStoreConflictError("ZipStore archive changed since open; reopen and reapply the mutation.")
-                    self._replace_durable(temporary, destination)
+                    self._filesystem(
+                        filesystem.publish_file,
+                        temporary,
+                        destination,
+                        replace=True,
+                    )
                     self._archive_baseline = staged
                     self._archive_evidence = self._physical_archive_evidence()
                     self._archive_dirty = False

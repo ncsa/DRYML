@@ -5,6 +5,7 @@ import pytest
 import threading
 from pathlib import Path
 
+import dryml.filesystem as filesystem
 from dryml.core import Object, Repo, Serializable
 from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
@@ -12,7 +13,7 @@ from dryml.core.store.records import (
     DefinitionRecord, LocalStateManifest, MainRefRecord, ObjectAliasRecord,
     StateAliasRecord, StoredRootRecord,
 )
-from dryml.core.store.store import StoreAuthorityError
+from dryml.core.store.store import StoreAuthorityError, StoreCapabilityError
 
 
 class AtomicRecordObject(Object):
@@ -121,18 +122,72 @@ def test_short_definition_write_never_publishes_truncated_authority(tmp_path, mo
     assert store.read_definition_record(record.digest) is None
 
 
+def test_dirstore_delegates_file_publication_to_public_filesystem_api(
+        tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    record = DefinitionRecord(AtomicRecordObject().definition)
+    observed = []
+    original = filesystem.publish_file
+
+    def publish(source, destination, *, replace=False):
+        observed.append((Path(source), Path(destination), replace))
+        return original(source, destination, replace=replace)
+
+    monkeypatch.setattr(filesystem, "publish_file", publish)
+    store.write_definition_record(record)
+
+    assert any(
+        destination == Path(store._definition_path(record.digest))
+        for _source, destination, _replace in observed
+    )
+
+
+def test_dirstore_can_initialize_beneath_symlinked_directory(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks unavailable: {error}")
+    store = DirStore(link / "store")
+    record = DefinitionRecord(AtomicRecordObject().definition)
+
+    store.write_definition_record(record)
+
+    assert store.read_definition_record(record.digest) == record
+    assert (real / "store").is_dir()
+
+
+def test_dirstore_translates_only_filesystem_capability_failures(
+        tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    record = DefinitionRecord(AtomicRecordObject().definition)
+
+    monkeypatch.setattr(
+        filesystem,
+        "publish_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            filesystem.FilesystemCapabilityError("exclusive rename unavailable"),
+        ),
+    )
+
+    with pytest.raises(StoreCapabilityError, match="exclusive rename unavailable"):
+        store.write_definition_record(record)
+
+
 def test_definition_replace_failure_leaves_no_new_immutable_authority(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
     record = DefinitionRecord(AtomicRecordObject().definition)
     target = Path(store.base_dir, "definitions", record.digest[:2], f"{record.digest}.record")
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_file
 
-    def fail_replace(source, destination, *, replace=True):
+    def fail_replace(source, destination, *, replace=False):
         if Path(destination) == target:
             raise OSError("injected immutable replacement failure")
-        return original_replace(source, destination, replace=replace)
+        return original_publish(source, destination, replace=replace)
 
-    monkeypatch.setattr(store, "_replace_durable", fail_replace)
+    monkeypatch.setattr(filesystem, "publish_file", fail_replace)
     with pytest.raises(OSError, match="immutable replacement"):
         store.write_definition_record(record)
 
@@ -146,14 +201,14 @@ def test_mutable_reference_replace_leaves_previous_complete_record_on_failure(tm
     replacement = MainRefRecord("2" * 64)
     store.write_main_ref(previous)
     target = Path(store.base_dir, "refs", "main.record")
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_file
 
-    def fail_replace(source, destination, *, replace=True):
+    def fail_replace(source, destination, *, replace=False):
         if Path(destination) == target:
             raise OSError("injected reference replacement failure")
-        return original_replace(source, destination, replace=replace)
+        return original_publish(source, destination, replace=replace)
 
-    monkeypatch.setattr(store, "_replace_durable", fail_replace)
+    monkeypatch.setattr(filesystem, "publish_file", fail_replace)
     with pytest.raises(OSError, match="replacement"):
         store.write_main_ref(replacement)
 
@@ -190,14 +245,14 @@ def test_mutable_reference_replacement_keeps_the_previous_complete_record_on_per
         target = Path(store.base_dir, "refs", "states", first.object.digest()[:2], first.object.digest(), "latest.record")
     write(previous)
     before = target.read_bytes()
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_file
 
-    def deny_replace(source, destination, *, replace=True):
+    def deny_replace(source, destination, *, replace=False):
         if Path(destination) == target:
             raise PermissionError("injected authority replacement denial")
-        return original_replace(source, destination, replace=replace)
+        return original_publish(source, destination, replace=replace)
 
-    monkeypatch.setattr(store, "_replace_durable", deny_replace)
+    monkeypatch.setattr(filesystem, "publish_file", deny_replace)
     with pytest.raises(PermissionError, match="denial"):
         write(replacement)
 
@@ -295,13 +350,13 @@ def test_reference_readers_observe_only_complete_old_or_new_records(tmp_path, mo
     entered_replace = threading.Event()
     release_replace = threading.Event()
     errors = []
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_file
 
-    def pause_before_replace(source, destination, *, replace=True):
+    def pause_before_replace(source, destination, *, replace=False):
         if Path(destination) == target:
             entered_replace.set()
             assert release_replace.wait(10)
-        return original_replace(source, destination, replace=replace)
+        return original_publish(source, destination, replace=replace)
 
     def write():
         try:
@@ -309,7 +364,7 @@ def test_reference_readers_observe_only_complete_old_or_new_records(tmp_path, mo
         except BaseException as error:
             errors.append(error)
 
-    monkeypatch.setattr(store, "_replace_durable", pause_before_replace)
+    monkeypatch.setattr(filesystem, "publish_file", pause_before_replace)
     writer = threading.Thread(target=write)
     writer.start()
     assert entered_replace.wait(10)
@@ -364,25 +419,26 @@ def test_closing_one_repo_does_not_close_a_shared_store_query_index(tmp_path):
     store.close()
 
 
-def test_definition_publication_interruption_keeps_authority_and_notifies_query_rebuild(tmp_path, monkeypatch):
+def test_dirty_marker_interruption_precedes_definition_authority(
+        tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index="sqlite")
     record = DefinitionRecord(AtomicRecordObject().definition)
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_file
 
     def interrupt_after_dirty_marker_replace(
-            source, destination, *, replace=True):
-        result = original_replace(source, destination, replace=replace)
+            source, destination, *, replace=False):
+        result = original_publish(source, destination, replace=replace)
         if Path(destination).parent == Path(store.dryml_dir) and Path(destination).name.startswith("query-index.dirty."):
             raise KeyboardInterrupt("injected after dirty marker publication")
         return result
 
     monkeypatch.setattr(
-        store, "_replace_durable", interrupt_after_dirty_marker_replace,
+        filesystem, "publish_file", interrupt_after_dirty_marker_replace,
     )
     with pytest.raises(KeyboardInterrupt, match="dirty marker"):
         store.write_definition_record(record)
 
-    assert store.read_definition_record(record.digest) == record
+    assert store.read_definition_record(record.digest) is None
     assert store.query_index_is_dirty()
 
 

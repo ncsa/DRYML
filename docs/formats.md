@@ -46,7 +46,10 @@ Definition, snapshot directory, local-state payload, lineage, current annotation
 declaration, claim, alias, and main-reference records are authoritative. SQLite
 query indexes, metadata projections, record-reference indexes, caches, and dirty
 markers are derived state. Rebuild may be visible and costly but must not replace
-authoritative Store records. First DirStore creation uses a retained
+authoritative Store records. DirStore durably marks query-visible definition,
+stored-root, declaration, and alias changes dirty under its writer fence before
+publishing authority; failed authority publication may leave a harmless marker,
+while idempotent writes publish none. First DirStore creation uses a retained
 sibling bootstrap lock derived from the canonical root; aliases of that root share
 the lock. This coordinates trusted local creation and is not a distributed or
 hostile-race guarantee.
@@ -57,20 +60,20 @@ Completing an extracted snapshot does not commit archive authority;
 Borrowed snapshot/payload paths point into the extraction and expire on
 `ZipStore.close()`.
 
-Direct Store publication persists file contents before changing authoritative
-names. POSIX then fsyncs the containing directory. On Windows, DRYML uses
-same-volume `MoveFileExW` publication with `MOVEFILE_WRITE_THROUGH`; it does not
-silently ignore unsupported directory-handle fsync. Missing directory components
-are installed through write-through moves, and logical deletion first moves the
-authoritative name to an ignored sibling tombstone before best-effort cleanup.
-The native adapter uses the documented Unicode extended path namespace rather
-than depending on the host's `LongPathsEnabled` policy.
-The derived SQLite index uses the same Windows write-through policy for dirty
-tokens and canonical sidecar replacement; retained deletion tombstones are not
-recognized as dirty tokens or index authority.
-Windows Store durability therefore requires a local filesystem that honors
-same-volume atomic rename and write-through requests; unsupported filesystems or
-sharing modes fail publication explicitly.
+Direct Store and derived-index publication use `dryml.filesystem`: staged file
+contents and snapshot trees are flushed before names change. POSIX persists
+changed directory entries after atomic replacement or native exclusive rename.
+Windows uses same-volume `MoveFileExW` publication with
+`MOVEFILE_WRITE_THROUGH`; missing components are installed through write-through
+moves, and logical deletion first moves the authoritative name to an ignored
+sibling tombstone before best-effort cleanup. Existing `.store-removed-` residue
+from the earlier Store-private adapter remains unrecognized as authority and is
+still excluded from ZipStore commits. Extended Win32 spellings remain private.
+The SQLite index uses the same public concern for dirty tokens and canonical
+sidecar replacement and never reaches through an owning Store for native helpers.
+Publication fails explicitly when the required local-filesystem primitive or
+barrier is unavailable; exceptions can follow visible publication and never
+assert rollback. See [Filesystem Publication](filesystem.md).
 
 The checked-in `tests/fixtures/store_v3/` directory and committed archive carry
 fixed public synthetic timestamps, identities, environment fields, requirement

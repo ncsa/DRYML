@@ -11,7 +11,12 @@ import zipfile
 from tests.tools.native_lock_audit import native_advisory_lock_offenders
 
 _REQUIRED_MODULES = {
+    "dryml/filesystem/__init__.py",
+    "dryml/filesystem/_posix.py",
+    "dryml/filesystem/_windows.py",
+    "dryml/filesystem/errors.py",
     "dryml/locking.py",
+    "dryml/paths.py",
     "dryml/core/state.py",
     "dryml/core/__init__.py",
     "dryml/core/cdef_codec.py",

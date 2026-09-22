@@ -19,6 +19,7 @@ from threading import RLock
 from typing import Any
 
 from dryml.formats.canonical import canonical_json_bytes, canonical_json_dumps
+from dryml.paths import local_path_key
 
 
 _BOUNDS = dict(
@@ -1778,7 +1779,7 @@ def _validate_live_store_identities(stores: list[Mapping[str, Any]]) -> None:
             evidence = os.stat(descriptor["path"])
             identity = ("dir", evidence.st_dev, evidence.st_ino)
         else:
-            identity = ("zip", os.path.normcase(os.path.realpath(descriptor["path"])))
+            identity = ("zip", local_path_key(descriptor["path"]))
         if identity in identities:
             raise RepoDefinitionError(
                 "Repo definition names duplicate physical Store destinations."

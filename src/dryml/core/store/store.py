@@ -26,7 +26,13 @@ class StoreAuthorityError(RuntimeError):
 
 
 class StoreCapabilityError(StoreAuthorityError):
-    """Raised before mutation when a backend cannot provide required semantics."""
+    """Raised when a backend cannot provide required Store semantics.
+
+    Preflight checks raise before mutation when possible. A filesystem
+    persistence barrier can fail after publication becomes visible, so this
+    error does not by itself promise rollback; Store callers reconcile authority
+    where the publication phase matters.
+    """
 
 
 class StoreAliasConflictError(StoreAuthorityError):

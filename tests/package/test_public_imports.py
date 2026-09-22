@@ -275,6 +275,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "env",
     "environments",
     "execute",
+    "filesystem",
     "freeze",
     "function",
     "load_object",
@@ -285,6 +286,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "Object",
     "ObjectId",
     "ObjectRef",
+    "paths",
     "Repo",
     "save_object",
     "Serializable",
@@ -564,6 +566,8 @@ print(json.dumps({
           "root": hasattr(dryml, "StateGraphReservation"),
       },
       "root_locking": dryml.locking is __import__("dryml.locking", fromlist=["*"]),
+      "root_filesystem": dryml.filesystem is __import__("dryml.filesystem", fromlist=["*"]),
+      "root_paths": dryml.paths is __import__("dryml.paths", fromlist=["*"]),
      "aliases": {
          "env": dryml.env is dryml.environments,
          "world": dryml.world is dryml.worlds,
@@ -583,6 +587,8 @@ print(json.dumps({
     assert set(data["managed_exports"]) == _EXPECTED_MANAGED_EXPORTS
     assert data["state_graph_reservation"] == {"core": True, "root": False}
     assert data["root_locking"]
+    assert data["root_filesystem"]
+    assert data["root_paths"]
     assert data["aliases"] == {"env": True, "world": True, "requirements": "dryml.requirements"}
     assert data["version"] == data["metadata_version"] == "0.3.0.dev2"
     assert "site-packages" in data["module"].replace("\\", "/")

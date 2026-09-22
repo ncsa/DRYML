@@ -13,8 +13,9 @@ from uuid import uuid4
 from pathlib import Path
 from typing import Iterable, Literal
 
+from ... import filesystem
 from ...locking import interprocess_lock, supports_advisory_locking
-from . import _windows_durability
+from ...paths import local_path_key
 from .records import (
     ClaimRecord, DeclarationRecord, DefinitionRecord, LocalStateManifest,
     MainRefRecord, ObjectAliasRecord, StateAliasRecord, StateRefRecord,
@@ -65,6 +66,15 @@ class DirStore(Store):
         self._initialize_format(existing_only=_existing_only)
         evidence = os.stat(self._base_dir)
         self._authority_evidence = (evidence.st_dev, evidence.st_ino)
+
+    @staticmethod
+    def _filesystem(operation, *args, **kwargs):
+        """Translate only missing filesystem guarantees into Store policy errors."""
+
+        try:
+            return operation(*args, **kwargs)
+        except filesystem.FilesystemCapabilityError as error:
+            raise StoreCapabilityError(str(error)) from error
 
     @classmethod
     def open_existing(
@@ -185,7 +195,7 @@ class DirStore(Store):
                 raise TypeError("Metadata dirty targets must be ObjectRef or StateRef.")
         if self._query_index_policy not in {"auto", "sqlite"}:
             return None
-        self._makedirs_durable(self.dryml_dir)
+        self._filesystem(filesystem.ensure_directory, self.dryml_dir)
         key = "dirty"
         if cdef is not None:
             key = DefinitionRecord(cdef).digest
@@ -197,9 +207,12 @@ class DirStore(Store):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as target:
                 target.write(f"{key}\n")
-                target.flush()
-                os.fsync(target.fileno())
-            self._replace_durable(temporary_path, marker_path)
+            self._filesystem(
+                filesystem.publish_file,
+                temporary_path,
+                marker_path,
+                replace=True,
+            )
         except BaseException:
             try:
                 os.unlink(temporary_path)
@@ -234,7 +247,12 @@ class DirStore(Store):
             DefinitionRecord authority. Concurrently added tokens remain dirty.
         """
         for marker in self._query_index_dirty_markers():
-            self._unlink_durable(marker)
+            self._filesystem(
+                filesystem.remove_file,
+                marker,
+                cleanup_directory=os.path.dirname(marker) or ".",
+                missing_ok=True,
+            )
 
     def query_index_is_dirty(self) -> bool:
         """Return whether a published definition may not be represented by SQLite."""
@@ -321,7 +339,7 @@ class DirStore(Store):
         Keeping it outside the root lets bootstrap reject arbitrary nonempty
         roots without first adding a Store-owned entry to them.
         """
-        root = os.path.normcase(os.path.realpath(self.base_dir))
+        root = local_path_key(self.base_dir)
         identity = hashlib.sha256(os.fsencode(root)).hexdigest()
         return os.path.join(os.path.dirname(root), f".dryml-bootstrap-{identity}.lock")
 
@@ -375,7 +393,9 @@ class DirStore(Store):
             self._read_file(self.store_format_path, StoreFormatRecord)
             return
         if not root.exists():
-            self._makedirs_durable(os.path.dirname(self.base_dir))
+            self._filesystem(
+                filesystem.ensure_directory, os.path.dirname(self.base_dir),
+            )
         # This lease covers root creation through final marker replacement.  It
         # remains outside authority so an unmarked root can still be rejected
         # without treating a Store-created lock as permission to overwrite it.
@@ -383,7 +403,7 @@ class DirStore(Store):
             if root.exists() and not root.is_dir():
                 raise StoreAuthorityError(f"DirStore root is not a directory: {self.base_dir!r}.")
             if not root.exists():
-                self._makedirs_durable(self.base_dir)
+                self._filesystem(filesystem.ensure_directory, self.base_dir)
             if os.path.lexists(self.store_format_path):
                 self._read_file(self.store_format_path, StoreFormatRecord)
                 return
@@ -424,180 +444,22 @@ class DirStore(Store):
         """
 
         parent = os.path.dirname(path)
-        self._makedirs_durable(parent)
+        self._filesystem(filesystem.ensure_directory, parent)
         fd, temporary = tempfile.mkstemp(prefix=".store-", dir=parent)
         try:
             with os.fdopen(fd, "wb") as target:
                 written = target.write(payload)
                 if written != len(payload):
                     raise OSError("Store authority temporary write was incomplete.")
-                target.flush()
-                os.fsync(target.fileno())
-            self._replace_durable(temporary, path)
+            self._filesystem(
+                filesystem.publish_file, temporary, path, replace=True,
+            )
         except BaseException:
             try:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
             raise
-
-    def _replace_durable(
-            self, source: str, destination: str, *, replace: bool = True
-    ) -> None:
-        """Atomically publish a sibling path and persist its directory entry.
-
-        Args:
-            source: Complete temporary file or directory on the destination volume.
-            destination: Final Store path.
-            replace: Whether Windows may replace an existing destination file.
-
-        Raises:
-            OSError: If the rename or platform durability barrier fails.
-            StoreCapabilityError: If POSIX directory metadata cannot be synced.
-
-        Side Effects:
-            Renames ``source`` to ``destination``. Windows performs one native
-            write-through move; POSIX retains replacement followed by parent fsync.
-        """
-
-        if _windows_durability.is_windows():
-            _windows_durability.move_file_write_through(
-                source, destination, replace=replace,
-            )
-            return
-        os.replace(source, destination)
-        self._fsync_directory(os.path.dirname(destination) or ".")
-
-    def _unlink_durable(self, path: str) -> bool:
-        """Durably remove one authoritative name without weakening Windows fences.
-
-        Args:
-            path: Existing Store file to remove.
-
-        Returns:
-            ``True`` when the authoritative name was removed, otherwise ``False``
-            when it was already absent.
-
-        Raises:
-            OSError: If logical removal or its durability barrier fails.
-            StoreCapabilityError: If POSIX parent metadata cannot be synced.
-
-        Side Effects:
-            POSIX unlinks and syncs the parent. Windows write-through renames the
-            file to an unrecognized sibling tombstone, then best-effort unlinks
-            only that non-authoritative tombstone.
-        """
-
-        if not _windows_durability.is_windows():
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                return False
-            self._fsync_directory(os.path.dirname(path) or ".")
-            return True
-
-        return _windows_durability.unlink_file_write_through(
-            path, tombstone_prefix=_REMOVED_ENTRY_PREFIX,
-        )
-
-    @staticmethod
-    def _fsync_directory(path: str) -> None:
-        """Persist a directory entry or fail before claiming durable publication.
-
-        Args:
-            path: Existing directory containing a newly replaced or removed entry.
-
-        Raises:
-            StoreCapabilityError: If the active filesystem cannot fsync directory
-                metadata required for the direct Store durability contract.
-
-        Side Effects:
-            Flushes filesystem metadata for ``path``. It does not read or alter
-            Store authority.
-        """
-
-        if _windows_durability.is_windows():
-            raise StoreCapabilityError(
-                "Windows directory handles do not provide the required documented fsync contract."
-            )
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        try:
-            fd = os.open(path, flags)
-        except OSError as error:
-            raise StoreCapabilityError(
-                "DirStore requires directory fsync support for durable publication."
-            ) from error
-        try:
-            os.fsync(fd)
-        except OSError as error:
-            raise StoreCapabilityError(
-                "DirStore filesystem cannot persist directory entries."
-            ) from error
-        finally:
-            os.close(fd)
-
-    def _makedirs_durable(self, path: str) -> None:
-        """Create a directory chain and persist every new parent entry.
-
-        Args:
-            path: Directory that must exist before authority publication.
-
-        Raises:
-            OSError: If directory installation fails for any reason other than a
-                verified destination-exists race.
-            StoreCapabilityError: If a new directory entry cannot be persisted.
-
-        Side Effects:
-            Creates missing directories and persists each new parent entry using
-            the active platform's supported publication primitive.
-        """
-
-        if not _windows_durability.is_windows():
-            missing = []
-            current = os.path.abspath(path)
-            while not os.path.exists(current):
-                missing.append(current)
-                parent = os.path.dirname(current)
-                if parent == current:
-                    break
-                current = parent
-            os.makedirs(path, exist_ok=True)
-            for directory in reversed(missing):
-                self._fsync_directory(os.path.dirname(directory))
-            return
-        _windows_durability.makedirs_write_through(path)
-
-    def _fsync_tree(self, root: str) -> None:
-        """Persist staged files and directories before snapshot activation.
-
-        Args:
-            root: Complete staged snapshot directory.
-
-        Raises:
-            StoreCapabilityError: If staged content or directory metadata cannot
-                be flushed before the final atomic directory replacement.
-
-        Side Effects:
-            Flushes every regular staged file. POSIX also flushes staged
-            directories; Windows persists the completed tree during activation.
-        """
-
-        for directory, _dirs, files in os.walk(root, topdown=False):
-            for name in files:
-                path = os.path.join(directory, name)
-                try:
-                    flags = os.O_RDWR if _windows_durability.is_windows() else os.O_RDONLY
-                    fd = os.open(path, flags)
-                    try:
-                        os.fsync(fd)
-                    finally:
-                        os.close(fd)
-                except OSError as error:
-                    raise StoreCapabilityError(
-                        "DirStore cannot persist staged snapshot content."
-                    ) from error
-            if not _windows_durability.is_windows():
-                self._fsync_directory(directory)
 
     @staticmethod
     def _digest_path(directory: str, digest: str) -> str:
@@ -645,24 +507,23 @@ class DirStore(Store):
         os.makedirs(os.path.join(path, "data"))
         return path
 
-    def _install_immutable(self, path: str, record, record_type):
-        self.preflight_publication(f"write {record_type.schema}")
-        with interprocess_lock(self._writer_lock_path):
-            existing = self._read_file(path, record_type)
-            if existing is not None:
-                if existing != record:
-                    if (
-                        isinstance(existing, DefinitionRecord)
-                        and isinstance(record, DefinitionRecord)
-                        and existing.definition.graph_equal(record.definition)
-                    ):
-                        # Private CDef node allocations are runtime-local and do
-                        # not distinguish immutable graph authority.
-                        return existing
-                    raise StoreAuthorityError(f"Immutable {record_type.schema} collision at {path!r}.")
-                return existing
-            self._atomic_write(path, record.to_bytes())
-            return record
+    def _existing_immutable(self, path: str, record, record_type):
+        """Return compatible existing authority or reject a collision."""
+
+        existing = self._read_file(path, record_type)
+        if existing is None or existing == record:
+            return existing
+        if (
+            isinstance(existing, DefinitionRecord)
+            and isinstance(record, DefinitionRecord)
+            and existing.definition.graph_equal(record.definition)
+        ):
+            # Private CDef node allocations are runtime-local and do not
+            # distinguish immutable graph authority.
+            return existing
+        raise StoreAuthorityError(
+            f"Immutable {record_type.schema} collision at {path!r}."
+        )
 
     def read_definition_record(self, digest: str) -> DefinitionRecord | None:
         """Read a validated DefinitionRecord and recompute its path key."""
@@ -687,20 +548,27 @@ class DirStore(Store):
         """
         if not isinstance(record, DefinitionRecord):
             raise TypeError("record must be a DefinitionRecord.")
+        self.preflight_publication(f"write {DefinitionRecord.schema}")
         path = self._definition_path(record.digest)
-        existed = self._read_file(path, DefinitionRecord) is not None
-        installed = self._install_immutable(path, record, DefinitionRecord)
-        root_installed = False
-        if stored_root:
+        with interprocess_lock(self._writer_lock_path):
+            existing = self._existing_immutable(
+                path, record, DefinitionRecord,
+            )
             root_record = StoredRootRecord(record.digest)
             root_path = self._stored_root_path(record.digest)
-            root_installed = self._read_file(root_path, StoredRootRecord) is None
-            self._install_immutable(root_path, root_record, StoredRootRecord)
-        if not existed:
+            existing_root = None
+            if stored_root:
+                existing_root = self._existing_immutable(
+                    root_path, root_record, StoredRootRecord,
+                )
+            if existing is not None and (not stored_root or existing_root is not None):
+                return existing
             self.mark_query_index_dirty(record.definition)
-        elif root_installed:
-            self.mark_query_index_dirty(record.definition)
-        return installed
+            if existing is None:
+                self._atomic_write(path, record.to_bytes())
+            if stored_root and existing_root is None:
+                self._atomic_write(root_path, root_record.to_bytes())
+            return existing if existing is not None else record
 
     def iter_definition_records(self) -> Iterable[DefinitionRecord]:
         """Yield all validated direct-layout DefinitionRecords in digest order."""
@@ -992,7 +860,12 @@ class DirStore(Store):
             try:
                 # Absence is indexed metadata too, so invalidate before removal.
                 self.mark_query_index_dirty(metadata_target=target)
-                return self._unlink_durable(path)
+                return self._filesystem(
+                    filesystem.remove_file,
+                    path,
+                    cleanup_directory=os.path.dirname(path) or ".",
+                    missing_ok=True,
+                )
             except FileNotFoundError:
                 return False
 
@@ -1401,9 +1274,10 @@ class DirStore(Store):
                             self.write_metadata(reference, annotations.state)
                     return existing[1]
                 self.mark_query_index_dirty(metadata_target=reference)
-                self._makedirs_durable(os.path.dirname(target))
-                self._fsync_tree(stage)
-                self._replace_durable(stage, target, replace=False)
+                self._filesystem(
+                    filesystem.ensure_directory, os.path.dirname(target),
+                )
+                self._filesystem(filesystem.publish_directory, stage, target)
                 installed = self._read_snapshot(reference.digest(), payloads=True)
                 if installed is None:
                     raise StoreAuthorityError("snapshot install did not survive read-back.")
@@ -1438,12 +1312,17 @@ class DirStore(Store):
         """Install one immutable DeclarationRecord."""
         if not isinstance(record, DeclarationRecord):
             raise TypeError("record must be a DeclarationRecord.")
+        self.preflight_publication(f"write {DeclarationRecord.schema}")
         path = self._declaration_path(record.digest)
-        existed = self._read_file(path, DeclarationRecord) is not None
-        installed = self._install_immutable(path, record, DeclarationRecord)
-        if not existed:
+        with interprocess_lock(self._writer_lock_path):
+            existing = self._existing_immutable(
+                path, record, DeclarationRecord,
+            )
+            if existing is not None:
+                return existing
             self.mark_query_index_dirty()
-        return installed
+            self._atomic_write(path, record.to_bytes())
+            return record
 
     def iter_declaration_records(self) -> Iterable[DeclarationRecord]:
         """Yield validated declaration records in deterministic direct-path order."""
@@ -1498,9 +1377,12 @@ class DirStore(Store):
         if not isinstance(record, ObjectAliasRecord):
             raise TypeError("record must be an ObjectAliasRecord.")
         self.preflight_publication("write object alias")
+        path = self._ref_path("objects", f"{record.alias}.record")
         with interprocess_lock(self._writer_lock_path):
-            self._atomic_write(self._ref_path("objects", f"{record.alias}.record"), record.to_bytes())
-        self.mark_query_index_dirty()
+            if self._read_file(path, ObjectAliasRecord) == record:
+                return record
+            self.mark_query_index_dirty()
+            self._atomic_write(path, record.to_bytes())
         return record
 
     def read_state_alias(self, object_digest: str, alias: str) -> StateAliasRecord | None:
@@ -1513,9 +1395,14 @@ class DirStore(Store):
             raise TypeError("record must be a StateAliasRecord.")
         self.preflight_publication("write state alias")
         digest = record.object_ref.digest()
+        path = self._ref_path(
+            "states", digest[:2], digest, f"{record.alias}.record",
+        )
         with interprocess_lock(self._writer_lock_path):
-            self._atomic_write(self._ref_path("states", digest[:2], digest, f"{record.alias}.record"), record.to_bytes())
-        self.mark_query_index_dirty()
+            if self._read_file(path, StateAliasRecord) == record:
+                return record
+            self.mark_query_index_dirty()
+            self._atomic_write(path, record.to_bytes())
         return record
 
     def iter_object_alias_records(self) -> Iterable[ObjectAliasRecord]:

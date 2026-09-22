@@ -1,21 +1,19 @@
 """Windows Store durability policy with a mocked native move boundary."""
 
-import builtins
 import os
 from pathlib import Path
 import zipfile
 
 import pytest
 
+import dryml.filesystem as filesystem
+from dryml.filesystem import _windows as windows_backend
 from dryml.core import Repo, Serializable
-import dryml.core.query.sqlite.index as sqlite_index_module
 from dryml.core.query.model import QueryIndexError
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core.store import _windows_durability
 from dryml.core.store.dir import DirStore, _REMOVED_ENTRY_PREFIX
 from dryml.core.store.records import DefinitionRecord
-from dryml.core.store.store import StoreCapabilityError
 from dryml.core.store.zip import ZipStore
 
 
@@ -37,7 +35,7 @@ def _emulate_windows_moves(monkeypatch):
     """Select Windows policy while implementing its native boundary on POSIX."""
 
     moves = []
-    replace_existing = _windows_durability._MOVEFILE_REPLACE_EXISTING
+    replace_existing = windows_backend._MOVEFILE_REPLACE_EXISTING
     original_replace = os.replace
     original_rename = os.rename
 
@@ -50,59 +48,9 @@ def _emulate_windows_moves(monkeypatch):
                 raise FileExistsError(destination)
             original_rename(source, destination)
 
-    monkeypatch.setattr(_windows_durability, "_IS_WINDOWS", True)
-    monkeypatch.setattr(_windows_durability, "_move_file_ex", move)
+    monkeypatch.setattr(filesystem, "_backend", windows_backend)
+    monkeypatch.setattr(windows_backend, "_move_file_ex", move)
     return moves
-
-
-def test_native_write_through_move_selects_exact_flags_and_propagates_failure(
-        tmp_path, monkeypatch):
-    """The adapter never requests cross-volume fallback or hides native errors."""
-
-    observed = []
-    monkeypatch.setattr(
-        _windows_durability,
-        "_move_file_ex",
-        lambda source, destination, flags: observed.append(
-            (source, destination, flags),
-        ),
-    )
-    source = tmp_path / "source"
-    destination = tmp_path / "destination"
-
-    _windows_durability.move_file_write_through(
-        source, destination, replace=False,
-    )
-    _windows_durability.move_file_write_through(
-        source, destination, replace=True,
-    )
-
-    write_through = _windows_durability._MOVEFILE_WRITE_THROUGH
-    replace_existing = _windows_durability._MOVEFILE_REPLACE_EXISTING
-    assert observed == [
-        (str(source), str(destination), write_through),
-        (str(source), str(destination), write_through | replace_existing),
-    ]
-
-    def fail(*_args):
-        raise PermissionError("native sharing denial")
-
-    monkeypatch.setattr(_windows_durability, "_move_file_ex", fail)
-    with pytest.raises(PermissionError, match="sharing denial"):
-        _windows_durability.move_file_write_through(
-            source, destination, replace=True,
-        )
-
-
-def test_native_adapter_uses_documented_extended_length_paths():
-    """Drive, UNC, and already-prefixed names retain exact Win32 meaning."""
-
-    convert = _windows_durability._extended_length_path
-    assert convert(r"C:\store\record") == r"\\?\C:\store\record"
-    assert convert(r"\\server\share\record") == (
-        r"\\?\UNC\server\share\record"
-    )
-    assert convert(r"\\?\C:\store\record") == r"\\?\C:\store\record"
 
 
 def test_windows_initialization_and_mkdir_use_write_through_directory_moves(
@@ -112,10 +60,10 @@ def test_windows_initialization_and_mkdir_use_write_through_directory_moves(
     moves = _emulate_windows_moves(monkeypatch)
     root = tmp_path / "source" / "store"
     store = DirStore(root, query_index="none")
-    store._makedirs_durable(os.fspath(root / "one" / "two"))
+    filesystem.ensure_directory(root / "one" / "two")
 
-    write_through = _windows_durability._MOVEFILE_WRITE_THROUGH
-    replace_existing = _windows_durability._MOVEFILE_REPLACE_EXISTING
+    write_through = windows_backend._MOVEFILE_WRITE_THROUGH
+    replace_existing = windows_backend._MOVEFILE_REPLACE_EXISTING
     destinations = {destination: flags for _source, destination, flags in moves}
     for directory in (root.parent, root, root / "one", root / "one" / "two"):
         assert destinations[directory] == write_through
@@ -123,8 +71,8 @@ def test_windows_initialization_and_mkdir_use_write_through_directory_moves(
         write_through | replace_existing
     )
     assert all(flags & write_through for _source, _destination, flags in moves)
-    with pytest.raises(StoreCapabilityError, match="Windows directory handles"):
-        store._fsync_directory(store.base_dir)
+    with pytest.raises(AssertionError, match="write-through"):
+        windows_backend.sync_directory(store.base_dir)
 
 
 def test_windows_mkdir_propagates_failure_after_destination_becomes_visible(
@@ -139,10 +87,10 @@ def test_windows_mkdir_propagates_failure_after_destination_becomes_visible(
         original_rename(source, target)
         raise OSError("write-through completion uncertain")
 
-    monkeypatch.setattr(_windows_durability, "_IS_WINDOWS", True)
-    monkeypatch.setattr(_windows_durability, "_move_file_ex", move_then_fail)
+    monkeypatch.setattr(filesystem, "_backend", windows_backend)
+    monkeypatch.setattr(windows_backend, "_move_file_ex", move_then_fail)
     with pytest.raises(OSError, match="completion uncertain"):
-        store._makedirs_durable(os.fspath(destination))
+        filesystem.ensure_directory(destination)
 
     assert destination.is_dir()
 
@@ -154,13 +102,6 @@ def test_windows_snapshot_and_metadata_publication_preserve_order_and_handle_mod
     store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(store)
     moves = _emulate_windows_moves(monkeypatch)
-    monkeypatch.setattr(
-        sqlite_index_module,
-        "_fsync_directory",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("Windows SQLite publication used POSIX directory fsync"),
-        ),
-    )
     opened = []
     original_open = os.open
 
@@ -185,7 +126,7 @@ def test_windows_snapshot_and_metadata_publication_preserve_order_and_handle_mod
     assert dirty_before_snapshot
     assert not (
         moves[snapshot_index][2]
-        & _windows_durability._MOVEFILE_REPLACE_EXISTING
+        & windows_backend._MOVEFILE_REPLACE_EXISTING
     )
     staged_opens = [
         flags for path, flags in opened
@@ -214,7 +155,7 @@ def test_windows_snapshot_and_metadata_publication_preserve_order_and_handle_mod
     assert not store.query_index_is_dirty()
     assert moves
     assert all(
-        destination.name.startswith(_REMOVED_ENTRY_PREFIX)
+        destination.name.startswith(".dryml-removed-")
         for _source, destination, _flags in moves
     )
 
@@ -228,13 +169,6 @@ def test_windows_standalone_sqlite_dirty_and_activation_paths_use_native_moves(
     """Standalone SQLite publication never requires a fake owning Store."""
 
     moves = _emulate_windows_moves(monkeypatch)
-    monkeypatch.setattr(
-        sqlite_index_module,
-        "_fsync_directory",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("Windows SQLite publication used POSIX directory fsync"),
-        ),
-    )
     path = tmp_path / "standalone.sqlite"
     dirty_path = tmp_path / "standalone.dirty"
     config = SQLiteQueryIndexConfig(path=path, journal_mode="delete")
@@ -296,19 +230,12 @@ def test_windows_standalone_sqlite_native_failures_remain_query_index_errors(
     marker = dirty_path.with_name(f"{dirty_path.name}.captured")
     marker.write_text("dirty\n", encoding="utf-8")
 
-    monkeypatch.setattr(_windows_durability, "_IS_WINDOWS", True)
+    monkeypatch.setattr(filesystem, "_backend", windows_backend)
     monkeypatch.setattr(
-        _windows_durability,
+        windows_backend,
         "_move_file_ex",
         lambda *_args: (_ for _ in ()).throw(
             PermissionError("native query-index denial"),
-        ),
-    )
-    monkeypatch.setattr(
-        sqlite_index_module,
-        "_fsync_directory",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("Windows SQLite publication used POSIX directory fsync"),
         ),
     )
 
@@ -339,7 +266,7 @@ def test_windows_logical_delete_retains_only_ignored_tombstone(
     original_unlink = os.unlink
 
     def retain_tombstone(path, *args, **kwargs):
-        if Path(path).name.startswith(_REMOVED_ENTRY_PREFIX):
+        if Path(path).name.startswith(".dryml-removed-"):
             raise PermissionError("retain tombstone")
         return original_unlink(path, *args, **kwargs)
 
@@ -347,12 +274,12 @@ def test_windows_logical_delete_retains_only_ignored_tombstone(
     assert store.delete_metadata(target)
 
     metadata_parent = Path(store._metadata_path(target)).parent
-    tombstones = tuple(metadata_parent.glob(f"{_REMOVED_ENTRY_PREFIX}*"))
+    tombstones = tuple(metadata_parent.glob(".dryml-removed-*"))
     assert store.read_metadata(target) is None
     assert len(tombstones) == 1
     assert not tuple(metadata_parent.glob("*.record"))
     assert moves[-1][1] == tombstones[0]
-    assert not (moves[-1][2] & _windows_durability._MOVEFILE_REPLACE_EXISTING)
+    assert not (moves[-1][2] & windows_backend._MOVEFILE_REPLACE_EXISTING)
 
 
 def test_windows_zip_commit_flushes_writable_file_and_filters_tombstones(
@@ -369,20 +296,13 @@ def test_windows_zip_commit_flushes_writable_file_and_filters_tombstones(
 
     with monkeypatch.context() as patch:
         def retain_tombstone(path, *args, **kwargs):
-            if Path(path).name.startswith(_REMOVED_ENTRY_PREFIX):
+            if Path(path).name.startswith(".dryml-removed-"):
                 raise PermissionError("retain tombstone")
             return original_unlink(path, *args, **kwargs)
 
         patch.setattr(os, "unlink", retain_tombstone)
         assert store.delete_metadata(target)
 
-    opened_modes = []
-
-    def observe_open(path, mode="r", *args, **kwargs):
-        opened_modes.append((Path(path), mode))
-        return builtins.open(path, mode, *args, **kwargs)
-
-    monkeypatch.setattr("dryml.core.store.zip.open", observe_open, raising=False)
     moves.clear()
     try:
         store.commit()
@@ -390,11 +310,10 @@ def test_windows_zip_commit_flushes_writable_file_and_filters_tombstones(
             item for item in moves if item[1] == archive_path
         )
         expected_flags = (
-            _windows_durability._MOVEFILE_WRITE_THROUGH
-            | _windows_durability._MOVEFILE_REPLACE_EXISTING
+            windows_backend._MOVEFILE_WRITE_THROUGH
+            | windows_backend._MOVEFILE_REPLACE_EXISTING
         )
         assert archive_move[2] == expected_flags
-        assert any(path.suffix == ".zip" and mode == "r+b" for path, mode in opened_modes)
         with zipfile.ZipFile(archive_path) as archive:
             names = archive.namelist()
             assert any(
@@ -403,7 +322,9 @@ def test_windows_zip_commit_flushes_writable_file_and_filters_tombstones(
             )
             assert all(
                 not (
-                    Path(name).name.startswith(_REMOVED_ENTRY_PREFIX)
+                    Path(name).name.startswith(
+                        (_REMOVED_ENTRY_PREFIX, ".dryml-removed-")
+                    )
                     and Path(name).parts[0] in {".dryml", "metadata"}
                 )
                 for name in names
@@ -413,7 +334,7 @@ def test_windows_zip_commit_flushes_writable_file_and_filters_tombstones(
 
 
 @pytest.mark.skipif(
-    not _windows_durability.is_windows(),
+    os.name != "nt",
     reason="requires native Windows MoveFileExW and file sharing semantics",
 )
 def test_native_windows_dir_and_zip_store_round_trip(tmp_path):

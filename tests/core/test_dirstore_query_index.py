@@ -1,23 +1,37 @@
 """DefinitionRecord authority and derived DirStore query-index integration tests."""
 
-import os
 from pathlib import Path
 import threading
 
 import dill
 import pytest
 
-from dryml.core import Definition, Object, Repo, SKIP_ARGS
+import dryml.filesystem as filesystem
+from dryml.core import Definition, Object, Repo, Serializable, SKIP_ARGS
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord, StoreFormatRecord
+from dryml.core.store.records import (
+    DeclarationRecord,
+    DefinitionRecord,
+    ObjectAliasRecord,
+    StateAliasRecord,
+    StoreFormatRecord,
+)
 from dryml.core.store.store import StoreAuthorityError
 
 
 class IndexedRecordObject(Object):
     def __init__(self, value="value"):
         self.value = value
+
+
+class IndexedSerializable(Serializable):
+    def __init__(self, value="value"):
+        self.value = value
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        pass
 
 
 def _record(value="value"):
@@ -304,14 +318,14 @@ def test_interrupted_definition_replacement_preserves_existing_authority(tmp_pat
     interrupted = _record("interrupted")
     store.write_definition_record(existing)
     target = _definition_path(store, interrupted)
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_file
 
-    def fail_install(source, destination, *, replace=True):
+    def fail_install(source, destination, *, replace=False):
         if Path(destination) == target:
             raise OSError("injected direct-record replacement failure")
-        return original_replace(source, destination, replace=replace)
+        return original_publish(source, destination, replace=replace)
 
-    monkeypatch.setattr(store, "_replace_durable", fail_install)
+    monkeypatch.setattr(filesystem, "publish_file", fail_install)
     with pytest.raises(OSError, match="replacement failure"):
         store.write_definition_record(interrupted)
 
@@ -320,23 +334,85 @@ def test_interrupted_definition_replacement_preserves_existing_authority(tmp_pat
     assert not list(target.parent.glob(".store-*"))
 
 
-def test_interrupted_record_write_does_not_create_or_dirty_a_sidecar(tmp_path, monkeypatch):
+def test_interrupted_record_write_leaves_harmless_dirty_token(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index="sqlite")
     record = _record()
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_file
 
-    def interrupt_install(source, destination, *, replace=True):
+    def interrupt_install(source, destination, *, replace=False):
         if Path(destination) == _definition_path(store, record):
             raise KeyboardInterrupt("injected interruption")
-        return original_replace(source, destination, replace=replace)
+        return original_publish(source, destination, replace=replace)
 
-    monkeypatch.setattr(store, "_replace_durable", interrupt_install)
+    monkeypatch.setattr(filesystem, "publish_file", interrupt_install)
     with pytest.raises(KeyboardInterrupt, match="interruption"):
         store.write_definition_record(record)
 
     assert store.read_definition_record(record.digest) is None
-    assert store.query_index_status().state == "missing"
-    assert not list(Path(store.base_dir, ".dryml").glob("query-index.dirty.*"))
+    assert store.query_index_status().state == "dirty"
+    assert list(Path(store.base_dir, ".dryml").glob("query-index.dirty.*"))
+
+
+def test_idempotent_query_visible_writes_do_not_publish_new_dirty_tokens(
+        tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    state = repo.save_object(IndexedRecordObject("idempotent"))
+    declaration = repo.declare_object(
+        IndexedSerializable("idempotent").definition,
+    )
+    writes = (
+        lambda: store.write_definition_record(
+            DefinitionRecord(state.object.definition),
+        ),
+        lambda: store.write_declaration_record(
+            DeclarationRecord(declaration),
+        ),
+        lambda: store.write_object_alias(
+            ObjectAliasRecord("idempotent", declaration),
+        ),
+        lambda: store.write_state_alias(
+            StateAliasRecord("idempotent", state.object, state.digest()),
+        ),
+    )
+    for write in writes:
+        write()
+
+    def unexpected_dirty(*_args, **_kwargs):
+        raise AssertionError("idempotent write marked the query index dirty")
+
+    monkeypatch.setattr(store, "mark_query_index_dirty", unexpected_dirty)
+    for write in writes:
+        write()
+
+
+@pytest.mark.skipif(not sqlite_available(), reason="sqlite3 unavailable")
+def test_post_publication_interruption_remains_dirty_and_query_complete(
+        tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    baseline = _record("baseline")
+    interrupted = _record("interrupted")
+    store.write_definition_record(baseline)
+    store.rebuild_query_index()
+    assert store.query_index_status().state == "ready"
+    target = store._stored_root_path(interrupted.digest)
+    original_write = store._atomic_write
+
+    def publish_then_interrupt(path, data):
+        original_write(path, data)
+        if path == target:
+            raise KeyboardInterrupt("injected after authority publication")
+
+    monkeypatch.setattr(store, "_atomic_write", publish_then_interrupt)
+    with pytest.raises(KeyboardInterrupt, match="after authority publication"):
+        store.write_definition_record(interrupted)
+
+    assert store.read_definition_record(interrupted.digest) == interrupted
+    assert store.read_stored_root_record(interrupted.digest) is not None
+    assert store.query_index_is_dirty()
+    reopened = Repo(DirStore(store.base_dir, query_index="sqlite"))
+    assert reopened.query(interrupted.definition).stored(refresh=True).count() == 1
+    assert reopened.default_store.query_index_status().state == "ready"
 
 
 def test_concurrent_immutable_definition_installs_preserve_every_complete_record(tmp_path):
@@ -393,16 +469,16 @@ def test_concurrent_reader_observes_only_absent_or_complete_direct_record(tmp_pa
     target = _definition_path(store, record)
     entered_replace = threading.Barrier(2)
     allow_replace = threading.Event()
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_file
     observations = []
 
-    def pause_install(source, destination, *, replace=True):
+    def pause_install(source, destination, *, replace=False):
         if Path(destination) == target:
             entered_replace.wait()
             allow_replace.wait()
-        return original_replace(source, destination, replace=replace)
+        return original_publish(source, destination, replace=replace)
 
-    monkeypatch.setattr(store, "_replace_durable", pause_install)
+    monkeypatch.setattr(filesystem, "publish_file", pause_install)
 
     writer = threading.Thread(target=lambda: store.write_definition_record(record))
 

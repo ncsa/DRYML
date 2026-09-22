@@ -88,6 +88,69 @@ def test_different_thread_uses_different_connection(tmp_path):
     manager.close_current()
 
 
+def test_coordinator_can_close_worker_thread_connections(tmp_path):
+    manager = SQLiteConnectionManager(
+        SQLiteQueryIndexConfig(
+            tmp_path / "index.sqlite", journal_mode="delete"
+        )
+    )
+    connections = []
+    results = []
+
+    def open_in_thread():
+        writable = manager.connection()
+        writable.execute("CREATE TABLE values_table (value INTEGER)")
+        readonly = manager.connection(readonly=True)
+        connections.extend((writable, readonly))
+        results.append(
+            (
+                writable.isolation_level,
+                readonly.isolation_level,
+                readonly.execute(
+                    "SELECT COUNT(*) FROM values_table"
+                ).fetchone()[0],
+            )
+        )
+
+    thread = threading.Thread(target=open_in_thread)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert results == [(None, None, 0)]
+    manager.close_all_current_process()
+    assert manager._connections == {}
+    sqlite3 = require_sqlite()
+    for con in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            con.execute("SELECT 1")
+
+
+def test_failed_manager_close_retains_cached_connection(tmp_path):
+    manager = SQLiteConnectionManager(
+        SQLiteQueryIndexConfig(
+            tmp_path / "index.sqlite", journal_mode="delete"
+        )
+    )
+    key = (connection_module.os.getpid(), threading.get_ident(), False)
+    failure = RuntimeError("close failed")
+
+    class Connection:
+        def close(self):
+            raise failure
+
+    con = Connection()
+    manager._connections[key] = con
+    manager._file_identities[key] = (1, 2)
+
+    with pytest.raises(RuntimeError) as caught:
+        manager.close_all_current_process()
+
+    assert caught.value is failure
+    assert manager._connections[key] is con
+    assert manager._file_identities[key] == (1, 2)
+
+
 def test_auto_journal_mode_uses_delete_when_wal_runtime_is_not_known_safe(monkeypatch, tmp_path):
     monkeypatch.setattr(connection_module, "wal_runtime_is_known_safe", lambda version: False)
     manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="auto"))
@@ -113,7 +176,9 @@ def test_existing_journal_mode_is_not_reapplied(tmp_path):
             statements.append(statement)
             return Result()
 
-    manager._configure_journal_and_durability(Connection())
+    connection_module._configure_journal_and_durability(
+        manager.config, Connection()
+    )
 
     assert statements == ["PRAGMA journal_mode", "PRAGMA synchronous = NORMAL"]
 

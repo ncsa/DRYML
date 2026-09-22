@@ -80,7 +80,7 @@ jobs:
 
       - name: Run local filesystem publication focus
         run: |
-          ./tests.sh tests/core/test_store_format.py tests/core/test_store_direct_layout.py tests/core/test_store_atomic_publication.py tests/core/test_state_ref_save.py tests/core/test_graph_save_failure.py tests/core/test_repo_claim_concurrency.py tests/core/test_repo_reference_aliases.py tests/core/test_pre_port_store_rejection.py tests/core/test_metadata_query_index.py tests/core/test_snapshot_publication_faults.py tests/core/test_snapshot_publication_concurrency.py tests/core/test_store_v3_fixtures.py tests/core/test_windows_store_durability.py --timeout=180 --timeout-method=thread
+          ./tests.sh tests/filesystem tests/paths tests/core/test_sqlite_connection_ownership.py tests/core/test_store_format.py tests/core/test_store_direct_layout.py tests/core/test_store_atomic_publication.py tests/core/test_state_ref_save.py tests/core/test_graph_save_failure.py tests/core/test_repo_claim_concurrency.py tests/core/test_repo_reference_aliases.py tests/core/test_pre_port_store_rejection.py tests/core/test_metadata_query_index.py tests/core/test_snapshot_publication_faults.py tests/core/test_snapshot_publication_concurrency.py tests/core/test_store_v3_fixtures.py tests/core/test_windows_store_durability.py --timeout=180 --timeout-method=thread
 
   heavy:
     name: Heavy frameworks (Ubuntu, Python ${{ matrix.python-version }})

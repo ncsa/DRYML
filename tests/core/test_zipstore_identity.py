@@ -19,6 +19,7 @@ import threading
 
 import pytest
 
+import dryml.filesystem as filesystem
 import dryml.core.store as store_exports
 import dryml.core.store.zip as zip_module
 from dryml.core import Object, Repo, SaveRouting, Serializable, StateRef
@@ -304,13 +305,13 @@ def test_zip_commit_builds_valid_complete_sibling_before_atomic_replace(tmp_path
     validated = []
     replacements = []
     original_testzip = zipfile.ZipFile.testzip
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_file
 
     def observe_validation(archive):
         validated.append(Path(archive.filename))
         return original_testzip(archive)
 
-    def inspect_replace(source, destination, *, replace=True):
+    def inspect_replace(source, destination, *, replace=False):
         if Path(destination) == path:
             staged = Path(source)
             assert staged.parent == path.parent
@@ -323,10 +324,10 @@ def test_zip_commit_builds_valid_complete_sibling_before_atomic_replace(tmp_path
                     f"stored-roots/{record.digest[:2]}/{record.digest}.record",
                 }
             replacements.append(staged)
-        return original_replace(source, destination, replace=replace)
+        return original_publish(source, destination, replace=replace)
 
     monkeypatch.setattr(zipfile.ZipFile, "testzip", observe_validation)
-    monkeypatch.setattr(store, "_replace_durable", inspect_replace)
+    monkeypatch.setattr(filesystem, "publish_file", inspect_replace)
     try:
         store.write_definition_record(record)
         store.commit()
@@ -344,15 +345,15 @@ def test_failed_zip_commit_keeps_previous_complete_archive_bytes(tmp_path, monke
     store.write_definition_record(first)
     store.commit()
     before = _archive_bytes(path)
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_file
 
-    def fail_archive_replace(source, destination, *, replace=True):
+    def fail_archive_replace(source, destination, *, replace=False):
         if Path(destination) == path:
             raise OSError("injected archive replacement failure")
-        return original_replace(source, destination, replace=replace)
+        return original_publish(source, destination, replace=replace)
 
     store.write_definition_record(_record("second"))
-    monkeypatch.setattr(store, "_replace_durable", fail_archive_replace)
+    monkeypatch.setattr(filesystem, "publish_file", fail_archive_replace)
     try:
         with pytest.raises(OSError, match="archive replacement"):
             store.commit()
@@ -375,16 +376,16 @@ def test_zip_post_publish_failure_preserves_complete_reopenable_replacement(tmp_
     store = ZipStore(path)
     record = _record("replacement")
     store.write_definition_record(record)
-    original = store._replace_durable
+    original = filesystem.publish_file
 
-    def fail_after_archive_publish(source, destination, *, replace=True):
+    def fail_after_archive_publish(source, destination, *, replace=False):
         result = original(source, destination, replace=replace)
         if Path(destination) == Path(store.archive_path):
             raise OSError("archive post-publication failure")
         return result
 
     monkeypatch.setattr(
-        store, "_replace_durable", fail_after_archive_publish,
+        filesystem, "publish_file", fail_after_archive_publish,
     )
     with pytest.raises(OSError, match="archive post-publication"):
         store.commit()

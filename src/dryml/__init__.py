@@ -31,6 +31,8 @@ _SUBMODULE_EXPORTS = {
     "methods": "dryml.methods",
     "managed": "dryml.managed",
     "locking": "dryml.locking",
+    "filesystem": "dryml.filesystem",
+    "paths": "dryml.paths",
 }
 
 _CORE_EXPORTS = {
@@ -132,6 +134,8 @@ __all__ = [
     "methods",
     "managed",
     "locking",
+    "filesystem",
+    "paths",
     "config",
     "configure",
     "reset_config",

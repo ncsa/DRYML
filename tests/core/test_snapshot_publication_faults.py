@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import dryml.filesystem as filesystem
 import dryml.environments as envs
 from dryml.core import Object, Repo, SaveAnnotations, SaveRouting, Selector, Serializable
 from dryml.core.repo import RepoLoadError, RepoSaveError
@@ -220,21 +221,20 @@ def test_snapshot_post_publish_interruption_retains_completed_authority(tmp_path
 
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
-    original_replace = store._replace_durable
+    original_publish = filesystem.publish_directory
 
-    def interrupt_after_snapshot_publish(
-            source, destination, *, replace=True):
+    def interrupt_after_snapshot_publish(source, destination):
         installs_snapshot = (
             Path(source).is_dir()
             and Path(destination).parent.name == Path(destination).name[:2]
         )
-        result = original_replace(source, destination, replace=replace)
+        result = original_publish(source, destination)
         if installs_snapshot:
             raise OSError("snapshot post-publication interruption")
         return result
 
     monkeypatch.setattr(
-        store, "_replace_durable", interrupt_after_snapshot_publish,
+        filesystem, "publish_directory", interrupt_after_snapshot_publish,
     )
     with pytest.raises(RepoSaveError, match="publication") as raised:
         repo.save_object(FaultPayload(repo=repo))
@@ -252,14 +252,14 @@ def test_retry_before_snapshot_install_captures_new_evidence(tmp_path, monkeypat
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     observed = []
-    original = store._replace_durable
+    original = filesystem.publish_directory
 
-    def fail_snapshot_replace(source, destination, *, replace=True):
+    def fail_snapshot_replace(source, destination):
         if Path(source).name.startswith("snapshot-"):
             raise OSError("staged snapshot replacement failed")
-        return original(source, destination, replace=replace)
+        return original(source, destination)
 
-    monkeypatch.setattr(store, "_replace_durable", fail_snapshot_replace)
+    monkeypatch.setattr(filesystem, "publish_directory", fail_snapshot_replace)
     value = FaultPayload(repo=repo)
     with pytest.raises(RepoSaveError) as raised:
         repo.save_object(value, _snapshot_observer=lambda: _observe_environment(observed, "first"))
@@ -268,7 +268,7 @@ def test_retry_before_snapshot_install_captures_new_evidence(tmp_path, monkeypat
     assert store.read_state_ref_record(state.digest()) is None
     assert _phases(raised.value.report)["snapshot"] == "failed"
 
-    monkeypatch.setattr(store, "_replace_durable", original)
+    monkeypatch.setattr(filesystem, "publish_directory", original)
     assert repo.save_object(
         value, _snapshot_observer=lambda: _observe_environment(observed, "retry"),
     ) == state
@@ -361,16 +361,16 @@ def test_current_metadata_post_publish_failure_retains_mapping_and_dirty_fallbac
     repo = Repo(store)
     state = repo.save_object(FaultPayload(repo=repo))
     target = Path(store._metadata_path(state.object))
-    original = store._replace_durable
+    original = filesystem.publish_file
 
-    def fail_after_metadata_publish(source, destination, *, replace=True):
+    def fail_after_metadata_publish(source, destination, *, replace=False):
         result = original(source, destination, replace=replace)
         if Path(destination) == target:
             raise OSError("metadata post-publication failure")
         return result
 
     monkeypatch.setattr(
-        store, "_replace_durable", fail_after_metadata_publish,
+        filesystem, "publish_file", fail_after_metadata_publish,
     )
     with pytest.raises(OSError, match="metadata post-publication"):
         repo.set_metadata(state.object, {"complete": True})

@@ -5,6 +5,7 @@ from pathlib import Path
 import dill
 import pytest
 
+import dryml.filesystem as filesystem
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import StoreFormatRecord
 from dryml.core.store.store import StoreAuthorityError
@@ -13,18 +14,16 @@ from dryml.core.store.store import StoreAuthorityError
 def _bootstrap_format_worker(root, ready, start, paused, resume, outcomes):
     """Race initial format replacement while one writer retains its temporary file."""
     target = os.path.join(os.path.abspath(root), "store-format.record")
-    original_replace = DirStore._replace_durable
+    original_publish = filesystem.publish_file
 
-    def pause_format_replacement(self, source, destination, *, replace=True):
+    def pause_format_replacement(source, destination, *, replace=False):
         if os.path.abspath(destination) == target:
             paused.set()
             if not resume.wait(10):
                 raise TimeoutError("format publication was not resumed")
-        return original_replace(
-            self, source, destination, replace=replace,
-        )
+        return original_publish(source, destination, replace=replace)
 
-    DirStore._replace_durable = pause_format_replacement
+    filesystem.publish_file = pause_format_replacement
     ready.set()
     start.wait(10)
     try:
@@ -83,17 +82,15 @@ def test_failed_initial_format_publication_leaves_an_empty_root_recoverable(tmp_
     """A failed initial replacement leaves no partial authority for a later constructor."""
     root = tmp_path / "source" / "store"
     target = os.fspath(root / "store-format.record")
-    original_replace = DirStore._replace_durable
+    original_publish = filesystem.publish_file
 
-    def fail_format_replacement(self, source, destination, *, replace=True):
+    def fail_format_replacement(source, destination, *, replace=False):
         if os.path.abspath(destination) == target:
             raise OSError("interrupted format replacement")
-        return original_replace(
-            self, source, destination, replace=replace,
-        )
+        return original_publish(source, destination, replace=replace)
 
     with monkeypatch.context() as patch:
-        patch.setattr(DirStore, "_replace_durable", fail_format_replacement)
+        patch.setattr(filesystem, "publish_file", fail_format_replacement)
         with pytest.raises(OSError, match="interrupted format replacement"):
             DirStore(root)
 
