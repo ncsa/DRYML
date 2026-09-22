@@ -18,6 +18,9 @@ signs, and Unicode are escaped according to the standard library rather than by
 interpolating a `file://` string. SQLite connection ownership uses this URI when
 adding its `mode=ro` query so reserved path characters cannot become SQLite URI
 syntax.
+The module loads the standard-library URI conversion dependency at import time,
+so a child's first conversion after `fork` needs no new module import. This does
+not relax DRYML's restrictions on inherited runtime or framework state.
 
 These functions do not define Store schemas, transport paths, or portable
 cross-host identities. Private native adapters may use extended Win32 path

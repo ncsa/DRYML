@@ -8,6 +8,9 @@ Every path parameter accepts text, bytes, or `os.PathLike`. The public boundary
 normalizes with `os.fspath` and `os.fsdecode`, so backend calls receive one
 consistent text shape while undecodable POSIX bytes round-trip through Python's
 filesystem `surrogateescape` handling.
+This preserves the path representation, not permission to create every byte
+sequence: native filesystem naming restrictions still apply. Filesystems that
+reject non-UTF-8 names report their native `EILSEQ` error unchanged.
 
 `sync_file(path)` flushes an existing regular file. `ensure_directory(path)`
 creates missing components and persists each new parent entry. Like

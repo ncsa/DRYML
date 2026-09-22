@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+# Python 3.13+ imports this lazily in Path.as_uri; load it before a caller forks.
+import urllib.parse  # noqa: F401
 
 
 _PathInput = str | bytes | os.PathLike[str] | os.PathLike[bytes]

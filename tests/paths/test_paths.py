@@ -2,6 +2,8 @@
 
 import os
 from pathlib import Path
+import subprocess
+import sys
 from urllib.parse import unquote, unquote_to_bytes, urlparse
 
 import pytest
@@ -49,6 +51,36 @@ def test_file_uri_uses_stdlib_escaping_and_absolute_path(tmp_path):
     assert parsed.scheme == "file"
     assert "%20" in uri and "%23" in uri and "%25" in uri
     assert unquote(parsed.path).endswith("space # percent % unicode-é")
+
+
+def test_file_uri_dependencies_are_ready_before_first_call_after_fork(tmp_path):
+    """A fresh child can convert its first URI without importing new modules."""
+    script = """
+import os
+import sys
+from dryml.paths import to_file_uri
+
+assert "urllib.parse" in sys.modules
+if hasattr(os, "fork"):
+    pid = os.fork()
+    if pid:
+        _, status = os.waitpid(pid, 0)
+        assert status == 0
+    else:
+        try:
+            assert "%23" in to_file_uri(sys.argv[1])
+        except BaseException as error:
+            sys.stderr.write(repr(error))
+            os._exit(1)
+        os._exit(0)
+else:
+    assert "%23" in to_file_uri(sys.argv[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "first # URI")],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("as_pathlike", [False, True], ids=["bytes", "pathlike"])

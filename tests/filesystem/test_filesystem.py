@@ -78,6 +78,19 @@ def test_bytes_and_bytes_pathlike_work_for_every_operation(
 
     root = os.fsencode(tmp_path)
     ensured = os.path.join(root, b"directory-" + suffix, b"nested")
+    if suffix == b"\xff":
+        probe = os.path.join(root, b"native-name-probe-" + suffix)
+        try:
+            os.mkdir(probe)
+        except OSError as error:
+            if error.errno != errno.EILSEQ:
+                raise
+            with pytest.raises(OSError) as raised:
+                filesystem.ensure_directory(path(ensured))
+            assert raised.value.errno == errno.EILSEQ
+            return
+        else:
+            os.rmdir(probe)
     filesystem.ensure_directory(path(ensured))
     assert os.path.isdir(ensured)
 
