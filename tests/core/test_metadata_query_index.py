@@ -94,6 +94,7 @@ def test_metadata_predicates_match_authority_across_index_states(tmp_path):
     index = sqlite_store.open_query_index()
     assert index is not None and index.status().state == "ready"
 
+    index.close()
     index.path.unlink()
     assert [_answers(sqlite_repo, predicate) for predicate in predicates] == expected
 
