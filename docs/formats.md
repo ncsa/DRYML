@@ -57,6 +57,18 @@ Completing an extracted snapshot does not commit archive authority;
 Borrowed snapshot/payload paths point into the extraction and expire on
 `ZipStore.close()`.
 
+Direct Store publication persists file contents before changing authoritative
+names. POSIX then fsyncs the containing directory. On Windows, DRYML uses
+same-volume `MoveFileExW` publication with `MOVEFILE_WRITE_THROUGH`; it does not
+silently ignore unsupported directory-handle fsync. Missing directory components
+are installed through write-through moves, and logical deletion first moves the
+authoritative name to an ignored sibling tombstone before best-effort cleanup.
+The native adapter uses the documented Unicode extended path namespace rather
+than depending on the host's `LongPathsEnabled` policy.
+Windows Store durability therefore requires a local filesystem that honors
+same-volume atomic rename and write-through requests; unsupported filesystems or
+sharing modes fail publication explicitly.
+
 The checked-in `tests/fixtures/store_v3/` directory and committed archive carry
 fixed public synthetic timestamps, identities, environment fields, requirement
 outcomes, annotations, local payloads, and routed-child placement. Its manifest

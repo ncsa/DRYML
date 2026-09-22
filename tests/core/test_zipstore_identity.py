@@ -304,13 +304,13 @@ def test_zip_commit_builds_valid_complete_sibling_before_atomic_replace(tmp_path
     validated = []
     replacements = []
     original_testzip = zipfile.ZipFile.testzip
-    original_replace = os.replace
+    original_replace = store._replace_durable
 
     def observe_validation(archive):
         validated.append(Path(archive.filename))
         return original_testzip(archive)
 
-    def inspect_replace(source, destination):
+    def inspect_replace(source, destination, *, replace=True):
         if Path(destination) == path:
             staged = Path(source)
             assert staged.parent == path.parent
@@ -323,10 +323,10 @@ def test_zip_commit_builds_valid_complete_sibling_before_atomic_replace(tmp_path
                     f"stored-roots/{record.digest[:2]}/{record.digest}.record",
                 }
             replacements.append(staged)
-        return original_replace(source, destination)
+        return original_replace(source, destination, replace=replace)
 
     monkeypatch.setattr(zipfile.ZipFile, "testzip", observe_validation)
-    monkeypatch.setattr(os, "replace", inspect_replace)
+    monkeypatch.setattr(store, "_replace_durable", inspect_replace)
     try:
         store.write_definition_record(record)
         store.commit()
@@ -344,15 +344,15 @@ def test_failed_zip_commit_keeps_previous_complete_archive_bytes(tmp_path, monke
     store.write_definition_record(first)
     store.commit()
     before = _archive_bytes(path)
-    original_replace = os.replace
+    original_replace = store._replace_durable
 
-    def fail_archive_replace(source, destination):
+    def fail_archive_replace(source, destination, *, replace=True):
         if Path(destination) == path:
             raise OSError("injected archive replacement failure")
-        return original_replace(source, destination)
+        return original_replace(source, destination, replace=replace)
 
     store.write_definition_record(_record("second"))
-    monkeypatch.setattr(os, "replace", fail_archive_replace)
+    monkeypatch.setattr(store, "_replace_durable", fail_archive_replace)
     try:
         with pytest.raises(OSError, match="archive replacement"):
             store.commit()
@@ -368,22 +368,25 @@ def test_failed_zip_commit_keeps_previous_complete_archive_bytes(tmp_path, monke
         reopened.close()
 
 
-def test_zip_parent_fsync_failure_preserves_complete_reopenable_replacement(tmp_path, monkeypatch):
-    """A post-replace barrier error never exposes a torn archive or false clean state."""
+def test_zip_post_publish_failure_preserves_complete_reopenable_replacement(tmp_path, monkeypatch):
+    """A post-publication error never exposes a torn archive or false clean state."""
 
     path = tmp_path / "store.zip"
     store = ZipStore(path)
     record = _record("replacement")
     store.write_definition_record(record)
-    original = store._fsync_directory
+    original = store._replace_durable
 
-    def fail_parent(path):
-        if Path(path) == Path(store.archive_path).parent:
-            raise OSError("archive parent fsync failed")
-        return original(path)
+    def fail_after_archive_publish(source, destination, *, replace=True):
+        result = original(source, destination, replace=replace)
+        if Path(destination) == Path(store.archive_path):
+            raise OSError("archive post-publication failure")
+        return result
 
-    monkeypatch.setattr(store, "_fsync_directory", fail_parent)
-    with pytest.raises(OSError, match="archive parent fsync"):
+    monkeypatch.setattr(
+        store, "_replace_durable", fail_after_archive_publish,
+    )
+    with pytest.raises(OSError, match="archive post-publication"):
         store.commit()
     assert store._archive_dirty
 

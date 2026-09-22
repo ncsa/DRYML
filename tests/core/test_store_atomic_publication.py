@@ -125,14 +125,14 @@ def test_definition_replace_failure_leaves_no_new_immutable_authority(tmp_path, 
     store = DirStore(tmp_path / "store")
     record = DefinitionRecord(AtomicRecordObject().definition)
     target = Path(store.base_dir, "definitions", record.digest[:2], f"{record.digest}.record")
-    original_replace = os.replace
+    original_replace = store._replace_durable
 
-    def fail_replace(source, destination):
+    def fail_replace(source, destination, *, replace=True):
         if Path(destination) == target:
             raise OSError("injected immutable replacement failure")
-        return original_replace(source, destination)
+        return original_replace(source, destination, replace=replace)
 
-    monkeypatch.setattr(os, "replace", fail_replace)
+    monkeypatch.setattr(store, "_replace_durable", fail_replace)
     with pytest.raises(OSError, match="immutable replacement"):
         store.write_definition_record(record)
 
@@ -146,14 +146,14 @@ def test_mutable_reference_replace_leaves_previous_complete_record_on_failure(tm
     replacement = MainRefRecord("2" * 64)
     store.write_main_ref(previous)
     target = Path(store.base_dir, "refs", "main.record")
-    original_replace = os.replace
+    original_replace = store._replace_durable
 
-    def fail_replace(source, destination):
+    def fail_replace(source, destination, *, replace=True):
         if Path(destination) == target:
             raise OSError("injected reference replacement failure")
-        return original_replace(source, destination)
+        return original_replace(source, destination, replace=replace)
 
-    monkeypatch.setattr(os, "replace", fail_replace)
+    monkeypatch.setattr(store, "_replace_durable", fail_replace)
     with pytest.raises(OSError, match="replacement"):
         store.write_main_ref(replacement)
 
@@ -190,14 +190,14 @@ def test_mutable_reference_replacement_keeps_the_previous_complete_record_on_per
         target = Path(store.base_dir, "refs", "states", first.object.digest()[:2], first.object.digest(), "latest.record")
     write(previous)
     before = target.read_bytes()
-    original_replace = os.replace
+    original_replace = store._replace_durable
 
-    def deny_replace(source, destination):
+    def deny_replace(source, destination, *, replace=True):
         if Path(destination) == target:
             raise PermissionError("injected authority replacement denial")
-        return original_replace(source, destination)
+        return original_replace(source, destination, replace=replace)
 
-    monkeypatch.setattr(os, "replace", deny_replace)
+    monkeypatch.setattr(store, "_replace_durable", deny_replace)
     with pytest.raises(PermissionError, match="denial"):
         write(replacement)
 
@@ -295,13 +295,13 @@ def test_reference_readers_observe_only_complete_old_or_new_records(tmp_path, mo
     entered_replace = threading.Event()
     release_replace = threading.Event()
     errors = []
-    original_replace = os.replace
+    original_replace = store._replace_durable
 
-    def pause_before_replace(source, destination):
+    def pause_before_replace(source, destination, *, replace=True):
         if Path(destination) == target:
             entered_replace.set()
             assert release_replace.wait(10)
-        return original_replace(source, destination)
+        return original_replace(source, destination, replace=replace)
 
     def write():
         try:
@@ -309,7 +309,7 @@ def test_reference_readers_observe_only_complete_old_or_new_records(tmp_path, mo
         except BaseException as error:
             errors.append(error)
 
-    monkeypatch.setattr(os, "replace", pause_before_replace)
+    monkeypatch.setattr(store, "_replace_durable", pause_before_replace)
     writer = threading.Thread(target=write)
     writer.start()
     assert entered_replace.wait(10)
@@ -367,15 +367,18 @@ def test_closing_one_repo_does_not_close_a_shared_store_query_index(tmp_path):
 def test_definition_publication_interruption_keeps_authority_and_notifies_query_rebuild(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index="sqlite")
     record = DefinitionRecord(AtomicRecordObject().definition)
-    original_replace = os.replace
+    original_replace = store._replace_durable
 
-    def interrupt_after_dirty_marker_replace(source, destination):
-        result = original_replace(source, destination)
+    def interrupt_after_dirty_marker_replace(
+            source, destination, *, replace=True):
+        result = original_replace(source, destination, replace=replace)
         if Path(destination).parent == Path(store.dryml_dir) and Path(destination).name.startswith("query-index.dirty."):
             raise KeyboardInterrupt("injected after dirty marker publication")
         return result
 
-    monkeypatch.setattr(os, "replace", interrupt_after_dirty_marker_replace)
+    monkeypatch.setattr(
+        store, "_replace_durable", interrupt_after_dirty_marker_replace,
+    )
     with pytest.raises(KeyboardInterrupt, match="dirty marker"):
         store.write_definition_record(record)
 

@@ -215,33 +215,27 @@ def test_post_snapshot_current_state_interruption_reports_both_completed_mapping
     assert store.read_metadata(state) == {"state": "installed"}
 
 
-def test_snapshot_rename_directory_fsync_interruption_retains_completed_authority(tmp_path, monkeypatch):
-    """A failed post-rename durability barrier is reported from snapshot read-back."""
+def test_snapshot_post_publish_interruption_retains_completed_authority(tmp_path, monkeypatch):
+    """A post-publication failure is reported from snapshot read-back."""
 
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
-    original = store._fsync_directory
-    installed_parent = []
+    original_replace = store._replace_durable
 
-    def fail_after_snapshot_rename(path):
-        if installed_parent and path == installed_parent[0]:
-            raise OSError("snapshot parent fsync interruption")
-        return original(path)
-
-    original_replace = __import__("os").replace
-
-    def observe_snapshot_rename(source, destination):
+    def interrupt_after_snapshot_publish(
+            source, destination, *, replace=True):
         installs_snapshot = (
             Path(source).is_dir()
             and Path(destination).parent.name == Path(destination).name[:2]
         )
-        result = original_replace(source, destination)
+        result = original_replace(source, destination, replace=replace)
         if installs_snapshot:
-            installed_parent.append(str(Path(destination).parent))
+            raise OSError("snapshot post-publication interruption")
         return result
 
-    monkeypatch.setattr(__import__("os"), "replace", observe_snapshot_rename)
-    monkeypatch.setattr(store, "_fsync_directory", fail_after_snapshot_rename)
+    monkeypatch.setattr(
+        store, "_replace_durable", interrupt_after_snapshot_publish,
+    )
     with pytest.raises(RepoSaveError, match="publication") as raised:
         repo.save_object(FaultPayload(repo=repo))
 
@@ -258,14 +252,14 @@ def test_retry_before_snapshot_install_captures_new_evidence(tmp_path, monkeypat
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     observed = []
-    original = __import__("os").replace
+    original = store._replace_durable
 
-    def fail_snapshot_replace(source, destination):
+    def fail_snapshot_replace(source, destination, *, replace=True):
         if Path(source).name.startswith("snapshot-"):
             raise OSError("staged snapshot replacement failed")
-        return original(source, destination)
+        return original(source, destination, replace=replace)
 
-    monkeypatch.setattr(__import__("os"), "replace", fail_snapshot_replace)
+    monkeypatch.setattr(store, "_replace_durable", fail_snapshot_replace)
     value = FaultPayload(repo=repo)
     with pytest.raises(RepoSaveError) as raised:
         repo.save_object(value, _snapshot_observer=lambda: _observe_environment(observed, "first"))
@@ -274,7 +268,7 @@ def test_retry_before_snapshot_install_captures_new_evidence(tmp_path, monkeypat
     assert store.read_state_ref_record(state.digest()) is None
     assert _phases(raised.value.report)["snapshot"] == "failed"
 
-    monkeypatch.setattr(__import__("os"), "replace", original)
+    monkeypatch.setattr(store, "_replace_durable", original)
     assert repo.save_object(
         value, _snapshot_observer=lambda: _observe_environment(observed, "retry"),
     ) == state
@@ -359,23 +353,26 @@ def test_zip_commit_interruption_after_replace_reports_completed_and_reopens(tmp
         reopened.close()
 
 
-def test_current_metadata_directory_fsync_failure_retains_mapping_and_dirty_fallback(
+def test_current_metadata_post_publish_failure_retains_mapping_and_dirty_fallback(
         tmp_path, monkeypatch):
-    """Post-replace durability failure exposes complete authority as dirty state."""
+    """Post-publication failure exposes complete authority as dirty state."""
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(store)
     state = repo.save_object(FaultPayload(repo=repo))
-    target_parent = Path(store._metadata_path(state.object)).parent
-    original = store._fsync_directory
+    target = Path(store._metadata_path(state.object))
+    original = store._replace_durable
 
-    def fail_metadata_parent(path):
-        if Path(path) == target_parent:
-            raise OSError("metadata parent fsync failed")
-        return original(path)
+    def fail_after_metadata_publish(source, destination, *, replace=True):
+        result = original(source, destination, replace=replace)
+        if Path(destination) == target:
+            raise OSError("metadata post-publication failure")
+        return result
 
-    monkeypatch.setattr(store, "_fsync_directory", fail_metadata_parent)
-    with pytest.raises(OSError, match="metadata parent fsync"):
+    monkeypatch.setattr(
+        store, "_replace_durable", fail_after_metadata_publish,
+    )
+    with pytest.raises(OSError, match="metadata post-publication"):
         repo.set_metadata(state.object, {"complete": True})
 
     assert store.read_metadata(state.object) == {"complete": True}

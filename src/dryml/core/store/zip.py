@@ -12,7 +12,7 @@ from threading import RLock
 import zipfile
 from contextlib import contextmanager
 
-from .dir import DirStore
+from .dir import DirStore, _REMOVED_ENTRY_PREFIX
 from .records import StoreFormatRecord, StoreRecordError
 from ...locking import interprocess_lock
 from .store import StoreAuthorityError, StorePublicationCapabilities
@@ -179,6 +179,22 @@ class ZipStore(DirStore):
             raise StoreAuthorityError("ZipStore archive is malformed.") from error
 
     def _atomic_write(self, path: str, payload: bytes) -> None:
+        """Publish one extracted record and mark this transaction dirty.
+
+        Args:
+            path: Final path within this handle's extracted Store.
+            payload: Complete record bytes to publish.
+
+        Raises:
+            RuntimeError: If this archive handle is closed.
+            OSError: If extracted publication fails.
+            StoreCapabilityError: If inherited publication guarantees fail.
+
+        Side Effects:
+            Serializes same-handle mutation and marks initialized archive state
+            dirty after inherited durable publication succeeds.
+        """
+
         self._assert_open()
         with self.transaction_fence():
             super()._atomic_write(path, payload)
@@ -199,7 +215,20 @@ class ZipStore(DirStore):
             return super().mark_query_index_dirty(cdef, metadata_target=metadata_target)
 
     def clear_query_index_dirty(self) -> None:
-        """Persist derived-marker removal rather than losing it after a commit."""
+        """Remove extracted dirty markers and retain that buffered mutation.
+
+        Returns:
+            ``None`` after inherited durable marker removal succeeds.
+
+        Raises:
+            RuntimeError: If this archive handle is closed.
+            OSError: If an extracted marker cannot be removed.
+            StoreCapabilityError: If inherited removal guarantees are unavailable.
+
+        Side Effects:
+            Serializes same-handle removal and marks an initialized transaction
+            dirty so a later commit does not lose the removal.
+        """
 
         self._assert_open()
         with self.transaction_fence():
@@ -274,6 +303,7 @@ class ZipStore(DirStore):
 
         Raises:
             TypeError: If ``target`` is unsupported.
+            OSError: If extracted logical removal fails.
             StoreCapabilityError: If the archive is file-like or cannot publish.
 
         Side Effects:
@@ -362,13 +392,15 @@ class ZipStore(DirStore):
         Raises:
             StoreAuthorityError: If the buffered archive cannot be validated or
                 the destination changed since this transaction opened.
+            OSError: If staging, flushing, or durable archive replacement fails.
             StoreCapabilityError: If archive or parent-directory durability cannot
                 be established before reporting commit completion.
 
         Side Effects:
             Replaces the path-backed archive only when this transaction is dirty,
-            then persists the replacement's parent directory. File-like archives
-            retain their existing unsupported publication behavior.
+            then persists the replacement through the active platform primitive.
+            File-like archives retain their existing unsupported publication
+            behavior.
         """
         with self.transaction_fence():
             self._assert_open()
@@ -385,20 +417,24 @@ class ZipStore(DirStore):
                         dirs[:] = sorted(dirs)
                         for name in sorted(files):
                             path = os.path.join(root, name)
-                            if path == self._writer_lock_path:
+                            relative_parts = Path(os.path.relpath(path, self.base_dir)).parts
+                            is_tombstone = (
+                                name.startswith(_REMOVED_ENTRY_PREFIX)
+                                and relative_parts[0] in {".dryml", "metadata"}
+                            )
+                            if path == self._writer_lock_path or is_tombstone:
                                 continue
                             archive.write(path, os.path.relpath(path, self.base_dir))
                 with zipfile.ZipFile(temporary, "r") as archive:
                     if archive.testzip() is not None:
                         raise StoreAuthorityError("Buffered ZipStore archive validation failed.")
-                with open(temporary, "rb") as staged_file:
+                with open(temporary, "r+b") as staged_file:
                     os.fsync(staged_file.fileno())
                 staged = self._archive_identity(temporary)
                 with interprocess_lock(self._archive_lock_path):
                     if self._archive_identity() != self._archive_baseline:
                         raise ZipStoreConflictError("ZipStore archive changed since open; reopen and reapply the mutation.")
-                    os.replace(temporary, destination)
-                    self._fsync_directory(directory)
+                    self._replace_durable(temporary, destination)
                     self._archive_baseline = staged
                     self._archive_evidence = self._physical_archive_evidence()
                     self._archive_dirty = False

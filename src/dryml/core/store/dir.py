@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterable, Literal
 
 from ...locking import interprocess_lock, supports_advisory_locking
+from . import _windows_durability
 from .records import (
     ClaimRecord, DeclarationRecord, DefinitionRecord, LocalStateManifest,
     MainRefRecord, ObjectAliasRecord, StateAliasRecord, StateRefRecord,
@@ -26,6 +27,7 @@ from ..query.sqlite.index import SQLiteStoreQueryIndex
 
 
 QueryIndexPolicy = Literal["auto", "sqlite", "memory", "none"]
+_REMOVED_ENTRY_PREFIX = ".store-removed-"
 
 
 class DirStore(Store):
@@ -171,7 +173,8 @@ class DirStore(Store):
             OSError: If durable marker publication fails.
 
         Side Effects:
-            Writes and fsyncs a unique derived token before metadata publication.
+            Writes, flushes, and durably publishes a unique derived token before
+            metadata publication.
         """
         from ..reference_values import ObjectRef, StateRef
 
@@ -182,7 +185,7 @@ class DirStore(Store):
                 raise TypeError("Metadata dirty targets must be ObjectRef or StateRef.")
         if self._query_index_policy not in {"auto", "sqlite"}:
             return None
-        os.makedirs(self.dryml_dir, exist_ok=True)
+        self._makedirs_durable(self.dryml_dir)
         key = "dirty"
         if cdef is not None:
             key = DefinitionRecord(cdef).digest
@@ -196,8 +199,7 @@ class DirStore(Store):
                 target.write(f"{key}\n")
                 target.flush()
                 os.fsync(target.fileno())
-            os.replace(temporary_path, marker_path)
-            self._fsync_directory(self.dryml_dir)
+            self._replace_durable(temporary_path, marker_path)
         except BaseException:
             try:
                 os.unlink(temporary_path)
@@ -217,16 +219,22 @@ class DirStore(Store):
         return markers
 
     def clear_query_index_dirty(self) -> None:
-        """Remove derived dirty markers without modifying DefinitionRecords."""
-        removed = False
+        """Durably remove every current derived query-index dirty marker.
+
+        Returns:
+            ``None`` after all markers visible at scan time are logically absent.
+
+        Raises:
+            OSError: If durable removal of any marker fails.
+            StoreCapabilityError: If the platform cannot provide the required
+                publication guarantee.
+
+        Side Effects:
+            Removes each derived token independently without modifying
+            DefinitionRecord authority. Concurrently added tokens remain dirty.
+        """
         for marker in self._query_index_dirty_markers():
-            try:
-                os.unlink(marker)
-                removed = True
-            except FileNotFoundError:
-                pass
-        if removed:
-            self._fsync_directory(self.dryml_dir)
+            self._unlink_durable(marker)
 
     def query_index_is_dirty(self) -> bool:
         """Return whether a published definition may not be represented by SQLite."""
@@ -341,6 +349,22 @@ class DirStore(Store):
             raise StoreAuthorityError("DirStore format record is malformed or inaccessible.") from error
 
     def _initialize_format(self, *, existing_only: bool = False) -> None:
+        """Validate or durably initialize this direct Store's format gate.
+
+        Args:
+            existing_only: Require existing current authority without creating it.
+
+        Raises:
+            StoreAuthorityError: If existing authority is absent, malformed, or
+                mixed with an unmarked nonempty root.
+            OSError: If bootstrap locking, directory creation, or gate publication
+                fails.
+
+        Side Effects:
+            May durably create missing root components and ``store-format.record``
+            while holding the derived bootstrap lock.
+        """
+
         root = Path(self.base_dir)
         if existing_only:
             self._validate_existing_root(self.base_dir)
@@ -350,6 +374,8 @@ class DirStore(Store):
         if os.path.lexists(self.store_format_path):
             self._read_file(self.store_format_path, StoreFormatRecord)
             return
+        if not root.exists():
+            self._makedirs_durable(os.path.dirname(self.base_dir))
         # This lease covers root creation through final marker replacement.  It
         # remains outside authority so an unmarked root can still be rejected
         # without treating a Store-created lock as permission to overwrite it.
@@ -357,7 +383,7 @@ class DirStore(Store):
             if root.exists() and not root.is_dir():
                 raise StoreAuthorityError(f"DirStore root is not a directory: {self.base_dir!r}.")
             if not root.exists():
-                root.mkdir(parents=True, exist_ok=True)
+                self._makedirs_durable(self.base_dir)
             if os.path.lexists(self.store_format_path):
                 self._read_file(self.store_format_path, StoreFormatRecord)
                 return
@@ -381,6 +407,22 @@ class DirStore(Store):
             raise StoreAuthorityError(f"Malformed Store record {path!r}: {error}") from error
 
     def _atomic_write(self, path: str, payload: bytes) -> None:
+        """Flush and atomically publish complete bytes at one Store path.
+
+        Args:
+            path: Final direct Store path.
+            payload: Complete record bytes to publish.
+
+        Raises:
+            OSError: If writing, flushing, or durable replacement fails.
+            StoreCapabilityError: If the platform cannot provide the required
+                publication guarantee.
+
+        Side Effects:
+            Creates durable parent directories, publishes one sibling temporary,
+            and removes an unpublished temporary after failure when possible.
+        """
+
         parent = os.path.dirname(path)
         self._makedirs_durable(parent)
         fd, temporary = tempfile.mkstemp(prefix=".store-", dir=parent)
@@ -391,14 +433,83 @@ class DirStore(Store):
                     raise OSError("Store authority temporary write was incomplete.")
                 target.flush()
                 os.fsync(target.fileno())
-            os.replace(temporary, path)
-            self._fsync_directory(parent)
+            self._replace_durable(temporary, path)
         except BaseException:
             try:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
             raise
+
+    def _replace_durable(
+            self, source: str, destination: str, *, replace: bool = True
+    ) -> None:
+        """Atomically publish a sibling path and persist its directory entry.
+
+        Args:
+            source: Complete temporary file or directory on the destination volume.
+            destination: Final Store path.
+            replace: Whether Windows may replace an existing destination file.
+
+        Raises:
+            OSError: If the rename or platform durability barrier fails.
+            StoreCapabilityError: If POSIX directory metadata cannot be synced.
+
+        Side Effects:
+            Renames ``source`` to ``destination``. Windows performs one native
+            write-through move; POSIX retains replacement followed by parent fsync.
+        """
+
+        if _windows_durability.is_windows():
+            _windows_durability.move_file_write_through(
+                source, destination, replace=replace,
+            )
+            return
+        os.replace(source, destination)
+        self._fsync_directory(os.path.dirname(destination) or ".")
+
+    def _unlink_durable(self, path: str) -> bool:
+        """Durably remove one authoritative name without weakening Windows fences.
+
+        Args:
+            path: Existing Store file to remove.
+
+        Returns:
+            ``True`` when the authoritative name was removed, otherwise ``False``
+            when it was already absent.
+
+        Raises:
+            OSError: If logical removal or its durability barrier fails.
+            StoreCapabilityError: If POSIX parent metadata cannot be synced.
+
+        Side Effects:
+            POSIX unlinks and syncs the parent. Windows write-through renames the
+            file to an unrecognized sibling tombstone, then best-effort unlinks
+            only that non-authoritative tombstone.
+        """
+
+        if not _windows_durability.is_windows():
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                return False
+            self._fsync_directory(os.path.dirname(path) or ".")
+            return True
+
+        parent = os.path.dirname(path) or "."
+        tombstone = os.path.join(parent, f"{_REMOVED_ENTRY_PREFIX}{uuid4().hex}")
+        try:
+            _windows_durability.move_file_write_through(
+                path, tombstone, replace=False,
+            )
+        except FileNotFoundError:
+            return False
+        try:
+            os.unlink(tombstone)
+        except OSError:
+            # A retained tombstone is no longer an authoritative Store name.
+            pass
+        return True
 
     @staticmethod
     def _fsync_directory(path: str) -> None:
@@ -416,6 +527,10 @@ class DirStore(Store):
             Store authority.
         """
 
+        if _windows_durability.is_windows():
+            raise StoreCapabilityError(
+                "Windows directory handles do not provide the required documented fsync contract."
+            )
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         try:
             fd = os.open(path, flags)
@@ -439,10 +554,13 @@ class DirStore(Store):
             path: Directory that must exist before authority publication.
 
         Raises:
+            OSError: If directory installation fails for any reason other than a
+                verified destination-exists race.
             StoreCapabilityError: If a new directory entry cannot be persisted.
 
         Side Effects:
-            Creates missing directories and fsyncs each containing directory.
+            Creates missing directories and persists each new parent entry using
+            the active platform's supported publication primitive.
         """
 
         missing = []
@@ -453,9 +571,35 @@ class DirStore(Store):
             if parent == current:
                 break
             current = parent
-        os.makedirs(path, exist_ok=True)
+        if not _windows_durability.is_windows():
+            os.makedirs(path, exist_ok=True)
+            for directory in reversed(missing):
+                self._fsync_directory(os.path.dirname(directory))
+            return
+
         for directory in reversed(missing):
-            self._fsync_directory(os.path.dirname(directory))
+            parent = os.path.dirname(directory) or "."
+            temporary = tempfile.mkdtemp(prefix=".store-dir-", dir=parent)
+            try:
+                self._replace_durable(temporary, directory, replace=False)
+            except FileExistsError:
+                if os.path.isdir(directory):
+                    try:
+                        os.rmdir(temporary)
+                    except FileNotFoundError:
+                        pass
+                    continue
+                try:
+                    os.rmdir(temporary)
+                except OSError:
+                    pass
+                raise
+            except OSError:
+                try:
+                    os.rmdir(temporary)
+                except OSError:
+                    pass
+                raise
 
     def _fsync_tree(self, root: str) -> None:
         """Persist staged files and directories before snapshot activation.
@@ -468,14 +612,16 @@ class DirStore(Store):
                 be flushed before the final atomic directory replacement.
 
         Side Effects:
-            Flushes every regular staged file and directory from leaves to root.
+            Flushes every regular staged file. POSIX also flushes staged
+            directories; Windows persists the completed tree during activation.
         """
 
         for directory, _dirs, files in os.walk(root, topdown=False):
             for name in files:
                 path = os.path.join(directory, name)
                 try:
-                    fd = os.open(path, os.O_RDONLY)
+                    flags = os.O_RDWR if _windows_durability.is_windows() else os.O_RDONLY
+                    fd = os.open(path, flags)
                     try:
                         os.fsync(fd)
                     finally:
@@ -484,7 +630,8 @@ class DirStore(Store):
                     raise StoreCapabilityError(
                         "DirStore cannot persist staged snapshot content."
                     ) from error
-            self._fsync_directory(directory)
+            if not _windows_durability.is_windows():
+                self._fsync_directory(directory)
 
     @staticmethod
     def _digest_path(directory: str, digest: str) -> str:
@@ -860,11 +1007,13 @@ class DirStore(Store):
 
         Raises:
             TypeError: If ``target`` is unsupported.
+            OSError: If durable logical removal fails.
             StoreCapabilityError: If this filesystem cannot provide publication.
 
         Side Effects:
-            Serializes cooperating writers and preserves all target, snapshot,
-            lineage, and payload authority.
+            Serializes cooperating writers and durably removes only the current
+            metadata name. Windows may retain a non-authoritative tombstone after
+            best-effort cleanup. Snapshot, lineage, and payload authority remain.
         """
 
         self.preflight_publication("delete current metadata")
@@ -877,11 +1026,9 @@ class DirStore(Store):
             try:
                 # Absence is indexed metadata too, so invalidate before removal.
                 self.mark_query_index_dirty(metadata_target=target)
-                os.unlink(path)
-                self._fsync_directory(os.path.dirname(path))
+                return self._unlink_durable(path)
             except FileNotFoundError:
                 return False
-            return True
 
     def read_lineage_metadata(self, target):
         """Read detached immutable lineage evidence without treating absence as corruption.
@@ -1187,6 +1334,7 @@ class DirStore(Store):
             TypeError: If publication inputs are unsupported.
             StoreAuthorityError: If records, sources, coverage, or immutable
                 existing snapshot evidence conflict.
+            OSError: If staged content or durable activation fails.
             StoreCapabilityError: If direct publication guarantees are unavailable.
 
         Side Effects:
@@ -1289,8 +1437,7 @@ class DirStore(Store):
                 self.mark_query_index_dirty(metadata_target=reference)
                 self._makedirs_durable(os.path.dirname(target))
                 self._fsync_tree(stage)
-                os.replace(stage, target)
-                self._fsync_directory(os.path.dirname(target))
+                self._replace_durable(stage, target, replace=False)
                 installed = self._read_snapshot(reference.digest(), payloads=True)
                 if installed is None:
                     raise StoreAuthorityError("snapshot install did not survive read-back.")
