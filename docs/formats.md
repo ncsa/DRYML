@@ -65,6 +65,9 @@ are installed through write-through moves, and logical deletion first moves the
 authoritative name to an ignored sibling tombstone before best-effort cleanup.
 The native adapter uses the documented Unicode extended path namespace rather
 than depending on the host's `LongPathsEnabled` policy.
+The derived SQLite index uses the same Windows write-through policy for dirty
+tokens and canonical sidecar replacement; retained deletion tombstones are not
+recognized as dirty tokens or index authority.
 Windows Store durability therefore requires a local filesystem that honors
 same-volume atomic rename and write-through requests; unsupported filesystems or
 sharing modes fail publication explicitly.

@@ -496,20 +496,9 @@ class DirStore(Store):
             self._fsync_directory(os.path.dirname(path) or ".")
             return True
 
-        parent = os.path.dirname(path) or "."
-        tombstone = os.path.join(parent, f"{_REMOVED_ENTRY_PREFIX}{uuid4().hex}")
-        try:
-            _windows_durability.move_file_write_through(
-                path, tombstone, replace=False,
-            )
-        except FileNotFoundError:
-            return False
-        try:
-            os.unlink(tombstone)
-        except OSError:
-            # A retained tombstone is no longer an authoritative Store name.
-            pass
-        return True
+        return _windows_durability.unlink_file_write_through(
+            path, tombstone_prefix=_REMOVED_ENTRY_PREFIX,
+        )
 
     @staticmethod
     def _fsync_directory(path: str) -> None:
@@ -563,43 +552,20 @@ class DirStore(Store):
             the active platform's supported publication primitive.
         """
 
-        missing = []
-        current = os.path.abspath(path)
-        while not os.path.exists(current):
-            missing.append(current)
-            parent = os.path.dirname(current)
-            if parent == current:
-                break
-            current = parent
         if not _windows_durability.is_windows():
+            missing = []
+            current = os.path.abspath(path)
+            while not os.path.exists(current):
+                missing.append(current)
+                parent = os.path.dirname(current)
+                if parent == current:
+                    break
+                current = parent
             os.makedirs(path, exist_ok=True)
             for directory in reversed(missing):
                 self._fsync_directory(os.path.dirname(directory))
             return
-
-        for directory in reversed(missing):
-            parent = os.path.dirname(directory) or "."
-            temporary = tempfile.mkdtemp(prefix=".store-dir-", dir=parent)
-            try:
-                self._replace_durable(temporary, directory, replace=False)
-            except FileExistsError:
-                if os.path.isdir(directory):
-                    try:
-                        os.rmdir(temporary)
-                    except FileNotFoundError:
-                        pass
-                    continue
-                try:
-                    os.rmdir(temporary)
-                except OSError:
-                    pass
-                raise
-            except OSError:
-                try:
-                    os.rmdir(temporary)
-                except OSError:
-                    pass
-                raise
+        _windows_durability.makedirs_write_through(path)
 
     def _fsync_tree(self, root: str) -> None:
         """Persist staged files and directories before snapshot activation.

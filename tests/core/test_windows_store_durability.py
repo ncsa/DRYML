@@ -8,6 +8,10 @@ import zipfile
 import pytest
 
 from dryml.core import Repo, Serializable
+import dryml.core.query.sqlite.index as sqlite_index_module
+from dryml.core.query.model import QueryIndexError
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core.store import _windows_durability
 from dryml.core.store.dir import DirStore, _REMOVED_ENTRY_PREFIX
 from dryml.core.store.records import DefinitionRecord
@@ -150,6 +154,13 @@ def test_windows_snapshot_and_metadata_publication_preserve_order_and_handle_mod
     store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(store)
     moves = _emulate_windows_moves(monkeypatch)
+    monkeypatch.setattr(
+        sqlite_index_module,
+        "_fsync_directory",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("Windows SQLite publication used POSIX directory fsync"),
+        ),
+    )
     opened = []
     original_open = os.open
 
@@ -206,6 +217,115 @@ def test_windows_snapshot_and_metadata_publication_preserve_order_and_handle_mod
         destination.name.startswith(_REMOVED_ENTRY_PREFIX)
         for _source, destination, _flags in moves
     )
+
+    store.rebuild_query_index()
+    assert repo.delete_metadata(state.object)
+    store.rebuild_query_index()
+
+
+def test_windows_standalone_sqlite_dirty_and_activation_paths_use_native_moves(
+        tmp_path, monkeypatch):
+    """Standalone SQLite publication never requires a fake owning Store."""
+
+    moves = _emulate_windows_moves(monkeypatch)
+    monkeypatch.setattr(
+        sqlite_index_module,
+        "_fsync_directory",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("Windows SQLite publication used POSIX directory fsync"),
+        ),
+    )
+    path = tmp_path / "standalone.sqlite"
+    dirty_path = tmp_path / "standalone.dirty"
+    config = SQLiteQueryIndexConfig(path=path, journal_mode="delete")
+    index = SQLiteStoreQueryIndex(
+        source_key="windows-standalone",
+        path=path,
+        config=config,
+        dirty_path=dirty_path,
+    )
+    index.initialize_empty()
+    index._mark_dirty()
+    captured = index._dirty_markers()
+    assert len(captured) == 1
+    index._clear_dirty(captured, roots=(), clear_unscoped=True)
+    assert not index._is_dirty()
+
+    replacement_path = index._replacement_path()
+    replacement = SQLiteStoreQueryIndex(
+        source_key=index.source_key,
+        path=replacement_path,
+        config=SQLiteQueryIndexConfig(
+            path=replacement_path, journal_mode="delete",
+        ),
+    )
+    replacement.initialize_empty(generation=7)
+    replacement.close()
+    index._activate_replacement(
+        replacement_path, quarantine_existing=False,
+    )
+
+    assert index.current_generation() == 7
+    assert any(destination == path for _source, destination, _flags in moves)
+    index.close()
+
+
+def test_windows_standalone_sqlite_native_failures_remain_query_index_errors(
+        tmp_path, monkeypatch):
+    """Native marker and activation failures are never hidden or downgraded."""
+
+    path = tmp_path / "failure.sqlite"
+    dirty_path = tmp_path / "failure.dirty"
+    index = SQLiteStoreQueryIndex(
+        source_key="windows-failure",
+        path=path,
+        config=SQLiteQueryIndexConfig(path=path, journal_mode="delete"),
+        dirty_path=dirty_path,
+    )
+    index.initialize_empty()
+    replacement_path = index._replacement_path()
+    replacement = SQLiteStoreQueryIndex(
+        source_key=index.source_key,
+        path=replacement_path,
+        config=SQLiteQueryIndexConfig(
+            path=replacement_path, journal_mode="delete",
+        ),
+    )
+    replacement.initialize_empty(generation=9)
+    replacement.close()
+    marker = dirty_path.with_name(f"{dirty_path.name}.captured")
+    marker.write_text("dirty\n", encoding="utf-8")
+
+    monkeypatch.setattr(_windows_durability, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        _windows_durability,
+        "_move_file_ex",
+        lambda *_args: (_ for _ in ()).throw(
+            PermissionError("native query-index denial"),
+        ),
+    )
+    monkeypatch.setattr(
+        sqlite_index_module,
+        "_fsync_directory",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("Windows SQLite publication used POSIX directory fsync"),
+        ),
+    )
+
+    with pytest.raises(QueryIndexError, match="dirty-marker publication"):
+        index._mark_dirty()
+    with pytest.raises(QueryIndexError, match="dirty-marker removal"):
+        index._clear_dirty(
+            (marker,), roots=(), clear_unscoped=True,
+        )
+    assert marker.exists()
+    with pytest.raises(QueryIndexError, match="replacement activation"):
+        index._activate_replacement(
+            replacement_path, quarantine_existing=False,
+        )
+    assert path.exists()
+    assert replacement_path.exists()
+    index.close()
 
 
 def test_windows_logical_delete_retains_only_ignored_tombstone(

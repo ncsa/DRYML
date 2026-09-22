@@ -57,6 +57,14 @@ _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
 
 
+def _windows_store_durability():
+    """Load the narrow Store Windows adapter only when publication executes."""
+
+    from ...store import _windows_durability
+
+    return _windows_durability
+
+
 def _try_lock_claim_file(fd: int) -> bool:
     """Try to hold the cross-process lock for a query-index claim file."""
 
@@ -1012,7 +1020,27 @@ class SQLiteStoreQueryIndex:
             clear_unscoped: bool = False,
             clear_scoped: bool = False,
             metadata_keys=()) -> None:
+        """Durably remove only captured dirty tokens covered by indexed work.
+
+        Args:
+            markers: Token paths captured before the completed index mutation.
+            roots: Root definitions whose scoped tokens may be acknowledged.
+            clear_unscoped: Whether unscoped tokens are covered.
+            clear_scoped: Whether every root-scoped token is covered.
+            metadata_keys: Exact metadata token keys covered by the mutation.
+
+        Raises:
+            QueryIndexError: If Windows logical removal fails.
+            OSError: If POSIX removal or its directory barrier fails.
+
+        Side Effects:
+            Removes only matching captured tokens. Tokens published concurrently
+            after the capture remain visible and keep the index dirty.
+        """
+
         root_keys = {self._root_marker_key(root) for root in roots}
+        windows_durability = _windows_store_durability()
+        windows = windows_durability.is_windows()
         removed = False
         for marker in markers:
             try:
@@ -1029,16 +1057,81 @@ class SQLiteStoreQueryIndex:
                     or mutation in metadata_keys
             ):
                 continue
+            if windows:
+                try:
+                    unlink_durable = getattr(self.store, "_unlink_durable", None)
+                    if unlink_durable is None:
+                        removed = windows_durability.unlink_file_write_through(
+                            marker,
+                            tombstone_prefix=".query-index-removed-",
+                        ) or removed
+                    else:
+                        removed = unlink_durable(os.fspath(marker)) or removed
+                except OSError as exc:
+                    raise QueryIndexError(
+                        "SQLite query-index dirty-marker removal failed."
+                    ) from exc
+                continue
             try:
                 marker.unlink()
                 removed = True
             except FileNotFoundError:
                 pass
-        if removed and self.dirty_path is not None:
+        if removed and self.dirty_path is not None and not windows:
             _fsync_directory(self.dirty_path.parent)
 
     def _mark_dirty(self) -> None:
+        """Durably publish one unscoped dirty token before index mutation.
+
+        Raises:
+            QueryIndexError: If Windows parent creation or token publication fails.
+            OSError: If POSIX token publication or its directory barrier fails.
+
+        Side Effects:
+            Creates a unique token containing ``dirty``. Windows first flushes a
+            private sibling and then activates it with a write-through move.
+        """
+
         if self.dirty_path is None:
+            return
+        windows_durability = _windows_store_durability()
+        if windows_durability.is_windows():
+            try:
+                makedirs_durable = getattr(self.store, "_makedirs_durable", None)
+                if makedirs_durable is None:
+                    windows_durability.makedirs_write_through(
+                        self.dirty_path.parent,
+                    )
+                else:
+                    makedirs_durable(os.fspath(self.dirty_path.parent))
+            except OSError as exc:
+                raise QueryIndexError(
+                    "SQLite query-index dirty-marker parent creation failed."
+                ) from exc
+            marker_path = self.dirty_path.with_name(
+                f"{self.dirty_path.name}.{uuid4().hex}"
+            )
+            temporary_path = marker_path.with_name(
+                f".query-index-dirty-{uuid4().hex}.tmp"
+            )
+            try:
+                with open(temporary_path, "x", encoding="utf-8") as file:
+                    file.write("dirty\n")
+                    file.flush()
+                    os.fsync(file.fileno())
+                self._replace_windows_durable(
+                    temporary_path, marker_path, replace=False,
+                )
+            except BaseException as exc:
+                try:
+                    temporary_path.unlink()
+                except FileNotFoundError:
+                    pass
+                if isinstance(exc, OSError):
+                    raise QueryIndexError(
+                        "SQLite query-index dirty-marker publication failed."
+                    ) from exc
+                raise
             return
         self.dirty_path.parent.mkdir(parents=True, exist_ok=True)
         marker_path = self.dirty_path.with_name(f"{self.dirty_path.name}.{uuid4().hex}")
@@ -1047,6 +1140,34 @@ class SQLiteStoreQueryIndex:
             file.flush()
             os.fsync(file.fileno())
         _fsync_directory(marker_path.parent)
+
+    def _replace_windows_durable(
+            self, source: Path, destination: Path, *, replace: bool
+    ) -> None:
+        """Publish one Windows sidecar path with or without an owning Store.
+
+        Args:
+            source: Complete sibling temporary path.
+            destination: Final query-index path.
+            replace: Whether an existing destination file may be replaced.
+
+        Raises:
+            OSError: If native write-through publication fails.
+
+        Side Effects:
+            Uses the bound Store policy when available; otherwise invokes the
+            same narrow native primitive directly for a standalone index.
+        """
+
+        replace_durable = getattr(self.store, "_replace_durable", None)
+        if replace_durable is not None:
+            replace_durable(
+                os.fspath(source), os.fspath(destination), replace=replace,
+            )
+            return
+        _windows_store_durability().move_file_write_through(
+            source, destination, replace=replace,
+        )
 
     def _replacement_generation_seed(self) -> int:
         current = -1
@@ -1392,7 +1513,20 @@ class SQLiteStoreQueryIndex:
         return self.path.with_name(f"{self.path.name}.rebuild-{uuid4().hex}.tmp")
 
     def _activate_replacement(self, replacement_path: Path, *, quarantine_existing: bool) -> None:
-        """Publish a complete staged sidecar without removing the canonical path early."""
+        """Durably publish a staged sidecar without removing authority early.
+
+        Args:
+            replacement_path: Complete validated sibling SQLite database.
+            quarantine_existing: Preserve a best-effort copy of old authority.
+
+        Raises:
+            QueryIndexError: If Windows write-through activation fails.
+            OSError: If POSIX replacement or its directory barrier fails.
+
+        Side Effects:
+            Closes canonical handles, may create a quarantine copy, and atomically
+            replaces the canonical sidecar through the active platform policy.
+        """
 
         SQLiteConnectionManager._close_current_thread_for_path(self.path)
         if quarantine_existing and self.path.exists():
@@ -1405,6 +1539,17 @@ class SQLiteStoreQueryIndex:
         # A quarantine copy can admit a final canonical read after the first
         # close barrier; Windows requires that pooled handle closed as well.
         SQLiteConnectionManager._close_current_thread_for_path(self.path)
+        windows_durability = _windows_store_durability()
+        if windows_durability.is_windows():
+            try:
+                self._replace_windows_durable(
+                    replacement_path, self.path, replace=True,
+                )
+            except OSError as exc:
+                raise QueryIndexError(
+                    "SQLite query-index replacement activation failed."
+                ) from exc
+            return
         os.replace(replacement_path, self.path)
         _fsync_directory(self.path.parent)
 

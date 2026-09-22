@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import tempfile
+from uuid import uuid4
 
 
 _IS_WINDOWS = os.name == "nt"
@@ -91,3 +93,90 @@ def move_file_write_through(
         os.path.abspath(os.fsdecode(os.fspath(destination))),
         flags,
     )
+
+
+def makedirs_write_through(path: str | os.PathLike[str]) -> None:
+    """Durably create every missing component of an absolute directory path.
+
+    Args:
+        path: Directory chain that must exist before publication.
+
+    Raises:
+        OSError: If creation or write-through installation fails for any reason
+            other than a verified destination-exists race.
+
+    Side Effects:
+        Creates private sibling directories and installs each through a
+        write-through move. Concurrently installed real directories are accepted.
+    """
+
+    destination = os.path.abspath(os.fsdecode(os.fspath(path)))
+    missing = []
+    current = destination
+    while not os.path.exists(current):
+        missing.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    for directory in reversed(missing):
+        parent = os.path.dirname(directory) or "."
+        temporary = tempfile.mkdtemp(prefix=".store-dir-", dir=parent)
+        try:
+            move_file_write_through(temporary, directory, replace=False)
+        except FileExistsError:
+            if os.path.isdir(directory):
+                try:
+                    os.rmdir(temporary)
+                except FileNotFoundError:
+                    pass
+                continue
+            try:
+                os.rmdir(temporary)
+            except OSError:
+                pass
+            raise
+        except OSError:
+            try:
+                os.rmdir(temporary)
+            except OSError:
+                pass
+            raise
+
+
+def unlink_file_write_through(
+        path: str | os.PathLike[str],
+        *,
+        tombstone_prefix: str,
+) -> bool:
+    """Durably remove one logical name through a unique sibling tombstone.
+
+    Args:
+        path: File whose recognized logical name must become absent.
+        tombstone_prefix: Prefix that the owning reader contract ignores.
+
+    Returns:
+        ``True`` when the logical name was moved, or ``False`` when it was
+        already absent.
+
+    Raises:
+        OSError: If Windows cannot durably move the logical name.
+
+    Side Effects:
+        Write-through moves ``path`` to a unique non-authoritative sibling, then
+        best-effort unlinks only that tombstone. Cleanup failure leaves the
+        caller's recognized name durably absent.
+    """
+
+    source = os.path.abspath(os.fsdecode(os.fspath(path)))
+    parent = os.path.dirname(source) or "."
+    tombstone = os.path.join(parent, f"{tombstone_prefix}{uuid4().hex}")
+    try:
+        move_file_write_through(source, tombstone, replace=False)
+    except FileNotFoundError:
+        return False
+    try:
+        os.unlink(tombstone)
+    except OSError:
+        pass
+    return True

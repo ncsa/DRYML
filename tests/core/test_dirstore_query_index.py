@@ -304,14 +304,14 @@ def test_interrupted_definition_replacement_preserves_existing_authority(tmp_pat
     interrupted = _record("interrupted")
     store.write_definition_record(existing)
     target = _definition_path(store, interrupted)
-    original_replace = os.replace
+    original_replace = store._replace_durable
 
-    def fail_install(source, destination):
+    def fail_install(source, destination, *, replace=True):
         if Path(destination) == target:
             raise OSError("injected direct-record replacement failure")
-        return original_replace(source, destination)
+        return original_replace(source, destination, replace=replace)
 
-    monkeypatch.setattr(os, "replace", fail_install)
+    monkeypatch.setattr(store, "_replace_durable", fail_install)
     with pytest.raises(OSError, match="replacement failure"):
         store.write_definition_record(interrupted)
 
@@ -323,14 +323,14 @@ def test_interrupted_definition_replacement_preserves_existing_authority(tmp_pat
 def test_interrupted_record_write_does_not_create_or_dirty_a_sidecar(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index="sqlite")
     record = _record()
-    original_replace = os.replace
+    original_replace = store._replace_durable
 
-    def interrupt_install(source, destination):
+    def interrupt_install(source, destination, *, replace=True):
         if Path(destination) == _definition_path(store, record):
             raise KeyboardInterrupt("injected interruption")
-        return original_replace(source, destination)
+        return original_replace(source, destination, replace=replace)
 
-    monkeypatch.setattr(os, "replace", interrupt_install)
+    monkeypatch.setattr(store, "_replace_durable", interrupt_install)
     with pytest.raises(KeyboardInterrupt, match="interruption"):
         store.write_definition_record(record)
 
@@ -393,16 +393,16 @@ def test_concurrent_reader_observes_only_absent_or_complete_direct_record(tmp_pa
     target = _definition_path(store, record)
     entered_replace = threading.Barrier(2)
     allow_replace = threading.Event()
-    original_replace = os.replace
+    original_replace = store._replace_durable
     observations = []
 
-    def pause_install(source, destination):
+    def pause_install(source, destination, *, replace=True):
         if Path(destination) == target:
             entered_replace.wait()
             allow_replace.wait()
-        return original_replace(source, destination)
+        return original_replace(source, destination, replace=replace)
 
-    monkeypatch.setattr(os, "replace", pause_install)
+    monkeypatch.setattr(store, "_replace_durable", pause_install)
 
     writer = threading.Thread(target=lambda: store.write_definition_record(record))
 
