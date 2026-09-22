@@ -61,6 +61,7 @@ import sys
 from dryml.paths import to_file_uri
 
 assert "urllib.parse" in sys.modules
+assert "urllib.request" in sys.modules
 if hasattr(os, "fork"):
     pid = os.fork()
     if pid:

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-# Python 3.13+ imports this lazily in Path.as_uri; load it before a caller forks.
-import urllib.parse  # noqa: F401
+# Path.as_uri lazily uses urllib.parse (3.13) or urllib.request (3.14).
+# Loading request also prepares parse before a caller forks.
+import urllib.request  # noqa: F401
 
 
 _PathInput = str | bytes | os.PathLike[str] | os.PathLike[bytes]
