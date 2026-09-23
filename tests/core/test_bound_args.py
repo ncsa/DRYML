@@ -135,6 +135,20 @@ def test_binding_partial_omits_defaults_and_projection_uses_current_signature():
     assert BindingFixture(*args, **kwargs).options == {"flag": True}
 
 
+def test_partial_binding_keeps_variadic_buckets_named_without_defaults():
+    partial = bind_partial_arguments(
+        BindingFixture, (1, 4, "tail"), {"keyword": 5, "flag": True}
+    )
+
+    assert tuple(partial.items()) == (
+        ("positional_only", 1),
+        ("value", 4),
+        ("items", ("tail",)),
+        ("keyword", 5),
+        ("options", {"flag": True}),
+    )
+
+
 def test_projection_avoids_duplicate_binding_before_nonempty_varargs():
     bound = bind_complete_arguments(BindingFixture, (1, 2, "tail"), {"keyword": 4})
 

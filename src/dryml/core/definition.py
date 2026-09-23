@@ -166,12 +166,13 @@ class Definition(DefInterface, Mapping):
     Args:
         *args: Optional class or symbol reference followed by positional
             constructor values. Use ``SKIP_ARGS`` after a class to preserve
-            keyword-only partial intent.
+            keyword-only partial intent, or by itself for a classless named
+            selector expression.
         **kwargs: Supplied constructor values, retained as immutable fields.
 
     Raises:
-        ValueError: If the leading value is not a supported class, callable, or
-            symbol reference, or ``SKIP_ARGS`` is used incorrectly.
+            ValueError: If the leading value is not a supported class, callable,
+                or symbol reference, or ``SKIP_ARGS`` is used incorrectly.
     """
 
     _cls: Callable[..., Any] | type | ImportRef | SourceSpec | None
@@ -200,6 +201,7 @@ class Definition(DefInterface, Mapping):
                     object.__setattr__(self, "_cls", None)
                     object.__setattr__(self, "_args", None)
                     object.__setattr__(self, "_kwargs", self._freeze_kwargs(kwargs))
+                    return
                 else:
                     raise ValueError("First positional argument must be a class, callable, or symbol reference.")
             if len(args) > 1 and args[1] is SKIP_ARGS:
