@@ -96,6 +96,31 @@ Examples include:
 
 Backend wrappers should keep external runtime state in object state and keep stable configuration in definitions.
 
+## Sequential Layer Factories
+
+TensorFlow Keras and PyTorch `Sequential` models require explicit layer
+factories. Import `F` from `dryml` (or `dryml.core`); it is the same
+`FactorySpec` class and records an inert, call-shaped construction recipe. The
+backend resolves short layer names only when it constructs the model.
+
+```python
+from dryml import F
+from dryml.models.tf import Sequential
+
+model = Sequential(layer_defs=[
+    F("Flatten"),
+    F("Dense", 32, activation="relu"),
+    F("Dense", 10),
+])
+```
+
+The outer `layer_defs` container may be a list or tuple, but every element must
+be an `F(...)` or `FactorySpec(...)` value. Bare strings and tuple/list layer
+shorthand are rejected. Factory construction preserves supplied positional and
+keyword arguments without inspecting target signatures, inserting defaults, or
+persisting a backend namespace; target resolution and constructor errors remain
+visible when the Sequential model is constructed.
+
 ## Train State
 
 `TrainState` records coarse training lifecycle state. Use it to distinguish untrained, trained, and related phases where supported by the training API.

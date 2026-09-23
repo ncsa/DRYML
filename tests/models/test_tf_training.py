@@ -5,7 +5,8 @@ import weakref
 import numpy as np
 import pytest
 
-from dryml.core import FactorySpec, Repo
+from dryml import F
+from dryml.core import Repo
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
 from dryml.models import AutoEncoder, Experiment
@@ -176,7 +177,7 @@ def test_tf_sequential_infers_output_spec_without_explicit_output_spec():
 
     x = np.zeros((4, 3), dtype=np.float32)
     ds = ArrayDataset(x)
-    model = Sequential(layer_defs=(("Dense", {"units": 2}),))
+    model = Sequential(layer_defs=(F("Dense", units=2),))
 
     assert Map(ds, model).spec == TensorSpec("float32", shape=(2,), backend="tf")
 
@@ -219,7 +220,7 @@ def test_tf_inference_never_invokes_an_opaque_model_or_changes_mode():
 def test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache():
     from dryml.models.tf import Sequential
 
-    model = Sequential(layer_defs=(("Dense", {"units": 2}),))
+    model = Sequential(layer_defs=(F("Dense", units=2),))
     element_spec = TensorSpec("float32", shape=(3,), backend="numpy")
     batch_spec = TensorSpec("float32", shape=(3,), batch=2, backend="numpy")
     element = model.find_implementation(input_spec=element_spec)
@@ -241,7 +242,7 @@ def test_tf_cached_element_invoker_does_not_retain_the_model():
 
     from dryml.models.tf import Sequential
 
-    model = Sequential(layer_defs=(("Dense", {"units": 2}),))
+    model = Sequential(layer_defs=(F("Dense", units=2),))
     model.default_batched = False
     model.learn()
     model(np.zeros((3,), dtype=np.float32))
@@ -253,20 +254,20 @@ def test_tf_cached_element_invoker_does_not_retain_the_model():
     assert reference() is None
 
 
-def test_tf_sequential_accepts_factory_spec_and_constructor_tuple_shorthand():
+def test_tf_sequential_accepts_explicit_factory_specs():
     from dryml.models.tf import Sequential
 
     x = np.zeros((4, 32, 32, 1), dtype=np.float32)
     ds = ArrayDataset(x)
     encoder = Sequential(layer_defs=[
-        ("Flatten",),
-        ("Dense", 32, {"activation": "relu"}),
-        FactorySpec("Dense", 2, activation="linear"),
+        F("Flatten"),
+        F("Dense", 32, activation="relu"),
+        F("Dense", 2, activation="linear"),
     ])
 
     decoder = Sequential(layer_defs=[
-        ("Dense", 32 * 32, {"activation": "linear"}),
-        ("Reshape", ((32, 32, 1),), {}),
+        F("Dense", 32 * 32, activation="linear"),
+        F("Reshape", (32, 32, 1)),
     ])
 
     assert Map(ds, encoder).spec == TensorSpec("float32", shape=(2,), backend="tf")
@@ -277,14 +278,58 @@ def test_tf_sequential_accepts_factory_spec_and_constructor_tuple_shorthand():
     )
 
 
+def test_tf_sequential_rejects_shorthand_before_constructing_any_layer(monkeypatch):
+    from dryml.models.tf import Sequential
+
+    built = []
+
+    def build(layer_def, **kwargs):
+        built.append(layer_def)
+        return tf.keras.layers.ReLU()
+
+    monkeypatch.setattr(type(F("ReLU")), "build", build)
+    for layer_defs in (["ReLU"], [("Dense", 2)], [["Dense", 2]]):
+        with pytest.raises(TypeError, match="explicit FactorySpec.*Use F"):
+            Sequential(layer_defs=layer_defs)
+    with pytest.raises(TypeError, match="explicit FactorySpec.*Use F"):
+        Sequential(layer_defs=[F("ReLU"), "ReLU"])
+
+    assert built == []
+
+
+def test_tf_sequential_rejects_wrong_backend_layer_type():
+    from dryml.models.tf import Sequential
+
+    with pytest.raises(TypeError, match="FactorySpec built object"):
+        Sequential(layer_defs=[F(object)])
+
+
+def test_tf_sequential_factory_state_ref_round_trip(tmp_path):
+    from dryml.models.tf import Sequential
+
+    repo = Repo(stores=tmp_path)
+    model = Sequential(
+        layer_defs=[F("Dense", 1, use_bias=False, kernel_initializer="ones")],
+        repo=repo,
+    )
+    value = tf.constant([[2.0]], dtype=tf.float32)
+    expected = model(value).numpy()
+
+    state = repo.save_object(model, deep_capture=True)
+    repo.close(flush=True)
+    loaded = Repo(stores=tmp_path).load_state_ref(state, reuse_live="never")
+
+    np.testing.assert_allclose(loaded(value).numpy(), expected)
+
+
 def test_tf_model_map_unbatched_image_uses_backend_batch_axis():
     from dryml.models.tf import Sequential
 
     x = np.zeros((2, 28, 28, 1), dtype=np.float32)
     ds = ArrayDataset(x)
     model = Sequential(layer_defs=[
-        ("Flatten",),
-        ("Dense", 2),
+        F("Flatten"),
+        F("Dense", 2),
     ])
     mapped = Map(ds, model)
 
@@ -301,8 +346,8 @@ def test_tf_model_project_pipe_maps_unbatched_images_and_preserves_labels():
     y = np.array([3, 7], dtype=np.int64)
     ds = ArrayDataset((x, y))
     model = Sequential(layer_defs=[
-        ("Flatten",),
-        ("Dense", 2),
+        F("Flatten"),
+        F("Dense", 2),
     ])
     mapped = Map(ds, Project(Pipe(Select(0), model), Select(1)))
 
@@ -320,11 +365,11 @@ def test_tf_argmax_pipeline_after_model_output():
     y = np.array([3, 7], dtype=np.int64)
     ds = ArrayDataset((x, y))
     encoder = Sequential(layer_defs=[
-        ("Flatten",),
-        ("Dense", 2),
+        F("Flatten"),
+        F("Dense", 2),
     ])
     classifier = Sequential(layer_defs=[
-        ("Dense", 10),
+        F("Dense", 10),
     ])
     mapped = Map(ds, Project(Pipe(Select(0), encoder, classifier, ArgMax()), Select(1)))
 
@@ -341,12 +386,12 @@ def test_tf_autoencoder_map_unbatched_image_uses_child_model_bindings():
     x = np.zeros((2, 28, 28, 1), dtype=np.float32)
     ds = ArrayDataset(x)
     encoder = Sequential(layer_defs=[
-        ("Flatten",),
-        ("Dense", 2),
+        F("Flatten"),
+        F("Dense", 2),
     ])
     decoder = Sequential(layer_defs=[
-        ("Dense", 28 * 28),
-        ("Reshape", (28, 28, 1)),
+        F("Dense", 28 * 28),
+        F("Reshape", (28, 28, 1)),
     ])
     model = AutoEncoder(encoder=encoder, decoder=decoder)
     mapped = Map(ds, model)
@@ -363,7 +408,7 @@ def test_tf_model_spec_inference_rejects_dataset_element_tuple():
     x = np.zeros((4, 3), dtype=np.float32)
     y = np.zeros((4,), dtype=np.int64)
     ds = ArrayDataset((x, y))
-    model = Sequential(layer_defs=(("Dense", {"units": 2}),))
+    model = Sequential(layer_defs=(F("Dense", units=2),))
 
     with pytest.raises(ValueError, match="Input spec structure does not match"):
         Map(ds, model)
@@ -389,14 +434,14 @@ def _autoencoder_model():
 
     encoder = Sequential(
         layer_defs=(
-            ("Dense", {"units": 8, "activation": "relu"}),
-            ("Dense", {"units": 2, "activation": "linear"}),
+            F("Dense", units=8, activation="relu"),
+            F("Dense", units=2, activation="linear"),
         )
     )
     decoder = Sequential(
         layer_defs=(
-            ("Dense", {"units": 8, "activation": "relu"}),
-            ("Dense", {"units": 3, "activation": "linear"}),
+            F("Dense", units=8, activation="relu"),
+            F("Dense", units=3, activation="linear"),
         )
     )
     return AutoEncoder(encoder=encoder, decoder=decoder)

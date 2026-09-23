@@ -1,6 +1,8 @@
 import pytest
 
-from dryml.core import FactorySpec, Object
+from dryml import F as RootF
+from dryml import FactorySpec as RootFactorySpec
+from dryml.core import F, FactorySpec, Object
 from dryml.core.canonical import NodeKind, node_kind
 
 
@@ -18,6 +20,20 @@ class FactoryObject(Object):
     pass
 
 
+class UnsupportedDefaultTarget:
+    def __init__(self, unsupported=object()):
+        self.unsupported = unsupported
+
+
+class FailingTarget:
+    def __init__(self):
+        raise RuntimeError("constructor failed")
+
+
+def test_public_factory_aliases_are_one_class():
+    assert F is FactorySpec is RootF is RootFactorySpec
+
+
 def test_factory_spec_builds_from_namespace_short_name():
     spec = FactorySpec("FactoryTarget", 1, label="x")
 
@@ -25,6 +41,29 @@ def test_factory_spec_builds_from_namespace_short_name():
 
     assert obj.args == (1,)
     assert obj.kwargs == {"label": "x"}
+
+
+def test_factory_spec_keeps_omitted_defaults_and_call_spellings_opaque():
+    omitted_default = F(UnsupportedDefaultTarget)
+    positional = F("FactoryTarget", 1)
+    keyword = F("FactoryTarget", value=1)
+
+    assert omitted_default.args == ()
+    assert omitted_default.kwargs == {}
+    assert positional != keyword
+    assert positional.__stable_leaf_bytes__() != keyword.__stable_leaf_bytes__()
+
+
+def test_factory_spec_prefers_namespace_and_propagates_build_failures():
+    namespaced = F("builtins.dict").build(namespace={"builtins.dict": FactoryTarget})
+
+    assert isinstance(namespaced, FactoryTarget)
+    with pytest.raises(ValueError, match="without a namespace"):
+        F("UnresolvedTarget").build()
+    with pytest.raises(RuntimeError, match="constructor failed"):
+        F(FailingTarget).build()
+    with pytest.raises(TypeError, match="expected FactoryTarget"):
+        F(object).build(instance_type=FactoryTarget)
 
 
 def test_factory_spec_coerces_tuple_shorthand():

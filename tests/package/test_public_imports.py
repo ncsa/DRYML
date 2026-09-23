@@ -248,6 +248,8 @@ _EXPECTED_ROOT_EXPORTS = {
     "ConcreteDefinition",
     "Definition",
     "Exact",
+    "F",
+    "FactorySpec",
     "IntRange",
     "Mat",
     "Missing",
@@ -557,7 +559,8 @@ print(json.dumps({
          getattr(dryml, name) is getattr(dryml.core, name)
          for name in dryml.core.__all__
          if name in dryml.__all__
-     ),
+      ),
+     "factory_aliases": dryml.F is dryml.FactorySpec is dryml.core.F is dryml.core.FactorySpec,
      "root_methods": dryml.methods is __import__("dryml.methods", fromlist=["*"]),
       "root_managed": dryml.managed is __import__("dryml.managed", fromlist=["*"]),
       "managed_exports": sorted(dryml.managed.__all__),
@@ -582,6 +585,7 @@ print(json.dumps({
     data = json.loads(result.stdout)
     assert set(data["exports"]) == _EXPECTED_ROOT_EXPORTS
     assert data["root_core_conveniences"]
+    assert data["factory_aliases"]
     assert data["root_methods"]
     assert data["root_managed"]
     assert set(data["managed_exports"]) == _EXPECTED_MANAGED_EXPORTS

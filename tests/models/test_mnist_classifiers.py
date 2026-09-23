@@ -1,5 +1,6 @@
 import pytest
 
+from dryml import F
 from dryml.core import Repo
 from dryml.core.repo import default_repo
 from dryml.core.tensor_spec import TensorSpec
@@ -46,7 +47,7 @@ def test_tf_basic_mnist_classifier_with_tfds_adapter():
     train_ds = _mnist_dataset(_MNIST_TRAIN_SPLIT)
     val_ds = _mnist_dataset(_MNIST_VAL_SPLIT)
     model = Sequential(
-        layer_defs=(("Dense", {"units": 10}),),
+        layer_defs=(F("Dense", units=10),),
     )
     optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.5)
     train_fn = BasicTraining(
@@ -71,7 +72,7 @@ def test_torch_basic_mnist_classifier_with_tfds_adapter():
     train_ds = _mnist_dataset(_MNIST_TRAIN_SPLIT)
     val_ds = _mnist_dataset(_MNIST_VAL_SPLIT)
     model = Sequential(
-        layer_defs=(("Linear", (28 * 28, 10), {}),),
+        layer_defs=(F("Linear", 28 * 28, 10),),
     )
     optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.5)
     train_fn = Training(

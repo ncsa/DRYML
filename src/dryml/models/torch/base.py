@@ -683,34 +683,53 @@ class ModelWrapper(Model):
 
 
 class Sequential(Model):
-    @classmethod
-    def __prepare_args__(cls, layer_defs=(), output_spec=None):
-        args = (FactorySpec.coerce_many(layer_defs),)
-        kwargs = {}
-        if output_spec is not None:
-            kwargs["output_spec"] = output_spec
-        return args, kwargs
+    """PyTorch Sequential model constructed from explicit layer factories.
+
+    Args:
+        layer_defs: A list or tuple of :class:`~dryml.core.FactorySpec` values
+            resolved in ``torch.nn`` when this model is constructed.
+        output_spec: Optional explicit DRYML output specification.
+
+    Raises:
+        TypeError: If ``layer_defs`` or any of its elements is not an explicit
+            FactorySpec, or a built layer is not a PyTorch Module.
+
+    Side Effects:
+        Imports PyTorch and constructs the declared modules.
+    """
 
     def __init__(self, layer_defs=(), output_spec=None):
+        """Construct the PyTorch Sequential backend object from explicit factories.
+
+        Args:
+            layer_defs: A list or tuple containing only FactorySpec values.
+            output_spec: Optional explicit DRYML output specification.
+
+        Raises:
+            TypeError: If layer declarations are not explicit factories or a
+                constructed object is not a PyTorch Module.
+
+        Side Effects:
+            Imports PyTorch and constructs every validated layer.
+        """
         import torch
 
+        if not isinstance(layer_defs, (list, tuple)) or not all(
+            isinstance(layer_def, FactorySpec) for layer_def in layer_defs
+        ):
+            raise TypeError(
+                "Sequential layer definitions must be a list or tuple of explicit "
+                "FactorySpec values. Use F(\"Linear\", 3, 8) or FactorySpec(...)."
+            )
         self.layer_defs = tuple(layer_defs)
         self.device = None
-        layers = []
-        for layer_def in self.layer_defs:
-            if isinstance(layer_def, FactorySpec):
-                layers.append(
-                    layer_def.build(
-                        namespace=torch.nn,
-                        instance_type=torch.nn.Module,
-                    )
-                )
-                continue
-
-            raise TypeError(
-                "Sequential layer definitions must be FactorySpec values. "
-                "Tuple and string shorthands should be normalized by __prepare_args__."
+        layers = [
+            layer_def.build(
+                namespace=torch.nn,
+                instance_type=torch.nn.Module,
             )
+            for layer_def in self.layer_defs
+        ]
 
         self.obj = torch.nn.Sequential(*layers)
         self.module = self.obj

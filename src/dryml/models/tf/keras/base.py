@@ -5,33 +5,52 @@ from dryml.models.tf.base import Model
 
 
 class Sequential(Model):
-    @classmethod
-    def __prepare_args__(cls, layer_defs=(), output_spec=None):
-        args = (FactorySpec.coerce_many(layer_defs),)
-        kwargs = {}
-        if output_spec is not None:
-            kwargs["output_spec"] = output_spec
-        return args, kwargs
+    """Keras Sequential model constructed from explicit layer factories.
+
+    Args:
+        layer_defs: A list or tuple of :class:`~dryml.core.FactorySpec` values
+            resolved in ``tf.keras.layers`` when this model is constructed.
+        output_spec: Optional explicit DRYML output specification.
+
+    Raises:
+        TypeError: If ``layer_defs`` or any of its elements is not an explicit
+            FactorySpec, or a built layer is not a Keras Layer.
+
+    Side Effects:
+        Imports TensorFlow and constructs the declared Keras layers.
+    """
 
     def __init__(self, layer_defs=(), output_spec=None):
+        """Construct the Keras Sequential backend object from explicit factories.
+
+        Args:
+            layer_defs: A list or tuple containing only FactorySpec values.
+            output_spec: Optional explicit DRYML output specification.
+
+        Raises:
+            TypeError: If layer declarations are not explicit factories or a
+                constructed object is not a Keras Layer.
+
+        Side Effects:
+            Imports TensorFlow and constructs every validated layer.
+        """
         import tensorflow as tf
 
-        self.layer_defs = tuple(layer_defs)
-        layers = []
-        for layer_def in self.layer_defs:
-            if isinstance(layer_def, FactorySpec):
-                layers.append(
-                    layer_def.build(
-                        namespace=tf.keras.layers,
-                        instance_type=tf.keras.layers.Layer,
-                    )
-                )
-                continue
-
+        if not isinstance(layer_defs, (list, tuple)) or not all(
+            isinstance(layer_def, FactorySpec) for layer_def in layer_defs
+        ):
             raise TypeError(
-                "Sequential layer definitions must be FactorySpec values. "
-                "Tuple and string shorthands should be normalized by __prepare_args__."
+                "Sequential layer definitions must be a list or tuple of explicit "
+                "FactorySpec values. Use F(\"Dense\", 32) or FactorySpec(...)."
             )
+        self.layer_defs = tuple(layer_defs)
+        layers = [
+            layer_def.build(
+                namespace=tf.keras.layers,
+                instance_type=tf.keras.layers.Layer,
+            )
+            for layer_def in self.layer_defs
+        ]
 
         self.obj = tf.keras.Sequential(layers)
         self.model = self.obj

@@ -36,6 +36,8 @@ core = dryml.core
 assert core is importlib.import_module("dryml.core")
 assert dryml.Definition is core.Definition
 assert dryml.definition_mode is core.definition_mode
+assert dryml.F is dryml.FactorySpec is core.F is core.FactorySpec
+assert not {"tensorflow", "torch"} & sys.modules.keys()
 assert "dryml.core" + "2" not in sys.modules
 """.replace("import sys", "import importlib\nimport sys")
     )
@@ -55,7 +57,7 @@ def test_promoted_package_keeps_the_destination_export_manifest():
         "Missing", "AnyValue", "Exact", "Choice", "IntRange", "SubclassOf", "Satisfies",
         "UniformIntRange", "UniformFromSet", "SearchSpace", "SKIP_ARGS", "Repo", "MetadataConflictError", "RepoDefinition", "RepoDefinitionError", "RepoReconstructionError", "configure",
         "reset_config", "status", "definition_mode", "selector_mode", "space_mode", "dtype",
-        "DType", "ConfigRef", "FactorySpec", "ConfigError", "CONFIG_MISSING", "as_tensor_spec",
+        "DType", "ConfigRef", "F", "FactorySpec", "ConfigError", "CONFIG_MISSING", "as_tensor_spec",
         "SpecHint", "TensorSpec", "ImportRef", "SourceSpec", "symbol_ref", "resolve_symbol",
         "CDefEdge", "CDefNode", "CDefOccurrence", "ConcreteDefinitionGraph",
         "ConcreteDefinitionGraphCycleError", "ConcreteDefinitionGraphError", "EdgeKind",

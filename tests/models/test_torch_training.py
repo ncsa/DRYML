@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 import sys
 
+from dryml import F
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
 from dryml.core import Repo
@@ -91,19 +92,58 @@ def test_torch_model_and_optimizer_state_ref_round_trip(tmp_path):
     )
 
 
-def test_torch_sequential_accepts_constructor_tuple_shorthand():
+def test_torch_sequential_accepts_explicit_factory_specs():
     from dryml.models.torch import Sequential
 
     x = np.zeros((4, 3), dtype=np.float32)
     ds = ArrayDataset(x)
     model = Sequential(layer_defs=[
-        ("Linear", 3, 8),
-        ("ReLU",),
-        ("Linear", 8, 2),
+        F("Linear", 3, 8),
+        F("ReLU"),
+        F("Linear", 8, 2),
     ])
 
     assert Map(ds, model).spec.backend.value == "torch"
     assert Map(ds, model).spec.shape == (2,)
+
+
+def test_torch_sequential_rejects_shorthand_before_constructing_any_layer(monkeypatch):
+    from dryml.models.torch import Sequential
+
+    built = []
+
+    def build(layer_def, **kwargs):
+        built.append(layer_def)
+        return torch.nn.ReLU()
+
+    monkeypatch.setattr(F, "build", build)
+    for layer_defs in (["ReLU"], [("Linear", 3, 2)], [["Linear", 3, 2]], [F("ReLU"), "ReLU"]):
+        with pytest.raises(TypeError, match="explicit FactorySpec.*Use F"):
+            Sequential(layer_defs=layer_defs)
+
+    assert built == []
+
+
+def test_torch_sequential_rejects_wrong_backend_layer_type():
+    from dryml.models.torch import Sequential
+
+    with pytest.raises(TypeError, match="FactorySpec built object"):
+        Sequential(layer_defs=[F(object)])
+
+
+def test_torch_sequential_factory_state_ref_round_trip(tmp_path):
+    from dryml.models.torch import Sequential
+
+    repo = Repo(stores=tmp_path)
+    model = Sequential(layer_defs=(F("Linear", 1, 1),), repo=repo)
+    value = torch.tensor([[2.0]], dtype=torch.float32)
+    expected = model(value).detach().clone()
+
+    state = repo.save_object(model, deep_capture=True)
+    repo.close(flush=True)
+    loaded = Repo(stores=tmp_path).load_state_ref(state, reuse_live="never")
+
+    torch.testing.assert_close(loaded(value), expected)
 
 
 def test_torch_inference_never_invokes_an_opaque_model_or_changes_mode():
@@ -122,7 +162,7 @@ def test_torch_inference_never_invokes_an_opaque_model_or_changes_mode():
 def test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache():
     from dryml.models.torch import Sequential
 
-    model = Sequential(layer_defs=(("Linear", (3, 2), {}),))
+    model = Sequential(layer_defs=(F("Linear", 3, 2),))
     element_spec = TensorSpec("float32", shape=(3,), backend="numpy")
     batch_spec = TensorSpec("float32", shape=(3,), batch=2, backend="numpy")
     element = model.find_implementation(input_spec=element_spec)
@@ -145,8 +185,8 @@ def test_torch_model_map_unbatched_tensor_uses_backend_batch_axis():
     x = np.zeros((2, 3, 4), dtype=np.float32)
     ds = ArrayDataset(x)
     model = Sequential(layer_defs=[
-        ("Flatten",),
-        ("Linear", 12, 2),
+        F("Flatten"),
+        F("Linear", 12, 2),
     ])
     mapped = Map(ds, model)
 
@@ -164,8 +204,8 @@ def test_torch_model_project_pipe_maps_unbatched_tensors_and_preserves_labels():
     y = np.array([1, 0], dtype=np.int64)
     ds = ArrayDataset((x, y))
     model = Sequential(layer_defs=[
-        ("Flatten",),
-        ("Linear", 12, 2),
+        F("Flatten"),
+        F("Linear", 12, 2),
     ])
     mapped = Map(ds, Project(Pipe(Select(0), model), Select(1)))
 
@@ -184,11 +224,11 @@ def test_torch_argmax_pipeline_after_model_output():
     y = np.array([1, 0], dtype=np.int64)
     ds = ArrayDataset((x, y))
     encoder = Sequential(layer_defs=[
-        ("Flatten",),
-        ("Linear", 12, 2),
+        F("Flatten"),
+        F("Linear", 12, 2),
     ])
     classifier = Sequential(layer_defs=[
-        ("Linear", 2, 3),
+        F("Linear", 2, 3),
     ])
     mapped = Map(ds, Project(Pipe(Select(0), encoder, classifier, ArgMax()), Select(1)))
 
@@ -214,16 +254,16 @@ def test_torch_autoencoder_optimizer_targets_composite_model():
     ds = ArrayDataset((x, x.copy()))
     encoder = Sequential(
         layer_defs=(
-            ("Linear", (3, 8), {}),
-            ("ReLU", {}),
-            ("Linear", (8, 2), {}),
+            F("Linear", 3, 8),
+            F("ReLU"),
+            F("Linear", 8, 2),
         )
     )
     decoder = Sequential(
         layer_defs=(
-            ("Linear", (2, 8), {}),
-            ("ReLU", {}),
-            ("Linear", (8, 3), {}),
+            F("Linear", 2, 8),
+            F("ReLU"),
+            F("Linear", 8, 3),
         )
     )
     model = AutoEncoder(encoder=encoder, decoder=decoder)
@@ -253,7 +293,7 @@ def test_torch_optimizer_targets_pipe_graph_without_pipe_trainable_parameters():
     from dryml.models.torch import Optimizer, Sequential
 
     repo = Repo()
-    model = Sequential(layer_defs=(("Linear", (3, 2), {}),), repo=repo)
+    model = Sequential(layer_defs=(F("Linear", 3, 2),), repo=repo)
     pipe = Pipe(model, repo=repo)
     optimizer = Optimizer(torch.optim.SGD, target=pipe, lr=0.05, repo=repo)
 
