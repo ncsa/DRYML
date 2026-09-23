@@ -4,7 +4,9 @@ set -euo pipefail
 # Category directories intentionally reuse focused module names such as
 # test_import_safety.py; importlib mode keeps broad collection collision-free.
 export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} --import-mode=importlib"
-export PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}"
+# Native Python chooses the path separator, including nested Git Bash on Windows.
+PYTHONPATH="$(python -c 'import os; print(os.getcwd() + (os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""))')"
+export PYTHONPATH
 
 phase_matched=0
 

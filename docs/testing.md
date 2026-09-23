@@ -34,6 +34,8 @@ GitHub's manual workflow dispatch is an explicit request.
 Named suite modes require Bash 4 or newer. On macOS, use a modern Bash with
 `bash ./tests.sh good-enough`; the system `/bin/bash` is version 3.2. Hosted
 macOS CI installs Bash through Homebrew and invokes it explicitly.
+The runner composes `PYTHONPATH` with the active Python's native path separator,
+including when a Windows test invokes the runner through Git Bash again.
 
 The complete runner modes are:
 

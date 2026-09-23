@@ -53,7 +53,8 @@ class OwnedProcess:
             ``True`` only when the owned group or Job has been confirmed empty.
 
         Failure behavior:
-            Native permission, status, or termination failures return ``False`` so
+            Native failures return ``False`` unless reaping the exited root and
+            checking group absence independently confirms cleanup. Otherwise,
             callers retain this owner for a later reconciliation pass.
         """
         return _terminate_owned(self.process, deadline=deadline, poll_interval=poll_interval, job=self.job, root_termination_sufficient=self.root_termination_sufficient)
@@ -325,6 +326,8 @@ def _terminate_owned(process: subprocess.Popen[bytes], *, deadline: float, poll_
     """Release an owned group/Job by a finite deadline and confirm its absence."""
     if os.name == "posix":
         try:
+            # Reap an exited launcher before signalling its possibly zombie group.
+            process.poll()
             _signal_group(process.pid, signal.SIGTERM)
             kill_at = time.monotonic() + max(0.0, deadline - time.monotonic()) / 2
             while _group_exists(process.pid) and time.monotonic() < kill_at:
@@ -337,8 +340,13 @@ def _terminate_owned(process: subprocess.Popen[bytes], *, deadline: float, poll_
                 time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
             process.poll()
             return not _group_exists(process.pid)
-        except (OSError, PermissionError):
-            return False
+        except OSError:
+            # Exit can race signalling; only an independently absent group is safe.
+            try:
+                process.poll()
+                return not _group_exists(process.pid)
+            except OSError:
+                return False
     if job is None and root_termination_sufficient:
         # Before GO, Execute's bootstrap performs no workload or descendant work;
         # a confirmed launcher exit therefore proves this narrow unassigned launch.

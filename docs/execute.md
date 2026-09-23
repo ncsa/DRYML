@@ -470,6 +470,11 @@ until cleanup, and `.pid` is the worker-confirmed PID. The owned group is
 reconciled on cleanup; descendants that escape the owned group remain caller
 managed.
 
+On POSIX, cleanup reaps an exited launcher before signalling its group. If
+signalling races with exit, a fresh group-absence check can confirm cleanup;
+launcher exit alone never proves that owned descendants have stopped. A group
+that remains present or cannot be inspected still leaves cleanup incomplete.
+
 ```python
 from pathlib import Path
 

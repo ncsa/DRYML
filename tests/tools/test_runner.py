@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def _run_tests_sh(
     tmp_path: Path, *args: str, pytest_statuses: tuple[int, ...] = ()
 ) -> tuple[subprocess.CompletedProcess, list[list[str]], list[str]]:
-    """Run the real shell runner while replacing only its pytest executable."""
+    """Run the shell with stubbed pytest/selection and real argument parsing."""
 
     bash = shutil.which("bash")
     if bash is None:
@@ -60,9 +60,10 @@ def _run_tests_sh(
     )
     python_stub.chmod(0o755)
     pytest_stub = bin_dir / "pytest"
+    # Record shell arguments before Git Bash translates paths for native Python.
     pytest_stub.write_text(
         "#!/usr/bin/env bash\n"
-        "\"$DRYML_REAL_PYTHON\" -c 'import json, os, sys; "
+        "MSYS2_ARG_CONV_EXCL='*' \"$DRYML_REAL_PYTHON\" -c 'import json, os, sys; "
         "path=os.environ[\"DRYML_PYTEST_LOG\"]; "
         "lines=open(path, encoding=\"utf-8\").readlines() if "
         "os.path.exists(path) else []; "
@@ -99,6 +100,14 @@ def _run_tests_sh(
     if bucket_log_path.exists():
         bucket_calls = bucket_log_path.read_text().splitlines()
     return result, calls, bucket_calls
+
+
+def test_nested_runner_accepts_an_inherited_native_pythonpath(tmp_path, monkeypatch):
+    """Nested shells preserve native path lists instead of mixing separators."""
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(ROOT), str(tmp_path / "with spaces"))))
+    result, calls, _ = _run_tests_sh(tmp_path, "good-enough")
+    assert result.returncode == 0, result.stderr
+    assert len(calls) == 2
 
 
 def test_runner_parser_preserves_path_options_and_removes_only_suite_root():

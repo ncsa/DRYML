@@ -307,36 +307,12 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
     """Exercise core publication/recovery through a real worker and separate Stores."""
     def cleanup_checked(future):
         """Retain bounded worker diagnostics when successful-work cleanup fails."""
-        backend_future = future.backend_future
-        original = backend_future._cleanup_reconciler
-        failures = []
-
-        def reconcile(timeout):
-            try:
-                return original(timeout)
-            except BaseException as error:
-                for failure in (error, error.__cause__):
-                    if failure is None:
-                        continue
-                    frames = []
-                    trace = failure.__traceback__
-                    while trace is not None:
-                        code = trace.tb_frame.f_code
-                        frames.append((Path(code.co_filename).name, trace.tb_lineno, code.co_name))
-                        trace = trace.tb_next
-                    failures.append((type(failure).__name__, getattr(failure, "errno", None), frames[-8:]))
-                raise
-
-        backend_future._cleanup_reconciler = reconcile
         try:
             future.cleanup(timeout=5)
         except CleanupError:
             pytest.fail(
-                f"core worker cleanup evidence: {backend_future.snapshot().cleanup_issues!r}; "
-                f"coordinator locations: {failures!r}"
+                f"core worker cleanup evidence: {future.backend_future.snapshot().cleanup_issues!r}"
             )
-        finally:
-            backend_future._cleanup_reconciler = original
 
     repo_store = DirStore(tmp_path / "state", query_index="none")
     control_store = DirStore(tmp_path / "control", query_index="none")

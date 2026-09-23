@@ -210,6 +210,38 @@ def test_cancellation_during_post_root_drain_is_bounded(tmp_path: Path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group fixture requires POSIX")
+@pytest.mark.parametrize(
+    ("exit_during_signal", "descendant_remains"),
+    [(False, False), (True, False), (True, True)],
+)
+def test_cleanup_reaps_an_exited_root_without_ignoring_descendants(
+        monkeypatch, exit_during_signal, descendant_remains):
+    """An exited root is reaped, but only absent groups qualify as cleaned up."""
+    state = {"exited": not exit_during_signal, "reaped": False}
+
+    def poll():
+        if state["exited"]:
+            state["reaped"] = True
+            return 0
+        return None
+
+    def signal_group(pid, sig):
+        if exit_during_signal:
+            state["exited"] = True
+            raise PermissionError("root exited during signalling")
+        assert state["reaped"], "reap an exited root before signalling its group"
+
+    monkeypatch.setattr(process_module, "_signal_group", signal_group)
+    monkeypatch.setattr(
+        process_module, "_group_exists",
+        lambda pid: descendant_remains or not state["reaped"],
+    )
+    owner = process_module.OwnedProcess(SimpleNamespace(pid=12345, poll=poll))
+    assert owner.reconcile(deadline=monotonic() + 1) is (not descendant_remains)
+    assert state["reaped"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group fixture requires POSIX")
 def test_cleanup_permission_error_retains_reconciliation_owner(monkeypatch, tmp_path: Path):
     """An unconfirmed group is reported with a narrow owner rather than forgotten."""
     pid_file = tmp_path / "root.pid"
