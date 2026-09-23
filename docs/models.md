@@ -121,6 +121,19 @@ keyword arguments without inspecting target signatures, inserting defaults, or
 persisting a backend namespace; target resolution and constructor errors remain
 visible when the Sequential model is constructed.
 
+This is deliberately different from Object construction, whose canonical CDef
+uses bound constructor parameters and declared defaults. Factory identity is the
+supplied call recipe: `F("Dense", 32)` is not normalized into
+`F("Dense", units=32)` and does not capture omitted defaults. A later backend
+default change can therefore alter construction from the unchanged declaration.
+`FactorySpec.coerce(...)` remains an independently invoked conversion utility;
+Sequential never performs that conversion implicitly.
+
+For migration only, an old layer declaration such as
+`[("Dense", 32, {"activation": "relu"})]` becomes
+`[F("Dense", 32, activation="relu")]`. The former is no longer accepted by
+Sequential; the outer layer sequence remains unchanged.
+
 ## Train State
 
 `TrainState` records coarse training lifecycle state. Use it to distinguish untrained, trained, and related phases where supported by the training API.

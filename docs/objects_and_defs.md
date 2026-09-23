@@ -79,3 +79,53 @@ reader. Durable layouts and validation limits are described in [Formats](formats
 Constructor and call-boundary roles are documented in [Signatures](signatures.md).
 Newly formed live-argument definitions follow their declared Ref/Mat role; this
 does not rewrite existing Store definitions or their identity algorithms.
+
+## Construction And Factories
+
+Ordinary Object construction binds a supplied call to the constructor signature:
+the resulting CDef has named parameters and declared defaults. An authored
+`Definition`, by contrast, preserves supplied call spelling and omission until it
+is concretized. This difference is intentional: a partial Definition without
+`seed` does not constrain `seed`, while a CDef created from that call can contain
+the constructor's bound default.
+
+`F(...)` and `FactorySpec(...)`, exported from both `dryml` and `dryml.core`, are
+the same inert factory class for non-Object runtime values. They preserve only
+the supplied target, positional arguments, and keywords. They neither inspect a
+target signature nor insert omitted defaults, resolve a target, or construct an
+object. Consequently, positional and keyword factory spellings can have distinct
+identities, and a later target-default change can affect a build without changing
+an unchanged factory declaration. `FactorySpec.build(namespace=...)` resolves and
+invokes the target at that explicit consumer boundary; resolution can import
+trusted target code.
+
+## Categorical Selectors
+
+`Definition.categorical(...)`, `ConcreteDefinition.categorical(...)`, and
+`categorical_definition(...)` return a new `Definition` selector expression;
+they never modify the source definition, its references, or saved state. Use
+`drop=("seed",)` to remove semantic constructor constraints by name,
+`drop_args=True` to remove every argument constraint, and `drop_class=True` to
+remove the class constraint. Omission means unconstrained, not `None` or a
+default. Both flags yield a classless Definition wildcard for definitions, not a
+wildcard for arbitrary scalar values.
+
+The definition and query methods default to projecting only the selected root;
+the standalone `categorical_definition(...)` helper retains its
+`recursive=True` default. Explicit `recursive=True` applies the
+controls to nested definitions in that subtree, without inspecting FactorySpec
+arguments or ordinary mapping keys. Each named drop must occur somewhere in the
+original selected traversal; malformed controls, a wholly unmatched name, a
+cycle, or a set transformation that would collapse members fails without a
+partial result. Repeating an already removed named drop can therefore fail.
+Parameters named `uid` and `metadata` are ordinary parameters and remain
+constrained unless explicitly dropped.
+
+Projection reads a CDef's stored named parameter record without resolving its
+class. Naming positional or variadic constraints in an authored Definition can
+resolve an ImportRef or execute trusted SourceSpec source to inspect a signature,
+but never constructs the target or fills omitted defaults. The result is a
+selection expression, not a promise that its retained fields are a valid
+construction call. SourceSpec remains the recorded authority; signature
+inspection does not replace it with a resolved class. DRYML provides no hot
+reload, historical ImportRef, or live-Object migration guarantee.

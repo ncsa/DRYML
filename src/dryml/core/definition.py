@@ -80,13 +80,20 @@ class DefInterface(ABC):
             drop_class: Whether to omit class constraints.
 
         Returns:
-            A named ``Definition`` selector expression.
+            A new named ``Definition`` selector expression. It is a selection
+            surface and need not be a valid construction call.
 
         Raises:
             TypeError: If a control is malformed or authored values cannot be
                 safely named.
             ValueError: If a requested drop name is absent from the selected
-                traversal or projection would collapse a set.
+                traversal, a cycle is encountered, or projection would collapse
+                a set.
+
+        Side Effects:
+            Never mutates or constructs the source graph. May resolve an authored
+            class authority to inspect its signature; exact CDef parameter
+            projection reads the stored named record without resolving its class.
         """
         return categorical_definition(
             self,
@@ -1150,7 +1157,8 @@ def categorical_definition(
 
     Raises:
         TypeError: If controls or source values cannot be projected safely.
-        ValueError: If requested names are absent or set cardinality would change.
+        ValueError: If requested names are absent, a cycle is encountered, or set
+            cardinality would change.
 
     Side Effects:
         May resolve authored symbolic classes for signature inspection. It never

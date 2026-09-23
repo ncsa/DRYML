@@ -180,12 +180,20 @@ class DefinitionQuery:
 
         Returns:
             An immutable query retaining original authority for :meth:`exact` and
-            :meth:`restore`.
+            :meth:`restore`. The resulting selector is a selection expression,
+            not a construction request.
 
         Raises:
             QueryPathError: If the query or selected occurrence is unconstrained.
             TypeError: If projection controls or selected values are invalid.
-            ValueError: If requested names are absent or projection collapses a set.
+            ValueError: If requested names are absent, a cycle is encountered, or
+                projection collapses a set.
+
+        Side Effects:
+            Does not materialize Objects or alter source definitions, Store
+            records, or references. It may resolve an authored class only when
+            required to name supplied call constraints; CDef parameter projection
+            reads stored names without resolving its class.
         """
 
         if self.selector is None:

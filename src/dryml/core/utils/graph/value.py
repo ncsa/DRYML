@@ -129,6 +129,16 @@ def replace_subtree(
         replacement: New value for the selected occurrence.
     Returns:
         A copy-on-write root with only the selected occurrence replaced.
+
+    Raises:
+        QueryPathError: If ``path`` cannot resolve a selected occurrence or a set
+            member cannot be addressed deterministically.
+        TypeError: If a path segment is incompatible with the encountered value.
+
+    Side Effects:
+        Does not mutate ``obj``. CDef ancestors are rebuilt from their stored
+        named parameters, preserving their named authority; only the addressed
+        occurrence is replaced.
     """
 
     norm = normalize_path(path)

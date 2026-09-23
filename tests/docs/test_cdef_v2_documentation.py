@@ -16,7 +16,7 @@ DOCUMENTS = (
         "query_index_backend_contracts.md", "sqlite_lowering.md",
         "ref_selector_values.md", "release_notes.md", "table_of_content.md",
         "testing.md", "execute.md", "signatures.md", "session.md",
-        "world_runtime.md",
+        "world_runtime.md", "models.md", "metadata.md", "annotations.md",
     )),
 )
 RETIRED = re.compile(r"\b(ObjectDef|load_alias|RepoSaveOptions|ephemeral_depth|save_self|dry_args|dry_kwargs)\b")
@@ -37,6 +37,24 @@ def test_local_markdown_links_in_cdef_v2_docs_resolve():
     for document in DOCUMENTS:
         for target in re.findall(r"\[[^]]+\]\(([^)#]+)(?:#[^)]+)?\)", document.read_text(encoding="utf-8")):
             assert (document.parent / target).exists(), f"{document}: {target}"
+
+
+def test_stage_2_guides_describe_current_factory_projection_and_metadata_boundaries():
+    """Current guides retain the Stage 2 migration and no hidden hook promises."""
+
+    signatures = (ROOT / "docs" / "signatures.md").read_text(encoding="utf-8")
+    objects = (ROOT / "docs" / "objects_and_defs.md").read_text(encoding="utf-8")
+    querying = (ROOT / "docs" / "graph_querying.md").read_text(encoding="utf-8")
+    models = (ROOT / "docs" / "models.md").read_text(encoding="utf-8")
+    metadata = (ROOT / "docs" / "metadata.md").read_text(encoding="utf-8")
+    annotations = (ROOT / "docs" / "annotations.md").read_text(encoding="utf-8")
+
+    assert "`__prepare_args__`" not in signatures
+    assert re.search(r"They neither inspect a\s+target signature", objects)
+    assert re.search(r"Factory identity is the\s+supplied call recipe", models)
+    assert re.search(r"named drops are validated against the original\s+selected traversal", querying)
+    assert "Migration Only: Constructor Mixins" in metadata
+    assert re.search(r"separate from \[Persistent Metadata\]\(metadata\.md\)", annotations)
 
 
 def test_managed_current_format_documentation_matches_control_codec():

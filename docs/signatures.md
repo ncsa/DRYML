@@ -131,8 +131,11 @@ Consequently an integration can pass explicit controls in a child task even when
 an inherited ambient context is invalid, provided the explicitly borrowed
 Repo/Store lifetime remains valid.
 
-Constructors normalize once after `__prepare_args__`; persisted and already-bound
-records do not replay preparation. `Method` selects from raw tensor facts first,
+Constructors normalize one supplied call through direct signature binding;
+declared Object defaults are recorded in a resulting CDef, while persisted and
+already-bound records do not replay binding. This is not FactorySpec behavior:
+an `F(...)` recipe retains only supplied arguments and does not inspect a target
+signature or insert defaults. `Method` selects from raw tensor facts first,
 then normalizes the selected implementation's arguments and return. Method adapters
 deliberately borrow the active `signature_context` through the same core-owned path
 as `function`, including its task/thread and lease checks. Managed

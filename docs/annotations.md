@@ -6,6 +6,13 @@ deterministic order. It does not resolve requirements, select Methods, enforce
 runtime policy, mutate session state, wrap calls, launch work, or activate a
 framework.
 
+It is separate from [Persistent Metadata](metadata.md): Store metadata is bounded
+data attached to ObjectRef or StateRef authority, supports explicit CRUD and
+reference queries, and can record save or lifecycle facts. Annotations are
+in-process declarations on Python targets. They are not persisted Store sidecars,
+do not provide lifecycle evidence, and are not a replacement for retired
+constructor metadata or identity mixins.
+
 ## Carrier And Keys
 
 An `Annotation` is a frozen two-field carrier: a consumer-selected `key` and an

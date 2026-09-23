@@ -44,6 +44,25 @@ Writes require an explicit Store when more than one writable connected Store
 holds the target. Unknown targets raise `KeyError`; malformed authority raises
 `StoreAuthorityError`.
 
+## Migration Only: Constructor Mixins
+
+The persistent APIs above replace the retired `Metadata` and `UniqueID`
+constructor mixins. This section is migration guidance, not a supported historical code
+example. Move descriptive labels from construction to `SaveAnnotations` or the
+reference-targeted CRUD methods above. Use `get_lineage_metadata()` for known
+creation evidence and `get_snapshot_metadata()` for immutable save evidence.
+
+Use `Serializable` and ObjectRef/StateRef facilities when an application needs
+framework identity or exact-state identity. When a class needs a distinct
+structural definition, declare an explicit ordinary constructor discriminator.
+`uid` and `metadata` are no longer reserved names: a class may use them as normal
+parameters, they remain part of its construction constraints, and categorical
+projection removes them only through an explicit named `drop`.
+
+This migration does not rewrite Stores, old definitions, payloads, or readers.
+An incompatible retired authority fails at its actual resolution or construction
+boundary rather than being silently stripped or reidentified.
+
 ## Save-Time Capture
 
 Pass `SaveAnnotations` to any ordinary save wrapper to replace current root
