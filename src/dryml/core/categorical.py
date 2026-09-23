@@ -1,6 +1,6 @@
 """Internal semantic projection of definitions into categorical selectors.
 
-This module prepares the named selector surface shared by future categorical
+This module prepares the named selector surface shared by categorical
 entry points. It preserves source definition authority and never materializes
 or mutates an input graph.
 """
@@ -15,6 +15,7 @@ from .bound_args import bind_partial_arguments
 from .canonical import (
     NodeKind,
     is_value_container_kind,
+    iter_value_children,
     node_kind,
     transform_container,
 )
@@ -158,7 +159,7 @@ def _project_categorical_definition(
         drop_class=drop_class,
         memo=memo,
     )
-    result = projection.transform(defn, selected_root=True)
+    result = projection.transform(defn)
     return result, projection.origins
 
 
@@ -244,7 +245,7 @@ def _collect_parameter_names(root: Any, *, recursive: bool) -> set[str]:
     active: set[tuple[str, Any]] = set()
     active_values: set[int] = set()
 
-    def visit(value: Any, *, selected_root: bool = False) -> None:
+    def visit(value: Any) -> None:
         key = _definition_key(value)
         if key is not None:
             if key in active:
@@ -263,8 +264,6 @@ def _collect_parameter_names(root: Any, *, recursive: bool) -> set[str]:
             seen.add(key)
             return
 
-        if not recursive and not selected_root:
-            return
         kind = node_kind(value)
         if is_value_container_kind(kind):
             oid = id(value)
@@ -272,7 +271,7 @@ def _collect_parameter_names(root: Any, *, recursive: bool) -> set[str]:
                 raise CycleError("categorical value traversal")
             active_values.add(oid)
             try:
-                for _, child in _value_children(value):
+                for _, child in iter_value_children(value):
                     visit(child)
             finally:
                 active_values.remove(oid)
@@ -280,14 +279,8 @@ def _collect_parameter_names(root: Any, *, recursive: bool) -> set[str]:
         if kind is NodeKind.DEFLINK and value.is_finalized:
             visit(value.target)
 
-    visit(root, selected_root=True)
+    visit(root)
     return names
-
-
-def _value_children(value: Any):
-    from .canonical import iter_value_children
-
-    return iter_value_children(value)
 
 
 class _ProjectionOrigins:
@@ -324,7 +317,7 @@ class _Projection:
         self.active: set[tuple[str, Any]] = set()
         self.active_values: set[int] = set()
 
-    def transform(self, value: Any, *, selected_root: bool = False) -> Any:
+    def transform(self, value: Any) -> Any:
         from .definition import Definition
         from .links import DefLink
 
@@ -352,8 +345,6 @@ class _Projection:
             finally:
                 self.active.remove(key)
 
-        if not self.recursive and not selected_root:
-            return value
         kind = node_kind(value)
         if is_value_container_kind(kind):
             key = ("container", id(value))

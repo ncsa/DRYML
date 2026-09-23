@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 
 from dryml import F
-from dryml.core import Repo
+from dryml.core import Object, Repo
+from dryml.core.query import field
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
 from dryml.models import AutoEncoder, Experiment
@@ -32,6 +33,14 @@ class EffectfulKerasModel(tf.keras.Model):
     def call(self, x):
         self.calls += 1
         return x
+
+
+class FactoryTopology(Object):
+    """Retain two references to one factory-built model for topology checks."""
+
+    def __init__(self, primary, mirror):
+        self.primary = primary
+        self.mirror = mirror
 
 
 def test_tf_basic_training_updates_experiment_state():
@@ -314,12 +323,37 @@ def test_tf_sequential_factory_state_ref_round_trip(tmp_path):
     )
     value = tf.constant([[2.0]], dtype=tf.float32)
     expected = model(value).numpy()
+    root = FactoryTopology(model, model, repo=repo)
+    peer = Sequential(
+        layer_defs=[F("Dense", 1, use_bias=False, kernel_initializer="zeros")],
+        repo=repo,
+    )
+    peer(value)
 
-    state = repo.save_object(model, deep_capture=True)
+    state = repo.save_object(root, deep_capture=True)
+    repo.save_object(FactoryTopology(peer, peer, repo=repo), deep_capture=True)
+    repo.set_metadata(state.object, {"scenario": "explicit-factory"})
     repo.close(flush=True)
-    loaded = Repo(stores=tmp_path).load_state_ref(state, reuse_live="never")
+    reopened = Repo(stores=tmp_path)
+    state_hash = next(iter(state.states.values()))
 
-    np.testing.assert_allclose(loaded(value).numpy(), expected)
+    assert reopened.references().exact(state.object).state_hash(state_hash).where(
+        field("object", "scenario").eq("explicit-factory")
+    ).state_refs().one() == state
+    assert list(
+        reopened.query(root.definition)
+        .categorical(drop=("layer_defs",), recursive=True)
+        .exact(path="primary")
+        .stored()
+        .defs()
+    ) == [root.definition]
+
+    loaded = reopened.load_state_ref(state, reuse_live="never")
+
+    np.testing.assert_allclose(loaded.primary(value).numpy(), expected)
+    assert loaded.primary is loaded.mirror
+    assert loaded.object_ref == state.object
+    assert loaded.last_state_ref == state
 
 
 def test_tf_model_map_unbatched_image_uses_backend_batch_axis():

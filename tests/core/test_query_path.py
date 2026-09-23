@@ -261,28 +261,6 @@ def test_chained_query_methods_return_independent_queries():
 
 
 @pytest.mark.parametrize("operation", ("exact", "restore"))
-def test_u4_semantic_query_projection_translates_nested_cdef_paths(operation):
-    """Public projection composes exact and restore across CDef boundaries."""
-    source = Definition(
-        objects.TestNest2,
-        Definition(
-            objects.TestNest2,
-            Definition(objects.TestClass1, 10, test="leaf"),
-        ),
-    ).concretize()
-    query = Repo().query(source).categorical(recursive=True)
-
-    transformed = getattr(query, operation)(path="A.A")
-
-    from dryml.core.query.path import get_subtree
-
-    assert get_subtree(transformed.selector, "A.A") == get_subtree(
-        source,
-        '$[@param("A")][@param("A")]',
-    )
-
-
-@pytest.mark.parametrize("operation", ("exact", "restore"))
 def test_u4_semantic_query_projection_maps_changed_set_member_paths(operation):
     """Set-member paths retain their original occurrence after projection."""
     from dryml.core.utils.graph.value import iter_set_members

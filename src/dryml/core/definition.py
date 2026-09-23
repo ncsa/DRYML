@@ -19,8 +19,7 @@ from .cdef_identity import (
 )
 from .utils.types import is_nonclass_callable
 from .utils.general import get_class_str
-from .utils.graph import GraphCtx, GraphTransformer, GraphMatcher
-from .types import is_pod
+from .utils.graph import GraphCtx, GraphMatcher
 from .freeze import FrozenDict, FrozenTuple
 from .errors import PathAccessError
 from .policies import CachePolicy

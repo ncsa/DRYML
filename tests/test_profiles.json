@@ -82,13 +82,14 @@
           ]
         },
         "tests/core/test_metadata_query.py": {
-          "rationale": "Keep the complete pure predicate validation plus representative current, state, conflict, projection, and Zip-backed query proofs; exhaustive mode covers equivalent composition permutations.",
+          "rationale": "Keep the complete pure predicate validation plus representative current, state, prepared-selector sidecar, conflict, projection, and Zip-backed query proofs; exhaustive mode covers equivalent composition permutations.",
           "functions": [
             "test_field_validates_paths_and_all_predicates_are_inert_and_round_trip",
             "test_predicate_bounds_and_codec_reject_malformed_noncanonical_input",
             "test_current_metadata_paths_types_and_empty_roots_are_scope_local",
             "test_predicate_construction_rejects_invalid_input_before_store_scanning",
             "test_state_metadata_projects_unique_objects_and_keeps_structure_constraints",
+            "test_u4_prepared_selector_composes_with_metadata_sidecars",
             "test_store_order_preserves_answers_and_exposes_current_or_snapshot_conflicts",
             "test_definition_where_composition_store_authority_and_zip_scan"
           ]
@@ -131,9 +132,10 @@
           ]
         },
         "tests/core/test_reference_query.py": {
-          "rationale": "Retain nonmaterializing scans, aggregate identity, exact paths/aliases, nested state references, and conflicting-authority rejection as the complete reference-query boundary roster.",
+          "rationale": "Retain nonmaterializing scans, prepared-selector sidecars, aggregate identity, exact paths/aliases, nested state references, and conflicting-authority rejection as the complete reference-query boundary roster.",
           "functions": [
             "test_reference_filters_scan_authority_without_materializing",
+            "test_u4_prepared_selector_composes_with_reference_sidecars",
             "test_object_id_lookup_is_closed_but_reference_query_returns_aggregate",
             "test_reference_filters_keep_exact_paths_aliases_and_all_ephemeral_refs",
             "test_object_terminal_preserves_nested_ref_state_reference",
@@ -326,6 +328,12 @@
             "test_owner_probe_checks_stale_attempt_before_probe_and_propagates_adapter_errors",
             "test_locked_owner_probe_marks_generation_replacement_inconclusive",
             "test_missing_lock_namespace_never_becomes_owner_loss_or_recovery_evidence"
+          ]
+        },
+        "tests/models/test_tf_training.py": {
+          "rationale": "Retain the small explicit-factory save/load integration proof with exact state, metadata, nested selection, and shared topology; broader backend training remains heavy.",
+          "functions": [
+            "test_tf_sequential_factory_state_ref_round_trip"
           ]
         },
         "tests/dispatch/test_backend_execution.py": {
