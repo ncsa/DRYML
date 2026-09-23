@@ -47,6 +47,32 @@ def test_memory_query_uses_v2_parameters_for_partial_selector_constraints():
     assert set(omitted) == {match, default}
 
 
+def test_u4_memory_query_and_fixed_refinement_use_prepared_parameters():
+    """Projected semantic selectors agree for catalog and fixed-result queries."""
+    from dryml.core.categorical import project_categorical_definition
+    from dryml.core.query.result import DefinitionResultSet
+
+    repo = Repo()
+    match = Definition(SemanticQueryLeaf, 7, label="match").concretize()
+    other = Definition(SemanticQueryLeaf, 8, label="other").concretize()
+    store = SemanticQueryStore()
+    repo._query_catalog.register_stored(match, store)
+    repo._query_catalog.register_stored(other, store)
+    selector = project_categorical_definition(
+        Definition(SemanticQueryLeaf, 7, label="discarded"),
+        drop=("label",),
+    )
+
+    assert tuple(repo.query(selector).stored(refresh=False).defs()) == (match,)
+    fixed = DefinitionResultSet(
+        repo,
+        (match, other),
+        materializable=False,
+        replicas={},
+    )
+    assert tuple(fixed.refine(selector)) == (match,)
+
+
 def test_nested_v2_selector_falls_back_to_authoritative_verification():
     repo = Repo()
     match_child = Definition(SemanticQueryLeaf, 7).concretize()

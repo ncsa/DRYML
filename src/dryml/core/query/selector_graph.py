@@ -293,6 +293,10 @@ def _selector_requires_scan(selector: Definition | ConcreteDefinition) -> bool:
 
     if not isinstance(selector, Definition):
         return False
+    from ..categorical import _is_prepared_selector_definition
+
+    if _is_prepared_selector_definition(selector):
+        return False
     supplied_args = () if selector.args is None else tuple(selector.args)
     if not isinstance(selector.cls, type):
         return bool(supplied_args or selector.kwargs)

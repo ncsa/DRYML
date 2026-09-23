@@ -273,6 +273,30 @@ def test_exact_and_local_candidate_lookup(tmp_path):
     assert cdefs == (wanted.definition,)
 
 
+def test_u4_prepared_selector_lowers_to_semantic_parameter_candidates(tmp_path):
+    """SQLite candidates use prepared semantic paths without a legacy kwarg."""
+    from dryml.core.categorical import project_categorical_definition
+
+    index = sqlite_index(tmp_path)
+    wanted = SQLiteLeaf("wanted")
+    other = SQLiteLeaf("other")
+    index.register_stored_roots(
+        ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition]),
+        [wanted.definition, other.definition],
+    )
+    selector_graph = compile_selector_graph(
+        project_categorical_definition(Definition(SQLiteLeaf, "wanted")),
+    )
+
+    assert selector_graph is not None
+    assert not selector_graph.requires_scan
+    with index.read_view() as view:
+        ids = graph_candidate_ids(view, selector_graph, StoredDomain(view))
+        cdefs = tuple(view.cdefs_by_id(ids).values())
+
+    assert cdefs == (wanted.definition,)
+
+
 def test_lowered_exact_anchor_relation_uses_hash_index(tmp_path):
     index = sqlite_index(tmp_path)
     wanted = SQLiteLeaf("wanted")

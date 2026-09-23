@@ -221,6 +221,29 @@ class Definition(DefInterface, Mapping):
             object.__setattr__(self, "_args", FrozenTuple())
             object.__setattr__(self, "_kwargs", self._freeze_kwargs(kwargs))
 
+    @classmethod
+    def _from_prepared_parameters(cls, selector_cls, parameters) -> "Definition":
+        """Create a prepared named selector from already-frozen parameters.
+
+        Args:
+            selector_cls: Stable class authority or ``None`` for a wildcard.
+            parameters: Immutable semantic parameter values prepared internally.
+
+        Returns:
+            A skipped-args Definition retaining the supplied value occurrences.
+
+        This private constructor is limited to projection internals. It avoids a
+        second deep-freeze pass that would replace transformed container
+        occurrences after their correspondence was recorded.
+        """
+
+        result = object.__new__(cls)
+        object.__setattr__(result, "_stable_hash_cache", None)
+        object.__setattr__(result, "_cls", selector_cls)
+        object.__setattr__(result, "_args", None)
+        object.__setattr__(result, "_kwargs", FrozenDict(parameters))
+        return result
+
     @staticmethod
     def _freeze_value(value):
         from .canonical import freeze_def_value
@@ -1456,10 +1479,39 @@ class SelectorMatcher(GraphMatcher):
     # dryml-specific matching
     # ------------------------------------------------------------------
 
+    def _semantic_selector_parameters(self, definition: Definition):
+        """Bind known fields while retaining absent-field Par constraints."""
+
+        try:
+            return definition.parameters
+        except TypeError:
+            from .bound_args import _constructor_signature, bind_partial_arguments
+
+            if not isinstance(definition.cls, type):
+                raise
+            signature = _constructor_signature(definition.cls)
+            known_kwargs = {
+                name: value
+                for name, value in definition.kwargs.items()
+                if name in signature.parameters
+            }
+            unknown_kwargs = {
+                name: value
+                for name, value in definition.kwargs.items()
+                if name not in signature.parameters
+            }
+            args = () if definition.args is None else tuple(definition.args)
+            parameters = dict(bind_partial_arguments(definition.cls, args, known_kwargs).items())
+            parameters.update(unknown_kwargs)
+            return parameters
+
     def match_dryml(self, selector, target, ctx: GraphCtx) -> bool:
         sel_def = self._normalize_dryml(selector)
         tgt_def = self._normalize_dryml(target)
         compare_failed = False
+
+        if isinstance(sel_def, ConcreteDefinition):
+            return isinstance(tgt_def, ConcreteDefinition) and sel_def.graph_equal(tgt_def)
 
         if sel_def.cls is not None:
             if not self.match(sel_def.cls, tgt_def.cls, ctx.child("cls")):
@@ -1470,15 +1522,41 @@ class SelectorMatcher(GraphMatcher):
         if isinstance(sel_def, Definition) and isinstance(tgt_def, ConcreteDefinition) and tgt_def._bound_args is not None:
             # V2 records have no raw invocation fields.  Bind only the values
             # supplied by the soft selector; defaults remain unconstrained.
-            for name, child in sel_def.parameters.items():
+            from .params import Par
+
+            for name, child in self._semantic_selector_parameters(sel_def).items():
                 child_ctx = ctx.child(f"parameters[{name!r}]")
                 if name not in tgt_def.parameters:
+                    if isinstance(child, Par) and child.matches(None, present=False):
+                        continue
                     compare_failed = True
                     self._print(child_ctx, "Semantic parameter missing in target")
                     if not self.full_diagnostic:
                         return False
                     continue
                 if not self.match(child, tgt_def.parameters[name], child_ctx):
+                    compare_failed = True
+                    if not self.full_diagnostic:
+                        return False
+            return not compare_failed
+
+        from .categorical import _is_prepared_selector_definition, _semantic_parameters
+
+        if isinstance(sel_def, Definition) and _is_prepared_selector_definition(sel_def):
+            target_parameters = _semantic_parameters(tgt_def)
+            from .params import Par
+
+            for name, child in self._semantic_selector_parameters(sel_def).items():
+                child_ctx = ctx.child(f"parameters[{name!r}]")
+                if name not in target_parameters:
+                    if isinstance(child, Par) and child.matches(None, present=False):
+                        continue
+                    compare_failed = True
+                    self._print(child_ctx, "Semantic parameter missing in target")
+                    if not self.full_diagnostic:
+                        return False
+                    continue
+                if not self.match(child, target_parameters[name], child_ctx):
                     compare_failed = True
                     if not self.full_diagnostic:
                         return False

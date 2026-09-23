@@ -34,6 +34,22 @@ def test_selector_without_nested_definitions_has_one_node():
     assert graph.edges == ()
 
 
+def test_u4_prepared_selector_uses_semantic_parameter_postings():
+    """Prepared symbolic fields lower to Parameter paths without a scan."""
+    from dryml.core.categorical import project_categorical_definition
+
+    prepared = project_categorical_definition(Definition(SelectorLeaf, "wanted"))
+    graph = compile_selector_graph(prepared)
+
+    assert graph is not None
+    assert not graph.requires_scan
+    assert any(
+        str(requirement.token.path) == '$[@param("name")]'
+        for branch in graph.node(graph.root).requirement_branches
+        for requirement in branch
+    )
+
+
 def test_nested_definition_creates_selector_edge():
     selector = Definition(SelectorParent, SKIP_ARGS, child=Definition(SelectorLeaf, SKIP_ARGS, name="x"))
 

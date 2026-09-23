@@ -1,7 +1,11 @@
 from tests.core import core_objects as objects
 import pytest
-from dryml.core import Satisfies
+from dryml.core import Missing, Present, Satisfies
 from dryml.core.definition import Definition, SKIP_ARGS, selector_match
+from dryml.core.bound_args import BoundArguments
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.symbol import ImportRef
 import dryml.core as core
 
@@ -12,6 +16,69 @@ class SemanticSelectorFixture(core.Object):
     def __init__(self, value=3, *, label="default"):
         self.value = value
         self.label = label
+
+
+class SemanticVariadicSelectorFixture(core.Object):
+    def __init__(self, first, /, width=2, *items, seed=3, **options):
+        self.first = first
+        self.width = width
+        self.items = items
+        self.seed = seed
+        self.options = options
+
+
+def test_u4_prepared_selector_matches_authored_semantic_parameters():
+    """Prepared named selectors match equivalent authored positional buckets."""
+    from dryml.core.categorical import project_categorical_definition
+
+    target = Definition(
+        SemanticVariadicSelectorFixture, 1, 4, "tail", seed=9, flag=True,
+    )
+    selector = project_categorical_definition(target, drop=("seed",))
+
+    assert core.Selector(selector).matches(target)
+    assert selector.match(target)
+    assert selector_match(selector, target)
+
+
+def test_u4_prepared_cdef_matching_is_import_free(monkeypatch):
+    """Named CDef records need no class resolution during semantic matching."""
+    from dryml.core.categorical import project_categorical_definition
+
+    source = ConcreteDefinition._from_persisted_record(
+        ImportRef("missing.u4", "Fixture"),
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((
+            ("first", 1),
+            ("items", FrozenTuple(("tail",))),
+            ("options", FrozenDict({"flag": True})),
+            ("seed", 9),
+        )),
+    )
+    selector = project_categorical_definition(source, drop=("seed",))
+    monkeypatch.setattr(
+        ImportRef,
+        "resolve",
+        lambda self: pytest.fail("prepared CDef matching must not resolve classes"),
+    )
+
+    assert core.Selector(selector).matches(source)
+    assert selector.match(source)
+    assert selector_match(selector, source)
+
+
+@pytest.mark.parametrize(
+    ("constraint", "expected"),
+    ((Missing(), True), (Present(), False)),
+)
+def test_u4_absent_semantic_parameter_parity_across_matchers(constraint, expected):
+    """All matcher entry points apply Par absent-field semantics consistently."""
+    selector = Definition(SemanticSelectorFixture, absent=constraint)
+    target = Definition(SemanticSelectorFixture, value=7).concretize()
+
+    assert core.Selector(selector).matches(target) is expected
+    assert selector.match(target) is expected
+    assert selector_match(selector, target) is expected
 
 
 def test_partial_selector_matches_v2_semantic_parameters_without_defaults():

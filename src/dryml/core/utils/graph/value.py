@@ -70,6 +70,10 @@ def resolve_set_member(values: Iterable[Any], segment: SetMember) -> Any:
 
 
 def iter_value_edges(value: Any) -> tuple[ValueEdge, ...]:
+    from ...links import DefLink
+
+    if isinstance(value, DefLink) and value.is_finalized:
+        return iter_value_edges(value.target)
     if isinstance(value, ConcreteDefinition):
         return tuple(ValueEdge(Parameter(name), child) for name, child in value.parameters.items())
 
@@ -111,18 +115,43 @@ def get_subtree(obj: Any, path: DefinitionPathLike = "$") -> Any:
     return cur
 
 
-def replace_subtree(obj: Any, path: DefinitionPathLike, replacement: Any) -> Any:
+def replace_subtree(
+        obj: Any,
+        path: DefinitionPathLike,
+        replacement: Any,
+        *,
+        semantic: bool = False,
+        _origins: Any = None) -> Any:
+    """Replace one structural occurrence, optionally preserving CDef named authority.
+
+    Args:
+        obj: Root value containing the selected occurrence.
+        path: Path to replace.
+        replacement: New value for the selected occurrence.
+        semantic: Emit prepared named selectors when a CDef ancestor becomes
+            soft. The default retains legacy call-spelling behavior.
+
+    Returns:
+        A copy-on-write root with only the selected occurrence replaced.
+    """
+
     norm = normalize_path(path)
     if len(norm) == 0:
         return replacement
     seg = norm[0]
     rest = GraphPath(norm.segments[1:])
     child = get_subtree(obj, GraphPath((seg,)))
-    new_child = replace_subtree(child, rest, replacement)
-    return _replace_child(obj, seg, new_child)
+    new_child = replace_subtree(
+        child, rest, replacement, semantic=semantic, _origins=_origins,
+    )
+    return _replace_child(obj, seg, new_child, semantic=semantic, _origins=_origins)
 
 
 def _get_child(obj: Any, seg: PathSegment) -> Any:
+    from ...links import DefLink
+
+    if isinstance(obj, DefLink) and obj.is_finalized:
+        return _get_child(obj.target, seg)
     if isinstance(obj, ConcreteDefinition):
         if isinstance(seg, Parameter):
             return obj.parameters[seg.name]
@@ -161,7 +190,22 @@ def _get_child(obj: Any, seg: PathSegment) -> Any:
     raise TypeError(f"Cannot traverse into {type(obj).__name__}.")
 
 
-def _replace_child(obj: Any, seg: PathSegment, child: Any) -> Any:
+def _replace_child(
+        obj: Any,
+        seg: PathSegment,
+        child: Any,
+        *,
+        semantic: bool = False,
+        _origins: Any = None) -> Any:
+    from ...links import DefLink
+
+    if isinstance(obj, DefLink) and obj.is_finalized:
+        return DefLink.finalized(
+            obj.kind,
+            _replace_child(
+                obj.target, seg, child, semantic=semantic, _origins=_origins,
+            ),
+        )
     if isinstance(obj, ConcreteDefinition):
         if not isinstance(seg, Parameter):
             raise QueryPathError(f"{seg!s} is not valid on a concrete definition; use Parameter.")
@@ -171,26 +215,12 @@ def _replace_child(obj: Any, seg: PathSegment, child: Any) -> Any:
 
         parameters = dict(obj.parameters)
         parameters[seg.name] = child
-        from ...canonical import (
-            CANONICAL_DICT_KINDS,
-            CANONICAL_SEQ_KINDS,
-            NodeKind,
-            iter_value_children,
-            node_kind,
-        )
+        if any(_contains_soft_definition(value) for value in parameters.values()):
+            if semantic:
+                from ...symbol import symbol_ref
 
-        def contains_soft_definition(value):
-            kind = node_kind(value)
-            if kind is NodeKind.DEFINITION:
-                return True
-            if kind in CANONICAL_SEQ_KINDS | CANONICAL_DICT_KINDS:
-                return any(contains_soft_definition(item) for _, item in iter_value_children(value))
-            return False
-
-        if any(contains_soft_definition(value) for value in parameters.values()):
-            # A soft replacement changes the exact root into a partial selector.
-            # Project only here, where query transformation intentionally leaves
-            # the import-free V2 identity surface.
+                cls = obj.cls if not isinstance(obj.cls, type) else symbol_ref(obj.cls)
+                return Definition._from_prepared_parameters(cls, parameters)
             from ...bound_args import project_bound_arguments
             from ...symbol import resolve_symbol
 
@@ -220,6 +250,8 @@ def _replace_child(obj: Any, seg: PathSegment, child: Any) -> Any:
             raise QueryPathError(f"{seg!s} is not valid on a definition.")
 
         if args is None:
+            if semantic:
+                return Definition._from_prepared_parameters(obj.cls, kwargs)
             return Definition(obj.cls, SKIP_ARGS, **kwargs)
         return Definition(obj.cls, *args, **kwargs)
 
@@ -268,15 +300,36 @@ def _replace_child(obj: Any, seg: PathSegment, child: Any) -> Any:
         return FrozenDict(out)
 
     if isinstance(obj, set):
-        return _replace_set_member(obj, seg, child, set)
+        return _replace_set_member(obj, seg, child, set, _origins=_origins)
 
     if isinstance(obj, frozenset) and not isinstance(obj, FrozenSet):
-        return _replace_set_member(obj, seg, child, frozenset)
+        return _replace_set_member(obj, seg, child, frozenset, _origins=_origins)
 
     if isinstance(obj, FrozenSet):
-        return _replace_set_member(obj, seg, child, FrozenSet)
+        return _replace_set_member(obj, seg, child, FrozenSet, _origins=_origins)
 
     raise QueryPathError(f"Cannot replace a child on {type(obj).__name__}.")
+
+
+def _contains_soft_definition(value: Any) -> bool:
+    from ...canonical import (
+        CANONICAL_DICT_KINDS,
+        CANONICAL_SEQ_KINDS,
+        NodeKind,
+        iter_value_children,
+        node_kind,
+    )
+
+    from ...links import DefLink
+
+    if isinstance(value, DefLink) and value.is_finalized:
+        return _contains_soft_definition(value.target)
+    kind = node_kind(value)
+    if kind is NodeKind.DEFINITION:
+        return True
+    if kind in CANONICAL_SEQ_KINDS | CANONICAL_DICT_KINDS:
+        return any(_contains_soft_definition(item) for _, item in iter_value_children(value))
+    return False
 
 
 def _mapping_key_from_segment(seg: PathSegment) -> Any:
@@ -287,7 +340,8 @@ def _mapping_key_from_segment(seg: PathSegment) -> Any:
     raise QueryPathError(f"{seg!s} is not valid on a mapping.")
 
 
-def _replace_set_member(obj: Iterable[Any], seg: PathSegment, child: Any, factory):
+def _replace_set_member(
+        obj: Iterable[Any], seg: PathSegment, child: Any, factory, *, _origins: Any = None):
     if not isinstance(seg, SetMember):
         raise QueryPathError("Replacing set members requires a stable SetMember path segment.")
     old = resolve_set_member(obj, seg)
@@ -299,4 +353,10 @@ def _replace_set_member(obj: Iterable[Any], seg: PathSegment, child: Any, factor
         raise QueryPathError("Replacement set member must be hashable.") from e
     if len(out) != len(set(obj)):
         raise QueryPathError("Replacement collapsed two distinct set members.")
-    return factory(out)
+    result = factory(out)
+    if _origins is not None:
+        _origins.record_set_members(
+            result,
+            [(child, old), *((value, value) for value in obj if value is not old)],
+        )
+    return result

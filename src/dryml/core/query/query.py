@@ -27,7 +27,6 @@ from .model import (
     QueryExplanation,
     QueryCardinalityError,
     QueryIndexError,
-    QueryIndexUnavailable,
     QueryVerifyBudgetExceeded,
     QueryProjection,
     SourceQueryPlan,
@@ -35,7 +34,7 @@ from .model import (
     RefreshPolicy,
     ResultUniverse,
 )
-from .path import DefinitionPath, DefinitionPathLike, QueryPathError, get_subtree, normalize_path, replace_subtree
+from .path import DefinitionPath, DefinitionPathLike, Kwarg, Parameter, QueryPathError, get_subtree, iter_value_edges, normalize_path, replace_subtree
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet
 from .selector_graph import compile_selector_graph
 from .utils import cdef_equal
@@ -82,6 +81,7 @@ class DefinitionQuery:
     occurrence_limit: int | None = None
     scan_policy_mode: str = "allow"
     max_verify_limit: int | None = None
+    _original_values: tuple[tuple[DefinitionPath, Any], ...] = ()
 
     @classmethod
     def from_source(
@@ -173,13 +173,64 @@ class DefinitionQuery:
         projected = categorical_definition(subtree, recursive=recursive)
         return replace(self, selector=replace_subtree(self.selector, norm, projected))
 
+    def _semantic_categorical(
+            self,
+            *,
+            path: DefinitionPathLike = "$",
+            recursive: bool = False,
+            drop=(),
+            drop_args: bool = False,
+            drop_class: bool = False) -> "DefinitionQuery":
+        """Internally project one query occurrence onto named constraints.
+
+        This U4 seam is intentionally private until the public categorical API
+        switches atomically. It preserves original source authority for later
+        ``exact`` and ``restore`` operations while using the import-free CDef
+        ancestor reconstruction required by prepared selectors.
+        """
+
+        if self.selector is None:
+            raise QueryPathError("Cannot apply semantic categorical projection to an unconstrained query.")
+        from ..categorical import _project_categorical_definition_with_origins
+
+        norm = normalize_path(path)
+        subtree = get_subtree(self.selector, norm)
+        projected, origins = _project_categorical_definition_with_origins(
+            subtree,
+            recursive=recursive,
+            drop=drop,
+            drop_args=drop_args,
+            drop_class=drop_class,
+        )
+        selector = replace_subtree(
+            self.selector,
+            norm,
+            projected,
+            semantic=True,
+            _origins=origins,
+        )
+        previous_values = dict(self._original_values)
+        original_values = {}
+        for selector_path, (source_path, source_value) in _projection_origin_paths(
+                selector, self.selector, origins).items():
+            original_values[selector_path] = (
+                previous_values[source_path]
+                if source_path is not None and source_path in previous_values
+                else source_value
+            )
+        return replace(
+            self,
+            selector=selector,
+            _original_values=tuple(original_values.items()),
+        )
+
     def restore(self, *, path: DefinitionPathLike = "$") -> "DefinitionQuery":
         if self.original is None or self.selector is None:
             raise QueryPathError("Cannot restore() on an unconstrained query.")
         norm = normalize_path(path)
-        subtree = get_subtree(self.original, self._original_path(norm))
+        subtree = self._original_value(norm)
         replacement = deepcopy(subtree) if isinstance(subtree, Definition) else subtree
-        return replace(self, selector=replace_subtree(self.selector, norm, replacement))
+        return replace(self, selector=replace_subtree(self.selector, norm, replacement, semantic=True))
 
     def exact(
             self,
@@ -192,12 +243,22 @@ class DefinitionQuery:
         if definition is None:
             if self.original is None:
                 raise QueryPathError(f"Cannot infer exact subtree at {norm!s}; query has no original source.")
-            definition = get_subtree(self.original, self._original_path(norm))
+            definition = self._original_value(norm)
         if isinstance(definition, Object):
             definition = definition.definition
         if not isinstance(definition, ConcreteDefinition):
             raise TypeError(f"Exact constraint at {norm!s} requires a ConcreteDefinition, got {type(definition).__name__}.")
-        return replace(self, selector=replace_subtree(self.selector, norm, definition))
+        return replace(self, selector=replace_subtree(self.selector, norm, definition, semantic=True))
+
+    def _original_value(self, path: DefinitionPath) -> Any:
+        """Return the original authority retained for one selector occurrence."""
+
+        original_values = dict(self._original_values)
+        if path in original_values:
+            return original_values[path]
+        if self.original is None:
+            raise QueryPathError("Cannot resolve an original value without a source query.")
+        return get_subtree(self.original, self._original_path(path))
 
     def _original_path(self, path: DefinitionPath) -> DefinitionPath:
         """Translate selector path segments to the original's V2 boundaries.
@@ -796,6 +857,7 @@ def _resolve_query_state_selectors(source, repo):
     from ..reference_values import StateSelectorRef
 
     memo = {}
+    active: set[int] = set()
 
     def visit(value):
         if isinstance(value, StateSelectorRef):
@@ -809,24 +871,40 @@ def _resolve_query_state_selectors(source, repo):
                     raise ValueError("StateSelectorRef query resolution returned a StateRef outside its ObjectRef scope.")
                 memo[key] = resolved
             return memo[key]
-        if isinstance(value, DefLink):
-            target = visit(value.target)
-            return target if value.kind is EdgeKind.MATERIALIZE else DefLink.finalized(value.kind, target)
-        if isinstance(value, Definition):
-            args = (SKIP_ARGS,) if value.args is None else tuple(visit(item) for item in value.args)
-            prefix = () if value.cls is None else (value.cls, *args)
-            if value.cls is None:
-                return Definition(*args, **{key: visit(item) for key, item in value.kwargs.items()})
-            return Definition(*prefix, **{key: visit(item) for key, item in value.kwargs.items()})
-        if isinstance(value, (dict, FrozenDict)):
-            return type(value)({key: visit(item) for key, item in value.items()})
-        if isinstance(value, (list, FrozenList)):
-            return type(value)(visit(item) for item in value)
-        if isinstance(value, (tuple, FrozenTuple)):
-            return type(value)(visit(item) for item in value)
-        if isinstance(value, (set, FrozenSet)):
-            return type(value)(visit(item) for item in value)
-        return value
+        if not isinstance(value, (DefLink, Definition, dict, FrozenDict, list,
+                                  FrozenList, tuple, FrozenTuple, set,
+                                  FrozenSet)):
+            return value
+        key = id(value)
+        if key in memo:
+            return memo[key]
+        if key in active:
+            raise ValueError("Cycle while resolving query state selectors.")
+        active.add(key)
+        try:
+            if isinstance(value, DefLink):
+                target = visit(value.target)
+                result = target if value.kind is EdgeKind.MATERIALIZE else DefLink.finalized(value.kind, target)
+            elif isinstance(value, Definition):
+                args = (SKIP_ARGS,) if value.args is None else tuple(visit(item) for item in value.args)
+                kwargs = {name: visit(item) for name, item in value.kwargs.items()}
+                result = (
+                    Definition(*args, **kwargs)
+                    if value.cls is None
+                    else Definition(value.cls, *args, **kwargs)
+                )
+            elif isinstance(value, (dict, FrozenDict)):
+                result = type(value)({name: visit(item) for name, item in value.items()})
+            elif isinstance(value, (list, FrozenList, tuple, FrozenTuple)):
+                result = type(value)(visit(item) for item in value)
+            else:
+                result = type(value)(visit(item) for item in value)
+                if len(result) != len(value):
+                    raise ValueError("Resolving query state selectors collapsed set members.")
+            memo[key] = result
+            return result
+        finally:
+            active.remove(key)
 
     return visit(source)
 
@@ -928,6 +1006,18 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
                         continue
                     return False
                 if not _query_match(child, target.parameters[name], strict=strict, class_match=class_match):
+                    return False
+            return True
+        from ..categorical import _is_prepared_selector_definition, _semantic_parameters
+
+        if _is_prepared_selector_definition(selector):
+            target_parameters = _semantic_parameters(target)
+            for name, child in selector.parameters.items():
+                if name not in target_parameters:
+                    if isinstance(child, Par) and child.matches(None, present=False):
+                        continue
+                    return False
+                if not _query_match(child, target_parameters[name], strict=strict, class_match=class_match):
                     return False
             return True
         if selector.args is not None:
@@ -1056,3 +1146,121 @@ def _unordered_match(selector_values, target_values, edge_predicate) -> bool:
         if not augment(sel_idx, set()):
             return False
     return True
+
+
+def _projection_origin_paths(
+        projected: Any,
+        source: Any,
+        origins: Any,
+) -> dict[DefinitionPath, tuple[DefinitionPath | None, Any]]:
+    """Map each projected occurrence to its exact preceding source occurrence.
+
+    The map follows the transformation itself instead of matching values. This
+    keeps distinct aliases, interned scalars, and changed set-member addresses
+    separate while a query composes multiple projections.
+    """
+
+    from ..categorical import _is_prepared_selector_definition, _semantic_parameters
+
+    paths: dict[DefinitionPath, tuple[DefinitionPath | None, Any]] = {}
+    active: set[tuple[int, int]] = set()
+
+    def source_parameter_path(value: Any, name: str) -> DefinitionPath | None:
+        if isinstance(value, ConcreteDefinition):
+            return DefinitionPath((Parameter(name),))
+        if _is_prepared_selector_definition(value):
+            return DefinitionPath((Kwarg(name),))
+        # Authored calls can synthesize positional and variadic semantic
+        # buckets, so only the value itself is authoritative at this boundary.
+        return None
+
+    def source_edge_path(value: Any, child: Any) -> DefinitionPath:
+        matches = [
+            edge.segment for edge in iter_value_edges(value)
+            if edge.value is child
+        ]
+        if len(matches) != 1:
+            raise QueryPathError(
+                "Semantic projection lost an exact source occurrence correspondence."
+            )
+        return DefinitionPath((matches[0],))
+
+    def visit(
+            projected_value: Any,
+            source_value: Any,
+            projected_path: DefinitionPath,
+            source_path: DefinitionPath | None) -> None:
+        paths[projected_path] = (source_path, source_value)
+        projected_edges = iter_value_edges(projected_value)
+        if not projected_edges:
+            return
+        key = (id(projected_value), id(source_value))
+        if key in active:
+            raise QueryPathError("Cycle while recording semantic query projection origins.")
+        active.add(key)
+        try:
+            if _is_prepared_selector_definition(projected_value):
+                if not isinstance(source_value, (Definition, ConcreteDefinition)):
+                    raise QueryPathError(
+                        "Semantic projection has no definition source for prepared parameters."
+                    )
+                source_parameters = _semantic_parameters(source_value)
+                for edge in projected_edges:
+                    if not isinstance(edge.segment, Kwarg) or edge.segment.name not in source_parameters:
+                        raise QueryPathError(
+                            "Semantic projection lost a prepared parameter source."
+                        )
+                    relative_source_path = source_parameter_path(
+                        source_value, edge.segment.name,
+                    )
+                    child_source_path = (
+                        None if source_path is None or relative_source_path is None
+                        else source_path.join(relative_source_path)
+                    )
+                    visit(
+                        edge.value,
+                        source_parameters[edge.segment.name],
+                        projected_path.child(edge.segment),
+                        child_source_path,
+                    )
+                return
+
+            member_origins = origins.set_members.get(id(projected_value))
+            if member_origins is not None:
+                for edge in projected_edges:
+                    matches = [
+                        source_member
+                        for projected_member, source_member in member_origins
+                        if projected_member is edge.value
+                    ]
+                    if len(matches) != 1:
+                        raise QueryPathError(
+                            "Semantic projection lost a transformed set-member correspondence."
+                        )
+                    relative_source_path = source_edge_path(source_value, matches[0])
+                    visit(
+                        edge.value,
+                        matches[0],
+                        projected_path.child(edge.segment),
+                        None if source_path is None else source_path.join(relative_source_path),
+                    )
+                return
+
+            source_edges = {edge.segment: edge for edge in iter_value_edges(source_value)}
+            for edge in projected_edges:
+                source_edge = source_edges.get(edge.segment)
+                if source_edge is None:
+                    raise QueryPathError(
+                        "Semantic projection changed an occurrence without recording its source."
+                    )
+                visit(
+                    edge.value,
+                    source_edge.value,
+                    projected_path.child(edge.segment),
+                    None if source_path is None else source_path.child(edge.segment),
+                )
+        finally:
+            active.remove(key)
+
+    visit(projected, source, DefinitionPath(), DefinitionPath())
+    return paths

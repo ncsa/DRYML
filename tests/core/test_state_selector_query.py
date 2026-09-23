@@ -22,6 +22,14 @@ class SelectorQueryConsumer(Serializable):
         pass
 
 
+class SelectorQueryPair(Serializable):
+    def __init__(self, values):
+        self.values = values
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        pass
+
+
 def test_query_resolves_soft_state_selector_before_index_access(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     state = repo.save_object(SelectorQueryValue(1, repo=repo))
@@ -59,3 +67,16 @@ def test_query_resolves_one_reused_soft_selector_once_before_index_access(tmp_pa
 
     assert calls == 1
     assert tuple(query.selector.parameters["selected"]) == (state, state)
+
+
+def test_u4_query_finalization_preserves_shared_definition_occurrences(tmp_path):
+    """State-selector resolution retains shared selector topology by identity."""
+    repo = Repo(DirStore(tmp_path / "store"))
+    state = repo.save_object(SelectorQueryValue(1, repo=repo))
+    repo.set_state_alias("best", state)
+    child = Definition(SelectorQueryConsumer, state.object.state("best"))
+
+    query = repo.query(Definition(SelectorQueryPair, [child, child]))
+    children = query.selector.parameters["values"]
+
+    assert children[0] is children[1]

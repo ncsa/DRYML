@@ -50,6 +50,27 @@ class FederationPair(Object):
         self.name = name
 
 
+class FederationVariadic(Object):
+    def __init__(self, first, /, *items, label="default", **options):
+        super().__init__()
+        self.first = first
+        self.items = items
+        self.label = label
+        self.options = options
+
+
+def _u4_semantic_variadic_selector(*, rank=None):
+    from dryml.core.categorical import project_categorical_definition
+
+    options = {"enabled": True}
+    if rank is not None:
+        options["rank"] = rank
+    return project_categorical_definition(
+        Definition(FederationVariadic, "wanted", "tail", label="discarded", **options),
+        drop=("label",),
+    )
+
+
 def test_repo_federation_bindings_follow_store_priority(tmp_path):
     store1 = DirStore(tmp_path / "store1", query_index="memory")
     store2 = DirStore(tmp_path / "store2", query_index="none")
@@ -128,6 +149,68 @@ def test_index_status_can_filter_one_store(tmp_path):
 
     assert len(statuses) == 1
     assert statuses[0].store_key == store2.catalog_key()
+
+
+def test_u4_semantic_selector_agrees_across_sqlite_terminals_and_index_rebuild(tmp_path, monkeypatch):
+    """Prepared variadic selectors retain the direct oracle through query routes."""
+    from dryml.core.query.query import _query_match
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    wanted = FederationVariadic("wanted", "tail", label="kept", enabled=True, rank=1, repo=repo)
+    other = FederationVariadic("other", "tail", label="kept", enabled=True, repo=repo)
+    paged_match = FederationVariadic("wanted", "tail", label="other", enabled=True, rank=2, repo=repo)
+    owner = FederationParent(wanted, name="owner", repo=repo)
+    selector = _u4_semantic_variadic_selector(rank=1)
+    oracle = tuple(
+        cdef for cdef in (wanted.definition, other.definition)
+        if _query_match(selector, cdef, strict=False, class_match="selector")
+    )
+
+    assert repo.index_status(store=store)[0].state == "missing"
+    repo.save_object(wanted)
+    repo.save_object(other)
+    repo.save_object(paged_match)
+    repo.save_object(owner)
+    assert repo.index_status(store=store)[0].state == "ready"
+
+    query = repo.query(selector).stored()
+    assert tuple(query.defs()) == oracle
+    assert tuple(query.execute()) == oracle
+    assert query.count() == len(oracle)
+    assert query.exists()
+    assert query.one() == query.one_or_none() == wanted.definition
+    assert tuple(query.nested().definitions().defs()) == oracle
+    assert query.nested().owners().one() == owner.definition
+    assert query.nested().one().definition == wanted.definition
+    assert tuple(query.defs().refine(selector)) == oracle
+
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_PAGE_SIZE", 1)
+    paged_selector = _u4_semantic_variadic_selector()
+    paged = repo.query(paged_selector).stored().defs()
+    assert isinstance(paged, QueryBackedDefinitionResultSet)
+    assert set(paged) == {wanted.definition, paged_match.definition}
+
+    store.mark_query_index_dirty()
+    assert repo.index_status(store=store)[0].state == "dirty"
+    store.rebuild_query_index()
+    assert repo.index_status(store=store)[0].state == "ready"
+    rebuilt = tuple(repo.query(selector).stored().defs())
+    assert {cdef.stable_hash() for cdef in rebuilt} == {cdef.stable_hash() for cdef in oracle}
+    assert all(_query_match(selector, cdef, strict=False, class_match="selector") for cdef in rebuilt)
+
+
+def test_u4_semantic_selector_disabled_index_uses_explicit_authoritative_scan(tmp_path):
+    """An explicit Store scan verifies semantic selectors without an index."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(stores=store)
+    wanted = FederationVariadic("wanted", "tail", enabled=True, repo=repo)
+    repo.save_object(wanted)
+
+    selector = _u4_semantic_variadic_selector()
+    assert repo.index_status(store=store)[0].state == "disabled"
+    assert tuple(repo.query(selector).stored().refresh(True).defs()) == (wanted.definition,)
 
 
 def test_save_registration_updates_sqlite_store_index(tmp_path):

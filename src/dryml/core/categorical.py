@@ -64,6 +64,58 @@ def project_categorical_definition(
         classes, or mutates source definitions.
     """
 
+    return _project_categorical_definition_with_origins(
+        defn,
+        recursive=recursive,
+        memo=memo,
+        drop=drop,
+        drop_args=drop_args,
+        drop_class=drop_class,
+    )[0]
+
+
+def _project_categorical_definition_with_origins(
+        defn: Any,
+        recursive: bool = True,
+        memo: dict[Any, Any] | None = None,
+        *,
+        drop: Sequence[str] = (),
+        drop_args: bool = False,
+        drop_class: bool = False,
+) -> tuple[Any, "_ProjectionOrigins"]:
+    """Project a definition and retain private source values for query composition.
+
+    The returned records exist only while an immutable query transformation is
+    composed. They neither alter selector syntax nor become persisted identity.
+    """
+
+    defn, names = _validated_projection_input(
+        defn,
+        recursive=recursive,
+        drop=drop,
+        drop_args=drop_args,
+        drop_class=drop_class,
+    )
+    return _project_categorical_definition(
+        defn,
+        recursive=recursive,
+        names=names,
+        drop_args=drop_args,
+        drop_class=drop_class,
+        memo=memo,
+    )
+
+
+def _validated_projection_input(
+        defn: Any,
+        *,
+        recursive: bool,
+        drop: Sequence[str],
+        drop_args: bool,
+        drop_class: bool,
+) -> tuple[Any, frozenset[str]]:
+    """Validate controls and return the definition selected for projection."""
+
     from .definition import ConcreteDefinition, Definition
     from .object import Object
 
@@ -77,8 +129,6 @@ def project_categorical_definition(
             "Categorical projection requires Object, Definition, or "
             f"ConcreteDefinition; got {type(defn).__name__}."
         )
-
-    # Name validation observes the original graph before any output nodes exist.
     if names:
         encountered = _collect_parameter_names(defn, recursive=recursive)
         missing = names - encountered
@@ -87,16 +137,29 @@ def project_categorical_definition(
                 "Categorical projection names were not found in the selected "
                 f"traversal: {sorted(missing)!r}."
             )
+    return defn, names
 
+
+def _project_categorical_definition(
+        defn: Any,
+        *,
+        recursive: bool,
+        names: frozenset[str],
+        drop_args: bool,
+        drop_class: bool,
+        memo: dict[Any, Any] | None,
+) -> tuple[Any, _ProjectionOrigins]:
     if memo is None:
         memo = {}
-    return _Projection(
+    projection = _Projection(
         recursive=recursive,
         names=names,
         drop_args=drop_args,
         drop_class=drop_class,
         memo=memo,
-    ).transform(defn, selected_root=True)
+    )
+    result = projection.transform(defn, selected_root=True)
+    return result, projection.origins
 
 
 def _validate_controls(
@@ -157,6 +220,18 @@ def _semantic_parameters(value: Any):
     return bind_partial_arguments(live_cls, args, value.kwargs).as_frozen_dict()
 
 
+def _is_prepared_selector_definition(value: Any) -> bool:
+    """Return whether a Definition stores named selector parameters directly."""
+
+    from .definition import Definition
+
+    return (
+        isinstance(value, Definition)
+        and value.skip_args
+        and (value.cls is None or isinstance(value.cls, (ImportRef, SourceSpec)))
+    )
+
+
 def _collect_parameter_names(root: Any, *, recursive: bool) -> set[str]:
     names: set[str] = set()
     seen: set[tuple[str, Any]] = set()
@@ -209,6 +284,19 @@ def _value_children(value: Any):
     return iter_value_children(value)
 
 
+class _ProjectionOrigins:
+    """Private exact source correspondence for transformed unordered members."""
+
+    def __init__(self) -> None:
+        self.set_members: dict[int, tuple[tuple[Any, Any], ...]] = {}
+
+    def record_set_members(
+            self, result: Any, members: list[tuple[Any, Any]]) -> None:
+        """Record output-to-source members for one transformed set occurrence."""
+
+        self.set_members[id(result)] = tuple(members)
+
+
 class _Projection:
     """One identity-preserving, cycle-aware categorical graph projection."""
 
@@ -226,11 +314,12 @@ class _Projection:
         self.drop_args = drop_args
         self.drop_class = drop_class
         self.memo = memo
+        self.origins = _ProjectionOrigins()
         self.active: set[tuple[str, Any]] = set()
         self.active_values: set[int] = set()
 
     def transform(self, value: Any, *, selected_root: bool = False) -> Any:
-        from .definition import Definition, SKIP_ARGS
+        from .definition import Definition
         from .links import DefLink
 
         key = _definition_key(value)
@@ -241,7 +330,8 @@ class _Projection:
                 return self.memo[key]
             self.active.add(key)
             try:
-                parameters = {} if self.drop_args else dict(_semantic_parameters(value).items())
+                source_parameters = {} if self.drop_args else _semantic_parameters(value)
+                parameters = dict(source_parameters.items())
                 if self.names:
                     for name in self.names:
                         parameters.pop(name, None)
@@ -250,10 +340,7 @@ class _Projection:
                         name: self.transform(child) for name, child in parameters.items()
                     }
                 cls = None if self.drop_class else _selector_class(value.cls)
-                result = Definition(
-                    *((SKIP_ARGS,) if cls is None else (cls, SKIP_ARGS)),
-                    **parameters,
-                )
+                result = Definition._from_prepared_parameters(cls, parameters)
                 self.memo[key] = result
                 return result
             finally:
@@ -270,16 +357,21 @@ class _Projection:
                 raise CycleError("categorical value projection")
             self.active_values.add(id(value))
             try:
-                result = transform_container(
-                    value,
-                    lambda _, child: self.transform(child),
-                    target="same",
-                )
+                members: list[tuple[Any, Any]] = []
+
+                def transform_child(_, child):
+                    transformed = self.transform(child)
+                    members.append((transformed, child))
+                    return transformed
+
+                result = transform_container(value, transform_child, target="same")
                 if kind in {NodeKind.SET, NodeKind.FROZEN_SET} and len(result) != len(value):
                     raise ValueError(
                         "Categorical projection would collapse set cardinality."
                     )
                 self.memo[key] = result
+                if kind in {NodeKind.SET, NodeKind.FROZEN_SET}:
+                    self.origins.record_set_members(result, members)
                 return result
             finally:
                 self.active_values.remove(id(value))
