@@ -4,6 +4,8 @@ import builtins
 import os
 import sys
 
+import pytest
+
 pytest_plugins = ("tests.timing_plugin",)
 
 try:
@@ -14,6 +16,59 @@ except ImportError:
 else:
     install()
     ics.configureOutput(frame_filters=[_pwe])
+
+
+@pytest.fixture
+def synthetic_environment_record(monkeypatch):
+    """Return policy evidence and reject installed-distribution inventory reads."""
+
+    from dryml.environments import (
+        DrymlRuntimeRecord,
+        EnvironmentRecord,
+        PackageRecord,
+        PlatformRecord,
+        PythonRecord,
+    )
+    from dryml.environments import introspection
+
+    inventory_reads = []
+
+    def reject_inventory(*_args, **_kwargs):
+        inventory_reads.append(True)
+        raise AssertionError(
+            "policy-only test must not inspect installed distributions"
+        )
+
+    monkeypatch.setattr(introspection.metadata, "distributions", reject_inventory)
+    yield EnvironmentRecord(
+        python=PythonRecord(
+            version=".".join(str(value) for value in sys.version_info[:3]),
+            implementation=sys.implementation.name,
+            executable=sys.executable,
+            prefix=sys.prefix,
+            base_prefix=getattr(sys, "base_prefix", sys.prefix),
+        ),
+        platform=PlatformRecord(
+            system="test",
+            release="1",
+            version="1",
+            machine="test",
+            platform="test-policy-environment",
+        ),
+        distributions={
+            "dryml": PackageRecord("dryml", "0.3.0"),
+            "policy-fixture": PackageRecord("policy-fixture", "1.0.0"),
+        },
+        dryml=DrymlRuntimeRecord(
+            version="0.3.0",
+            execution_protocol="test",
+            schema_versions={"environment_record": "1.1"},
+            features=("dryml.environments.v1.1",),
+        ),
+        kind="test",
+    )
+    assert not inventory_reads, "policy-only test attempted host inventory"
+
 
 def pytest_sessionstart(session):
     if os.environ.get("DRYML_TEST_BOOTSTRAP_CONTEXTS") != "1":

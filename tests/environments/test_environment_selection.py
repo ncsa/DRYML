@@ -40,11 +40,10 @@ def test_current_selection_captures_once_without_reinterpreting_selector(
 
 
 def test_current_launch_path_uses_the_observed_snapshot_not_a_later_sys_value(
-    monkeypatch,
+    monkeypatch, synthetic_environment_record,
 ):
     """Current identity and launch command use one coordinator observation."""
-    observed = resolve_environment_spec(CurrentEnvironmentSpec()).record
-    assert observed is not None
+    observed = synthetic_environment_record
 
     def observe_then_mutate(_spec):
         """Model an ordinary interpreter-global change during resolution."""
@@ -62,11 +61,10 @@ def test_current_launch_path_uses_the_observed_snapshot_not_a_later_sys_value(
 
 
 def test_explicit_python_keeps_symlink_launch_spelling_and_prefix_evidence(
-    monkeypatch,
+    monkeypatch, synthetic_environment_record,
 ):
     """A venv symlink launches as supplied, not as its base Python."""
-    observed = resolve_environment_spec(CurrentEnvironmentSpec()).record
-    assert observed is not None
+    observed = synthetic_environment_record
     monkeypatch.setattr(
         "dryml.environments.selection._probe_record",
         lambda _spec: observed,
@@ -83,10 +81,9 @@ def test_explicit_python_keeps_symlink_launch_spelling_and_prefix_evidence(
 
 
 def test_relative_python_path_becomes_absolute_without_symlink_resolution(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, synthetic_environment_record):
     """Exact launch paths become absolute while retaining the symlink name."""
-    observed = resolve_environment_spec(CurrentEnvironmentSpec()).record
-    assert observed is not None
+    observed = synthetic_environment_record
     monkeypatch.setattr(
         "dryml.environments.selection._probe_record", lambda _spec: observed
     )
@@ -109,10 +106,11 @@ def test_conda_name_requires_exactly_one_existing_prefix(inventory):
         )
 
 
-def test_conda_name_freezes_one_prefix_and_conda_run_form(monkeypatch):
+def test_conda_name_freezes_one_prefix_and_conda_run_form(
+    monkeypatch, synthetic_environment_record,
+):
     """Name resolution retains the resolved prefix and requested launcher."""
-    observed = resolve_environment_spec(CurrentEnvironmentSpec()).record
-    assert observed is not None
+    observed = synthetic_environment_record
     monkeypatch.setattr(
         "dryml.environments.selection._probe_record", lambda _spec: observed
     )
@@ -136,10 +134,11 @@ def test_conda_name_freezes_one_prefix_and_conda_run_form(monkeypatch):
     )
 
 
-def test_default_conda_inventory_uses_its_existing_bounded_tuple(monkeypatch):
+def test_default_conda_inventory_uses_its_existing_bounded_tuple(
+    monkeypatch, synthetic_environment_record,
+):
     """Default Conda discovery does not re-copy its bounded inventory."""
 
-    observed = resolve_environment_spec(CurrentEnvironmentSpec()).record
     monkeypatch.setattr(
         "dryml.environments.selection._conda_prefixes",
         lambda _executable: ("/envs/selected",),
@@ -151,7 +150,8 @@ def test_default_conda_inventory_uses_its_existing_bounded_tuple(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "dryml.environments.selection._probe_record", lambda _spec: observed
+        "dryml.environments.selection._probe_record",
+        lambda _spec: synthetic_environment_record,
     )
 
     selection = resolve_environment_spec(CondaEnvironmentSpec(name="selected"))
@@ -159,8 +159,14 @@ def test_default_conda_inventory_uses_its_existing_bounded_tuple(monkeypatch):
     assert selection.resolved_prefix == "/envs/selected"
 
 
-def test_selection_comparison_rejects_identity_but_ignores_advisory_data():
+def test_selection_comparison_rejects_identity_but_ignores_advisory_data(
+    monkeypatch, synthetic_environment_record,
+):
     """Exact identity remains separate from record labels and details."""
+    monkeypatch.setattr(
+        "dryml.environments.selection._probe_record",
+        lambda _spec: synthetic_environment_record,
+    )
     selection = resolve_environment_spec(CurrentEnvironmentSpec())
     advisory = replace(
         selection.record,
@@ -178,13 +184,12 @@ def test_selection_comparison_rejects_identity_but_ignores_advisory_data():
 
 
 def test_exact_selection_probe_omits_ambient_environment_except_pythonpath(
-    monkeypatch,
+    monkeypatch, synthetic_environment_record,
 ):
     """Exact probes pass only launch controls and approved ``PYTHONPATH``."""
 
     probe_module = importlib.import_module("dryml.environments.probe")
-    observed = resolve_environment_spec(CurrentEnvironmentSpec()).record
-    assert observed is not None
+    observed = synthetic_environment_record
     captured = {}
 
     def fake_run(command, **kwargs):
@@ -219,12 +224,12 @@ def test_exact_selection_probe_omits_ambient_environment_except_pythonpath(
     }
 
 
-def test_named_conda_inventory_omits_ambient_environment(monkeypatch):
+def test_named_conda_inventory_omits_ambient_environment(
+    monkeypatch, synthetic_environment_record,
+):
     """Named Conda inventory starts from the same minimal environment."""
 
     selection_module = importlib.import_module("dryml.environments.selection")
-    observed = resolve_environment_spec(CurrentEnvironmentSpec()).record
-    assert observed is not None
     captured = {}
 
     class FakeProcess:
@@ -246,7 +251,7 @@ def test_named_conda_inventory_omits_ambient_environment(monkeypatch):
     monkeypatch.setattr(
         selection_module,
         "_probe_record",
-        lambda _spec: observed,
+        lambda _spec: synthetic_environment_record,
     )
     monkeypatch.setattr(selection_module.subprocess, "Popen", fake_popen)
 
@@ -264,16 +269,16 @@ def test_named_conda_inventory_omits_ambient_environment(monkeypatch):
     assert captured["env"]["CONDA_CONTROL"] == "kept"
 
 
-def test_resolved_selection_repr_omits_private_launch_values(monkeypatch):
+def test_resolved_selection_repr_omits_private_launch_values(
+    monkeypatch, synthetic_environment_record,
+):
     """Selection carriers remain usable without exposing nested secrets."""
 
     from dryml.execute.models import PayloadSpool, SubmittedCall
 
-    observed = resolve_environment_spec(CurrentEnvironmentSpec()).record
-    assert observed is not None
     monkeypatch.setattr(
         "dryml.environments.selection._probe_record",
-        lambda _spec: observed,
+        lambda _spec: synthetic_environment_record,
     )
     private_path = "/private/selection/python"
     secret = "resolved-selection-secret"

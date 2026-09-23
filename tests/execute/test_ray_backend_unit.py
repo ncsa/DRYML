@@ -134,12 +134,17 @@ def test_ray_runtime_environment_honors_selector_pythonpath_policy():
 
 
 def test_ray_exact_current_pin_stays_lazy_and_conda_run_fails_before_submission(  # noqa: E501
+    monkeypatch, synthetic_environment_record,
 ):
     """
     Ray admits supported pinned forms or rejects launcher semantics without SDK
     work.
     """
     backend = RayBackendConfig().create_backend()
+    monkeypatch.setattr(
+        "dryml.environments.selection._probe_record",
+        lambda _spec: synthetic_environment_record,
+    )
     current = resolve_environment_spec(CurrentEnvironmentSpec())
 
     candidate, runtime = backend._select_environment(
@@ -160,10 +165,14 @@ def test_ray_exact_current_pin_stays_lazy_and_conda_run_fails_before_submission(
 
 
 def test_ray_exact_pin_world_plan_is_keyed_to_its_selected_candidate(
-        monkeypatch):
+        monkeypatch, synthetic_environment_record):
     """
     Keep exact selector and logical-world feasibility evidence associated.
     """
+    monkeypatch.setattr(
+        "dryml.environments.selection._probe_record",
+        lambda _spec: synthetic_environment_record,
+    )
     selection = resolve_environment_spec(CurrentEnvironmentSpec())
     backend = RayBackendConfig(
         automatic_environment_discovery=False,
@@ -343,10 +352,14 @@ def test_fake_ray_rejects_old_v3_worker_before_go_or_payload():
 @pytest.mark.parametrize(
     "mismatch", ("missing", "executable", "prefix", "base_prefix", "software"))
 def test_fake_ray_selection_handshake_rejects_before_go_payload_or_grant(
-        monkeypatch, mismatch):
+        monkeypatch, mismatch, synthetic_environment_record):
     """
     Reject absent or incompatible exact-pin evidence without authorizing work.
     """
+    monkeypatch.setattr(
+        "dryml.environments.selection._probe_record",
+        lambda _spec: synthetic_environment_record,
+    )
     selection = resolve_environment_spec(CurrentEnvironmentSpec())
     backend = RayBackendConfig().create_backend()
     descriptor = BootstrapDescriptor(

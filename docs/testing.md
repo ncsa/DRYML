@@ -22,6 +22,9 @@ Run smoke plus medium tests:
 ./tests.sh medium
 ```
 
+The `medium` suite already includes `smoke`; use `medium` alone rather than
+running both as a default local sequence.
+
 Run heavy tests only:
 
 ```bash
@@ -39,6 +42,33 @@ full runs execute process-sensitive session/runtime/orchestrator/dispatch tests
 in a fresh phase, other smoke/medium files in a second phase, and heavy files
 last. This keeps intentional late-import and terminal-publication tests
 isolated while combining coverage through `pytest-cov` append mode.
+
+For a focused run, put test paths or node IDs first and disable coverage
+explicitly when it is not needed:
+
+```bash
+./tests.sh tests/core/test_repo_save_load.py --no-cov -x
+```
+
+Named `smoke`, `medium`, `heavy`, `full`, and `profile` suites accept pytest
+options but reject explicit test selections; put focused paths first instead.
+Options such as `-k` and `-m` further restrict each named suite and cannot
+broaden its speed-tier selection.
+
+## Policy Test Evidence
+
+Policy-only tests can request the explicit `synthetic_environment_record`
+fixture instead of scanning installed distributions. It supplies a small
+controlled package inventory with portable interpreter paths and rejects real
+inventory access for the duration of that test, including attempts caught by
+the code under test. It is not an autouse fixture: current-environment
+inspection, actual worker probes, and integration tests retain real observation
+where observation itself is the contract being verified.
+
+Test-tier administration shares one maintained-node collection per pytest
+session. Both stale-node and intentional-tier checks use that snapshot;
+collection failures still fail the checks. This does not cache the standalone
+tier-management CLI across calls or change tier membership.
 
 ## Speed Tiers
 
@@ -114,7 +144,15 @@ When only newly added tests need node-tier timings, run:
 ./tests.sh profile --unknown-only
 ```
 
-Unknown means a collected test nodeid is absent from `tests/test_tiers.json` `node_tiers`. Path tiers, category tiers, and default tiers still decide which profile phase collects the test, but only missing nodeids are executed and written to the timing output. This is the preferred workflow after adding tests to an existing file because the new tests inherit enough tier information to be collected, then get explicit node timings without rerunning all known tests.
+Unknown means a collected test nodeid is absent from `tests/test_tiers.json`
+`node_tiers`. It does not mean recently added: the filter excludes only IDs
+known specifically to `node_tiers`. Path tiers, category tiers, and default
+tiers still decide which profile phase collects the test, but they do not make
+a node known for this filter. Only missing nodeids are executed and written to
+the timing output. This is the preferred workflow after adding tests to an
+existing file because the new tests inherit enough tier information to be
+collected, then get explicit node timings without rerunning all node-tier-known
+tests.
 
 The default thresholds are:
 
@@ -134,7 +172,7 @@ When adding tests:
 2. Prefer small pure tests that can live in `smoke`.
 3. Put integration, subprocess, SQLite, locking, or import-safety tests in `medium` unless they are clearly heavyweight.
 4. Keep framework imports, training, dataset-backed tests, and multi-framework tests in `heavy`.
-5. Run `./tests.sh smoke` first, then `./tests.sh medium`, then relevant `heavy` tests.
+5. Run `./tests.sh medium` (which includes smoke), then relevant `heavy` tests.
 6. Run `./tests.sh profile --unknown-only` to populate node-tier timings for new tests.
 7. Keep only classifications for the tests added or changed by the current work;
    remove profiler spillover for unrelated existing nodes before review.

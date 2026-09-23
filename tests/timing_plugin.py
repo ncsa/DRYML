@@ -38,6 +38,12 @@ def pytest_addoption(parser):
         action="store_true",
         help="When profiling, run only tests missing from baseline node_tiers.",
     )
+    group.addoption(
+        "--dryml-runner-tiers",
+        action="store",
+        default=None,
+        help="Internal tests.sh tier constraint, as a comma-separated list.",
+    )
 
 
 def pytest_configure(config):
@@ -56,6 +62,9 @@ def pytest_configure(config):
 
 def pytest_collection_modifyitems(config, items):
     baseline = getattr(config, "_dryml_tier_baseline", {})
+    runner_tiers = _runner_tiers(config)
+    selected = []
+    deselected = []
     for item in items:
         category = category_for_nodeid(item.nodeid)
         tier = tier_for_item(item, baseline)
@@ -64,13 +73,18 @@ def pytest_collection_modifyitems(config, items):
         if category:
             item.add_marker(pytest.mark.category(category))
             item.add_marker(f"category_{category}")
+        if runner_tiers is None or tier in runner_tiers:
+            selected.append(item)
+        else:
+            deselected.append(item)
+    items[:] = selected
     if _unknown_only_enabled(config):
         known = set(baseline.get("node_tiers", {}))
         selected = [item for item in items if item.nodeid not in known]
-        deselected = [item for item in items if item.nodeid in known]
-        if deselected:
-            config.hook.pytest_deselected(items=deselected)
-            items[:] = selected
+        deselected.extend(item for item in items if item.nodeid in known)
+        items[:] = selected
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -128,6 +142,23 @@ def _unknown_only_enabled(config) -> bool:
         return bool(getoption("--dryml-timing-unknown-only"))
     except (AttributeError, ValueError):
         return bool(getattr(config, "_dryml_timing_unknown_only", False))
+
+
+def _runner_tiers(config) -> set[str] | None:
+    """Return the internal runner tier constraint, if one was supplied."""
+
+    try:
+        value = config.getoption("--dryml-runner-tiers")
+    except (AttributeError, ValueError):
+        return None
+    if value is None:
+        return None
+    tiers = {tier.strip() for tier in value.split(",") if tier.strip()}
+    invalid = tiers - VALID_TIERS
+    if not tiers or invalid:
+        detail = ", ".join(sorted(invalid)) or "empty tier set"
+        raise pytest.UsageError(f"invalid tests.sh runner tiers: {detail}")
+    return tiers
 
 
 def path_for_nodeid(nodeid: str) -> str:

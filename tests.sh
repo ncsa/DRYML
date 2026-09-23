@@ -38,20 +38,20 @@ run_tier() {
     local tier_name="$1"
     shift
     local tiers=()
-    local markexpr=""
+    local tier_filter=""
 
     case "$tier_name" in
         smoke)
             tiers=(smoke)
-            markexpr="speed_smoke"
+            tier_filter="smoke"
             ;;
         medium)
             tiers=(smoke medium)
-            markexpr="speed_smoke or speed_medium"
+            tier_filter="smoke,medium"
             ;;
         heavy)
             tiers=(heavy)
-            markexpr="speed_heavy"
+            tier_filter="heavy"
             ;;
         *)
             echo "Unknown test tier: $tier_name" >&2
@@ -59,45 +59,48 @@ run_tier() {
             ;;
     esac
 
+    prepare_suite_args "$@"
     mapfile -t selected < <(python ./tests/tools/test_buckets.py select "${tiers[@]}")
     if [ "${#selected[@]}" -eq 0 ]; then
         echo "No tests selected for tier: $tier_name" >&2
         exit 2
     fi
     if [ "$tier_name" == "heavy" ]; then
-        DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov -m "$markexpr" "${selected[@]}" "$@"
+        DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers "$tier_filter" "${selected[@]}" "${stripped_args[@]}"
     else
         partition_process_state_tests "${selected[@]}"
         if [ "${#process_state_selected[@]}" -gt 0 ]; then
-            pytest --no-cov -m "$markexpr" "${process_state_selected[@]}" "$@"
+            pytest --no-cov --dryml-runner-tiers "$tier_filter" "${process_state_selected[@]}" "${stripped_args[@]}"
         fi
         if [ "${#ordinary_selected[@]}" -gt 0 ]; then
-            pytest --no-cov -m "$markexpr" "${ordinary_selected[@]}" "$@"
+            pytest --no-cov --dryml-runner-tiers "$tier_filter" "${ordinary_selected[@]}" "${stripped_args[@]}"
         fi
     fi
 }
 
-strip_suite_paths() {
+prepare_suite_args() {
+    local root_index
+    if ! root_index="$(python ./tests/tools/test_buckets.py runner-args -- "$@")"; then
+        return 2
+    fi
     stripped_args=()
+    local index=0
     for arg in "$@"; do
-        case "$arg" in
-            tests|./tests)
-                ;;
-            *)
-                stripped_args+=("$arg")
-                ;;
-        esac
+        if [ "$index" -ne "$root_index" ]; then
+            stripped_args+=("$arg")
+        fi
+        index=$((index + 1))
     done
 }
 
 run_full() {
-    strip_suite_paths "$@"
+    prepare_suite_args "$@"
     mapfile -t medium_selected < <(python ./tests/tools/test_buckets.py select smoke medium)
     mapfile -t heavy_selected < <(python ./tests/tools/test_buckets.py select heavy)
     partition_process_state_tests "${medium_selected[@]}"
-    pytest --cov=dryml -m "speed_smoke or speed_medium" "${process_state_selected[@]}" "${stripped_args[@]}"
-    pytest --cov=dryml --cov-append -m "speed_smoke or speed_medium" "${ordinary_selected[@]}" "${stripped_args[@]}"
-    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --cov=dryml --cov-append -m "speed_heavy" "${heavy_selected[@]}" "${stripped_args[@]}"
+    pytest --cov=dryml --dryml-runner-tiers smoke,medium "${process_state_selected[@]}" "${stripped_args[@]}"
+    pytest --cov=dryml --cov-append --dryml-runner-tiers smoke,medium "${ordinary_selected[@]}" "${stripped_args[@]}"
+    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --cov=dryml --cov-append --dryml-runner-tiers heavy "${heavy_selected[@]}" "${stripped_args[@]}"
 }
 
 run_profile() {
@@ -113,7 +116,7 @@ run_profile() {
                 ;;
         esac
     done
-    strip_suite_paths "${profile_args[@]}"
+    prepare_suite_args "${profile_args[@]}"
     local medium_output="./tests/.test-timings-medium.json"
     local process_state_output="./tests/.test-timings-process-state.json"
     local heavy_output="./tests/.test-timings-heavy.json"
@@ -124,9 +127,9 @@ run_profile() {
     mapfile -t medium_selected < <(python ./tests/tools/test_buckets.py select smoke medium)
     mapfile -t heavy_selected < <(python ./tests/tools/test_buckets.py select heavy)
     partition_process_state_tests "${medium_selected[@]}"
-    pytest --no-cov -m "speed_smoke or speed_medium" "${process_state_selected[@]}" --dryml-timing-output "$process_state_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
-    pytest --no-cov -m "speed_smoke or speed_medium" "${ordinary_selected[@]}" --dryml-timing-output "$medium_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
-    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov -m "speed_heavy" "${heavy_selected[@]}" --dryml-timing-output "$heavy_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    pytest --no-cov --dryml-runner-tiers smoke,medium "${process_state_selected[@]}" --dryml-timing-output "$process_state_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    pytest --no-cov --dryml-runner-tiers smoke,medium "${ordinary_selected[@]}" --dryml-timing-output "$medium_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers heavy "${heavy_selected[@]}" --dryml-timing-output "$heavy_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
     python ./tests/tools/test_buckets.py update "$process_state_output" "$medium_output" "$heavy_output"
     python ./tests/tools/test_buckets.py summary --all-files
 }

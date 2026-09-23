@@ -10,7 +10,6 @@ import pytest
 
 import dryml.dispatch as dispatch
 from dryml.core.execute import CoreOptions
-from dryml.environments import inspect_current
 from dryml.environments import req as environment_req
 from dryml.environments.specs import (
     CurrentEnvironmentSpec,
@@ -152,12 +151,17 @@ class DiscoveryBackend(Backend):
     """Return controlled non-reserving discovery evidence."""
 
     def __init__(
-        self, *, available: bool = True, launchable: bool | None = True
+        self,
+        record,
+        *,
+        available: bool = True,
+        launchable: bool | None = True,
     ):
         """Record discovery lifecycle calls and evidence availability."""
 
         self.available = available
         self.launchable = launchable
+        self.record = record
         self.started = 0
         self.discoveries: list[tuple[object, object, object]] = []
         self.closed = 0
@@ -198,7 +202,7 @@ class DiscoveryBackend(Backend):
                 EnvironmentCandidate(
                     "candidate",
                     CurrentEnvironmentSpec(),
-                    inspect_current(),
+                    self.record,
                     None,
                     self.launchable,
                     (),
@@ -237,11 +241,15 @@ class DiscoveryConfig(BackendConfig):
         return self.backend
 
 
-def test_explain_discovers_only_the_selected_backend_and_cleans_up() -> None:
+def test_explain_discovers_only_the_selected_backend_and_cleans_up(
+    synthetic_environment_record,
+) -> None:
     """Use actual selected discovery while leaving other names inert."""
 
-    unavailable = DiscoveryBackend(available=False)
-    viable = DiscoveryBackend()
+    unavailable = DiscoveryBackend(
+        synthetic_environment_record, available=False
+    )
+    viable = DiscoveryBackend(synthetic_environment_record)
     dispatch.register_backend("viable", DiscoveryConfig(backend=viable))
     dispatch.set_execute_backend_default(DiscoveryConfig(backend=unavailable))
 
@@ -269,11 +277,13 @@ def test_explain_discovers_only_the_selected_backend_and_cleans_up() -> None:
     ],
 )
 def test_explain_requires_affirmative_backend_environment_evidence(
-    launchable: bool | None, expected: str
+    launchable: bool | None, expected: str, synthetic_environment_record,
 ) -> None:
     """Treat failed or unknown selected-candidate grants as ineligible."""
 
-    backend = DiscoveryBackend(launchable=launchable)
+    backend = DiscoveryBackend(
+        synthetic_environment_record, launchable=launchable
+    )
     dispatch.set_execute_backend_default(DiscoveryConfig(backend=backend))
 
     @environment_req(tags=("dispatch-test-unavailable",))
@@ -288,10 +298,12 @@ def test_explain_requires_affirmative_backend_environment_evidence(
     assert backend.closed == 1
 
 
-def test_explain_accepts_affirmative_selected_backend_evidence() -> None:
+def test_explain_accepts_affirmative_selected_backend_evidence(
+    synthetic_environment_record,
+) -> None:
     """Accept complete compatible evidence from the one selected backend."""
 
-    backend = DiscoveryBackend()
+    backend = DiscoveryBackend(synthetic_environment_record)
     dispatch.set_execute_backend_default(DiscoveryConfig(backend=backend))
 
     @environment_req()
@@ -307,11 +319,15 @@ def test_explain_accepts_affirmative_selected_backend_evidence() -> None:
 
 @pytest.mark.parametrize("require_world", [False, True])
 def test_exact_pin_does_not_require_unrequested_resource_evidence(
-    require_world: bool,
+    require_world: bool, monkeypatch, synthetic_environment_record,
 ) -> None:
     """Incomplete resource inventory only blocks a requested world check."""
 
-    backend = DiscoveryBackend()
+    backend = DiscoveryBackend(synthetic_environment_record)
+    monkeypatch.setattr(
+        "dryml.environments.selection._probe_record",
+        lambda _spec: synthetic_environment_record,
+    )
     discover = backend.discover
 
     def incomplete_resources(**kwargs):
@@ -332,10 +348,12 @@ def test_exact_pin_does_not_require_unrequested_resource_evidence(
     assert backend.closed == 1
 
 
-def test_explain_revalidates_target_after_backend_discovery() -> None:
+def test_explain_revalidates_target_after_backend_discovery(
+    synthetic_environment_record,
+) -> None:
     """Reject declaration drift observed after selected discovery completes."""
 
-    backend = DiscoveryBackend()
+    backend = DiscoveryBackend(synthetic_environment_record)
     dispatch.set_execute_backend_default(DiscoveryConfig(backend=backend))
 
     def workload() -> None:
@@ -357,12 +375,16 @@ def test_explain_revalidates_target_after_backend_discovery() -> None:
 
 
 def test_explain_checks_the_frozen_selected_environment_pin(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, synthetic_environment_record,
 ) -> None:
     """Reject a discovered candidate that mismatches the exact frozen pin."""
 
-    backend = DiscoveryBackend()
+    backend = DiscoveryBackend(synthetic_environment_record)
     dispatch.set_execute_backend_default(DiscoveryConfig(backend=backend))
+    monkeypatch.setattr(
+        "dryml.environments.selection._probe_record",
+        lambda _spec: synthetic_environment_record,
+    )
     resolved = dispatch._preflight.resolve_environment_spec(
         CurrentEnvironmentSpec()
     )
@@ -382,10 +404,12 @@ def test_explain_checks_the_frozen_selected_environment_pin(
     assert backend.discoveries[0][1] is mismatched
 
 
-def test_invalid_selector_is_a_safe_ineligible_report() -> None:
+def test_invalid_selector_is_a_safe_ineligible_report(
+    synthetic_environment_record,
+) -> None:
     """Keep known selector failures on the Dispatch report boundary."""
 
-    backend = DiscoveryBackend()
+    backend = DiscoveryBackend(synthetic_environment_record)
     dispatch.set_execute_backend_default(DiscoveryConfig(backend=backend))
     view = dispatch.with_options(
         python=PythonExecutableSpec(executable="/missing/dispatch-python")
@@ -446,10 +470,12 @@ def test_malformed_probe_options_remain_a_type_error() -> None:
         dispatch.ProbeOptions(environment_spec=object())
 
 
-def test_explain_requires_backend_world_feasibility() -> None:
+def test_explain_requires_backend_world_feasibility(
+    synthetic_environment_record,
+) -> None:
     """Reject a selected backend that supplies no affirmative world plan."""
 
-    backend = DiscoveryBackend()
+    backend = DiscoveryBackend(synthetic_environment_record)
     dispatch.set_execute_backend_default(DiscoveryConfig(backend=backend))
 
     @world_req(cpus=1)
@@ -464,7 +490,7 @@ def test_explain_requires_backend_world_feasibility() -> None:
 
 
 def test_in_process_explain_checks_current_constraints_without_core_capture(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, synthetic_environment_record,
 ) -> None:
     """Reject local constraints without core execution state."""
 
@@ -474,6 +500,16 @@ def test_in_process_explain_checks_current_constraints_without_core_capture(
         lambda *_args, **_kwargs: pytest.fail(
             "local route must not capture core"
         ),
+    )
+    monkeypatch.setattr(
+        dispatch._probe,
+        "inspect_current",
+        lambda: synthetic_environment_record,
+    )
+    monkeypatch.setattr(
+        dispatch._admission,
+        "inspect_current",
+        lambda: synthetic_environment_record,
     )
 
     @environment_req(tags=("dispatch-test-unavailable",))
@@ -553,10 +589,14 @@ def test_in_process_orchestrator_is_ineligible(
 
 
 def test_in_process_pin_mismatch_is_ineligible(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, synthetic_environment_record,
 ) -> None:
     """Compare a frozen local selector against fresh current evidence."""
 
+    monkeypatch.setattr(
+        "dryml.environments.selection._probe_record",
+        lambda _spec: synthetic_environment_record,
+    )
     resolved = dispatch._preflight.resolve_environment_spec(
         CurrentEnvironmentSpec()
     )
@@ -565,6 +605,11 @@ def test_in_process_pin_mismatch_is_ineligible(
         dispatch._preflight,
         "resolve_environment_spec",
         lambda _spec: mismatched,
+    )
+    monkeypatch.setattr(
+        dispatch._admission,
+        "inspect_current",
+        lambda: synthetic_environment_record,
     )
 
     report = dispatch.with_options(
@@ -576,7 +621,7 @@ def test_in_process_pin_mismatch_is_ineligible(
 
 
 def test_in_process_ignores_disabled_automatic_environment_enforcement(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, synthetic_environment_record,
 ) -> None:
     """Require direct owner checking even when automatic axes are disabled."""
 
@@ -589,6 +634,16 @@ def test_in_process_ignores_disabled_automatic_environment_enforcement(
             allocation=None,
             requirement_axes={"environment": False},
         ),
+    )
+    monkeypatch.setattr(
+        dispatch._probe,
+        "inspect_current",
+        lambda: synthetic_environment_record,
+    )
+    monkeypatch.setattr(
+        dispatch._admission,
+        "inspect_current",
+        lambda: synthetic_environment_record,
     )
 
     @environment_req(tags=("dispatch-test-unavailable",))

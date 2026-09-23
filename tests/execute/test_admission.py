@@ -5,25 +5,33 @@ from __future__ import annotations
 from threading import Event
 from time import monotonic
 
-from dryml.environments import EnvironmentRequirement, inspect_current
+from dryml.environments import EnvironmentRequirement
 from dryml.execute.admission import admit, plan_admission
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement, local_inventory
 
 
-def test_optional_axes_do_not_invent_reports_or_world_defaults():
+def test_optional_axes_do_not_invent_reports_or_world_defaults(
+    synthetic_environment_record,
+):
     """Omitted requirement domains bypass their owner checks and barriers."""
-    result = admit(record=inspect_current(), inventory=local_inventory(), deadline=monotonic() + 1)
+    result = admit(
+        record=synthetic_environment_record,
+        inventory=local_inventory(),
+        deadline=monotonic() + 1,
+    )
     assert result.ok
     assert result.report.environment is None
     assert result.report.world is None
     assert result.world is None
 
 
-def test_environment_is_rechecked_from_actual_worker_evidence():
+def test_environment_is_rechecked_from_actual_worker_evidence(
+    synthetic_environment_record,
+):
     """Admission derives a fresh owner report rather than trusting transported flags."""
     result = admit(
         environment=EnvironmentRequirement(requirements=("certainly-not-installed>=1",)),
-        record=inspect_current(),
+        record=synthetic_environment_record,
         deadline=monotonic() + 1,
     )
     assert not result.ok
@@ -50,10 +58,20 @@ def test_multiple_and_unenforceable_controls_reject_without_a_default_cpu_capabi
     assert not admit(world=cpu, inventory=local_inventory(), deadline=monotonic() + 1).ok
 
 
-def test_cancelled_or_expired_attempt_cannot_emit_go():
+def test_cancelled_or_expired_attempt_cannot_emit_go(
+    synthetic_environment_record,
+):
     """Cancellation and deadline races close the admission authorization gate."""
     cancelled = Event()
     cancelled.set()
-    assert not admit(record=inspect_current(), deadline=monotonic() + 1, cancelled=cancelled).go
-    assert not admit(record=inspect_current(), deadline=monotonic() - 1).go
-    assert not admit(record=inspect_current(), deadline=float("nan")).go
+    assert not admit(
+        record=synthetic_environment_record,
+        deadline=monotonic() + 1,
+        cancelled=cancelled,
+    ).go
+    assert not admit(
+        record=synthetic_environment_record, deadline=monotonic() - 1
+    ).go
+    assert not admit(
+        record=synthetic_environment_record, deadline=float("nan")
+    ).go

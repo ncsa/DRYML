@@ -63,7 +63,24 @@ def main(argv: list[str] | None = None) -> int:
         help="updated baseline path; defaults to --baseline",
     )
 
+    runner_args = subparsers.add_parser(
+        "runner-args", help=argparse.SUPPRESS
+    )
+    runner_args.add_argument("pytest_args", nargs=argparse.REMAINDER)
+
     args = parser.parse_args(argv)
+    if args.command == "runner-args":
+        pytest_args = list(args.pytest_args)
+        if pytest_args[:1] == ["--"]:
+            pytest_args.pop(0)
+        try:
+            root_index = runner_suite_root_index(pytest_args)
+        except Exception as exc:
+            print(f"tests.sh: {exc}", file=sys.stderr)
+            return 2
+        print(-1 if root_index is None else root_index)
+        return 0
+
     baseline = load_baseline(Path(args.baseline))
     if args.command == "select":
         tiers = set(VALID_TIERS if "full" in args.tiers else args.tiers)
@@ -233,6 +250,65 @@ def collected_test_nodeids() -> set[str]:
     }
 
 
+def runner_suite_root_index(pytest_args: list[str]) -> int | None:
+    """Validate named-suite pytest arguments and locate a positional root.
+
+    The pytest parser is authoritative for distinguishing positional selections
+    from values consumed by options. A lone ``tests`` or ``./tests`` positional
+    root is an accepted alias and is removed by ``tests.sh`` before phase paths
+    are appended. Any narrower selection is rejected before pytest executes.
+    """
+
+    reserved = "--dryml-runner-tiers"
+    if any(
+        arg == reserved or arg.startswith(reserved + "=")
+        for arg in pytest_args
+    ):
+        raise ValueError(f"{reserved} is reserved for tests.sh")
+
+    selections = _pytest_file_or_dir(pytest_args)
+    suite_roots = {"tests", "./tests"}
+    if not selections:
+        return None
+    if len(selections) != 1 or selections[0] not in suite_roots:
+        selected = ", ".join(repr(path) for path in selections)
+        raise ValueError(
+            "named full/tier/profile suites do not accept explicit test "
+            f"paths or node IDs ({selected}); put focused paths first, for "
+            "example './tests.sh tests/path.py --no-cov'"
+        )
+
+    positional_indexes = []
+    for index, arg in enumerate(pytest_args):
+        if arg not in suite_roots:
+            continue
+        probe = f"__dryml_runner_positional_probe_{index}__"
+        probe_args = list(pytest_args)
+        probe_args[index] = probe
+        if probe in _pytest_file_or_dir(probe_args):
+            positional_indexes.append(index)
+    if len(positional_indexes) != 1:
+        raise RuntimeError(
+            "could not identify the positional pytest suite root"
+        )
+    return positional_indexes[0]
+
+
+def _pytest_file_or_dir(pytest_args: list[str]) -> list[str]:
+    """Parse arguments without collection and return positional roots."""
+
+    from _pytest.config import get_config
+
+    parsed_args = list(pytest_args)
+    config = get_config(parsed_args)
+    try:
+        config.pluginmanager.import_plugin("tests.timing_plugin")
+        config.parse(parsed_args)
+        return list(config.known_args_namespace.file_or_dir)
+    finally:
+        config._ensure_unconfigure()
+
+
 def prune_stale_node_tiers(
     baseline: dict[str, Any], nodeids: set[str]
 ) -> dict[str, Any]:
@@ -271,7 +347,9 @@ def test_tier_metadata_references_existing_test_files() -> None:
     assert missing == []
 
 
-def test_tier_metadata_references_collected_test_nodes() -> None:
+def test_tier_metadata_references_collected_test_nodes(
+    maintained_test_nodeids: set[str],
+) -> None:
     """Reject stale overrides in modules collectable with installed extras.
 
     Optional-framework modules may skip collection in the lightweight CI
@@ -280,7 +358,7 @@ def test_tier_metadata_references_collected_test_nodes() -> None:
     """
 
     baseline = load_baseline(DEFAULT_BASELINE)
-    collected = collected_test_nodeids()
+    collected = maintained_test_nodeids
     collected_paths = {path_for_nodeid(nodeid) for nodeid in collected}
     stale = sorted(
         nodeid
@@ -291,8 +369,10 @@ def test_tier_metadata_references_collected_test_nodes() -> None:
     assert stale == []
 
 
-def test_every_maintained_test_has_an_intentional_tier() -> None:
-    """Require a node, path, or category tier instead of the default fallback."""
+def test_every_maintained_test_has_an_intentional_tier(
+    maintained_test_nodeids: set[str],
+) -> None:
+    """Require an intentional node, path, or category tier."""
 
     baseline = load_baseline(DEFAULT_BASELINE)
     node_tiers = baseline.get("node_tiers", {})
@@ -300,7 +380,7 @@ def test_every_maintained_test_has_an_intentional_tier() -> None:
     category_tiers = baseline.get("category_tiers", {})
     missing = sorted(
         nodeid
-        for nodeid in collected_test_nodeids()
+        for nodeid in maintained_test_nodeids
         if nodeid not in node_tiers
         and path_for_nodeid(nodeid) not in path_tiers
         and category_for_path(path_for_nodeid(nodeid)) not in category_tiers
