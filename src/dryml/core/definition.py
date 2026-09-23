@@ -1269,6 +1269,9 @@ class SelectorMatcher(GraphMatcher):
         selector_ref = maybe_symbol_ref(selector, functions=False)
         target_ref = maybe_symbol_ref(target, functions=False)
         if selector_ref is not None and target_ref is not None:
+            if selector_ref == target_ref:
+                return True
+
             if not self.strict:
                 try:
                     selector_obj = resolve_symbol(selector_ref)
@@ -1286,10 +1289,8 @@ class SelectorMatcher(GraphMatcher):
                         )
                     return condition
 
-            condition = selector_ref == target_ref
-            if not condition:
-                self._print(ctx, "Symbol refs differ")
-            return condition
+            self._print(ctx, "Symbol refs differ")
+            return False
 
         if self.cls_str_compare and isinstance(selector, str) and isclass(target):
             condition = selector == get_class_str(target)

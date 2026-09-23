@@ -6,7 +6,7 @@ from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
-from dryml.core.symbol import ImportRef
+from dryml.core.symbol import ImportRef, SourceSpec
 import dryml.core as core
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
@@ -65,6 +65,28 @@ def test_u4_prepared_cdef_matching_is_import_free(monkeypatch):
     assert core.Selector(selector).matches(source)
     assert selector.match(source)
     assert selector_match(selector, source)
+
+
+@pytest.mark.parametrize(
+    "ref",
+    (
+        ImportRef("missing.equal_symbol", "Fixture"),
+        SourceSpec.from_source(
+            "class Fixture:\n    pass",
+            kind="class",
+            name="Fixture",
+        ),
+    ),
+)
+def test_equal_symbol_refs_match_without_resolution_in_non_strict_mode(monkeypatch, ref):
+    """Equal symbolic classes match without importing or executing source."""
+    monkeypatch.setattr(
+        type(ref),
+        "resolve",
+        lambda self: pytest.fail("equal symbol matching must not resolve classes"),
+    )
+
+    assert selector_match(ref, ref, strict=False)
 
 
 @pytest.mark.parametrize(
