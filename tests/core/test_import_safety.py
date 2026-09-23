@@ -14,8 +14,8 @@ import pytest
 _EXPECTED_CORE_EXPORTS = (
     "load_object", "save_object", "load_state_ref", "LiveReusePolicy",
     "StoreReport", "SavePublication", "SavedSnapshot", "PublicationPhase", "PublicationStatus",
-    "SaveRouting", "StateGraphReservation", "Object", "Serializable", "UniqueID", "Metadata",
-    "Compute", "Definition", "ConcreteDefinition", "DefLink", "Ref", "Mat", "AutoRef",
+    "SaveRouting", "StateGraphReservation", "Object", "Serializable", "Compute", "Definition",
+    "categorical_definition", "ConcreteDefinition", "DefLink", "Ref", "Mat", "AutoRef",
     "normalize_args", "normalize_return", "signature_context", "function", "SignatureError",
     "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace",
     "freeze", "QuotedDef", "SelectorSpec", "Selector",
@@ -46,8 +46,8 @@ _EXPECTED_CORE_EXPORTS = (
 )
 
 _EXPORT_MODULES = {
-    **dict.fromkeys(("Object", "Serializable", "UniqueID", "Metadata", "Compute", "definition_mode", "selector_mode", "space_mode"), "dryml.core.object"),
-    **dict.fromkeys(("ConcreteDefinition", "Definition", "SKIP_ARGS", "freeze"), "dryml.core.definition"),
+    **dict.fromkeys(("Object", "Serializable", "Compute", "definition_mode", "selector_mode", "space_mode"), "dryml.core.object"),
+    **dict.fromkeys(("ConcreteDefinition", "Definition", "categorical_definition", "SKIP_ARGS", "freeze"), "dryml.core.definition"),
     "DefLink": "dryml.core.links",
     **dict.fromkeys(("AutoRef", "Mat", "Ref", "SignatureError", "function", "normalize_args", "normalize_return", "signature_context"), "dryml.core.signatures"),
     **dict.fromkeys(("ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace"), "dryml.core.reference_values"),

@@ -36,9 +36,9 @@ def test_selector_without_nested_definitions_has_one_node():
 
 def test_u4_prepared_selector_uses_semantic_parameter_postings():
     """Prepared symbolic fields lower to Parameter paths without a scan."""
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
 
-    prepared = project_categorical_definition(Definition(SelectorLeaf, "wanted"))
+    prepared = categorical_definition(Definition(SelectorLeaf, "wanted"))
     graph = compile_selector_graph(prepared)
 
     assert graph is not None

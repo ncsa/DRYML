@@ -27,6 +27,18 @@ class PersistentLoadLeaf(Serializable):
         self.name = name
 
 
+class HookProbeLoadLeaf(Serializable):
+    prepare_count = 0
+
+    @classmethod
+    def __prepare_args__(cls, *args, **kwargs):
+        cls.prepare_count += 1
+        return args, kwargs
+
+    def __init__(self, name):
+        self.name = name
+
+
 def test_repo_load_concretizes_a_definition_before_structural_lookup(tmp_path):
     repo = Repo(stores=DirStore(tmp_path / "store"))
     saved = LoadLeaf("x", repo=repo)
@@ -46,7 +58,7 @@ def test_load_or_build_concretizes_definition_once(tmp_path):
     obj = repo.load_or_build(definition)
 
     assert obj.name == "x"
-    assert LoadLeaf.prepare_count == 1
+    assert LoadLeaf.prepare_count == 0
     assert obj.definition.identity_version == V2_IDENTITY_VERSION
 
 
@@ -73,3 +85,16 @@ def test_repo_load_requires_persisted_structural_authority(tmp_path):
     loaded = repo.load_or_build(cdef)
 
     assert loaded.name == "missing"
+
+
+def test_exact_saved_restore_never_invokes_retired_constructor_hook(tmp_path):
+    """Exact StateRef restoration uses stored bound arguments without hooks."""
+
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    HookProbeLoadLeaf.prepare_count = 0
+    saved = repo.save_object(HookProbeLoadLeaf("saved", repo=repo))
+
+    restored = Repo(stores=DirStore(tmp_path / "store")).load_state_ref(saved, reuse_live="never")
+
+    assert restored.name == "saved"
+    assert HookProbeLoadLeaf.prepare_count == 0

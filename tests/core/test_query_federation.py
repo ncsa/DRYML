@@ -60,12 +60,12 @@ class FederationVariadic(Object):
 
 
 def _u4_semantic_variadic_selector(*, rank=None):
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
 
     options = {"enabled": True}
     if rank is not None:
         options["rank"] = rank
-    return project_categorical_definition(
+    return categorical_definition(
         Definition(FederationVariadic, "wanted", "tail", label="discarded", **options),
         drop=("label",),
     )

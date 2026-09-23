@@ -726,7 +726,18 @@ class _ToCanonicalTransformer(GraphTransformer):
                     f"Cannot concretize Definition with missing args at {ctx.path_str()}"
                 )
 
-            live_cls = resolve_symbol(obj.cls)
+            try:
+                live_cls = resolve_symbol(obj.cls)
+            except (ImportError, AttributeError) as error:
+                if (
+                        isinstance(obj.cls, ImportRef)
+                        and obj.cls.module == "dryml.core.object"
+                        and obj.cls.qualname in {"Metadata", "UniqueID"}):
+                    raise TypeError(
+                        f"Definition references retired {obj.cls.qualname} mixin authority; "
+                        "reconstruct it with an ordinary Object class."
+                    ) from error
+                raise
             if not isinstance(live_cls, type):
                 raise TypeError(
                     f"ConcreteDefinition class target at {ctx.path_str()} must resolve to a class, "

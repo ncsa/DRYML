@@ -49,7 +49,7 @@ def test_memory_query_uses_v2_parameters_for_partial_selector_constraints():
 
 def test_u4_memory_query_and_fixed_refinement_use_prepared_parameters():
     """Projected semantic selectors agree for catalog and fixed-result queries."""
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
     from dryml.core.query.result import DefinitionResultSet
 
     repo = Repo()
@@ -58,7 +58,7 @@ def test_u4_memory_query_and_fixed_refinement_use_prepared_parameters():
     store = SemanticQueryStore()
     repo._query_catalog.register_stored(match, store)
     repo._query_catalog.register_stored(other, store)
-    selector = project_categorical_definition(
+    selector = categorical_definition(
         Definition(SemanticQueryLeaf, 7, label="discarded"),
         drop=("label",),
     )
@@ -121,8 +121,8 @@ def test_exact_root_rejects_structurally_compatible_extra_kwargs():
 
 def test_exact_root_distinguishes_unique_ids():
     repo = Repo()
-    first = objects.TestClass4(1, repo=repo)
-    second = objects.TestClass4(1, repo=repo)
+    first = objects.TestClass4(1, discriminator="first", repo=repo)
+    second = objects.TestClass4(1, discriminator="second", repo=repo)
     repo.add_objects(first, second)
 
     assert list(repo.query(first.definition).known(refresh=False).defs()) == [first.definition]
@@ -130,8 +130,8 @@ def test_exact_root_distinguishes_unique_ids():
 
 def test_nested_exact_accepts_identical_and_rejects_compatible_subtree():
     repo = Repo()
-    child_a = objects.TestClass4(1, repo=repo)
-    child_b = objects.TestClass4(1, repo=repo)
+    child_a = objects.TestClass4(1, discriminator="child-a", repo=repo)
+    child_b = objects.TestClass4(1, discriminator="child-b", repo=repo)
     parent_a = objects.TestNest3(child=child_a, label="same", repo=repo)
     parent_b = objects.TestNest3(child=child_b, label="same", repo=repo)
     repo.add_objects(parent_a, parent_b)
@@ -139,7 +139,7 @@ def test_nested_exact_accepts_identical_and_rejects_compatible_subtree():
     results = (
         repo.query(parent_a.definition)
         .categorical(recursive=True)
-        .exact(path="child")
+        .exact(path="kwargs.child")
         .known(refresh=False)
         .defs()
     )
@@ -149,9 +149,9 @@ def test_nested_exact_accepts_identical_and_rejects_compatible_subtree():
 
 def test_multiple_exact_constraints_are_conjunctive():
     repo = Repo()
-    left = objects.TestClass4(1, repo=repo)
-    right = objects.TestClass4(2, repo=repo)
-    other_right = objects.TestClass4(2, repo=repo)
+    left = objects.TestClass4(1, discriminator="left", repo=repo)
+    right = objects.TestClass4(2, discriminator="right", repo=repo)
+    other_right = objects.TestClass4(2, discriminator="other-right", repo=repo)
     match = objects.TestNest3(left=left, right=right, repo=repo)
     mismatch = objects.TestNest3(left=left, right=other_right, repo=repo)
     repo.add_objects(match, mismatch)
@@ -159,8 +159,8 @@ def test_multiple_exact_constraints_are_conjunctive():
     results = (
         repo.query(match.definition)
         .categorical(recursive=True)
-        .exact(path="left")
-        .exact(path="right")
+        .exact(path="kwargs.left")
+        .exact(path="kwargs.right")
         .known(refresh=False)
         .defs()
     )
@@ -194,12 +194,12 @@ def test_exact_with_explicit_object_uses_object_definition():
 
 def test_exact_constraint_confirms_equality_after_hash_match(monkeypatch):
     repo = Repo()
-    child_a = objects.TestClass4(1, repo=repo)
-    child_b = objects.TestClass4(1, repo=repo)
+    child_a = objects.TestClass4(1, discriminator="child-a", repo=repo)
+    child_b = objects.TestClass4(1, discriminator="child-b", repo=repo)
     parent_a = objects.TestNest3(child=child_a, repo=repo)
     parent_b = objects.TestNest3(child=child_b, repo=repo)
 
-    selector = repo.query(parent_a.definition).categorical(recursive=True).exact(path="child").selector
+    selector = repo.query(parent_a.definition).categorical(recursive=True).exact(path="kwargs.child").selector
 
     monkeypatch.setattr(ConcreteDefinition, "stable_hash", lambda self: "collision")
 

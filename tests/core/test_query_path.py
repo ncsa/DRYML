@@ -187,7 +187,6 @@ def test_u4_soft_cdef_ancestor_uses_stored_parameters_without_resolution(monkeyp
         source,
         DefinitionPath((Parameter("child"),)),
         Definition(SKIP_ARGS, selected=True),
-        semantic=True,
     )
 
     assert result.cls == source.cls
@@ -223,16 +222,15 @@ def test_u4_soft_cdef_ancestor_preserves_finalized_ref_links_and_siblings(monkey
         source,
         DefinitionPath((Parameter("left"), Parameter("value"))),
         Definition(SKIP_ARGS, selected=True),
-        semantic=True,
     )
 
     assert get_subtree(result, DefinitionPath((Kwarg("left"), Kwarg("value")))).parameters == {"selected": True}
     assert get_subtree(result, DefinitionPath((Kwarg("right"), Parameter("value")))) == 1
 
 
-def test_query_projection_does_not_mutate_source_or_reinject_uid():
+def test_query_projection_does_not_mutate_source_or_drop_ordinary_controls():
     repo = Repo()
-    child = objects.TestClass4(1, repo=repo)
+    child = objects.TestClass4(1, discriminator="child", repo=repo)
     parent = objects.TestNest3(child=child, repo=repo)
     original = parent.definition
 
@@ -242,27 +240,29 @@ def test_query_projection_does_not_mutate_source_or_reinject_uid():
     )
 
     assert parent.definition == original
-    assert "uid" in original.parameters["kwargs"]["child"].parameters["kwargs"]
-    assert "uid" not in projected.selector.kwargs["child"].kwargs
+    assert original.parameters["kwargs"]["child"].parameters["discriminator"] == "child"
+    assert projected.selector.kwargs["kwargs"]["child"].kwargs["discriminator"] == "child"
 
 
 def test_chained_query_methods_return_independent_queries():
     repo = Repo()
-    source = objects.TestNest3(child=objects.TestClass4(1, repo=repo), repo=repo).definition
+    source = objects.TestNest3(
+        child=objects.TestClass4(1, discriminator="child", repo=repo), repo=repo,
+    ).definition
     q1 = repo.query(source)
     q2 = q1.categorical(path='$[@param("kwargs")]["child"]', recursive=True)
     q3 = q2.restore()
 
     assert q1 is not q2
     assert q2 is not q3
-    assert "uid" in q1.selector.parameters["kwargs"]["child"].parameters["kwargs"]
-    assert "uid" not in q2.selector.kwargs["child"].kwargs
+    assert q1.selector.parameters["kwargs"]["child"].parameters["discriminator"] == "child"
+    assert q2.selector.kwargs["kwargs"]["child"].kwargs["discriminator"] == "child"
     assert q3.selector == source
 
 
 @pytest.mark.parametrize("operation", ("exact", "restore"))
 def test_u4_semantic_query_projection_translates_nested_cdef_paths(operation):
-    """Private U4 projection composes exact and restore across CDef boundaries."""
+    """Public projection composes exact and restore across CDef boundaries."""
     source = Definition(
         objects.TestNest2,
         Definition(
@@ -270,7 +270,7 @@ def test_u4_semantic_query_projection_translates_nested_cdef_paths(operation):
             Definition(objects.TestClass1, 10, test="leaf"),
         ),
     ).concretize()
-    query = Repo().query(source)._semantic_categorical(recursive=True)
+    query = Repo().query(source).categorical(recursive=True)
 
     transformed = getattr(query, operation)(path="A.A")
 
@@ -290,7 +290,7 @@ def test_u4_semantic_query_projection_maps_changed_set_member_paths(operation):
     first = Definition(U4SetLeaf, 1, seed=10).concretize()
     second = Definition(U4SetLeaf, 2, seed=20).concretize()
     source = Definition(U4SetParent, {first, second}).concretize()
-    query = Repo().query(source)._semantic_categorical(
+    query = Repo().query(source).categorical(
         recursive=True,
         drop=("seed",),
     )
@@ -318,7 +318,7 @@ def test_u4_semantic_projection_restores_authored_semantic_buckets(operation, pa
         seed=9,
         selected=leaf,
     )
-    query = Repo().query(source)._semantic_categorical()._semantic_categorical()
+    query = Repo().query(source).categorical().categorical()
     path = DefinitionPath((Kwarg(parameter),))
 
     if operation == "exact" and parameter in {"first", "width", "items", "options"}:
@@ -361,7 +361,7 @@ def test_u4_semantic_projection_set_correspondence_is_occurrence_specific(operat
     )
     resolved = []
     monkeypatch.setattr(ImportRef, "resolve", lambda self: resolved.append(self))
-    query = Repo().query(source)._semantic_categorical(recursive=True, drop=("seed",))
+    query = Repo().query(source).categorical(recursive=True, drop=("seed",))
     member_segment, member = next(
         (segment, value)
         for segment, value in iter_set_members(query.selector.parameters["members"])
@@ -384,8 +384,8 @@ def test_u4_repeated_root_projection_tracks_changed_set_member_occurrences(opera
     source = Definition(U4SetParent, {original_child}).concretize()
     query = (
         Repo().query(source)
-        ._semantic_categorical(recursive=True, drop=("seed",))
-        ._semantic_categorical(recursive=True, drop=("another",))
+        .categorical(recursive=True, drop=("seed",))
+        .categorical(recursive=True, drop=("another",))
     )
     segment, projected_child = iter_set_members(query.selector.kwargs["members"])[0]
     assert projected_child.parameters == {"value": 1}
@@ -410,13 +410,13 @@ def test_u4_nested_projection_composes_current_prepared_paths(operation):
         selected=leaf,
     ).concretize()
     source = Definition(U4AliasParent, child, child).concretize()
-    first = Repo().query(source)._semantic_categorical(
+    first = Repo().query(source).categorical(
         path=DefinitionPath((Parameter("child"),)),
         recursive=True,
         drop=("seed",),
     )
     assert first.selector.kwargs["sibling"] is child
-    query = first._semantic_categorical(
+    query = first.categorical(
         path=DefinitionPath((Kwarg("child"),)),
         recursive=True,
         drop=("another",),
@@ -432,7 +432,7 @@ def test_u4_nested_projection_composes_current_prepared_paths(operation):
 def test_u4_restore_none_uses_synthesized_named_positional_origin():
     """A retained original ``None`` is not confused with a missing path cache entry."""
     source = Definition(U4NoneLeaf, None)
-    query = Repo().query(source)._semantic_categorical()
+    query = Repo().query(source).categorical()
 
     result = query.restore(path=DefinitionPath((Kwarg("value"),)))
 
@@ -445,7 +445,7 @@ def test_u4_projection_keeps_equal_independent_occurrence_authority(operation):
     first = Definition(U4SetLeaf, 1, seed=10, another=20).concretize()
     second = first.copy_graph()
     source = Definition(U4ListParent, [first, second]).concretize()
-    query = Repo().query(source)._semantic_categorical(
+    query = Repo().query(source).categorical(
         recursive=True,
         drop=("seed",),
     )
@@ -459,12 +459,12 @@ def test_u4_projection_keeps_equal_independent_occurrence_authority(operation):
 
 def test_u4_projection_treats_existing_prepared_selector_as_its_own_source():
     """Projecting a prepared form does not guess an earlier authored authority."""
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
 
-    prepared = project_categorical_definition(
+    prepared = categorical_definition(
         Definition(U4SetLeaf, 1, seed=10, another=20),
     )
-    query = Repo().query(prepared)._semantic_categorical(drop=("another",))
+    query = Repo().query(prepared).categorical(drop=("another",))
 
     assert query.restore().selector == prepared
 
@@ -499,7 +499,7 @@ def test_restore_frozen_list_branch_preserves_query_soundness():
     other = objects.TestNest3(items=[1, 3], repo=repo)
     repo.add_objects(match, other)
 
-    query = repo.query(source).categorical(recursive=True).restore(path="items")
+    query = repo.query(source).categorical(recursive=True).restore(path="kwargs.items")
 
-    assert isinstance(query.selector.kwargs["items"], FrozenList)
+    assert isinstance(query.selector.kwargs["kwargs"]["items"], FrozenList)
     assert list(query.known(refresh=False).defs()) == [match.definition]

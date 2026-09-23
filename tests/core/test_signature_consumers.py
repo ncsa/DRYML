@@ -77,22 +77,22 @@ class ExactSelectorDataConsumer(Object):
         self.value = value
 
 
-def test_constructor_prepares_once_and_persisted_or_bound_paths_do_not_replay() -> None:
-    """New calls use one hook while bound and persisted records remain inert."""
+def test_constructor_binding_never_invokes_retired_hooks() -> None:
+    """New, bound, and persisted paths never invoke retired constructor hooks."""
 
     child = Definition(ConsumerLeaf).concretize()
     PreparedConsumer.preparations = 0
     cdef = Definition(PreparedConsumer, child).concretize()
 
-    assert PreparedConsumer.preparations == 1
+    assert PreparedConsumer.preparations == 0
     plan = compile_signature(PreparedConsumer, constructor=True)
     bound = plan.prepare_bound(BoundArguments((("child", child),)))
     assert bound.canonical["child"].kind is EdgeKind.REF
-    assert PreparedConsumer.preparations == 1
+    assert PreparedConsumer.preparations == 0
 
     restored = pickle.loads(pickle.dumps(cdef))
     assert restored == cdef
-    assert PreparedConsumer.preparations == 1
+    assert PreparedConsumer.preparations == 0
 
 
 def test_constructor_ref_annotations_choose_finalized_edges_and_keep_sharing() -> None:

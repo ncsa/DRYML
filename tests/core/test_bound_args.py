@@ -193,17 +193,17 @@ def test_materialization_preserves_constructor_parameter_named_cls():
     assert rebuilt.dryml_cls is Definition
 
 
-def test_private_v2_pipeline_prepares_once_and_captures_injected_values(monkeypatch):
+def test_private_v2_pipeline_binds_declared_defaults_without_constructor_hooks(monkeypatch):
     PreparedFixture.prepare_count = 0
 
     cdef = Definition(PreparedFixture, "example").concretize()
 
     assert cdef.identity_version == V2_IDENTITY_VERSION
-    assert PreparedFixture.prepare_count == 1
+    assert PreparedFixture.prepare_count == 0
     assert cdef["parameters"] == FrozenDict({
         "name": "example",
-        "uid": "prepared",
-        "metadata": FrozenDict({"source": "prepare"}),
+        "uid": None,
+        "metadata": None,
     })
     assert "args" not in cdef
     state = cdef.__getstate__()
@@ -276,8 +276,7 @@ def test_private_v2_binding_and_canonicalization_fail_at_semantic_parameter_path
         Definition(RequiredFixture).concretize()
     with pytest.raises(TypeError, match="value"):
         Definition(UnsupportedDefaultFixture).concretize()
-    with pytest.raises(TypeError, match="argument binding failed"):
-        Definition(InvalidPreparedFixture, 1).concretize()
+    assert Definition(InvalidPreparedFixture, 1).concretize().parameters == FrozenDict({"value": 1})
 
 
 def test_persisted_bound_records_reject_malformed_names_and_values_without_binding(monkeypatch):

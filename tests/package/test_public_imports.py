@@ -246,6 +246,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "AutoRef",
     "Choice",
     "ConcreteDefinition",
+    "categorical_definition",
     "Definition",
     "Exact",
     "F",

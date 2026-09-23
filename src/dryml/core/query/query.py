@@ -6,7 +6,7 @@ from typing import Any
 
 from ..canonical import matching_container_family
 from ..cdef_identity import V2_IDENTITY_VERSION
-from ..definition import ConcreteDefinition, Definition, categorical_definition, selector_match
+from ..definition import ConcreteDefinition, Definition, selector_match
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..links import DefLink
 from ..object import Object
@@ -165,28 +165,27 @@ class DefinitionQuery:
             self,
             *,
             path: DefinitionPathLike = "$",
-            recursive: bool = False) -> "DefinitionQuery":
-        if self.selector is None:
-            raise QueryPathError("Cannot apply categorical() to an unconstrained query.")
-        norm = normalize_path(path)
-        subtree = get_subtree(self.selector, norm)
-        projected = categorical_definition(subtree, recursive=recursive)
-        return replace(self, selector=replace_subtree(self.selector, norm, projected))
-
-    def _semantic_categorical(
-            self,
-            *,
-            path: DefinitionPathLike = "$",
             recursive: bool = False,
             drop=(),
             drop_args: bool = False,
             drop_class: bool = False) -> "DefinitionQuery":
-        """Internally project one query occurrence onto named constraints.
+        """Project one query occurrence onto named categorical constraints.
 
-        This U4 seam is intentionally private until the public categorical API
-        switches atomically. It preserves original source authority for later
-        ``exact`` and ``restore`` operations while using the import-free CDef
-        ancestor reconstruction required by prepared selectors.
+        Args:
+            path: Root-relative occurrence to project.
+            recursive: Whether to project nested definitions.
+            drop: Constructor parameter names to omit from the selected traversal.
+            drop_args: Whether to omit every argument constraint.
+            drop_class: Whether to omit class constraints.
+
+        Returns:
+            An immutable query retaining original authority for :meth:`exact` and
+            :meth:`restore`.
+
+        Raises:
+            QueryPathError: If the query or selected occurrence is unconstrained.
+            TypeError: If projection controls or selected values are invalid.
+            ValueError: If requested names are absent or projection collapses a set.
         """
 
         if self.selector is None:
@@ -206,7 +205,6 @@ class DefinitionQuery:
             self.selector,
             norm,
             projected,
-            semantic=True,
             _origins=origins,
         )
         previous_values = dict(self._original_values)
@@ -230,7 +228,7 @@ class DefinitionQuery:
         norm = normalize_path(path)
         subtree = self._original_value(norm)
         replacement = deepcopy(subtree) if isinstance(subtree, Definition) else subtree
-        return replace(self, selector=replace_subtree(self.selector, norm, replacement, semantic=True))
+        return replace(self, selector=replace_subtree(self.selector, norm, replacement))
 
     def exact(
             self,
@@ -248,7 +246,7 @@ class DefinitionQuery:
             definition = definition.definition
         if not isinstance(definition, ConcreteDefinition):
             raise TypeError(f"Exact constraint at {norm!s} requires a ConcreteDefinition, got {type(definition).__name__}.")
-        return replace(self, selector=replace_subtree(self.selector, norm, definition, semantic=True))
+        return replace(self, selector=replace_subtree(self.selector, norm, definition))
 
     def _original_value(self, path: DefinitionPath) -> Any:
         """Return the original authority retained for one selector occurrence."""

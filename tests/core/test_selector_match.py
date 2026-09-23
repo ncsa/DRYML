@@ -29,12 +29,12 @@ class SemanticVariadicSelectorFixture(core.Object):
 
 def test_u4_prepared_selector_matches_authored_semantic_parameters():
     """Prepared named selectors match equivalent authored positional buckets."""
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
 
     target = Definition(
         SemanticVariadicSelectorFixture, 1, 4, "tail", seed=9, flag=True,
     )
-    selector = project_categorical_definition(target, drop=("seed",))
+    selector = categorical_definition(target, drop=("seed",))
 
     assert core.Selector(selector).matches(target)
     assert selector.match(target)
@@ -43,7 +43,7 @@ def test_u4_prepared_selector_matches_authored_semantic_parameters():
 
 def test_u4_prepared_cdef_matching_is_import_free(monkeypatch):
     """Named CDef records need no class resolution during semantic matching."""
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
 
     source = ConcreteDefinition._from_persisted_record(
         ImportRef("missing.u4", "Fixture"),
@@ -55,7 +55,7 @@ def test_u4_prepared_cdef_matching_is_import_free(monkeypatch):
             ("seed", 9),
         )),
     )
-    selector = project_categorical_definition(source, drop=("seed",))
+    selector = categorical_definition(source, drop=("seed",))
     monkeypatch.setattr(
         ImportRef,
         "resolve",

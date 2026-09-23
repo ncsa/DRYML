@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from ...cdef_identity import V2_IDENTITY_VERSION
-from ...definition import ConcreteDefinition, Definition, SKIP_ARGS
+from ...definition import ConcreteDefinition, Definition
 from ...freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ...utils.stable_hash import stable_hash_function
 from .path import (
@@ -120,17 +120,13 @@ def replace_subtree(
         path: DefinitionPathLike,
         replacement: Any,
         *,
-        semantic: bool = False,
         _origins: Any = None) -> Any:
-    """Replace one structural occurrence, optionally preserving CDef named authority.
+    """Replace one structural occurrence while preserving CDef named authority.
 
     Args:
         obj: Root value containing the selected occurrence.
         path: Path to replace.
         replacement: New value for the selected occurrence.
-        semantic: Emit prepared named selectors when a CDef ancestor becomes
-            soft. The default retains legacy call-spelling behavior.
-
     Returns:
         A copy-on-write root with only the selected occurrence replaced.
     """
@@ -142,9 +138,9 @@ def replace_subtree(
     rest = GraphPath(norm.segments[1:])
     child = get_subtree(obj, GraphPath((seg,)))
     new_child = replace_subtree(
-        child, rest, replacement, semantic=semantic, _origins=_origins,
+        child, rest, replacement, _origins=_origins,
     )
-    return _replace_child(obj, seg, new_child, semantic=semantic, _origins=_origins)
+    return _replace_child(obj, seg, new_child, _origins=_origins)
 
 
 def _get_child(obj: Any, seg: PathSegment) -> Any:
@@ -195,7 +191,6 @@ def _replace_child(
         seg: PathSegment,
         child: Any,
         *,
-        semantic: bool = False,
         _origins: Any = None) -> Any:
     from ...links import DefLink
 
@@ -203,7 +198,7 @@ def _replace_child(
         return DefLink.finalized(
             obj.kind,
             _replace_child(
-                obj.target, seg, child, semantic=semantic, _origins=_origins,
+                obj.target, seg, child, _origins=_origins,
             ),
         )
     if isinstance(obj, ConcreteDefinition):
@@ -216,19 +211,10 @@ def _replace_child(
         parameters = dict(obj.parameters)
         parameters[seg.name] = child
         if any(_contains_soft_definition(value) for value in parameters.values()):
-            if semantic:
-                from ...symbol import symbol_ref
+            from ...symbol import symbol_ref
 
-                cls = obj.cls if not isinstance(obj.cls, type) else symbol_ref(obj.cls)
-                return Definition._from_prepared_parameters(cls, parameters)
-            from ...bound_args import project_bound_arguments
-            from ...symbol import resolve_symbol
-
-            args, kwargs = project_bound_arguments(
-                resolve_symbol(obj.cls),
-                BoundArguments(parameters),
-            )
-            return Definition(obj.cls, *args, **kwargs)
+            cls = obj.cls if not isinstance(obj.cls, type) else symbol_ref(obj.cls)
+            return Definition._from_prepared_parameters(cls, parameters)
         return ConcreteDefinition._from_bound_record(
             obj.cls,
             BoundArguments(parameters),
@@ -250,9 +236,7 @@ def _replace_child(
             raise QueryPathError(f"{seg!s} is not valid on a definition.")
 
         if args is None:
-            if semantic:
-                return Definition._from_prepared_parameters(obj.cls, kwargs)
-            return Definition(obj.cls, SKIP_ARGS, **kwargs)
+            return Definition._from_prepared_parameters(obj.cls, kwargs)
         return Definition(obj.cls, *args, **kwargs)
 
     if isinstance(obj, list):

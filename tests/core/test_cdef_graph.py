@@ -172,7 +172,7 @@ def test_same_child_at_two_paths_has_one_node_and_two_edges():
 
 
 def test_projection_memo_uses_private_cdef_nodes_not_structural_equality():
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
 
     shared = GraphLeaf("same").definition
     independent = GraphLeaf("same").definition
@@ -182,7 +182,7 @@ def test_projection_memo_uses_private_cdef_nodes_not_structural_equality():
         parameters=BoundArguments((("value", FrozenTuple((shared, shared, independent))),)),
     )
 
-    projected = project_categorical_definition(root, recursive=True)
+    projected = categorical_definition(root, recursive=True)
     children = projected.parameters["value"]
 
     assert children[0] is children[1]

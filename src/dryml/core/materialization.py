@@ -8,7 +8,7 @@ from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from .definition import ConcreteDefinition, Definition
 from .object import Object, Serializable
 from .policies import CachePolicy, LiveReusePolicy
-from .symbol import resolve_symbol
+from .symbol import ImportRef, resolve_symbol
 from .cdef_identity import cdef_node_key
 from .repo_plan import _NodeBindings, attach_runtime_binding, realization_scope
 from .utils.graph.path import GraphPath
@@ -16,6 +16,23 @@ from .utils.graph.path import GraphPath
 
 MaterializationActionKind = Literal["reuse", "construct"]
 MaterializationReuseSource = Literal["memo", "cache", None]
+
+
+def _resolve_materialization_class(cdef: ConcreteDefinition) -> type:
+    """Resolve one CDef class while explaining retired mixin authority."""
+
+    try:
+        return resolve_symbol(cdef.cls)
+    except (ImportError, AttributeError) as error:
+        if (
+                isinstance(cdef.cls, ImportRef)
+                and cdef.cls.module == "dryml.core.object"
+                and cdef.cls.qualname in {"Metadata", "UniqueID"}):
+            raise TypeError(
+                f"ConcreteDefinition references retired {cdef.cls.qualname} mixin "
+                "authority; reconstruct it with an ordinary Object class."
+            ) from error
+        raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +170,7 @@ def _execute_materialization_plan(
             raise RepoLoadError(f"Unknown materialization action kind {action.kind!r} at {action.primary_path}.")
 
         try:
-            cls = resolve_symbol(cdef.cls)
+            cls = _resolve_materialization_class(cdef)
         except Exception as e:
             cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
             raise RepoLoadError(f"Error resolving {cls_name} at {action.primary_path}: {e}") from e
@@ -667,7 +684,7 @@ def execute_exact_state_load_plan(
                         continue
 
                 try:
-                    cls = resolve_symbol(cdef.cls)
+                    cls = _resolve_materialization_class(cdef)
                     from .cdef_codec import validate_cdef_stateful_role
                     validate_cdef_stateful_role(cdef, cls)
                     args, kwargs = project_cdef_call(cdef, cls=cls)
@@ -830,7 +847,7 @@ def project_cdef_call(
 
     with materialization_admission(operation="project_cdef_constructor_call"):
         if cls is None:
-            cls = resolve_symbol(cdef.cls)
+            cls = _resolve_materialization_class(cdef)
         from .bound_args import project_bound_arguments
 
         return project_bound_arguments(cls, cdef._bound_args)

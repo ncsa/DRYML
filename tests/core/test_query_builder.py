@@ -9,8 +9,8 @@ pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 def test_mixed_categorical_and_exact_query_keeps_only_exact_branch():
     repo = Repo()
-    encoder_a = objects.TestClass4(1, repo=repo)
-    encoder_b = objects.TestClass4(1, repo=repo)
+    encoder_a = objects.TestClass4(1, discriminator="encoder-a", repo=repo)
+    encoder_b = objects.TestClass4(1, discriminator="encoder-b", repo=repo)
     parent_a = objects.TestNest3(model=encoder_a, tag="same", repo=repo)
     parent_b = objects.TestNest3(model=encoder_b, tag="same", repo=repo)
     repo.add_objects(parent_a, parent_b)
@@ -18,7 +18,7 @@ def test_mixed_categorical_and_exact_query_keeps_only_exact_branch():
     results = (
         repo.query(parent_a.definition)
         .categorical(recursive=True)
-        .exact(path="model")
+        .exact(path="kwargs.model")
         .known()
         .defs()
     )
@@ -28,8 +28,8 @@ def test_mixed_categorical_and_exact_query_keeps_only_exact_branch():
 
 def test_restore_reinstates_original_concrete_anchor():
     repo = Repo()
-    opt_a = objects.TestClass4(1, repo=repo)
-    opt_b = objects.TestClass4(1, repo=repo)
+    opt_a = objects.TestClass4(1, discriminator="optimizer-a", repo=repo)
+    opt_b = objects.TestClass4(1, discriminator="optimizer-b", repo=repo)
     parent_a = objects.TestNest3(model=objects.TestClass4(2, repo=repo), optimizer=opt_a, repo=repo)
     parent_b = objects.TestNest3(model=objects.TestClass4(3, repo=repo), optimizer=opt_b, repo=repo)
     repo.add_objects(parent_a, parent_b)
@@ -37,7 +37,7 @@ def test_restore_reinstates_original_concrete_anchor():
     results = (
         repo.query(parent_a.definition)
         .categorical(recursive=True)
-        .restore(path="optimizer")
+        .restore(path="kwargs.optimizer")
         .known()
         .defs()
     )

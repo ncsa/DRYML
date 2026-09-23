@@ -1,4 +1,4 @@
-"""Focused coverage for the internal semantic categorical projection engine."""
+"""Focused coverage for the public semantic categorical projection engine."""
 
 import pickle
 
@@ -32,9 +32,9 @@ class ProjectionContainer(Object):
 
 
 def _project(value, **controls):
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
 
-    return project_categorical_definition(value, **controls)
+    return categorical_definition(value, **controls)
 
 
 def test_classless_skipped_definition_and_prepared_projection_preserve_named_fields():
@@ -153,6 +153,15 @@ def test_source_spec_signature_keeps_source_authority_and_never_constructs():
     assert result.cls is source
     assert result.parameters == FrozenDict({"value": 4})
     assert _project(result).cls is source
+
+
+def test_retired_authored_import_reference_reports_contextual_projection_error():
+    """Retired mixin authorities fail only when authored calls require inspection."""
+
+    retired = Definition(ImportRef("dryml.core.object", "UniqueID"), 4)
+
+    with pytest.raises(TypeError, match="retired mixin references"):
+        _project(retired)
 
 
 def test_partial_omissions_stay_absent_while_cdef_defaults_remain_bound():

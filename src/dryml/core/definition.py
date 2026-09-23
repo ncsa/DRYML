@@ -63,20 +63,38 @@ class DefInterface(ABC):
     def concretize(self, repo: "Repo | None"=None) -> Any:
         ...
 
-    def categorical(self, recursive=False):
-        """Return a categorical form with unique arguments removed.
+    def categorical(
+            self,
+            recursive: bool = False,
+            *,
+            drop=(),
+            drop_args: bool = False,
+            drop_class: bool = False):
+        """Project this definition onto named categorical constraints.
 
         Args:
-            recursive: Whether to strip unique arguments from nested definitions
-                as well as this definition.
+            recursive: Whether to project nested definition values as well as this
+                definition.
+            drop: Constructor parameter names to omit from the selected traversal.
+            drop_args: Whether to omit every constructor parameter constraint.
+            drop_class: Whether to omit class constraints.
 
         Returns:
-            A transformed definition expression.
+            A named ``Definition`` selector expression.
 
         Raises:
-            ValueError: If a definition required for categorization has no class.
+            TypeError: If a control is malformed or authored values cannot be
+                safely named.
+            ValueError: If a requested drop name is absent from the selected
+                traversal or projection would collapse a set.
         """
-        return categorical_definition(self, recursive=recursive)
+        return categorical_definition(
+            self,
+            recursive=recursive,
+            drop=drop,
+            drop_args=drop_args,
+            drop_class=drop_class,
+        )
 
     def build(
             self, *,
@@ -1109,106 +1127,46 @@ def render_path(path, key):
     return "/".join(map(str, path))
 
 
-# ----------------------------------------------------------------------
-# Categorical definition
-# ----------------------------------------------------------------------
+def categorical_definition(
+        defn,
+        recursive: bool = True,
+        memo=None,
+        *,
+        drop=(),
+        drop_args: bool = False,
+        drop_class: bool = False):
+    """Project one definition graph onto named categorical constraints.
 
-class CategoricalDefinitionTransformer(GraphTransformer):
+    Args:
+        defn: Object, Definition, or ConcreteDefinition graph to project.
+        recursive: Whether to project nested definitions.
+        memo: Optional identity memo shared by one projection operation.
+        drop: Constructor parameter names to omit.
+        drop_args: Whether to omit every constructor parameter constraint.
+        drop_class: Whether to omit class constraints.
+
+    Returns:
+        A named Definition selector graph preserving source class authority.
+
+    Raises:
+        TypeError: If controls or source values cannot be projected safely.
+        ValueError: If requested names are absent or set cardinality would change.
+
+    Side Effects:
+        May resolve authored symbolic classes for signature inspection. It never
+        constructs objects, applies omitted defaults, or resolves CDef classes.
     """
-    Strip unique args recursively (or only at the root when recursive=False).
-    """
 
-    def __init__(self, recursive: bool = True):
-        super().__init__()
-        self.recursive = recursive
+    from .categorical import project_categorical_definition
 
-    def transform(self, obj: Any, ctx: GraphCtx | None = None) -> Any:
-        if ctx is not None and (not self.recursive) and ctx.path:
-            # Match the intended current behavior: only operate at the root.
-            return obj
-        return super().transform(obj, ctx)
-
-    def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
-        return is_pod(obj) or isinstance(obj, type)
-
-    def memo_key(self, obj: Any, ctx: GraphCtx):
-        if isinstance(obj, Definition):
-            return id(obj)
-        return None
-
-    def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
-        return obj
-
-    def dispatch(self, obj: Any, ctx: GraphCtx) -> Any:
-        from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
-
-        if isinstance(obj, FrozenDict):
-            return {k: self.transform(v, ctx.child(k if isinstance(k, (str, int)) else str(k))) for k, v in obj.items()}
-        if isinstance(obj, FrozenList):
-            return [self.transform(v, ctx.child(i)) for i, v in enumerate(obj)]
-        if isinstance(obj, FrozenTuple):
-            return tuple(self.transform(v, ctx.child(i)) for i, v in enumerate(obj))
-        if isinstance(obj, FrozenSet):
-            return {self.transform(v, ctx.child(f"<set:{i}>")) for i, v in enumerate(obj)}
-        return super().dispatch(obj, ctx)
-
-    def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
-        from .definition import Definition
-
-        return super().should_track_cycle(obj, ctx) or isinstance(obj, Definition)
-
-    def transform_other(self, obj: Any, ctx: GraphCtx) -> Any:
-        from .definition import Definition
-
-        if isinstance(obj, Definition):
-            if obj.cls is None:
-                raise ValueError(
-                    f"Cannot categorical-ify Definition with missing cls at {ctx.path_str()}"
-                )
-
-            defn_args = (
-                self.transform(obj.args, ctx.child("args"))
-                if obj.args is not None
-                else None
-            )
-            defn_kwargs = self.transform(obj.kwargs, ctx.child("kwargs"))
-
-            temp_args = defn_args if obj.args is not None else tuple()
-            live_cls = resolve_symbol(obj.cls)
-            new_args, new_kwargs = live_cls.__strip_unique_args__(
-                *temp_args,
-                **defn_kwargs,
-            )
-
-            new_defn_args = [live_cls]
-            if obj.args is not None:
-                new_defn_args.extend(new_args)
-            else:
-                from .definition import SKIP_ARGS
-                new_defn_args.append(SKIP_ARGS)
-
-            return Definition(*new_defn_args, **new_kwargs)
-
-        raise TypeError(
-            f"Cannot categorical-ify object of type {type(obj).__name__} at {ctx.path_str()}"
-        )
-
-
-def categorical_definition(defn, recursive=True, memo=None):
-    from .definition import ConcreteDefinition
-    from .object import Object
-
-    if memo is None:
-        memo = {}
-
-    if isinstance(defn, Object):
-        root = thaw_concrete(defn.definition, memo=memo)
-    elif isinstance(defn, ConcreteDefinition):
-        root = thaw_concrete(defn, memo=memo)
-    else:
-        root = deepcopy(defn)
-
-    return CategoricalDefinitionTransformer(recursive=recursive).transform(root)
+    return project_categorical_definition(
+        defn,
+        recursive=recursive,
+        memo=memo,
+        drop=drop,
+        drop_args=drop_args,
+        drop_class=drop_class,
+    )
 
 
 class SelectorMatcher(GraphMatcher):

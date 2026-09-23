@@ -275,7 +275,7 @@ def test_exact_and_local_candidate_lookup(tmp_path):
 
 def test_u4_prepared_selector_lowers_to_semantic_parameter_candidates(tmp_path):
     """SQLite candidates use prepared semantic paths without a legacy kwarg."""
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
 
     index = sqlite_index(tmp_path)
     wanted = SQLiteLeaf("wanted")
@@ -285,7 +285,7 @@ def test_u4_prepared_selector_lowers_to_semantic_parameter_candidates(tmp_path):
         [wanted.definition, other.definition],
     )
     selector_graph = compile_selector_graph(
-        project_categorical_definition(Definition(SQLiteLeaf, "wanted")),
+        categorical_definition(Definition(SQLiteLeaf, "wanted")),
     )
 
     assert selector_graph is not None

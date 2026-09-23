@@ -41,12 +41,12 @@ def test_reference_filters_scan_authority_without_materializing(tmp_path):
 
 def test_u4_prepared_selector_composes_with_reference_sidecars(tmp_path):
     """Prepared semantic constraints remain sound through reference sidecar scans."""
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
 
     repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
     state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
     repo.save_object(ReferenceQueryLeaf(4, repo=repo))
-    selector = project_categorical_definition(Definition(ReferenceQueryLeaf, 3))
+    selector = categorical_definition(Definition(ReferenceQueryLeaf, 3))
 
     assert repo.query(selector).references().object_refs().one() == state.object
 

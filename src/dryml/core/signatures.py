@@ -446,11 +446,11 @@ class SignaturePlan:
                                  repo: Any = None, cache: Any = None,
                                  reuse_live: Any = None,
                                  selections: Mapping[Any, Any] | None = None) -> "BoundaryPlan":
-        """Prepare and normalize one new constructor call exactly once.
+        """Bind and normalize one new constructor call exactly once.
 
         Args:
-            args: Positional constructor arguments before the class hook runs.
-            kwargs: Keyword constructor arguments before the class hook runs.
+            args: Positional constructor arguments.
+            kwargs: Keyword constructor arguments.
             repo: Explicit caller-owned Repo authority for later seams.
             cache: Optional Repo cache policy.
             reuse_live: Optional Repo live-reuse policy.
@@ -462,30 +462,24 @@ class SignaturePlan:
             finalized compatible assertions.
 
         Raises:
-            SignatureError: If this is not a constructor plan, the preparation
-                hook returns an invalid call shape, or ordinary binding fails.
-            Exception: Propagates preparation-hook and Repo metadata failures
-                without changing their type.
+            SignatureError: If this is not a constructor plan or ordinary
+                binding fails.
+            Exception: Propagates Repo metadata failures without changing their
+                type.
 
         Side Effects:
-            Calls the target class's ``__prepare_args__`` hook once and may read
-            explicitly supplied Repo metadata during selection. It never
-            materializes, saves, claims, or replays persisted constructor records.
-            Explicit roles validate finalized structural links as fresh input;
-            unannotated constructor slots retain compatible canonical links.
+            May read explicitly supplied Repo metadata during selection. It never
+            invokes constructor hooks, materializes, saves, claims, or replays
+            persisted constructor records. Explicit roles validate finalized
+            structural links as fresh input; unannotated constructor slots retain
+            compatible canonical links.
         """
 
         if not self.constructor:
             raise SignatureError("constructor preparation requires a constructor plan")
-        prepared = self.target.__prepare_args__(*args, **dict(kwargs))
-        if not isinstance(prepared, tuple) or len(prepared) != 2:
-            raise SignatureError("constructor preparation returned an invalid call shape")
-        prepared_args, prepared_kwargs = prepared
-        if not isinstance(prepared_args, tuple) or not isinstance(prepared_kwargs, Mapping):
-            raise SignatureError("constructor preparation returned an invalid call shape")
         return self.prepare_args(
-            prepared_args,
-            prepared_kwargs,
+            args,
+            kwargs,
             repo=repo,
             cache=cache,
             reuse_live=reuse_live,

@@ -27,9 +27,9 @@ def test_class_utils_2():
 
 
 def test_list_unique_objs_1():
-    obj_f1_1 = objects.TestClassF1() 
-    obj_f1_2 = objects.TestClassF1() 
-    obj_f1_3 = objects.TestClassF1() 
+    obj_f1_1 = objects.TestClassF1("first")
+    obj_f1_2 = objects.TestClassF1("second")
+    obj_f1_3 = objects.TestClassF1("third")
     obj_c_1 = objects.TestClassC(
         obj_f1_2,
         B=obj_f1_3) 

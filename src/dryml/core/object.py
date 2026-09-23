@@ -5,8 +5,6 @@ from threading import Lock
 import inspect
 import types
 
-import uuid
-import time
 import os
 from contextlib import contextmanager
 
@@ -279,16 +277,6 @@ class Object(metaclass=Dryml):
 
     __ws__: WorkspaceHandle | None
     __cdef__: ConcreteDefinition
-
-    @classmethod
-    def __prepare_args__(cls, *args, **kwargs):
-        # __prepare_args__ should be an idempotent function
-        return args, kwargs
-
-    @classmethod
-    def __strip_unique_args__(cls, *args, **kwargs):
-        # __strip_unique_args__ should be an idempotent function
-        return args, kwargs
 
     @classmethod
     def defn(cls, *args, **kwargs) -> "Definition":
@@ -577,58 +565,6 @@ class Pickleable(Serializable):
             key for key, value in self.__dict__.items()
             if key not in self._HEAVY_EXCLUDE and retains_graph_node(value, set())
         }
-
-
-class UniqueID(Object):
-    # Mixing in this class adds a `uid` keyword argument which is
-    # initialized automatically if not provided.
-    @classmethod
-    def __prepare_args__(cls, *args, **kwargs):
-        args, kwargs = super().__prepare_args__(*args, **kwargs)
-        kwargs.setdefault("uid", str(uuid.uuid4()))
-        return args, kwargs
-
-    @classmethod
-    def __strip_unique_args__(cls, *args, **kwargs):
-        args, kwargs = super().__strip_unique_args__(*args, **kwargs)
-        kwargs = kwargs.copy()
-        if 'uid' in kwargs:
-            del kwargs['uid']
-        return args, kwargs
-
-    def __init__(self, *args, uid=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        # unique ID
-        self.uid = uid
-
-
-class Metadata(Object):
-    # Mixing in this class adds a `metadata` keyword argument which is
-    # used to store a basic 'description', and 'creation_time' metadata
-    # along with any other metadata the user wishes to store.
-    @classmethod
-    def __prepare_args__(cls, *args, **kwargs):
-        args, kwargs = super().__prepare_args__(*args, **kwargs)
-        if 'metadata' not in kwargs:
-            kwargs['metadata'] = {
-            }
-        if 'description' not in kwargs['metadata']:
-            kwargs['metadata']['description'] = ""
-        if 'creation_time' not in kwargs['metadata']:
-            kwargs['metadata']['creation_time'] = time.time()
-        return args, kwargs
-
-    @classmethod
-    def __strip_unique_args__(cls, *args, **kwargs):
-        args, kwargs = super().__strip_unique_args__(*args, **kwargs)
-        kwargs = kwargs.copy()
-        if 'metadata' in kwargs:
-            del kwargs['metadata']
-        return args, kwargs
-
-    def __init__(self, *args, metadata=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.metadata = metadata
 
 
 class Compute(Object):

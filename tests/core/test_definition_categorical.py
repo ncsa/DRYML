@@ -1,3 +1,5 @@
+import pytest
+
 from tests.core import core_objects as objects
 from dryml.core.cdef_identity import cdef_node_key
 from dryml.core.definition import Definition
@@ -5,9 +7,7 @@ from dryml.core.freeze import FrozenList, FrozenTuple
 
 
 def test_def_1():
-    """
-    A case which looks at stripping id methods
-    """
+    """Categorical projection compares structural nested definitions directly."""
 
     obj = objects.TestNest4(
         objects.TestNest2(
@@ -25,17 +25,12 @@ def test_def_1():
 
     obj_def = obj.definition
 
-    assert obj_def != obj_def_manual
-    assert 'uid' in obj_def.kwargs
-
-    assert 'uid' not in obj_def_manual.kwargs
+    assert obj_def == obj_def_manual.concretize()
     obj_class_def = obj_def.categorical(recursive=True)
-    ic(obj_def, obj_class_def, obj_class_def.args, obj_class_def.kwargs)
-    assert obj_class_def.match(obj_def_manual)
+    assert obj_class_def.match(obj_def)
 
     obj_class_def = obj_def.categorical(recursive=False)
-    obj_def_thawed = obj_def.thaw().without_kwarg('uid')
-    assert obj_class_def(obj_def_thawed)
+    assert obj_class_def(obj_def)
 
 
 def test_def_2():
@@ -130,12 +125,6 @@ def test_def_4():
     assert trainable_obj_built['train_fn']['epochs'] == train_fn_obj['epochs']
     assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A
 
-    # Building from 'class' definition
-    trainable_obj_built = obj_def.categorical(recursive=True).build()
-
-    assert trainable_obj_built['model'] is \
-        trainable_obj_built['train_fn']['optimizer']['model']
-    assert trainable_obj_built['model'].A == model_obj.A
-    assert trainable_obj_built['train_fn']['optimizer'][0] == opt_obj[0]
-    assert trainable_obj_built['train_fn']['epochs'] == train_fn_obj['epochs']
-    assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A
+    # Named categorical forms are selectors, not reconstruction recipes.
+    with pytest.raises(ValueError, match="missing args"):
+        obj_def.categorical(recursive=True).build()

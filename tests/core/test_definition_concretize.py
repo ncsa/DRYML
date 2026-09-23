@@ -37,8 +37,7 @@ def test_definition_concrete_2():
     assert selector_match(definition, new_def, verbose=True)
     assert definition != new_def
     assert type(new_def) is ConcreteDefinition
-    assert 'uid' in new_def.parameters['kwargs']
-    assert 'metadata' in new_def.parameters['kwargs']
+    assert new_def.parameters["discriminator"] is None
 
 
 def test_definition_concrete_3():
@@ -134,9 +133,7 @@ def test_definition_concrete_6():
 
 
 def test_object_build_from_def_1():
-    """
-    Test that an object definition with no id results in an object with an id.
-    """
+    """Explicit discriminators remain part of the constructed definition."""
 
     from tests.core import core_objects as objects
     obj = Definition(
@@ -144,4 +141,4 @@ def test_object_build_from_def_1():
         1,
         base_msg='Test').build()
 
-    assert 'uid' in obj.definition.parameters['kwargs']
+    assert obj.definition.parameters["kwargs"]["base_msg"] == "Test"

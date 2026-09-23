@@ -210,7 +210,13 @@ def _semantic_parameters(value: Any):
             )
         return value.kwargs
 
-    live_cls = resolve_symbol(value.cls)
+    try:
+        live_cls = resolve_symbol(value.cls)
+    except (ImportError, AttributeError) as error:
+        raise TypeError(
+            "Categorical projection cannot inspect the authored class authority "
+            f"{value.cls!r}; retired mixin references cannot be projected."
+        ) from error
     if not isclass(live_cls):
         raise TypeError(
             "Categorical projection class target must resolve to a class; "

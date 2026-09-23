@@ -232,12 +232,12 @@ def test_state_metadata_projects_unique_objects_and_keeps_structure_constraints(
 
 def test_u4_prepared_selector_composes_with_metadata_sidecars(tmp_path):
     """Metadata filtering verifies prepared semantic selectors against authority."""
-    from dryml.core.categorical import project_categorical_definition
+    from dryml.core import categorical_definition
 
     repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
     selected = _saved(repo, name="selected", object_values={"team": "vision"})
     _saved(repo, name="other", object_values={"team": "vision"})
-    selector = project_categorical_definition(Definition(QueryMetadataValue, "selected"))
+    selector = categorical_definition(Definition(QueryMetadataValue, "selected"))
 
     assert repo.query(selector).where(field("object", "team").eq("vision")).object_refs().one() == selected.object
 

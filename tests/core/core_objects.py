@@ -1,4 +1,4 @@
-from dryml.core.object import Object, Pickleable, UniqueID, Metadata
+from dryml.core.object import Object, Pickleable
 from dryml.core.utils.general import pickler, unpickler
 from copy import deepcopy
 from dryml.core.object import Object
@@ -7,7 +7,7 @@ from dryml.core.utils.general import validate_class
 
 
 
-class HelloObject(UniqueID):
+class HelloObject(Object):
     def __init__(self, **kwargs):
         pass
 
@@ -31,7 +31,7 @@ class HelloInt(HelloObject):
         return f"Hello! {self.int_msg}"
 
 
-class TestBase(UniqueID, Metadata):
+class TestBase(Object):
     def __init__(self, *args, base_msg: str = "base", **kwargs):
         super().__init__(*args, **kwargs)
         self.base_msg = base_msg
@@ -79,15 +79,16 @@ class TestNest3(Object):
             raise KeyError()
 
 
-class TestNest4(UniqueID):
+class TestNest4(Object):
     def __init__(self, A, **kwargs):
         super().__init__(**kwargs)
         self.A = A
 
 
-class TestClassF1(UniqueID):
-    def __init__(self, **kwargs):
+class TestClassF1(Object):
+    def __init__(self, discriminator, **kwargs):
         super().__init__(**kwargs)
+        self.discriminator = discriminator
         self.val = None
 
 
@@ -128,11 +129,12 @@ class TestClass3(Object):
         self.args = args
 
 
-class TestClass4(UniqueID, Metadata):
-    def __init__(self, x, *args, test=None, **kwargs):
+class TestClass4(Object):
+    def __init__(self, x, *args, test=None, discriminator=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
         self.test = test
+        self.discriminator = discriminator
 
 
 class TestClass5(Object):
