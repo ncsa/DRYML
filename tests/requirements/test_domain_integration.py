@@ -113,7 +113,7 @@ def test_cross_domain_unsupported_collection_and_merge_fail_closed() -> None:
     ],
 )
 def test_fresh_source_root_entry_points_are_effect_free_and_isolated(
-    action: str, inverse: tuple[str, ...]
+    action: str, inverse: tuple[str, ...], tmp_path: Path,
 ) -> None:
     """Fresh source processes keep root entry points lazy and domain-local."""
 
@@ -151,7 +151,7 @@ print(json.dumps({{
 """
     completed = subprocess.run(
         [sys.executable, "-c", script],
-        cwd="/tmp/dryml",
+        cwd=tmp_path,
         env={**os.environ, "PYTHONPATH": str(_SOURCE)},
         capture_output=True,
         text=True,

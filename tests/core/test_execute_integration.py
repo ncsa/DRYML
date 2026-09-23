@@ -305,6 +305,15 @@ def test_real_core_submission_freezes_default_repo_before_worker_delivery(tmp_pa
 
 def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_keeps_control_store_separate(tmp_path):
     """Exercise core publication/recovery through a real worker and separate Stores."""
+    def cleanup_checked(future):
+        """Retain bounded worker diagnostics when successful-work cleanup fails."""
+        try:
+            future.cleanup(timeout=5)
+        except CleanupError:
+            pytest.fail(
+                f"core worker cleanup evidence: {future.backend_future.snapshot().cleanup_issues!r}"
+            )
+
     repo_store = DirStore(tmp_path / "state", query_index="none")
     control_store = DirStore(tmp_path / "control", query_index="none")
     repo = Repo(repo_store)
@@ -330,7 +339,7 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
         assert metric == 3.0
         assert value.value == 6
         assert value.last_state_ref is not None
-        future.cleanup(timeout=5)
+        cleanup_checked(future)
 
         nested = executor.submit(_update_child_and_return_it, root)
         returned = nested.result(timeout=40)
@@ -339,11 +348,11 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
         assert returned == root.last_state_ref.at(next(
             path for path, child in root._runtime_projection.items() if child is root.child
         ))
-        nested.cleanup(timeout=5)
+        cleanup_checked(nested)
 
         control = executor.submit(_control_store_path)
         assert control.result(timeout=40) == str(control_store.base_dir)
-        control.cleanup(timeout=5)
+        cleanup_checked(control)
     finally:
         executor.close(cancel=True, timeout=10)
 
