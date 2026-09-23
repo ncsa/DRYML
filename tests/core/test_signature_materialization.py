@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import ConcreteDefinition, Definition, Object, Repo, Serializable
 from dryml.core.freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from dryml.core.repo import RepoLoadError

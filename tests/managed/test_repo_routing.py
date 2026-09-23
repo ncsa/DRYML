@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+
 from dryml.core import Object, Repo, SaveRouting, Selector
 from dryml.core.object import Pickleable
 from dryml.core.reference_values import StateRef

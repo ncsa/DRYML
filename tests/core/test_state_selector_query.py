@@ -3,6 +3,8 @@ import pytest
 from dryml.core import Definition, Repo, Serializable
 from dryml.core.store.dir import DirStore
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class SelectorQueryValue(Serializable):
     def __init__(self, value):

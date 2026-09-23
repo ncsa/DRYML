@@ -1,5 +1,9 @@
 import sqlite3
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import Definition, Object, ObjectId, ObjectRef, Repo, Serializable
 from dryml.core.query.codecs import decode_reference, encode_reference
 from dryml.core.query.path import GraphPath

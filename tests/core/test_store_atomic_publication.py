@@ -2,6 +2,8 @@ import hashlib
 import multiprocessing
 import os
 import pytest
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 import threading
 from pathlib import Path
 

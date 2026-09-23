@@ -6,6 +6,8 @@ from dryml.core import Object, Repo, Serializable
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class SeedValue(Serializable):
     def __init__(self, value):

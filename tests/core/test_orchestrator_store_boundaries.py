@@ -6,6 +6,8 @@ from dryml.core.store.dir import DirStore
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.runtime.errors import RuntimeTransitionError
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class StoreBoundaryObject(Serializable):
     def __init__(self, value):

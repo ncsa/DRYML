@@ -19,6 +19,8 @@ import threading
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 import dryml.filesystem as filesystem
 import dryml.core.store as store_exports
 import dryml.core.store.zip as zip_module

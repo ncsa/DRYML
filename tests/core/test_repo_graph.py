@@ -11,6 +11,8 @@ from dryml.core.store.records import DefinitionRecord
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.core.workspaces import WorkspaceManager
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class GraphLeaf(Object):
     def __init__(self, name):

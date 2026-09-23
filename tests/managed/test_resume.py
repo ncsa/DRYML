@@ -9,6 +9,8 @@ from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+
 from dryml.managed import ManagedConfig, ManagedRecoveryError, ManagedRerunRequiredError, managed_operation
 from dryml.managed.control import ControlSnapshot, ManagedControlStore
 from dryml.managed.identity import argument_digest, operation_digest

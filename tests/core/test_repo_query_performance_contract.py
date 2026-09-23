@@ -1,5 +1,9 @@
+import pytest
+
 from dryml.core import Definition, Object, Repo, Serializable, SKIP_ARGS
 from dryml.core.store.dir import DirStore
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 
 class PerfLeaf(Object):

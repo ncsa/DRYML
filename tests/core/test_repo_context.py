@@ -175,6 +175,7 @@ def test_owned_registration_failure_rolls_back_and_retains_failed_cleanup(tmp_pa
     repo.close(flush=False)
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_constructor_and_explicit_save_path_own_only_opened_handles(tmp_path, monkeypatch):
     """Partial construction unwinds and explicit save paths remain Repo-owned."""
 

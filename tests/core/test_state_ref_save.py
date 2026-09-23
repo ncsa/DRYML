@@ -2,6 +2,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef
 from dryml.core.repo import RepoLoadError
 from dryml.core.utils.graph.path import GraphPath, Parameter

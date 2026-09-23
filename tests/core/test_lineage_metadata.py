@@ -62,6 +62,7 @@ def test_exact_identity_replaces_provisional_lineage_facts_before_capture(tmp_pa
     assert capture_lineages(build_save_plan(repo, restored))[GraphPath()].creation_status == "unknown"
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_declaration_and_forks_create_in_memory_candidates_without_store_hooks(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)

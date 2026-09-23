@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from dryml.core import Repo, Serializable
 from dryml.core.store.dir import DirStore
 
@@ -12,6 +14,7 @@ class SnapshotDirectoryValue(Serializable):
         Path(dest_dir, "value.txt").write_text(self.value, encoding="utf-8")
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_saved_state_is_complete_snapshot_local_authority(tmp_path):
     store = DirStore(tmp_path / "store")
     state_ref = Repo(store).save_object(SnapshotDirectoryValue())

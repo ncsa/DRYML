@@ -16,6 +16,8 @@ from dryml.core.store.dir import DirStore, _REMOVED_ENTRY_PREFIX
 from dryml.core.store.records import DefinitionRecord
 from dryml.core.store.zip import ZipStore
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class WindowsDurabilityPayload(Serializable):
     """Small stateful object used across direct and archive publication tests."""

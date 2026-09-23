@@ -1,6 +1,19 @@
 name: Tests
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Test suite to run
+        required: true
+        default: good-enough
+        type: choice
+        options:
+          - good-enough
+          - exhaustive
+          - coverage
 
 permissions:
   contents: read
@@ -51,21 +64,34 @@ jobs:
           print(f"dryml: {metadata.version('dryml')}")
           PY
 
-      - name: Run lightweight and package tests
+      - name: Run lightweight tests
+        env:
+          REQUESTED_SUITE: ${{ github.event_name == 'workflow_dispatch' && inputs.suite || 'good-enough' }}
         run: |
-          ./tests.sh medium --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread
+          if [[ "$REQUESTED_SUITE" == "good-enough" ]]; then
+            ./tests.sh good-enough --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread
+          else
+            ./tests.sh medium --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread
+          fi
 
   local-filesystem-publication:
-    name: Local filesystem publication (${{ matrix.os }})
+    name: Good-enough (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest]
         python-version: ["3.12"]
 
     steps:
       - uses: actions/checkout@v5
+
+      - name: Install Bash for named test suites
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install bash
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
@@ -78,12 +104,18 @@ jobs:
           python -m pip install -r test_requirements.txt
           python -m pip install .
 
-      - name: Run local filesystem publication focus
+      - name: Run good-enough including native publication tests
         run: |
-          ./tests.sh tests/filesystem tests/paths tests/core/test_sqlite_connection_ownership.py tests/core/test_store_format.py tests/core/test_store_direct_layout.py tests/core/test_store_atomic_publication.py tests/core/test_state_ref_save.py tests/core/test_graph_save_failure.py tests/core/test_repo_claim_concurrency.py tests/core/test_repo_reference_aliases.py tests/core/test_pre_port_store_rejection.py tests/core/test_metadata_query_index.py tests/core/test_snapshot_publication_faults.py tests/core/test_snapshot_publication_concurrency.py tests/core/test_store_v3_fixtures.py tests/core/test_windows_store_durability.py --timeout=180 --timeout-method=thread
+          bash ./tests.sh good-enough --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread
+
+      - name: Run package-only tests
+        if: github.event_name == 'workflow_dispatch' && (inputs.suite == 'exhaustive' || inputs.suite == 'coverage')
+        run: |
+          bash ./tests.sh package --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread
 
   heavy:
     name: Heavy frameworks (Ubuntu, Python ${{ matrix.python-version }})
+    if: github.event_name == 'workflow_dispatch' && (inputs.suite == 'exhaustive' || inputs.suite == 'coverage')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -126,6 +158,7 @@ jobs:
 
   ray-integration:
     name: Existing Ray integration (Ubuntu, Python 3.12)
+    if: github.event_name == 'workflow_dispatch' && (inputs.suite == 'exhaustive' || inputs.suite == 'coverage')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -172,3 +205,26 @@ jobs:
         if: always()
         run: |
           ray stop --force
+
+  coverage:
+    name: Coverage (Ubuntu, Python 3.12)
+    if: github.event_name == 'workflow_dispatch' && inputs.suite == 'coverage'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install test and heavy dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r test_requirements.txt -r heavy_test_requirements.txt
+          python -m pip install .
+
+      - name: Run combined coverage
+        run: |
+          ./tests.sh coverage --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread

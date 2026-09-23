@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 import dryml.core.execute as execute_module
 from dryml.core import Repo, Serializable
 from dryml.core.execute import CoreExecutionError, CoreOptions, SharedDirStoreStrategy

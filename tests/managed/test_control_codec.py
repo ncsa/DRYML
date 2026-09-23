@@ -8,6 +8,8 @@ from uuid import uuid4
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+
 from dryml.core import Repo, Serializable
 from dryml.core.store.dir import DirStore
 from dryml.managed import control as control_module

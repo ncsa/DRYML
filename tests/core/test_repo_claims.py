@@ -1,8 +1,12 @@
 from pathlib import Path
 
+import pytest
+
 from dryml.core import Repo, Serializable
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import ClaimRecord
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 
 class ClaimedValue(Serializable):

@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import Definition, ObjectRef, Repo, Serializable
 from dryml.core.store.dir import DirStore
 

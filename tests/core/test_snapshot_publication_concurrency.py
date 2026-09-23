@@ -11,6 +11,8 @@ from threading import Barrier, Event, Thread
 import dryml.environments as envs
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import MetadataConflictError, Repo, SaveAnnotations, Serializable
 from dryml.core.query import field
 from dryml.core.store.dir import DirStore

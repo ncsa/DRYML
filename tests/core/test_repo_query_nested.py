@@ -1,5 +1,9 @@
 """DefinitionRecord closure coverage for graphs with ephemeral nodes."""
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import Object, Repo, Serializable
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord

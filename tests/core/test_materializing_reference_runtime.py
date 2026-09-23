@@ -58,6 +58,7 @@ def test_unregistered_materializing_object_ref_is_rejected():
         ReferenceParent(original.object_ref, repo=repo)
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_registered_materializing_object_ref_uses_its_claim(tmp_path):
     """Closure placement completes and reports a materialized descendant claim."""
     repo = Repo(DirStore(tmp_path / "store"))
@@ -86,6 +87,7 @@ def test_registered_materializing_object_ref_uses_its_claim(tmp_path):
     assert loaded.target.value == "saved"
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 @pytest.mark.parametrize("after", [False, True])
 def test_closure_descendant_claim_interruption_reports_exact_boundary(tmp_path, monkeypatch, after):
     """Interrupted nested claim completion preserves published closure authority."""

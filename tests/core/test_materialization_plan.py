@@ -8,6 +8,8 @@ from dryml.core.materialization import MaterializationAction, build_materializat
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class MaterialLeaf(Object):
     constructed = []

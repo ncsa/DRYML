@@ -6,6 +6,8 @@ from uuid import uuid4
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+
 from dryml.core import Repo
 from dryml.core.object import Pickleable
 from dryml.core.repo import RepoLoadError

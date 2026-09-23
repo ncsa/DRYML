@@ -53,6 +53,7 @@ def test_graph_reservation_covers_stateful_descendants_and_rejects_nested_owner(
         repo.save_object(root, reservation=reservation)
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_graph_reservation_allows_its_exact_save_reuse(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     obj = ReservedState(3, repo=repo)
@@ -77,6 +78,7 @@ def test_failed_save_on_closed_repo_releases_owned_graph_reservation(tmp_path):
         pass
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_graph_reservation_reuses_its_route_neutral_evidence_for_save(tmp_path, monkeypatch):
     """An admitted save does not rebuild graph bindings after reservation."""
     repo = Repo(DirStore(tmp_path / "store"))
@@ -121,6 +123,7 @@ def test_graph_reservation_rejects_a_token_for_a_different_live_graph(tmp_path):
             repo.save_object(second, reservation=reservation)
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_disjoint_graph_save_can_proceed_while_another_graph_is_reserved(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     first = ReservedState(1, repo=repo)
@@ -167,6 +170,7 @@ def test_graph_reservation_orders_object_ids_by_canonical_identity(tmp_path):
         )
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 @pytest.mark.parametrize("reuse_live", ["matching", "greedy"])
 def test_reserved_logical_object_is_not_reused_by_a_sibling_thread(tmp_path, reuse_live):
     repo = Repo(DirStore(tmp_path / "store"))

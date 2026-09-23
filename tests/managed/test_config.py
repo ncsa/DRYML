@@ -6,6 +6,8 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+
 from dryml.core.store.dir import DirStore
 from dryml.managed import InterruptRequestResult, ManagedConfig, ManagedConfigError, ManagedStatus, ManagedStoreError
 

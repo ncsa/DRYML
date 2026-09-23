@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import ConcreteDefinition, Object, ObjectRef, Repo, SaveRouting, Selector, Serializable, StateRef
 from dryml.core.execute import (
     CoreExecutionError, ExecutionContext, SharedDirStoreStrategy, current_context, decode_core_outcome,

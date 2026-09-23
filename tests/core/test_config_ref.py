@@ -4,6 +4,8 @@ from tests.core import core_objects as objects
 from dryml.core.config import ConfigError, ConfigRef
 from dryml.core.repo import Repo
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 def test_config_ref_resolves_during_object_construction():
     repo = Repo(config={"data.root": "/local/data"})

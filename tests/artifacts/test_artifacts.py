@@ -9,6 +9,8 @@ from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
 from dryml.models import Model
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class ParityClassifier(Model):
     def __init__(self):

@@ -63,7 +63,7 @@ def test_object_args_passing_1():
     assert obj.definition.parameters["layers"] == 1
 
 
-@pytest.mark.usefixtures("create_name")
+@pytest.mark.usefixtures("create_name", "fixed_snapshot_environment")
 def test_object_args_passing_2(create_name):
     from tests.core import core_objects as objs
 

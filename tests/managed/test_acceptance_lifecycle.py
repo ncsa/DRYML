@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+
 from dryml import Object, Repo
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore

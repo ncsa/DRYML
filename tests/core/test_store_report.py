@@ -9,6 +9,8 @@ from dryml.core.repo import RepoSaveError, save_object
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class ReportState(Serializable):
     def __init__(self, value=0):

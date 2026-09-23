@@ -102,7 +102,8 @@ def _worker_context():
 
 @pytest.mark.parametrize("nested", (False, True))
 @pytest.mark.parametrize("selection", ("omitted", "empty", "state", "control", "both"))
-def test_managed_default_resolution_uses_invocation_state_and_worker_control(tmp_path, nested, selection):
+def test_managed_default_resolution_uses_invocation_state_and_worker_control(
+        tmp_path, nested, selection, fixed_managed_snapshot_environment):
     """Direct and nested calls share field-wise state/control precedence."""
 
     ambient = Repo(DirStore(tmp_path / "ambient"))
@@ -126,7 +127,8 @@ def test_managed_default_resolution_uses_invocation_state_and_worker_control(tmp
     assert result == (str(expected_state.default_store.base_dir), str(expected_control.base_dir))
 
 
-def test_omitted_state_honors_nested_selection_and_clearing_fails(tmp_path):
+def test_omitted_state_honors_nested_selection_and_clearing_fails(
+        tmp_path, fixed_managed_snapshot_environment):
     """Defaults read the current Repo at invocation time rather than setup time."""
 
     first = Repo(DirStore(tmp_path / "first"))
@@ -221,7 +223,8 @@ def test_ordinary_managed_named_keyword_remains_callable_data(tmp_path):
 
 
 @pytest.mark.parametrize("nested", (False, True))
-def test_execute_omitted_defaults_read_the_invocation_repo_not_the_codec_repo(tmp_path, nested):
+def test_execute_omitted_defaults_read_the_invocation_repo_not_the_codec_repo(
+        tmp_path, nested, fixed_managed_snapshot_environment):
     """Managed Execute targets do not receive an injected root state configuration."""
 
     codec_repo = Repo(DirStore(tmp_path / "codec", query_index="none"))
@@ -271,7 +274,8 @@ def _check_worker_defaults(tmp_path):
         )
 
 
-def test_dynamic_missing_resource_preserves_earlier_effect_and_skips_managed_mutation(tmp_path):
+def test_dynamic_missing_resource_preserves_earlier_effect_and_skips_managed_mutation(
+        tmp_path, fixed_managed_snapshot_environment):
     """A demand-driven request fails only after preceding ordinary code has run."""
 
     repo = Repo(DirStore(tmp_path / "state", query_index="none"))

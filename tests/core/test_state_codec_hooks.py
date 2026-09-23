@@ -24,6 +24,7 @@ class CodecLeaf(CodecBase):
         Path(dest_dir, "leaf.txt").write_text(str(self.value))
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 @pytest.mark.parametrize("codec", ["pkl", "HDF5", "torch2"])
 def test_codec_reaches_every_mro_hook_unchanged(tmp_path, codec):
     CodecLeaf.calls = []

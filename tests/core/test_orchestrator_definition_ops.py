@@ -7,6 +7,8 @@ from dryml.core import Definition, Object, Repo
 from dryml.core.store.dir import DirStore
 from dryml.runtime.errors import RuntimeTransitionError
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class DefinitionOnlyObject(Object):
     prepared = 0

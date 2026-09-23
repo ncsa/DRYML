@@ -5,6 +5,8 @@ from dryml.core.query import QueryCardinalityError, QueryDomainError
 from dryml.core.query.result import QueryBackedDefinitionResultSet
 from dryml.core.store.dir import DirStore
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class ResultLeaf(Object):
     def __init__(self, name):

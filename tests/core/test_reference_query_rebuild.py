@@ -1,5 +1,9 @@
 import sqlite3
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import Repo, Serializable
 from dryml.core.store.dir import DirStore
 

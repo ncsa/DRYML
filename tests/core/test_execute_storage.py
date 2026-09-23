@@ -31,6 +31,7 @@ def _pinned_value():
     return None
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_storage_snapshot_uses_one_export_and_survives_later_topology_changes(tmp_path, monkeypatch):
     """An export and selected-Store table remain one locked configuration generation."""
 

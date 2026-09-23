@@ -6,6 +6,8 @@ import dill
 from pathlib import Path
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import ObjectRef, Repo, Serializable
 from dryml.core.execute import CoreOptions, SharedDirStoreStrategy, prepare_shared_storage
 from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation

@@ -5,6 +5,8 @@ from dryml.core.definition import Definition, SKIP_ARGS, selector_match
 from dryml.core.symbol import ImportRef
 import dryml.core as core
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class SemanticSelectorFixture(core.Object):
     def __init__(self, value=3, *, label="default"):

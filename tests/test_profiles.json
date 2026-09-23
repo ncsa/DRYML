@@ -1,0 +1,421 @@
+{
+  "profiles": {
+    "good-enough": {
+      "description": "Coverage-first routine suite: broad unit and component coverage plus named cross-layer integration representatives that run to completion.",
+      "excluded_categories": {
+        "package": "Artifact builds and installed-package checks remain available through ./tests.sh package and exhaustive modes."
+      },
+      "representative_functions": {
+        "tests/core/test_live_reuse.py": {
+          "rationale": "Retain matching, never-reuse, unique greedy restore, ambiguous fallback, and failed-restore eviction; exhaustive mode covers equivalent stale/equal-node combinations.",
+          "functions": [
+            "test_matching_reuses_current_checkpoint_without_restoring",
+            "test_never_constructs_a_new_live_object_under_the_saved_id",
+            "test_greedy_restores_one_unique_stale_candidate_in_place",
+            "test_ambiguous_eligible_candidates_build_fresh",
+            "test_failed_greedy_restore_evicts_and_clears_the_visible_candidate"
+          ]
+        },
+        "tests/core/test_execute_integration.py": {
+          "rationale": "Retain real-worker payload withholding, output draining, Store publication/recovery, cleanup uncertainty, and cancellation; exhaustive mode covers repeated setup/cache compositions and callable-owner transport.",
+          "functions": [
+            "test_core_setup_failure_withholds_payload_from_a_real_subprocess",
+            "test_real_setup_and_teardown_output_flood_drains_before_payload_completion",
+            "test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_keeps_control_store_separate",
+            "test_real_subprocess_core_setup_reports_unresolved_cache_cleanup_after_workload_failure",
+            "test_real_subprocess_core_pre_and_post_go_cancellation_are_not_reported_as_results"
+          ]
+        },
+        "tests/core/test_execute_callables.py": {
+          "rationale": "Retain broad callable-owner invocation and copied-wrapper ownership; the real core and Dispatch representatives prove process transport and publication without repeating every owner cross-process.",
+          "functions": [
+            "test_function_closure_lambda_bound_method_callable_instance_and_decorator_invoke_once",
+            "test_copied_function_wrapper_metadata_rebuilds_its_established_owner"
+          ]
+        },
+        "tests/core/test_execute_managed_integration.py": {
+          "rationale": "Retain one decorator-order product plus malformed-config and independent-normalization validation; Dispatch retains the single explicit managed-config process proof.",
+          "functions": [
+            "test_managed_decorator_orders_materialize_once_and_publish_one_final_state",
+            "test_direct_bound_operation_rejects_malformed_config_before_mutation",
+            "test_unrelated_nested_function_keeps_its_own_normalization_boundary"
+          ]
+        },
+        "tests/core/test_execute_results.py": {
+          "rationale": "Retain live publication, cyclic-result rejection, update withholding, post-publication evidence, and partial-replica failure; exhaustive mode covers repeated alias/materialization and limit compositions.",
+          "functions": [
+            "test_live_results_publish_before_automatic_reference_selection",
+            "test_result_cycles_fail_without_claiming_a_successful_outcome",
+            "test_rejected_result_graph_does_not_publish_selected_updates",
+            "test_post_publication_overflow_retains_exact_evidence_only",
+            "test_partial_replica_publication_is_a_failed_outcome_with_exact_evidence"
+          ]
+        },
+        "tests/core/test_execute_updates.py": {
+          "rationale": "Retain successful in-place update publication and ordered refresh-failure evidence; result and alias suites own the omitted fresh-result and descendant-coalescing compositions.",
+          "functions": [
+            "test_update_args_publishes_once_and_restores_the_original_argument",
+            "test_refresh_failure_retains_ordered_ledger_and_never_retries_earlier_targets"
+          ]
+        },
+        "tests/core/test_repo_forks.py": {
+          "rationale": "Retain object/state identity, copied snapshot payloads, environment capture, pre-boundary failure, and post-boundary interruption; exhaustive mode covers the second seed/declaration failure shapes.",
+          "functions": [
+            "test_object_and_state_forks_rekey_ids_and_preserve_source_namespace",
+            "test_fork_copies_verified_snapshot_local_payloads",
+            "test_state_fork_captures_its_own_environment_instead_of_relabeling_source",
+            "test_fork_failure_before_final_boundaries_leaves_no_new_authority",
+            "test_interruption_after_state_fork_boundary_leaves_complete_discoverable_authority"
+          ]
+        },
+        "tests/core/test_repo_metadata.py": {
+          "rationale": "Retain metadata CRUD/value semantics, multistore conflict handling, invalid authority rejection, directory and Zip behavior, and fork copying; exhaustive mode covers repeated save-wrapper and closure shapes.",
+          "functions": [
+            "test_current_metadata_crud_is_scope_local_and_nonmaterializing",
+            "test_absent_empty_and_null_round_trip_and_capture_once",
+            "test_metadata_multi_store_conflicts_are_order_independent",
+            "test_save_rejects_conflicting_completed_destination_evidence",
+            "test_metadata_rejects_unknown_and_disconnected_targets_before_mutation",
+            "test_directory_lookup_and_all_save_wrappers_preserve_return_shapes",
+            "test_forks_copy_selected_current_annotations_by_value",
+            "test_zip_metadata_mutations_remain_buffered_until_normal_flush"
+          ]
+        },
+        "tests/core/test_metadata_query.py": {
+          "rationale": "Keep the complete pure predicate validation plus representative current, state, conflict, projection, and Zip-backed query proofs; exhaustive mode covers equivalent composition permutations.",
+          "functions": [
+            "test_field_validates_paths_and_all_predicates_are_inert_and_round_trip",
+            "test_predicate_bounds_and_codec_reject_malformed_noncanonical_input",
+            "test_current_metadata_paths_types_and_empty_roots_are_scope_local",
+            "test_predicate_construction_rejects_invalid_input_before_store_scanning",
+            "test_state_metadata_projects_unique_objects_and_keeps_structure_constraints",
+            "test_store_order_preserves_answers_and_exposes_current_or_snapshot_conflicts",
+            "test_definition_where_composition_store_authority_and_zip_scan"
+          ]
+        },
+        "tests/core/test_pending_reference_save.py": {
+          "rationale": "Retain claim completion, nested unwind, explicit/routed exclusion, dependency failure, generation fencing, and route ordering; exhaustive mode covers equivalent claim failure windows.",
+          "functions": [
+            "test_pending_declaration_save_completes_its_claim_and_captures_once",
+            "test_nested_constructor_failure_releases_only_acquired_claims_in_reverse_order",
+            "test_explicit_store_rejects_excluded_pending_declaration_before_capture",
+            "test_dependency_save_failure_abandons_enclosing_claims",
+            "test_routing_rejects_an_excluded_pending_declaration_before_capture",
+            "test_routed_claim_generation_fences_snapshot_membership_and_completion",
+            "test_route_order_remains_a_then_b_while_declaration_b_claim_completes_first"
+          ]
+        },
+        "tests/core/test_query_index.py": {
+          "rationale": "Retain authoritative refresh, exact-hit verification, deleted-index recovery, reference occurrence semantics, retired-root rejection, and strict unindexed rejection; exhaustive mode covers a second closure-root shape.",
+          "functions": [
+            "test_definition_query_refreshes_from_definition_records",
+            "test_exact_definition_query_confirms_authoritative_record_after_hash_hit",
+            "test_deleting_derived_index_rebuilds_without_changing_authority",
+            "test_reference_results_preserve_exact_occurrences_while_definitions_dedupe",
+            "test_reference_query_never_treats_retired_object_roots_as_authority",
+            "test_strict_index_guard_rejects_unindexed_broad_query"
+          ]
+        },
+        "tests/core/test_query_graph_planner.py": {
+          "rationale": "Keep every dependency-free planner and backend-contract case plus one authoritative graph-query comparison; exhaustive mode covers repeated Store-backed no-enumeration and projection compositions.",
+          "functions": [
+            "test_planner_can_choose_nested_exact_anchor",
+            "test_nested_exact_anchor_does_not_enumerate_full_root_domain",
+            "test_selective_known_query_never_constructs_known_id_set",
+            "test_selective_cached_query_never_constructs_cached_id_set",
+            "test_planner_propagates_child_scalar_candidates_to_parent",
+            "test_anchor_selection_estimates_every_node_and_materializes_chosen_branches",
+            "test_planner_runs_against_backend_without_lock_or_internal_dicts",
+            "test_graph_planner_matches_independent_bruteforce_matrix",
+            "test_graph_query_matches_bruteforce_across_domains_and_replicas"
+          ]
+        },
+        "tests/core/test_reference_query.py": {
+          "rationale": "Retain nonmaterializing scans, aggregate identity, exact paths/aliases, nested state references, and conflicting-authority rejection as the complete reference-query boundary roster.",
+          "functions": [
+            "test_reference_filters_scan_authority_without_materializing",
+            "test_object_id_lookup_is_closed_but_reference_query_returns_aggregate",
+            "test_reference_filters_keep_exact_paths_aliases_and_all_ephemeral_refs",
+            "test_object_terminal_preserves_nested_ref_state_reference",
+            "test_derived_candidates_cannot_hide_conflicting_store_authority"
+          ]
+        },
+        "tests/core/test_repo_query_multistore.py": {
+          "rationale": "Retain distinct and replicated result identity, equivalent physical handles, stale refresh replacement, and structural-versus-exact state behavior; exhaustive mode covers ordering and duplicate refresh variants.",
+          "functions": [
+            "test_distinct_cdefs_in_two_stores_produce_two_logical_results",
+            "test_same_cdef_in_two_stores_deduplicates_and_tracks_replicas",
+            "test_equivalent_store_instances_share_physical_identity",
+            "test_forced_refresh_replaces_stale_store_reference",
+            "test_structural_query_is_fresh_while_exact_state_ref_load_restores_state"
+          ]
+        },
+        "tests/core/test_repo_save_load.py": {
+          "rationale": "Retain public and explicit-store publication, failure atomicity, structural and reopened query authority, read-only main hydration, and exact nested/shared restoration; lower Store suites retain exhaustive format and publication branches.",
+          "functions": [
+            "test_public_save_returns_state_ref_and_publishes_local_state",
+            "test_explicit_store_save_copies_reusable_state_into_its_closure",
+            "test_failed_local_state_save_never_publishes_a_state_ref",
+            "test_structural_load_without_state_restore_builds_from_definition_authority",
+            "test_reopen_hydrates_definition_authority_and_discovers_queries_without_materializing",
+            "test_u7_exact_state_ref_restores_nested_independent_local_states",
+            "test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph"
+          ]
+        },
+        "tests/core/test_repo_save_routing.py": {
+          "rationale": "Retain policy normalization/validation, first/all selection, context leasing, per-object and closure routing, explicit-store bypass, and seed/reference distinctions; exhaustive mode covers additional equivalent graph shapes.",
+          "functions": [
+            "test_save_routing_normalizes_rules_and_placement_shorthands",
+            "test_internal_selection_uses_first_all_fallback_and_handle_deduplication",
+            "test_invalid_routing_and_physical_handles_fail_without_mutating_configuration",
+            "test_per_object_routing_projects_a_child_state_ref_without_copying_its_payload",
+            "test_all_matching_routing_captures_once_and_replicates_exact_projections",
+            "test_closure_and_explicit_store_route_the_complete_root_closure",
+            "test_save_mode_overrides_validate_before_explicit_store_routing",
+            "test_per_save_modes_do_not_mutate_policy_and_explicit_store_bypasses_routes",
+            "test_seed_payload_routes_by_its_definition_not_the_stateful_root"
+          ]
+        },
+        "tests/core/test_state_ref_load.py": {
+          "rationale": "Retain shared-topology restoration, dependency ordering, and failed fresh-load cleanup as the complete exact-load integration boundary.",
+          "functions": [
+            "test_load_state_ref_restores_saved_identity_and_shared_topology",
+            "test_exact_load_restores_dependencies_before_parent_construction",
+            "test_failed_fresh_exact_restore_leaves_no_cache_or_state_hash"
+          ]
+        },
+        "tests/core/test_state_ref_load_preflight.py": {
+          "rationale": "Retain missing authority, aggregate missing state, and pre-reservation failure as the complete exact-load preflight boundary.",
+          "functions": [
+            "test_exact_preflight_reports_missing_authority_before_construction",
+            "test_exact_preflight_reports_every_missing_local_state_before_construction",
+            "test_exact_preflight_fails_before_live_candidate_reservation"
+          ]
+        },
+        "tests/core/test_state_ref_receipt.py": {
+          "rationale": "Retain immutable empty receipts, completed-save retention, selected-root exact-load attachment, alias topology, and enclosing failure survival; exhaustive mode covers aggregate/reuse spelling repetitions.",
+          "functions": [
+            "test_receipt_starts_empty_is_read_only_and_is_excluded_from_pickle_payload",
+            "test_successful_save_keeps_the_last_complete_receipt_across_unsaved_mutation",
+            "test_exact_load_attaches_only_its_requested_root_receipt",
+            "test_receipt_preserves_equal_child_identity_and_shared_alias_topology",
+            "test_recursive_child_receipt_survives_an_enclosing_root_failure"
+          ]
+        },
+        "tests/core/test_state_ref_restore_into.py": {
+          "rationale": "Retain identity-preserving restore, hook-failure invalidation, sibling invalidation, preflight safety, reference closure ordering, and pickle binding behavior as the complete targeted-restore roster.",
+          "functions": [
+            "test_targeted_restore_keeps_the_supplied_live_identity_and_forces_hook",
+            "test_targeted_restore_preserves_alias_identity_and_invalidates_after_hook_failure",
+            "test_restore_failure_invalidates_equal_definition_siblings",
+            "test_targeted_restore_preflight_failure_leaves_target_valid_and_pickle_payload_replaces",
+            "test_targeted_restore_walks_embedded_reference_closure_once_before_parent_hook",
+            "test_pickleable_targeted_restore_preserves_live_graph_bindings"
+          ]
+        },
+        "tests/core/test_state_ref_save.py": {
+          "rationale": "Retain import rebasing, verified state publication, ephemeral topology, shared-node identity, deep recapture, and Zip authority; exhaustive mode covers duplicate ephemeral and unpublished-import shapes.",
+          "functions": [
+            "test_imported_state_ref_rebases_live_nested_bindings_without_owning_ref_edges",
+            "test_stateful_save_publishes_verified_exact_state_ref",
+            "test_ephemeral_root_has_topology_but_only_child_state_paths",
+            "test_shared_node_is_saved_once_and_independent_equal_nodes_twice",
+            "test_deep_capture_serializes_reused_owned_nodes_again",
+            "test_zip_store_publishes_the_same_state_ref_authority"
+          ]
+        },
+        "tests/core/test_zipstore_identity.py": {
+          "rationale": "Retain Zip round-trip, buffering/integrity, Repo and routed publication, no-op/stale commits, atomic replace and failure windows, stale-writer protection, process serialization, malformed archives, snapshot/reference hydration, close semantics, and concurrent mutation; exhaustive mode covers equivalent archive edge cases.",
+          "functions": [
+            "test_zipstore_round_trips_current_logical_definition_authority",
+            "test_path_backed_zip_buffers_direct_record_mutation_until_commit",
+            "test_existing_only_zip_open_rejects_uncommitted_or_invalid_archive",
+            "test_repo_save_reports_and_commits_a_buffered_zip_publication",
+            "test_routed_zip_commit_control_flow_retains_identity_and_report",
+            "test_no_op_zip_commit_hydrates_without_rewriting_archive_bytes",
+            "test_zip_commit_builds_valid_complete_sibling_before_atomic_replace",
+            "test_failed_zip_commit_keeps_previous_complete_archive_bytes",
+            "test_zip_post_publish_failure_preserves_complete_reopenable_replacement",
+            "test_path_backed_zip_serializes_direct_record_publication_across_processes",
+            "test_malformed_or_escaping_zip_members_fail_closed_without_rewriting_bytes",
+            "test_snapshot_and_mutable_references_round_trip_through_zip",
+            "test_zip_close_discards_uncommitted_buffer_and_cleans_extraction",
+            "test_stale_zip_save_cannot_replace_a_newer_exact_state_ref",
+            "test_same_handle_commit_does_not_clear_a_concurrent_mutation"
+          ]
+        },
+        "tests/managed/test_callbacks.py": {
+          "rationale": "Retain ordered receipt delivery, callback failure, disjoint and overlapping nested operations, checkpoint requests, and caught interruption; exhaustive mode covers repeated terminal/callback timing shapes.",
+          "functions": [
+            "test_callbacks_receive_exact_committed_receipt_in_list_order",
+            "test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails",
+            "test_callback_cannot_begin_an_overlapping_managed_operation",
+            "test_caught_local_interruption_remains_terminal_and_rejects_safe_points"
+          ]
+        },
+        "tests/managed/test_execute_defaults.py": {
+          "rationale": "Retain the state/control product and representative omitted, lifetime, nesting, codec-repo, worker-setup, and missing-resource behavior; exhaustive mode covers copied-task and keyword-data variants.",
+          "functions": [
+            "test_managed_default_resolution_uses_invocation_state_and_worker_control",
+            "test_omitted_state_honors_nested_selection_and_clearing_fails",
+            "test_worker_control_default_is_owner_bound_and_expires_after_setup",
+            "test_worker_control_default_allows_same_store_nesting_only",
+            "test_execute_omitted_defaults_read_the_invocation_repo_not_the_codec_repo",
+            "test_worker_setup_installs_its_control_default_before_managed_invocation",
+            "test_dynamic_missing_resource_preserves_earlier_effect_and_skips_managed_mutation"
+          ]
+        },
+        "tests/managed/test_lifecycle.py": {
+          "rationale": "Retain completion, descendant persistence, primary application failure, late requests, indeterminate completion, final-save failure, and runtime admission; exhaustive mode covers a second failure-recording composition.",
+          "functions": [
+            "test_start_deep_saves_completes_and_returns_the_ordinary_result",
+            "test_stateless_root_deep_saves_its_stateful_descendant",
+            "test_method_error_is_recorded_without_replacing_the_application_exception",
+            "test_late_request_does_not_stale_owner_completion_or_failure",
+            "test_indeterminate_completion_preserves_pending_authority_and_withholds_result",
+            "test_final_save_failure_records_failed_without_a_completion_association",
+            "test_managed_workload_requires_a_materialized_receiver_and_runtime_admission"
+          ]
+        },
+        "tests/managed/test_repo_routing.py": {
+          "rationale": "Retain checkpoint/final replica routing, Zip commit success/failure/interruption, route-stable resume, partial-publication rejection, reopened closure validation, and borrowed-store ownership; exhaustive mode covers repeated closure/seed layouts.",
+          "functions": [
+            "test_checkpoint_and_final_preserve_per_object_replica_closures",
+            "test_resume_uses_retained_checkpoint_authority_after_routes_change",
+            "test_zip_commit_failure_has_report_and_never_associates_checkpoint",
+            "test_interrupted_completed_zip_commit_preserves_prior_checkpoint",
+            "test_replica_or_index_failure_never_associates_partial_state",
+            "test_missing_committed_replica_cannot_be_hidden_by_a_valid_replica"
+          ]
+        },
+        "tests/managed/test_signature_integration.py": {
+          "rationale": "Retain StateRef delivery, opposing-input and preflight rejection, return failure, interruption, pinned arguments, resume overlap, and claim-transfer failure; signature unit suites cover omitted normalization repetitions.",
+          "functions": [
+            "test_managed_mat_state_ref_digests_selected_snapshot_and_delivers_live_state",
+            "test_managed_signature_rejects_opposing_input_before_body_or_control_creation",
+            "test_managed_return_normalization_records_failure_without_completion",
+            "test_managed_terminal_interrupt_suppresses_return_realization",
+            "test_managed_resume_preflights_checkpoint_with_overlapping_mat_state_ref",
+            "test_managed_argument_claim_transfer_survives_later_final_publication_failure"
+          ]
+        },
+        "tests/managed/test_interruption.py": {
+          "rationale": "Retain explicit checkpoint interruption, external requests, checkpoint-backed keyboard interruption, and malformed-cause rejection; exhaustive mode covers no-checkpoint and disjoint nesting compositions.",
+          "functions": [
+            "test_explicit_interrupt_associates_checkpoint_then_preserves_exact_cause",
+            "test_external_request_is_honored_at_the_next_checkpoint",
+            "test_keyboard_interrupt_retains_checkpoint_for_resume_restoration",
+            "test_invalid_explicit_interrupt_cause_fails_before_checkpoint_mutation"
+          ]
+        },
+        "tests/managed/test_rerun.py": {
+          "rationale": "Acceptance lifecycle retains completed-state rerun; keep pending-completion reconciliation and later checkpoint argument identity here.",
+          "functions": [
+            "test_invocation_reconciles_a_pending_completed_authority_before_deciding",
+            "test_rerun_replaces_argument_digest_for_a_later_checkpoint_resume"
+          ]
+        },
+        "tests/managed/test_status.py": {
+          "rationale": "Retain absent/wrong authority, owner loss, stale requests, spawned-owner exit, probe errors, generation replacement, and missing-lock behavior; exhaustive mode covers equivalent retained-key/store mismatch checks.",
+          "functions": [
+            "test_status_is_not_started_for_the_selected_absent_authority_without_hooks",
+            "test_wrong_selected_control_store_has_independent_not_started_metadata",
+            "test_owner_loss_status_and_request_are_read_only_after_full_free_probe",
+            "test_request_validates_stale_attempt_and_merges_only_the_current_owner",
+            "test_spawned_owner_exit_then_request_does_not_write_running_authority",
+            "test_owner_probe_checks_stale_attempt_before_probe_and_propagates_adapter_errors",
+            "test_locked_owner_probe_marks_generation_replacement_inconclusive",
+            "test_missing_lock_namespace_never_becomes_owner_loss_or_recovery_evidence"
+          ]
+        },
+        "tests/dispatch/test_backend_execution.py": {
+          "rationale": "Retain real submit/run, exact-selector handoff, target-drift cleanup, borrowed-authority rejection, and primary cleanup ordering; core Execute owns repeated alias and wrapper transport proofs.",
+          "functions": [
+            "test_dispatch_submit_and_run_use_the_existing_core_one_off_owner",
+            "test_dispatch_forwards_one_frozen_exact_selector_without_reresolution",
+            "test_target_drift_during_core_preparation_reclaims_owned_resources",
+            "test_closed_borrowed_repo_rejects_final_acceptance_without_substitution",
+            "test_dispatch_run_keeps_execution_failure_primary_when_cleanup_fails"
+          ]
+        },
+        "tests/dispatch/test_in_process.py": {
+          "rationale": "Retain direct invocation, interruption/lease release, deferred values, runtime and target rechecks, rebinding, failed admission, publication safety, and warning behavior; explain and admission suites cover omitted remote-probe and pin compositions.",
+          "functions": [
+            "test_in_process_invokes_original_function_wrapper_and_object_without_store",
+            "test_in_process_propagates_interruption_identity_and_releases_lease",
+            "test_in_process_rechecks_runtime_after_probe_before_direct_call",
+            "test_in_process_final_target_guard_runs_under_held_lease",
+            "test_in_process_releases_failed_admission_and_rejects_local_core_controls",
+            "test_incompatible_publication_fails_while_direct_call_holds_lease",
+            "test_incomplete_coverage_warns_but_known_conflict_is_ineligible"
+          ]
+        },
+        "tests/dispatch/test_managed_execution.py": {
+          "rationale": "Retain pre-run declaration conflict and one explicit subprocess managed-config proof; owning managed suites cover decorator, wrapper, discovery, and placement products.",
+          "functions": [
+            "test_dispatch_rejects_conflicting_managed_declarations_before_run",
+            "test_dispatch_subprocess_retains_explicit_direct_managed_config"
+          ]
+        },
+        "tests/execute/test_subprocess_admission.py": {
+          "rationale": "Retain real environment and combined-axis admission, shared-authority release, portable synthetic CPU/GPU controls and rejection, and contention reprobe behavior; exhaustive mode covers duplicate real affinity/GPU observations.",
+          "functions": [
+            "test_environment_is_checked_against_actual_worker_owner_evidence",
+            "test_combined_admission_checks_both_axes_and_rejects_unsupported_controls_preload",
+            "test_shared_local_authority_keeps_constrained_executors_disjoint_and_releases_waiters",
+            "test_worker_allocation_controls_apply_synthetic_cpu_and_gpu_without_hardware",
+            "test_worker_allocation_controls_reject_contradictory_cuda_visibility",
+            "test_contended_local_admission_reprobes_only_after_authority_transition"
+          ]
+        },
+        "tests/execute/test_subprocess_backend.py": {
+          "rationale": "Retain protocol/pin validation, real happy path and setup ordering, payload withholding, cleanup uncertainty/retry, callable failure, result bounds, STOP-before-deserialize, output uncertainty, cancellation cleanup, and Windows ownership; exhaustive mode covers duplicate process starts.",
+          "functions": [
+            "test_subprocess_rejects_old_v3_worker_before_go_or_payload",
+            "test_affinity_marker_is_visible_only_after_payload_write",
+            "test_subprocess_future_runs_descriptor_payload_and_retains_output",
+            "test_subprocess_worker_setup_runs_before_payload_and_preserves_teardown_output",
+            "test_subprocess_setup_teardown_failure_preserves_result_and_cleanup_evidence",
+            "test_subprocess_setup_entry_failure_withholds_payload_deserialization",
+            "test_subprocess_spool_retry_skips_retired_backend_cleanup",
+            "test_subprocess_supports_lambda_closure_and_remote_failure",
+            "test_subprocess_rejects_oversized_worker_result_without_success",
+            "test_rejected_go_never_deserializes_payload_at_actual_worker_boundary",
+            "test_known_result_survives_missing_output_fences_and_group_cleanup",
+            "test_cancel_before_subprocess_admission_settles_launch_cleanup",
+            "test_windows_assignment_failure_retains_run_and_charge_until_retry"
+          ]
+        }
+      },
+      "sampled_functions": {
+        "tests/core/test_execute_managed_integration.py::test_managed_decorator_orders_materialize_once_and_publish_one_final_state": "Genuine decorator-order by placement product; every member/order and placement value remains represented.",
+        "tests/managed/test_execute_defaults.py::test_managed_default_resolution_uses_invocation_state_and_worker_control": "Genuine nested-state by control-selection product; every value remains represented."
+      },
+      "exhaustive_functions": {},
+      "exhaustive_paths": {
+        "tests/core/test_graph_save_failure.py": "Store graph-save failure and cleanup proof.",
+        "tests/core/test_live_reuse_concurrency.py": "Store live-object concurrency safety proof.",
+        "tests/core/test_repo_claim_concurrency.py": "Store claim concurrency safety proof.",
+        "tests/core/test_snapshot_publication_concurrency.py": "Store publication concurrency safety proof.",
+        "tests/core/test_snapshot_publication_faults.py": "Store publication interruption and fault-window proof.",
+        "tests/core/test_store_atomic_publication.py": "Store filesystem publication, locking, and failure proof.",
+        "tests/execute/test_concurrency.py": "Execute concurrency safety proof.",
+        "tests/execute/test_failure_matrix.py": "Execute failure-boundary matrix.",
+        "tests/execute/test_future_races.py": "Execute future race safety proof.",
+        "tests/execute/test_subprocess_cancellation.py": "Real-worker cancellation and deadline proof.",
+        "tests/locking/test_advisory_locking.py": "Native locking interruption and concurrency proof.",
+        "tests/managed/test_failure_windows.py": "Managed checkpoint/final association failure-window proof.",
+        "tests/runtime/test_failure_rollback.py": "Runtime rollback safety proof.",
+        "tests/runtime/test_fork_safety.py": "Runtime fork-safety proof.",
+        "tests/runtime/test_framework_import_concurrency.py": "Framework import concurrency proof.",
+        "tests/runtime/test_publication_concurrency.py": "Runtime publication concurrency proof."
+      },
+      "must_run": {
+        "tests/core/test_execute_managed_integration.py::test_managed_decorator_orders_materialize_once_and_publish_one_final_state[subprocess-operation_afm-written_order0]": "Keep the real managed worker boundary even if parameter collection order changes.",
+        "tests/managed/test_execute_defaults.py::test_managed_default_resolution_uses_invocation_state_and_worker_control[both-True]": "Pin the nested state-plus-control interaction in addition to marginal axis coverage."
+      },
+      "sample_multi_axis_at": 8
+    }
+  },
+  "version": 1
+}

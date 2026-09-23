@@ -26,6 +26,7 @@ class ReportTransportValue(Serializable):
         Path(dest_dir, "value").write_text(str(self.value), encoding="ascii")
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_report_transport_accepts_every_closed_v3_phase(tmp_path):
     """Detached worker evidence preserves every StoreReport phase without handles."""
 
@@ -52,6 +53,7 @@ def test_report_transport_accepts_every_closed_v3_phase(tmp_path):
     assert {item.store_index for item in outcome.evidence.publications} == {0}
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_snapshot_failure_reports_unattempted_late_work_before_hooks(tmp_path, monkeypatch):
     """An early snapshot error retains planned derived work as unattempted evidence."""
 

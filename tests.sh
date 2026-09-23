@@ -6,6 +6,40 @@ set -euo pipefail
 export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} --import-mode=importlib"
 export PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}"
 
+phase_matched=0
+
+run_phase() {
+    local status
+    if "$@"; then
+        phase_matched=1
+        return 0
+    else
+        status=$?
+    fi
+    if [ "$status" -eq 5 ]; then
+        return 0
+    fi
+    return "$status"
+}
+
+finish_phases() {
+    if [ "$phase_matched" -eq 0 ]; then
+        echo "No tests matched any runner phase." >&2
+        return 5
+    fi
+}
+
+coverage_control_args() {
+    pytest_coverage_args=(--no-cov)
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--cov" || "$arg" == --cov=* ]]; then
+            pytest_coverage_args=()
+            return
+        fi
+    done
+}
+
 partition_process_state_tests() {
     local paths=("$@")
     process_state_selected=()
@@ -66,16 +100,17 @@ run_tier() {
         exit 2
     fi
     if [ "$tier_name" == "heavy" ]; then
-        DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers "$tier_filter" "${selected[@]}" "${stripped_args[@]}"
+        run_phase env DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers "$tier_filter" "${selected[@]}" "${stripped_args[@]}"
     else
         partition_process_state_tests "${selected[@]}"
         if [ "${#process_state_selected[@]}" -gt 0 ]; then
-            pytest --no-cov --dryml-runner-tiers "$tier_filter" "${process_state_selected[@]}" "${stripped_args[@]}"
+            run_phase pytest --no-cov --dryml-runner-tiers "$tier_filter" "${process_state_selected[@]}" "${stripped_args[@]}"
         fi
         if [ "${#ordinary_selected[@]}" -gt 0 ]; then
-            pytest --no-cov --dryml-runner-tiers "$tier_filter" "${ordinary_selected[@]}" "${stripped_args[@]}"
+            run_phase pytest --no-cov --dryml-runner-tiers "$tier_filter" "${ordinary_selected[@]}" "${stripped_args[@]}"
         fi
     fi
+    finish_phases
 }
 
 prepare_suite_args() {
@@ -93,14 +128,67 @@ prepare_suite_args() {
     done
 }
 
-run_full() {
+run_maintained() {
     prepare_suite_args "$@"
     mapfile -t medium_selected < <(python ./tests/tools/test_buckets.py select smoke medium)
     mapfile -t heavy_selected < <(python ./tests/tools/test_buckets.py select heavy)
     partition_process_state_tests "${medium_selected[@]}"
-    pytest --cov=dryml --dryml-runner-tiers smoke,medium "${process_state_selected[@]}" "${stripped_args[@]}"
-    pytest --cov=dryml --cov-append --dryml-runner-tiers smoke,medium "${ordinary_selected[@]}" "${stripped_args[@]}"
-    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --cov=dryml --cov-append --dryml-runner-tiers heavy "${heavy_selected[@]}" "${stripped_args[@]}"
+    run_phase pytest --no-cov --dryml-runner-tiers smoke,medium "${process_state_selected[@]}" "${stripped_args[@]}"
+    run_phase pytest --no-cov --dryml-runner-tiers smoke,medium "${ordinary_selected[@]}" "${stripped_args[@]}"
+    run_phase env DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers heavy "${heavy_selected[@]}" "${stripped_args[@]}"
+    finish_phases
+}
+
+run_good_enough() {
+    prepare_suite_args "$@"
+    mapfile -t selected < <(python ./tests/tools/test_buckets.py select-profile good-enough smoke medium)
+    if [ "${#selected[@]}" -eq 0 ]; then
+        echo "No test files selected for profile: good-enough" >&2
+        return 2
+    fi
+    echo "DRYML good-enough: smoke+medium with named integration representatives; package and heavy tests excluded." >&2
+    partition_process_state_tests "${selected[@]}"
+    if [ "${#process_state_selected[@]}" -gt 0 ]; then
+        run_phase pytest --no-cov --dryml-runner-tiers smoke,medium --dryml-test-profile good-enough "${process_state_selected[@]}" "${stripped_args[@]}"
+    fi
+    if [ "${#ordinary_selected[@]}" -gt 0 ]; then
+        run_phase pytest --no-cov --dryml-runner-tiers smoke,medium --dryml-test-profile good-enough "${ordinary_selected[@]}" "${stripped_args[@]}"
+    fi
+    finish_phases
+}
+
+run_coverage() {
+    prepare_suite_args "$@"
+    mapfile -t medium_selected < <(python ./tests/tools/test_buckets.py select smoke medium)
+    mapfile -t heavy_selected < <(python ./tests/tools/test_buckets.py select heavy)
+    partition_process_state_tests "${medium_selected[@]}"
+    run_coverage_phase smoke,medium "${process_state_selected[@]}"
+    run_coverage_phase smoke,medium "${ordinary_selected[@]}"
+    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 run_coverage_phase heavy "${heavy_selected[@]}"
+    finish_phases
+}
+
+run_coverage_phase() {
+    local tier_filter="$1"
+    shift
+    local append_args=()
+    if [ "$phase_matched" -eq 1 ]; then
+        append_args=(--cov-append)
+    fi
+    run_phase pytest --cov=dryml "${append_args[@]}" --dryml-runner-tiers "$tier_filter" "$@" "${stripped_args[@]}"
+}
+
+run_package() {
+    prepare_suite_args "$@"
+    mapfile -t selected < <(python ./tests/tools/test_buckets.py select-category package)
+    coverage_control_args "${stripped_args[@]}"
+    run_phase pytest "${pytest_coverage_args[@]}" "${selected[@]}" "${stripped_args[@]}"
+    finish_phases
+}
+
+run_focused() {
+    coverage_control_args "$@"
+    pytest "${pytest_coverage_args[@]}" "$@"
 }
 
 run_profile() {
@@ -117,9 +205,11 @@ run_profile() {
         esac
     done
     prepare_suite_args "${profile_args[@]}"
-    local medium_output="./tests/.test-timings-medium.json"
-    local process_state_output="./tests/.test-timings-process-state.json"
-    local heavy_output="./tests/.test-timings-heavy.json"
+    local output_dir="/tmp/dryml/profile"
+    mkdir -p "$output_dir"
+    local medium_output="$output_dir/test-timings-medium.json"
+    local process_state_output="$output_dir/test-timings-process-state.json"
+    local heavy_output="$output_dir/test-timings-heavy.json"
     local unknown_args=()
     if [ "$unknown_only" -eq 1 ]; then
         unknown_args=(--dryml-timing-unknown-only)
@@ -127,27 +217,37 @@ run_profile() {
     mapfile -t medium_selected < <(python ./tests/tools/test_buckets.py select smoke medium)
     mapfile -t heavy_selected < <(python ./tests/tools/test_buckets.py select heavy)
     partition_process_state_tests "${medium_selected[@]}"
-    pytest --no-cov --dryml-runner-tiers smoke,medium "${process_state_selected[@]}" --dryml-timing-output "$process_state_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
-    pytest --no-cov --dryml-runner-tiers smoke,medium "${ordinary_selected[@]}" --dryml-timing-output "$medium_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
-    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers heavy "${heavy_selected[@]}" --dryml-timing-output "$heavy_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    run_phase pytest --no-cov --dryml-runner-tiers smoke,medium "${process_state_selected[@]}" --dryml-timing-output "$process_state_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    run_phase pytest --no-cov --dryml-runner-tiers smoke,medium "${ordinary_selected[@]}" --dryml-timing-output "$medium_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    run_phase env DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers heavy "${heavy_selected[@]}" --dryml-timing-output "$heavy_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    finish_phases
     python ./tests/tools/test_buckets.py update "$process_state_output" "$medium_output" "$heavy_output"
     python ./tests/tools/test_buckets.py summary --all-files
 }
 
 if [ "$#" -eq 0 ]; then
-    run_full
+    run_good_enough
 elif [[ "$1" == "smoke" || "$1" == "medium" || "$1" == "heavy" ]]; then
     mode="$1"
     shift
     run_tier "$mode" "$@"
-elif [[ "$1" == "full" ]]; then
+elif [[ "$1" == "good-enough" ]]; then
     shift
-    run_full "$@"
+    run_good_enough "$@"
+elif [[ "$1" == "full" || "$1" == "exhaustive" ]]; then
+    shift
+    run_maintained "$@"
+elif [[ "$1" == "coverage" ]]; then
+    shift
+    run_coverage "$@"
+elif [[ "$1" == "package" ]]; then
+    shift
+    run_package "$@"
 elif [[ "$1" == "profile" ]]; then
     shift
     run_profile "$@"
 elif [[ "$1" == -* ]]; then
-    run_full "$@"
+    run_good_enough "$@"
 else
-    pytest --cov=dryml "$@"
+    run_focused "$@"
 fi

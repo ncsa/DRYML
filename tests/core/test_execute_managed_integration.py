@@ -188,14 +188,17 @@ def test_accepted_composite_snapshots_closure_and_default_wrapper_captures(
 @pytest.mark.parametrize("placement", ("local", "subprocess"))
 def test_managed_decorator_orders_materialize_once_and_publish_one_final_state(
         tmp_path, member, written_order, placement,
-        monkeypatch: pytest.MonkeyPatch):
-    """Each order has one normalized Mat boundary and one final state publication."""
+        monkeypatch: pytest.MonkeyPatch,
+        request: pytest.FixtureRequest):
+    """Each order has one Mat boundary; subprocess rows retain host observation."""
 
     state_store = DirStore(tmp_path / "state", query_index="none")
     control_store = DirStore(tmp_path / "control", query_index="none")
     repo = Repo((state_store, control_store))
     subject = ManagedMatrixValue(repo=repo)
     argument = MatrixArgument(3, repo=repo)
+    if placement == "local":
+        request.getfixturevalue("fixed_managed_snapshot_environment")
     argument_state = repo.save_object(argument, deep_capture=True)
     operation = getattr(subject, member)
     from dryml.annotations import annotations_for_method
@@ -346,6 +349,7 @@ def test_direct_bound_operation_transports_explicit_managed_config(
     assert (restored.value, restored.checkpoint_callbacks) == (2, 2)
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_direct_bound_operation_rejects_malformed_config_before_mutation(tmp_path) -> None:
     """Invalid explicit policy is rejected during capture before a worker can mutate."""
 

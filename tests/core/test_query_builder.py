@@ -1,6 +1,10 @@
+import pytest
+
 from tests.core import core_objects as objects
 
 from dryml.core import Definition, Repo, SKIP_ARGS
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 
 def test_mixed_categorical_and_exact_query_keeps_only_exact_branch():

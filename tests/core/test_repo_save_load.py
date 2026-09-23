@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml import session
 from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef
 from dryml.core.repo import make_store

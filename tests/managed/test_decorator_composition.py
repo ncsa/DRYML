@@ -138,8 +138,9 @@ class ChainFunctionManaged(Serializable):
         ("F", "M", "A"), ("M", "A", "F"), ("M", "F", "A"),
     ),
 )
-def test_all_decorator_orders_preserve_one_managed_boundary(tmp_path, written_order):
-    """Every supported written A/F/M order binds, declares, and runs once."""
+def test_all_decorator_orders_preserve_one_managed_boundary(
+        tmp_path, written_order, fixed_managed_snapshot_environment):
+    """Every local A/F/M order binds, declares, and runs once."""
 
     calls = []
 
@@ -177,7 +178,8 @@ def test_all_decorator_orders_preserve_one_managed_boundary(tmp_path, written_or
     assert subject.operation.status(state_repo=repo).state == "completed"
 
 
-def test_outer_wrapper_exposes_managed_controls_and_preserves_its_behavior(tmp_path):
+def test_outer_wrapper_exposes_managed_controls_and_preserves_its_behavior(
+        tmp_path, fixed_managed_snapshot_environment):
     """W(M(method)) has controls before call and retains outer result processing."""
 
     repo = Repo((DirStore(tmp_path / "state"),))
@@ -195,8 +197,9 @@ def test_outer_wrapper_exposes_managed_controls_and_preserves_its_behavior(tmp_p
     assert failing.events == ["before", "body", "error", "finally"]
 
 
-def test_outer_wrapper_reconstructs_as_one_managed_target_in_a_worker(tmp_path):
-    """A fresh core worker restores the hidden composite before its first call."""
+def test_outer_wrapper_reconstructs_as_one_managed_target_in_a_worker(
+        tmp_path, fixed_managed_snapshot_environment):
+    """An in-process core worker restores the composite before its first call."""
 
     repo = Repo((DirStore(tmp_path / "state"),))
     subject = OuterManaged(repo=repo)
@@ -221,7 +224,8 @@ def test_outer_wrapper_reconstructs_as_one_managed_target_in_a_worker(tmp_path):
     ) == 13
 
 
-def test_managed_wrapper_function_handoff_runs_once_and_resets_after_failure(tmp_path):
+def test_managed_wrapper_function_handoff_runs_once_and_resets_after_failure(
+        tmp_path, fixed_managed_snapshot_environment):
     """M(W(F(method))) skips only its inner F boundary and never leaks it."""
 
     repo = Repo((DirStore(tmp_path / "state"),))
@@ -281,7 +285,8 @@ def test_hidden_managed_aliases_and_copied_wrapper_evidence_are_rejected():
         managed_operation()(copied)
 
 
-def test_managed_wrapper_chain_preserves_every_wrapper_and_one_function_boundary(tmp_path):
+def test_managed_wrapper_chain_preserves_every_wrapper_and_one_function_boundary(
+        tmp_path, fixed_managed_snapshot_environment):
     """M(W(W(F(method))) retains both ordinary bodies and bypasses only F once."""
 
     repo = Repo((DirStore(tmp_path / "state"),))
@@ -331,7 +336,8 @@ def test_hidden_managed_finalization_rejects_unproven_outer_relationship(kind):
             operation = outer
 
 
-def test_hidden_managed_finalization_accepts_default_captured_target(tmp_path):
+def test_hidden_managed_finalization_accepts_default_captured_target(
+        tmp_path, fixed_managed_snapshot_environment):
     """A wrapper that keeps its exact target in a default remains transportable."""
 
     class Subject(Serializable):
@@ -407,8 +413,9 @@ def test_function_handoff_lease_expires_and_is_shared_once_across_context_copies
     assert calls == ["args", "return"] * 5
 
 
-def test_codec_transports_a_nested_callback_capturing_managed_declaration_and_config(tmp_path):
-    """Invocation graph v2 retains a hidden declaration/config capture by node."""
+def test_codec_transports_a_nested_callback_capturing_managed_declaration_and_config(
+        tmp_path, fixed_managed_snapshot_environment):
+    """In-process graph v2 retains a hidden declaration/config capture by node."""
 
     declaration = OuterManaged.__dict__["operation"]._descriptor
     config = ManagedConfig()

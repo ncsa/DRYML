@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import Definition, Object, Repo, Serializable
 from dryml.core.query import QueryIndexError
 from dryml.core.store.dir import DirStore

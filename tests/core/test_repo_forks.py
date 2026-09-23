@@ -31,6 +31,7 @@ def _environment(version):
     )
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_object_and_state_forks_rekey_ids_and_preserve_source_namespace(tmp_path):
     source = DirStore(tmp_path / "source")
     target = DirStore(tmp_path / "target")
@@ -51,6 +52,7 @@ def test_object_and_state_forks_rekey_ids_and_preserve_source_namespace(tmp_path
     assert target.validate_local_state(state_fork, ())
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_state_fork_rekeys_materializing_seed_references_and_copies_their_records(tmp_path):
     source = DirStore(tmp_path / "source")
     target = DirStore(tmp_path / "target")
@@ -81,6 +83,7 @@ def test_state_fork_rekeys_materializing_seed_references_and_copies_their_record
     assert loaded.child.object_id == fork.object.objects[child_path]
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_fork_copies_verified_snapshot_local_payloads(tmp_path):
     source = DirStore(tmp_path / "source")
     target = DirStore(tmp_path / "target")
@@ -116,6 +119,7 @@ def test_state_fork_captures_its_own_environment_instead_of_relabeling_source(
     assert fork_evidence.requirements_coverage == "incomplete"
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_fork_failure_before_final_boundaries_leaves_no_new_authority(tmp_path, monkeypatch):
     source = DirStore(tmp_path / "source")
     target = DirStore(tmp_path / "target")
@@ -139,6 +143,7 @@ def test_fork_failure_before_final_boundaries_leaves_no_new_authority(tmp_path, 
     assert tuple(target.iter_declaration_records()) == ()
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_interruption_after_state_fork_boundary_leaves_complete_discoverable_authority(tmp_path, monkeypatch):
     source = DirStore(tmp_path / "source")
     target = DirStore(tmp_path / "target")
@@ -166,6 +171,7 @@ def test_interruption_after_state_fork_boundary_leaves_complete_discoverable_aut
         assert target.validate_local_state(fork, path)
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_object_fork_failure_before_declaration_leaves_no_declaration_authority(tmp_path, monkeypatch):
     source = DirStore(tmp_path / "source")
     target = DirStore(tmp_path / "target")

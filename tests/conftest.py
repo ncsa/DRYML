@@ -18,9 +18,8 @@ else:
     ics.configureOutput(frame_filters=[_pwe])
 
 
-@pytest.fixture
-def synthetic_environment_record(monkeypatch):
-    """Return policy evidence and reject installed-distribution inventory reads."""
+def _synthetic_environment_record():
+    """Build the small environment record shared by opt-in test fixtures."""
 
     from dryml.environments import (
         DrymlRuntimeRecord,
@@ -29,18 +28,8 @@ def synthetic_environment_record(monkeypatch):
         PlatformRecord,
         PythonRecord,
     )
-    from dryml.environments import introspection
 
-    inventory_reads = []
-
-    def reject_inventory(*_args, **_kwargs):
-        inventory_reads.append(True)
-        raise AssertionError(
-            "policy-only test must not inspect installed distributions"
-        )
-
-    monkeypatch.setattr(introspection.metadata, "distributions", reject_inventory)
-    yield EnvironmentRecord(
+    return EnvironmentRecord(
         python=PythonRecord(
             version=".".join(str(value) for value in sys.version_info[:3]),
             implementation=sys.implementation.name,
@@ -67,7 +56,78 @@ def synthetic_environment_record(monkeypatch):
         ),
         kind="test",
     )
+
+
+@pytest.fixture
+def synthetic_environment_record(monkeypatch):
+    """Return policy evidence and reject installed-distribution inventory reads."""
+
+    from dryml.environments import introspection
+
+    inventory_reads = []
+
+    def reject_inventory(*_args, **_kwargs):
+        inventory_reads.append(True)
+        raise AssertionError(
+            "policy-only test must not inspect installed distributions"
+        )
+
+    monkeypatch.setattr(introspection.metadata, "distributions", reject_inventory)
+    yield _synthetic_environment_record()
     assert not inventory_reads, "policy-only test attempted host inventory"
+
+
+@pytest.fixture
+def fixed_snapshot_environment(monkeypatch):
+    """Use fixed evidence only when snapshot capture omits its observer.
+
+    The opt-in fixture leaves explicit observers and clocks intact and delegates
+    lineage and requirement capture to the production implementation. Unlike
+    :func:`synthetic_environment_record`, it does not guard unrelated environment
+    admission or introspection calls made by an integration test.
+
+    Returns:
+        The fixed environment record supplied to default snapshot observations.
+    """
+
+    from dryml.core import snapshot_capture
+
+    environment = _synthetic_environment_record()
+    original_capture = snapshot_capture._capture_snapshot_evidence
+
+    def capture(lineages, classes, *, observer=None,
+                clock=snapshot_capture.current_utc_time):
+        if observer is None:
+            observer = lambda: environment
+        return original_capture(
+            lineages, classes, observer=observer, clock=clock,
+        )
+
+    monkeypatch.setattr(snapshot_capture, "_capture_snapshot_evidence", capture)
+    return environment
+
+
+@pytest.fixture
+def fixed_managed_snapshot_environment(
+        monkeypatch, fixed_snapshot_environment):
+    """Use fixed evidence for managed lifecycle snapshot pre-observation.
+
+    This explicit opt-in extends :func:`fixed_snapshot_environment` only at the
+    managed runtime's pre-observation seam. Requirement collection, clocks,
+    persistence, and lifecycle failure handling continue through production
+    implementations.
+
+    Returns:
+        The fixed environment record supplied to managed snapshot observations.
+    """
+
+    from dryml.managed import runtime
+
+    def preobserve():
+        return lambda: fixed_snapshot_environment
+
+    monkeypatch.setattr(runtime, "_preobserve_snapshot_environment", preobserve)
+    return fixed_snapshot_environment
 
 
 def pytest_sessionstart(session):

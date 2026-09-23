@@ -14,6 +14,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 TESTS_DIR = ROOT / "tests"
 DEFAULT_BASELINE = TESTS_DIR / "test_tiers.json"
+DEFAULT_PROFILES = TESTS_DIR / "test_profiles.json"
 VALID_TIERS = ("smoke", "medium", "heavy")
 
 
@@ -32,6 +33,17 @@ def main(argv: list[str] | None = None) -> int:
         "select", help="print test files for a tier set"
     )
     select.add_argument("tiers", nargs="+", choices=VALID_TIERS + ("full",))
+
+    select_profile = subparsers.add_parser(
+        "select-profile", help="print test files for a representative profile"
+    )
+    select_profile.add_argument("profile")
+    select_profile.add_argument("tiers", nargs="+", choices=VALID_TIERS)
+
+    select_category = subparsers.add_parser(
+        "select-category", help="print maintained test files in a category"
+    )
+    select_category.add_argument("category")
 
     summary = subparsers.add_parser("summary", help="print bucket summary")
     summary.add_argument(
@@ -87,6 +99,20 @@ def main(argv: list[str] | None = None) -> int:
         for path in select_files(baseline, tiers):
             print(path)
         return 0
+    if args.command == "select-profile":
+        policy = load_baseline(DEFAULT_PROFILES)
+        profiles = policy.get("profiles", {})
+        if args.profile not in profiles:
+            parser.error(f"unknown test profile: {args.profile}")
+        for path in select_profile_files(
+            baseline, set(args.tiers), profiles[args.profile]
+        ):
+            print(path)
+        return 0
+    if args.command == "select-category":
+        for path in select_category_files(args.category):
+            print(path)
+        return 0
     if args.command == "summary":
         print_summary(baseline, include_all=args.all_files)
         return 0
@@ -137,6 +163,29 @@ def select_files(baseline: dict[str, Any], tiers: set[str]) -> list[str]:
         ):
             selected.append("./" + rel_text)
     return selected
+
+
+def select_profile_files(
+    baseline: dict[str, Any], tiers: set[str], profile: dict[str, Any]
+) -> list[str]:
+    """Return tier-selected files after cheap profile-level exclusions."""
+
+    excluded_categories = set(profile.get("excluded_categories", {}))
+    return [
+        path
+        for path in select_files(baseline, tiers)
+        if category_for_path(path.removeprefix("./")) not in excluded_categories
+    ]
+
+
+def select_category_files(category: str) -> list[str]:
+    """Return every maintained test file owned by one category."""
+
+    return [
+        "./" + path.as_posix()
+        for path in iter_test_files()
+        if category_for_path(path.as_posix()) == category
+    ]
 
 
 def has_node_tier(
@@ -259,12 +308,12 @@ def runner_suite_root_index(pytest_args: list[str]) -> int | None:
     are appended. Any narrower selection is rejected before pytest executes.
     """
 
-    reserved = "--dryml-runner-tiers"
-    if any(
-        arg == reserved or arg.startswith(reserved + "=")
-        for arg in pytest_args
-    ):
-        raise ValueError(f"{reserved} is reserved for tests.sh")
+    for reserved in ("--dryml-runner-tiers", "--dryml-test-profile"):
+        if any(
+            arg == reserved or arg.startswith(reserved + "=")
+            for arg in pytest_args
+        ):
+            raise ValueError(f"{reserved} is reserved for tests.sh")
 
     selections = _pytest_file_or_dir(pytest_args)
     suite_roots = {"tests", "./tests"}

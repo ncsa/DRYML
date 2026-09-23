@@ -20,6 +20,8 @@ from dryml.core.store.records import (
 )
 from dryml.core.store.store import StoreAuthorityError
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class IndexedRecordObject(Object):
     def __init__(self, value="value"):

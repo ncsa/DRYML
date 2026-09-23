@@ -334,8 +334,9 @@ def test_malformed_managed_graph_nodes_fail_before_import_or_resource_open(
         invoke_invocation(dill.dumps(graph, protocol=5), repo=repo)
 
 
-def test_transported_callback_runs_inside_nested_worker_managed_call(tmp_path):
-    """Checkpoint callbacks run in the worker-managed lifecycle, not at capture."""
+def test_transported_callback_runs_inside_nested_worker_managed_call(
+        tmp_path, fixed_managed_snapshot_environment):
+    """Checkpoint callbacks run in the in-process worker lifecycle, not capture."""
 
     repo = Repo(DirStore(tmp_path / "state", query_index="none"))
     value = _ManagedValue(repo=repo)

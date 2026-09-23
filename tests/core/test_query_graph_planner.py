@@ -1,5 +1,9 @@
 from collections.abc import Mapping
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import Definition, Object, Repo, SKIP_ARGS, Satisfies
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.query.graph_plan import graph_candidate_ids

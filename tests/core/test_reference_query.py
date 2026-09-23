@@ -1,5 +1,7 @@
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import Definition, Object, ObjectRef, Repo, Serializable
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink

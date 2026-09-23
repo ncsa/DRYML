@@ -34,17 +34,43 @@ verification under the global verification policy, not another full-suite run.
 The old and development tiers, `tests/old` and `tests/dev`, are excluded unless
 the user explicitly requests them.
 
-### Final Maintained Verification
+### Verification Gates
 
-After affected subsystem tests pass and all implementation units are integrated,
-run the maintained selection at final closeout:
+Routine final verification proceeds from focused tests to the affected subsystem
+and then the representative maintained suite:
 
 ```bash
-./tests.sh --ignore tests/old --ignore tests/dev -x tests
+./tests.sh good-enough --ignore tests/old --ignore tests/dev -x tests
 ```
 
-`./tests.sh full` is the maintained full selection;
-`./tests.sh profile --unknown-only` profiles unclassified test tiers.
+The no-argument and option-first forms also select `good-enough`. This routine
+gate runs smoke and medium tests without coverage, excludes package and heavy
+tests, and deliberately uses the checked-in representative policy for selected
+integration functions and parameter products.
+
+Run the exhaustive suite **only when the user explicitly requests it**. Earlier
+instrumented full runs took roughly 2.5 hours. Do not infer permission from a
+request to implement, verify, review, commit, push, release, or fix CI. This rule
+supersedes older plans and workflow instructions prescribing a full closeout.
+Pass this restriction to delegated agents as well.
+
+`./tests.sh exhaustive` (also `full`) retains every maintained combination;
+`./tests.sh coverage` runs that exhaustive selection with instrumentation. Both
+require an explicit user request, as do broad `medium`, `heavy`, and `profile`
+runs that bypass the representative selection. Do not substitute `pytest tests`
+or a broad focused-directory invocation to bypass this policy. Targeted tests
+for an actual change or failure remain appropriate. Routine automated runners
+and CI use `good-enough`; there is no scheduled exhaustive gate.
+
+When adding code, add the smallest set of meaningful routine tests covering its
+new behavior and important failure boundaries. Keep exhaustive parameter and
+integration products out of the routine gate: mark separate matrix tests
+`@pytest.mark.exhaustive_only`, or deliberately choose representative functions
+and marginal matrix cases in `tests/test_profiles.json`. Keep all combinations
+available to explicit exhaustive runs. Update curated-file allowlists when a
+new regression belongs in `good-enough`; do not weaken assertions or use time
+cutoffs to reach the feedback goal. Prefer controlled setup evidence where host
+observation is incidental, but retain real observation tests at their boundaries.
 
 ## Source Ownership
 

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import Definition, MetadataConflictError, Object, Repo, SaveAnnotations, Serializable
 from dryml.core.query import MetadataField, MetadataPredicate, QueryError, field
 from dryml.core.query.codecs import QueryCodecError, decode_metadata_predicate, encode_metadata_predicate

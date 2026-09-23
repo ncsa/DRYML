@@ -5,6 +5,8 @@ from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DeclarationRecord
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 
 class LookupValue(Serializable):
     def __init__(self, value):

@@ -249,3 +249,55 @@ def test_ray_ci_job_enables_real_integration_and_uses_job_owned_fixture() -> Non
     cleanup = job["steps"][-1]
     assert cleanup["if"] == "always()"
     assert "ray stop --force" in cleanup["run"]
+
+
+def test_ci_workflow_keeps_comprehensive_and_coverage_suites_opt_in() -> None:
+    """Keep routine, comprehensive, and coverage workflow gates distinct."""
+
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "tests.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    events = workflow.get("on", workflow.get(True))
+    suite = events["workflow_dispatch"]["inputs"]["suite"]
+    assert suite["default"] == "good-enough"
+    assert suite["options"] == ["good-enough", "exhaustive", "coverage"]
+    assert set(events) == {"push", "pull_request", "workflow_dispatch"}
+
+    jobs = workflow["jobs"]
+    lightweight_step = jobs["lightweight"]["steps"][-1]
+    assert "./tests.sh good-enough" in lightweight_step["run"]
+    assert "./tests.sh medium" in lightweight_step["run"]
+    assert "github.event_name == 'workflow_dispatch'" in lightweight_step["env"]["REQUESTED_SUITE"]
+    assert "'good-enough'" in lightweight_step["env"]["REQUESTED_SUITE"]
+
+    for name in ("heavy", "ray-integration"):
+        condition = jobs[name]["if"]
+        assert condition == (
+            "github.event_name == 'workflow_dispatch' && "
+            "(inputs.suite == 'exhaustive' || inputs.suite == 'coverage')"
+        )
+
+    coverage = jobs["coverage"]
+    assert coverage["if"] == (
+        "github.event_name == 'workflow_dispatch' && "
+        "inputs.suite == 'coverage'"
+    )
+    coverage_runs = "\n".join(
+        step.get("run", "") for step in coverage["steps"]
+    )
+    assert "heavy_test_requirements.txt" in coverage_runs
+    assert "python -m pip install ." in coverage_runs
+    assert "./tests.sh coverage" in coverage_runs
+
+    publication = jobs["local-filesystem-publication"]
+    assert publication["strategy"]["matrix"]["os"] == ["macos-latest"]
+    assert any("brew install bash" in step.get("run", "") for step in publication["steps"])
+    routine_steps = [step for step in publication["steps"] if "./tests.sh" in step.get("run", "")]
+    for step in routine_steps:
+        if "./tests.sh package" in step["run"]:
+            assert step["if"] == jobs["heavy"]["if"]
+        else:
+            assert "bash ./tests.sh good-enough" in step["run"]
+    assert any("./tests.sh good-enough" in step["run"] for step in routine_steps)

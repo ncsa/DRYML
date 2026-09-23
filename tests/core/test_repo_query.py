@@ -1,5 +1,7 @@
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import Definition, Object, Repo, SKIP_ARGS
 from dryml.core.query import QueryDomainError
 from dryml.core.store.dir import DirStore

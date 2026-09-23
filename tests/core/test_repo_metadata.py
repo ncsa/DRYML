@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
 from dryml.core import (
     MetadataConflictError, Object, Repo, SaveAnnotations, Serializable,
     read_snapshot_metadata, save_object,

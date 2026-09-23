@@ -523,6 +523,7 @@ def test_source_spec_preserves_globals_module_and_caller_precedence(monkeypatch)
     ].import_path() == "numpy"
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_source_spec_identity_round_trips_through_store_lookup(tmp_path):
     """Source-backed CDef identity remains usable for persisted structural lookup."""
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 import subprocess
 import sys
 from threading import Event, Thread

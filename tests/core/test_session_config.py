@@ -1,3 +1,5 @@
+import pytest
+
 import dryml
 
 from dryml.core import Repo, Serializable, definition_mode
@@ -5,6 +7,8 @@ from dryml.core.definition import ConcreteDefinition, Definition
 from dryml.core.repo import default_repo, get_default_repo
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.general import pickle_load, pickle_save
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 
 class SessionThing(Serializable):

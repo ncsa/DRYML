@@ -1,7 +1,10 @@
+import pytest
+
 from tests.core import core_objects as objects
 from dryml.core.repo import Repo, make_store
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_object_save_load_uses_complete_snapshot_metadata(store_resource_factory):
     res = store_resource_factory("directory", prefix="environment_guard")
     store = make_store(res.resource)
