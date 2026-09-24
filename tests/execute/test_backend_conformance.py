@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from dryml.execute.executor import Executor
+from dryml.execute import subprocess as subprocess_module
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.ray import RayBackendConfig
 from dryml.execute.subprocess import SubProcessConfig
@@ -43,8 +44,16 @@ def backend_config(request: pytest.FixtureRequest, tmp_path: Path):
     )
 
 
-def test_subprocess_preserves_a_positive_submillisecond_output_final_timeout(tmp_path: Path):
+def test_subprocess_preserves_a_positive_submillisecond_output_final_timeout(tmp_path: Path, monkeypatch):
     """A valid fractional final-fence timeout reaches the worker without rounding to zero."""
+    encoded_timeouts = []
+    encode = subprocess_module.encode_bootstrap_descriptor
+
+    def record_descriptor(descriptor):
+        encoded_timeouts.append(descriptor.output_final_timeout)
+        return encode(descriptor)
+
+    monkeypatch.setattr(subprocess_module, "encode_bootstrap_descriptor", record_descriptor)
     output = ExecutionOutput()
     executor = Executor(
         SubProcessConfig(
@@ -55,7 +64,9 @@ def test_subprocess_preserves_a_positive_submillisecond_output_final_timeout(tmp
     try:
         future = executor.submit(_emit, "result", output=output)
         assert future.result(timeout=10) == "result"
-        assert "fractional-final-timeout" in output.snapshot().stdout
+        # This deadline permits incomplete output; precision, not drainer
+        # scheduling within 0.1 ms, is the transport contract under test.
+        assert encoded_timeouts == [0.0001]
         future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=5)

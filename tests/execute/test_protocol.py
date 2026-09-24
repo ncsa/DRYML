@@ -285,7 +285,10 @@ def test_typed_frame_limit_rejects_from_metadata_before_reading_payload_bytes():
 
 def test_bootstrap_descriptor_is_closed_and_bounded_before_transport():
     """Bootstrap controls carry only correlation and effective wire-limit scalars."""
-    descriptor = BootstrapDescriptor(_correlation(), "token-1", "127.0.0.1", 43123, 512, 32, 512, 128, 128, 64)
+    descriptor = BootstrapDescriptor(
+        _correlation(), "token-1", "127.0.0.1", 43123, 512, 32, 512, 128, 128, 64,
+        output_final_timeout=0.0001,
+    )
     encoded = encode_bootstrap_descriptor(descriptor)
     assert decode_bootstrap_descriptor(encoded, header_limit=512) == descriptor
     assert "token-1" not in repr(descriptor)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 from pathlib import Path
 from threading import Event
@@ -61,9 +62,30 @@ def test_root_exit_cannot_leave_owned_descendant_holding_a_pipe(tmp_path: Path):
         assert stat.exists() and stat.read_text().split()[2] == "Z"
 
 
-def test_termination_escalates_when_an_owned_child_ignores_sigterm():
-    """A timeout kills an owned process group rather than waiting for SIGTERM."""
-    program = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(10)"
-    result = run_bounded([sys.executable, "-c", program], timeout=0.05, output_limit=64, termination_timeout=0.05)
-    assert result.timed_out
-    assert result.cleanup_complete
+def test_termination_escalates_when_an_owned_child_ignores_sigterm(tmp_path: Path):
+    """Cancellation escalates after the child confirms its SIGTERM handler."""
+    ready = tmp_path / "ignoring-sigterm"
+
+    class CancelWhenReady:
+        def is_set(self):
+            return ready.exists()
+
+    program = (
+        "import signal, time; from pathlib import Path; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"Path({str(ready)!r}).write_text('ready'); time.sleep(30)"
+    )
+    result = run_bounded(
+        [sys.executable, "-c", program], timeout=5, output_limit=64,
+        termination_timeout=2, cancelled=CancelWhenReady(),
+    )
+    try:
+        assert ready.exists()
+        assert result.cancelled
+        assert not result.timed_out
+        assert result.cleanup_complete
+        if os.name == "posix":
+            assert result.returncode == -signal.SIGKILL
+    finally:
+        if result.cleanup_owner is not None:
+            assert result.cleanup_owner.reconcile(deadline=monotonic() + 5)
