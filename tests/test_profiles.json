@@ -330,12 +330,6 @@
             "test_missing_lock_namespace_never_becomes_owner_loss_or_recovery_evidence"
           ]
         },
-        "tests/models/test_tf_training.py": {
-          "rationale": "Retain the small explicit-factory save/load integration proof with exact state, metadata, nested selection, and shared topology; broader backend training remains heavy.",
-          "functions": [
-            "test_tf_sequential_factory_state_ref_round_trip"
-          ]
-        },
         "tests/dispatch/test_backend_execution.py": {
           "rationale": "Retain real submit/run, exact-selector handoff, target-drift cleanup, borrowed-authority rejection, and primary cleanup ordering; core Execute owns repeated alias and wrapper transport proofs.",
           "functions": [

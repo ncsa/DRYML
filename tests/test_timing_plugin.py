@@ -524,3 +524,16 @@ def test_good_enough_policy_retains_required_boundary_proofs():
         "tests/dispatch/test_explain.py",
     ):
         assert complete_path not in representatives
+
+
+def test_good_enough_does_not_collect_backend_training_modules():
+    """Training-module imports must not preempt managed visibility setup."""
+    baseline = test_buckets.load_baseline(test_buckets.DEFAULT_BASELINE)
+    policy = test_buckets.load_baseline(test_buckets.DEFAULT_PROFILES)
+    selected = test_buckets.select_profile_files(
+        baseline, {"smoke", "medium"}, policy["profiles"]["good-enough"]
+    )
+    assert not {
+        "./tests/models/test_tf_training.py",
+        "./tests/models/test_torch_training.py",
+    }.intersection(selected)
