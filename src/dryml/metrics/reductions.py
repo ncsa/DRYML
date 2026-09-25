@@ -10,22 +10,15 @@ from dryml.artifacts import Fold, mean
 from dryml.core import AutoRef, ConcreteDefinition, Ref, function
 from dryml.core.tensor_spec import SpecTree, TensorSpec
 from dryml.data import Abs, Diff, Map, Pipe, Project, Select, Squared
-from dryml.data.reduction_methods import _MAX_INT64, _backend, _cast_float64, _dtype_name, _zeros
+from dryml.data.reduction_methods import (
+    Path, ReductionMode, _MAX_INT64, _backend, _cast_float64, _dtype_name,
+    _path, _reshape, _where, _zeros,
+)
 from dryml.methods import Accumulator, Method
 
 
 Label: TypeAlias = int | str
 F1Average: TypeAlias = Literal["binary", "micro", "macro", "weighted", "none"]
-Path: TypeAlias = str | int | tuple[str | int, ...]
-ReductionMode: TypeAlias = Literal["global", "coordinate"]
-
-
-def _path(value: Any, path: Path) -> Any:
-    """Select one declared nested value without creating a helper Method."""
-
-    for key in path if isinstance(path, tuple) else (path,):
-        value = value[key]
-    return value
 
 
 def _classes(classes: tuple[Label, ...]) -> tuple[Label, ...]:
@@ -129,20 +122,6 @@ def _diagonal(value: object, backend: str):
     return tf.linalg.diag_part(value)
 
 
-def _where(condition: object, left: object, right: object, backend: str):
-    """Choose native values without backend conversion."""
-
-    if backend == "numpy":
-        return np.where(condition, left, right)
-    if backend == "torch":
-        import torch
-
-        return torch.where(condition, left, right)
-    import tensorflow as tf
-
-    return tf.where(condition, left, right)
-
-
 def _label_indexes(value: object, classes: tuple[Label, ...], backend: str, role: str):
     """Map scalar or one-dimensional native labels to fixed class indexes.
 
@@ -199,18 +178,6 @@ def _bincount(indexes: object, size: int, backend: str):
     return tf.math.bincount(tf.reshape(indexes, (-1,)), minlength=size, maxlength=size, dtype=tf.int64)
 
 
-def _reshape(value: object, shape: tuple[int, ...], backend: str):
-    """Reshape a native count vector without using host array conversion."""
-
-    if backend == "numpy":
-        return value.reshape(shape)
-    if backend == "torch":
-        return value.reshape(shape)
-    import tensorflow as tf
-
-    return tf.reshape(value, shape)
-
-
 def _validate_count_matrix(matrix: object, *, require_int64: bool = False) -> str:
     """Validate a non-empty native square nonnegative integer count matrix."""
 
@@ -223,6 +190,16 @@ def _validate_count_matrix(matrix: object, *, require_int64: bool = False) -> st
     if _native_bool(_any(matrix < 0, backend)):
         raise ValueError("confusion matrix must not contain negative counts.")
     return backend
+
+
+def _confusion_state_spec(observation_spec, classes, prediction, target):
+    """Infer fixed count storage without constructing or invoking a Method."""
+    prediction, target = _path(observation_spec, prediction), _path(observation_spec, target)
+    if not isinstance(prediction, TensorSpec) or not isinstance(target, TensorSpec):
+        raise TypeError("ConfusionInitial requires TensorSpec prediction and target labels.")
+    if prediction.backend != target.backend or prediction.shape != target.shape:
+        raise ValueError("prediction and target label specs must match.")
+    return TensorSpec("int64", shape=(len(classes), len(classes)), backend=prediction.backend)
 
 
 class ConfusionInitial(Method):
@@ -263,12 +240,7 @@ class ConfusionInitial(Method):
     def infer_output_spec(self, observation_spec: SpecTree) -> SpecTree:
         """Infer a fixed native int64 matrix without invoking label conversion."""
 
-        prediction, target = _path(observation_spec, self.prediction), _path(observation_spec, self.target)
-        if not isinstance(prediction, TensorSpec) or not isinstance(target, TensorSpec):
-            raise TypeError("ConfusionInitial requires TensorSpec prediction and target labels.")
-        if prediction.backend != target.backend or prediction.shape != target.shape:
-            raise ValueError("prediction and target label specs must match.")
-        return TensorSpec("int64", shape=(len(self.classes), len(self.classes)), backend=prediction.backend)
+        return _confusion_state_spec(observation_spec, self.classes, self.prediction, self.target)
 
 
 class ConfusionCounts(Accumulator):
@@ -316,7 +288,7 @@ class ConfusionCounts(Accumulator):
     def infer_output_spec(self, observation_spec: SpecTree, state_spec: SpecTree) -> SpecTree:
         """Require the declared fixed carry shape and return it unchanged."""
 
-        expected = ConfusionInitial(self.classes, prediction=self.prediction, target=self.target).infer_output_spec(observation_spec)
+        expected = _confusion_state_spec(observation_spec, self.classes, self.prediction, self.target)
         if state_spec != expected:
             raise ValueError("ConfusionCounts state spec must match its fixed class-domain matrix.")
         return state_spec

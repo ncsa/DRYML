@@ -17,6 +17,24 @@ from dryml.models import Model
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 
+def test_confusion_inference_constructs_no_helper_methods(monkeypatch):
+    """Pure transition inference must not construct an initializer Method."""
+    from dryml.metrics import reductions
+
+    observation = {
+        "prediction": TensorSpec("int64", shape=(), backend="numpy"),
+        "target": TensorSpec("int64", shape=(), backend="numpy"),
+    }
+    transition = reductions.ConfusionCounts((0, 1))
+    expected = reductions.ConfusionInitial((0, 1)).infer_output_spec(observation)
+
+    def forbid_construction(*args, **kwargs):
+        raise AssertionError("inference constructed a helper Method")
+
+    monkeypatch.setattr(reductions, "ConfusionInitial", forbid_construction)
+    assert transition.infer_output_spec(observation, expected) == expected
+
+
 class EvaluationDataset(Dataset):
     """Small re-iterable batched source that records evaluations by class."""
 

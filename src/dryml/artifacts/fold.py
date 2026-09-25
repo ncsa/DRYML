@@ -17,11 +17,10 @@ from dryml.managed import ManagedContext, managed_operation
 from dryml.methods import Accumulator, ImplementationSelectionError, Method
 from dryml.methods.signature import satisfies, spec_node
 
-from .value import Value
+from .value import Value, _VALUE_FORMAT, _VALUE_VERSION
 
 
 ResultT = TypeVar("ResultT")
-_VALUE_FORMAT = "dryml.artifacts.value"
 
 
 class Fold(Value[ResultT], Generic[ResultT]):
@@ -134,7 +133,7 @@ class Fold(Value[ResultT], Generic[ResultT]):
             carry = initializer(first)
             carry_spec = _runtime_spec(carry)
             _require_spec_satisfaction(initial_spec, carry_spec, "initializer carry")
-            _, transition, finalizer = self._select_followups(
+            transition, finalizer = self._select_followups(
                 observed_spec, carry_spec,
             )
             carry = transition(first, carry)
@@ -151,7 +150,7 @@ class Fold(Value[ResultT], Generic[ResultT]):
             result = carry if finalizer is None else finalizer(carry)
             self._install_value_payload({
                 "format": _VALUE_FORMAT,
-                "version": 1,
+                "version": _VALUE_VERSION,
                 "present": True,
                 "result": _normalize_result(result),
             })
@@ -197,8 +196,7 @@ class Fold(Value[ResultT], Generic[ResultT]):
                 runtime carry.
 
         Returns:
-            Optional final result spec, selected transition, and optional selected
-            finalizer.
+            Selected transition and optional selected finalizer.
 
         Raises:
             ImplementationSelectionError: If the initialized carry cannot remain
@@ -218,12 +216,12 @@ class Fold(Value[ResultT], Generic[ResultT]):
             observation_spec, carry_spec, output_spec=carry_spec,
         )
         if self.finalize is None:
-            return None, transition, None
+            return transition, None
         final_spec = self.finalize.infer_output_spec(carry_spec)
         if not is_spec_tree(final_spec):
             raise ImplementationSelectionError("conflict")
         finalizer = self.finalize.find_implementation(carry_spec, output_spec=final_spec)
-        return final_spec, transition, finalizer
+        return transition, finalizer
 
     def _load_source(self, managed: ManagedContext) -> Dataset:
         """Materialize one retained source reference through selected Repo authority.
