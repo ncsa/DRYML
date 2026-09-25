@@ -50,6 +50,16 @@ class DType:
         return f"{self.kind}{self.bits}"
 
     def np(self):
+        """Return the equivalent NumPy scalar type for this canonical dtype.
+
+        Returns:
+            The NumPy scalar type, including :class:`numpy.str_` for the
+            canonical semantic ``"string"`` dtype.
+
+        Raises:
+            TypeError: If NumPy has no equivalent for this dtype.
+        """
+
         import numpy as np
 
         mapping = {
@@ -67,8 +77,7 @@ class DType:
             "float64": np.float64,
             "complex64": np.complex64,
             "complex128": np.complex128,
-            "bytes": np.bytes_,
-            "str": np.str_,
+            "string": np.str_,
         }
 
         if self.name == "bfloat16":
@@ -99,6 +108,23 @@ _DTYPE_RE = re.compile(
 
 
 def normalize_dtype(x: Any) -> DType:
+    """Normalize one canonical or supported backend dtype to :class:`DType`.
+
+    NumPy Unicode dtypes of every storage width normalize to the one semantic
+    ``"string"`` kind. NumPy object dtypes retain their distinct ``"object"``
+    kind; byte strings are not implicitly decoded to Unicode.
+
+    Args:
+        x: A canonical dtype, canonical dtype name, or supported backend dtype.
+
+    Returns:
+        The corresponding canonical dtype.
+
+    Raises:
+        TypeError: If ``x`` is unsupported, including NumPy byte-string dtypes.
+        ValueError: If a dtype name is not canonical.
+    """
+
     if isinstance(x, DType):
         return x
 
@@ -118,9 +144,14 @@ def normalize_dtype(x: Any) -> DType:
     # numpy scalar type / numpy dtype
     try:
         np_dtype = np.dtype(x)
-        return normalize_dtype(np_dtype.name)
-    except Exception:
+    except TypeError:
         pass
+    else:
+        if np_dtype.kind == "U":
+            return DType("string")
+        if np_dtype.kind == "S":
+            raise TypeError("NumPy byte-string dtypes are not supported.")
+        return normalize_dtype(np_dtype.name)
 
     # generic ".name" fallback for tf dtypes and similar
     name = getattr(x, "name", None)

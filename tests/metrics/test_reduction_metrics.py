@@ -374,6 +374,66 @@ def test_classification_factories_use_explicit_labels_and_one_traversal_each(tmp
     assert IdentityModel.calls == 6
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+def test_classification_folds_accept_numpy_string_labels_with_varying_widths(tmp_path):
+    """String label factories retain one semantic dtype across unequal Unicode batches."""
+
+    from dryml.metrics import classifier_accuracy, classifier_confusion_matrix, classifier_f1
+
+    source = EvaluationDataset((
+        {"x": ["cat", "house"], "y": ["cat", "house"]},
+        {"x": ["cat"], "y": ["house"]},
+    ), dtype="string")
+    model = IdentityModel(dtype="string")
+    labels = IdentityLabels()
+    factories = (
+        ("confusion", classifier_confusion_matrix, {}, np.array([[1, 0], [1, 1]])),
+        ("accuracy", classifier_accuracy, {}, pytest.approx(2 / 3)),
+        ("f1", classifier_f1, {"average": "macro"}, pytest.approx(2 / 3)),
+    )
+
+    assert source.batches[0]["x"].dtype != source.batches[1]["x"].dtype
+    for name, factory, options, expected in factories:
+        fold = factory(
+            source,
+            model,
+            classes=("cat", "house"),
+            prediction_labels=labels,
+            target_labels=labels,
+            **options,
+        )
+        fold.compute(managed=ManagedConfig(state_repo=DirStore(tmp_path / name)))
+
+        if isinstance(expected, np.ndarray):
+            assert np.array_equal(fold.value(), expected)
+        else:
+            assert fold.value() == expected
+
+
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+def test_classifier_string_fold_rejects_unknown_labels_before_value_publication(tmp_path):
+    """Unknown Unicode labels fail before a classifier Fold installs a terminal value."""
+
+    from dryml.metrics import classifier_confusion_matrix
+
+    source = EvaluationDataset((
+        {"x": ["cat"], "y": ["otter"]},
+    ), dtype="string")
+    fold = classifier_confusion_matrix(
+        source,
+        IdentityModel(dtype="string"),
+        classes=("cat", "house"),
+        prediction_labels=IdentityLabels(),
+        target_labels=IdentityLabels(),
+    )
+
+    with pytest.raises(ValueError, match="outside"):
+        fold.compute(managed=ManagedConfig(state_repo=DirStore(tmp_path / "store")))
+
+    assert fold.ready is False
+    assert fold.last_state_ref is None
+
+
 @pytest.mark.parametrize("backend", ("numpy", "torch", "tf"))
 def test_regression_factories_keep_native_batches_until_terminal_result(tmp_path, backend):
     """MAE/MSE retain native batch arithmetic and the U6 uneven-batch denominator."""

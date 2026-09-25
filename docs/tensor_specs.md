@@ -35,7 +35,7 @@ Batch values:
 
 ## DTypes
 
-DRYML normalizes dtype values through its core dtype system. Users can usually pass simple strings such as `"float32"`, `"int64"`, or backend dtype objects when supported.
+DRYML normalizes dtype values through its core dtype system. Users can usually pass simple strings such as `"float32"`, `"int64"`, or backend dtype objects when supported. NumPy Unicode dtypes, regardless of their storage width, normalize to the canonical `"string"` dtype and convert back to `np.str_`. NumPy object dtypes retain the distinct `"object"` kind; byte strings are not implicitly decoded. Numerical reductions and classification label validation still reject object arrays.
 
 The normalized dtype is stored on `TensorSpec.dtype`.
 

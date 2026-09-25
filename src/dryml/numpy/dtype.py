@@ -4,6 +4,16 @@ from dryml.core.dtype import DType, normalize_dtype
 
 
 def _dtype_np(self):
+    """Return the NumPy scalar type for one canonical DRYML dtype.
+
+    Returns:
+        The NumPy scalar type, including :class:`numpy.str_` for semantic
+        ``"string"`` values.
+
+    Raises:
+        TypeError: If this dtype has no NumPy representation.
+    """
+
     import numpy as np
 
     mapping = {
@@ -21,8 +31,7 @@ def _dtype_np(self):
         "float64": np.float64,
         "complex64": np.complex64,
         "complex128": np.complex128,
-        "bytes": np.bytes_,
-        "str": np.str_,
+        "string": np.str_,
     }
 
     if self.name == "bfloat16":
@@ -40,11 +49,16 @@ def _dtype_np(self):
 
 def dtype(x: Any) -> DType:
     """
-    Convert a NumPy dtype-like object, ndarray, or scalar value
-    to a DRYML DType.
+    Convert a NumPy dtype-like object, ndarray, or scalar value to a DRYML
+    DType. Unicode dtypes of every storage width map to semantic ``"string"``;
+    object dtypes remain ``"object"`` and byte-string dtypes are unsupported.
+
+    Raises:
+        TypeError: If the dtype is bytes or otherwise unsupported.
+        ValueError: If the dtype cannot be normalized.
     """
     if hasattr(x, "dtype"):
         x = x.dtype
 
     np_dtype = np.dtype(x)
-    return normalize_dtype(np_dtype.name)
+    return normalize_dtype(np_dtype)

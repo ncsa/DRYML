@@ -107,6 +107,32 @@ def test_normalize_dtype_accepts_dtype_instance():
     assert normalize_dtype(d) is d
 
 
+@pytest.mark.parametrize("numpy_dtype", (np.dtype("<U3"), np.dtype("<U5"), np.str_))
+def test_normalize_dtype_canonicalizes_numpy_unicode_widths(numpy_dtype):
+    """NumPy Unicode storage widths share DRYML's one semantic string dtype."""
+
+    assert normalize_dtype(numpy_dtype) == DType("string")
+
+
+def test_string_dtype_round_trips_to_numpy_unicode_kind():
+    """The canonical string dtype reconstructs NumPy Unicode rather than bytes."""
+
+    dtype = DType("string")
+
+    assert dtype.name == "string"
+    assert dtype.np() is np.str_
+    assert np.dtype(dtype.np()).kind == "U"
+    assert normalize_dtype(dtype.np()) == dtype
+
+
+def test_normalize_dtype_rejects_non_unicode_numpy_text():
+    """Only native Unicode has the semantic string contract at this boundary."""
+
+    with pytest.raises((TypeError, ValueError)):
+        normalize_dtype(np.dtype("S3"))
+    assert normalize_dtype(np.dtype(object)) == DType("object")
+
+
 def test_dtype_not_equal_to_raw_string():
     assert DType("float", 32) != "float32"
 

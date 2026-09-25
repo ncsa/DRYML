@@ -419,3 +419,24 @@ def test_np_tensor_spec_from_value():
     assert spec.shape == (4, 32)
     assert spec.batch == None
     assert spec.layout is Layout.DENSE
+
+
+@pytest.mark.parametrize("values", (("cat", "dog"), ("cat", "house")))
+def test_np_tensor_spec_canonicalizes_unicode_storage_widths(values):
+    """NumPy Unicode arrays retain one canonical string TensorSpec dtype."""
+
+    spec = dryml_np.as_tensor_spec(np.asarray(values), batched=True)
+
+    assert spec.dtype == DType("string")
+    assert spec.dtype.np() is np.str_
+    assert spec.shape == ()
+    assert spec.batch == len(values)
+    assert spec.backend.value == "numpy"
+
+
+@pytest.mark.parametrize("values", ((b"cat",),))
+def test_np_tensor_spec_rejects_byte_string_arrays(values):
+    """The NumPy tensor adapter does not implicitly decode byte strings."""
+
+    with pytest.raises((TypeError, ValueError)):
+        dryml_np.as_tensor_spec(np.asarray(values))
