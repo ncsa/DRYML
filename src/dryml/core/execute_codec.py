@@ -128,6 +128,8 @@ def _failure_reason(error: Exception) -> str:
     """Project expected owner failures into a bounded transport-safe category."""
     if isinstance(error, SignatureError):
         return f"SignatureError:{error.reason}" + ("" if error.slot is None else f":{error.slot}")
+    if isinstance(error, TypeError):
+        return "TypeError"
     return type(error).__name__
 
 

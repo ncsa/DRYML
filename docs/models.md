@@ -158,6 +158,16 @@ repo.save_object(experiment)
 
 Exact constructor signatures vary by model and experiment class. Prefer backend-specific docs and docstrings for detailed parameters.
 
+## Evaluation Results
+
+Metric factories return inert Artifact Folds rather than training-history scalars.
+Their Dataset and Model inputs are retained as non-materializing references, so a
+direct managed call or supported same-host worker materializes them only for
+compute. The completed metric's exact StateRef restores its lightweight result
+without reloading that model or Dataset; recomputation still requires the selected
+input authority. Factories neither start a backend, download data, nor provision a
+Ray target.
+
 ## Common Pitfalls
 
 - Do not put trained weights in definitions.

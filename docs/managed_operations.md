@@ -107,6 +107,14 @@ execution errors. It does not inspect status, reconcile an operation, retry, or
 rerun a managed method automatically. After such an error, reconnect to the
 chosen state/control authority and use `status()` or make an explicit compatible
 managed call to decide recovery.
+
+`Fold.compute` is a non-resumable managed operation. It owns one fresh Dataset
+traversal and carry per attempt, then installs its complete Value payload before
+the ordinary final state/control publication boundary. An interruption, branch
+failure, ownership conflict, or publication failure is never reported as completed;
+an explicit `rerun=True` begins a new traversal. A successful direct or supported
+same-host worker invocation leaves an exact final StateRef that a result reader can
+restore without the source/model payload or this control Store.
 See [Generic Execute](execute.md) for backend lifecycle boundaries,
 [Repos and Stores](repos.md) for borrowed Store authority, and
 [Session](session.md) for the cache scope used during worker reconstruction.

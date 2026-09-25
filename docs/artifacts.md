@@ -120,3 +120,15 @@ To produce confusion, accuracy, and F1 from one traversal, declare one Fold with
 an `AccumulatorGroup`, matching grouped initializer, and a `Project` finalizer.
 Calling the convenience factories independently intentionally creates independent
 evaluation streams.
+
+## Execution And Recovery
+
+Direct managed invocation and `dryml.core.execute` can compute a concrete Value or
+Fold through a supported same-host worker. The managed operation publishes its
+exact final `StateRef`; callers recover the result by loading that StateRef, not by
+transporting a live Dataset, model, iterator, accumulator, or managed-control
+record. A result reader may use an explicit orchestrator materialization scope for
+that selected result only; retained `Ref[AutoRef]` inputs remain inert. A later
+rerun still needs the caller-owned source/model authority and fails if it is gone.
+Ray is optional and attaches only to a caller-supplied existing same-host target;
+Artifact construction and ordinary imports never start or provision Ray.

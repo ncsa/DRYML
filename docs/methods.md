@@ -160,6 +160,12 @@ Reusing a child declaration creates no shared execution state: callers supply
 distinct carry entries. Group inference and selection do not run transition
 targets or change child learning/cached mode.
 
+Fold owns invocation and publication around these Methods. Initializer,
+Accumulator, and finalizer declarations are visible in the Fold definition before
+execution, but their selected carriers and carry values are worker-local. A direct
+or supported same-host Execute worker can select and invoke them without making a
+Method selection cache, source Dataset, or carry part of the final result payload.
+
 ## Eager, Learning, And Cached Calls
 
 Alternative-backed Methods begin with `call_mode == "eager"`. Each direct call

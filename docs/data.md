@@ -108,6 +108,12 @@ regression. Classification factories require caller-supplied label Methods;
 `ArgMax` remains an explicit conversion rather than an implicit classifier
 policy.
 
+`Fold` retains its Dataset through `Ref[AutoRef]`. The declaration, its CDef, and
+an exact completed Fold state retain the selected reference rather than an owned
+Dataset payload. The Dataset is materialized only by `Fold.compute()` through its
+selected managed Repo; a result-only `StateRef` remains readable after that input
+is unavailable, while a later compute/rerun fails normally.
+
 ## Structural Operations
 
 Structural dataset nodes change iteration structure rather than individual values.

@@ -272,6 +272,13 @@ exact StateRefs and Store-table-relative facts. Recovery and worker teardown clo
 their freshly opened handles with `flush=False` and never close the caller's Repo
 or Store. See [Generic Execute](execute.md) for the execution lifecycle.
 
+A managed Artifact worker publishes its final state through the same ordinary
+Repo/managed authority. Its coordinator-visible result is the exact final
+`StateRef`, and a later reader reconnects only the required state Store to restore
+the result. The worker does not transfer live source/model payloads or managed
+control records to that reader; those references remain required only for a later
+compute or rerun.
+
 ## Store Authority And Lifetime
 
 `DirStore` is the supported directory checkpoint backend. Its immutable

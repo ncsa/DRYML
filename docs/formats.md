@@ -151,6 +151,12 @@ any separate hook files and their domain validation. As with all pickle payloads
 the reader accepts trusted same-host data only and is not safe deserialization for
 hostile input.
 
+The checked-in `tests/fixtures/artifact_value_v1/` fixtures identify this v1
+envelope with an independent manifest and byte hashes. They exercise reader
+compatibility only: they do not serialize a source Dataset/model, iterator,
+accumulator, or managed-control record, and they do not define a compatibility
+format for subclass-owned files.
+
 ## Managed Control Formats
 
 Managed lifecycle control is separate bounded canonical-JSON authority in the

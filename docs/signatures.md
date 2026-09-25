@@ -29,6 +29,12 @@ its `ObjectRef` otherwise. Automatic selection never saves or searches for a new
 receipt. `AutoRef` is an annotation-only marker class; use `Ref[AutoRef]`, not
 `Ref[AutoRef()]`, on every supported Python version.
 
+Artifact Folds use `Ref[AutoRef]` for their source/model-facing inputs. This keeps
+the selected CDef, ObjectRef, or StateRef as data in the declaration and prevents
+automatic input saving or materialization during construction, readiness, value
+access, and result restoration. Fold's managed compute boundary deliberately
+materializes that reference through its selected state Repo.
+
 Same-role unions such as `Ref[ConcreteDefinition | ObjectRef | StateRef]` select
 the strictest reachable authority independent of member order. Ambiguous
 strengthening fails instead of falling back. Nullable forms are flat:

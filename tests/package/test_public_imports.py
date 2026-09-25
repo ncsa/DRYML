@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 _EXPECTED_CODE_EXPORTS = [
     "AccessCollection",
@@ -1043,6 +1044,49 @@ def test_source_tree_code_analysis_contract_and_removed_apis() -> None:
             if importlib.util.find_spec(name) is not None
         ],
     })
+
+
+def test_source_artifact_and_metric_imports_remain_optional_backend_safe() -> None:
+    """Import lightweight Stage 3 result APIs in a fresh interpreter without plugins."""
+
+    root = Path(__file__).parents[2]
+    env = dict(os.environ)
+    source_path = str(root / "src")
+    env["PYTHONPATH"] = source_path + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+import dryml.core
+import dryml.methods
+import dryml.artifacts
+import dryml.metrics
+print(json.dumps({
+    'artifacts': sorted(dryml.artifacts.__all__),
+    'metrics': sorted(dryml.metrics.__all__),
+    'heavy': sorted(name for name in ('tensorflow', 'torch', 'jax', 'jaxlib', 'ray') if name in sys.modules),
+}))
+""",
+        ],
+        cwd="/tmp/dryml",
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["artifacts"] == [
+        "Artifact", "ArtifactNotReadyError", "CachedDataset", "Fold", "Value", "mean", "quantile",
+    ]
+    assert data["metrics"] == [
+        "AccuracyFromConfusion", "ConfusionCounts", "ConfusionInitial", "F1Average", "F1FromConfusion",
+        "Label", "categorical_accuracy", "classifier_accuracy", "classifier_confusion_matrix",
+        "classifier_f1", "mean_squared_error", "regressor_mae", "regressor_mse",
+    ]
+    assert data["heavy"] == []
 
 
 def _assert_code_analysis_contract(data: dict[str, object]) -> None:
