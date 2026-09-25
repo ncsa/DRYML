@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import numpy as np
 import pytest
+from pathlib import Path
+import subprocess
+import sys
 from threading import Event, Thread
 
 from dryml.core import Repo
@@ -138,6 +142,38 @@ def _fold(source, *, accumulator=None, finalizer=None):
         accumulator=Adding() if accumulator is None else accumulator,
         finalize=FinishTotal() if finalizer is None else finalizer,
     )
+
+
+def _run_native_fold_test_in_subprocess(request):
+    """Run one native Fold assertion in a child without loading its framework here.
+
+    Returns:
+        ``True`` when the parent ran the selected assertion in a child and should
+        return; ``False`` when the guarded child must execute the assertion body.
+
+    Raises:
+        AssertionError: If the child test fails or imports a native framework
+            into the parent process.
+    """
+    if os.environ.get("DRYML_FOLD_NATIVE_SUBPROCESS") == "1":
+        return False
+
+    loaded_frameworks = {name for name in ("torch", "tensorflow") if name in sys.modules}
+    env = os.environ.copy()
+    env["DRYML_FOLD_NATIVE_SUBPROCESS"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "--no-cov", request.node.nodeid],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        f"native Fold child failed:\n{completed.stdout}\n{completed.stderr}"
+    )
+    assert {name for name in ("torch", "tensorflow") if name in sys.modules} == loaded_frameworks
+    return True
 
 
 def test_fold_declaration_is_inert_and_persists_without_source_or_method_calls(tmp_path):
@@ -320,8 +356,11 @@ def test_fold_rejects_missing_or_ambiguous_specs_and_invalid_role_results(tmp_pa
         assert fold.ready is False
 
 
-def test_fold_rejects_mixed_initializer_carry_before_the_first_transition(tmp_path):
+def test_fold_rejects_mixed_initializer_carry_before_the_first_transition(tmp_path, request):
     """A NumPy observation cannot select a transition with a Torch initializer carry."""
+
+    if _run_native_fold_test_in_subprocess(request):
+        return
 
     import dryml.torch
     import torch
@@ -423,8 +462,11 @@ def test_fold_validates_first_observation_against_declared_source_spec(tmp_path)
 
 
 @pytest.mark.parametrize("backend", ("numpy", "torch", "tf"))
-def test_fold_rejects_zero_sized_native_observation_before_initializer(tmp_path, backend):
+def test_fold_rejects_zero_sized_native_observation_before_initializer(tmp_path, backend, request):
     """Native zero-sized inputs fail before allocation or selected Method calls."""
+
+    if backend != "numpy" and _run_native_fold_test_in_subprocess(request):
+        return
 
     initializer = NativeInitial()
     fold = _native_fold(backend, (0, 1), initializer=initializer)
@@ -437,8 +479,11 @@ def test_fold_rejects_zero_sized_native_observation_before_initializer(tmp_path,
 
 
 @pytest.mark.parametrize("backend", ("torch", "tf"))
-def test_fold_normalizes_native_terminal_result_only_after_completion(tmp_path, backend):
+def test_fold_normalizes_native_terminal_result_only_after_completion(tmp_path, backend, request):
     """Native carries remain native until Fold converts the final result to host data."""
+
+    if _run_native_fold_test_in_subprocess(request):
+        return
 
     initializer = NativeInitial()
     fold = _native_fold(backend, (1, 3), fill=1, initializer=initializer)
@@ -468,8 +513,11 @@ def test_fold_named_mean_program_keeps_the_first_batch_and_uneven_weighting(tmp_
 
 
 @pytest.mark.parametrize("backend", ("torch", "tf"))
-def test_fold_rejects_restored_native_tensor_payloads(tmp_path, backend):
+def test_fold_rejects_restored_native_tensor_payloads(tmp_path, backend, request):
     """The result-only persistence boundary never admits a heavyweight tensor."""
+
+    if _run_native_fold_test_in_subprocess(request):
+        return
 
     fold = _fold(CountingDataset([np.ones((1, 1), dtype=np.float32)]))
 
