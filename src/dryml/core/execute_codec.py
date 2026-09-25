@@ -23,7 +23,7 @@ from .cdef_codec import decode_cdef_graph, encode_cdef_graph
 from .cdef_graph import has_stateful_materialization
 from .definition import ConcreteDefinition
 from .links import DefLink
-from .object import Object
+from .object import Object, _AbstractObjectAdmissionError
 from .reference_values import ObjectRef, StateRef
 from .repo import Repo
 from .repo_plan import PUBLICATION_PHASES
@@ -128,7 +128,7 @@ def _failure_reason(error: Exception) -> str:
     """Project expected owner failures into a bounded transport-safe category."""
     if isinstance(error, SignatureError):
         return f"SignatureError:{error.reason}" + ("" if error.slot is None else f":{error.slot}")
-    if isinstance(error, TypeError):
+    if isinstance(error, _AbstractObjectAdmissionError):
         return "TypeError"
     return type(error).__name__
 
