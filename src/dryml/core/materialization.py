@@ -737,7 +737,12 @@ def execute_exact_state_load_plan(
     try:
         with realization_scope():
             graph = ConcreteDefinitionGraph.from_root(plan.state_ref.definition)
-            for cdef in graph.topological_order(dependencies_first=True):
+            # Exact reconstruction follows the same materializing closure as
+            # preflight; REF targets remain inert constructor data.
+            for cdef in reversed(tuple(
+                    occurrence.definition
+                    for occurrence in graph.iter_occurrences(include_roots=True)
+            )):
                 if cdef in selected:
                     continue
                 direct = tuple(edge for edge in graph.outgoing(cdef) if edge.kind is EdgeKind.MATERIALIZE)
