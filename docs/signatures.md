@@ -90,6 +90,13 @@ during parent construction rather than reclaimed or reconstructed. Unresolved
 nested declarations use their preflighted claim and any explicitly pinned
 declaration Store.
 
+Before a `Mat` boundary begins any construction, exact restore, cache update, or
+claim acquisition, Repo resolves the complete selected materializing closure and
+rejects an abstract current Object class with `TypeError`. This includes nested
+materializing CDefs, ObjectRefs, StateRefs, and greedy-reuse candidates. `Ref`
+links, quotations, and reference-as-value values are terminal data, so their
+hidden definitions are not resolved by this admission check.
+
 Selection, normalization, and `function` never save, open a Repo, allocate an
 identity, or capture payloads. They can read supplied Repo authority for reference
 evidence. Mat realization can construct, restore, reserve, or claim through Repo.

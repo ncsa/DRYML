@@ -111,6 +111,15 @@ operation. It follows records across the connected Stores, not the current route
 map. `matching`, `greedy`, and `never` are live-reuse policies; structural
 similarity cannot substitute for the exact ObjectId and binding requirements.
 
+Live construction admits every selected materializing class before it acquires a
+declaration claim, restores an exact state, changes a live cache, allocates a
+workspace, or invokes user construction hooks. An abstract current class raises
+`TypeError` locally even when an older definition or StateRef exists. The
+preflight includes materializing CDef, ObjectRef, and StateRef closures, including
+reused exact nodes; `Ref` links and quotations remain inert data and are not
+resolved. Definition, CDef, selector, and search-space construction remains
+non-materializing and may describe an abstract class.
+
 `Repo.reserve_state_graph(obj)` returns a process/thread-local, Store-neutral,
 nonblocking reservation for the exact live graph. Use it as a context manager and
 pass it only to `save_object(..., reservation=...)` or

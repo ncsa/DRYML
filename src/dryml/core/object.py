@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from threading import Lock
+from abc import ABCMeta, update_abstractmethods
 import inspect
 import types
 
@@ -57,7 +58,64 @@ def definition_mode(enabled: bool = True, *, concrete: bool = False):
         yield
 
 
-class Dryml(type):
+_CLASS_TRANSFORMERS = "__dryml_class_transformers__"
+_CLASS_VALIDATORS = "__dryml_class_validators__"
+
+
+class _AbstractObjectAdmissionError(TypeError):
+    """Raised when a live DRYML construction selects an abstract class."""
+
+
+def _register_class_transformer(owner: type, callback) -> None:
+    """Register one owner-local class-finalization transformer.
+
+    The private protocol lets higher-level declaration owners transform their
+    descriptors before standard ABC finalization without core importing them.
+    """
+
+    callbacks = owner.__dict__.get(_CLASS_TRANSFORMERS, ())
+    if not isinstance(callbacks, tuple):
+        raise TypeError("DRYML class transformer registration must be a tuple.")
+    type.__setattr__(owner, _CLASS_TRANSFORMERS, (*callbacks, callback))
+
+
+def _register_class_validator(owner: type, callback) -> None:
+    """Register one owner-local non-mutating class-finalization validator."""
+
+    callbacks = owner.__dict__.get(_CLASS_VALIDATORS, ())
+    if not isinstance(callbacks, tuple):
+        raise TypeError("DRYML class validator registration must be a tuple.")
+    type.__setattr__(owner, _CLASS_VALIDATORS, (*callbacks, callback))
+
+
+def _collect_class_finalizers(cls: type, slot: str) -> tuple:
+    """Return class-local callbacks in base-to-derived C3 order by identity."""
+
+    callbacks = []
+    seen = set()
+    for owner in reversed(cls.__mro__):
+        registered = owner.__dict__.get(slot, ())
+        if not isinstance(registered, tuple):
+            raise TypeError("DRYML class finalizer registration must be a tuple.")
+        for callback in registered:
+            if id(callback) not in seen:
+                seen.add(id(callback))
+                callbacks.append(callback)
+    return tuple(callbacks)
+
+
+def _admit_materialization_class(cls: type) -> None:
+    """Reject an abstract class before any DRYML runtime construction effect."""
+
+    if inspect.isabstract(cls):
+        members = ", ".join(sorted(cls.__abstractmethods__))
+        raise _AbstractObjectAdmissionError(
+            f"Cannot materialize abstract Object {cls.__qualname__}; "
+            f"missing abstract members: {members}."
+        )
+
+
+class Dryml(ABCMeta):
     """Capture Object construction calls and apply the active repository mode."""
 
     def __new__(mcls, name, bases, namespace, **kwargs):
@@ -87,6 +145,11 @@ class Dryml(type):
                         raise TypeError("declaration finalization returned no descriptor")
                     type.__setattr__(cls, member_name, replacement)
                     break
+        for callback in _collect_class_finalizers(cls, _CLASS_TRANSFORMERS):
+            callback(cls)
+        update_abstractmethods(cls)
+        for callback in _collect_class_finalizers(cls, _CLASS_VALIDATORS):
+            callback(cls)
         return cls
 
     def __call__(dryml_cls, /, *args, repo=None, __cdef__=None, **kwargs):
@@ -129,6 +192,8 @@ class Dryml(type):
 
         if __cdef__ is None and object_mode == "space":
             return dryml_cls.defn(*args, **kwargs).as_space()
+
+        _admit_materialization_class(dryml_cls)
 
         from dryml.runtime import materialization_admission
         from .session import _construction_config
@@ -271,9 +336,12 @@ def _collect_runtime_objects(value, memo) -> None:
 
 
 class Object(metaclass=Dryml):
-    # Base type for using CreationControl metaclass.
-    # Provides basic implementations for all methods used
-    # In the CreationControl process
+    """Base type for DRYML definition-controlled runtime Objects.
+
+    Subclasses may declare normal Python ABC obligations. Abstract subclasses can
+    still produce inert definitions and selectors, but every live construction or
+    materialization rejects them before framework allocation or user hooks.
+    """
 
     __ws__: WorkspaceHandle | None
     __cdef__: ConcreteDefinition

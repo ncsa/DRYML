@@ -6,7 +6,12 @@ from typing import Any, Literal, Mapping
 from .canonical import from_canonical
 from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from .definition import ConcreteDefinition, Definition
-from .object import Object, Serializable
+from .object import (
+    Object,
+    Serializable,
+    _AbstractObjectAdmissionError,
+    _admit_materialization_class,
+)
 from .policies import CachePolicy, LiveReusePolicy
 from .symbol import ImportRef, resolve_symbol
 from .cdef_identity import cdef_node_key
@@ -33,6 +38,70 @@ def _resolve_materialization_class(cdef: ConcreteDefinition) -> type:
                 "authority; reconstruct it with an ordinary Object class."
             ) from error
         raise
+
+
+def preflight_materialization_classes(*roots) -> _NodeBindings:
+    """Resolve and admit every class in a selected materializing closure.
+
+    Args:
+        *roots: CDefs, ObjectRefs, StateRefs, or nested values selected for live
+            materialization.
+
+    Returns:
+        A private-node-keyed manifest retaining each resolved runtime class.
+
+    Raises:
+        _AbstractObjectAdmissionError: If any selected target is abstract.
+        Exception: If a selected materializing class cannot be resolved.
+
+    Ref links, quotations, and reference-as-value data remain terminal. The
+    helper is deliberately separate from definition-only planning so inert CDef
+    construction never resolves classes.
+    """
+
+    from .links import DefLink
+    from .quoted import QuotedDef, SelectorSpec
+    from .reference_values import ObjectRef, StateRef
+    from .utils.graph.value import iter_value_edges
+
+    manifest = _NodeBindings()
+    visited = set()
+
+    def visit_cdef(cdef: ConcreteDefinition) -> None:
+        key = cdef_node_key(cdef)
+        if key in visited:
+            return
+        visited.add(key)
+        try:
+            cls = _resolve_materialization_class(cdef)
+        except Exception as error:
+            from .repo import RepoLoadError
+
+            raise RepoLoadError("Materialization class preflight failed.") from error
+        _admit_materialization_class(cls)
+        manifest[cdef] = cls
+        for edge in iter_value_edges(cdef):
+            visit_value(edge.value)
+
+    def visit_value(value) -> None:
+        if isinstance(value, ConcreteDefinition):
+            visit_cdef(value)
+            return
+        if isinstance(value, (ObjectRef, StateRef)):
+            visit_cdef(value.definition)
+            return
+        if isinstance(value, DefLink):
+            if value.kind is EdgeKind.MATERIALIZE:
+                visit_value(value.target)
+            return
+        if isinstance(value, (QuotedDef, SelectorSpec)):
+            return
+        for edge in iter_value_edges(value):
+            visit_value(edge.value)
+
+    for root in roots:
+        visit_value(root)
+    return manifest
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,13 +181,18 @@ def execute_materialization_plan(
         plan: MaterializationPlan,
         *,
         memo: dict,
-        root: ConcreteDefinition):
+        root: ConcreteDefinition,
+        class_manifest: _NodeBindings | None = None):
     from dryml.runtime import materialization_admission
     from .repo import RepoLoadError
 
     with materialization_admission(operation="execute_materialization_plan"):
+        if class_manifest is None:
+            class_manifest = preflight_materialization_classes(root)
         with realization_scope():
-            return _execute_materialization_plan(repo, plan, memo=memo, root=root)
+            return _execute_materialization_plan(
+                repo, plan, memo=memo, root=root, class_manifest=class_manifest,
+            )
 
 
 def _execute_materialization_plan(
@@ -126,7 +200,8 @@ def _execute_materialization_plan(
         plan: MaterializationPlan,
         *,
         memo: dict,
-        root: ConcreteDefinition):
+        root: ConcreteDefinition,
+        class_manifest: _NodeBindings):
     """Execute an already admitted plan without resolving classes beforehand."""
 
     from .repo import RepoLoadError
@@ -156,6 +231,7 @@ def _execute_materialization_plan(
                         refreshed,
                         memo=memo,
                         root=root,
+                        class_manifest=class_manifest,
                     )
                 source = "memoized" if action.reuse_source == "memo" else "cached"
                 raise RepoLoadError(
@@ -170,10 +246,9 @@ def _execute_materialization_plan(
             raise RepoLoadError(f"Unknown materialization action kind {action.kind!r} at {action.primary_path}.")
 
         try:
-            cls = _resolve_materialization_class(cdef)
-        except Exception as e:
-            cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
-            raise RepoLoadError(f"Error resolving {cls_name} at {action.primary_path}: {e}") from e
+            cls = class_manifest[cdef]
+        except KeyError as error:
+            raise RepoLoadError("Materialization class preflight is incomplete.") from error
 
         from .cdef_codec import CDefGraphCodecError, validate_cdef_stateful_role
 
@@ -188,6 +263,8 @@ def _execute_materialization_plan(
         try:
             obj = cls(*rt_args, repo=repo, __cdef__=cdef, **rt_kwargs)
             repo._num_constructions += 1
+        except _AbstractObjectAdmissionError:
+            raise
         except Exception as e:
             cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
             raise RepoLoadError(f"Error constructing {cls_name} at {action.primary_path}: {e}") from e
@@ -522,7 +599,8 @@ def execute_exact_state_load_plan(
         _retained_reservations: list[Object] | None = None,
         _retained_graph_reservations: list[tuple[Object, object]] | None = None,
         _failure_targets: list[Object] | None = None,
-        _restore_started: list[bool] | None = None):
+        _restore_started: list[bool] | None = None,
+        class_manifest: _NodeBindings | None = None):
     """Realize a verified StateRef dependency-first without partial cache publication.
 
     Args:
@@ -555,6 +633,8 @@ def execute_exact_state_load_plan(
 
     if reuse_live not in {"matching", "greedy", "never"}:
         raise ValueError("reuse_live must be 'matching', 'greedy', or 'never'.")
+    if class_manifest is None:
+        class_manifest = preflight_materialization_classes(plan.state_ref)
     owns_reference_memo = _reference_memo is None
     reference_memo = {} if owns_reference_memo else _reference_memo
     known = reference_memo.get(plan.state_ref.digest())
@@ -684,7 +764,7 @@ def execute_exact_state_load_plan(
                         continue
 
                 try:
-                    cls = _resolve_materialization_class(cdef)
+                    cls = class_manifest[cdef]
                     from .cdef_codec import validate_cdef_stateful_role
                     validate_cdef_stateful_role(cdef, cls)
                     args, kwargs = project_cdef_call(cdef, cls=cls)
@@ -745,6 +825,7 @@ def execute_exact_state_load_plan(
                                 _retained_graph_reservations=retained_graph_reservations,
                                 _failure_targets=failure_targets,
                                 _restore_started=restore_started,
+                                class_manifest=class_manifest,
                             )
                         raise RepoLoadError(
                             f"Unsupported materializing reference {type(reference).__name__}."
@@ -779,7 +860,7 @@ def execute_exact_state_load_plan(
                             reservation.release()
                     selected[cdef] = obj
                     completed.append(obj)
-                except RepoLoadError:
+                except (_AbstractObjectAdmissionError, RepoLoadError):
                     raise
                 except BaseException as error:
                     raise RepoLoadError(f"Exact construction at {exact_action(cdef, graph).path if action else '$'} failed: {error}") from error

@@ -1,4 +1,5 @@
 from pathlib import Path
+from abc import abstractmethod, update_abstractmethods
 
 import pytest
 
@@ -24,6 +25,38 @@ class PreflightPair(Object):
     def __init__(self, first, second):
         self.first = first
         self.second = second
+
+
+class AbstractablePreflightValue(PreflightValue):
+    restores = 0
+
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
+        type(self).restores += 1
+
+
+def test_exact_preflight_rejects_currently_abstract_class_before_greedy_restore(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    saved = AbstractablePreflightValue(1, repo=repo)
+    state = repo.save_object(saved)
+    repo.pin(saved)
+
+    def required(self):
+        """Return the newly required implementation result."""
+
+    AbstractablePreflightValue.required = abstractmethod(required)
+    update_abstractmethods(AbstractablePreflightValue)
+    try:
+        with pytest.raises(TypeError, match="required"):
+            repo.load_state_ref(state, reuse_live="greedy")
+        with pytest.raises(TypeError, match="required"):
+            repo.restore_state_ref_into(saved, state)
+    finally:
+        del AbstractablePreflightValue.required
+        update_abstractmethods(AbstractablePreflightValue)
+
+    assert AbstractablePreflightValue.restores == 0
+    assert saved in repo._all_live_candidates()
 
 
 def test_exact_preflight_reports_missing_authority_before_construction(tmp_path):

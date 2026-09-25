@@ -1,4 +1,5 @@
 import pytest
+from abc import abstractmethod
 
 from dryml.core import ConcreteDefinition, Definition, Object, Repo, Serializable
 from dryml.core.cdef_graph import EdgeKind
@@ -61,6 +62,66 @@ class FailingMaterial(Object):
         super().__init__()
         self.child = child
         raise RuntimeError("construct boom")
+
+
+class UserTypeErrorMaterial(Object):
+    def __init__(self):
+        raise TypeError("user constructor error")
+
+
+class AbstractMaterialNode(Object):
+    @abstractmethod
+    def required(self):
+        """Return the required implementation result."""
+
+
+def test_materialization_preflights_every_materializing_class_before_dependencies():
+    repo = Repo()
+    abstract_child = Definition(AbstractMaterialNode).concretize(repo=repo)
+    root = Definition(MaterialParent, abstract_child).concretize(repo=repo)
+    MaterialLeaf.constructed.clear()
+
+    with pytest.raises(TypeError, match="required"):
+        repo.load_or_build(root)
+
+    assert MaterialLeaf.constructed == []
+    assert repo._num_constructions == 0
+
+
+def test_materialization_preflight_does_not_resolve_ref_targets():
+    repo = Repo()
+    hidden = Definition(AbstractMaterialNode).concretize(repo=repo)
+    root = Definition(
+        MaterialChainNode,
+        "root",
+        ref=DefLink.finalized(EdgeKind.REF, hidden),
+    ).concretize(repo=repo)
+    MaterialChainNode.constructed.clear()
+
+    loaded = repo.load_or_build(root)
+
+    assert loaded.name == "root"
+    assert loaded.ref == hidden
+    assert MaterialChainNode.constructed == ["root"]
+
+
+def test_materialization_uses_the_preflighted_class_identity(monkeypatch):
+    from dryml.core import materialization as materialization_mod
+
+    repo = Repo()
+    cdef = Definition(MaterialLeaf, "resolved-once").concretize(repo=repo)
+    original_resolve = materialization_mod.resolve_symbol
+    calls = 0
+
+    def count_resolve(value):
+        nonlocal calls
+        calls += 1
+        return original_resolve(value)
+
+    monkeypatch.setattr(materialization_mod, "resolve_symbol", count_resolve)
+
+    assert repo.load_or_build(cdef).name == "resolved-once"
+    assert calls == 1
 
 
 def test_materialization_plan_does_not_construct():
@@ -218,19 +279,33 @@ def test_constructor_failure_does_not_publish_cache_entry():
     assert cdef not in repo.weak_obj_cache
 
 
-def test_cached_reuse_does_not_resolve_backend_class(monkeypatch):
+def test_user_constructor_type_error_remains_a_repo_load_error():
+    repo = Repo()
+    cdef = Definition(UserTypeErrorMaterial).concretize(repo=repo)
+
+    with pytest.raises(RepoLoadError, match="user constructor error"):
+        repo.load_or_build(cdef)
+
+
+def test_cached_reuse_preflights_class_without_reresolving_during_execution(monkeypatch):
     from dryml.core import materialization as materialization_mod
 
     repo = Repo()
     obj = MaterialLeaf("cached", repo=repo)
     repo.pin(obj)
 
-    def fail_resolve(_):
-        raise AssertionError("resolve_symbol should not be called for cached reuse")
+    original_resolve = materialization_mod.resolve_symbol
+    calls = 0
 
-    monkeypatch.setattr(materialization_mod, "resolve_symbol", fail_resolve)
+    def count_resolve(value):
+        nonlocal calls
+        calls += 1
+        return original_resolve(value)
+
+    monkeypatch.setattr(materialization_mod, "resolve_symbol", count_resolve)
 
     assert repo.load_or_build(obj.definition) is obj
+    assert calls == 1
 
 
 def test_executor_honors_materialization_action_kind():

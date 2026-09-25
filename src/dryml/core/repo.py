@@ -2593,9 +2593,11 @@ class Repo:
         """
         from .reference_values import ObjectRef
         from .repo_plan import apply_exact_reference_identity
+        from .materialization import preflight_materialization_classes
 
         if not isinstance(reference, ObjectRef) or not reference.objects:
             raise ValueError("build_object_ref requires a non-empty ObjectRef.")
+        class_manifest = preflight_materialization_classes(reference)
         selected = self._selected_declaration_store(reference, store)
         acquired = []
         try:
@@ -2618,7 +2620,9 @@ class Repo:
                 }
             )
             try:
-                obj = self._load_structural(reference.definition, cache="none")
+                obj = self._materialize_cdef(
+                    reference.definition, cache="none", class_manifest=class_manifest,
+                )
             finally:
                 _active_object_ref_builds.reset(token)
             apply_exact_reference_identity(
@@ -3810,6 +3814,7 @@ class Repo:
         from .materialization import (
             build_exact_state_load_plan,
             execute_exact_state_load_plan,
+            preflight_materialization_classes,
         )
         from .reference_values import ObjectRef, StateRef
         from .repo_plan import AggregateMaterializationPlan, _NodeBindings, realization_scope
@@ -3999,6 +4004,7 @@ class Repo:
             digest: build_exact_state_load_plan(self, reference)
             for digest, reference in state_refs.items()
         }
+        class_manifest = preflight_materialization_classes(*plan.roots)
 
         # Every exact state closure, including snapshots selected from ObjectRefs,
         # is complete before conflict admission. Compare each enclosing snapshot's
@@ -4101,7 +4107,7 @@ class Repo:
                     result = (
                         reserved if reserved is not None else execute_exact_state_load_plan(
                             self, exact, reuse_live=plan.reuse_live, cache=plan.cache,
-                            _reference_memo=reference_memo,
+                            _reference_memo=reference_memo, class_manifest=class_manifest,
                         )
                     )
                     # Every exact aggregate root keeps the StateRef that selected
@@ -4134,6 +4140,7 @@ class Repo:
                     try:
                         obj = self._materialize_cdef(
                             reference.definition, cache="none", memo=cdef_memo,
+                            class_manifest=class_manifest,
                         )
                     finally:
                         _active_object_ref_results.reset(results_token)
@@ -4160,7 +4167,10 @@ class Repo:
                     if isinstance(value, Object):
                         return value
                     if isinstance(value, ConcreteDefinition):
-                        result = self._materialize_cdef(value, cache=plan.cache, memo=cdef_memo)
+                        result = self._materialize_cdef(
+                            value, cache=plan.cache, memo=cdef_memo,
+                            class_manifest=class_manifest,
+                        )
                     elif isinstance(value, StateRef):
                         result = results[value.object.digest()]
                     elif isinstance(value, ObjectRef):
@@ -4226,6 +4236,7 @@ class Repo:
         # internal
         memo: dict | None = None,   # cdef->obj memo for this realization pass
         path: list[str | int] | None = None,
+        class_manifest=None,
     ):
         from dryml.runtime import materialization_admission
 
@@ -4249,6 +4260,7 @@ class Repo:
                 plan,
                 memo=memo,
                 root=cdef,
+                class_manifest=class_manifest,
             )
 
     def _materialize_object_ref(
@@ -4500,6 +4512,9 @@ class Repo:
             self, state_ref, source_store=source_store,
             source_stores=source_stores,
         )
+        from .materialization import preflight_materialization_classes
+
+        preflight_materialization_classes(state_ref)
         _, nodes, object_ids = self._state_graph_evidence(obj)
         if obj.object_ref != state_ref.object:
             raise RepoLoadError("Target object does not carry the requested exact ObjectRef.")

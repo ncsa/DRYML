@@ -1,11 +1,27 @@
 import numpy as np
+from abc import abstractmethod
+import pytest
 from tests.core import core_objects as objects
 from dryml.core.definition import Definition
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
-from dryml.core.object import definition_mode
+from dryml.core.object import Object, definition_mode
 from dryml.core.repo import Repo
 
 ### Tests for methods of creating objects. We verify they have the intended properties.
+
+
+class AbstractCreateObject(Object):
+    @abstractmethod
+    def required(self):
+        """Return the required implementation result."""
+
+
+def test_abstract_internal_reconstruction_is_rejected_before_initialization():
+    repo = Repo()
+    cdef = Definition(AbstractCreateObject).concretize(repo=repo)
+
+    with pytest.raises(TypeError, match="required"):
+        AbstractCreateObject(repo=repo, __cdef__=cdef)
 
 
 def test_build_from_definition_1():

@@ -1,8 +1,9 @@
 from pathlib import Path
+from abc import abstractmethod
 
 import pytest
 
-from dryml.core import Repo, Serializable
+from dryml.core import Definition, Repo, Serializable
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import ClaimRecord
 
@@ -15,6 +16,46 @@ class ClaimedValue(Serializable):
 
     def save_state_to_dir_imp(self, dest_dir, *, codec):
         Path(dest_dir, "value").write_text(str(self.value), encoding="ascii")
+
+
+class AbstractClaimedValue(Serializable):
+    @abstractmethod
+    def required(self):
+        """Return the required implementation result."""
+
+
+def test_aggregate_abstract_admission_precedes_all_claims(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    concrete = repo.declare_object(Definition(ClaimedValue, 1).concretize(repo=repo))
+    abstract = repo.declare_object(Definition(AbstractClaimedValue).concretize(repo=repo))
+    before = {
+        reference.digest(): store.read_claim_record(reference.digest())
+        for reference in (concrete, abstract)
+    }
+
+    with pytest.raises(TypeError, match="required"):
+        repo.materialize_boundary((concrete, abstract))
+
+    after = {
+        reference.digest(): store.read_claim_record(reference.digest())
+        for reference in (concrete, abstract)
+    }
+    assert after == before
+
+
+def test_object_ref_abstract_admission_precedes_its_claim(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    reference = repo.declare_object(
+        Definition(AbstractClaimedValue).concretize(repo=repo)
+    )
+    before = store.read_claim_record(reference.digest())
+
+    with pytest.raises(TypeError, match="required"):
+        repo.build_object_ref(reference)
+
+    assert store.read_claim_record(reference.digest()) == before
 
 
 def test_claim_can_be_renewed_abandoned_and_completed_with_one_fence(tmp_path):
