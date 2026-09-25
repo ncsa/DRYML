@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from dryml.core.tensor_spec import Dynamic, batch_spec_tree, iter_specs
-from dryml.methods import Method
+from dryml.methods import ImplementationSelectionError, Method
 
 
 class Model(Method):
@@ -27,7 +27,28 @@ class Model(Method):
     def prep_eval(self):
         pass
 
-    def infer_output_spec(self, input_spec):
+    def infer_output_spec(self, input_spec, *additional_input_specs):
+        """Infer a Model result spec from one input without executing the model.
+
+        Args:
+            input_spec: Normalized logical model input specification.
+            *additional_input_specs: Unsupported additional inputs.
+
+        Raises:
+            TypeError: If additional input specifications are supplied.
+            NotImplementedError: If no explicit or subclass-provided pure output
+                specification is available.
+
+        Returns:
+            The explicit output specification, preserving a known input batch
+            contract when appropriate.
+
+        Side Effects:
+            None. This method does not execute or probe a backend model.
+        """
+
+        if additional_input_specs:
+            raise TypeError("Model accepts exactly one input specification.")
         if self.output_spec is None:
             return super().infer_output_spec(input_spec)
         if any(spec.batched for spec in iter_specs(self.output_spec)):
@@ -68,13 +89,17 @@ class AutoEncoder(Model):
     def __call__(self, x):
         return self.decoder(self.encoder(x))
 
-    def find_implementation(self, input_spec=None, *, backend=None, batch_mode=None):
+    def find_implementation(self, input_spec=None, *additional_input_specs, backend=None, batch_mode=None,
+                            output_spec=None):
         """Select this composite and both children from one threaded input spec.
 
         Args:
             input_spec: Normalized input specification for the encoder.
+            *additional_input_specs: Unsupported because AutoEncoder is unary.
             backend: Optional explicit backend selection constraint.
             batch_mode: Optional explicit batch-mode selection constraint.
+            output_spec: Optional retained result constraint for the selected
+                composite call.
 
         Returns:
             A callable implementation that validates the outer input and invokes
@@ -85,10 +110,13 @@ class AutoEncoder(Model):
             be selected from the supplied constraints.
         """
 
+        if additional_input_specs:
+            raise ImplementationSelectionError("conflict")
         implementation = super().find_implementation(
             input_spec,
             backend=backend,
             batch_mode=batch_mode,
+            output_spec=output_spec,
         )
         return self._specialize_implementation(
             implementation,
@@ -150,7 +178,28 @@ class AutoEncoder(Model):
 
         return replace(implementation, _invoker=invoke_autoencoder)
 
-    def infer_output_spec(self, input_spec):
+    def infer_output_spec(self, input_spec, *additional_input_specs):
+        """Infer an AutoEncoder result from exactly one input specification.
+
+        Args:
+            input_spec: Normalized encoder input specification.
+            *additional_input_specs: Unsupported additional inputs.
+
+        Returns:
+            The explicit output specification, or the decoder result inferred
+            from the encoder's pure intermediate specification.
+
+        Raises:
+            TypeError: If additional input specifications are supplied.
+            NotImplementedError: If a child lacks pure inference and no explicit
+                final output specification is configured.
+
+        Side Effects:
+            None. No child is selected or executed.
+        """
+
+        if additional_input_specs:
+            raise TypeError("AutoEncoder accepts exactly one input specification.")
         if self.output_spec is not None:
             return super().infer_output_spec(input_spec)
         return self.decoder.infer_output_spec(self.encoder.infer_output_spec(input_spec))

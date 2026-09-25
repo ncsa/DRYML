@@ -1,7 +1,9 @@
 import numpy as np
+import pytest
 
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArrayDataset, Batch, collate_xy
+from dryml.methods import ImplementationSelectionError
 from dryml.models import AutoEncoder, Model
 from dryml.models.utils import prepare_training_data
 
@@ -90,3 +92,25 @@ def test_autoencoder_derives_decoder_backend_from_encoded_spec():
     model.learn()
     assert model(source).backend.value == "tf"
     assert model.call_mode == "cached"
+
+
+def test_autoencoder_preserves_output_constraints_and_rejects_extra_specs():
+    """The unary model composite cannot silently discard a carry specification."""
+
+    model = AutoEncoder(CountingIdentityModel(), CountingIdentityModel())
+    spec = TensorSpec("float32", shape=(2,), backend="numpy")
+
+    with pytest.raises(TypeError):
+        model.infer_output_spec(spec, spec)
+    with pytest.raises(ImplementationSelectionError) as extra:
+        model.find_implementation(spec, spec)
+    assert extra.value.reason == "conflict"
+
+    selected = model.find_implementation(spec, output_spec=spec)
+    assert selected(np.ones((2,), dtype=np.float32)).shape == (2,)
+    invalid_output = model.find_implementation(
+        spec,
+        output_spec=TensorSpec("int32", shape=(2,), backend="numpy"),
+    )
+    with pytest.raises(ImplementationSelectionError):
+        invalid_output(np.ones((2,), dtype=np.float32))

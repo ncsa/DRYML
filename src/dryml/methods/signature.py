@@ -96,6 +96,32 @@ def spec_node(spec: SpecTree) -> MethodCallNode:
     return _node_from_spec(spec)
 
 
+def spec_nodes(
+    input_spec: SpecTree | None,
+    additional_input_specs: tuple[SpecTree, ...],
+) -> tuple[MethodCallNode, ...]:
+    """Normalize retained positional selected-call specifications immutably.
+
+    Args:
+        input_spec: Optional first logical input specification.
+        additional_input_specs: Later positional specifications, which require a
+            first specification.
+
+    Returns:
+        Immutable normalized nodes in positional order.
+
+    Raises:
+        TypeError: If a specification is malformed or later specifications are
+        supplied without a first specification.
+    """
+
+    if input_spec is None:
+        if additional_input_specs:
+            raise TypeError("Additional Method specs require a first input spec.")
+        return ()
+    return (spec_node(input_spec), *map(spec_node, additional_input_specs))
+
+
 def runtime_node(value: object) -> MethodCallNode:
     """Normalize one supported runtime value without inferring a batch axis.
 

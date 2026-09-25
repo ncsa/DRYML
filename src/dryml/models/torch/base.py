@@ -21,7 +21,7 @@ from dryml.models.utils import (
     prepare_training_data,
     validate_num_examples,
 )
-from dryml.methods import MethodError, traits
+from dryml.methods import ImplementationSelectionError, MethodError, traits
 
 
 def _resolve_device(torch):
@@ -275,14 +275,17 @@ class Model(BaseModel, Serializable):
 
         return self._call_raw(x, *args, **kwargs)
 
-    def find_implementation(self, input_spec=None, *, backend=None, batch_mode=None):
+    def find_implementation(self, input_spec=None, *additional_input_specs, backend=None, batch_mode=None,
+                            output_spec=None):
         """Select a model call and attach explicit element batch adaptation.
 
         Args:
             input_spec: Optional normalized first-input specification retained
                 for selected-call validation and element adaptation.
+            *additional_input_specs: Unsupported because wrapped Models are unary.
             backend: Optional required backend value or closed string spelling.
             batch_mode: Optional required element/batched value or spelling.
+            output_spec: Optional retained raw-result contract.
 
         Returns:
             A selected callable that moves element inputs to the selected Torch
@@ -302,10 +305,13 @@ class Model(BaseModel, Serializable):
         # Torch model path rather than a lightweight package import.
         import dryml.torch
 
+        if additional_input_specs:
+            raise ImplementationSelectionError("conflict")
         implementation = super().find_implementation(
             input_spec,
             backend=backend,
             batch_mode=batch_mode,
+            output_spec=output_spec,
         )
         return self._specialize_implementation(implementation, input_spec)
 
@@ -380,7 +386,29 @@ class Model(BaseModel, Serializable):
         state_path = os.path.join(src_dir, "state.pth")
         self.obj.load_state_dict(torch.load(state_path, map_location=self.device or "cpu"))
 
-    def infer_output_spec(self, input_spec):
+    def infer_output_spec(self, input_spec, *additional_input_specs):
+        """Infer Torch output metadata from exactly one logical input spec.
+
+        Args:
+            input_spec: Normalized Torch model input specification.
+            *additional_input_specs: Unsupported additional inputs.
+
+        Returns:
+            The configured output specification or pure built-in module metadata
+            translated to the input's logical batch representation.
+
+        Raises:
+            TypeError: If additional input specifications are supplied.
+            NotImplementedError: If the module lacks supported static metadata or
+                has no configured output specification.
+
+        Side Effects:
+            Imports Torch only to inspect recognized module metadata; it never
+            invokes the module or allocates an input tensor.
+        """
+
+        if additional_input_specs:
+            raise TypeError("Torch Model accepts exactly one input specification.")
         if self.output_spec is not None:
             return super().infer_output_spec(input_spec)
 

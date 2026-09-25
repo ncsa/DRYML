@@ -19,11 +19,11 @@ Import the public API from this package. `dryml.code.Method`,
 ```python
 from dryml.core.backend import Backend
 from dryml.core.tensor_spec import BatchMode, TensorSpec
-from dryml.methods import Method, Traits, traits
+from dryml.methods import Accumulator, AccumulatorGroup, Method, Traits, traits
 ```
 
 `Backend` and `BatchMode` remain core vocabulary. The exact Methods public API
-is `Method`, `MethodImplementation`, `Traits`, `traits`, `MethodCallNode`,
+is `Method`, `Accumulator`, `AccumulatorGroup`, `MethodImplementation`, `Traits`, `traits`, `MethodCallNode`,
 `MethodCallSignature`, `MethodCallMode`, `MethodCallNodeKind`, `MethodError`,
 `ImplementationDeclarationError`, `ImplementationSelectionError`,
 `PreparedCallMismatchError`, `SelectionFailureReason`, and
@@ -33,10 +33,10 @@ is `Method`, `MethodImplementation`, `Traits`, `traits`, `MethodCallNode`,
 
 A simple Method declares one ordinary `__call__` implementation. Its positional
 and keyword arguments are logical arguments forwarded unchanged, and its return
-value is the implementation result. `infer_output_spec(input_spec)` accepts one
-normalized `SpecTree`, returns a normalized output `SpecTree` without executing
-user or model code, and raises `NotImplementedError` if that pure contract is
-not supplied.
+value is the implementation result. `infer_output_spec(input_spec,
+*additional_input_specs)` accepts one or more normalized positional `SpecTree`
+values, returns a normalized output `SpecTree` without executing user or model
+code, and raises `NotImplementedError` if that pure contract is not supplied.
 
 ```python
 import numpy as np
@@ -105,15 +105,19 @@ Object/runtime machinery. It is unsupported inside an active orchestrator in
 Stage 2. Stage 3's generic in-process static analysis does not change that
 constraint: cross-process Method probing remains deferred.
 
-`compatible_implementations(input_spec=None, *, backend=None, batch_mode=None)`
-accepts an optional first-input `SpecTree` and core trait constraints, returns
-every compatible candidate in deterministic order, and never ranks or selects.
+`compatible_implementations(input_spec=None, *additional_input_specs,
+backend=None, batch_mode=None)` accepts optional positional input `SpecTree`
+constraints and core trait constraints, returns every compatible candidate in
+deterministic order, and never ranks or selects. Additional input specs require
+the first spec and validate selected calls but do not influence ranking.
 It returns an empty tuple for no compatible entries and raises
 `ImplementationSelectionError(reason="conflict")` for malformed or
 contradictory constraints.
 
-`find_implementation(...)` uses the same inputs to return one uniquely
-most-specific callable `MethodImplementation`. It raises
+`find_implementation(..., output_spec=None)` uses the same inputs to return one
+uniquely most-specific callable `MethodImplementation`. `output_spec` is an
+optional raw-result contract; it does not rank candidates or trigger inference.
+The API raises
 `ImplementationSelectionError` with `reason` `"no_candidate"`, `"ambiguous"`,
 `"unknown_traits"`, or `"conflict"` before a target runs. For
 `"unknown_traits"`, `unknown_traits` names missing `"backend"` and/or
@@ -129,13 +133,32 @@ implementation = Double().find_implementation(input_spec=input_spec)
 assert implementation(np.ones((4, 2), dtype=np.float32)).shape == (4, 2)
 ```
 
-The selected carrier validates the retained `input_spec` against exactly the
-first positional logical argument. Known structure, mapping key/order, dtype,
-shape, layout, backend, and batch facts must agree; unknown and `Dynamic` facts
-accept concrete observations. Missing or conflicting first input raises
-`ImplementationSelectionError` before the target. Later positional and keyword
-arguments are forwarded unchanged. Calling a selected carrier never discovers
-candidates or reads/mutates Method preparation state.
+The selected carrier validates every retained positional input spec before the
+target runs. Known structure, mapping key/order, dtype, shape, layout, backend,
+and batch facts must agree; unknown and `Dynamic` facts accept concrete values.
+Missing or conflicting constrained input raises `ImplementationSelectionError`
+before the target. A retained `output_spec` validates the target's raw result
+before return normalization or an Execute raw-result callback can observe it.
+Unconstrained later positional and keyword arguments are forwarded unchanged.
+Calling a selected carrier never discovers candidates or reads/mutates Method
+preparation state.
+
+## Accumulators
+
+`Accumulator[ObservationT, StateT]` is an abstract two-input Method for one
+streaming transition: `__call__(observation, state) -> state`. Its first input
+is the observation and drives backend/batch selection; its second input is an
+explicit invocation-owned carry validated independently, including backend.
+`infer_output_spec(observation_spec, state_spec)` is mandatory and pure. An
+Accumulator has no reset, checkpoint, merge, or mutable carry field.
+
+`AccumulatorGroup(accumulators)` composes a non-empty list, tuple, or
+string-keyed mapping of Accumulators. A selected group accepts matching carry
+and result structures, sends one observation to every branch, preserves the
+declared structure/names, and retains its child selections for that invocation.
+Reusing a child declaration creates no shared execution state: callers supply
+distinct carry entries. Group inference and selection do not run transition
+targets or change child learning/cached mode.
 
 ## Eager, Learning, And Cached Calls
 

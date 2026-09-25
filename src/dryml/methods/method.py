@@ -30,6 +30,7 @@ from .signature import (
     runtime_facts,
     spec_from_runtime_node,
     spec_node,
+    spec_nodes,
 )
 from .traits import METHOD_TRAITS_KEY, Traits
 
@@ -342,15 +343,17 @@ class Method(Object):
     def compatible_implementations(
         self,
         input_spec: SpecTree | None = None,
-        *,
+        *additional_input_specs: SpecTree,
         backend: Backend | str | None = None,
         batch_mode: BatchMode | str | None = None,
     ) -> tuple[MethodImplementation, ...]:
         """Return every catalog candidate compatible with known constraints.
 
         Args:
-            input_spec: Optional normalized constraint for exactly the first
-                logical argument.
+            input_spec: Optional normalized constraint for the first logical
+                argument. Additional constraints require this argument.
+            *additional_input_specs: Normalized constraints for later positional
+                logical arguments. They validate calls but never rank candidates.
             backend: Optional required backend value or closed string spelling.
             batch_mode: Optional required element/batched value or string spelling.
 
@@ -366,26 +369,32 @@ class Method(Object):
             ranks candidates, invokes targets, or accesses a cache.
         """
 
-        input_node, required_backend, required_batch = self._selection_constraints(
-            input_spec, backend, batch_mode
+        input_nodes, required_backend, required_batch = self._selection_constraints(
+            input_spec, additional_input_specs, backend, batch_mode
         )
-        del input_node
+        del input_nodes
         return self._compatible(required_backend, required_batch)
 
     def find_implementation(
         self,
         input_spec: SpecTree | None = None,
-        *,
+        *additional_input_specs: SpecTree,
         backend: Backend | str | None = None,
         batch_mode: BatchMode | str | None = None,
+        output_spec: SpecTree | None = None,
     ) -> MethodImplementation:
         """Select one safe most-specific callable implementation.
 
         Args:
             input_spec: Optional normalized first-argument constraint retained by
                 the returned callable for directional runtime validation.
+            *additional_input_specs: Normalized later positional constraints. They
+                require ``input_spec`` and do not influence candidate ranking.
             backend: Optional required backend value or closed string spelling.
             batch_mode: Optional required element/batched value or string spelling.
+            output_spec: Optional normalized raw-result constraint retained by the
+                returned callable. It validates after target execution but before
+                a raw-result callback or successful return.
 
         Returns:
             One callable carrier retaining its raw authored target and traits.
@@ -401,31 +410,44 @@ class Method(Object):
 
         return self._find_implementation(
             input_spec,
+            additional_input_specs,
             backend=backend,
             batch_mode=batch_mode,
+            output_spec=output_spec,
             derive_spec_batch=True,
         )
 
     def _find_implementation(
         self,
         input_spec: SpecTree | None,
+        additional_input_specs: tuple[SpecTree, ...] = (),
         *,
         backend: Backend | str | None,
         batch_mode: BatchMode | str | None,
+        output_spec: SpecTree | None = None,
         derive_spec_batch: bool,
     ) -> MethodImplementation:
         """Construct one selected callable with explicit spec-fact handling."""
 
-        input_node, required_backend, required_batch = self._selection_constraints(
+        input_nodes, required_backend, required_batch = self._selection_constraints(
             input_spec,
+            additional_input_specs,
             backend,
             batch_mode,
             derive_spec_batch=derive_spec_batch,
         )
+        try:
+            output_node = None if output_spec is None else spec_node(output_spec)
+        except TypeError as error:
+            raise ImplementationSelectionError("conflict") from error
         implementation = self._select(required_backend, required_batch)
         return replace(
             implementation,
-            _input_spec=complete_backend_constraint(input_node, required_backend),
+            _input_specs=tuple(
+                complete_backend_constraint(input_node, required_backend)
+                for input_node in input_nodes
+            ),
+            _output_spec=output_node,
         )
 
     def _prepare_implementation(
@@ -439,26 +461,29 @@ class Method(Object):
 
         return self._find_implementation(
             input_spec,
+            (),
             backend=backend,
             batch_mode=batch_mode,
+            output_spec=None,
             derive_spec_batch=False,
         )
 
     def _selection_constraints(
         self,
         input_spec: SpecTree | None,
+        additional_input_specs: tuple[SpecTree, ...],
         backend: Backend | str | None,
         batch_mode: BatchMode | str | None,
         *,
         derive_spec_batch: bool = True,
-    ) -> tuple[MethodCallNode | None, Backend | None, BatchMode | None]:
+    ) -> tuple[tuple[MethodCallNode, ...], Backend | None, BatchMode | None]:
         """Normalize API constraints and reject contradictory known facts."""
 
         try:
             required_backend = None if backend is None else Backend(backend)
             required_batch = None if batch_mode is None else BatchMode(batch_mode)
-            input_node = None if input_spec is None else spec_node(input_spec)
-            spec_backend, spec_batch = (None, None) if input_node is None else node_facts(input_node)
+            input_nodes = spec_nodes(input_spec, additional_input_specs)
+            spec_backend, spec_batch = (None, None) if not input_nodes else node_facts(input_nodes[0])
             if not derive_spec_batch:
                 spec_batch = None
         except (TypeError, ValueError) as error:
@@ -467,7 +492,7 @@ class Method(Object):
             raise ImplementationSelectionError("conflict")
         if required_batch is not None and spec_batch is not None and required_batch != spec_batch:
             raise ImplementationSelectionError("conflict")
-        return input_node, required_backend or spec_backend, required_batch or spec_batch
+        return input_nodes, required_backend or spec_backend, required_batch or spec_batch
 
     def _compatible(
         self,
@@ -509,6 +534,20 @@ class Method(Object):
             raise ImplementationSelectionError("ambiguous")
         return winners[0]
 
+    def _runtime_selection_facts(
+        self,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> tuple[Backend | None, BatchMode | None]:
+        """Return eager trait facts without changing selected-call validation.
+
+        Generic Methods retain legacy behavior by observing every logical call
+        argument. Multi-input subclasses may narrow this hook when only one
+        argument has selection semantics.
+        """
+
+        return runtime_facts(args, kwargs)
+
     @staticmethod
     def _alternative_call(
         receiver: object,
@@ -540,7 +579,7 @@ class Method(Object):
                 raise PreparedCallMismatchError(expected, observed)
             return cached.invoke(args, kwargs, on_raw_result=on_raw_result)
         try:
-            backend, batch_mode = runtime_facts(args, kwargs)
+            backend, batch_mode = receiver._runtime_selection_facts(args, kwargs)
         except ValueError as error:
             raise ImplementationSelectionError("conflict") from error
         effective_batch = batch_mode
@@ -584,11 +623,13 @@ class Method(Object):
             if on_raw_result is not None else implementation(*args, **kwargs)
         )
 
-    def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
+    def infer_output_spec(self, input_spec: SpecTree, *additional_input_specs: SpecTree) -> SpecTree:
         """Infer a normalized output specification without executing an implementation.
 
         Args:
             input_spec: Normalized specification for the first logical input.
+            *additional_input_specs: Normalized specifications for later logical
+                positional inputs when a subclass supports a multi-input Method.
 
         Returns:
             The subclass-defined normalized output specification.

@@ -4,6 +4,8 @@ import subprocess
 import sys
 
 _EXPECTED_METHOD_EXPORTS = {
+    "Accumulator",
+    "AccumulatorGroup",
     "ImplementationDeclarationError",
     "ImplementationSelectionError",
     "Method",
@@ -32,7 +34,8 @@ import dryml.code
 import dryml.methods
 
 assert set(dryml.methods.__all__) == {
-    'ImplementationDeclarationError', 'ImplementationSelectionError', 'Method',
+    'Accumulator', 'AccumulatorGroup', 'ImplementationDeclarationError',
+    'ImplementationSelectionError', 'Method',
     'MethodCallMode', 'MethodCallNode', 'MethodCallNodeKind',
     'MethodCallSignature', 'MethodError', 'MethodImplementation',
     'PreparedCallMismatchError', 'SelectionFailureReason', 'SelectionTraitName',

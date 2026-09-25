@@ -297,6 +297,25 @@ def test_pipe_infer_output_spec_and_call():
     assert out.tolist() == [1.0, 2.0]
 
 
+def test_unary_project_and_pipe_reject_extra_specs_without_dropping_output_constraints():
+    """Unary compositions retain selected output validation and reject carry specs."""
+
+    spec = TensorSpec("int32", shape=(2,), backend="numpy")
+    output = TensorSpec("float32", shape=(2,), backend="numpy")
+    for method in (Project(Cast("float32")), Pipe(Cast("float32"))):
+        with pytest.raises(TypeError):
+            method.infer_output_spec(spec, spec)
+        with pytest.raises(ImplementationSelectionError) as extra:
+            method.find_implementation(spec, spec)
+        assert extra.value.reason == "conflict"
+
+        selected = method.find_implementation(spec, output_spec=output)
+        assert selected(np.ones((2,), dtype=np.int32)).dtype == np.dtype("float32")
+        invalid_output = method.find_implementation(spec, output_spec=spec)
+        with pytest.raises(ImplementationSelectionError):
+            invalid_output(np.ones((2,), dtype=np.int32))
+
+
 def test_learning_pipe_derives_each_child_backend_from_intermediate_specs():
     class ChangeBackend(Method):
         @traits(backend="numpy")

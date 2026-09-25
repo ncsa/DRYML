@@ -16,7 +16,7 @@ from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress, metric_value
 from dryml.models.utils import advance_train_state, finite_dataset_len, prepare_training_data, validate_num_examples
 from dryml.tf.tensor_spec import output_signature as tf_output_signature
-from dryml.methods import MethodError, traits
+from dryml.methods import ImplementationSelectionError, MethodError, traits
 
 
 def _unwrap_backend_obj(obj):
@@ -372,14 +372,17 @@ class Model(BaseModel, Serializable):
 
         return self._call_raw(x, *args, **kwargs)
 
-    def find_implementation(self, input_spec=None, *, backend=None, batch_mode=None):
+    def find_implementation(self, input_spec=None, *additional_input_specs, backend=None, batch_mode=None,
+                            output_spec=None):
         """Select a model call and attach explicit element batch adaptation.
 
         Args:
             input_spec: Optional normalized first-input specification retained
                 for selected-call validation and element adaptation.
+            *additional_input_specs: Unsupported because wrapped Models are unary.
             backend: Optional required backend value or closed string spelling.
             batch_mode: Optional required element/batched value or spelling.
+            output_spec: Optional retained raw-result contract.
 
         Returns:
             A selected callable that adds and removes one TensorFlow batch axis
@@ -393,10 +396,13 @@ class Model(BaseModel, Serializable):
             Binds a local selected callable without changing preparation state.
         """
 
+        if additional_input_specs:
+            raise ImplementationSelectionError("conflict")
         implementation = super().find_implementation(
             input_spec,
             backend=backend,
             batch_mode=batch_mode,
+            output_spec=output_spec,
         )
         return self._specialize_implementation(implementation, input_spec)
 
@@ -445,7 +451,31 @@ class Model(BaseModel, Serializable):
             kwargs["metrics"] = [metric.obj if hasattr(metric, "obj") else metric for metric in metrics]
         return self.obj.compile(**kwargs)
 
-    def infer_output_spec(self, input_spec):
+    def infer_output_spec(self, input_spec, *additional_input_specs):
+        """Infer TensorFlow output metadata from exactly one logical input spec.
+
+        Args:
+            input_spec: Normalized TensorFlow model input specification.
+            *additional_input_specs: Unsupported additional inputs.
+
+        Returns:
+            The configured output specification or pure Keras shape metadata
+            translated to the input's logical batch representation.
+
+        Raises:
+            TypeError: If additional input specifications are supplied.
+            NotImplementedError: If the model lacks supported static metadata and
+                has no configured output specification.
+            ValueError: If supplied structured input metadata cannot match a
+                supported Keras input structure.
+
+        Side Effects:
+            Imports TensorFlow only to inspect supported Keras metadata; it never
+            invokes the model or allocates input tensors.
+        """
+
+        if additional_input_specs:
+            raise TypeError("TensorFlow Model accepts exactly one input specification.")
         if self.output_spec is not None:
             return super().infer_output_spec(input_spec)
 

@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from dryml.core.dtype import normalize_dtype
 from dryml.core.tensor_spec import Dynamic, SpecTree, map_spec_tree
-from dryml.methods import Method, traits
+from dryml.methods import ImplementationSelectionError, Method, traits
 
 
 def _validate_tree_key(key):
@@ -96,19 +96,27 @@ class Project(Method):
     def __call__(self, x):
         return _map_method_tree(self.branches, lambda method: method(x))
 
-    def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
+    def infer_output_spec(self, input_spec: SpecTree, *additional_input_specs: SpecTree) -> SpecTree:
+        """Infer branch output specs from exactly one logical input specification."""
+
+        if additional_input_specs:
+            raise TypeError("Project accepts exactly one input specification.")
         return _map_method_tree(
             self.branches,
             lambda method: method.infer_output_spec(input_spec),
         )
 
-    def find_implementation(self, input_spec=None, *, backend=None, batch_mode=None):
+    def find_implementation(self, input_spec=None, *additional_input_specs, backend=None, batch_mode=None,
+                            output_spec=None):
         """Select each branch once using one shared completed input specification.
 
         Args:
             input_spec: Normalized source constraint for every branch.
+            *additional_input_specs: Unsupported because Project is unary.
             backend: Optional completed backend constraint.
             batch_mode: Optional completed batch-mode constraint.
+            output_spec: Optional retained result constraint for the selected
+                composite call.
 
         Returns:
             A selected Project callable that validates its source input then invokes
@@ -119,10 +127,13 @@ class Project(Method):
             uniquely selected from the supplied constraints.
         """
 
+        if additional_input_specs:
+            raise ImplementationSelectionError("conflict")
         implementation = super().find_implementation(
             input_spec,
             backend=backend,
             batch_mode=batch_mode,
+            output_spec=output_spec,
         )
         return self._specialize_implementation(
             implementation,
@@ -198,19 +209,27 @@ class Pipe(Method):
             result = method(result)
         return result
 
-    def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
+    def infer_output_spec(self, input_spec: SpecTree, *additional_input_specs: SpecTree) -> SpecTree:
+        """Infer sequential output specs from exactly one logical input specification."""
+
+        if additional_input_specs:
+            raise TypeError("Pipe accepts exactly one input specification.")
         spec = input_spec
         for method in self.methods:
             spec = method.infer_output_spec(spec)
         return spec
 
-    def find_implementation(self, input_spec=None, *, backend=None, batch_mode=None):
+    def find_implementation(self, input_spec=None, *additional_input_specs, backend=None, batch_mode=None,
+                            output_spec=None):
         """Select each child once while threading pure intermediate specifications.
 
         Args:
             input_spec: Normalized source constraint for the first child.
+            *additional_input_specs: Unsupported because Pipe is unary.
             backend: Optional completed backend constraint.
             batch_mode: Optional completed batch-mode constraint.
+            output_spec: Optional retained result constraint for the selected
+                composite call.
 
         Returns:
             A selected Pipe callable that validates its source input then invokes
@@ -221,10 +240,13 @@ class Pipe(Method):
             uniquely selected from the threaded constraints.
         """
 
+        if additional_input_specs:
+            raise ImplementationSelectionError("conflict")
         implementation = super().find_implementation(
             input_spec,
             backend=backend,
             batch_mode=batch_mode,
+            output_spec=output_spec,
         )
         return self._specialize_implementation(
             implementation,

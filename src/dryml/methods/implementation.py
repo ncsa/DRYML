@@ -300,9 +300,11 @@ class MethodImplementation:
         target: Exact raw descriptor stored in the authoring class namespace.
         traits: Complete closed trait set supplied by the author.
 
-    Calling the carrier validates its retained first-input constraint, then uses a
-    selected-descriptor adapter to apply the bound target's core signature before
-    invocation and on every fresh return.
+    Calling the carrier validates its retained positional input constraints, then
+    uses a selected-descriptor adapter to apply the bound target's core signature
+    before invocation and on every fresh return. A retained output constraint is
+    checked against the raw target result before a caller-provided raw-result
+    callback can publish it.
     """
 
     name: str
@@ -311,7 +313,8 @@ class MethodImplementation:
     _descriptor: object | None = field(default=None, repr=False, compare=False)
     _receiver: object | None = field(default=None, repr=False, compare=False)
     _receiver_type: type | None = field(default=None, repr=False, compare=False)
-    _input_spec: MethodCallNode | None = field(default=None, repr=False, compare=False)
+    _input_specs: tuple[MethodCallNode, ...] = field(default=(), repr=False, compare=False)
+    _output_spec: MethodCallNode | None = field(default=None, repr=False, compare=False)
     _direct: bool = field(default=False, repr=False, compare=False)
     _invoker: Callable[..., object] | None = field(default=None, repr=False, compare=False)
 
@@ -353,24 +356,14 @@ class MethodImplementation:
         Raises:
             ImplementationDeclarationError: If this manually constructed carrier
                 has no Method binding or an unsupported descriptor.
-            ImplementationSelectionError: If retained first-input validation fails
+            ImplementationSelectionError: If retained input/output validation fails
                 before target signature normalization or invocation.
             SignatureError: If selected argument or return normalization fails.
         """
 
-        if self._input_spec is not None:
-            if not args:
-                raise ImplementationSelectionError("conflict")
-            try:
-                valid = satisfies(
-                    self._input_spec,
-                    runtime_node_for_constraint(args[0], self._input_spec),
-                )
-            except TypeError as error:
-                raise ImplementationSelectionError("conflict") from error
-            if not valid:
-                raise ImplementationSelectionError("conflict")
-        return self.selected_adapter().invoke(args, kwargs)
+        self._validate_inputs(args)
+        on_raw_result = self._validate_raw_result if self._output_spec is not None else None
+        return self.selected_adapter().invoke(args, kwargs, on_raw_result=on_raw_result)
 
     def invoke_with_raw_result(
         self, args: tuple[object, ...], kwargs: dict[str, object],
@@ -381,10 +374,44 @@ class MethodImplementation:
         Execute uses this owner seam after Method selection. It preserves the
         selected adapter's single argument and return boundaries.
         """
-        if self._input_spec is not None:
-            if not args or not satisfies(self._input_spec, runtime_node_for_constraint(args[0], self._input_spec)):
-                raise ImplementationSelectionError("conflict")
-        return self.selected_adapter().invoke(args, kwargs, on_raw_result=on_raw_result)
+        self._validate_inputs(args)
+
+        def validate_then_publish(result: object) -> object:
+            self._validate_raw_result(result)
+            return on_raw_result(result)
+
+        return self.selected_adapter().invoke(args, kwargs, on_raw_result=validate_then_publish)
+
+    def _validate_inputs(self, args: tuple[object, ...]) -> None:
+        """Reject a missing or incompatible retained positional input before invocation."""
+
+        if len(args) < len(self._input_specs):
+            raise ImplementationSelectionError("conflict")
+        try:
+            valid = all(
+                satisfies(constraint, runtime_node_for_constraint(args[index], constraint))
+                for index, constraint in enumerate(self._input_specs)
+            )
+        except TypeError as error:
+            raise ImplementationSelectionError("conflict") from error
+        if not valid:
+            raise ImplementationSelectionError("conflict")
+
+    def _validate_raw_result(self, result: object) -> object:
+        """Validate one raw result and return it for adapter callback composition."""
+
+        if self._output_spec is None:
+            return result
+        try:
+            valid = satisfies(
+                self._output_spec,
+                runtime_node_for_constraint(result, self._output_spec),
+            )
+        except TypeError as error:
+            raise ImplementationSelectionError("conflict") from error
+        if not valid:
+            raise ImplementationSelectionError("conflict")
+        return result
 
 
 __all__ = ["MethodImplementation"]

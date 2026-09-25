@@ -14,6 +14,7 @@ from .errors import (
     SelectionFailureReason,
     SelectionTraitName,
 )
+from .accumulator import Accumulator, AccumulatorGroup
 from .implementation import MethodImplementation
 from .method import Method
 from .signature import MethodCallMode, MethodCallNode, MethodCallNodeKind, MethodCallSignature
@@ -28,6 +29,8 @@ __all__ = [
     "MethodCallNode",
     "MethodCallSignature",
     "Method",
+    "Accumulator",
+    "AccumulatorGroup",
     "MethodError",
     "ImplementationDeclarationError",
     "ImplementationSelectionError",

@@ -71,3 +71,52 @@ def test_input_spec_constraints_conflicts_and_selected_calls_do_not_touch_prepar
     selected(np.ones((2, 3), dtype=np.float32), None, option=None)
     assert method.call_mode == "learning"
     assert method.cached_signature is None
+
+
+def test_selected_callable_validates_all_positional_specs_and_raw_output_before_callbacks():
+    """Carry and result constraints fail at their selected-call boundaries."""
+
+    method = Checked()
+    observation = TensorSpec("float32", shape=(3,), batch=Dynamic, backend="numpy")
+    carry = TensorSpec("float32", shape=(3,), backend="numpy")
+    selected = method.find_implementation(observation, carry, output_spec=carry)
+
+    with pytest.raises(ImplementationSelectionError) as missing:
+        selected(np.ones((2, 3), dtype=np.float32))
+    assert missing.value.reason == "conflict"
+    assert method.calls == 0
+
+    with pytest.raises(ImplementationSelectionError) as bad_carry:
+        selected(
+            np.ones((2, 3), dtype=np.float32),
+            np.ones((2, 3), dtype=np.float32),
+            option=None,
+        )
+    assert bad_carry.value.reason == "conflict"
+    assert method.calls == 0
+
+    callbacks = []
+    with pytest.raises(ImplementationSelectionError) as bad_output:
+        selected.invoke_with_raw_result(
+            (np.ones((1, 3), dtype=np.float32), np.ones((3,), dtype=np.float32)),
+            {"option": None},
+            callbacks.append,
+        )
+    assert bad_output.value.reason == "conflict"
+    assert method.calls == 1
+    assert callbacks == []
+
+
+def test_extra_specs_require_a_first_spec_and_malformed_specs_fail_before_selection():
+    """Selected contracts reject invalid static input layouts before targets run."""
+
+    method = Checked()
+    carry = TensorSpec("float32", shape=(3,), backend="numpy")
+
+    with pytest.raises(ImplementationSelectionError) as missing_first:
+        method.find_implementation(None, carry)
+    assert missing_first.value.reason == "conflict"
+
+    with pytest.raises(ImplementationSelectionError) as malformed:
+        method.find_implementation(carry, object())
+    assert malformed.value.reason == "conflict"
