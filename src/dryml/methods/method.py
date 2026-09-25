@@ -492,7 +492,19 @@ class Method(Object):
             raise ImplementationSelectionError("conflict")
         if required_batch is not None and spec_batch is not None and required_batch != spec_batch:
             raise ImplementationSelectionError("conflict")
-        return input_nodes, required_backend or spec_backend, required_batch or spec_batch
+        selected_backend = required_backend or spec_backend
+        try:
+            for input_node in input_nodes[1:]:
+                additional_backend, _ = node_facts(input_node)
+                if (
+                    selected_backend is not None
+                    and additional_backend is not None
+                    and additional_backend != selected_backend
+                ):
+                    raise ImplementationSelectionError("conflict")
+        except ValueError as error:
+            raise ImplementationSelectionError("conflict") from error
+        return input_nodes, selected_backend, required_batch or spec_batch
 
     def _compatible(
         self,
@@ -682,7 +694,9 @@ def _catalog_for_class(
         for name, descriptor in namespace.items():
             if name == "__call__" and type(captured) is _CapturedDirectCall:
                 ensure_supported_descriptor(captured.descriptor, name=name)
-                if not getattr(captured.descriptor, "__isabstractmethod__", False):
+                if getattr(captured.descriptor, "__isabstractmethod__", False):
+                    _remove_catalog_slot(slots, order, name)
+                else:
                     _place_catalog_slot(
                         slots,
                         order,
@@ -709,6 +723,7 @@ def _catalog_for_class(
                 )
             ensure_supported_descriptor(descriptor, name=name)
             if getattr(descriptor, "__isabstractmethod__", False):
+                _remove_catalog_slot(slots, order, name)
                 continue
             _place_catalog_slot(
                 slots,
@@ -765,6 +780,20 @@ def _place_catalog_slot(
             f"Method implementation {implementation.name!r} has an inherited name conflict."
         )
     slots[implementation.name] = (owner, implementation)
+
+
+def _remove_catalog_slot(
+    slots: dict[str, tuple[type, MethodImplementation]],
+    order: list[str],
+    name: str,
+) -> None:
+    """Remove an inherited implementation hidden by one abstract declaration."""
+
+    previous = slots.get(name)
+    if previous is None:
+        return
+    del slots[name]
+    order.remove(name)
 
 
 def _finalize_method_abstractness(cls: type) -> None:

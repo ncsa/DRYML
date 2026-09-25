@@ -11,7 +11,7 @@ from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import Dynamic, TensorSpec
 from dryml.data import Dataset
 from dryml.managed import ManagedConfig, ManagedConflictError, ManagedInterrupted
-from dryml.methods import Accumulator, AccumulatorGroup, Method, traits
+from dryml.methods import Accumulator, AccumulatorGroup, ImplementationSelectionError, Method, traits
 
 
 OBSERVATION_SPEC = TensorSpec("float32", shape=(Dynamic,), batch=Dynamic, backend="numpy")
@@ -318,6 +318,59 @@ def test_fold_rejects_missing_or_ambiguous_specs_and_invalid_role_results(tmp_pa
         with pytest.raises(Exception):
             fold.compute(managed=ManagedConfig(state_repo=DirStore(tmp_path / name)))
         assert fold.ready is False
+
+
+def test_fold_rejects_mixed_initializer_carry_before_the_first_transition(tmp_path):
+    """A NumPy observation cannot select a transition with a Torch initializer carry."""
+
+    import dryml.torch
+    import torch
+    from dryml.artifacts import Fold
+
+    class TorchCarryInitial(Method):
+        """Declare a Torch carry while remaining selectable from a NumPy observation."""
+
+        @traits(backend="numpy", batch_mode="batched")
+        def numpy(self, observation):
+            """Return the incompatible native carry for the transition check."""
+
+            return torch.zeros((), dtype=torch.float64)
+
+        def infer_output_spec(self, observation_spec):
+            """Declare the deliberately incompatible carry backend."""
+
+            return TensorSpec("float64", shape=(), backend="torch")
+
+    class MustNotTransition(Accumulator):
+        """Record any transition that runs after an invalid carry selection."""
+
+        def __init__(self):
+            self.calls = 0
+
+        @traits(backend="numpy", batch_mode="batched")
+        def numpy(self, observation, state):
+            """Fail if selection did not reject the mixed backend first."""
+
+            self.calls += 1
+            raise AssertionError("mixed carry reached transition")
+
+        def infer_output_spec(self, observation_spec, state_spec):
+            """Retain the initializer carry contract for the selected transition."""
+
+            return state_spec
+
+    accumulator = MustNotTransition()
+    fold = Fold(
+        CountingDataset([np.ones((1, 1), dtype=np.float32)]),
+        initial_state=TorchCarryInitial(),
+        accumulator=accumulator,
+    )
+
+    with pytest.raises(ImplementationSelectionError) as error:
+        fold.compute(managed=ManagedConfig(state_repo=DirStore(tmp_path / "store")))
+    assert error.value.reason == "conflict"
+    assert accumulator.calls == 0
+    assert fold.ready is False
 
 
 def test_fold_freezes_dynamic_coordinate_shape_from_first_observation(tmp_path):

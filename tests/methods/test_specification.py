@@ -20,6 +20,19 @@ class Checked(Method):
         return value, extra, option
 
 
+class BackendChecked(Method):
+    """Select a NumPy transition while recording successful target calls."""
+
+    calls = 0
+
+    @traits(backend="numpy", batch_mode="batched")
+    def numpy(self, observation, carry):
+        """Return the carry only after selected-call validation succeeds."""
+
+        type(self).calls += 1
+        return carry
+
+
 def test_selected_callable_directionally_validates_nested_dynamic_first_input_only():
     """Known spec facts reject conflicts while Dynamic dimensions accept concrete values."""
 
@@ -120,3 +133,32 @@ def test_extra_specs_require_a_first_spec_and_malformed_specs_fail_before_select
     with pytest.raises(ImplementationSelectionError) as malformed:
         method.find_implementation(carry, object())
     assert malformed.value.reason == "conflict"
+
+
+def test_additional_known_backends_conflict_without_selecting_or_ranking_from_carry():
+    """Carry backends validate against observation/explicit backend without driving selection."""
+
+    method = BackendChecked()
+    BackendChecked.calls = 0
+    observation = TensorSpec("float32", shape=(2,), batch=Dynamic, backend="numpy")
+    unknown_observation = TensorSpec("float32", shape=(2,), batch=Dynamic)
+    torch_carry = TensorSpec("float32", shape=(), backend="torch")
+    unknown_carry = TensorSpec("float32", shape=())
+
+    with pytest.raises(ImplementationSelectionError) as compatible:
+        method.compatible_implementations(observation, torch_carry)
+    assert compatible.value.reason == "conflict"
+
+    with pytest.raises(ImplementationSelectionError) as selected_conflict:
+        method.find_implementation(observation, torch_carry)
+    assert selected_conflict.value.reason == "conflict"
+
+    with pytest.raises(ImplementationSelectionError) as explicit_conflict:
+        method.find_implementation(unknown_observation, torch_carry, backend="numpy")
+    assert explicit_conflict.value.reason == "conflict"
+    assert BackendChecked.calls == 0
+
+    selected = method.find_implementation(observation, unknown_carry)
+    carry = np.array(2.0, dtype=np.float32)
+    assert selected(np.ones((1, 2), dtype=np.float32), carry) is carry
+    assert BackendChecked.calls == 1
