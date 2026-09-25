@@ -2,6 +2,21 @@ from dryml.data.dataset import Dataset, Map
 from dryml.data.source import ArrayDataset, GeneratorDataset, NpyFileDataset, TFDSAdapter, TorchDatasetAdapter
 from dryml.data.combine import Chain, Zip
 from dryml.data.methods import ArgMax, Cast, Flatten, Pipe, Project, Scale, Select
+from dryml.data.reduction_methods import (
+    Abs,
+    ArrayMean,
+    ArrayQuantile,
+    Diff,
+    Equal,
+    MeanFinalize,
+    MeanInitial,
+    MeanUpdate,
+    ReductionMode,
+    ReservoirInitial,
+    ReservoirQuantile,
+    ReservoirUpdate,
+    Squared,
+)
 from dryml.data.structural import Batch, Repeat, Shuffle, Skip, Take, Unbatch
 from dryml.data.util import (
     Collect,
@@ -38,4 +53,17 @@ __all__ = [
     "collect_xy",
     "collate_xy",
     "Collect",
+    "Abs",
+    "ArrayMean",
+    "ArrayQuantile",
+    "Diff",
+    "Equal",
+    "MeanFinalize",
+    "MeanInitial",
+    "MeanUpdate",
+    "ReductionMode",
+    "ReservoirInitial",
+    "ReservoirQuantile",
+    "ReservoirUpdate",
+    "Squared",
 ]

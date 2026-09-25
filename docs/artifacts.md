@@ -53,3 +53,29 @@ tree for persistence. A failure or interruption before that point
 leaves the old (or absent) result unchanged; an explicit managed rerun starts a
 new iterator and carry. A later managed state/control-publication failure still
 raises honestly even though the complete live result remains ready.
+
+`dryml.artifacts.mean(src, mode="global" | "coordinate")` and
+`dryml.artifacts.quantile(src, q, mode=..., capacity=..., seed=0)` return inert
+Fold Artifacts with all initializer, transition, and finalizer Methods already
+declared. They accept no update/finalizer injection. Global mode reduces every
+scalar coordinate in logical observation order; coordinate mode excludes the
+declared batch axis and keeps one state per remaining coordinate. Uneven batches
+therefore preserve the same population and weighting as unbatched input.
+
+Mean stores native float64 sums and int64 counts and accepts signed integer,
+float32/64, and boolean observations. Quantile stores at most `capacity * C`
+float64 values, where `C` is one globally or the coordinate count, plus bounded
+metadata and working-batch storage. It accepts signed integer and float32/64
+observations, uses a private seeded Threefry/Algorithm R sampler, and is exact
+with linear interpolation while the population fits capacity. After overflow it
+is a deterministic sample estimate: endpoint results are reservoir extrema, not
+guaranteed stream extrema, and no worst-case rank/tail bound is claimed. Fixed
+seed, backend, version, CPU device, and logical item order reproduce membership;
+partitioning into uneven batches does not change that order. Quantile rejects
+boolean, non-finite, empty, unsigned, complex, object, sparse, ragged,
+mixed-backend, shape-changing, invalid q/capacity/seed inputs before publication.
+Both factories normalize `src` at the existing `Ref[AutoRef]` function boundary:
+construction retains an inert concrete source reference, does not save or load
+the source, and rejects a raw soft `Definition`. Count, population, or draw
+overflow, non-finite native intermediate arithmetic, and changed carry
+shape/dtype fail before a successor state or terminal payload is installed.

@@ -72,6 +72,35 @@ Common transformation methods:
 - `Scale`: multiply/shift values.
 - `ArgMax`: compute argmax along an axis.
 
+## Numerical Reduction Methods
+
+`Diff`, `Abs`, `Squared`, and `Equal` are reusable native numerical Methods.
+`Diff`, `Abs`, and `Squared` promote signed `int8`/`int16`/`int32`/`int64` and
+`float32`/`float64` inputs to float64 before arithmetic; they reject boolean
+arithmetic, broadcasting, mixed backends, non-finite inputs, unsigned/complex,
+object, sparse, and ragged values. `Equal` accepts supported numeric or boolean
+equal-shaped values and returns a native boolean tensor.
+
+`ArrayMean(axis=None)` and `ArrayQuantile(q, axis=None)` reduce one bounded
+native array. Their axis declarations accept `None`, one integer, or a unique
+tuple of integers. Mean accepts booleans and returns float64; quantile rejects
+booleans, preserves tuple request order and duplicates, and uses native linear
+interpolation. Empty selected populations, invalid axes, non-finite values, and
+unsupported dtypes raise rather than changing population semantics.
+
+`MeanInitial`, `MeanUpdate`, and `MeanFinalize` are the reusable declared
+sum/count program behind the named mean factory. `ReservoirInitial`,
+`ReservoirUpdate`, and `ReservoirQuantile` are the corresponding bounded
+Algorithm R program. They keep carry tensors in NumPy, Torch CPU, or TensorFlow
+CPU through initialization, transitions, and finalization. They do not collect
+the Dataset or use a global random generator. Mean carry is a finite float64
+sum with a nonnegative scalar int64 count; transitions reject changed carry
+shape/dtype, non-finite intermediate sums, and count wrap before returning a
+next carry. Reservoir carry is float64 storage plus scalar int64 population and
+draw counters and a two-limb int64 key. Fill consumes no draw; each attempted
+post-fill draw, including a rejection, advances the counter once. Invalid
+population/draw metadata and int64 wrap fail before arithmetic or sampling.
+
 ## Structural Operations
 
 Structural dataset nodes change iteration structure rather than individual values.

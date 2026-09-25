@@ -396,6 +396,24 @@ def test_fold_normalizes_native_terminal_result_only_after_completion(tmp_path, 
     assert initializer.calls == 1
 
 
+def test_fold_named_mean_program_keeps_the_first_batch_and_uneven_weighting(tmp_path):
+    """U6's declared mean program uses Fold's one-pass first-item semantics."""
+
+    from dryml.artifacts import mean
+
+    CountingDataset.reset()
+    source = CountingDataset([
+        np.array([[1.0, 10.0], [3.0, 30.0]], dtype=np.float64),
+        np.array([[9.0, 90.0]], dtype=np.float64),
+    ], spec=TensorSpec("float64", shape=(2,), batch=Dynamic, backend="numpy"))
+    fold = mean(source, mode="coordinate")
+
+    fold.compute(managed=ManagedConfig(state_repo=DirStore(tmp_path / "mean")))
+
+    assert np.allclose(fold.value(), [13 / 3, 130 / 3])
+    assert (CountingDataset.iterations, CountingDataset.yields) == (1, 2)
+
+
 @pytest.mark.parametrize("backend", ("torch", "tf"))
 def test_fold_rejects_restored_native_tensor_payloads(tmp_path, backend):
     """The result-only persistence boundary never admits a heavyweight tensor."""
