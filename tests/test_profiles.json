@@ -50,15 +50,6 @@
             "test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader"
           ]
         },
-        "tests/artifacts/test_fold.py": {
-          "rationale": "Retain representative Fold interruption/rerun, source/finalizer branch failures, publication failure, and managed-owner conflict while backend numerical products remain separately sampled.",
-          "functions": [
-            "test_fold_failures_and_interruptions_leave_no_partial_payload_then_rerun_fresh",
-            "test_fold_rejects_empty_and_source_failures_without_replacing_old_result",
-            "test_fold_keeps_complete_live_result_when_final_managed_publication_fails",
-            "test_fold_uses_one_managed_owner_and_does_not_poll_interrupt_requests"
-          ]
-        },
         "tests/core/test_execute_results.py": {
           "rationale": "Retain live publication, cyclic-result rejection, update withholding, post-publication evidence, and partial-replica failure; exhaustive mode covers repeated alias/materialization and limit compositions.",
           "functions": [
@@ -209,7 +200,10 @@
           "functions": [
             "test_exact_preflight_reports_missing_authority_before_construction",
             "test_exact_preflight_reports_every_missing_local_state_before_construction",
-            "test_exact_preflight_fails_before_live_candidate_reservation"
+            "test_exact_preflight_fails_before_live_candidate_reservation",
+            "test_exact_preflight_rejects_currently_abstract_class_before_greedy_restore",
+            "test_exact_preflight_keeps_ref_held_nested_state_refs_inert",
+            "test_exact_preflight_still_requires_materializing_child_declaration"
           ]
         },
         "tests/core/test_state_ref_receipt.py": {
