@@ -8,17 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from dryml import session
-from dryml.core import AutoRef, Definition, Executor as CoreExecutor
-from dryml.core import Mat, Object, Ref, Repo, StateRef, function, signatures
+from dryml.core import Definition, Executor as CoreExecutor
+from dryml.core import Mat, Object, Repo, StateRef, function, signatures
 from dryml.core.execute import CoreExecutionError, CoreOptions
 from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.managed import ManagedConfig, managed_operation
-from dryml.runtime import materialization_scope
-from dryml.runtime.errors import RuntimeTransitionError
 from tests.managed.execution_fixtures import (
     InnerFunctionWrappedManagedValue,
     ManagedMatrixValue,
@@ -143,16 +140,6 @@ class AbstractWorkerTarget(Object):
         """Declare the unresolved ordinary abstract obligation."""
 
 
-class ScopedResult(Object):
-    """Small result whose reference-valued input must remain inert on restore."""
-
-    def __init__(self, source: Ref[AutoRef], value: int) -> None:
-        """Retain a non-materializing source reference and one scalar result."""
-
-        self.source = source
-        self.value = value
-
-
 @function
 def _materialize_worker_target(value: Mat[Object]) -> str:
     """Force worker-side Mat delivery only after Execute has accepted the call."""
@@ -186,38 +173,6 @@ def test_abstract_worker_materialization_keeps_remote_type_evidence_and_dependen
         future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=10)
-
-
-@pytest.mark.usefixtures("fixed_snapshot_environment")
-def test_orchestrator_result_materialization_scope_restores_after_success_and_error(tmp_path):
-    """A scoped result read restores strict orchestration without loading its input."""
-
-    marker = tmp_path / "source-built"
-    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
-    source = WorkerDependent(str(marker), repo=repo)
-    marker.unlink()
-    result = ScopedResult(source, 7, repo=repo)
-    state = repo.save_object(result, deep_capture=True)
-    session.set_mode("orchestrator")
-    try:
-        with pytest.warns(RuntimeWarning, match="explicit warn scope"):
-            with materialization_scope("warn"):
-                restored = repo.load_state_ref(state, reuse_live="never")
-        assert restored.value == 7
-        assert not marker.exists()
-        with pytest.raises(RuntimeTransitionError, match="prohibits Object materialization"):
-            repo.load_state_ref(state, reuse_live="never")
-
-        with pytest.warns(RuntimeWarning, match="explicit warn scope"):
-            with materialization_scope("warn"):
-                with pytest.raises(RuntimeError, match="reader failure"):
-                    repo.load_state_ref(state, reuse_live="never")
-                    raise RuntimeError("reader failure")
-        with pytest.raises(RuntimeTransitionError, match="prohibits Object materialization"):
-            repo.load_state_ref(state, reuse_live="never")
-        assert not marker.exists()
-    finally:
-        session.reset()
 
 
 def test_accepted_composite_uses_captured_wrapper_after_class_mutation(tmp_path):

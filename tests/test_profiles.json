@@ -34,13 +34,12 @@
           ]
         },
         "tests/core/test_execute_managed_integration.py": {
-          "rationale": "Retain one decorator-order product, malformed-config and independent-normalization validation, plus typed abstract-worker rejection and scoped result-materialization restoration; Dispatch retains the single explicit managed-config process proof.",
+          "rationale": "Retain one decorator-order product, malformed-config and independent-normalization validation, plus typed abstract-worker rejection; scoped result restoration runs in the isolated orchestrator bucket.",
           "functions": [
             "test_managed_decorator_orders_materialize_once_and_publish_one_final_state",
             "test_direct_bound_operation_rejects_malformed_config_before_mutation",
             "test_unrelated_nested_function_keeps_its_own_normalization_boundary",
-            "test_abstract_worker_materialization_keeps_remote_type_evidence_and_dependencies_inert",
-            "test_orchestrator_result_materialization_scope_restores_after_success_and_error"
+            "test_abstract_worker_materialization_keeps_remote_type_evidence_and_dependencies_inert"
           ]
         },
         "tests/artifacts/test_fold_execution.py": {
