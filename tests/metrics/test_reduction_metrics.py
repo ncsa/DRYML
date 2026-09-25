@@ -12,6 +12,7 @@ from dryml.data import Dataset, Map, Pipe, Project, Select
 from dryml.managed import ManagedConfig
 from dryml.methods import AccumulatorGroup, Method
 from dryml.models import Model
+from tests.fixtures import require_optional_backend
 
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
@@ -187,6 +188,7 @@ def test_confusion_result_methods_define_all_f1_modes_and_zero_policies():
 def test_confusion_result_methods_promote_narrow_counts_before_aggregation(backend, dtype):
     """Accuracy and aggregate F1 reduce narrow native counts after float64 promotion."""
 
+    require_optional_backend(backend)
     from dryml.metrics import AccuracyFromConfusion, F1FromConfusion
 
     maximum = np.iinfo(dtype).max
@@ -204,6 +206,7 @@ def test_confusion_result_methods_promote_narrow_counts_before_aggregation(backe
 def test_confusion_counts_preserve_native_integer_carry_on_required_backends(backend):
     """NumPy, Torch CPU, and TensorFlow CPU count decoded integer labels natively."""
 
+    require_optional_backend(backend)
     from dryml.metrics import AccuracyFromConfusion, ConfusionCounts, ConfusionInitial, F1FromConfusion
 
     if backend == "numpy":
@@ -231,6 +234,7 @@ def test_confusion_counts_preserve_native_integer_carry_on_required_backends(bac
 def test_confusion_counts_reject_aggregate_population_overflow_before_mutation(backend):
     """A split count total cannot exceed int64 even when each updated cell fits."""
 
+    require_optional_backend(backend)
     from dryml.data.reduction_methods import _MAX_INT64
     from dryml.metrics import ConfusionCounts
 
@@ -306,6 +310,7 @@ def test_confusion_rejects_invalid_domains_labels_and_overflow_before_mutation()
 def test_confusion_methods_keep_native_values_until_the_terminal_boundary(monkeypatch, backend):
     """Native count transitions and result Methods avoid host tensor extraction."""
 
+    require_optional_backend(backend)
     from dryml.metrics import AccuracyFromConfusion, ConfusionCounts, ConfusionInitial, F1FromConfusion
 
     labels = _native_tensor(backend, (1, 0, 1), "int64")
@@ -484,6 +489,7 @@ def test_classifier_string_fold_rejects_unknown_labels_before_value_publication(
 def test_regression_factories_keep_native_batches_until_terminal_result(tmp_path, backend):
     """MAE/MSE retain native batch arithmetic and the U6 uneven-batch denominator."""
 
+    require_optional_backend(backend)
     from dryml.metrics import regressor_mae, regressor_mse
 
     NativeEvaluationDataset.iterations = IdentityModel.calls = 0

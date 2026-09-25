@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import numpy as np
 import pytest
@@ -144,8 +145,12 @@ def _fold(source, *, accumulator=None, finalizer=None):
     )
 
 
-def _run_native_fold_test_in_subprocess(request):
+def _run_native_fold_test_in_subprocess(request, backend):
     """Run one native Fold assertion in a child without loading its framework here.
+
+    Args:
+        request: Pytest request for the selected native test.
+        backend: Optional native backend required by the test.
 
     Returns:
         ``True`` when the parent ran the selected assertion in a child and should
@@ -155,6 +160,9 @@ def _run_native_fold_test_in_subprocess(request):
         AssertionError: If the child test fails or imports a native framework
             into the parent process.
     """
+    framework = {"torch": "torch", "tf": "tensorflow"}[backend]
+    if importlib.util.find_spec(framework) is None:
+        pytest.skip(f"optional {framework} backend is not installed")
     if os.environ.get("DRYML_FOLD_NATIVE_SUBPROCESS") == "1":
         return False
 
@@ -359,7 +367,7 @@ def test_fold_rejects_missing_or_ambiguous_specs_and_invalid_role_results(tmp_pa
 def test_fold_rejects_mixed_initializer_carry_before_the_first_transition(tmp_path, request):
     """A NumPy observation cannot select a transition with a Torch initializer carry."""
 
-    if _run_native_fold_test_in_subprocess(request):
+    if _run_native_fold_test_in_subprocess(request, "torch"):
         return
 
     import dryml.torch
@@ -465,7 +473,7 @@ def test_fold_validates_first_observation_against_declared_source_spec(tmp_path)
 def test_fold_rejects_zero_sized_native_observation_before_initializer(tmp_path, backend, request):
     """Native zero-sized inputs fail before allocation or selected Method calls."""
 
-    if backend != "numpy" and _run_native_fold_test_in_subprocess(request):
+    if backend != "numpy" and _run_native_fold_test_in_subprocess(request, backend):
         return
 
     initializer = NativeInitial()
@@ -482,7 +490,7 @@ def test_fold_rejects_zero_sized_native_observation_before_initializer(tmp_path,
 def test_fold_normalizes_native_terminal_result_only_after_completion(tmp_path, backend, request):
     """Native carries remain native until Fold converts the final result to host data."""
 
-    if _run_native_fold_test_in_subprocess(request):
+    if _run_native_fold_test_in_subprocess(request, backend):
         return
 
     initializer = NativeInitial()
@@ -516,7 +524,7 @@ def test_fold_named_mean_program_keeps_the_first_batch_and_uneven_weighting(tmp_
 def test_fold_rejects_restored_native_tensor_payloads(tmp_path, backend, request):
     """The result-only persistence boundary never admits a heavyweight tensor."""
 
-    if _run_native_fold_test_in_subprocess(request):
+    if _run_native_fold_test_in_subprocess(request, backend):
         return
 
     fold = _fold(CountingDataset([np.ones((1, 1), dtype=np.float32)]))

@@ -1,3 +1,5 @@
+import importlib.util
+
 import pytest
 import tempfile
 import uuid
@@ -152,6 +154,22 @@ def fixture_def(store_sets: list[list[StoreDef]], *, name: str):
                 h.close()
 
     return _fx
+
+
+def require_optional_backend(backend: str) -> None:
+    """Skip a native-backend test when its optional framework is absent.
+
+    Args:
+        backend: DRYML backend name selected by a test parametrization.
+
+    Raises:
+        pytest.skip.Exception: If the selected optional framework is unavailable.
+    """
+    framework = {"torch": "torch", "tf": "tensorflow"}.get(backend)
+    if framework is not None and importlib.util.find_spec(framework) is None:
+        pytest.skip(
+            f"optional {framework} backend is not installed"
+        )
 
 
 # Legacy wrappers (optional while migrating)

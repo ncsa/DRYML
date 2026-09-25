@@ -9,12 +9,14 @@ from dryml.core.tensor_spec import Dynamic, TensorSpec
 from dryml.core.store.dir import DirStore
 from dryml.data import Dataset
 from dryml.managed import ManagedConfig
+from tests.fixtures import require_optional_backend
 
 
 @pytest.mark.parametrize("backend", ("numpy", "torch", "tf"))
 def test_threefry_known_answer_vectors(backend):
     """The private native counter primitive matches Random123 v1.14 vectors."""
 
+    require_optional_backend(backend)
     from dryml.data.reduction_methods import _threefry2x32_20
 
     def tensor(words):
@@ -71,6 +73,7 @@ def test_element_methods_promote_before_arithmetic_and_reject_broadcasting():
 def test_native_primitives_reject_nonfinite_intermediate_outputs(backend):
     """Every native arithmetic primitive rejects overflow before returning it."""
 
+    require_optional_backend(backend)
     from dryml.data import Diff, Squared
 
     if backend == "numpy":
@@ -96,6 +99,7 @@ def test_native_primitives_reject_nonfinite_intermediate_outputs(backend):
 def test_native_element_primitives_preserve_promoted_values(backend):
     """The reusable primitive values agree across all required native backends."""
 
+    require_optional_backend(backend)
     from dryml.data import Abs, Diff, Equal, Squared
 
     left = _native_tensor(backend, [127, -128], dtype="int64")
@@ -130,6 +134,7 @@ def test_exact_array_reductions_validate_requests_and_preserve_plural_order():
 def test_array_reductions_have_native_axis_and_dtype_conformance(backend):
     """Array mean/quantile normalize axes and preserve native numerical semantics."""
 
+    require_optional_backend(backend)
     from dryml.data import ArrayMean, ArrayQuantile
 
     values = np.array([[1, 11], [3, 13], [9, 19]], dtype=np.int16)
@@ -182,6 +187,7 @@ def _host_values(value):
 def test_coordinate_element_mean_updates_each_coordinate_once(backend):
     """Unbatched coordinate mean never reduces a whole observation to one scalar."""
 
+    require_optional_backend(backend)
     from dryml.data.reduction_methods import MeanFinalize, _mean_initial, _mean_update
 
     first = _native_tensor(backend, [1, 10])
@@ -198,6 +204,7 @@ def test_coordinate_element_mean_updates_each_coordinate_once(backend):
 def test_mean_transition_rejects_nonfinite_carry_and_count_wrap(backend):
     """Mean validates native carry before arithmetic can return a bad next state."""
 
+    require_optional_backend(backend)
     from dryml.data.reduction_methods import _MAX_INT64, _mean_update
 
     observation = _native_tensor(backend, [1, 2])
@@ -221,6 +228,7 @@ def test_mean_transition_rejects_nonfinite_carry_and_count_wrap(backend):
 def test_mean_accepts_boolean_observations_while_quantile_rejects_them(backend):
     """Boolean equality rates are mean-only; quantile numerical inputs exclude bool."""
 
+    require_optional_backend(backend)
     from dryml.data.reduction_methods import _mean_initial, _mean_update, _reservoir_initial
 
     values = _native_tensor(backend, [True, False])
@@ -389,6 +397,7 @@ def test_quantile_factory_is_exact_within_capacity_and_reuses_one_summary(tmp_pa
 def test_native_mean_and_quantile_fold_conformance_on_uneven_cpu_batches(tmp_path, backend):
     """All required CPU backends retain native transitions and finalization semantics."""
 
+    require_optional_backend(backend)
     from dryml.artifacts import mean, quantile
 
     batches = (((1.0, 10.0), (3.0, 30.0)), ((9.0, 90.0),))
@@ -411,6 +420,7 @@ def test_bounded_index_controlled_boundary_candidates_advance_exactly_once(
 ):
     """Every sampler backend handles approved rejection boundaries without wrapping."""
 
+    require_optional_backend(backend)
     import dryml.data.reduction_methods as reductions
 
     limit = ((reductions._MAX_INT64 // n) * n)
@@ -455,6 +465,7 @@ def test_bounded_index_controlled_boundary_candidates_advance_exactly_once(
 def test_reservoir_fill_consumes_no_draw_even_at_exhausted_counter(monkeypatch, backend):
     """The first capacity items never evaluate the sampler or advance its counter."""
 
+    require_optional_backend(backend)
     import dryml.data.reduction_methods as reductions
 
     observation = _native_tensor(backend, [1.0])
@@ -489,6 +500,7 @@ def test_reservoir_replacement_and_rejection_consume_the_pinned_draw_schedule(
 ):
     """Accepted replacement, non-replacement, and rejection update draw counts exactly."""
 
+    require_optional_backend(backend)
     import dryml.data.reduction_methods as reductions
 
     def controlled_threefry(counter, _key):
@@ -523,6 +535,7 @@ def test_reservoir_replacement_and_rejection_consume_the_pinned_draw_schedule(
 def test_reservoir_population_and_draw_overflow_fail_before_native_wrap(backend):
     """Population and draw counters reject their signed-int64 terminal values."""
 
+    require_optional_backend(backend)
     from dryml.data.reduction_methods import _MAX_INT64, _reservoir_initial, _reservoir_update
 
     observation = _native_tensor(backend, [1.0])
@@ -565,6 +578,7 @@ def test_reservoir_storage_is_bounded_and_partitions_preserve_the_same_sample(tm
 def test_coordinate_reservoir_element_and_uneven_batches_have_identical_membership(backend):
     """Coordinate row reservoirs keep the same sample across element/batch partitions."""
 
+    require_optional_backend(backend)
     from dryml.data.reduction_methods import _reservoir_initial, _reservoir_update
 
     rows = ((1.0, 10.0), (3.0, 30.0), (9.0, 90.0))
@@ -582,6 +596,7 @@ def test_coordinate_reservoir_element_and_uneven_batches_have_identical_membersh
 def test_native_reduction_transitions_do_not_extract_numerical_values(monkeypatch, backend):
     """Transitions/finalizers keep native data native; host conversion is terminal only."""
 
+    require_optional_backend(backend)
     import dryml.data.reduction_methods as reductions
 
     observation = _native_tensor(backend, [1.0, 2.0, 3.0])
@@ -622,6 +637,7 @@ def test_native_reduction_transitions_do_not_extract_numerical_values(monkeypatc
 def test_fold_terminal_normalization_converts_only_after_native_traversal(monkeypatch, tmp_path, backend):
     """Fold observes its one host conversion after, not during, all native transitions."""
 
+    require_optional_backend(backend)
     import importlib
 
     from dryml.artifacts import mean
@@ -693,6 +709,7 @@ def _rank_interval_distance(ordered, value, q):
 def test_reservoir_fixed_empirical_coordinate_qualification(tmp_path, backend):
     """Pinned U6 fixtures meet the approved rank interval threshold without tuning."""
 
+    require_optional_backend(backend)
     from dryml.artifacts import quantile
 
     reference = _pinned_reference()
@@ -713,6 +730,7 @@ def test_reservoir_fixed_empirical_coordinate_qualification(tmp_path, backend):
 def test_reservoir_fixed_empirical_global_qualification(tmp_path, backend, column):
     """Every pinned recipe also qualifies through the independent global path."""
 
+    require_optional_backend(backend)
     from dryml.artifacts import quantile
 
     reference = _pinned_reference()[:, column]
