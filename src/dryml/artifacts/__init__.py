@@ -1,13 +1,11 @@
 from dryml.artifacts.base import Artifact
 from dryml.artifacts.dataset import CachedDataset
-from dryml.artifacts.scalar import Accuracy, Scalar, ScalarAgg, ScalarAvg
+from dryml.artifacts.value import ArtifactNotReadyError, Value
 
 
 __all__ = [
-    "Accuracy",
     "Artifact",
-    "Scalar",
-    "ScalarAgg",
-    "ScalarAvg",
+    "ArtifactNotReadyError",
     "CachedDataset",
+    "Value",
 ]

@@ -1,0 +1,38 @@
+{
+  "fixtures": {
+    "absent": {
+      "file": "absent/value.pkl",
+      "present": false,
+      "sha256": "095f73ba9a431da3d488213489f1618e236950038cb01385fd7bfa206b9aa6d9"
+    },
+    "array": {
+      "file": "array/value.pkl",
+      "present": true,
+      "sha256": "6315634e3c8b0bfbc91169bdc04e53692019cc04b224a1c7a3c5c9c3cdc6930e"
+    },
+    "float": {
+      "file": "float/value.pkl",
+      "present": true,
+      "sha256": "e25d2788f12314af7ed9eeeb8d1ce5b9e035ea3115a63c610fa7411d028474bc"
+    },
+    "matrix": {
+      "file": "matrix/value.pkl",
+      "present": true,
+      "sha256": "3530fe89d980c97ba801bc5125493c0c8a2e16d7574c741abdaf30a546e0aad4"
+    },
+    "none": {
+      "file": "none/value.pkl",
+      "present": true,
+      "sha256": "3b742a3648048f2bf2bd66df24853dc954a023464fbd3c29ee82ee5403fbd700"
+    },
+    "tree": {
+      "file": "tree/value.pkl",
+      "present": true,
+      "sha256": "bf509ca3a26305837884300df14ee4bb96429b7367c751bc35d872308f1a9685"
+    }
+  },
+  "format": "dryml.artifacts.value",
+  "generator": "generate.py",
+  "provenance": "Hand-authored fixed U4 beta cases; envelopes are encoded directly with dill protocol 5, not Value.",
+  "version": 1
+}

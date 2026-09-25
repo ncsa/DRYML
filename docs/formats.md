@@ -135,6 +135,22 @@ See [Repos and Stores](repos.md) for reconstruction ownership and
 [Session](session.md) for cache lifetime; [Generic Execute](execute.md) accepts
 only the narrower direct-DirStore worker transport.
 
+## Artifact Value V1
+
+`Value` local state contains one trusted dill protocol-5 `value.pkl` envelope:
+`{"format": "dryml.artifacts.value", "version": 1, "present": bool,
+"result": object}`. The four keys are exact, `version` is the exact integer
+`1` rather than a boolean, and an absent result has `present: false` with
+`result: null`. A present `null` result is valid and distinct from absence.
+
+Readers reject missing, corrupt, incomplete, unknown-format, and unknown-version
+payloads before replacing an existing result. The format contains only the result
+envelope, not input references, live iterators, managed controls, or transient
+computation state. It is a framework-owned beta format commitment; subclasses own
+any separate hook files and their domain validation. As with all pickle payloads,
+the reader accepts trusted same-host data only and is not safe deserialization for
+hostile input.
+
 ## Managed Control Formats
 
 Managed lifecycle control is separate bounded canonical-JSON authority in the

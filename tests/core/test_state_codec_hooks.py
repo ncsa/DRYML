@@ -54,13 +54,13 @@ def test_invalid_codec_fails_before_hook_or_store_mutation(tmp_path):
 
 
 def test_lightweight_backend_hooks_accept_keyword_only_codec_without_runtime_imports():
-    from dryml.artifacts import Scalar
+    from dryml.artifacts import Value
     from dryml.models.experiment import Experiment
     from dryml.models.tf.base import Model as TensorFlowModel
     from dryml.models.torch.base import Model as TorchModel
 
     for hook in (
-            Scalar.save_state_to_dir_imp,
+            Value.save_state_to_dir_imp,
             Experiment.save_state_to_dir_imp,
             TensorFlowModel.save_state_to_dir_imp,
             TorchModel.save_state_to_dir_imp):
