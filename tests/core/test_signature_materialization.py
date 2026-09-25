@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from abc import abstractmethod, update_abstractmethods
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,10 @@ class FalseyBoundaryValue(BoundaryValue):
 
     def __bool__(self):
         return False
+
+
+class AbstractableBoundaryValue(BoundaryValue):
+    """Stateful fixture that can become abstract after snapshot publication."""
 
 
 def _plan(*annotations):
@@ -297,8 +302,11 @@ def test_object_ref_claim_is_admitted_once_and_transfers_at_existing_save(tmp_pa
     assert repo.default_store.read_claim_record(reference.digest()).status == "completed"
 
 
-def test_materializing_object_ref_uses_unique_saved_authority_before_claim(tmp_path):
-    """A completed ObjectRef selects its sole saved snapshot rather than rebuilding."""
+def test_materializing_object_ref_uses_unique_saved_authority_before_claim(tmp_path, monkeypatch):
+    """A selected hydrated snapshot retains its private-node class for execution."""
+
+    from dryml.core import materialization
+    from dryml.core.cdef_identity import cdef_node_key
 
     source = Repo(DirStore(tmp_path / "store"))
     reference = source.declare_object(Definition(BoundaryValue, 12).concretize(repo=source))
@@ -306,12 +314,56 @@ def test_materializing_object_ref_uses_unique_saved_authority_before_claim(tmp_p
     saved.value = 14
     source.save_object(saved, deep_capture=True)
     loaded = Repo(DirStore(tmp_path / "store"))
+    caller_node = cdef_node_key(reference.definition)
+    original_execute = materialization.execute_exact_state_load_plan
+
+    def verify_selected_class_manifest(repo, plan, **kwargs):
+        assert cdef_node_key(plan.state_ref.definition) is not caller_node
+        assert plan.state_ref.definition in kwargs["class_manifest"]
+        return original_execute(repo, plan, **kwargs)
+
+    monkeypatch.setattr(
+        materialization, "execute_exact_state_load_plan", verify_selected_class_manifest,
+    )
 
     boundary = _single(Mat[ObjectRef]).prepare_args((reference,), {}, repo=loaded)
     result = boundary.deliver_args()[0][0]
 
     assert result.object_ref == reference
     assert result.value == 14
+
+
+def test_aggregate_preflights_later_selected_snapshot_before_earlier_claim(tmp_path):
+    """An abstract selected snapshot cannot acquire an earlier pending claim."""
+
+    store = DirStore(tmp_path / "store")
+    source = Repo(store)
+    pending = source.declare_object(
+        Definition(BoundaryValue, 71).concretize(repo=source)
+    )
+    selected = source.save_object(AbstractableBoundaryValue(72, repo=source))
+    before = store.read_claim_record(pending.digest())
+    BoundaryValue.constructions = 0
+
+    def required(self):
+        """Return the newly required implementation result."""
+
+    AbstractableBoundaryValue.required = abstractmethod(required)
+    update_abstractmethods(AbstractableBoundaryValue)
+    try:
+        with pytest.raises(TypeError, match="required"):
+            Repo(DirStore(tmp_path / "store")).materialize_boundary(
+                (pending, selected.object), reuse_live="never",
+            )
+    finally:
+        del AbstractableBoundaryValue.required
+        update_abstractmethods(AbstractableBoundaryValue)
+
+    after = store.read_claim_record(pending.digest())
+    assert (after.generation, after.status, after.owner) == (
+        before.generation, before.status, before.owner,
+    )
+    assert BoundaryValue.constructions == 0
 
 
 def test_pending_parent_reuses_saved_nested_object_ref_without_reclaiming(tmp_path):

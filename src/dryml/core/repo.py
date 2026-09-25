@@ -4004,7 +4004,18 @@ class Repo:
             digest: build_exact_state_load_plan(self, reference)
             for digest, reference in state_refs.items()
         }
-        class_manifest = preflight_materialization_classes(*plan.roots)
+        # Exact plans hydrate persisted CDefs with new private node keys. Retain
+        # classes for those execution nodes and their synthesized child plans,
+        # not only for the caller's structural roots.
+        class_manifest = preflight_materialization_classes(
+            *plan.roots,
+            *(exact.state_ref for exact in exact_plans.values()),
+            *(
+                action.definition
+                for exact in exact_plans.values()
+                for action in exact.actions
+            ),
+        )
 
         # Every exact state closure, including snapshots selected from ObjectRefs,
         # is complete before conflict admission. Compare each enclosing snapshot's
