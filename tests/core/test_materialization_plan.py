@@ -78,7 +78,9 @@ class AbstractMaterialNode(Object):
 def test_materialization_preflights_every_materializing_class_before_dependencies():
     repo = Repo()
     abstract_child = Definition(AbstractMaterialNode).concretize(repo=repo)
-    root = Definition(MaterialParent, abstract_child).concretize(repo=repo)
+    root = Definition(
+        MaterialParent, Definition(MaterialLeaf, "earlier"), abstract_child,
+    ).concretize(repo=repo)
     MaterialLeaf.constructed.clear()
 
     with pytest.raises(TypeError, match="required"):

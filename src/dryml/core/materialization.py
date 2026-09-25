@@ -65,13 +65,10 @@ def preflight_materialization_classes(*roots) -> _NodeBindings:
     from .utils.graph.value import iter_value_edges
 
     manifest = _NodeBindings()
-    visited = set()
 
     def visit_cdef(cdef: ConcreteDefinition) -> None:
-        key = cdef_node_key(cdef)
-        if key in visited:
+        if cdef in manifest:
             return
-        visited.add(key)
         try:
             cls = _resolve_materialization_class(cdef)
         except Exception as error:

@@ -32,7 +32,6 @@ from dryml.managed import (
 def test_abstract_managed_declarations_preserve_the_standard_marker(written_order):
     """Both abstract/managed orders preserve one abstract managed obligation."""
 
-    from dryml.annotations import attach_annotation
     from dryml.core import Serializable, function
 
     def annotation(target):

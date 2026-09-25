@@ -375,6 +375,8 @@ class MethodImplementation:
         selected adapter's single argument and return boundaries.
         """
         self._validate_inputs(args)
+        if self._output_spec is None:
+            return self.selected_adapter().invoke(args, kwargs, on_raw_result=on_raw_result)
 
         def validate_then_publish(result: object) -> object:
             self._validate_raw_result(result)
