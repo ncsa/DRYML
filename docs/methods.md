@@ -65,6 +65,15 @@ class, never both. Direct declarations retain normal descriptor and cooperative
 `super().__call__` behavior. Method identity excludes selected targets,
 arguments, cache state, persistence state, and dispatch/lifecycle state.
 
+An intermediate Method interface may declare `__call__` with standard
+`@abstractmethod`. A concrete direct override satisfies that obligation normally.
+Alternatively, a subclass with a nonempty, statically valid catalog of concrete
+trait alternatives satisfies only that logical-call obligation; catalog targets
+are not invoked during class finalization. Abstract placeholders never become
+executable alternatives, and any other abstract member remains required. The
+root `Method`, runtime-only subclasses, and optional `infer_output_spec` remain
+concrete.
+
 ## Closed Traits And Catalogs
 
 `Traits(backend=None, batch_mode=None)` is an immutable closed declaration for

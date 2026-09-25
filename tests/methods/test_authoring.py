@@ -1,5 +1,8 @@
 """Tests for Method authoring and the simple central call gateway."""
 
+import inspect
+from abc import abstractmethod
+
 import pytest
 
 from dryml.core.backend import Backend
@@ -119,3 +122,23 @@ def test_mixed_direct_and_alternative_inheritance_is_rejected():
         object.__new__(DirectLeaf).implementations()
     with pytest.raises(ImplementationDeclarationError, match="hierarchy"):
         object.__new__(AlternativeLeaf).implementations()
+
+
+def test_abstract_direct_calls_stay_out_of_the_executable_catalog():
+    """A logical abstract call is not a candidate until a child implements it."""
+
+    from dryml.methods.method import _catalog_for_class
+
+    class AbstractCall(Method):
+        @abstractmethod
+        def __call__(self, value):
+            """Return the implementation-specific value."""
+
+    class ConcreteCall(AbstractCall):
+        def __call__(self, value):
+            return value + 1
+
+    assert inspect.isabstract(AbstractCall)
+    assert _catalog_for_class(AbstractCall, receiver=None) == ()
+    assert not inspect.isabstract(ConcreteCall)
+    assert object.__new__(ConcreteCall)(2) == 3

@@ -111,6 +111,75 @@ def test_class_finalization_callbacks_are_class_local_and_phased():
     ]
 
 
+def test_class_finalization_callbacks_are_deduplicated_in_diamond_order():
+    """Diamond callbacks run once per phase in reverse-C3 base-to-derived order."""
+
+    events = []
+
+    class Left(Object):
+        pass
+
+    class Right(Object):
+        pass
+
+    def left_transform(cls):
+        events.append(("left-transform", cls))
+
+    def right_transform(cls):
+        events.append(("right-transform", cls))
+
+    def left_validator(cls):
+        events.append(("left-validate", cls))
+
+    def right_validator(cls):
+        events.append(("right-validate", cls))
+
+    _register_class_transformer(Left, left_transform)
+    _register_class_transformer(Right, right_transform)
+    _register_class_validator(Left, left_validator)
+    _register_class_validator(Right, right_validator)
+    left_transformers = Left.__dict__["__dryml_class_transformers__"]
+    right_transformers = Right.__dict__["__dryml_class_transformers__"]
+
+    class Diamond(Left, Right):
+        pass
+
+    assert events == [
+        ("right-transform", Diamond),
+        ("left-transform", Diamond),
+        ("right-validate", Diamond),
+        ("left-validate", Diamond),
+    ]
+    assert Left.__dict__["__dryml_class_transformers__"] is left_transformers
+    assert Right.__dict__["__dryml_class_transformers__"] is right_transformers
+    assert "__dryml_class_transformers__" not in Diamond.__dict__
+
+
+def test_class_validators_cannot_change_finalized_abstractness():
+    """A validator that changes finalized ABC state fails instead of hiding it."""
+
+    class ValidationBase(Object):
+        pass
+
+    def transformer(cls):
+        def required(self):
+            """Represent one transformed abstract declaration."""
+
+        required.__isabstractmethod__ = True
+        cls.required = required
+
+    def validator(cls):
+        assert cls.__abstractmethods__ == {"required"}
+        cls.__abstractmethods__ = frozenset()
+
+    _register_class_transformer(ValidationBase, transformer)
+    _register_class_validator(ValidationBase, validator)
+
+    with pytest.raises(TypeError, match="validators must not mutate"):
+        class InvalidValidation(ValidationBase):
+            pass
+
+
 def test_abstract_object_inert_modes_do_not_construct_or_resolve():
     class AbstractProbe(Object):
         effects = 0

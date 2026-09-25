@@ -18,6 +18,14 @@ authored position. `@managed_operation` composes with one `@dryml.function` laye
 and one passive annotation layer in any written order without creating a second
 lifecycle or normalization boundary. Copied metadata alone is not declaration
 evidence.
+
+Managed declarations also compose with Python's standard `@abstractmethod` in
+either decorator order. An abstract managed operation keeps its normal ABC
+obligation through the managed descriptor and any supported outer wrapper. A
+concrete subclass may inherit a concrete managed operation or replace an
+abstract managed operation with another `@managed_operation`; it may not replace
+an inherited managed member with a plain concrete method. That declaration fails
+at class finalization with `ManagedDeclarationError`, before any lifecycle starts.
 `@managed_operation(resumable=True)` permits a compatible unfinished attempt to
 restore its retained Object state before re-entering the method body.
 

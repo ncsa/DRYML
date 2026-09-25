@@ -1,7 +1,10 @@
 import numpy as np
+import inspect
+import pytest
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import Dynamic, TensorSpec
+from dryml.data.dataset import Dataset
 from dryml.data.source import GeneratorDataset
 
 
@@ -55,3 +58,16 @@ def test_generator_dataset_infers_spec_from_hint():
     )
 
     assert ds.spec == TensorSpec("float32", shape=(Dynamic,), backend="numpy")
+
+
+def test_dataset_requires_iteration_without_affecting_supported_generators():
+    """Dataset subclasses must provide iteration while current sources stay concrete."""
+
+    class MissingIteration(Dataset):
+        pass
+
+    assert inspect.isabstract(Dataset)
+    assert inspect.isabstract(MissingIteration)
+    with pytest.raises(TypeError, match="__iter__"):
+        MissingIteration()
+    assert not inspect.isabstract(GeneratorDataset)

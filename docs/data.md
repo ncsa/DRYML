@@ -6,7 +6,10 @@ The DRYML Data API provides reusable, repo-backed dataset objects and dataset tr
 
 ## Dataset Contract
 
-`Dataset` is the base iterable dataset type.
+`Dataset` is an abstract iterable dataset type. Every concrete Dataset subclass
+must implement `__iter__`; `__len__` remains optional because cardinality can be
+unknown. The supported source, mapped, and structural dataset classes implement
+iteration and remain constructible.
 
 Important expectations:
 
@@ -25,6 +28,10 @@ Common source dataset classes:
 - `NpyFileDataset`
 - `TFDSAdapter`
 - `TorchDatasetAdapter`
+
+The historical modules `dryml.data.tf.dataset` and
+`dryml.data.torch.dataset` are unsupported legacy APIs. They are not current
+exports and are not compatible with this Dataset contract.
 
 Example:
 

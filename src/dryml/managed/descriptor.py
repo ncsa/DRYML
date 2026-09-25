@@ -100,6 +100,12 @@ class ManagedOperation:
         # Do not copy the function dictionary: it can already contain passive
         # annotations, which are copied below through their owning API.
         functools.update_wrapper(self, authored, updated=())
+        # ``update_wrapper`` intentionally does not assign this standard ABC
+        # marker. Preserve it from every supported authored wrapper source.
+        self.__isabstractmethod__ = any(
+            bool(getattr(source, "__isabstractmethod__", False))
+            for source in annotation_sources
+        )
         self.__signature__ = self._author_signature
         seen_annotations: set[int] = set()
         for source in annotation_sources:
@@ -207,6 +213,9 @@ class ManagedOperation:
             self._owner = owner
         elif self._member != name or self._owner is not owner:
             raise ManagedDeclarationError(message="a managed descriptor cannot use multiple member names or multiple owners")
+        from dryml.core.object import _register_class_validator
+
+        _register_class_validator(owner, _validate_managed_obligations)
 
     def __call__(self, instance: object, *args: object,
                  managed: ManagedConfig | None = None, **kwargs: object) -> object:
@@ -245,6 +254,10 @@ class _ManagedComposite:
         self._descriptor = descriptor
         self._outer = outer
         functools.update_wrapper(self, outer, updated=())
+        self.__isabstractmethod__ = bool(
+            getattr(descriptor, "__isabstractmethod__", False)
+            or getattr(outer, "__isabstractmethod__", False)
+        )
         seen_annotations: set[int] = set()
         for source in (descriptor, outer):
             for annotation in own_annotations(source):
@@ -667,6 +680,47 @@ def _bound_signature(author_signature: inspect.Signature) -> inspect.Signature:
             parameter = parameter.replace(annotation=ManagedConfig | None, default=None)
         projected.append(parameter)
     return author_signature.replace(parameters=projected)
+
+
+def _managed_member_names(cls: type) -> set[str]:
+    """Return names that any ancestor declares through a managed descriptor."""
+
+    return {
+        name
+        for owner in cls.__mro__
+        for name, member in owner.__dict__.items()
+        if type(member) in {ManagedOperation, _ManagedComposite}
+    }
+
+
+def _resolved_member(cls: type, name: str) -> object:
+    """Return the raw declaration selected by normal MRO without binding it."""
+
+    for owner in cls.__mro__:
+        if name in owner.__dict__:
+            return owner.__dict__[name]
+    raise AssertionError(f"missing managed member {name!r}")
+
+
+def _validate_managed_obligations(cls: type) -> None:
+    """Reject concrete inherited managed members replaced by bare declarations.
+
+    Abstract replacements remain valid intermediate declarations. Concrete managed
+    descriptors continue to use their own lifecycle and no descriptor is wrapped
+    or rewritten during validation.
+    """
+
+    for name in _managed_member_names(cls):
+        member = _resolved_member(cls, name)
+        if getattr(member, "__isabstractmethod__", False):
+            continue
+        if type(member) not in {ManagedOperation, _ManagedComposite}:
+            raise ManagedDeclarationError(
+                message=(
+                    f"{cls.__qualname__}.{name} implements an inherited managed "
+                    "member without @managed_operation."
+                )
+            )
 
 
 __all__ = ["ManagedOperation", "managed_operation"]

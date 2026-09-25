@@ -9,7 +9,7 @@ from threading import Lock
 
 from dryml.annotations import AnnotatedMember, annotations_for_members
 from dryml.core.backend import Backend
-from dryml.core.object import Object
+from dryml.core.object import Object, _register_class_transformer
 from dryml.core.tensor_spec import BatchMode, SpecTree
 
 from .errors import ImplementationDeclarationError, ImplementationSelectionError, MethodError, PreparedCallMismatchError
@@ -99,8 +99,9 @@ class _MethodGatewayDescriptor:
 
     __slots__ = ("owner", "__dict__")
 
-    def __init__(self, owner: type) -> None:
+    def __init__(self, owner: type, *, is_abstract: bool = False) -> None:
         self.owner = owner
+        self.__isabstractmethod__ = is_abstract
 
     def __get__(self, instance: object, owner: type | None = None):
         if instance is None:
@@ -167,7 +168,14 @@ class Method(Object):
             )
         if direct is not None:
             type.__setattr__(cls, _DIRECT_CALL_ATTR, _CapturedDirectCall(direct))
-            type.__setattr__(cls, "__call__", _MethodGatewayDescriptor(cls))
+            type.__setattr__(
+                cls,
+                "__call__",
+                _MethodGatewayDescriptor(
+                    cls,
+                    is_abstract=bool(getattr(direct, "__isabstractmethod__", False)),
+                ),
+            )
 
     @staticmethod
     def _call_gateway(
@@ -605,91 +613,131 @@ class Method(Object):
                 unsupported descriptor. No target is bound or invoked first.
         """
 
-        evidence = {
-            (id(member.owner), member.name): member
-            for member in _method_members(type(self))
-        }
-        slots: dict[str, tuple[type, MethodImplementation]] = {}
-        order: list[str] = []
-        for owner in reversed(type(self).__mro__):
-            if owner is object:
+        return _catalog_for_class(type(self), receiver=self)
+
+def _catalog_for_class(
+    cls: type,
+    *,
+    receiver: Method | None,
+) -> tuple[MethodImplementation, ...]:
+    """Collect concrete Method targets without binding or invoking them.
+
+    ``receiver`` is optional so class finalization can validate a trait catalog
+    before any Object allocation. Abstract declarations are deliberately checked
+    but omitted from executable candidates.
+    """
+
+    evidence = {
+        (id(member.owner), member.name): member
+        for member in _method_members(cls)
+    }
+    slots: dict[str, tuple[type, MethodImplementation]] = {}
+    order: list[str] = []
+    for owner in reversed(cls.__mro__):
+        if owner is object:
+            continue
+        namespace = owner.__dict__
+        captured = namespace.get(_DIRECT_CALL_ATTR)
+        for name, descriptor in namespace.items():
+            if name == "__call__" and type(captured) is _CapturedDirectCall:
+                ensure_supported_descriptor(captured.descriptor, name=name)
+                if not getattr(captured.descriptor, "__isabstractmethod__", False):
+                    _place_catalog_slot(
+                        slots,
+                        order,
+                        owner,
+                        _catalog_implementation(
+                            name, captured.descriptor, Traits(), receiver, cls,
+                        ),
+                    )
+            member = evidence.get((id(owner), name))
+            if member is None:
                 continue
-            namespace = owner.__dict__
-            captured = namespace.get(_DIRECT_CALL_ATTR)
-            for name, descriptor in namespace.items():
-                if name == "__call__" and type(captured) is _CapturedDirectCall:
-                    implementation = self._implementation_for(
-                        name,
-                        captured.descriptor,
-                        Traits(),
-                    )
-                    self._place_catalog_slot(slots, order, owner, implementation)
-                member = evidence.get((id(owner), name))
-                if member is None:
-                    continue
-                if not member.annotations:
-                    raise ImplementationDeclarationError(
-                        f"Method implementation {name!r} has an unannotated shadow."
-                    )
-                if len(member.annotations) != 1:
-                    raise ImplementationDeclarationError(
-                        f"Method implementation {name!r} has multiple trait annotations."
-                    )
-                declared_traits = member.annotations[0].value
-                if type(declared_traits) is not Traits:
-                    raise ImplementationDeclarationError(
-                        f"Method implementation {name!r} must carry a Traits value."
-                    )
-                implementation = self._implementation_for(name, descriptor, declared_traits)
-                self._place_catalog_slot(slots, order, owner, implementation)
-        catalog = tuple(slots[name][1] for name in order)
-        if any(candidate._direct for candidate in catalog) and any(
-            not candidate._direct for candidate in catalog
-        ):
-            raise ImplementationDeclarationError(
-                "A Method hierarchy cannot combine a direct __call__ with trait alternatives."
+            if not member.annotations:
+                raise ImplementationDeclarationError(
+                    f"Method implementation {name!r} has an unannotated shadow."
+                )
+            if len(member.annotations) != 1:
+                raise ImplementationDeclarationError(
+                    f"Method implementation {name!r} has multiple trait annotations."
+                )
+            declared_traits = member.annotations[0].value
+            if type(declared_traits) is not Traits:
+                raise ImplementationDeclarationError(
+                    f"Method implementation {name!r} must carry a Traits value."
+                )
+            ensure_supported_descriptor(descriptor, name=name)
+            if getattr(descriptor, "__isabstractmethod__", False):
+                continue
+            _place_catalog_slot(
+                slots,
+                order,
+                owner,
+                _catalog_implementation(name, descriptor, declared_traits, receiver, cls),
             )
-        return catalog
-
-    def _implementation_for(
-        self,
-        name: str,
-        descriptor: object,
-        declared_traits: Traits,
-    ) -> MethodImplementation:
-        """Build one carrier after descriptor validation without binding it."""
-
-        ensure_supported_descriptor(descriptor, name=name)
-        return MethodImplementation(
-            name=name,
-            target=descriptor,
-            traits=declared_traits,
-            _descriptor=descriptor,
-            _receiver=self,
-            _receiver_type=type(self),
-            _direct=name == "__call__",
+    catalog = tuple(slots[name][1] for name in order)
+    if any(candidate._direct for candidate in catalog) and any(
+        not candidate._direct for candidate in catalog
+    ):
+        raise ImplementationDeclarationError(
+            "A Method hierarchy cannot combine a direct __call__ with trait alternatives."
         )
+    return catalog
 
-    @staticmethod
-    def _place_catalog_slot(
-        slots: dict[str, tuple[type, MethodImplementation]],
-        order: list[str],
-        owner: type,
-        implementation: MethodImplementation,
-    ) -> None:
-        """Replace an inherited slot or reject unrelated declaration conflicts."""
 
-        previous = slots.get(implementation.name)
-        if previous is None:
-            slots[implementation.name] = (owner, implementation)
-            order.append(implementation.name)
-            return
-        previous_owner, _ = previous
-        if previous_owner not in owner.__mro__[1:]:
-            raise ImplementationDeclarationError(
-                f"Method implementation {implementation.name!r} has an inherited name conflict."
-            )
+def _catalog_implementation(
+    name: str,
+    descriptor: object,
+    declared_traits: Traits,
+    receiver: Method | None,
+    receiver_type: type,
+) -> MethodImplementation:
+    """Build an inspected catalog carrier without binding its target."""
+
+    return MethodImplementation(
+        name=name,
+        target=descriptor,
+        traits=declared_traits,
+        _descriptor=descriptor,
+        _receiver=receiver,
+        _receiver_type=receiver_type if receiver is not None else None,
+        _direct=name == "__call__",
+    )
+
+
+def _place_catalog_slot(
+    slots: dict[str, tuple[type, MethodImplementation]],
+    order: list[str],
+    owner: type,
+    implementation: MethodImplementation,
+) -> None:
+    """Replace an inherited catalog slot or reject an unrelated conflict."""
+
+    previous = slots.get(implementation.name)
+    if previous is None:
         slots[implementation.name] = (owner, implementation)
+        order.append(implementation.name)
+        return
+    previous_owner, _ = previous
+    if previous_owner not in owner.__mro__[1:]:
+        raise ImplementationDeclarationError(
+            f"Method implementation {implementation.name!r} has an inherited name conflict."
+        )
+    slots[implementation.name] = (owner, implementation)
+
+
+def _finalize_method_abstractness(cls: type) -> None:
+    """Discharge an abstract logical call only when concrete traits prove it."""
+
+    if "__call__" not in cls.__abstractmethods__:
+        return
+    catalog = _catalog_for_class(cls, receiver=None)
+    if not catalog:
+        return
+    type.__setattr__(cls, "__call__", _MethodGatewayDescriptor(cls))
+
+
+_register_class_transformer(Method, _finalize_method_abstractness)
 
 
 __all__ = ["Method"]

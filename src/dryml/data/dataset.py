@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Generic, Iterator, TypeVar
 
 from dryml.core import Object
@@ -13,14 +14,11 @@ T = TypeVar("T")
 
 
 class Dataset(Object, Generic[T]):
-    """
-    Base iterable dataset.
+    """Abstract re-iterable source of values with an optional element spec.
 
-    Notes
-    -----
-    - A Dataset should be re-iterable: calling iter(ds) multiple times should
-      produce fresh iterators.
-    - `spec` describes what one yielded element looks like.
+    Subclasses must implement :meth:`__iter__`; cardinality remains optional.
+    ``spec`` describes one yielded element when known, and ``peek`` obtains one
+    value from a fresh iterator without changing persistent dataset state.
     """
 
     def __init__(self, spec: SpecTree | None = None):
@@ -33,8 +31,17 @@ class Dataset(Object, Generic[T]):
             raise ValueError(f"{type(self).__name__} has no known spec.")
         return self._spec
 
+    @abstractmethod
     def __iter__(self) -> Iterator[T]:
-        raise NotImplementedError
+        """Return a fresh iterator over this dataset's elements.
+
+        Returns:
+            An iterator yielding values compatible with this Dataset's element
+            specification when one is available.
+
+        Raises:
+            Implementations may raise source-specific access or decoding errors.
+        """
 
     def peek(self) -> T:
         """

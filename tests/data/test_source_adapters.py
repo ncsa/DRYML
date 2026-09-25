@@ -1,4 +1,5 @@
 import builtins
+import inspect
 import sys
 import types
 
@@ -8,7 +9,7 @@ import pytest
 from dryml.core import ConfigRef, Repo
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import TFDSAdapter, NpyFileDataset
+from dryml.data import TFDSAdapter, NpyFileDataset, TorchDatasetAdapter
 
 
 def test_npy_file_dataset_loads_sorted_files_from_config_ref(tmp_path):
@@ -120,3 +121,16 @@ def test_tfds_adapter_maps_unknown_and_infinite_cardinality(monkeypatch):
 
     _install_fake_tfds(monkeypatch, _FakeTFDS(items, cardinality=-1))
     assert TFDSAdapter("fake", as_supervised=True, as_numpy=True).__len__() == Cardinality.INFINITE
+
+
+def test_torch_adapter_remains_a_concrete_dataset_iteration_source():
+    """The supported torch adapter supplies Dataset's mandatory iteration method."""
+
+    torch = pytest.importorskip("torch")
+    values = torch.tensor([[1.0], [2.0]])
+    dataset = torch.utils.data.TensorDataset(values)
+    adapter = object.__new__(TorchDatasetAdapter)
+    adapter.dataset = dataset
+
+    assert not inspect.isabstract(TorchDatasetAdapter)
+    assert [item[0].item() for item in adapter] == [1.0, 2.0]

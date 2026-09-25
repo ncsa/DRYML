@@ -149,7 +149,23 @@ class Dryml(ABCMeta):
             callback(cls)
         update_abstractmethods(cls)
         for callback in _collect_class_finalizers(cls, _CLASS_VALIDATORS):
+            namespace = dict(cls.__dict__)
+            markers = {
+                name: getattr(member, "__isabstractmethod__", None)
+                for name, member in namespace.items()
+            }
             callback(cls)
+            if (
+                set(cls.__dict__) != set(namespace)
+                or any(cls.__dict__[name] is not member for name, member in namespace.items())
+                or any(
+                    getattr(cls.__dict__[name], "__isabstractmethod__", None) != marker
+                    for name, marker in markers.items()
+                )
+            ):
+                raise TypeError(
+                    "DRYML class validators must not mutate descriptors or abstractness."
+                )
         return cls
 
     def __call__(dryml_cls, /, *args, repo=None, __cdef__=None, **kwargs):

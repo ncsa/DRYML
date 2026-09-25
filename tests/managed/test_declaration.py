@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from abc import abstractmethod
 
 import pytest
 
@@ -15,6 +16,95 @@ from dryml.managed import (
     ManagedDeclarationError,
     managed_operation,
 )
+
+
+@pytest.mark.parametrize(
+    "written_order",
+    (
+        ("abstract", "annotation", "function", "managed"),
+        ("annotation", "function", "abstract", "managed"),
+        ("function", "abstract", "annotation", "managed"),
+        ("managed", "annotation", "function", "abstract"),
+        ("annotation", "managed", "function", "abstract"),
+        ("function", "managed", "annotation", "abstract"),
+    ),
+)
+def test_abstract_managed_declarations_preserve_the_standard_marker(written_order):
+    """Both abstract/managed orders preserve one abstract managed obligation."""
+
+    from dryml.annotations import attach_annotation
+    from dryml.core import Serializable, function
+
+    def annotation(target):
+        return attach_annotation(target, Annotation("test.abstract", "present"))
+
+    def operation(self, *, managed):
+        raise AssertionError("abstract declarations must not run")
+
+    decorators = {
+        "abstract": abstractmethod,
+        "annotation": annotation,
+        "function": function,
+        "managed": managed_operation(),
+    }
+    member = operation
+    for name in reversed(written_order):
+        member = decorators[name](member)
+
+    subject = type("AbstractManagedSubject", (Serializable,), {"operation": member})
+
+    assert inspect.isabstract(subject)
+    assert subject.__abstractmethods__ == {"operation"}
+    assert getattr(subject.__dict__["operation"], "__isabstractmethod__", False)
+
+
+def test_managed_validator_rejects_concrete_bare_overrides_across_mro():
+    """Inherited managed obligations cannot be discharged by a bare method."""
+
+    from dryml.core import Serializable
+
+    class AbstractManaged(Serializable):
+        @abstractmethod
+        @managed_operation()
+        def operation(self, *, managed):
+            """Provide one operation that concrete children must keep managed."""
+
+    class StillAbstract(AbstractManaged):
+        @abstractmethod
+        def operation(self, *, managed):
+            """Leave the inherited managed operation abstract."""
+
+    class ConcreteManaged(AbstractManaged):
+        @managed_operation()
+        def operation(self, *, managed):
+            """Supply the required managed implementation."""
+
+    base_validators = AbstractManaged.__dict__["__dryml_class_validators__"]
+    concrete_validators = ConcreteManaged.__dict__["__dryml_class_validators__"]
+
+    class SiblingManaged(AbstractManaged):
+        @managed_operation()
+        def operation(self, *, managed):
+            """Supply an independent managed implementation."""
+
+    class OtherImplementation:
+        def operation(self, *, managed):
+            """Deliberately provide a non-managed competing implementation."""
+
+    assert inspect.isabstract(StillAbstract)
+    assert not inspect.isabstract(ConcreteManaged)
+    assert AbstractManaged.__dict__["__dryml_class_validators__"] is base_validators
+    assert ConcreteManaged.__dict__["__dryml_class_validators__"] is concrete_validators
+    assert SiblingManaged.__dict__["__dryml_class_validators__"] is not base_validators
+
+    with pytest.raises(ManagedDeclarationError, match=r"BareOverride\.operation"):
+        class BareOverride(AbstractManaged):
+            def operation(self, *, managed):
+                """Incorrectly drop the managed declaration."""
+
+    with pytest.raises(ManagedDeclarationError, match=r"CrossBaseOverride\.operation"):
+        class CrossBaseOverride(OtherImplementation, AbstractManaged):
+            pass
 
 
 def test_declaration_requires_a_native_instance_function_and_keyword_only_slot():

@@ -1,3 +1,5 @@
+import inspect
+
 import pytest
 
 from dryml.models import Experiment, TrainFunction, TrainState
@@ -31,6 +33,19 @@ def test_train_state_phase_constants_and_predicates():
 
     assert state == TrainState.trained
     assert state.is_trained
+
+
+def test_train_function_requires_a_logical_call_without_breaking_current_training():
+    """TrainFunction declares one mandatory call and direct subclasses satisfy it."""
+
+    class MissingCall(TrainFunction):
+        pass
+
+    assert inspect.isabstract(TrainFunction)
+    assert inspect.isabstract(MissingCall)
+    with pytest.raises(TypeError, match="__call__"):
+        MissingCall()
+    assert not inspect.isabstract(SuccessfulTrain)
 
 
 def test_experiment_train_sets_trained_on_success():
