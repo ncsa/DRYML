@@ -183,6 +183,24 @@ def test_confusion_result_methods_define_all_f1_modes_and_zero_policies():
 
 
 @pytest.mark.parametrize("backend", ("numpy", "torch", "tf"))
+@pytest.mark.parametrize("dtype", ("int8", "int16", "int32"))
+def test_confusion_result_methods_promote_narrow_counts_before_aggregation(backend, dtype):
+    """Accuracy and aggregate F1 reduce narrow native counts after float64 promotion."""
+
+    from dryml.metrics import AccuracyFromConfusion, F1FromConfusion
+
+    maximum = np.iinfo(dtype).max
+    matrix = _native_tensor(backend, ((maximum, 0), (1, 0)), dtype)
+    expected_accuracy = maximum / (maximum + 1)
+    expected_class_zero_f1 = 2 * maximum / (2 * maximum + 1)
+    expected_weighted_f1 = expected_class_zero_f1 * expected_accuracy
+
+    assert _host_values(AccuracyFromConfusion()(matrix)) == pytest.approx(expected_accuracy)
+    assert _host_values(F1FromConfusion(average="micro")(matrix)) == pytest.approx(expected_accuracy)
+    assert _host_values(F1FromConfusion(average="weighted")(matrix)) == pytest.approx(expected_weighted_f1)
+
+
+@pytest.mark.parametrize("backend", ("numpy", "torch", "tf"))
 def test_confusion_counts_preserve_native_integer_carry_on_required_backends(backend):
     """NumPy, Torch CPU, and TensorFlow CPU count decoded integer labels natively."""
 
@@ -207,6 +225,34 @@ def test_confusion_counts_preserve_native_integer_carry_on_required_backends(bac
     assert np.array_equal(host, [[0, 1], [1, 1]])
     assert _host_values(AccuracyFromConfusion()(actual)) == pytest.approx(1 / 3)
     assert _host_values(F1FromConfusion(average="macro")(actual)) == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("backend", ("numpy", "torch", "tf"))
+def test_confusion_counts_reject_aggregate_population_overflow_before_mutation(backend):
+    """A split count total cannot exceed int64 even when each updated cell fits."""
+
+    from dryml.data.reduction_methods import _MAX_INT64
+    from dryml.metrics import ConfusionCounts
+
+    counts = ConfusionCounts((0, 1))
+    observation = {
+        "prediction": _native_tensor(backend, (0,), "int64"),
+        "target": _native_tensor(backend, (1,), "int64"),
+    }
+    overflowed = _native_tensor(backend, ((_MAX_INT64, 0), (0, 0)), "int64")
+    with pytest.raises(OverflowError, match="overflow"):
+        counts(observation, overflowed)
+    assert np.array_equal(_host_values(overflowed), [[_MAX_INT64, 0], [0, 0]])
+
+    valid = _native_tensor(backend, ((_MAX_INT64 - 1, 0), (0, 0)), "int64")
+    successor = counts(observation, valid)
+    assert np.array_equal(_host_values(valid), [[_MAX_INT64 - 1, 0], [0, 0]])
+    assert np.array_equal(_host_values(successor), [[_MAX_INT64 - 1, 0], [1, 0]])
+
+    already_overflowed = _native_tensor(backend, ((_MAX_INT64, 1), (0, 0)), "int64")
+    with pytest.raises(OverflowError, match="overflow"):
+        counts(observation, already_overflowed)
+    assert np.array_equal(_host_values(already_overflowed), [[_MAX_INT64, 1], [0, 0]])
 
 
 def test_confusion_rejects_invalid_domains_labels_and_overflow_before_mutation():

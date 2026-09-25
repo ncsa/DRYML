@@ -12,7 +12,7 @@ from dryml.core.tensor_spec import SpecTree, TensorSpec
 from dryml.data import Abs, Diff, Map, Pipe, Project, Select, Squared
 from dryml.data.reduction_methods import (
     Path, ReductionMode, _MAX_INT64, _backend, _cast_float64, _dtype_name,
-    _path, _reshape, _where, _zeros,
+    _path, _reshape, _scalar, _where, _zeros,
 )
 from dryml.methods import Accumulator, Method
 
@@ -192,6 +192,25 @@ def _validate_count_matrix(matrix: object, *, require_int64: bool = False) -> st
     return backend
 
 
+def _consume_count_capacity(matrix: object, remaining: object, backend: str):
+    """Return native int64 capacity after exactly subtracting nonnegative count cells.
+
+    Raises:
+        OverflowError: If the matrix population exceeds the supplied capacity.
+
+    This walks the fixed matrix coordinates instead of reducing them, because an
+    int64 aggregate can wrap before a native reduction can be compared safely.
+    """
+
+    for row in range(int(matrix.shape[0])):
+        for column in range(int(matrix.shape[1])):
+            count = matrix[row, column]
+            if _native_bool(count > remaining):
+                raise OverflowError("confusion count update would overflow int64.")
+            remaining = remaining - count
+    return remaining
+
+
 def _confusion_state_spec(observation_spec, classes, prediction, target):
     """Infer fixed count storage without constructing or invoking a Method."""
     prediction, target = _path(observation_spec, prediction), _path(observation_spec, target)
@@ -279,10 +298,12 @@ class ConfusionCounts(Accumulator):
         backend, predicted, expected = _validate_labels(observation, self.classes, self.prediction, self.target)
         if _validate_count_matrix(state, require_int64=True) != backend or int(state.shape[0]) != len(self.classes):
             raise ValueError("confusion carry must be an int64 matrix for the configured class domain.")
+        remaining = _consume_count_capacity(state, _scalar(_MAX_INT64, backend), backend)
         increments = _bincount(expected * len(self.classes) + predicted, len(self.classes) ** 2, backend)
         increments = _reshape(increments, tuple(state.shape), backend)
         if _native_bool(_any(state > _MAX_INT64 - increments, backend)):
             raise OverflowError("confusion count update would overflow int64.")
+        _consume_count_capacity(increments, remaining, backend)
         return state + increments
 
     def infer_output_spec(self, observation_spec: SpecTree, state_spec: SpecTree) -> SpecTree:
@@ -301,7 +322,9 @@ class AccuracyFromConfusion(Method):
         matrix: A non-empty square native signed-integer count matrix.
 
     Returns:
-        A native float64 scalar; an all-zero matrix returns zero.
+        A native float64 scalar; an all-zero matrix returns zero. Aggregate
+        arithmetic promotes counts before summing, so large int64 totals retain
+        float64 rounding semantics rather than wrapping.
 
     Raises:
         TypeError: If the matrix is not a supported native signed-integer tensor.
@@ -315,10 +338,11 @@ class AccuracyFromConfusion(Method):
         """Return native diagonal-over-total accuracy without changing the matrix."""
 
         backend = _validate_count_matrix(matrix)
-        total = _sum(matrix, backend)
+        matrix_float = _cast_float64(matrix, backend)
+        total = _sum(matrix_float, backend)
         if _native_bool(total == 0):
             return _zeros((), backend, dtype="float64")
-        return _cast_float64(_sum(_diagonal(matrix, backend), backend), backend) / _cast_float64(total, backend)
+        return _sum(_diagonal(matrix_float, backend), backend) / total
 
     def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
         """Infer one native float64 scalar from a square integer matrix spec."""
@@ -344,6 +368,8 @@ class F1FromConfusion(Method):
     Returns:
         A native float64 scalar for aggregate modes or a class-ordered float64
         vector for ``average="none"``. Undefined per-class terms are zero.
+        Aggregate arithmetic promotes counts before summing, so large int64
+        totals retain float64 rounding semantics rather than wrapping.
 
     Raises:
         ValueError: If averaging controls, matrix counts, or binary class
@@ -371,10 +397,10 @@ class F1FromConfusion(Method):
         classes = int(matrix.shape[0])
         if self.average == "binary" and (classes != 2 or self.positive_index >= classes):
             raise ValueError("binary F1 requires exactly two classes and a valid positive_index.")
-        total = _sum(matrix, backend)
+        matrix_float = _cast_float64(matrix, backend)
+        total = _sum(matrix_float, backend)
         if _native_bool(total == 0):
             return _zeros((classes,), backend, dtype="float64") if self.average == "none" else _zeros((), backend, dtype="float64")
-        matrix_float = _cast_float64(matrix, backend)
         true_positive = _diagonal(matrix_float, backend)
         support = _sum(matrix_float, backend, axis=1)
         predicted = _sum(matrix_float, backend, axis=0)
@@ -386,10 +412,10 @@ class F1FromConfusion(Method):
         if self.average == "binary":
             return per_class[self.positive_index]
         if self.average == "micro":
-            return 2.0 * _sum(true_positive, backend) / (2.0 * _cast_float64(total, backend))
+            return 2.0 * _sum(true_positive, backend) / (2.0 * total)
         if self.average == "macro":
             return _sum(per_class, backend) / float(classes)
-        return _sum(per_class * support, backend) / _cast_float64(total, backend)
+        return _sum(per_class * support, backend) / total
 
     def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
         """Infer scalar or class-vector native float64 output without counting."""

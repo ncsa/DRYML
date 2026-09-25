@@ -107,8 +107,8 @@ classes. It consumes scalar labels or matching non-empty one-dimensional label
 batches, uses truth rows and prediction columns, and keeps native int64 carry
 on NumPy, Torch CPU, and TensorFlow CPU. NumPy accepts string and integer
 labels; Torch and TensorFlow accept integer labels. Unknown labels, shape or
-backend mismatch, and int64 count overflow raise before a successor count
-matrix is returned.
+backend mismatch, a per-cell int64 overflow, or a total population above
+`MAX_INT64` raise before a successor count matrix is returned.
 
 `AccuracyFromConfusion` and `F1FromConfusion` accept only non-empty square,
 nonnegative signed-integer matrices. Accuracy and weighted F1 return zero for a
@@ -116,10 +116,12 @@ zero-total matrix. Undefined per-class F1 terms are zero; macro includes those
 zeros, weighted uses truth support, micro aggregates counts, and `average="none"`
 preserves class order. Binary F1 requires exactly two classes and an explicit
 valid `positive_index`; that argument is invalid for every other averaging mode.
-To produce confusion, accuracy, and F1 from one traversal, declare one Fold with
-an `AccumulatorGroup`, matching grouped initializer, and a `Project` finalizer.
-Calling the convenience factories independently intentionally creates independent
-evaluation streams.
+Their aggregate arithmetic promotes counts to native float64 before reduction;
+large int64 totals therefore have normal float64 rounding rather than signed
+integer wraparound. To produce confusion, accuracy, and F1 from one traversal,
+declare one Fold with an `AccumulatorGroup`, matching grouped initializer, and a
+`Project` finalizer. Calling the convenience factories independently intentionally
+creates independent evaluation streams.
 
 ## Execution And Recovery
 
