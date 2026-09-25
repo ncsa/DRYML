@@ -101,6 +101,13 @@ draw counters and a two-limb int64 key. Fill consumes no draw; each attempted
 post-fill draw, including a rejection, advances the counter once. Invalid
 population/draw metadata and int64 wrap fail before arithmetic or sampling.
 
+The evaluation factories in `dryml.metrics` build their source projections from
+these Data Methods: `Project(prediction=Pipe(Select(x), model),
+target=Select(y))`, followed by `Diff` and either `Abs` or `Squared` for
+regression. Classification factories require caller-supplied label Methods;
+`ArgMax` remains an explicit conversion rather than an implicit classifier
+policy.
+
 ## Structural Operations
 
 Structural dataset nodes change iteration structure rather than individual values.

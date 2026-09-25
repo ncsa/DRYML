@@ -519,15 +519,12 @@ def build_exact_state_load_plan(
         if key in definition_seen:
             return
         definition_seen.add(key)
-        graph = ConcreteDefinitionGraph.from_root(definition)
-        for node in graph.nodes():
-            validate_definition(node.definition, node.definition.graph_hash())
-        # Definition graph edges intentionally stop at exact references. Walk
-        # values separately so materializing ObjectRef/StateRef seed topology is
-        # also current DefinitionRecord authority before any realization.
-        for node in graph.nodes():
-            for edge in iter_value_edges(node.definition):
-                visit_value(edge.value)
+        validate_definition(definition, definition.graph_hash())
+        # Graph inventory retains Ref target declarations for codec identity, but
+        # exact loading follows only materializing occurrences. Recursing through
+        # every inventory node would turn reference-as-value data into authority.
+        for edge in iter_value_edges(definition):
+            visit_value(edge.value)
 
     def visit(reference):
         digest = reference.digest()

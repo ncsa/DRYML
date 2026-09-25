@@ -79,3 +79,44 @@ construction retains an inert concrete source reference, does not save or load
 the source, and rejects a raw soft `Definition`. Count, population, or draw
 overflow, non-finite native intermediate arithmetic, and changed carry
 shape/dtype fail before a successor state or terminal payload is installed.
+
+## Evaluation Metrics
+
+`dryml.metrics.regressor_mae(test_ds, model, mode=..., x="x", y="y")` and
+`regressor_mse(...)` declare inert Fold evaluations. They assemble a `Map`,
+`Project`, `Select`, `Pipe`, `Diff`, and `Abs` or `Squared` graph as a complete
+concrete definition before supplying it to Fold. No Dataset is traversed, model
+is loaded, state is selected, or input is saved during factory construction.
+Their mean denominator is the selected global or coordinate population, so an
+uneven final batch has the same meaning as individual observations.
+
+`classifier_confusion_matrix`, `classifier_accuracy`, and `classifier_f1`
+likewise accept non-materializing Dataset/model references and require explicit
+prediction and target label Methods. They never decode logits, probabilities,
+or one-hot values implicitly. A caller can use `ArgMax` or another declared
+Method in the supplied conversion graph when that conversion is intended.
+Incoming `StateRef` inputs remain exact nested references in that declared graph:
+a later model save does not replace the selected snapshot. Factory construction
+never saves an unpersisted source or model. A completed metric Fold can restore
+its result from its own StateRef without source/model payloads or managed control
+records; a later rerun still requires the retained input references and fails
+when that authority is unavailable.
+
+`ConfusionCounts` uses fixed ordered, unique, homogeneous exact `int` or `str`
+classes. It consumes scalar labels or matching non-empty one-dimensional label
+batches, uses truth rows and prediction columns, and keeps native int64 carry
+on NumPy, Torch CPU, and TensorFlow CPU. NumPy accepts string and integer
+labels; Torch and TensorFlow accept integer labels. Unknown labels, shape or
+backend mismatch, and int64 count overflow raise before a successor count
+matrix is returned.
+
+`AccuracyFromConfusion` and `F1FromConfusion` accept only non-empty square,
+nonnegative signed-integer matrices. Accuracy and weighted F1 return zero for a
+zero-total matrix. Undefined per-class F1 terms are zero; macro includes those
+zeros, weighted uses truth support, micro aggregates counts, and `average="none"`
+preserves class order. Binary F1 requires exactly two classes and an explicit
+valid `positive_index`; that argument is invalid for every other averaging mode.
+To produce confusion, accuracy, and F1 from one traversal, declare one Fold with
+an `AccumulatorGroup`, matching grouped initializer, and a `Project` finalizer.
+Calling the convenience factories independently intentionally creates independent
+evaluation streams.

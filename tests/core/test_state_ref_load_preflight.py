@@ -5,9 +5,10 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Object, Repo, Serializable
+from dryml.core import ConcreteDefinition, Definition, Object, Ref, Repo, Serializable
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DefinitionRecord
 
 
 class PreflightValue(Serializable):
@@ -25,6 +26,26 @@ class PreflightPair(Object):
     def __init__(self, first, second):
         self.first = first
         self.second = second
+
+
+class ReferenceBarrierRoot(Serializable):
+    """Stateful root retaining one CDef as non-materializing constructor data."""
+
+    def __init__(self, target: Ref[ConcreteDefinition]):
+        self.target = target
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        Path(dest_dir, "value").write_text("root", encoding="ascii")
+
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
+        Path(src_dir, "value").read_text(encoding="ascii")
+
+
+class MaterializingTarget(Object):
+    """Structural wrapper whose child remains in the materializing closure."""
+
+    def __init__(self, child):
+        self.child = child
 
 
 class AbstractablePreflightValue(PreflightValue):
@@ -117,3 +138,50 @@ def test_exact_preflight_fails_before_live_candidate_reservation(tmp_path):
         repo.load_state_ref(state)
 
     assert ReservationProbe.attempts == 0
+
+
+def test_exact_preflight_keeps_ref_held_nested_state_refs_inert(tmp_path):
+    """Ref CDef data does not require its own declaration or nested snapshot authority."""
+
+    source_repo = Repo(DirStore(tmp_path / "source"))
+    missing_state = source_repo.save_object(PreflightValue(1, repo=source_repo))
+    reference_target = Definition(MaterializingTarget, missing_state).concretize()
+    store = DirStore(tmp_path / "root")
+    writer = Repo(store)
+    state = writer.save_object(ReferenceBarrierRoot(reference_target, repo=writer))
+
+    loaded = Repo(store).load_state_ref(state, reuse_live="never")
+
+    assert loaded.target.graph_equal(reference_target)
+
+
+def test_exact_preflight_still_requires_materializing_child_declaration(tmp_path, monkeypatch):
+    """A missing declaration on a materializing occurrence fails before construction."""
+
+    store = DirStore(tmp_path / "store")
+    writer = Repo(store)
+    state = writer.save_object(
+        MaterializingTarget(PreflightValue(1, repo=writer), repo=writer),
+        deep_capture=True,
+    )
+    child_definition = next(
+        definition
+        for path, definition in (
+            (path, state.object.at(path).definition) for path in state.object.objects
+        )
+        if path
+    )
+    hidden_digest = DefinitionRecord(child_definition).digest
+    original_read = store.read_definition_record
+
+    monkeypatch.setattr(
+        store,
+        "read_definition_record",
+        lambda digest: None if digest == hidden_digest else original_read(digest),
+    )
+    PreflightValue.constructions = 0
+
+    with pytest.raises(RepoLoadError, match="DefinitionRecord"):
+        Repo(store).load_state_ref(state, reuse_live="never")
+
+    assert PreflightValue.constructions == 0

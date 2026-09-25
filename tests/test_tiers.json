@@ -15,6 +15,7 @@
     "locking": "medium",
     "managed": "medium",
     "methods": "medium",
+    "metrics": "medium",
     "models": "heavy",
     "multi_framework": "heavy",
     "package": "medium",
