@@ -1,4 +1,4 @@
-"""Concrete resumable Dataset Artifact backed by a logical NumPy cache."""
+"""Concrete resumable Dataset Artifact backed by logical cache codecs."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from ._cache_model import (
     numpy_spec, rebuild_value, spec_from_data, spec_to_data,
 )
 from ._cache_numpy import normalize_leaf, read_chunk, validate_chunk_descriptor, write_chunk
+from . import _cache_parquet
 from .base import Artifact
 from .value import ArtifactNotReadyError
 
@@ -48,7 +49,7 @@ class _CacheGeneration:
 
 
 class CachedDataset(Artifact, Dataset[T], Generic[T]):
-    """Persist a finite referenced Dataset as re-iterable NumPy cache content.
+    """Persist a finite referenced Dataset as re-iterable cache content.
 
     Args:
         src: A ``Ref[AutoRef]`` source binding. Construction retains the reference
@@ -82,7 +83,7 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
 
     @property
     def spec(self) -> SpecTree:
-        """Return completed NumPy output spec, or raise before computation."""
+        """Return completed codec output spec, or raise before computation."""
 
         if not self.ready:
             raise ArtifactNotReadyError("CachedDataset is not ready.")
@@ -140,10 +141,11 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
     def compute(
             self, *, codec: CacheCodec, store=None, target_chunk_bytes: int | None = None,
             managed: ManagedContext) -> None:
-        """Compute or republish one NumPy cache through the managed lifecycle.
+        """Compute or republish one selected cache codec through managed lifecycle.
 
         Args:
-            codec: Built-in physical codec. This unit implements ``"numpy"``.
+            codec: Built-in physical codec, currently ``"numpy"`` or optional
+                ``"parquet"``.
             store: Optional managed publication Store override.
             target_chunk_bytes: Positive soft target for retained logical chunks.
             managed: Runtime-created lifecycle authority.
@@ -162,8 +164,12 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
 
         if codec not in {"numpy", "parquet", "netcdf"}:
             raise ValueError("CachedDataset codec must be one of numpy, parquet, or netcdf.")
-        if codec != "numpy":
+        if codec == "netcdf":
             raise ValueError(f"CachedDataset codec {codec!r} is not implemented in this build.")
+        if codec == "parquet":
+            # Dependency admission intentionally precedes source loading, including
+            # same-codec republication that otherwise skips the source.
+            _cache_parquet.load_pyarrow()
         target = _validate_target(target_chunk_bytes)
         current = getattr(self, "_cache_payload", None)
         if current is not None and current.get("mode") == "completed" and current.get("codec") == codec:
@@ -215,14 +221,14 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
                     count += 1
                     pending += 1
                     if pending == _MAX_YIELDS_PER_CHUNK:
-                        chunks.append(self._flush_chunk(workdir, chunk_index, (tuple() for _ in range(pending)), target))
+                        chunks.append(self._flush_chunk(workdir, chunk_index, (tuple() for _ in range(pending)), target, codec))
                         chunk_index += 1
                         pending = 0
                         if count < expected:
                             self._install_working(codec, output_spec, expected, count, workdir, chunks, managed)
                             managed.checkpoint()
                 if pending:
-                    chunks.append(self._flush_chunk(workdir, chunk_index, (tuple() for _ in range(pending)), target))
+                    chunks.append(self._flush_chunk(workdir, chunk_index, (tuple() for _ in range(pending)), target, codec))
                 try:
                     next(cursor)
                 except StopIteration:
@@ -249,7 +255,7 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
                 normalized = tuple(normalize_leaf(value, spec) for value, spec in zip(raw_leaves, leaves))
                 size = sum(value.nbytes for value in normalized)
                 if buffered and (buffered_bytes + size > target or len(buffered) == _MAX_YIELDS_PER_CHUNK):
-                    chunks.append(self._flush_chunk(workdir, chunk_index, buffered, target))
+                    chunks.append(self._flush_chunk(workdir, chunk_index, buffered, target, codec))
                     chunk_index += 1
                     buffered = []
                     buffered_bytes = 0
@@ -260,7 +266,7 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
                 buffered_bytes += size
                 count += 1
             if buffered:
-                chunks.append(self._flush_chunk(workdir, chunk_index, buffered, target))
+                chunks.append(self._flush_chunk(workdir, chunk_index, buffered, target, codec))
             try:
                 next(cursor)
             except StopIteration:
@@ -309,8 +315,11 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
             if not isinstance(chunks, list):
                 raise CacheIntegrityError("CachedDataset working chunk inventory is malformed.")
             for chunk in chunks:
-                read_chunk(os.path.join(_work_data_directory(workdir), "chunks", chunk["file"]), chunk, flatten_spec(spec))
-            _discard_unassociated_tail(workdir, chunks)
+                _read_chunk(
+                    codec, os.path.join(_work_data_directory(workdir), "chunks", chunk["file"]),
+                    chunk, flatten_spec(spec),
+                )
+            _discard_unassociated_tail(workdir, chunks, codec)
             return workdir, chunks, payload["count"]
         if payload is not None and payload.get("mode") == "working":
             # Managed has already fenced this fresh rerun with a new attempt.  Do
@@ -348,11 +357,13 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
             self._cache_payload["prior_ready_state_digest"] = prior_ready_state_digest
 
     @staticmethod
-    def _flush_chunk(workdir, index, values, target):
+    def _flush_chunk(workdir, index, values, target, codec):
         """Encode one sealed logical chunk into the retained working directory."""
 
-        return write_chunk(
-            os.path.join(_work_data_directory(workdir), "chunks", f"chunk-{index:08d}.npz"), values,
+        suffix = "npz" if codec == "numpy" else "parquet"
+        writer = write_chunk if codec == "numpy" else _cache_parquet.write_chunk
+        return writer(
+            os.path.join(_work_data_directory(workdir), "chunks", f"chunk-{index:08d}.{suffix}"), values,
             segment_bytes=min(target, 8 * 1024 * 1024),
         )
 
@@ -365,7 +376,7 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
         leaves = flatten_spec(payload["spec"])
         for descriptor in payload["chunks"]:
             path = os.path.join(source_dir, "chunks", descriptor["file"])
-            for values in read_chunk(path, descriptor, leaves):
+            for values in _read_chunk(payload["codec"], path, descriptor, leaves):
                 yield rebuild_value(payload["spec"], values)
 
     def _generation_guard(self):
@@ -527,6 +538,31 @@ def _finite_cardinality(source: Dataset) -> int:
     return cardinality.value
 
 
+def _read_chunk(codec: str, path: str, descriptor: dict[str, object], leaves):
+    """Decode one physical chunk through the selected private codec.
+
+    Args:
+        codec: Persisted built-in codec name.
+        path: Snapshot-local chunk path.
+        descriptor: Authenticated manifest inventory entry.
+        leaves: Validated output logical leaves.
+
+    Returns:
+        Fully validated logical leaf tuples for the chunk.
+
+    Raises:
+        CacheIntegrityError: If the persisted codec is unknown or its physical
+            content is structurally invalid.
+        ImportError: If the selected optional codec dependency is unavailable.
+    """
+
+    if codec == "numpy":
+        return read_chunk(path, descriptor, leaves)
+    if codec == "parquet":
+        return _cache_parquet.read_chunk(path, descriptor, leaves)
+    raise CacheIntegrityError("CachedDataset chunk uses an unsupported codec.")
+
+
 def _create_work_directory(repo, obj) -> str:
     """Allocate work from a Store selected by this invocation's save routing.
 
@@ -638,7 +674,7 @@ def _validate_stored_work_marker(workdir: str, payload: dict[str, Any]) -> None:
         raise CacheIntegrityError("CachedDataset work marker belongs to another cache attempt.")
 
 
-def _discard_unassociated_tail(workdir: str, chunks: list[dict[str, Any]]) -> None:
+def _discard_unassociated_tail(workdir: str, chunks: list[dict[str, Any]], codec: str) -> None:
     """Remove only contiguous sealed chunk names absent from an associated prefix.
 
     A checkpoint association is the sole durable inventory authority.  A crash
@@ -646,10 +682,13 @@ def _discard_unassociated_tail(workdir: str, chunks: list[dict[str, Any]]) -> No
     files in work storage; no other work-tree entries are inferred disposable.
     """
 
+    suffix = "npz" if codec == "numpy" else "parquet" if codec == "parquet" else None
+    if suffix is None:
+        raise CacheIntegrityError("CachedDataset work codec is unsupported.")
     directory = Path(_work_data_directory(workdir), "chunks")
     index = len(chunks)
     while True:
-        candidate = directory / f"chunk-{index:08d}.npz"
+        candidate = directory / f"chunk-{index:08d}.{suffix}"
         try:
             mode = os.lstat(candidate).st_mode
         except FileNotFoundError:
@@ -937,7 +976,7 @@ def _payload_from_record(record: object, src_dir: str) -> dict[str, Any]:
         common |= {"expected", "work_token", "object_ref_digest", "operation_id", "attempt_id"}
         if "prior_ready_state_digest" in record:
             common |= {"prior_ready_state_digest"}
-    if mode not in {"working", "completed"} or set(record) != common or record["codec"] != "numpy":
+    if mode not in {"working", "completed"} or set(record) != common or record["codec"] not in {"numpy", "parquet"}:
         raise CacheIntegrityError("CachedDataset manifest fields are invalid.")
     if type(record["count"]) is not int or record["count"] < 0 or not isinstance(record["chunks"], list):
         raise CacheIntegrityError("CachedDataset manifest count or chunks are invalid.")
@@ -947,15 +986,19 @@ def _payload_from_record(record: object, src_dir: str) -> dict[str, Any]:
     if sum(item.get("count", -1) for item in chunks if isinstance(item, dict)) != record["count"]:
         raise CacheIntegrityError("CachedDataset manifest chunk counts are invalid.")
     for index, item in enumerate(chunks):
-        if not isinstance(item, dict) or item.get("file") != f"chunk-{index:08d}.npz":
+        suffix = "npz" if record["codec"] == "numpy" else "parquet"
+        if not isinstance(item, dict) or item.get("file") != f"chunk-{index:08d}.{suffix}":
             raise CacheIntegrityError("CachedDataset manifest chunk names are invalid.")
-        validate_chunk_descriptor(item, leaves)
+        if record["codec"] == "numpy":
+            validate_chunk_descriptor(item, leaves)
+        else:
+            _cache_parquet.validate_chunk_descriptor(item, leaves)
     if mode == "working":
         if (type(record["expected"]) is not int or record["expected"] < record["count"]
                 or type(record["work_token"]) is not str
                 or not all(type(record[key]) is str and record[key] for key in ("object_ref_digest", "operation_id", "attempt_id"))):
             raise CacheIntegrityError("CachedDataset working manifest is invalid.")
-        result = {"mode": mode, "codec": "numpy", "spec": spec, "expected": record["expected"], "count": record["count"], "work_token": record["work_token"], "object_ref_digest": record["object_ref_digest"], "operation_id": record["operation_id"], "attempt_id": record["attempt_id"], "chunks": chunks}
+        result = {"mode": mode, "codec": record["codec"], "spec": spec, "expected": record["expected"], "count": record["count"], "work_token": record["work_token"], "object_ref_digest": record["object_ref_digest"], "operation_id": record["operation_id"], "attempt_id": record["attempt_id"], "chunks": chunks}
         if "prior_ready_state_digest" in record:
             if not _is_digest(record["prior_ready_state_digest"]):
                 raise CacheIntegrityError("CachedDataset prior ready reference is invalid.")
@@ -964,7 +1007,7 @@ def _payload_from_record(record: object, src_dir: str) -> dict[str, Any]:
     for item in chunks:
         if not Path(src_dir, "chunks", item["file"]).is_file():
             raise CacheIntegrityError("CachedDataset manifest names a missing chunk.")
-    return {"mode": mode, "codec": "numpy", "spec": spec, "count": record["count"], "chunks": chunks, "source_dir": src_dir}
+    return {"mode": mode, "codec": record["codec"], "spec": spec, "count": record["count"], "chunks": chunks, "source_dir": src_dir}
 
 
 def _is_digest(value: object) -> bool:

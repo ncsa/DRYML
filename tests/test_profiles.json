@@ -67,6 +67,19 @@
             "test_oversized_logical_yield_uses_bounded_physical_segments"
           ]
         },
+        "tests/artifacts/test_cached_dataset_parquet.py": {
+          "rationale": "Retain optional-dependency timing, nested typed Parquet fidelity, physical schema, bounded writer/reader batches, deferred corruption, empty distinctions, oversized segmentation, and import isolation; exhaustive mode retains full dtype/rank and malformed-layout products.",
+          "functions": [
+            "test_parquet_missing_dependency_fails_before_source_traversal",
+            "test_parquet_cache_round_trips_nested_dynamic_typed_values",
+            "test_parquet_schema_contains_typed_value_shape_and_complex_columns",
+            "test_parquet_reads_multiple_bounded_batches_and_chunks",
+            "test_parquet_corruption_fails_before_chunk_yield",
+            "test_parquet_distinguishes_empty_cache_container_and_tensor",
+            "test_parquet_oversized_yield_segments_and_reconstructs_once",
+            "test_parquet_import_isolated_from_public_import_and_numpy_cache"
+          ]
+        },
         "tests/artifacts/test_cached_dataset_resume.py": {
           "rationale": "Retain Store-token authority, EOF completion without source reopening, pre-source resume rejection, prior-ready metadata, and fresh-process completed restore.",
           "functions": [
