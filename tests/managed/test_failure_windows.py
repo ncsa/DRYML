@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import warnings
 
 import pytest
 
@@ -12,7 +13,7 @@ pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 from dryml.core import Repo
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
-from dryml.managed import ManagedConfig, ManagedControlError, ManagedPublicationError, managed_operation
+from dryml.managed import ManagedConfig, ManagedControlError, ManagedInterrupted, ManagedPublicationError, managed_operation
 from dryml.managed.control import ManagedControlStore
 from dryml.managed import context as context_module
 from dryml.managed import runtime as runtime_module
@@ -61,6 +62,43 @@ class CrashWindowValue(Pickleable):
 
         self.value = 2
         return "complete"
+
+
+class HookWindowValue(Pickleable):
+    """Receiver proving failed lifecycle windows never deliver a completion handoff."""
+
+    def __init__(self):
+        """Initialize observable hook delivery count."""
+
+        self.handoffs = 0
+
+    @managed_operation(return_state_ref=True)
+    def complete(self, *, managed) -> None:
+        """Return normally so injected publication windows are reachable."""
+
+    @managed_operation(return_state_ref=True)
+    def fail(self, *, managed) -> None:
+        """Fail in the workload body before final publication."""
+
+        raise ValueError("body failed")
+
+    @managed_operation(return_state_ref=True)
+    def warn(self, *, managed) -> None:
+        """Return an unwanted value to exercise warning-filter failure."""
+
+        return object()
+
+    @managed_operation(return_state_ref=True)
+    def interrupt(self, *, managed) -> None:
+        """Stop at a managed safe point before completion."""
+
+        managed.interrupt()
+
+    def _managed_post_publication(self, final_state, state_repo, report) -> None:
+        """Count only successful post-completion delivery attempts."""
+
+        del final_state, state_repo, report
+        self.handoffs += 1
 
 
 def _crash_window_worker(store_root, state_ref, member, boundary, reached, release):
@@ -290,3 +328,59 @@ def test_spawned_callback_window_recovery_does_not_replay_observers(tmp_path):
     finally:
         recovered.close()
     assert calls == []
+
+
+@pytest.mark.parametrize("window", ("body", "interruption", "warning", "publication", "validation", "association"))
+def test_private_post_publication_hook_is_not_called_before_completed_association(
+        tmp_path, monkeypatch, window,
+):
+    """Every pre-completion failure window suppresses the optional receiver hook."""
+
+    store = DirStore(tmp_path / "state")
+    repo = Repo((store,))
+    value = HookWindowValue(repo=repo)
+    config = ManagedConfig(state_repo=repo)
+
+    if window == "body":
+        with pytest.raises(ValueError, match="body failed"):
+            value.fail(managed=config)
+    elif window == "interruption":
+        with pytest.raises(ManagedInterrupted):
+            value.interrupt(managed=config)
+    elif window == "warning":
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            with pytest.raises(RuntimeWarning, match="discarded"):
+                value.warn(managed=config)
+    elif window == "publication":
+        monkeypatch.setattr(
+            runtime_module, "publish_managed_state",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("publication failed")),
+        )
+        with pytest.raises(OSError, match="publication failed"):
+            value.complete(managed=config)
+    elif window == "validation":
+        monkeypatch.setattr(
+            runtime_module, "validate_state_ref",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("validation failed")),
+        )
+        with pytest.raises(OSError, match="validation failed"):
+            value.complete(managed=config)
+    else:
+        original = ManagedControlStore.transition_running_owner
+        calls = 0
+
+        def fail_final_association(self, operation_id, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("association failed")
+            return original(self, operation_id, **kwargs)
+
+        monkeypatch.setattr(
+            ManagedControlStore, "transition_running_owner", fail_final_association,
+        )
+        with pytest.raises(OSError, match="association failed"):
+            value.complete(managed=config)
+
+    assert value.handoffs == 0

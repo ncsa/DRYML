@@ -220,6 +220,7 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
                 if not isinstance(error, ManagedPublicationError) or error.outcome == "not_committed":
                     _record_failure(control, running, "publication_error", error)
                 raise
+            _deliver_post_publication(instance, final_state, state_repo, report)
             return final_state if descriptor.return_state_ref else result
     finally:
         if context is not None:
@@ -451,6 +452,40 @@ def _validate_attempt_id(attempt_id: str) -> None:
 
 def _completion_boundary(stage: str) -> None:
     """Provide a no-op in-process seam for deterministic final-save crash tests."""
+
+
+def _deliver_post_publication(receiver: object, final_state, state_repo, report) -> None:
+    """Deliver one optional receiver-local completed-publication handoff.
+
+    A managed receiver may define ``_managed_post_publication(final_state,
+    state_repo, report)`` to bind invocation-local resources to the immutable
+    snapshot that has already passed durable validation and control completion.
+    The private protocol deliberately passes only the exact final StateRef, the
+    borrowed selected Repo, and its immutable save report; it neither reads the
+    receiver's mutable receipt nor transports a callback, handle, or routing
+    configuration across an execution boundary.
+
+    Args:
+        receiver: The reconstructed live managed Object for this invocation.
+        final_state: Exact validated final StateRef associated with completed
+            managed control authority.
+        state_repo: Borrowed selected Repo whose handles remain valid while the
+            existing managed ownership/reservation is retained.
+        report: Immutable StoreReport for the selected durable publication.
+
+    Raises:
+        BaseException: Propagates a receiver hook delivery failure after completion.
+            The caller receives no success return, while the already-completed
+            control and final StateRef remain authoritative.
+
+    Side Effects:
+        Invokes only the optional private method on ``receiver``. It does not
+        mutate routing/configuration or close borrowed resources.
+    """
+
+    hook = getattr(receiver, "_managed_post_publication", None)
+    if hook is not None:
+        hook(final_state, state_repo, report)
 
 
 def _preobserve_snapshot_environment():
