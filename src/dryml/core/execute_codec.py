@@ -310,6 +310,8 @@ class _Encoder:
                 "owner": self.value(owner, f"{path}.owner", depth + 1),
                 "member": member,
                 "resumable": value.resumable,
+                "return_state_ref": value.return_state_ref,
+                "store_parameter": value.store_parameter,
             }
         if type(value) is _ManagedComposite:
             descriptor = value._descriptor
@@ -535,7 +537,7 @@ class _Decoder:
             "function": {"tag", "code", "name", "defaults", "kwdefaults", "annotations", "captures", "freevars"},
             "class": {"tag", "name", "bases", "namespace"},
             "instance": {"tag", "type", "fields"},
-            "managed_declaration": {"tag", "authored", "executable", "owner", "member", "resumable"},
+            "managed_declaration": {"tag", "authored", "executable", "owner", "member", "resumable", "return_state_ref", "store_parameter"},
             "managed_composite": {"tag", "declaration", "outer", "owner", "member"},
             "managed_target": {"tag", "receiver", "declaration"},
             "managed_composite_target": {"tag", "receiver", "composite"},
@@ -588,7 +590,12 @@ class _Decoder:
                     references.append(node["type"])
                 references.extend(node["fields"].values())
             elif tag == "managed_declaration":
-                if not isinstance(node["member"], str) or type(node["resumable"]) is not bool:
+                if (
+                        not isinstance(node["member"], str)
+                        or type(node["resumable"]) is not bool
+                        or type(node["return_state_ref"]) is not bool
+                        or (node["store_parameter"] is not None and type(node["store_parameter"]) is not str)
+                ):
                     _fail("malformed managed target", f"$.node[{index}]")
                 references.extend((node["authored"], node["executable"], node["owner"]))
             elif tag == "managed_composite":
@@ -809,7 +816,11 @@ class _Decoder:
             ):
                 _fail("malformed managed declaration", path)
             try:
-                declaration = ManagedOperation(executable, resumable=node["resumable"])
+                declaration = ManagedOperation(
+                    executable, resumable=node["resumable"],
+                    return_state_ref=node["return_state_ref"],
+                    store_parameter=node["store_parameter"],
+                )
                 declaration.__set_name__(owner, node["member"])
             except (TypeError, ValueError) as error:
                 raise CoreCallCodecError(
@@ -954,6 +965,68 @@ def _selection_controls(data: Mapping[Any, Any], repo: Repo) -> Mapping[Any, Any
     return result
 
 
+def _managed_store_control(fn: Any, kwargs: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Detach one declared managed Store control from ordinary worker arguments.
+
+    Store handles remain forbidden everywhere except this declaration-owned slot.
+    The worker rebuilds the handle from its existing Store definition only after
+    the managed target has been reconstructed and its metadata checked.
+    """
+
+    from dryml.managed.descriptor import ManagedOperation
+
+    descriptor = getattr(fn, "_descriptor", None)
+    values = dict(kwargs)
+    if type(descriptor) is not ManagedOperation or descriptor.store_parameter is None:
+        return {"version": 1, "store_parameter": None, "store": None}, values
+    name = descriptor.store_parameter
+    value = values.pop(name, None)
+    if value is None:
+        store = None
+    elif isinstance(value, Store):
+        try:
+            store = value.to_definition()
+        except (TypeError, ValueError) as error:
+            raise CoreCallCodecError(
+                "core execution transport rejected declared managed Store"
+            ) from error
+    else:
+        _fail("unsupported declared managed Store", "$.managed_controls")
+    return {"version": 1, "store_parameter": name, "store": store}, values
+
+
+def _decode_managed_store_control(target: Any, data: Any) -> tuple[str | None, Store | None]:
+    """Validate and rebuild a declaration-owned Store control on the worker."""
+
+    from dryml.managed.descriptor import ManagedOperation
+    from .repo_definition import _validate_store_descriptor
+
+    descriptor = getattr(target, "_descriptor", None)
+    if (
+            not isinstance(data, Mapping)
+            or set(data) != {"version", "store_parameter", "store"}
+            or type(data["version"]) is not int or data["version"] != 1
+            or (data["store_parameter"] is not None and type(data["store_parameter"]) is not str)
+    ):
+        _fail("malformed managed Store control", "$.managed_controls")
+    expected = descriptor.store_parameter if type(descriptor) is ManagedOperation else None
+    if data["store_parameter"] != expected:
+        _fail("forbidden managed Store control", "$.managed_controls")
+    if expected is None:
+        if data["store"] is not None:
+            _fail("forbidden managed Store control", "$.managed_controls")
+        return None, None
+    if data["store"] is None:
+        return expected, None
+    try:
+        definition = _validate_store_descriptor(data["store"])
+        return expected, Store.from_definition(definition)
+    except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError) as error:
+        raise CoreCallCodecError(
+            "core execution transport rejected malformed managed Store control"
+        ) from error
+
+
 def encode_invocation(
         fn: Any, args: tuple[Any, ...], kwargs: Mapping[str, Any], *, repo: Repo,
         selections: Mapping[Any, Any] | None = None,
@@ -972,7 +1045,8 @@ def encode_invocation(
     encoder = _Encoder(limit_bytes=limit_bytes)
     if not isinstance(update_targets, tuple):
         raise CoreCallCodecError("core execution transport requires tuple update targets")
-    root = encoder.value({"target": target, "args": args, "kwargs": dict(kwargs), "owner": owner, "selections": _selection_data(selections or {}, repo, store_table), "updates": list(update_targets)}, "$")
+    managed_controls, ordinary_kwargs = _managed_store_control(fn, kwargs)
+    root = encoder.value({"target": target, "args": args, "kwargs": ordinary_kwargs, "owner": owner, "selections": _selection_data(selections or {}, repo, store_table), "updates": list(update_targets), "managed_controls": managed_controls}, "$")
     return encoder.finish(root)
 
 
@@ -980,7 +1054,7 @@ def decode_invocation(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LI
     """Reconstruct a call graph after worker setup and before one local boundary."""
     decoder = _Decoder(data, repo=repo, limit_bytes=limit_bytes)
     decoded = decoder.value(decoder.graph["root"])
-    if not isinstance(decoded, Mapping) or set(decoded) != {"target", "args", "kwargs", "owner", "selections", "updates"}:
+    if not isinstance(decoded, Mapping) or set(decoded) != {"target", "args", "kwargs", "owner", "selections", "updates", "managed_controls"}:
         raise CoreCallCodecError("core execution transport rejected malformed call descriptor")
     if not callable(decoded["target"]) or not isinstance(decoded["args"], tuple) or not isinstance(decoded["kwargs"], dict) or not all(isinstance(key, str) for key in decoded["kwargs"]):
         raise CoreCallCodecError("core execution transport rejected malformed call descriptor")
@@ -995,6 +1069,11 @@ def decode_invocation(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LI
         if not isinstance(item, Mapping) or set(item) != {"target", "object_digest", "path"} or not all(isinstance(item[name], str) and item[name] for name in item):
             raise CoreCallCodecError("core execution transport rejected malformed update target")
         targets.append(item)
+    name, store = _decode_managed_store_control(
+        decoded["target"], decoded["managed_controls"],
+    )
+    if name is not None:
+        decoded["kwargs"][name] = store
     return decoded["target"], decoded["args"], decoded["kwargs"], decoded["owner"], _selection_controls(decoded["selections"], repo), tuple(targets)
 
 

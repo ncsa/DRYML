@@ -8,37 +8,51 @@ import types
 from dataclasses import replace
 
 from dryml.annotations import attach_annotation, own_annotations
+from dryml.core.reference_values import StateRef
 
 from .config import ManagedConfig
 from .errors import ManagedConfigError, ManagedDeclarationError
 
 
-def managed_operation(*, resumable: bool = False):
+def managed_operation(*, resumable: bool = False, return_state_ref: bool = False,
+                      store_parameter: str | None = None):
     """Create a checked descriptor for one synchronous managed instance method.
 
     Args:
         resumable: Exact bool declaring whether a later lifecycle may resume from
             an associated Object-state checkpoint.
+        return_state_ref: Exact bool selecting an invocation-captured final
+            ``StateRef`` result instead of the method body's result. The body must
+            explicitly annotate its return as ``None``.
+        store_parameter: Optional keyword-only parameter name whose ``None`` or
+            ``Store`` value selects this invocation's publication authority.
 
     Returns:
         A decorator that retains the checked native function as a descriptor.
 
     Raises:
-        ManagedDeclarationError: If ``resumable`` is not an exact bool or the
-            decorated target is not a supported native instance function.
+        ManagedDeclarationError: If policy values are invalid, the completion
+            annotation or Store control is incompatible, or the decorated target
+            is not a supported native instance function.
 
     Side Effects:
         Decoration performs static signature validation only. It does not bind or
         invoke the authored method and creates no lifecycle authority.
     """
 
-    if type(resumable) is not bool:
+    if type(resumable) is not bool or type(return_state_ref) is not bool:
         raise ManagedDeclarationError(message="resumable must be an exact bool")
+    if store_parameter is not None and (
+            type(store_parameter) is not str or not store_parameter.isidentifier()):
+        raise ManagedDeclarationError(message="store_parameter must be an identifier or None")
 
     def decorate(target: object) -> "ManagedOperation":
         """Validate and retain one exact native method function."""
 
-        return ManagedOperation(target, resumable=resumable)
+        return ManagedOperation(
+            target, resumable=resumable, return_state_ref=return_state_ref,
+            store_parameter=store_parameter,
+        )
 
     return decorate
 
@@ -50,9 +64,14 @@ class ManagedOperation:
         target: Exact synchronous Python function with a required keyword-only
             ``managed`` parameter.
         resumable: Exact declaration flag retained for future resume policy.
+        return_state_ref: Exact declaration flag selecting a final StateRef result
+            after successful publication and completion association.
+        store_parameter: Optional declared keyword-only Store control excluded from
+            ordinary call identity and used only for publication selection.
 
     Raises:
-        ManagedDeclarationError: If the target has forged inspection metadata,
+        ManagedDeclarationError: If policy values, a completion annotation, or a
+            Store control are invalid; or the target has forged inspection metadata,
             unsupported descriptor form, async/generator behavior, or an invalid
             native signature.
 
@@ -66,7 +85,9 @@ class ManagedOperation:
 
     __dryml_function_participant__ = _FUNCTION_DECLARATION_PARTICIPANT
 
-    def __init__(self, target: object, *, resumable: bool):
+    def __init__(self, target: object, *, resumable: bool,
+                 return_state_ref: bool = False,
+                 store_parameter: str | None = None):
         """Create a statically checked declaration without evaluating annotations."""
 
         authored, executable, handoff_owner, annotation_sources = _managed_target(
@@ -82,6 +103,8 @@ class ManagedOperation:
         self._executable = executable
         self._function_handoff_owner = handoff_owner
         self._resumable = resumable
+        self._return_state_ref = return_state_ref
+        self._store_parameter = store_parameter
         self._author_signature = _native_signature(authored)
         parameters = tuple(self._author_signature.parameters.values())
         if not parameters or parameters[0].kind not in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
@@ -93,6 +116,21 @@ class ManagedOperation:
             or managed_parameter.default is not inspect.Parameter.empty
         ):
             raise ManagedDeclarationError(message="managed operations require a keyword-only managed parameter")
+        if store_parameter is not None:
+            store = self._author_signature.parameters.get(store_parameter)
+            if (
+                    store_parameter == "managed" or store is None
+                    or store.kind is not inspect.Parameter.KEYWORD_ONLY
+                    or store.default is not None
+            ):
+                raise ManagedDeclarationError(
+                    message="store_parameter must name a keyword-only parameter with None default"
+                )
+        if return_state_ref and not _is_none_annotation(
+                self._author_signature.return_annotation):
+            raise ManagedDeclarationError(
+                message="return_state_ref requires an explicit None return annotation"
+            )
         self._instance_parameter = parameters[0].name
         self._signature_plan = None
         self._member: str | None = None
@@ -119,6 +157,18 @@ class ManagedOperation:
         """Return the author-declared exact resume capability."""
 
         return self._resumable
+
+    @property
+    def return_state_ref(self) -> bool:
+        """Return whether successful calls expose their captured final StateRef."""
+
+        return self._return_state_ref
+
+    @property
+    def store_parameter(self) -> str | None:
+        """Return the optional declared Store control parameter name."""
+
+        return self._store_parameter
 
     @property
     def member(self) -> str | None:
@@ -167,8 +217,28 @@ class ManagedOperation:
             raise ManagedConfigError(message="managed arguments do not bind") from error
         return BoundArguments(
             (name, value) for name, value in bound.arguments.items()
-            if name not in {self._instance_parameter, "managed"}
+            if name not in {self._instance_parameter, "managed", self._store_parameter}
         )
+
+    def bind_store_parameter(self, instance: object, args: tuple[object, ...],
+                             kwargs: dict[str, object]) -> object:
+        """Return the already-bound declared Store control without retaining it.
+
+        The value is excluded from ordinary argument identity and signature
+        materialization.  Runtime resolution validates non-``None`` values before
+        managed ownership is acquired.
+        """
+
+        if self._store_parameter is None:
+            return None
+        try:
+            bound = self._author_signature.bind(
+                instance, *args, managed=None, **kwargs,
+            )
+            bound.apply_defaults()
+        except TypeError as error:
+            raise ManagedConfigError(message="managed arguments do not bind") from error
+        return bound.arguments[self._store_parameter]
 
     def signature_plan(self):
         """Return the cached core plan for ordinary authored managed slots.
@@ -190,7 +260,9 @@ class ManagedOperation:
 
             parameters = tuple(
                 parameter for parameter in self._author_signature.parameters.values()
-                if parameter.name not in {self._instance_parameter, "managed"}
+                if parameter.name not in {
+                    self._instance_parameter, "managed", self._store_parameter,
+                }
             )
 
             def boundary_target(*args, **kwargs):
@@ -199,7 +271,9 @@ class ManagedOperation:
             boundary_target.__signature__ = self._author_signature.replace(parameters=parameters)
             boundary_target.__annotations__ = {
                 name: annotation for name, annotation in self._target.__annotations__.items()
-                if name not in {self._instance_parameter, "managed"}
+                if name not in {
+                    self._instance_parameter, "managed", self._store_parameter,
+                }
             }
             plan = compile_signature(boundary_target, annotation_namespace=self._target.__globals__)
             self._signature_plan = replace(plan, target=lambda: None)
@@ -288,7 +362,7 @@ class _BoundComposite:
         self.__qualname__ = composite.__qualname__
         self.__doc__ = composite.__doc__
         self.__wrapped__ = composite._outer
-        self.__signature__ = _bound_signature(self._descriptor.author_signature)
+        self.__signature__ = _bound_signature(self._descriptor)
 
     def __call__(self, *args: object, managed: ManagedConfig | None = None,
                  **kwargs: object) -> object:
@@ -335,7 +409,7 @@ class _BoundOperation:
         self.__qualname__ = descriptor.__qualname__
         self.__doc__ = descriptor.__doc__
         self.__wrapped__ = descriptor._target
-        self.__signature__ = _bound_signature(descriptor.author_signature)
+        self.__signature__ = _bound_signature(descriptor)
 
     def __call__(self, *args: object, managed: ManagedConfig | None = None, **kwargs: object) -> object:
         """Validate and synchronously execute one selected managed lifecycle.
@@ -356,8 +430,9 @@ class _BoundOperation:
             after a running control snapshot is committed.
 
         Returns:
-            The wrapped method's ordinary return value after final publication
-            and control completion association succeed.
+            The wrapped method's ordinary return value, or its invocation-captured
+            final StateRef when the declaration selects ``return_state_ref``, after
+            final publication and control completion association succeed.
         """
 
         if managed is not None and type(managed) is not ManagedConfig:
@@ -615,9 +690,11 @@ def _compatible_wrapper_signature(wrapper: types.FunctionType,
 
 def _invoke_target(descriptor: ManagedOperation, instance: object,
                    args: tuple[object, ...], context: object,
-                   kwargs: dict[str, object]) -> object:
+                   kwargs: dict[str, object], store: object = None) -> object:
     """Invoke the retained executable chain with any exact one-shot handoff."""
 
+    if descriptor.store_parameter is not None:
+        kwargs = {**kwargs, descriptor.store_parameter: store}
     if descriptor._function_handoff_owner is None:
         return descriptor._executable(instance, *args, managed=context, **kwargs)
     from dryml.core.signatures import function_normalization_handoff
@@ -670,16 +747,33 @@ def _native_signature(target: types.FunctionType) -> inspect.Signature:
     )
 
 
-def _bound_signature(author_signature: inspect.Signature) -> inspect.Signature:
+def _bound_signature(descriptor: ManagedOperation) -> inspect.Signature:
     """Project a caller signature that replaces injected context with config policy."""
 
+    author_signature = descriptor.author_signature
     parameters = list(author_signature.parameters.values())[1:]
     projected = []
     for parameter in parameters:
         if parameter.name == "managed":
             parameter = parameter.replace(annotation=ManagedConfig | None, default=None)
         projected.append(parameter)
-    return author_signature.replace(parameters=projected)
+    return author_signature.replace(
+        parameters=projected,
+        return_annotation=(StateRef if descriptor.return_state_ref else author_signature.return_annotation),
+    )
+
+
+def _is_none_annotation(annotation: object) -> bool:
+    """Accept only native or canonical postponed spellings of explicit ``None``."""
+
+    if annotation is None:
+        return True
+    if type(annotation) is not str:
+        return False
+    text = annotation.strip()
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1].strip()
+    return text == "None"
 
 
 def _managed_member_names(cls: type) -> set[str]:

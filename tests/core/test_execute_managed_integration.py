@@ -14,6 +14,7 @@ from dryml.core.execute import CoreExecutionError, CoreOptions
 from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
+from dryml.core.store.store import Store
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.managed import ManagedConfig, managed_operation
 from tests.managed.execution_fixtures import (
@@ -105,6 +106,23 @@ class DirectConfigValue(Pickleable):
         self.value += 1
         managed.checkpoint()
         return self.value
+
+
+class StoreControlValue(Pickleable):
+    """Worker fixture that requires a declaration-owned Store control."""
+
+    def __init__(self) -> None:
+        """Initialize the small state published through the selected Store."""
+
+        self.value = 0
+
+    @managed_operation(return_state_ref=True, store_parameter="store")
+    def advance(self, *, store: Store | None = None, managed) -> None:
+        """Require the decoded Store control before mutating worker-local state."""
+
+        if store is None:
+            raise AssertionError("worker lost declared Store control")
+        self.value += 1
 
 
 def _count_checkpoint_callback(value, context) -> None:
@@ -423,6 +441,36 @@ def test_direct_bound_operation_rejects_malformed_config_before_mutation(tmp_pat
 
     assert subject.value == 0
     assert subject.advance.status(state_repo=repo).state == "not_started"
+
+
+def test_managed_store_control_uses_definition_transport_and_returns_state_ref(tmp_path) -> None:
+    """A worker rebuilds only the declared Store control and returns its final ref."""
+
+    source = DirStore(tmp_path / "source", query_index="none")
+    override = DirStore(tmp_path / "override", query_index="none")
+    control = DirStore(tmp_path / "control", query_index="none")
+    repo = Repo((source,))
+    subject = StoreControlValue(repo=repo)
+    repo.save_object(subject, deep_capture=True)
+
+    outcome = decode_outcome(
+        invoke_invocation(
+            encode_invocation(
+                subject.advance, (), {
+                    "store": override,
+                    "managed": ManagedConfig(
+                        state_repo=repo, control_store=control,
+                    ),
+                }, repo=repo,
+            ),
+            repo=repo,
+        ),
+        repo=repo,
+    )
+
+    assert outcome["success"]
+    assert type(outcome["result"]) is StateRef
+    assert override.read_state_ref_record(outcome["result"].digest()).state_ref == outcome["result"]
 
 
 def test_unrelated_nested_function_keeps_its_own_normalization_boundary(

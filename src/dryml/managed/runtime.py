@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from uuid import UUID, uuid4
+import warnings
 
 from dryml.core import Object
 
@@ -41,8 +42,9 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
         kwargs: Caller ordinary keyword arguments.
 
     Returns:
-        The wrapped method's ordinary result, only after final state and completed
-        control authority are both published.
+        The wrapped method's ordinary result, or the invocation-captured final
+        StateRef for a declaration selecting ``return_state_ref``, only after final
+        state and completed control authority are both published.
 
     Raises:
         ManagedError: For lifecycle, storage, compatibility, or cleanup failures.
@@ -59,8 +61,13 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
     config = ManagedConfig() if managed is None else managed
     options = config.snapshot()
     bound = descriptor.bind_arguments(instance, args, kwargs)
+    store_override = descriptor.bind_store_parameter(instance, args, kwargs)
     operation_id = operation_digest(instance.object_ref, descriptor.member)
-    stores = resolve_stores(instance, state_repo=options.state_repo, control_store=options.control_store)
+    stores = resolve_stores(
+        instance,
+        state_repo=store_override if store_override is not None else options.state_repo,
+        control_store=options.control_store,
+    )
     try:
         arguments_boundary = descriptor.signature_plan().prepare_bound(bound, repo=stores.state_repo)
         encoded = tuple(
@@ -75,14 +82,16 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
         with materialization_admission(operation="managed invocation"):
             return _invoke_selected(
                 descriptor, instance, arguments_boundary, arguments,
-                operation_id, stores, options, on_raw_result=on_raw_result,
+                operation_id, stores, options, store_override=store_override,
+                on_raw_result=on_raw_result,
             )
     finally:
         stores.close()
 
 
 def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
-                     operation_id, stores, options, *, on_raw_result=None):
+                      operation_id, stores, options, *, store_override=None,
+                      on_raw_result=None):
     """Execute one already-admitted managed lifecycle against selected Stores."""
 
     state_repo = stores.state_repo
@@ -143,20 +152,28 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
 
                 result = _invoke_target(
                     descriptor, instance, call_args, context, call_kwargs,
+                    store_override,
                 )
                 context._raise_if_interrupted()
-                if on_raw_result is not None:
-                    result = on_raw_result(result)
-                plan = descriptor.signature_plan()
-                if plan.return_slot is not None:
-                    return_boundary = plan.prepare_return(result, repo=state_repo)
-                    return_reserved = {instance.object_ref.digest(): instance}
-                    last_state_ref = instance.last_state_ref
-                    if last_state_ref is not None:
-                        return_reserved[last_state_ref.digest()] = instance
-                    result = return_boundary.deliver_return(
-                        reservation=ownership.reservation, reserved_live=return_reserved,
-                    )
+                if descriptor.return_state_ref:
+                    if result is not None:
+                        warnings.warn(
+                            "managed return_state_ref operation discarded a non-None body result",
+                            RuntimeWarning, stacklevel=2,
+                        )
+                else:
+                    if on_raw_result is not None:
+                        result = on_raw_result(result)
+                    plan = descriptor.signature_plan()
+                    if plan.return_slot is not None:
+                        return_boundary = plan.prepare_return(result, repo=state_repo)
+                        return_reserved = {instance.object_ref.digest(): instance}
+                        last_state_ref = instance.last_state_ref
+                        if last_state_ref is not None:
+                            return_reserved[last_state_ref.digest()] = instance
+                        result = return_boundary.deliver_return(
+                            reservation=ownership.reservation, reserved_live=return_reserved,
+                        )
             except ManagedInterrupted as error:
                 if context._terminal_interrupted:
                     raise
@@ -203,7 +220,7 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
                 if not isinstance(error, ManagedPublicationError) or error.outcome == "not_committed":
                     _record_failure(control, running, "publication_error", error)
                 raise
-            return result
+            return final_state if descriptor.return_state_ref else result
     finally:
         if context is not None:
             context._deactivate()
