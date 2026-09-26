@@ -102,7 +102,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r test_requirements.txt
-          python -m pip install .
+          python -m pip install ".[test]"
 
       - name: Run good-enough including native publication tests
         run: |

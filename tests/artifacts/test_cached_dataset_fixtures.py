@@ -58,11 +58,21 @@ def _load(repo: Repo, digest: str):
     return cache
 
 
+def _require_codec(codec: str) -> None:
+    """Skip fixture reads when their qualified optional codec is unavailable."""
+
+    if codec == "parquet":
+        pytest.importorskip("pyarrow", minversion="25.0.1")
+    elif codec == "netcdf":
+        pytest.importorskip("netCDF4", minversion="1.7.4")
+
+
 @pytest.mark.parametrize("codec", ("numpy", "parquet", "netcdf"))
 def test_v1_fixtures_restore_in_a_fresh_repo_without_source_or_codec_input(
         tmp_path, codec):
     """Read every committed codec, nested value, and empty cache directly."""
 
+    _require_codec(codec)
     repo, manifest = _fresh_repo(tmp_path)
     fidelity = _load(repo, manifest["states"][codec]["fidelity"])
     empty = _load(repo, manifest["states"][codec]["empty"])
@@ -91,6 +101,7 @@ def test_polynomial_numpy_and_parquet_fixtures_are_equivalent_and_reusable(
         tmp_path):
     """Reuse one exact saved NumPy cache across two ordinary workflow runs."""
 
+    _require_codec("parquet")
     repo, manifest = _fresh_repo(tmp_path)
     numpy_digest = manifest["states"]["numpy"]["polynomial"]
     parquet_cache = _load(repo, manifest["states"]["parquet"]["polynomial"])
