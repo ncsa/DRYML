@@ -83,7 +83,11 @@ class DType:
         if self.name == "bfloat16":
             if hasattr(np, "bfloat16"):
                 return np.bfloat16
-            raise TypeError("NumPy bfloat16 is not available in this environment.")
+            try:
+                import ml_dtypes
+            except ImportError as error:
+                raise TypeError("NumPy bfloat16 requires optional ml_dtypes in this environment.") from error
+            return ml_dtypes.bfloat16
 
         try:
             return mapping[self.name]

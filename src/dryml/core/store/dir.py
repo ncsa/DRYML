@@ -502,6 +502,49 @@ class DirStore(Store):
     def _staging_root(self) -> str:
         return os.path.join(self.base_dir, ".staging")
 
+    def _local_state_staging_id(self, handle: object) -> str:
+        """Return the opaque ID of one existing direct local-state allocation.
+
+        The helper validates Store containment and returns no path information;
+        callers retain all cache-specific marker and retention policy.  It does
+        not allocate, delete, or otherwise transfer ownership of ``handle``.
+        """
+
+        try:
+            path = os.path.abspath(os.fspath(handle))
+        except TypeError as error:
+            raise StoreAuthorityError("local-state staging handle is invalid.") from error
+        token = os.path.basename(path)
+        if (os.path.dirname(path) != self._staging_root or len(token) != 32
+                or any(char not in "0123456789abcdef" for char in token)):
+            raise StoreAuthorityError("local-state staging handle is foreign or malformed.")
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError as error:
+            raise StoreAuthorityError("local-state staging handle is missing.") from error
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            raise StoreAuthorityError("local-state staging handle is not a real directory.")
+        return token
+
+    def _resolve_local_state_staging_id(self, work_id: object) -> str | None:
+        """Resolve one opaque local-state ID without allocating or deleting state.
+
+        ``None`` denotes a missing direct child.  Malformed IDs and non-directory
+        entries are rejected rather than silently treated as a resumable prefix.
+        """
+
+        if type(work_id) is not str or len(work_id) != 32 or any(
+                char not in "0123456789abcdef" for char in work_id):
+            raise StoreAuthorityError("local-state staging ID is malformed.")
+        path = os.path.join(self._staging_root, work_id)
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            raise StoreAuthorityError("local-state staging ID is not a real directory.")
+        return path
+
     def create_local_state_staging(self) -> str:
         """Create one Store-owned empty staging directory with an empty ``data`` root."""
         self.preflight_publication("create local-state staging", local_state=True)

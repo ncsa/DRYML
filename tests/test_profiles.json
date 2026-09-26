@@ -49,6 +49,43 @@
             "test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader"
           ]
         },
+        "tests/artifacts/test_cached_dataset.py": {
+          "rationale": "Retain finite admission, exact post-completion retry delivery, and managed same-instance conflict; exhaustive mode retains larger cache products.",
+          "functions": [
+            "test_cache_rejects_nonfinite_and_mismatched_cardinality_before_completion",
+            "test_cache_construction_keeps_live_and_saved_sources_inert",
+            "test_post_completion_cleanup_failure_retries_exact_state_without_source_traversal",
+            "test_same_instance_overlap_is_a_managed_conflict"
+          ]
+        },
+        "tests/artifacts/test_cached_dataset_numpy.py": {
+          "rationale": "Retain compact nested NumPy fidelity, rejection boundaries, readiness, and one bounded-segment representative; exhaustive mode retains dtype/rank matrices and yield-count stress.",
+          "functions": [
+            "test_cache_is_not_ready_before_compute_and_validates_codec_keyword",
+            "test_numpy_cache_preserves_compact_logical_fidelity_surface",
+            "test_numpy_cache_rejects_invalid_logical_yields",
+            "test_oversized_logical_yield_uses_bounded_physical_segments"
+          ]
+        },
+        "tests/artifacts/test_cached_dataset_resume.py": {
+          "rationale": "Retain Store-token authority, EOF completion without source reopening, pre-source resume rejection, prior-ready metadata, and fresh-process completed restore.",
+          "functions": [
+            "test_work_tokens_only_resolve_allocated_direct_staging_children",
+            "test_eof_checkpoint_resumes_without_reopening_source",
+            "test_resume_rejects_invalid_work_before_source_open",
+            "test_completed_cache_restores_in_a_fresh_process_without_source_or_work"
+          ]
+        },
+        "tests/artifacts/test_cached_dataset_routing.py": {
+          "rationale": "Retain lazy corruption isolation, generation lease behavior, route/override placement, and optional-import boundaries; exhaustive mode retains broad corruption and concurrency matrices.",
+          "functions": [
+            "test_current_generation_corruption_preserves_pinned_old_generation_and_other_cache",
+            "test_republication_retires_generation_only_after_cursor_lease_closes",
+            "test_routed_scratch_uses_first_local_store_and_final_replicates_all",
+            "test_explicit_store_override_controls_work_and_completed_placement",
+            "test_artifacts_import_does_not_import_optional_tensor_frameworks"
+          ]
+        },
         "tests/core/test_execute_results.py": {
           "rationale": "Retain live publication, cyclic-result rejection, update withholding, post-publication evidence, and partial-replica failure; exhaustive mode covers repeated alias/materialization and limit compositions.",
           "functions": [

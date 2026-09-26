@@ -125,6 +125,14 @@ def test_string_dtype_round_trips_to_numpy_unicode_kind():
     assert normalize_dtype(dtype.np()) == dtype
 
 
+def test_bfloat_dtype_uses_ml_dtypes_when_numpy_has_no_native_scalar():
+    """Canonical bfloat16 remains usable on NumPy builds without a native alias."""
+
+    scalar = DType("bfloat", 16).np()
+
+    assert normalize_dtype(scalar) == DType("bfloat", 16)
+
+
 def test_normalize_dtype_rejects_non_unicode_numpy_text():
     """Only native Unicode has the semantic string contract at this boundary."""
 
