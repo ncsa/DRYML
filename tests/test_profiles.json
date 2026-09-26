@@ -80,6 +80,19 @@
             "test_parquet_import_isolated_from_public_import_and_numpy_cache"
           ]
         },
+        "tests/artifacts/test_cached_dataset_netcdf.py": {
+          "rationale": "Retain optional admission timing, representative typed NETCDF4 fidelity, flat nonlossy schema, zero-axis metadata, strict pre-yield validation, native-call locking, and import isolation; exhaustive mode retains full dtype/rank/tree and malformed-layout products.",
+          "functions": [
+            "test_netcdf_missing_dependency_fails_before_source_traversal",
+            "test_netcdf_cache_round_trips_nested_dynamic_typed_values",
+            "test_netcdf_file_uses_flat_native_nonlossy_component_streams",
+            "test_netcdf_zero_sized_tensor_dimensions_are_metadata",
+            "test_netcdf_schema_corruption_fails_before_first_chunk_yield",
+            "test_netcdf_resume_tail_cleanup_uses_nc_chunk_sequence",
+            "test_netcdf_native_access_uses_one_reentrant_process_lock",
+            "test_netcdf_import_isolated_from_public_numpy_and_parquet_paths"
+          ]
+        },
         "tests/artifacts/test_cached_dataset_resume.py": {
           "rationale": "Retain Store-token authority, EOF completion without source reopening, pre-source resume rejection, prior-ready metadata, and fresh-process completed restore.",
           "functions": [

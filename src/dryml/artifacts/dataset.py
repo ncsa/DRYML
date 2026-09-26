@@ -25,7 +25,7 @@ from ._cache_model import (
     numpy_spec, rebuild_value, spec_from_data, spec_to_data,
 )
 from ._cache_numpy import normalize_leaf, read_chunk, validate_chunk_descriptor, write_chunk
-from . import _cache_parquet
+from . import _cache_netcdf, _cache_parquet
 from .base import Artifact
 from .value import ArtifactNotReadyError
 
@@ -144,8 +144,8 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
         """Compute or republish one selected cache codec through managed lifecycle.
 
         Args:
-            codec: Built-in physical codec, currently ``"numpy"`` or optional
-                ``"parquet"``.
+            codec: Built-in physical codec: ``"numpy"``, optional ``"parquet"``,
+                or optional ``"netcdf"``.
             store: Optional managed publication Store override.
             target_chunk_bytes: Positive soft target for retained logical chunks.
             managed: Runtime-created lifecycle authority.
@@ -164,12 +164,14 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
 
         if codec not in {"numpy", "parquet", "netcdf"}:
             raise ValueError("CachedDataset codec must be one of numpy, parquet, or netcdf.")
-        if codec == "netcdf":
-            raise ValueError(f"CachedDataset codec {codec!r} is not implemented in this build.")
         if codec == "parquet":
             # Dependency admission intentionally precedes source loading, including
             # same-codec republication that otherwise skips the source.
             _cache_parquet.load_pyarrow()
+        elif codec == "netcdf":
+            # Native-library admission precedes every source or retained-prefix
+            # access, including same-codec republication.
+            _cache_netcdf.load_netcdf4()
         target = _validate_target(target_chunk_bytes)
         current = getattr(self, "_cache_payload", None)
         if current is not None and current.get("mode") == "completed" and current.get("codec") == codec:
@@ -360,8 +362,12 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
     def _flush_chunk(workdir, index, values, target, codec):
         """Encode one sealed logical chunk into the retained working directory."""
 
-        suffix = "npz" if codec == "numpy" else "parquet"
-        writer = write_chunk if codec == "numpy" else _cache_parquet.write_chunk
+        suffix = {"numpy": "npz", "parquet": "parquet", "netcdf": "nc"}[codec]
+        writer = {
+            "numpy": write_chunk,
+            "parquet": _cache_parquet.write_chunk,
+            "netcdf": _cache_netcdf.write_chunk,
+        }[codec]
         return writer(
             os.path.join(_work_data_directory(workdir), "chunks", f"chunk-{index:08d}.{suffix}"), values,
             segment_bytes=min(target, 8 * 1024 * 1024),
@@ -560,6 +566,8 @@ def _read_chunk(codec: str, path: str, descriptor: dict[str, object], leaves):
         return read_chunk(path, descriptor, leaves)
     if codec == "parquet":
         return _cache_parquet.read_chunk(path, descriptor, leaves)
+    if codec == "netcdf":
+        return _cache_netcdf.read_chunk(path, descriptor, leaves)
     raise CacheIntegrityError("CachedDataset chunk uses an unsupported codec.")
 
 
@@ -682,7 +690,7 @@ def _discard_unassociated_tail(workdir: str, chunks: list[dict[str, Any]], codec
     files in work storage; no other work-tree entries are inferred disposable.
     """
 
-    suffix = "npz" if codec == "numpy" else "parquet" if codec == "parquet" else None
+    suffix = {"numpy": "npz", "parquet": "parquet", "netcdf": "nc"}.get(codec)
     if suffix is None:
         raise CacheIntegrityError("CachedDataset work codec is unsupported.")
     directory = Path(_work_data_directory(workdir), "chunks")
@@ -976,7 +984,7 @@ def _payload_from_record(record: object, src_dir: str) -> dict[str, Any]:
         common |= {"expected", "work_token", "object_ref_digest", "operation_id", "attempt_id"}
         if "prior_ready_state_digest" in record:
             common |= {"prior_ready_state_digest"}
-    if mode not in {"working", "completed"} or set(record) != common or record["codec"] not in {"numpy", "parquet"}:
+    if mode not in {"working", "completed"} or set(record) != common or record["codec"] not in {"numpy", "parquet", "netcdf"}:
         raise CacheIntegrityError("CachedDataset manifest fields are invalid.")
     if type(record["count"]) is not int or record["count"] < 0 or not isinstance(record["chunks"], list):
         raise CacheIntegrityError("CachedDataset manifest count or chunks are invalid.")
@@ -986,13 +994,15 @@ def _payload_from_record(record: object, src_dir: str) -> dict[str, Any]:
     if sum(item.get("count", -1) for item in chunks if isinstance(item, dict)) != record["count"]:
         raise CacheIntegrityError("CachedDataset manifest chunk counts are invalid.")
     for index, item in enumerate(chunks):
-        suffix = "npz" if record["codec"] == "numpy" else "parquet"
+        suffix = {"numpy": "npz", "parquet": "parquet", "netcdf": "nc"}[record["codec"]]
         if not isinstance(item, dict) or item.get("file") != f"chunk-{index:08d}.{suffix}":
             raise CacheIntegrityError("CachedDataset manifest chunk names are invalid.")
         if record["codec"] == "numpy":
             validate_chunk_descriptor(item, leaves)
-        else:
+        elif record["codec"] == "parquet":
             _cache_parquet.validate_chunk_descriptor(item, leaves)
+        else:
+            _cache_netcdf.validate_chunk_descriptor(item, leaves)
     if mode == "working":
         if (type(record["expected"]) is not int or record["expected"] < record["count"]
                 or type(record["work_token"]) is not str
