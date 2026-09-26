@@ -60,11 +60,14 @@ partition_process_state_tests() {
         [[ "$path" == ./tests/core/test_orchestrator_* ]] && process_state_selected+=("$path")
     done
     for path in "${paths[@]}"; do
+        [[ "$path" == ./tests/core/test_execute_worker_context.py ]] && process_state_selected+=("$path")
+    done
+    for path in "${paths[@]}"; do
         [[ "$path" == ./tests/dispatch/* ]] && process_state_selected+=("$path")
     done
     for path in "${paths[@]}"; do
         case "$path" in
-            ./tests/session/*|./tests/runtime/*|./tests/core/test_orchestrator_*|./tests/dispatch/*) ;;
+            ./tests/session/*|./tests/runtime/*|./tests/core/test_orchestrator_*|./tests/core/test_execute_worker_context.py|./tests/dispatch/*) ;;
             *) ordinary_selected+=("$path") ;;
         esac
     done
