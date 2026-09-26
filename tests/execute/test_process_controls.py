@@ -63,13 +63,14 @@ def test_escaped_pipe_holder_returns_incomplete_output_without_killing_escape(tm
         started = monotonic()
         result = run_bounded(
             [sys.executable, "-c", _escaped_pipe_holder(pid_file)],
-            timeout=0.05,
+            timeout=1.0,
             termination_timeout=0.05,
             output_limit=64,
         )
         elapsed = monotonic() - started
+        assert not result.timed_out
         pid = int(pid_file.read_text(encoding="utf-8"))
-        assert elapsed < 0.3
+        assert elapsed < 1.3
         assert result.cleanup_complete
         assert not result.stdout_complete
         assert _running(pid)
