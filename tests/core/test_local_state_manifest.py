@@ -35,6 +35,8 @@ def test_local_state_preparation_validates_manifest_and_owned_staging(tmp_path):
     source = store.prepare_local_state(stage, manifest)
 
     assert source.manifest == manifest
+    assert source.manifest.version == 3
+    assert source.manifest.deferred_paths == ()
     assert Path(source.handle).is_dir()
 
 
@@ -91,3 +93,45 @@ def test_manifest_rejects_reencoded_or_modified_definition_bytes(tmp_path):
     (stage / "def.pkl").write_bytes(encoded + b"\n")
     with pytest.raises(StoreAuthorityError, match="definition file bytes"):
         store.prepare_local_state(stage, manifest)
+
+
+def test_v3_deferred_paths_must_be_sorted_unique_and_in_the_payload_inventory(tmp_path):
+    store = DirStore(tmp_path / "store")
+    record = DefinitionRecord(ManifestObject().definition)
+    stage, manifest = _stage(store, record)
+    files = manifest.files
+
+    for deferred_paths in (
+            ("nested/value.bin", "nested/value.bin"),
+            ("../nested/value.bin",),
+            ("missing",),
+    ):
+        with pytest.raises(StoreRecordError):
+            LocalStateManifest(
+                manifest.codec, manifest.graph_hash, manifest.definition_digest,
+                manifest.definition_file_digest, files, deferred_paths,
+            )
+
+    sorted_files = (("another", 0, "0" * 64), *files)
+    with pytest.raises(StoreRecordError, match="sorted"):
+        LocalStateManifest(
+            manifest.codec, manifest.graph_hash, manifest.definition_digest,
+            manifest.definition_file_digest, sorted_files,
+            ("nested/value.bin", "another"),
+        )
+
+    deferred = LocalStateManifest(
+        manifest.codec, manifest.graph_hash, manifest.definition_digest,
+        manifest.definition_file_digest, files, ("nested/value.bin",),
+    )
+    (stage / "data" / "extra").write_bytes(b"extra")
+    with pytest.raises(StoreRecordError, match="empty nested|exactly match"):
+        deferred.validate_payload(stage / "data", defer_payload=True)
+    (stage / "data" / "extra").unlink()
+    (stage / "data" / "nested" / "value.bin").unlink()
+    with pytest.raises(StoreRecordError, match="empty nested|exactly match"):
+        deferred.validate_payload(stage / "data", defer_payload=True)
+    (stage / "data" / "nested").rmdir()
+    (stage / "data" / "nested").symlink_to(stage / "data")
+    with pytest.raises(StoreRecordError, match="unsupported directory"):
+        deferred.validate_payload(stage / "data", defer_payload=True)

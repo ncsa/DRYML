@@ -578,6 +578,28 @@ class Serializable(Object):
 
     state_codec = "pkl"
 
+    def deferred_state_payload_paths(
+            self, data_dir: str, *, codec: str) -> tuple[str, ...]:
+        """Return authenticated payload paths whose hash may wait until consumption.
+
+        Args:
+            data_dir: Completed framework-owned local-state payload directory.
+            codec: Validated opaque state codec selected for this save.
+
+        Returns:
+            A sorted tuple of normalized regular-file paths inside ``data_dir``.
+            The default empty tuple retains eager validation for all payload bytes.
+
+        Raises:
+            StoreRecordError: During state preparation if a subclass returns a
+                path that is not a unique payload inventory entry.
+
+        Side Effects:
+            None. The hook neither allocates storage nor reads payload content.
+        """
+
+        return ()
+
 
 class Pickleable(Serializable):
     _HEAVY_EXCLUDE = {

@@ -4001,7 +4001,7 @@ class Repo:
         # conflict admission. Enclosing exact plans own their embedded reference
         # topology, so the visitor deliberately stops at each exact boundary.
         exact_plans = {
-            digest: build_exact_state_load_plan(self, reference)
+            digest: build_exact_state_load_plan(self, reference, _defer_payload=True)
             for digest, reference in state_refs.items()
         }
         # Exact plans hydrate persisted CDefs with new private node keys. Retain
@@ -4458,7 +4458,7 @@ class Repo:
         with materialization_admission(operation="repo_load_state_ref"):
             plan = build_exact_state_load_plan(
                 self, state_ref, source_store=source_store,
-                source_stores=source_stores,
+                source_stores=source_stores, _defer_payload=True,
             )
             return execute_exact_state_load_plan(
                 self, plan, reuse_live=reuse_live, cache=cache,
@@ -4521,7 +4521,7 @@ class Repo:
         # complete before the first user restore hook can run.
         plan = build_exact_state_load_plan(
             self, state_ref, source_store=source_store,
-            source_stores=source_stores,
+            source_stores=source_stores, _defer_payload=True,
         )
         from .materialization import preflight_materialization_classes
 

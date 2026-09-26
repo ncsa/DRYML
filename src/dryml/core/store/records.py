@@ -275,16 +275,19 @@ class LocalStateManifest(_Record):
     ``definition_digest`` names validated logical graph authority while
     ``definition_file_digest`` authenticates the exact framed ``def.pkl`` bytes
     stored beside the payload. Both are required before a local state can be
-    reused, copied, or restored.
+    reused, copied, or restored. v3 additionally authenticates a sorted subset
+    of payload paths whose content hash exact restoration may defer; v2 records
+    remain readable and always validate every payload byte eagerly.
     """
 
     schema: ClassVar[str] = "local-state-manifest"
-    version: ClassVar[int] = 2
     codec: str
     graph_hash: str
     definition_digest: str
     definition_file_digest: str
     files: tuple[tuple[str, int, str], ...]
+    deferred_paths: tuple[str, ...] = ()
+    version: int = 3
 
     def __post_init__(self) -> None:
         _codec(self.codec)
@@ -293,6 +296,8 @@ class LocalStateManifest(_Record):
         _digest_value(self.definition_file_digest, "definition file digest")
         if not isinstance(self.files, tuple) or len(self.files) > _MAX_FILES:
             raise StoreRecordError("manifest files must be a bounded tuple.")
+        if self.version not in {2, 3}:
+            raise StoreRecordError(f"Unsupported LocalStateManifest version {self.version!r}.")
         previous = None
         for path, size, digest in self.files:
             _normalized_file_path(path)
@@ -302,15 +307,37 @@ class LocalStateManifest(_Record):
             if previous is not None and path <= previous:
                 raise StoreRecordError("manifest payload paths must be unique and sorted.")
             previous = path
+        if not isinstance(self.deferred_paths, tuple) or len(self.deferred_paths) > len(self.files):
+            raise StoreRecordError("manifest deferred paths must be a bounded tuple.")
+        if self.version == 2 and self.deferred_paths:
+            raise StoreRecordError("v2 local-state manifests cannot defer payload files.")
+        inventory = {path for path, _, _ in self.files}
+        previous = None
+        for path in self.deferred_paths:
+            _normalized_file_path(path)
+            if path not in inventory:
+                raise StoreRecordError("manifest deferred path is not a payload inventory entry.")
+            if previous is not None and path <= previous:
+                raise StoreRecordError("manifest deferred paths must be unique and sorted.")
+            previous = path
 
     @property
     def local_digest(self) -> str:
         # Definition authority selects the storage namespace and is validated
         # separately. State identity describes the codec payload so a fork can
         # rebind identical local state to freshly keyed graph authority.
+        if self.version == 2:
+            return _digest(
+                "dryml-local-state-manifest-v2",
+                {"codec": self.codec, "files": self.files},
+            )
         return _digest(
-            "dryml-local-state-manifest-v2",
-            {"codec": self.codec, "files": self.files},
+            "dryml-local-state-manifest-v3",
+            {
+                "codec": self.codec,
+                "files": self.files,
+                "deferred_paths": self.deferred_paths,
+            },
         )
 
     @property
@@ -318,30 +345,54 @@ class LocalStateManifest(_Record):
         return f"{self.codec}-{self.local_digest}"
 
     def to_data(self) -> dict[str, Any]:
-        return {
+        data = {
             "schema": self.schema, "version": self.version, "codec": self.codec,
             "graph_hash": self.graph_hash, "definition_digest": self.definition_digest,
             "definition_file_digest": self.definition_file_digest,
             "local_digest": self.local_digest,
             "files": [{"path": path, "size": size, "digest": digest} for path, size, digest in self.files],
         }
+        if self.version == 3:
+            data["deferred_paths"] = list(self.deferred_paths)
+        return data
 
     @classmethod
     def from_data(cls, data: Any) -> "LocalStateManifest":
-        data = _require_exact(data, {"schema", "version", "codec", "graph_hash", "definition_digest", "definition_file_digest", "local_digest", "files"}, cls.schema)
-        if data["schema"] != cls.schema or data["version"] != cls.version or not isinstance(data["files"], list):
+        if not isinstance(data, Mapping):
+            raise StoreRecordError("LocalStateManifest must be a mapping.")
+        version = data.get("version")
+        fields = {
+            "schema", "version", "codec", "graph_hash", "definition_digest",
+            "definition_file_digest", "local_digest", "files",
+        }
+        if version == 3:
+            fields.add("deferred_paths")
+        data = _require_exact(data, fields, cls.schema)
+        if data["schema"] != cls.schema or version not in {2, 3} or not isinstance(data["files"], list):
             raise StoreRecordError("Unsupported LocalStateManifest version or files.")
         files = []
         for entry in data["files"]:
             entry = _require_exact(entry, {"path", "size", "digest"}, "manifest file")
             files.append((entry["path"], entry["size"], entry["digest"]))
-        result = cls(data["codec"], data["graph_hash"], data["definition_digest"], data["definition_file_digest"], tuple(files))
+        deferred_paths = () if version == 2 else data["deferred_paths"]
+        if version == 3 and not isinstance(deferred_paths, list):
+            raise StoreRecordError("manifest deferred paths must be a list.")
+        result = cls(
+            data["codec"], data["graph_hash"], data["definition_digest"],
+            data["definition_file_digest"], tuple(files), tuple(deferred_paths), version,
+        )
         if data["local_digest"] != result.local_digest:
             raise StoreRecordError("LocalStateManifest digest does not match its content.")
         return result
 
-    def validate_payload(self, data_dir: str | os.PathLike[str]) -> None:
-        """Verify that ``data_dir`` is exactly this manifest's regular-file tree."""
+    def validate_payload(
+            self, data_dir: str | os.PathLike[str], *, defer_payload: bool = False) -> None:
+        """Verify that ``data_dir`` is exactly this manifest's regular-file tree.
+
+        ``defer_payload`` is private restore support. It always verifies the tree,
+        file types, and every declared size, but skips content hashing only for
+        v3 ``deferred_paths``. Public Store validation always leaves it false.
+        """
         root = os.fspath(data_dir)
         try:
             root_stat = os.lstat(root)
@@ -349,7 +400,7 @@ class LocalStateManifest(_Record):
             raise StoreRecordError("local state data directory is missing.") from error
         if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
             raise StoreRecordError("local state data root must be a real directory.")
-        found: list[tuple[str, int, str]] = []
+        found: list[tuple[str, int, str | None]] = []
         for current, directories, names in os.walk(root, followlinks=False):
             relative_dir = os.path.relpath(current, root)
             if relative_dir != "." and not directories and not names:
@@ -365,12 +416,24 @@ class LocalStateManifest(_Record):
                 if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
                     raise StoreRecordError(f"local state data contains an unsupported file entry: {path!r}.")
                 rel = _normalized_file_path(os.path.relpath(path, root).replace(os.sep, "/"))
+                size = os.path.getsize(path)
+                if defer_payload and rel in self.deferred_paths:
+                    found.append((rel, size, None))
+                    continue
                 digest = hashlib.sha256()
                 with open(path, "rb") as source:
                     for block in iter(lambda: source.read(1024 * 1024), b""):
                         digest.update(block)
-                found.append((rel, os.path.getsize(path), digest.hexdigest()))
-        if tuple(sorted(found)) != self.files:
+                found.append((rel, size, digest.hexdigest()))
+        expected = {
+            path: (size, digest) for path, size, digest in self.files
+        }
+        actual = {path: (size, digest) for path, size, digest in found}
+        if set(actual) != set(expected) or any(
+                size != expected[path][0]
+                or (digest is not None and digest != expected[path][1])
+                for path, (size, digest) in actual.items()
+        ):
             raise StoreRecordError("local state data tree does not exactly match manifest files.")
 
 

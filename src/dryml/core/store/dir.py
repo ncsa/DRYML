@@ -44,6 +44,8 @@ class DirStore(Store):
     live temporary format file for old authority.
     """
 
+    _supports_deferred_local_state = True
+
     def __init__(
             self,
             base_dir: str | os.PathLike[str],
@@ -705,7 +707,9 @@ class DirStore(Store):
             metadata.st_mtime_ns,
         )
 
-    def _validate_local_state_dir(self, directory: str, manifest: LocalStateManifest) -> None:
+    def _validate_local_state_dir(
+            self, directory: str, manifest: LocalStateManifest,
+            *, defer_payload: bool = False) -> None:
         expected = {"data", "def.pkl", "manifest.record"}
         try:
             root_mode = os.lstat(directory).st_mode
@@ -730,7 +734,9 @@ class DirStore(Store):
         if definition is None or definition.digest != manifest.definition_digest or definition.graph_hash != manifest.graph_hash:
             raise StoreAuthorityError("local state definition does not match manifest graph and definition digests.")
         try:
-            manifest.validate_payload(os.path.join(directory, "data"))
+            manifest.validate_payload(
+                os.path.join(directory, "data"), defer_payload=defer_payload,
+            )
         except StoreRecordError as error:
             raise StoreAuthorityError(f"local state payload is invalid: {error}") from error
 
@@ -1100,6 +1106,7 @@ class DirStore(Store):
         root = os.path.realpath(self._staging_root)
         if os.path.commonpath((root, os.path.realpath(path))) != root:
             raise StoreAuthorityError("local-state staging must be created by the selected Store.")
+        self._require_deferred_local_state_support(manifest)
         self._validate_local_state_dir(path, manifest)
         return LocalStateSource(self, path, manifest)
 
@@ -1108,6 +1115,8 @@ class DirStore(Store):
 
         if not isinstance(source, LocalStateSource):
             raise TypeError("source must be a LocalStateSource.")
+        if not source.eagerly_validated:
+            raise StoreAuthorityError("cannot rebind a metadata-only local-state source.")
         stage = self.create_local_state_staging()
         try:
             shutil.rmtree(stage)
@@ -1115,7 +1124,11 @@ class DirStore(Store):
             record = DefinitionRecord(target_definition)
             definition_bytes = record.to_bytes()
             Path(stage, "def.pkl").write_bytes(definition_bytes)
-            manifest = LocalStateManifest(source.manifest.codec, record.graph_hash, record.digest, hashlib.sha256(definition_bytes).hexdigest(), source.manifest.files)
+            manifest = LocalStateManifest(
+                source.manifest.codec, record.graph_hash, record.digest,
+                hashlib.sha256(definition_bytes).hexdigest(), source.manifest.files,
+                source.manifest.deferred_paths, source.manifest.version,
+            )
             if manifest.state_hash != source.manifest.state_hash:
                 raise StoreAuthorityError("rebound local state changed its payload identity.")
             Path(stage, "manifest.record").write_bytes(manifest.to_bytes())
@@ -1146,10 +1159,64 @@ class DirStore(Store):
     def open_local_state(self, reference, path) -> LocalStateSource:
         """Open one validated snapshot-local payload source for restoration/copy."""
 
+        from ..utils.graph.path import normalize_path
+
+        path = normalize_path(path)
         manifest = self.validate_local_state(reference, path)
         snapshot = self._read_snapshot(reference.digest())
         assert snapshot is not None
         return LocalStateSource(self, os.path.join(self._snapshot_path(reference.digest()), snapshot[2][path]), manifest)
+
+    def _open_local_state_for_exact_load(self, reference, path) -> LocalStateSource:
+        """Open one exact-restore payload after metadata-only deferred validation."""
+
+        from ..reference_values import StateRef
+        from ..utils.graph.path import normalize_path
+
+        if not isinstance(reference, StateRef):
+            raise TypeError("reference must be a StateRef.")
+        path = normalize_path(path)
+        snapshot = self._read_snapshot(reference.digest())
+        if snapshot is None or snapshot[0].state_ref != reference:
+            raise KeyError(reference.digest())
+        relative = snapshot[2].get(path)
+        if relative is None:
+            raise KeyError(path)
+        directory = os.path.join(self._snapshot_path(reference.digest()), relative)
+        manifest = self._read_file(
+            os.path.join(directory, "manifest.record"), LocalStateManifest,
+        )
+        if manifest is None or manifest.state_hash != reference.states[path]:
+            raise StoreAuthorityError("snapshot payload manifest does not match placement.")
+        self._require_deferred_local_state_support(manifest)
+        self._validate_local_state_dir(
+            directory, manifest, defer_payload=bool(manifest.deferred_paths),
+        )
+        expected = reference.object.at(path).definition
+        definition = self._read_file(os.path.join(directory, "def.pkl"), DefinitionRecord)
+        if definition is None or not definition.definition.graph_equal(expected):
+            raise StoreAuthorityError("snapshot payload definition does not match StateRef path.")
+        return LocalStateSource(
+            self, directory, manifest, eagerly_validated=not manifest.deferred_paths,
+        )
+
+    def _require_deferred_local_state_support(self, manifest: LocalStateManifest) -> None:
+        """Reject deferred manifests on backends without durable payload paths."""
+
+        if manifest.deferred_paths and not self._supports_deferred_local_state:
+            raise StoreCapabilityError(
+                "Store backend does not support deferred local-state payload validation."
+            )
+
+    def _validate_local_state_source_for_publication(
+            self, source: LocalStateSource) -> None:
+        """Require full verification and supported deferred paths before publish."""
+
+        if not isinstance(source, LocalStateSource):
+            raise TypeError("source must be a LocalStateSource.")
+        self._require_deferred_local_state_support(source.manifest)
+        if not source.eagerly_validated:
+            raise StoreAuthorityError("snapshot source must be fully payload-validated.")
 
     def publish_snapshot(
             self, reference, *, evidence, annotations=None, local_states,
@@ -1217,6 +1284,7 @@ class DirStore(Store):
                     raise TypeError("snapshot local states must map GraphPath to LocalStateSource.")
                 if source.manifest.state_hash != reference.states[path]:
                     raise StoreAuthorityError("snapshot source does not match StateRef state hash.")
+                self._validate_local_state_source_for_publication(source)
                 target_definition = reference.object.at(path).definition
                 source_definition = self._read_file(os.path.join(os.fspath(source.handle), "def.pkl"), DefinitionRecord)
                 if source_definition is None or not source_definition.definition.graph_equal(target_definition):

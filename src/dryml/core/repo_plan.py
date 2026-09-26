@@ -1245,6 +1245,7 @@ def _prepare_snapshot_local_state(obj: Object, definition: ConcreteDefinition, s
         manifest = LocalStateManifest(
             obj.state_codec, record.graph_hash, record.digest,
             hashlib.sha256(definition_bytes).hexdigest(), _manifest_files(data_dir),
+            obj.deferred_state_payload_paths(data_dir, codec=obj.state_codec),
         )
         Path(stage, "manifest.record").write_bytes(manifest.to_bytes())
         source = store.prepare_local_state(stage, manifest)
@@ -1413,6 +1414,11 @@ def execute_routed_save_plan(
                 source_by_path[action.path] = _prepare_snapshot_local_state(
                     action.obj, action.definition, routed.destinations[action.path][0], action.path,
                 )
+        # Every destination must reject an unsupported deferred manifest before
+        # any snapshot authority is installed, even when staging used another route.
+        for destination in destinations:
+            for source in source_by_path.values():
+                destination._validate_local_state_source_for_publication(source)
         state_ref = StateRef(plan.object_ref, {
             path: source.manifest.state_hash for path, source in source_by_path.items()
         })

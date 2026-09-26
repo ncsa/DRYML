@@ -36,6 +36,8 @@ class ZipStore(DirStore):
     make the required replacement guarantee.
     """
 
+    _supports_deferred_local_state = False
+
     def __init__(
             self, zip_dest: str | Path | IOBase, *, _existing_only: bool = False,
             _authority_prevalidated: bool = False):

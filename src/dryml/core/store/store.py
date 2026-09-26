@@ -76,11 +76,14 @@ class LocalStateSource:
     ``handle`` is backend-private.  A source prepared from staging is owned by
     its allocating Store until discarded; a source opened from a snapshot is
     borrowed immutable authority and cannot be discarded by its consumer.
+    ``eagerly_validated`` is private provenance: metadata-only exact-restore
+    sources cannot be rebound, copied, or published as verified authority.
     """
 
     store: "Store"
     handle: object
     manifest: LocalStateManifest
+    eagerly_validated: bool = True
 
 
 class Store(ABC):
@@ -277,6 +280,19 @@ class Store(ABC):
         """Validate one snapshot-local payload manifest and return it."""
 
         raise NotImplementedError("This Store does not validate snapshot-local payloads.")
+
+    def _validate_local_state_source_for_publication(
+            self, source: LocalStateSource) -> None:
+        """Reject unsupported deferred or metadata-only local state before publish."""
+
+        if not isinstance(source, LocalStateSource):
+            raise TypeError("source must be a LocalStateSource.")
+        if source.manifest.deferred_paths:
+            raise StoreCapabilityError(
+                "Store backend does not support deferred local-state payload validation."
+            )
+        if not source.eagerly_validated:
+            raise StoreAuthorityError("snapshot source must be fully payload-validated.")
 
     @abstractmethod
     def read_state_ref_record(self, digest: str) -> StateRefRecord | None:

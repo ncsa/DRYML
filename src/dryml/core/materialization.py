@@ -329,7 +329,8 @@ class ExactStateLoadPlan:
 
 
 def build_exact_state_load_plan(
-        repo, state_ref, *, source_store=None, source_stores=None) -> ExactStateLoadPlan:
+        repo, state_ref, *, source_store=None, source_stores=None,
+        _defer_payload: bool = False) -> ExactStateLoadPlan:
     """Verify complete StateRef authority without constructing or reserving Objects.
 
     Args:
@@ -438,6 +439,13 @@ def build_exact_state_load_plan(
         return matches[0]
 
     def locate_payload(reference, path, source):
+        def open_payload(store, target, target_path):
+            if _defer_payload:
+                adapter = getattr(store, "_open_local_state_for_exact_load", None)
+                if adapter is not None:
+                    return adapter(target, target_path)
+            return store.open_local_state(target, target_path)
+
         projection = reference.at(path) if path else None
         if projection is not None:
             known_references.setdefault(projection, projection)
@@ -451,14 +459,14 @@ def build_exact_state_load_plan(
                 selected_store, metadata = candidate
                 record_lineages(projection, metadata)
                 try:
-                    return selected_store, selected_store.open_local_state(projection, GraphPath())
+                    return selected_store, open_payload(selected_store, projection, GraphPath())
                 except Exception as error:
                     missing.append(
                         f"local state {projection.digest()} at {path!s}: {error}"
                     )
                     return None
         try:
-            return source, source.open_local_state(reference, path)
+            return source, open_payload(source, reference, path)
         except KeyError:
             # A missing local placement can be delegated to a projected child
             # snapshot. Any validation failure below is advertised corruption,
@@ -478,7 +486,7 @@ def build_exact_state_load_plan(
         selected_store, metadata = candidate
         record_lineages(projection, metadata)
         try:
-            return selected_store, selected_store.open_local_state(projection, GraphPath())
+            return selected_store, open_payload(selected_store, projection, GraphPath())
         except Exception as error:
             missing.append(f"local state {projection.digest()} at {path!s}: {error}")
             return None
