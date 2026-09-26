@@ -19,6 +19,12 @@ Important expectations:
 - `len(dataset)` should return cardinality when known.
 - `peek()` returns one element without permanently consuming the dataset.
 
+`dryml.artifacts.CachedDataset` implements this same contract after completion.
+Its persisted output spec is the codec's actual NumPy-backed `SpecTree`, so
+`Map`, `Batch`, `Unbatch`, cursors, and other ordinary Dataset consumers do not
+branch on cache type or codec. A new or progress-only cache has no consumable
+spec; only a completed StateRef restores an iterable Dataset.
+
 ### Cursors and Exact Bounds
 
 `dataset.iterator()` creates an independent closeable `DatasetCursor`. Its
@@ -139,6 +145,9 @@ it never persists or transfers the prior iterator. Exact skipping detects a sour
 that now ends before the saved position. Positional continuation assumes a
 re-iterable source but does not claim that a stochastic suffix equals the suffix
 from the interrupted traversal. Saved EOF progress needs no new source cursor.
+CachedDataset applies the same positional meaning to retained cache progress: the
+completed prefix remains exact, while a resumed stochastic source may provide a
+fresh suffix after the saved yield count.
 
 ## Structural Operations
 

@@ -48,6 +48,10 @@ archive commit can fail. Thus a later failure can preserve a valid inspectable
 receipt without reporting overall save success. A successful exact top-level load
 also installs its requested receipt. Embedded descendants never receive projected
 or synthetic receipts, and later ordinary mutation does not change the receipt.
+For a managed declaration using `return_state_ref=True`, the call result is the
+exact final StateRef captured for that invocation after association; callers must
+not substitute a later mutable `last_state_ref` receipt. Interruption, warning
+failure, or late publication/association failure returns no successful reference.
 
 ## Restore And References
 

@@ -1067,7 +1067,11 @@ import dryml.metrics
 print(json.dumps({
     'artifacts': sorted(dryml.artifacts.__all__),
     'metrics': sorted(dryml.metrics.__all__),
-    'heavy': sorted(name for name in ('tensorflow', 'torch', 'jax', 'jaxlib', 'ray') if name in sys.modules),
+    'heavy': sorted(
+        name
+        for name in ('pyarrow', 'netCDF4', 'tensorflow', 'torch', 'jax', 'jaxlib', 'ray')
+        if name in sys.modules
+    ),
 }))
 """,
         ],
@@ -1079,7 +1083,8 @@ print(json.dumps({
     )
     data = json.loads(result.stdout)
     assert data["artifacts"] == [
-        "Artifact", "ArtifactNotReadyError", "CachedDataset", "Fold", "Value", "mean", "quantile",
+        "Artifact", "ArtifactNotReadyError", "CacheCodec", "CacheIntegrityError",
+        "CachedDataset", "Fold", "Value", "mean", "quantile",
     ]
     assert data["metrics"] == [
         "AccuracyFromConfusion", "ConfusionCounts", "ConfusionInitial", "F1Average", "F1FromConfusion",
@@ -1087,6 +1092,35 @@ print(json.dumps({
         "classifier_f1", "mean_squared_error", "regressor_mae", "regressor_mse",
     ]
     assert data["heavy"] == []
+
+
+def test_installed_stage_four_dataset_exports_are_optional_backend_safe(
+    installed_python: Path,
+) -> None:
+    """Expose installed cache/cursor APIs without importing optional backends."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+import sys
+from dryml.artifacts import CacheCodec, CacheIntegrityError, CachedDataset
+from dryml.data import DatasetCursor, DatasetExhaustedError
+print(json.dumps({
+    'artifacts': [CachedDataset.__name__, CacheIntegrityError.__name__, str(CacheCodec)],
+    'data': [DatasetCursor.__name__, DatasetExhaustedError.__name__],
+    'optional': sorted(
+        name for name in ('pyarrow', 'netCDF4', 'tensorflow', 'torch', 'jax', 'jaxlib')
+        if name in sys.modules
+    ),
+}))
+""",
+    )
+    data = json.loads(result.stdout)
+    assert data["artifacts"][0:2] == ["CachedDataset", "CacheIntegrityError"]
+    assert "numpy" in data["artifacts"][2]
+    assert data["data"] == ["DatasetCursor", "DatasetExhaustedError"]
+    assert data["optional"] == []
 
 
 def _assert_code_analysis_contract(data: dict[str, object]) -> None:

@@ -2,6 +2,31 @@
 
 ## 0.3.0.dev2 (unreleased)
 
+`CachedDataset`, `CacheCodec`, and `CacheIntegrityError` are now concrete public
+Artifact APIs. Finite dense Dataset trees can be streamed into built-in NumPy,
+optional Parquet (`pyarrow>=25.0.1`), or optional NetCDF (`netCDF4>=1.7.4`) cache
+state and restored as ordinary NumPy-backed Datasets. Completed same-codec content
+can be republished without its source; codec changes recompute. Metadata is
+validated on restore and chunk integrity before delivery. Checked-in fixture-set
+v1 freezes finished format-v2 reader evidence for all three codecs and a
+deterministic NumPy/Parquet polynomial sample.
+
+CachedDataset progress uses managed checkpoints plus opaque Store-owned work
+tokens, fresh-cursor positional resume, and direct-DirStore retained files; final
+StateRefs are self-contained. Fold now checkpoints bounded carry and the same
+yield-position model. Dataset cursors are independent and closeable, Take is exact
+and reports requested/actual exhaustion, and explicit Method iteration
+independence allows eligible Map prefixes to skip transformations conservatively.
+These are same-host local-Store contracts, not stochastic replay, cache discovery,
+remote Store transport, a codec plugin API, or automatic cross-process
+synchronization.
+
+Managed declarations can opt into exact completed-StateRef returns and one
+definition-transported optional Store publication control. Authored bodies still
+declare `-> None`; unexpected body values warn and are discarded, and failures
+never return apparent completion. `ml_dtypes>=0.6.0` is a base dependency; the
+`parquet`, `netcdf`, and test extras carry the qualified optional readers.
+
 `dryml.dispatch` adds an explicit configuration-first facade for bounded static
 environment/world declaration discovery and one selected execution route. Process
 defaults and immutable views can select an Execute backend or `InProcess()`;

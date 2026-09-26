@@ -15,7 +15,14 @@ _VERSION = 2
 
 
 class CacheIntegrityError(ValueError):
-    """Raised when persisted cache metadata or encoded content is invalid."""
+    """Report invalid, incompatible, or corrupt CachedDataset content.
+
+    Args:
+        message: Bounded diagnostic describing the rejected metadata or payload.
+
+    This error identifies a failed integrity check; it does not repair content,
+    fall back to another codec, or recompute from the retained source.
+    """
 
 
 def flatten_spec(spec: SpecTree) -> tuple[TensorSpec, ...]:

@@ -303,6 +303,25 @@ class _Encoder:
             member = value.member
             if not isinstance(owner, type) or not isinstance(member, str):
                 _fail("unbound managed declaration", path)
+            owner_ref = _import_ref(owner)
+            if (
+                owner_ref is not None
+                and owner_ref.qualname is not None
+                and (
+                    owner_ref.module == "dryml"
+                    or owner_ref.module.startswith("dryml.")
+                )
+                and inspect.getattr_static(owner, member, None) is value
+            ):
+                # Framework declarations are version-local imports; caller-owned
+                # declarations retain the existing by-value snapshot contract.
+                prefix = f"{owner_ref.qualname}.{member}"
+                self.imported_captures[id(value._target)] = ImportRef(
+                    owner_ref.module, f"{prefix}._target",
+                )
+                self.imported_captures[id(value._executable)] = ImportRef(
+                    owner_ref.module, f"{prefix}._executable",
+                )
             return {
                 "tag": "managed_declaration",
                 "authored": self.value(value._target, f"{path}.authored", depth + 1),
@@ -624,9 +643,12 @@ class _Decoder:
 
         tag = node["tag"]
         if tag == "managed_declaration":
-            require("authored", {"function"}, "malformed managed declaration")
             require(
-                "executable", {"function", "function_owner"},
+                "authored", {"function", "import"},
+                "malformed managed declaration",
+            )
+            require(
+                "executable", {"function", "function_owner", "import"},
                 "malformed managed declaration",
             )
             require("owner", {"class", "import"}, "malformed managed declaration")

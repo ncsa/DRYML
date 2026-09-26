@@ -217,6 +217,10 @@ selects encoder then decoder from threaded specs. This is local structural
 selection, not global pipeline optimization, adapter insertion, or shared-node
 planning.
 
+A restored CachedDataset supplies its persisted codec-output spec through the
+ordinary Dataset API. Map selects from that spec exactly as it does for another
+source; there is no cache-aware Method selection or codec branch.
+
 ## Iteration Independence
 
 `Method.iteration_independent` is an explicit, side-effect-free declaration used
@@ -227,6 +231,10 @@ subclasses must re-declare a positive value because changing a subclass otherwis
 resets the capability to false. `Pipe` is independent only when every child is,
 and `Project` only when every branch leaf is. Select, Cast, Scale, Flatten, and
 ArgMax explicitly qualify; generic/custom Methods remain conservative.
+This capability can accelerate positional cache or Fold resume by skipping a
+discarded mapped prefix at the source cursor. It does not restore Method state,
+infer purity, or change the already selected implementation; false or unresolved
+capability retains normal prefix execution.
 
 ```python
 import numpy as np

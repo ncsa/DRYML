@@ -29,6 +29,23 @@ at class finalization with `ManagedDeclarationError`, before any lifecycle start
 `@managed_operation(resumable=True)` permits a compatible unfinished attempt to
 restore its retained Object state before re-entering the method body.
 
+`return_state_ref=True` is an opt-in completion-result contract. The authored
+body must have an explicit `-> None` annotation, including its canonical
+postponed form; missing or incompatible annotations fail declaration. After
+successful body execution, publication, and final association, the caller
+receives that invocation's exact completed `StateRef`. A non-None body result is
+discarded with a fixed `RuntimeWarning`; if warning filters turn it into an error,
+final success is withheld. Unflagged managed methods retain ordinary return
+normalization.
+
+`store_parameter="store"` declares one optional keyword-only Store control for
+checkpoint and final closure publication. Omitted or `None` preserves normal Repo
+routing and required replicas. One explicit supported Store overrides placement
+for that invocation without changing source lookup, object identity, or control
+authority. It is definition-transported by the supported core worker path rather
+than serialized as an arbitrary live resource; no other Store parameter is
+accepted.
+
 ```python
 from dryml import Repo
 from dryml.core.object import Pickleable
@@ -124,6 +141,15 @@ Interruption, branch failure, ownership conflict, or publication failure is neve
 reported as completed. A successful direct or supported same-host worker invocation
 leaves an exact final StateRef that a result reader can restore without the
 source/model payload or this control Store.
+
+`CachedDataset.compute(codec=..., store=None, target_chunk_bytes=None)` combines
+both declaration options. A checkpoint associates only progress metadata and an
+opaque Store-owned work token; sealed bytes remain in retained direct-DirStore
+working storage. Compatible resume authenticates that dependency before source
+access and applies the saved yield position to a fresh cursor. Completed
+same-codec rerun can republish without source access. Finished state is
+self-contained, while a progress StateRef ceases to be resumable if its working
+dependency is removed.
 See [Generic Execute](execute.md) for backend lifecycle boundaries,
 [Repos and Stores](repos.md) for borrowed Store authority, and
 [Session](session.md) for the cache scope used during worker reconstruction.

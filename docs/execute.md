@@ -186,6 +186,9 @@ context getters, use their import reference. Caller-owned helper functions,
 including importable module-level helpers, and closure values remain structurally
 captured with their coordinator globals and defaults. Standard `pathlib` values
 use their public kind and text rather than version-specific private slots.
+Stable DRYML-owned managed declarations likewise import the authored and
+executable functions through their exact owner member; caller-owned declarations
+remain captured by value.
 Live `Repo` and `Store` captures are rejected except in an exact
 `ManagedConfig` value. Core invocation graph v2 captures those configs wherever
 they occur in supported arguments, containers, defaults, captures, or instance
@@ -216,6 +219,17 @@ managed targets and managed calls nested inside ordinary transported callables u
 the same managed resolver. Worker failure, cancellation, and lost delivery remain
 ordinary Execute/core errors; the coordinator does not inspect managed status or
 automatically reconcile, retry, resume, or rerun mutation.
+
+A same-host worker may compute or republish a CachedDataset when its exact source
+and state authority are available through the supported shared direct-DirStore
+strategy. The managed call returns its final StateRef as reference data; payload
+chunks and live Dataset/Repo/Store objects are not result transport. Same-codec
+completed content can republish without opening the source. A changed codec or
+unfinished resume still needs the retained source/work authority. Missing or
+malformed descriptors, worker interruption, publication failure, result delivery
+failure, or incomplete cleanup retain their ordinary Execute/managed failure
+classification and never become a successful cache result. Cross-host Stores,
+automatic remote refresh, and runtime provisioning remain unsupported.
 See [Managed Operations](managed_operations.md) for lifecycle recovery,
 [Session](session.md) for resource-cache lifetime, and [Repos and Stores](repos.md)
 for the authoritative state and detached-definition boundaries.

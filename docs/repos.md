@@ -279,6 +279,27 @@ the result. The worker does not transfer live source/model payloads or managed
 control records to that reader; those references remain required only for a later
 compute or rerun.
 
+### CachedDataset Working Storage
+
+CachedDataset allocates unpublished work only beneath one routing-selected direct
+DirStore's private local-state staging namespace. Checkpoints persist an opaque
+token and owner/operation/attempt evidence, never a path or directory contents.
+Lookup probes only already connected Stores and requires exactly one matching
+validated child; it does not create storage, follow current routing to another
+destination, or use inode/device identity. Retained work survives ordinary
+process exit. Cleanup separately requires explicit reclaimable evidence and the
+work lease; owner loss alone never authorizes deletion.
+
+This working dependency is distinct from final publication. A completed cache
+copies its sealed chunks into the immutable snapshot selected by ordinary routing,
+replication, or one explicit `store=` closure override. Removing completed work
+therefore does not affect the final StateRef, while removing progress work makes
+that checkpoint non-resumable. Only direct local DirStore work and same-host
+access are qualified; ZipStore work allocation, distributed filesystems, remote
+workers, and automatic handle refresh are not implied. A caller that observes
+writes from another process must use the Repo/Store's existing explicit refresh
+or reopen behavior.
+
 ## Store Authority And Lifetime
 
 `DirStore` is the supported directory checkpoint backend. Its immutable

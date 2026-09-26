@@ -24,8 +24,49 @@ without recomputation or input materialization. Invalid result payloads fail
 restoration rather than becoming ready values; existing core restoration
 invalidation handles failed in-place restores.
 
-`CachedDataset` is an intentionally abstract Stage 4 placeholder. The retired
-mutable Store-root cache implementation has no compatibility surface.
+`CachedDataset[T]` is a concrete resumable Artifact and ordinary re-iterable
+`Dataset[T]`. Its constructor retains one `Ref[AutoRef]` source without loading,
+traversing, or implicitly saving it. Before successful computation, `ready` is
+false and spec, length, and iteration raise `ArtifactNotReadyError`. Completed
+state publishes the codec's actual NumPy-backed output spec with exact container
+kinds, mapping keys/order, tensor values, shapes, yield boundaries, and supported
+dtypes. Ragged, sparse, Python-object, and nullable-object leaves are rejected.
+
+`compute(codec="numpy" | "parquet" | "netcdf", store=None,
+target_chunk_bytes=None)` requires known finite cardinality, verifies exact EOF,
+streams chunks around a positive byte target, and returns the completed
+invocation's exact `StateRef`. The authored body still declares and returns
+`None`; this result is the managed completion policy, not its body value.
+NumPy is always available; Parquet and NetCDF import `pyarrow>=25.0.1` and
+`netCDF4>=1.7.4` only after selection and before source traversal. Missing
+dependencies raise actionable `ImportError` without codec fallback. Install the
+`parquet` or `netcdf` extra as needed; `ml_dtypes>=0.6.0` supplies bfloat fidelity.
+
+Progress checkpoints contain validated sealed-chunk descriptors, yielded count,
+source/spec evidence, and one opaque Store-owned work token. They contain no
+chunk bytes, absolute work path, iterator, or source values and are not iterable
+partial caches. Compatible resume resolves exactly one retained work directory
+through connected Stores, authenticates its owner/operation/attempt marker, opens
+a fresh cursor, skips the saved yield count, and appends only a fresh suffix.
+Position preserves a stochastic prefix but does not promise replay-equivalent
+suffix values. Missing, ambiguous, mismatched, or deleted work fails before source
+access; it is not silently rebuilt.
+
+Finished state is self-contained in its immutable Store snapshot and remains
+readable after retained work is reclaimed or the source is unavailable. Restore
+validates manifest completeness and descriptors eagerly but opens and verifies a
+chunk only when iteration reaches it; corruption raises `CacheIntegrityError`
+before any yield from that chunk. Independent iterators lease immutable cache
+generations. Same-codec managed rerun republishes completed content without source
+access; changing codec recomputes from the source. Default Repo routing and
+required replicas apply normally, while `store=` selects one supported closure
+destination for that invocation.
+
+Current work allocation and same-host worker transport are qualified only for
+already connected direct `DirStore` authority. Work directories remain private
+Store-owned staging children; no public Store/Repo API, inode-based cache identity,
+automatic cross-process synchronization, remote Store transport, cache discovery,
+or public codec plugin system is added.
 
 `Fold[T]` is a concrete resumable `Value[T]` for a declared streaming
 `Dataset` reduction. Its constructor accepts a non-materializing `Ref[AutoRef]`
@@ -139,9 +180,10 @@ creates independent evaluation streams.
 
 ## Execution And Recovery
 
-Direct managed invocation and `dryml.core.execute` can compute a concrete Value or
-Fold through a supported same-host worker. The managed operation publishes its
-exact final `StateRef`; callers recover the result by loading that StateRef, not by
+Direct managed invocation and `dryml.core.execute` can compute a concrete Value,
+Fold, or CachedDataset through a supported same-host worker. The managed operation
+publishes its exact final `StateRef`; callers recover the result by loading that
+StateRef, not by
 transporting a live Dataset, model, iterator, accumulator, or managed-control
 record. A result reader may use an explicit orchestrator materialization scope for
 that selected result only; retained `Ref[AutoRef]` inputs remain inert. A later

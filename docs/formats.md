@@ -157,6 +157,43 @@ compatibility only: they do not serialize a source Dataset/model, iterator,
 accumulator, or managed-control record, and they do not define a compatibility
 format for subclass-owned files.
 
+## CachedDataset Format V2 And Fixture Set V1
+
+Completed CachedDataset local state uses exact JSON `cache-manifest.json` format
+`dryml.cached-dataset`, version `2`, plus an ordered `chunks/` inventory. The
+manifest stores mode, selected built-in codec, encoded NumPy-backed SpecTree,
+total yield count, and closed codec descriptors. It stores no source value,
+absolute path, work token, attempt identity, iterator, or live backend object.
+Restore validates format, fields, spec, names, counts, descriptor shape, and
+declared file presence before installing readiness. Store deferred-file manifests
+authenticate chunk bytes; iteration then performs codec-level validation before
+delivering any yield from a chunk.
+
+NumPy chunks are non-pickle NPZ component arrays with explicit logical dtype,
+shape, and bounded-segment descriptors. Parquet chunks use typed value streams,
+offsets/shapes, paired complex components, UTF-8 bytes, and explicit bfloat bits;
+they require `pyarrow>=25.0.1`. NetCDF chunks require `netCDF4>=1.7.4`, use
+`NETCDF4` fixed typed component streams and explicit offsets/shapes, disable
+mask/scale authority, and serialize native library access within the process.
+All codecs reconstruct only supported dense logical trees as NumPy leaves. There
+is no object/VLEN reconstruction authority, silent coercion, codec fallback, or
+public extension grammar.
+
+Working snapshots use the same format/version with mode `working`, expected and
+sealed counts, descriptors, exact owner/operation/attempt evidence, and an opaque
+Store-local work token. They deliberately refer to external retained work and are
+not independently iterable. Finished snapshots use mode `completed`, include no
+work identity, and own every declared chunk through normal snapshot-local state.
+
+`tests/fixtures/cached_dataset/v1/` is fixture-package version 1, not an older
+cache manifest version. Its complete Store-v3 snapshots contain finished NumPy,
+Parquet, and NetCDF format-v2 payloads, including empty, nested dynamic/dtype, and
+polynomial cases. The manifest hashes every authority file and records PyArrow
+25.0.1/netCDF4 1.7.4 writer qualification. Compatibility tests read these bytes
+directly with supported readers and never regenerate them in the assertion path;
+no progress snapshot, staging dependency, work token, or machine-local path is
+part of the fixture commitment.
+
 ## Managed Control Formats
 
 Managed lifecycle control is separate bounded canonical-JSON authority in the

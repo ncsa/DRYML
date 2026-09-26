@@ -150,11 +150,18 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
             target_chunk_bytes: Positive soft target for retained logical chunks.
             managed: Runtime-created lifecycle authority.
 
+        Returns:
+            The managed boundary returns this invocation's exact completed
+            ``StateRef`` after publication and association. The authored body
+            itself returns ``None``.
+
         Raises:
             ValueError: If arguments, source cardinality, source values, or source
                 specification violate the cache contract.
             TypeError: If the source is not a Dataset or leaves are unsupported.
             CacheIntegrityError: If retained progress or payload bytes are invalid.
+            ImportError: If the selected optional codec dependency is unavailable
+                or older than its qualified minimum.
 
         Side Effects:
             Materializes the source only when a new codec computation is needed,

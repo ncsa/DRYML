@@ -124,6 +124,19 @@
             "test_artifacts_import_does_not_import_optional_tensor_frameworks"
           ]
         },
+        "tests/artifacts/test_cached_dataset_execution.py": {
+          "rationale": "Retain local completion plus direct real-subprocess same-codec republication, exact receipts, and a fresh-lineage Store override over shared direct-DirStore authority.",
+          "functions": [
+            "test_local_compute_and_subprocess_republication_return_exact_state_refs"
+          ]
+        },
+        "tests/artifacts/test_cached_dataset_fixtures.py": {
+          "rationale": "Retain direct v1 reader compatibility for all codecs and one polynomial NumPy/Parquet ordinary-consumer workflow; exhaustive mode owns broader codec/lifecycle cross-products.",
+          "functions": [
+            "test_v1_fixtures_restore_in_a_fresh_repo_without_source_or_codec_input",
+            "test_polynomial_numpy_and_parquet_fixtures_are_equivalent_and_reusable"
+          ]
+        },
         "tests/core/test_execute_results.py": {
           "rationale": "Retain live publication, cyclic-result rejection, update withholding, post-publication evidence, and partial-replica failure; exhaustive mode covers repeated alias/materialization and limit compositions.",
           "functions": [

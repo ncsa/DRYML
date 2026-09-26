@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import re
 import tarfile
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from pathlib import PurePosixPath
 import zipfile
+
+from packaging.requirements import Requirement
 
 from tests.tools.native_lock_audit import native_advisory_lock_offenders
 
@@ -295,3 +299,33 @@ def test_sdist_contains_port_modules_without_retired_core(
     } == {"src/dryml/locking.py"}
     assert "src/dryml/core/repo_graph.py" not in names
     assert not any(name.startswith("tutorials/") for name in names)
+
+
+def test_wheel_metadata_declares_cached_dataset_dependencies(
+    release_artifacts: tuple[Path, Path],
+) -> None:
+    """Require base dtype support and closed optional codec/test extras."""
+
+    _, wheel = release_artifacts
+    with zipfile.ZipFile(wheel) as archive:
+        metadata_name = next(
+            name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+        )
+        metadata = BytesParser(policy=policy.default).parsebytes(
+            archive.read(metadata_name)
+        )
+    requirements = [Requirement(value) for value in metadata.get_all("Requires-Dist", [])]
+    observed = {
+        (
+            requirement.name.lower().replace("-", "_"),
+            str(requirement.specifier),
+            None if requirement.marker is None else str(requirement.marker),
+        )
+        for requirement in requirements
+    }
+
+    assert ("ml_dtypes", ">=0.6.0", None) in observed
+    assert ("pyarrow", ">=25.0.1", 'extra == "parquet"') in observed
+    assert ("netcdf4", ">=1.7.4", 'extra == "netcdf"') in observed
+    assert ("pyarrow", ">=25.0.1", 'extra == "test"') in observed
+    assert ("netcdf4", ">=1.7.4", 'extra == "test"') in observed

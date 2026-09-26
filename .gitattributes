@@ -2,3 +2,4 @@
 tests/fixtures/store_v3/dir-store/** -text
 tests/fixtures/store_v3/zip-store.zip -text
 tests/fixtures/artifact_value_v1/**/value.pkl -text
+tests/fixtures/cached_dataset/v1/dir-store/** -text
