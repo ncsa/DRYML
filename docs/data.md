@@ -133,7 +133,12 @@ policy.
 an exact completed Fold state retain the selected reference rather than an owned
 Dataset payload. The Dataset is materialized only by `Fold.compute()` through its
 selected managed Repo; a result-only `StateRef` remains readable after that input
-is unavailable, while a later compute/rerun fails normally.
+is unavailable, while a later fresh rerun fails normally. During compatible
+recovery Fold applies its saved processed-yield count to a new closeable cursor;
+it never persists or transfers the prior iterator. Exact skipping detects a source
+that now ends before the saved position. Positional continuation assumes a
+re-iterable source but does not claim that a stochastic suffix equals the suffix
+from the interrupted traversal. Saved EOF progress needs no new source cursor.
 
 ## Structural Operations
 

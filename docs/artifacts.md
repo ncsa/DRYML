@@ -27,7 +27,7 @@ invalidation handles failed in-place restores.
 `CachedDataset` is an intentionally abstract Stage 4 placeholder. The retired
 mutable Store-root cache implementation has no compatibility surface.
 
-`Fold[T]` is a concrete non-resumable `Value[T]` for a declared streaming
+`Fold[T]` is a concrete resumable `Value[T]` for a declared streaming
 `Dataset` reduction. Its constructor accepts a non-materializing `Ref[AutoRef]`
 source plus an initializer `Method`, an `Accumulator`, and an optional finalizer
 `Method`; every dependency is retained before computation. Constructing or
@@ -41,18 +41,32 @@ observation against that declared spec, uses the first item to resolve dynamic
 coordinate facts while retaining a dynamic batch axis, then holds coordinate
 shape, backend, and device stable for the invocation.
 
-Each Fold invocation owns fresh carry and is not resumable. The accumulator
-receives observation and carry as separate Method inputs, and selected carriers
-validate initializer, transition, and finalizer contracts. Fold keeps working
-state and iterator resources invocation-local, so sharing declared Methods or
-running independent Folds does not share carry. Complete terminal results are
-normalized and installed atomically. NumPy, Torch CPU, and TensorFlow CPU
-results stay native throughout initialization, transitions, and finalization;
-only the completed terminal result is converted to a host float or NumPy array
-tree for persistence. A failure or interruption before that point
-leaves the old (or absent) result unchanged; an explicit managed rerun starts a
-new iterator and carry. A later managed state/control-publication failure still
-raises honestly even though the complete live result remains ready.
+`compute(checkpoint_every=1000, store=None)` requires a positive exact checkpoint
+interval. After each successful transition Fold advances `processed_count`; at
+the selected cadence it publishes that count and one bounded carry snapshot
+through the existing managed checkpoint authority. The optional `store` is the
+managed publication override for both checkpoints and final state. Checkpoints
+also retain source, declared/refined spec, backend/device, and Method-definition
+evidence. They contain no source payload, iterator, selected callable, or runtime
+context.
+
+Compatible recovery restores the same carry, reselects implementations without
+executing the initializer, opens a fresh independent source cursor, and skips
+exactly `processed_count` yields before continuing. Fold checkpoints actual EOF
+before running the finalizer; recovery from that state retries finalization and
+publication without loading or traversing the source. Source replay is positional:
+a deterministic source reproduces uninterrupted results, while a stochastic fresh
+cursor may produce a new suffix after the saved prefix position.
+
+NumPy, Torch CPU, and TensorFlow CPU carry leaves are copied losslessly to tagged
+host arrays only at checkpoint boundaries and restored to the same native backend.
+Transitions and finalization perform no host numerical reduction. Complete
+terminal results are still normalized and installed atomically in Value's result
+envelope. A failure before installation leaves the old (or absent) result
+unchanged. An explicit managed rerun starts count, cursor, initializer, and carry
+fresh while preserving an old completed result until its replacement succeeds.
+A later managed publication failure still raises honestly even when a complete
+live result is ready.
 
 `dryml.artifacts.mean(src, mode="global" | "coordinate")` and
 `dryml.artifacts.quantile(src, q, mode=..., capacity=..., seed=0)` return inert

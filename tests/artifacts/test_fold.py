@@ -289,6 +289,10 @@ def test_fold_rejects_empty_and_source_failures_without_replacing_old_result(tmp
     finally:
         FinishTotal.fail_globally = False
 
+    assert fold.compute(managed=ManagedConfig(state_repo=store)) is None
+    assert fold.value() == 1.0
+    assert CountingDataset.iterations == 2
+
     empty = _fold(CountingDataset([]))
     with pytest.raises(ValueError, match="empty"):
         empty.compute(managed=ManagedConfig(state_repo=DirStore(tmp_path / "empty")))
@@ -307,9 +311,12 @@ def test_fold_keeps_complete_live_result_when_final_managed_publication_fails(tm
     source = CountingDataset([np.ones((1, 2), dtype=np.float32)])
     fold = _fold(source)
     store = DirStore(tmp_path / "store")
+    save_object = Repo.save_object
 
-    def fail_final_save(*args, **kwargs):
-        raise OSError("state publication failed")
+    def fail_final_save(repo, obj, *args, **kwargs):
+        if obj.ready:
+            raise OSError("state publication failed")
+        return save_object(repo, obj, *args, **kwargs)
 
     monkeypatch.setattr(Repo, "save_object", fail_final_save)
     with pytest.raises(OSError, match="state publication failed"):
@@ -572,8 +579,8 @@ def test_fold_iterator_close_failure_is_not_completed(tmp_path):
     assert fold.compute.status(state_repo=store).state == "failed"
 
 
-def test_fold_uses_one_managed_owner_and_does_not_poll_interrupt_requests(tmp_path):
-    """A concurrent owner conflicts while a request alone cannot stop Fold workload."""
+def test_fold_uses_one_managed_owner_and_services_interrupt_at_checkpoint(tmp_path):
+    """A concurrent owner conflicts and a request stops at Fold's next safe point."""
 
     CountingDataset.reset()
     BlockingAccumulator.entered, BlockingAccumulator.release = Event(), Event()
@@ -607,10 +614,17 @@ def test_fold_uses_one_managed_owner_and_does_not_poll_interrupt_requests(tmp_pa
         BlockingAccumulator.release.set()
         worker.join(10)
 
-    assert outcome == [None]
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], ManagedInterrupted)
     status = fold.compute.status(state_repo=store)
-    assert status.state == "completed"
+    assert status.state == "interrupted"
     assert status.attempt_id is not None
+    assert status.checkpoint_state_ref is not None
+    assert fold.ready is False
+
+    assert fold.compute(managed=ManagedConfig(state_repo=store)) is None
+    assert fold.value() == 1.0
+    assert CountingDataset.iterations == 1
 
 
 class MethodGroupInitializer(Method):

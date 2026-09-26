@@ -108,13 +108,22 @@ rerun a managed method automatically. After such an error, reconnect to the
 chosen state/control authority and use `status()` or make an explicit compatible
 managed call to decide recovery.
 
-`Fold.compute` is a non-resumable managed operation. It owns one fresh Dataset
-traversal and carry per attempt, then installs its complete Value payload before
-the ordinary final state/control publication boundary. An interruption, branch
-failure, ownership conflict, or publication failure is never reported as completed;
-an explicit `rerun=True` begins a new traversal. A successful direct or supported
-same-host worker invocation leaves an exact final StateRef that a result reader can
-restore without the source/model payload or this control Store.
+`Fold.compute(checkpoint_every=1000, store=None)` is resumable. At each positive
+exact cadence it saves processed-yield count and bounded host carry together, and
+it saves an exhausted checkpoint before finalization. Compatible recovery uses the
+same managed attempt and argument authority, restores state before body entry,
+reselects Method implementations without rerunning the initializer, and skips a
+fresh Dataset cursor to the saved count. Exhausted recovery retries finalization
+without loading the source. `store` uses the managed Store-override path, so it
+governs checkpoint and final publication without creating Fold control records.
+
+An incompatible cadence or other authored argument requires `rerun=True` under
+the normal argument-digest rule. A rerun starts a new cursor, count, initializer,
+and carry but does not clear an already completed Value before replacement succeeds.
+Interruption, branch failure, ownership conflict, or publication failure is never
+reported as completed. A successful direct or supported same-host worker invocation
+leaves an exact final StateRef that a result reader can restore without the
+source/model payload or this control Store.
 See [Generic Execute](execute.md) for backend lifecycle boundaries,
 [Repos and Stores](repos.md) for borrowed Store authority, and
 [Session](session.md) for the cache scope used during worker reconstruction.
