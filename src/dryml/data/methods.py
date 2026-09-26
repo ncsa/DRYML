@@ -64,6 +64,12 @@ def _validate_method_leaf(method):
 # Elementwise methods
 
 class Select(Method):
+    @property
+    def iteration_independent(self) -> bool:
+        """Return whether discarded Select calls can be omitted safely."""
+
+        return True
+
     def __init__(self, *idxs):
         self.idxs = _normalize_path(idxs)
 
@@ -92,6 +98,12 @@ class Project(Method):
         if not tuple(_iter_method_leaves(self.branches)):
             raise ValueError("Project requires at least one Method leaf.")
         _map_method_tree(self.branches, _validate_method_leaf)
+
+    @property
+    def iteration_independent(self) -> bool:
+        """Return true only when every branch leaf permits omitted calls."""
+
+        return all(method.iteration_independent for method in _iter_method_leaves(self.branches))
 
     def __call__(self, x):
         return _map_method_tree(self.branches, lambda method: method(x))
@@ -202,6 +214,12 @@ class Pipe(Method):
         if not methods:
             raise ValueError("Pipe requires at least one Method.")
         self.methods = methods
+
+    @property
+    def iteration_independent(self) -> bool:
+        """Return true only when every sequential child permits omitted calls."""
+
+        return all(method.iteration_independent for method in self.methods)
 
     def __call__(self, x):
         result = x
@@ -314,6 +332,12 @@ class Pipe(Method):
 
 
 class Cast(Method):
+    @property
+    def iteration_independent(self) -> bool:
+        """Return whether discarded Cast calls can be omitted safely."""
+
+        return True
+
     def __init__(self, dtype):
         self.dtype = normalize_dtype(dtype)
 
@@ -359,6 +383,12 @@ def _argmax_shape(shape, axis):
 
 
 class ArgMax(Method):
+    @property
+    def iteration_independent(self) -> bool:
+        """Return whether discarded ArgMax calls can be omitted safely."""
+
+        return True
+
     def __init__(self, axis: int = -1):
         if not isinstance(axis, int):
             raise TypeError("ArgMax axis must be an int.")
@@ -411,6 +441,12 @@ class ArgMax(Method):
 
 
 class Flatten(Method):
+    @property
+    def iteration_independent(self) -> bool:
+        """Return whether discarded Flatten calls can be omitted safely."""
+
+        return True
+
     def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
         return map_spec_tree(input_spec, lambda spec: spec.with_shape(_flat_shape(spec.shape)))
 
@@ -444,6 +480,12 @@ class Flatten(Method):
 
 
 class Scale(Method):
+    @property
+    def iteration_independent(self) -> bool:
+        """Return whether discarded Scale calls can be omitted safely."""
+
+        return True
+
     def __init__(self, mean=0.0, std=1.0, *, dtype="float32"):
         if std == 0:
             raise ValueError("std must be non-zero.")

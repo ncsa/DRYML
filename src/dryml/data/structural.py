@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import itertools
-
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import Dynamic, SpecTree, batch_spec_tree, unbatch_spec_tree
 from dryml.data.collate import default_collate
-from dryml.data.dataset import Dataset
+from dryml.data.dataset import Dataset, DatasetCursor, DatasetExhaustedError
 from dryml.data.split import default_split
 
 
@@ -86,7 +84,11 @@ class Unbatch(Dataset):
 
 
 class Take(Dataset):
+    """Yield exactly a requested number of source values or report exhaustion."""
+
     def __init__(self, src: Dataset, n: int):
+        if type(n) is not int:
+            raise TypeError("n must be a nonnegative exact int.")
         if n < 0:
             raise ValueError("n must be non-negative.")
         self.src = src
@@ -94,15 +96,60 @@ class Take(Dataset):
         super().__init__(spec=src.spec)
 
     def __iter__(self):
-        yield from itertools.islice(iter(self.src), self.n)
+        """Return an independent strict Take cursor for ordinary iteration."""
+
+        return self.iterator()
+
+    def iterator(self) -> DatasetCursor:
+        """Create a lazy closeable cursor that owns at most ``n`` source yields.
+
+        Returns:
+            A cursor reporting source exhaustion with this Take's requested and
+            observed counts. ``Take(0)`` creates no source iterator.
+        """
+
+        return _TakeCursor(self.src, self.n)
 
     def __len__(self) -> Cardinality:
-        src_cardinality = _as_cardinality(self.src.__len__())
-        if src_cardinality.is_unknown:
-            return Cardinality.finite(self.n)
-        if src_cardinality.is_infinite:
-            return Cardinality.finite(self.n)
-        return Cardinality.finite(min(self.n, src_cardinality.require_finite()))
+        return Cardinality.finite(self.n)
+
+
+class _TakeCursor(DatasetCursor):
+    """Lazy strict Take cursor that closes its source on every terminal path."""
+
+    def __init__(self, src: Dataset, n: int) -> None:
+        super().__init__(iter(()))
+        self._src = src
+        self._n = n
+        self._source_cursor: DatasetCursor | None = None
+
+    def __next__(self):
+        """Return one required source value or raise Take's counted exhaustion error."""
+
+        if self._closed or self._position >= self._n:
+            self.close()
+            raise StopIteration
+        if self._source_cursor is None:
+            self._source_cursor = self._src.iterator()
+        try:
+            value = next(self._source_cursor)
+        except (StopIteration, DatasetExhaustedError) as error:
+            self.close()
+            raise DatasetExhaustedError(self._n, self._position) from error
+        except BaseException:
+            self.close()
+            raise
+        self._position += 1
+        return value
+
+    def close(self) -> None:
+        """Close this cursor and any lazily acquired source cursor once."""
+
+        if self._closed:
+            return
+        if self._source_cursor is not None:
+            self._source_cursor.close()
+        super().close()
 
 
 class Skip(Dataset):

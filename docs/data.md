@@ -19,6 +19,21 @@ Important expectations:
 - `len(dataset)` should return cardinality when known.
 - `peek()` returns one element without permanently consuming the dataset.
 
+### Cursors and Exact Bounds
+
+`dataset.iterator()` creates an independent closeable `DatasetCursor`. Its
+`position` counts consumed yields, `skip(n)` requires a nonnegative exact
+integer and either advances exactly `n` values or raises `DatasetExhaustedError`
+with requested and actual counts, and `close()` releases its owned iterator.
+Dataset objects do not retain a shared cursor. Array and NPY-file sources use
+equivalent private indexed advancement, so skipping does not read discarded rows
+or files.
+
+`Take(source, n)` requires a nonnegative exact integer and has finite
+cardinality `n`. It yields exactly `n` values or raises `DatasetExhaustedError`
+after its available prefix; `Take(source, 0)` does not open the source. The
+older `Skip(source, n)` remains forgiving when a source ends before its prefix.
+
 ## Source Datasets
 
 Common source dataset classes:
@@ -55,6 +70,12 @@ types and authoring helpers are owned by `dryml.methods`, not `dryml.code`.
 when only the backend is missing, it may inspect one first value to select it.
 That local selection does not change the Method's eager, learning, or cached
 state.
+
+When a selected Method explicitly declares `iteration_independent`, a Map cursor
+may delegate discarded values to its source cursor without invoking the Method.
+Otherwise it transforms the discarded prefix normally. The fast path may omit
+data-dependent errors in discarded transformed values, but preserves source
+counts, exhaustion, and validation for delivered values.
 
 ```python
 from dryml.data import Map, Scale

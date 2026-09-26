@@ -217,6 +217,17 @@ selects encoder then decoder from threaded specs. This is local structural
 selection, not global pipeline optimization, adapter insertion, or shared-node
 planning.
 
+## Iteration Independence
+
+`Method.iteration_independent` is an explicit, side-effect-free declaration used
+only by Dataset cursors. It is false by default. A true declaration asserts that
+omitting calls for discarded inputs cannot affect later values or omit required
+effects; it is not inferred from purity or a selected implementation. Concrete
+subclasses must re-declare a positive value because changing a subclass otherwise
+resets the capability to false. `Pipe` is independent only when every child is,
+and `Project` only when every branch leaf is. Select, Cast, Scale, Flatten, and
+ArgMax explicitly qualify; generic/custom Methods remain conservative.
+
 ```python
 import numpy as np
 

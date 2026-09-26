@@ -35,6 +35,8 @@ from .signature import (
 from .traits import METHOD_TRAITS_KEY, Traits
 
 _DIRECT_CALL_ATTR = "__dryml_method_direct_call__"
+_UNDECLARED = object()
+_ITERATION_INDEPENDENCE: weakref.WeakKeyDictionary[type, object] = weakref.WeakKeyDictionary()
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +154,11 @@ class Method(Object):
 
         super().__init_subclass__(**kwargs)
         namespace = cls.__dict__
+        declared_independence = namespace.get("iteration_independent", _UNDECLARED)
+        if declared_independence is not _UNDECLARED:
+            # Properties are valid capability declarations but not Method catalog
+            # targets. Preserve the declaration privately before catalog scans.
+            type.__delattr__(cls, "iteration_independent")
         direct = namespace.get("__call__")
         local_members = tuple(
             member
@@ -177,6 +184,12 @@ class Method(Object):
                     is_abstract=bool(getattr(direct, "__isabstractmethod__", False)),
                 ),
             )
+        # A changed subclass must opt in again instead of inheriting its parent's
+        # assertion about omitted calls. The base property reads this exact-class
+        # declaration, so catalog inspection never treats a property as a target.
+        _ITERATION_INDEPENDENCE[cls] = (
+            False if declared_independence is _UNDECLARED else declared_independence
+        )
 
     @staticmethod
     def _call_gateway(
@@ -236,6 +249,24 @@ class Method(Object):
         """
 
         return self._call_gateway(self, Method, args, kwargs)
+
+    @property
+    def iteration_independent(self) -> bool:
+        """Return whether discarded iteration calls may be omitted safely.
+
+        Returns:
+            ``False`` unless this exact concrete Method class explicitly declares
+            that skipped calls cannot affect later results or required effects.
+
+        Side Effects:
+            This declaration never selects, prepares, or invokes an
+            implementation and never changes Method-local runtime state.
+        """
+
+        declaration = _ITERATION_INDEPENDENCE.get(type(self), False)
+        if isinstance(declaration, property):
+            return declaration.__get__(self, type(self)) is True
+        return declaration is True
 
     @property
     def default_batched(self) -> bool | None:

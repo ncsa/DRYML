@@ -16,7 +16,7 @@ from dryml.core.tensor_spec import (
 )
 from dryml.core.cardinality import Cardinality
 from dryml.core.utils.recurse import first_leaf, iter_leaves, map_leaves
-from .dataset import Dataset
+from .dataset import Dataset, DatasetCursor, DatasetExhaustedError
 
 
 # ----------------------------------------------------------------------
@@ -25,6 +25,35 @@ from .dataset import Dataset
 
 class SourceDataset(Dataset):
     pass
+
+
+class _IndexedDatasetCursor(DatasetCursor):
+    """Cursor that advances a private index without fetching discarded values."""
+
+    def __init__(self, length: int, item_at: Callable[[int], Any]) -> None:
+        super().__init__(iter(()))
+        self._length = length
+        self._item_at = item_at
+
+    def __next__(self) -> Any:
+        """Fetch the current indexed value and advance this cursor's position."""
+
+        if self._closed or self._position >= self._length:
+            self.close()
+            raise StopIteration
+        value = self._item_at(self._position)
+        self._position += 1
+        return value
+
+    def skip(self, n: int) -> None:
+        """Advance the private index exactly without reading skipped values."""
+
+        self._validate_skip_count(n)
+        actual = min(n, self._length - self._position)
+        self._position += actual
+        if actual != n:
+            self.close()
+            raise DatasetExhaustedError(n, actual)
 
 
 def _tree_index(x: Any, i: int) -> Any:
@@ -141,6 +170,11 @@ class ArrayDataset(SourceDataset):
         for i in range(self._length):
             yield _tree_index(self.arrays, i)
 
+    def iterator(self) -> DatasetCursor[Any]:
+        """Create an indexed cursor that does not materialize skipped array rows."""
+
+        return _IndexedDatasetCursor(self._length, lambda index: _tree_index(self.arrays, index))
+
     def __len__(self) -> int:
         return self._length
 
@@ -180,6 +214,14 @@ class NpyFileDataset(SourceDataset):
     def __iter__(self):
         for path in self.files:
             yield np.load(path, allow_pickle=self.allow_pickle)
+
+    def iterator(self) -> DatasetCursor[Any]:
+        """Create an indexed cursor that loads only files whose values are read."""
+
+        return _IndexedDatasetCursor(
+            len(self.files),
+            lambda index: np.load(self.files[index], allow_pickle=self.allow_pickle),
+        )
 
     def __len__(self) -> Cardinality:
         return Cardinality.finite(len(self.files))
