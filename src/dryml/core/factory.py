@@ -16,6 +16,7 @@ def _is_target_token(value: Any) -> bool:
 def _freeze_factory_value(value: Any, path: tuple[str, ...] = ()) -> Any:
     from .definition import ConcreteDefinition, Definition
     from .object import Object
+    from .template import Template
 
     if isinstance(value, (Object, Definition, ConcreteDefinition)):
         loc = "/".join(path) or "<root>"
@@ -23,6 +24,9 @@ def _freeze_factory_value(value: Any, path: tuple[str, ...] = ()) -> Any:
             f"FactorySpec arguments cannot contain DRYML graph nodes at {loc}. "
             "Pass plain runtime construction values instead."
         )
+
+    if isinstance(value, Template):
+        return value
 
     symbol = maybe_symbol_ref(value)
     if symbol is not None:
@@ -191,6 +195,22 @@ class FactorySpec:
             args = tuple(parts)
 
         return cls(target, *args, **kwargs)
+
+    @classmethod
+    def _from_template_parts(
+        cls, target: Any, args: tuple[Any, ...], kwargs: FrozenDict
+    ) -> "FactorySpec":
+        """Rebuild an already-frozen call without resolving its target.
+
+        Template rewriting uses this private constructor to preserve inert
+        factory spelling and aliases among rewritten argument values.
+        """
+
+        result = object.__new__(cls)
+        object.__setattr__(result, "target", target)
+        object.__setattr__(result, "args", args)
+        object.__setattr__(result, "kwargs", kwargs)
+        return result
 
     @classmethod
     def coerce_many(cls, values, *, strict: bool = False) -> tuple[Any, ...]:

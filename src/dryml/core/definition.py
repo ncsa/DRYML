@@ -268,10 +268,29 @@ class Definition(DefInterface, Mapping):
         object.__setattr__(result, "_kwargs", FrozenDict(parameters))
         return result
 
+    @classmethod
+    def _from_template_parts(cls, definition_cls, args, kwargs) -> "Definition":
+        """Rebuild an already-frozen soft call without rebinding its spelling.
+
+        Template rewriting owns the supplied immutable values and uses this
+        narrow constructor to preserve positional, keyword, and skipped-args
+        call shape without resolving the target or applying defaults.
+        """
+
+        result = object.__new__(cls)
+        object.__setattr__(result, "_stable_hash_cache", None)
+        object.__setattr__(result, "_cls", definition_cls)
+        object.__setattr__(result, "_args", args)
+        object.__setattr__(result, "_kwargs", kwargs)
+        return result
+
     @staticmethod
     def _freeze_value(value):
         from .canonical import freeze_def_value
+        from .template import Template
 
+        if isinstance(value, Template):
+            return value
         return freeze_def_value(value)
 
     @classmethod
