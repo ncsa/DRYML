@@ -4716,6 +4716,24 @@ class Repo:
             return result.one()
 
     def query(self, selector=None):
+        """Create an immutable structural or exact-template definition query.
+
+        Args:
+            selector: A Definition, ConcreteDefinition, Selector,
+                TemplateSelector, Object, or ``None``. Template selectors retain
+                an exact support residual and verify graph-distinct witnesses at
+                terminal execution.
+
+        Returns:
+            A DefinitionQuery with no selected domain yet.
+
+        Raises:
+            TypeError: If ``selector`` is not a supported query source.
+
+        Side Effects:
+            Does not refresh indexes, enumerate Stores, materialize Objects, or
+            invoke template verification until a terminal is evaluated.
+        """
         from .query import DefinitionQuery
 
         return DefinitionQuery.from_source(self, selector)

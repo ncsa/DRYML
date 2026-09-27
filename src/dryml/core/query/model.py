@@ -422,6 +422,8 @@ class ResultUniverse:
     materializable: bool = False
     domain: str = "stored"
     replicas: dict[Any, tuple[Any, ...]] | None = None
+    witnesses: tuple[Any, ...] = ()
+    witness_complete: bool = False
 
 
 @dataclass(slots=True)

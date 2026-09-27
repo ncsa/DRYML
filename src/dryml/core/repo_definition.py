@@ -767,6 +767,10 @@ class _SelectorEncoder:
         }
 
     def selector(self, selector: Any, path: str, depth: int = 0) -> dict[str, Any]:
+        from .template_selector import TemplateSelector
+
+        if isinstance(selector, TemplateSelector):
+            return {"kind": "template-selector", "payload": selector.to_data()}
         return {"root": self.definition(selector.root, path + ".root", depth + 1), "strict": selector.strict, "cls_policy": selector.cls_policy, "nodes": self.nodes}
 
 
@@ -862,6 +866,14 @@ def _validate_reference_graph_path(value: Any, path: str) -> None:
 
 
 def _validate_selector(value: Any, path: str) -> None:
+    if isinstance(value, Mapping) and value.get("kind") == "template-selector":
+        record = _exact_keys(value, {"kind", "payload"}, path)
+        try:
+            from .template_selector import TemplateSelector
+            TemplateSelector.from_data(record["payload"])
+        except (TypeError, ValueError):
+            raise _error(path, "template selector payload is invalid") from None
+        return
     record = _exact_keys(value, {"root", "strict", "cls_policy", "nodes"}, path)
     if type(record["strict"]) is not bool or record["cls_policy"] not in _CLASS_POLICIES:
         raise _error(path, "selector policy is invalid")
@@ -1444,6 +1456,9 @@ def _selector_from_data(value: Mapping[str, Any]):
     from .template import Template
     from .template_selector import TemplateSelector
     from .utils.graph.path import GraphPath
+
+    if value.get("kind") == "template-selector":
+        return TemplateSelector.from_data(value["payload"])
 
     nodes = {node["label"]: node for node in value["nodes"]}
     definitions: dict[str, Any] = {}

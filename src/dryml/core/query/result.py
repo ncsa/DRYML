@@ -54,6 +54,8 @@ class DefinitionResultSet:
     domain: str = "stored"
     explanation: QueryExplanation | None = None
     _replicas: dict[ConcreteDefinition, tuple[Any, ...]] | None = None
+    _witnesses: tuple[ConcreteDefinition, ...] = ()
+    _witness_complete: bool = False
 
     def __init__(
             self,
@@ -63,7 +65,9 @@ class DefinitionResultSet:
             materializable: bool = True,
             domain: str = "stored",
             explanation: QueryExplanation | None = None,
-            replicas: Mapping[ConcreteDefinition, tuple[Any, ...]] | None = None):
+            replicas: Mapping[ConcreteDefinition, tuple[Any, ...]] | None = None,
+            witnesses: Iterable[ConcreteDefinition] = (),
+            witness_complete: bool = False):
         if replicas is None:
             raise ValueError("DefinitionResultSet requires explicit replica metadata; use {} for nonmaterializable results.")
         object.__setattr__(self, "repo", repo)
@@ -77,6 +81,8 @@ class DefinitionResultSet:
             if missing:
                 raise ValueError("Materializable DefinitionResultSet requires a replica entry for every definition.")
         object.__setattr__(self, "_replicas", dict(replicas))
+        object.__setattr__(self, "_witnesses", tuple(witnesses))
+        object.__setattr__(self, "_witness_complete", bool(witness_complete))
 
     def __iter__(self) -> Iterator[ConcreteDefinition]:
         return iter(self._definitions)
@@ -118,6 +124,8 @@ class DefinitionResultSet:
             materializable=self.materializable,
             domain=self.domain,
             replicas=dict(self._replicas),
+            witnesses=self._witnesses,
+            witness_complete=self._witness_complete,
         )
         return DefinitionQuery.from_source(
             self.repo,
@@ -212,6 +220,8 @@ class QueryBackedDefinitionResultSet(DefinitionResultSet):
         object.__setattr__(self, "domain", domain)
         object.__setattr__(self, "explanation", explanation)
         object.__setattr__(self, "_replicas", {})
+        object.__setattr__(self, "_witnesses", ())
+        object.__setattr__(self, "_witness_complete", False)
         object.__setattr__(self, "_page_factory", page_factory)
         object.__setattr__(self, "_definition_cache", [])
         object.__setattr__(self, "_replica_cache", {})
@@ -304,6 +314,8 @@ class OccurrenceResultSet:
     _occurrence_factory: Callable[[], Iterable[DefinitionOccurrence]] | None
     explanation: QueryExplanation | None = None
     _owner_replicas: dict[ConcreteDefinition, tuple[Any, ...]] | None = None
+    _witnesses: tuple[DefinitionOccurrence, ...] = ()
+    _witness_complete: bool = False
 
     def __init__(
             self,
@@ -312,7 +324,9 @@ class OccurrenceResultSet:
             *,
             occurrence_factory: Callable[[], Iterable[DefinitionOccurrence]] | None = None,
             explanation: QueryExplanation | None = None,
-            owner_replicas: Mapping[ConcreteDefinition, tuple[Any, ...]] | None = None):
+            owner_replicas: Mapping[ConcreteDefinition, tuple[Any, ...]] | None = None,
+            witnesses: Iterable[DefinitionOccurrence] = (),
+            witness_complete: bool = False):
         if occurrences is None and occurrence_factory is None:
             occurrences = ()
         if occurrences is not None and occurrence_factory is not None:
@@ -322,6 +336,8 @@ class OccurrenceResultSet:
         object.__setattr__(self, "_occurrence_factory", occurrence_factory)
         object.__setattr__(self, "explanation", explanation)
         object.__setattr__(self, "_owner_replicas", None if owner_replicas is None else dict(owner_replicas))
+        object.__setattr__(self, "_witnesses", tuple(witnesses))
+        object.__setattr__(self, "_witness_complete", bool(witness_complete))
 
     def __iter__(self) -> Iterator[DefinitionOccurrence]:
         if self._occurrences is not None:
@@ -392,6 +408,8 @@ class OccurrenceResultSet:
             materializable=False,
             domain="nested",
             replicas=dict(self._owner_replicas or {}),
+            witnesses=self._witnesses,
+            witness_complete=self._witness_complete,
         )
         return DefinitionQuery.from_source(
             self.repo,

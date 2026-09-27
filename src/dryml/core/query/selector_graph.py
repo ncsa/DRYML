@@ -142,7 +142,7 @@ class _SelectorGraphCompiler:
 
         node_id = len(self.nodes)
         self.nodes.append(SelectorGraphNode(node_id, source_path, selector, (), None))
-        if _selector_requires_scan(selector):
+        if _selector_requires_scan(selector) or _selector_has_partial_factory(selector):
             self.requires_scan = True
         try:
             counts: Counter[FeatureToken] = Counter()
@@ -305,6 +305,64 @@ def _selector_requires_scan(selector: Definition | ConcreteDefinition) -> bool:
     except (TypeError, ValueError):
         return bool(supplied_args or selector.kwargs)
     return False
+
+
+def _selector_has_partial_factory(value: Any, active: set[int] | None = None) -> bool:
+    """Detect Match-bearing FactorySpec calls that cannot use an atomic hash."""
+
+    from ..factory import FactorySpec
+    from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+    from ..params import Par
+
+    if isinstance(value, Par):
+        return False
+    if active is None:
+        active = set()
+    if isinstance(value, FactorySpec):
+        return _factory_pattern(value, active)
+    if isinstance(value, Definition):
+        values = (() if value.args is None else value.args, value.kwargs.values())
+    elif isinstance(value, (dict, FrozenDict)):
+        values = (value.values(),)
+    elif isinstance(value, (list, tuple, FrozenList, FrozenTuple, set, frozenset, FrozenSet)):
+        values = (value,)
+    else:
+        return False
+    marker = id(value)
+    if marker in active:
+        return False
+    active.add(marker)
+    try:
+        return any(_selector_has_partial_factory(item, active) for group in values for item in group)
+    finally:
+        active.remove(marker)
+
+
+def _factory_pattern(value: Any, active: set[int]) -> bool:
+    """Return whether one factory call contains a predicate leaf."""
+
+    from ..factory import FactorySpec
+    from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+    from ..params import Par
+
+    if isinstance(value, Par):
+        return True
+    if isinstance(value, (dict, FrozenDict)):
+        values = value.values()
+    elif isinstance(value, (list, tuple, FrozenList, FrozenTuple, set, frozenset, FrozenSet)):
+        values = value
+    elif not isinstance(value, FactorySpec):
+        return False
+    else:
+        values = (*value.args, *value.kwargs.values())
+    marker = id(value)
+    if marker in active:
+        return False
+    active.add(marker)
+    try:
+        return any(_factory_pattern(item, active) for item in values)
+    finally:
+        active.remove(marker)
 
 
 def _validate_acyclic(

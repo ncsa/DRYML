@@ -332,6 +332,10 @@ class ReferenceQuery:
             TypeError: If ``value`` is neither Definition nor ConcreteDefinition.
         """
 
+        from ..template_selector import TemplateSelector
+
+        if isinstance(value, TemplateSelector):
+            raise TypeError("ReferenceQuery does not support TemplateSelector constraints.")
         if not isinstance(value, (Definition, ConcreteDefinition)):
             raise TypeError("definition filter requires a Definition or ConcreteDefinition.")
         return self._replace(definition=value)

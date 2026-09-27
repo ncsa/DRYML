@@ -18,6 +18,7 @@ from .definition import ConcreteDefinition
 from .object import Object, Serializable
 from .policies import RepoGraphOptions
 from .selector import Selector
+from .template_selector import TemplateSelector
 from .store.store import Store, StoreCapabilityError
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
@@ -36,7 +37,7 @@ class SaveRouting:
     """Detached, immutable ordered destination policy for future Repo saves.
 
     Args:
-        routes: Ordered ``(Selector, Store)`` bindings.  Store handles are
+        routes: Ordered ``(Selector | TemplateSelector, Store)`` bindings. Store handles are
             retained, never opened or created, and must be connected to a Repo
             before that Repo installs this policy.
         match_mode: ``"first"`` selects the first matching binding and
@@ -45,7 +46,7 @@ class SaveRouting:
 
     Raises:
         TypeError: If fields have unsupported types or route entries are not
-            Selector/Store pairs.
+            Selector or TemplateSelector/Store pairs.
         ValueError: If a mode is not one of the supported closed values.
 
     Side Effects:
@@ -53,7 +54,7 @@ class SaveRouting:
         policy never opens, creates, validates, or publishes to a Store.
     """
 
-    routes: tuple[tuple[Selector, Store], ...] = ()
+    routes: tuple[tuple[Selector | TemplateSelector, Store], ...] = ()
     match_mode: str = "first"
     graph_mode: str = "per-object"
 
@@ -67,8 +68,8 @@ class SaveRouting:
             if not isinstance(route, (tuple, list)) or len(route) != 2:
                 raise TypeError("SaveRouting routes must contain (Selector, Store) pairs.")
             selector, store = route
-            if not isinstance(selector, Selector):
-                raise TypeError("SaveRouting route selectors must be Selectors.")
+            if not isinstance(selector, (Selector, TemplateSelector)):
+                raise TypeError("SaveRouting route selectors must be Selectors or TemplateSelectors.")
             if not isinstance(store, Store):
                 raise TypeError("SaveRouting route destinations must be Stores.")
             routes.append((selector, store))
