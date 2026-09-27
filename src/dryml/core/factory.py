@@ -72,6 +72,33 @@ def _resolve_factory_value(value: Any) -> Any:
     return value
 
 
+def _contains_match(value: Any, active: set[int] | None = None) -> bool:
+    """Return whether a frozen factory value contains a Match predicate."""
+
+    from .params import Match
+
+    if isinstance(value, Match):
+        return True
+    if not isinstance(value, (FactorySpec, Mapping, list, tuple, set, frozenset, FrozenList, FrozenSet)):
+        return False
+    if active is None:
+        active = set()
+    marker = id(value)
+    if marker in active:
+        return False
+    active.add(marker)
+    try:
+        if isinstance(value, FactorySpec):
+            values = (*value.args, *value.kwargs.values())
+        elif isinstance(value, Mapping):
+            values = value.values()
+        else:
+            values = value
+        return any(_contains_match(item, active) for item in values)
+    finally:
+        active.remove(marker)
+
+
 def _namespace_get(namespace: Any, name: str) -> Any | None:
     if namespace is None:
         return None

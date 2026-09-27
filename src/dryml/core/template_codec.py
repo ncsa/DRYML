@@ -303,8 +303,8 @@ def _encode(kind: str, root: object) -> dict[str, object]:
 
 
 class _DecodeState:
-    def __init__(self, records: dict[str, Mapping[str, object]], built: dict[str, object]) -> None:
-        self.records, self.built, self.active = records, built, set()
+    def __init__(self, records: dict[str, Mapping[str, object]]) -> None:
+        self.records, self.built, self.active = records, {}, set()
 
 
 def _decode(data: Mapping[str, object], *, extra: set[str] | None = None):
@@ -322,7 +322,7 @@ def _decode(data: Mapping[str, object], *, extra: set[str] | None = None):
         if record["label"] in records:
             raise TemplateCodecError("template node label is duplicated")
         records[record["label"]] = record
-    state = _DecodeState(records, {})
+    state = _DecodeState(records)
     root = _decode_value(data["root"], state, 0)
     if extra is not None and "domains" in extra and isinstance(data["domains"], list):
         # Domain choice values share the selector graph labels but are not
@@ -446,7 +446,12 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
         items = [value(item) for item in data["items"]]
         if tag == "set" and any(not _portable_set_member(item) for item in items):
             raise TemplateCodecError("template set members must be literal portable values")
-        try: return FrozenList(items) if tag == "list" else FrozenTuple(items) if tag == "tuple" else FrozenSet(items)
+        try:
+            if tag == "list":
+                return FrozenList(items)
+            if tag == "tuple":
+                return FrozenTuple(items)
+            return FrozenSet(items)
         except Exception: raise TemplateCodecError("template set is invalid") from None
     if tag == "quoted" and set(data) == {"tag", "value"}: return QuotedDef(value(data["value"]))
     if tag == "selector-spec" and set(data) == {"tag", "selector"}: return SelectorSpec(value(data["selector"]))

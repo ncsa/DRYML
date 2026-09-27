@@ -312,14 +312,13 @@ def _selector_has_partial_factory(value: Any, active: set[int] | None = None) ->
 
     from ..factory import FactorySpec
     from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
-    from ..params import Match
 
-    if isinstance(value, Match):
-        return False
     if active is None:
         active = set()
     if isinstance(value, FactorySpec):
-        return _factory_pattern(value, active)
+        from ..factory import _contains_match
+
+        return _contains_match(value)
     if isinstance(value, Definition):
         values = (() if value.args is None else value.args, value.kwargs.values())
     elif isinstance(value, (dict, FrozenDict)):
@@ -334,33 +333,6 @@ def _selector_has_partial_factory(value: Any, active: set[int] | None = None) ->
     active.add(marker)
     try:
         return any(_selector_has_partial_factory(item, active) for group in values for item in group)
-    finally:
-        active.remove(marker)
-
-
-def _factory_pattern(value: Any, active: set[int]) -> bool:
-    """Return whether one factory call contains a predicate leaf."""
-
-    from ..factory import FactorySpec
-    from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
-    from ..params import Match
-
-    if isinstance(value, Match):
-        return True
-    if isinstance(value, (dict, FrozenDict)):
-        values = value.values()
-    elif isinstance(value, (list, tuple, FrozenList, FrozenTuple, set, frozenset, FrozenSet)):
-        values = value
-    elif not isinstance(value, FactorySpec):
-        return False
-    else:
-        values = (*value.args, *value.kwargs.values())
-    marker = id(value)
-    if marker in active:
-        return False
-    active.add(marker)
-    try:
-        return any(_factory_pattern(item, active) for item in values)
     finally:
         active.remove(marker)
 

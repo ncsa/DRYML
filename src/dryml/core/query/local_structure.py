@@ -85,7 +85,6 @@ def _walk(
     if isinstance(value, Object):
         value = value.definition
 
-    is_target = mode.startswith("target")
     is_local = mode.endswith("local")
     if isinstance(value, DefLink):
         target = value.target
@@ -157,8 +156,8 @@ def _walk_checked(
     is_selector = mode.startswith("selector")
     is_local = mode.endswith("local")
 
-    from ..factory import FactorySpec
-    if isinstance(value, FactorySpec) and is_selector and _factory_has_pattern(value):
+    from ..factory import FactorySpec, _contains_match
+    if isinstance(value, FactorySpec) and is_selector and _contains_match(value):
         # A Match-bearing factory is a partial call pattern, not an atomic value.
         # Its hash cannot safely reject a candidate with wildcard arguments.
         return
@@ -396,30 +395,3 @@ def _tracks_cycles(value: Any) -> bool:
 
 def _can_match_absent(value: Any) -> bool:
     return isinstance(value, Match) and value.matches(None, present=False)
-
-
-def _factory_has_pattern(value: Any, active: set[int] | None = None) -> bool:
-    """Return whether a FactorySpec contains a predicate rather than exact data."""
-
-    from ..factory import FactorySpec
-
-    if isinstance(value, Match):
-        return True
-    if active is None:
-        active = set()
-    if not isinstance(value, (FactorySpec, dict, FrozenDict, list, tuple, FrozenList, FrozenTuple, set, frozenset, FrozenSet)):
-        return False
-    marker = id(value)
-    if marker in active:
-        return False
-    active.add(marker)
-    try:
-        if isinstance(value, FactorySpec):
-            values = (*value.args, *value.kwargs.values())
-        elif isinstance(value, (dict, FrozenDict)):
-            values = value.values()
-        else:
-            values = value
-        return any(_factory_has_pattern(item, active) for item in values)
-    finally:
-        active.remove(marker)

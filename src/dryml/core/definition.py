@@ -20,7 +20,7 @@ from .cdef_identity import (
 from .utils.types import is_nonclass_callable
 from .utils.general import get_class_str
 from .utils.graph import GraphCtx, GraphMatcher
-from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+from .freeze import FrozenDict, FrozenTuple
 from .errors import PathAccessError
 from .policies import CachePolicy
 from .canonical import (
@@ -1388,8 +1388,7 @@ class SelectorMatcher(GraphMatcher):
     def _match_factory(self, selector, target, ctx: GraphCtx) -> bool:
         """Match exact factories and projected partial factory call patterns."""
 
-        from .factory import FactorySpec
-        from .params import Match
+        from .factory import FactorySpec, _contains_match
 
         if not isinstance(target, FactorySpec):
             return False
@@ -1400,18 +1399,7 @@ class SelectorMatcher(GraphMatcher):
         if any(not self.match(left, right, ctx.child(index)) for index, (left, right) in enumerate(zip(selector.args, target.args))):
             return False
 
-        def patterned(value):
-            if isinstance(value, Match):
-                return True
-            if isinstance(value, FactorySpec):
-                return any(patterned(item) for item in (*value.args, *value.kwargs.values()))
-            if isinstance(value, Mapping):
-                return any(patterned(item) for item in value.values())
-            if isinstance(value, (tuple, list, set, frozenset, FrozenTuple, FrozenList, FrozenSet)):
-                return any(patterned(item) for item in value)
-            return False
-
-        is_pattern = any(patterned(value) for value in (*selector.args, *selector.kwargs.values()))
+        is_pattern = _contains_match(selector)
         if not is_pattern and tuple(selector.kwargs) != tuple(target.kwargs):
             return False
         for key, value in selector.kwargs.items():

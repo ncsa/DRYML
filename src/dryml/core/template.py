@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import math
 import re
-from typing import Any
 
 from .errors import TemplateError, TemplateLimitError, UnresolvedTemplateError
 from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
@@ -389,7 +388,7 @@ class Template:
     @property
     def is_resolved(self) -> bool:
         """Return whether the active recipe contains no template expressions."""
-        return not _active_parameters(self._root) and not _contains_expression(self._root)
+        return not _contains_expression(self._root)
 
     def sub(
         self,

@@ -11,9 +11,8 @@ from collections.abc import Mapping
 from itertools import product
 from types import MappingProxyType
 import random
-from typing import Any
 
-from .definition import ConcreteDefinition, Definition
+from .definition import ConcreteDefinition, Definition, _structural_value_equal
 from .domains import Distribution, UniformFromSet
 from .errors import (
     TemplateError,
@@ -33,14 +32,6 @@ from .template import (
 
 _MAX_GRID_RESULTS = 4_096
 _MAX_ASSIGNMENTS = 65_536
-
-
-def _same_value(left: object, right: object) -> bool:
-    """Compare generated scalar values without numeric coercion."""
-
-    from .definition import _structural_value_equal
-
-    return _structural_value_equal(left, right)
 
 
 def _validate_limit(value: object, *, label: str, maximum: int) -> int:
@@ -410,7 +401,7 @@ class TemplateSelector:
         cardinality = _support_cardinality(provider, name)
         if cardinality > self._max_assignments:
             raise TemplateLimitError("template support membership scan limit exceeded")
-        return any(_same_value(value, _provider_value(provider, name, index)) for index in range(cardinality))
+        return any(_structural_value_equal(value, _provider_value(provider, name, index)) for index in range(cardinality))
 
     def _infer_visible_roots(self, target: Definition | ConcreteDefinition) -> dict[str, object]:
         """Collect consistent direct empty-path parameter occurrences from target."""
@@ -423,7 +414,7 @@ class TemplateSelector:
             prior = found.get(parameter.name, _MISSING)
             if prior is _MISSING:
                 found[parameter.name] = value
-            elif not _same_value(prior, value):
+            elif not _structural_value_equal(prior, value):
                 found[parameter.name] = _INCONSISTENT
 
         def pairs(source: object, candidate: object) -> None:
@@ -578,13 +569,13 @@ def _loose_selector(template: Template):
     if not isinstance(template.root, Definition):
         raise TemplateError("Template.as_selector requires a soft Definition root")
 
-    def project(value: object, *, sequence: bool = False) -> object:
-        if isinstance(value, (Par, Expr)):
+    def project(value: object) -> object:
+        if isinstance(value, Expr):
             return _UNKNOWN
         if isinstance(value, DefLink):
             return value
         if isinstance(value, FactorySpec):
-            args = tuple(AnyValue() if (item := project(arg, sequence=True)) is _UNKNOWN else item for arg in value.args)
+            args = tuple(AnyValue() if (item := project(arg)) is _UNKNOWN else item for arg in value.args)
             kwargs = FrozenDict(
                 (name, AnyValue() if (item := project(arg)) is _UNKNOWN else item)
                 for name, arg in value.kwargs.items()
@@ -592,7 +583,7 @@ def _loose_selector(template: Template):
             return FactorySpec._from_template_parts(value.target, args, kwargs)
         if isinstance(value, Definition):
             args = None if value.args is None else FrozenTuple(
-                AnyValue() if (item := project(arg, sequence=True)) is _UNKNOWN else item
+                AnyValue() if (item := project(arg)) is _UNKNOWN else item
                 for arg in value.args
             )
             kwargs = FrozenDict(
@@ -608,9 +599,9 @@ def _loose_selector(template: Template):
                 if (item := project(arg)) is not _UNKNOWN
             )
         if isinstance(value, (list, FrozenList)):
-            return FrozenList(AnyValue() if (item := project(arg, sequence=True)) is _UNKNOWN else item for arg in value)
+            return FrozenList(AnyValue() if (item := project(arg)) is _UNKNOWN else item for arg in value)
         if isinstance(value, (tuple, FrozenTuple)):
-            return FrozenTuple(AnyValue() if (item := project(arg, sequence=True)) is _UNKNOWN else item for arg in value)
+            return FrozenTuple(AnyValue() if (item := project(arg)) is _UNKNOWN else item for arg in value)
         if isinstance(value, (set, frozenset, FrozenSet)):
             items = [project(item) for item in value]
             return _UNKNOWN if any(item is _UNKNOWN for item in items) else FrozenSet(items)
