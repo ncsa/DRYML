@@ -255,11 +255,18 @@ class FactorySpec:
         Raises:
             ValueError: If a short string target cannot be resolved.
             TypeError: If the built object is not ``instance_type``.
+            UnresolvedTemplateError: If an argument still contains an active
+                template expression; the target is not resolved or invoked.
             Exception: Any resolution or target-constructor failure unchanged.
 
         Side Effects:
             May import target code and invokes the target constructor.
         """
+        from .errors import UnresolvedTemplateError
+        from .template import _contains_expression
+
+        if _contains_expression(self.args) or _contains_expression(self.kwargs):
+            raise UnresolvedTemplateError("FactorySpec cannot build unresolved template expressions")
         target = self.resolve_target(namespace=namespace)
         args = tuple(_resolve_factory_value(arg) for arg in self.args)
         kwargs = {

@@ -49,6 +49,24 @@ class Par:
         return ("par", self.name, self.matcher.stable_key(), gen_key)
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class Match(Par):
+    """Independent query predicate leaf with optional descriptive metadata.
+
+    Args:
+        matcher: The predicate implementation used for selector matching.
+        name: Optional metadata retained in the stable predicate identity. It
+            does not bind a template parameter or connect query fields.
+
+    The class remains a legacy ``Par`` subclass during the staged migration so
+    existing selector walkers continue to recognize it without treating the
+    new template expression ``Par`` as a query predicate.
+    """
+
+    def __init__(self, matcher: Matcher, name: str | None = None) -> None:
+        Par.__init__(self, name, matcher)
+
+
 @dataclass(frozen=True, slots=True)
 class PresentMatcher:
     def matches(self, value: Any, *, present: bool = True) -> bool:

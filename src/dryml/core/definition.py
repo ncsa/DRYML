@@ -550,6 +550,19 @@ class Definition(DefInterface, Mapping):
         from .search_space import SearchSpace
         return SearchSpace.from_def(self)
 
+    def as_template(self) -> "Template":
+        """Convert this Definition into an inert reusable template.
+
+        Returns:
+            A Template retaining this Definition's frozen recipe exactly.
+
+        Side Effects:
+            None. The source is neither resolved nor constructed.
+        """
+        from .template import Template
+
+        return Template.from_value(self)
+
 
 # Python 3.10's frozen-slots dataclass transform replaces custom pickle methods.
 Definition.__getstate__ = Definition._pickle_getstate

@@ -19,7 +19,7 @@ _EXPECTED_CORE_EXPORTS = (
     "normalize_args", "normalize_return", "signature_context", "function", "SignatureError",
     "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace",
     "freeze", "QuotedDef", "SelectorSpec", "Selector",
-    "selector", "Par", "Present", "Missing", "AnyValue", "Exact", "Choice",
+    "selector", "Par", "Expr", "Shared", "Template", "repeat", "Match", "Distribution", "TemplateError", "UnresolvedTemplateError", "TemplateLimitError", "UnsupportedTemplateVerificationError", "Present", "Missing", "AnyValue", "Exact", "Choice",
     "IntRange", "SubclassOf", "Satisfies", "UniformIntRange", "UniformFromSet",
     "SearchSpace", "SKIP_ARGS", "Repo", "MetadataConflictError", "RepoDefinition", "RepoDefinitionError", "RepoReconstructionError", "configure", "reset_config", "status",
     "definition_mode", "selector_mode", "space_mode", "dtype", "DType",
@@ -51,7 +51,10 @@ _EXPORT_MODULES = {
     "DefLink": "dryml.core.links",
     **dict.fromkeys(("AutoRef", "Mat", "Ref", "SignatureError", "function", "normalize_args", "normalize_return", "signature_context"), "dryml.core.signatures"),
     **dict.fromkeys(("ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace"), "dryml.core.reference_values"),
-    **dict.fromkeys(("AnyValue", "Choice", "Exact", "IntRange", "Missing", "Par", "Present", "Satisfies", "SubclassOf", "UniformFromSet", "UniformIntRange"), "dryml.core.params"),
+    **dict.fromkeys(("AnyValue", "Choice", "Exact", "IntRange", "Match", "Missing", "Par", "Present", "Satisfies", "SubclassOf", "UniformFromSet", "UniformIntRange"), "dryml.core.params"),
+    "Distribution": "dryml.core.domains",
+    **dict.fromkeys(("TemplateError", "UnresolvedTemplateError", "TemplateLimitError", "UnsupportedTemplateVerificationError"), "dryml.core.errors"),
+    **dict.fromkeys(("Expr", "Shared", "Template", "repeat"), "dryml.core.template"),
     **dict.fromkeys(("QuotedDef", "SelectorSpec"), "dryml.core.quoted"),
     "SearchSpace": "dryml.core.search_space",
     **dict.fromkeys(("Selector", "selector"), "dryml.core.selector"),
@@ -87,7 +90,7 @@ def _run_import_probe(code: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.parametrize("module_name", ("dryml.core.object", "dryml.core.tensor_spec", "dryml.core.signatures"))
+@pytest.mark.parametrize("module_name", ("dryml.core.object", "dryml.core.tensor_spec", "dryml.core.signatures", "dryml.core.template"))
 def test_narrow_core_module_imports_do_not_load_heavy_packages(module_name: str) -> None:
     """Narrow core modules load without persistence, runtime, consumer, or backend imports."""
 

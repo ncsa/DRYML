@@ -221,6 +221,7 @@ class NodeKind(Enum):
     SELECTOR_SPEC = auto()
     SELECTOR = auto()
     PAR = auto()
+    EXPR = auto()
     OBJECT = auto()
     REFERENCE_VALUE = auto()
     STATE_SELECTOR_REF = auto()
@@ -235,6 +236,7 @@ def node_kind(x: Any) -> NodeKind:
     from .params import Par
     from .quoted import QuotedDef, SelectorSpec
     from .selector import Selector
+    from .template import Expr
 
     if isinstance(x, type):
         return NodeKind.TYPE
@@ -290,6 +292,9 @@ def node_kind(x: Any) -> NodeKind:
 
     if isinstance(x, Par):
         return NodeKind.PAR
+
+    if isinstance(x, Expr):
+        return NodeKind.EXPR
 
     if isinstance(x, ConcreteDefinition):
         return NodeKind.CONCRETE_DEFINITION
@@ -713,7 +718,7 @@ class _ToCanonicalTransformer(GraphTransformer):
             from .quoted import SelectorSpec
             return SelectorSpec(obj)
 
-        if kind is NodeKind.PAR:
+        if kind in {NodeKind.PAR, NodeKind.EXPR}:
             raise CannotConcretizeParameterizedDefinition(tuple(ctx.path), obj)
 
         if kind is NodeKind.DEFINITION:
@@ -843,7 +848,7 @@ class _ThawValueTransformer(GraphTransformer):
         if kind is NodeKind.DEFLINK:
             return obj
 
-        if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.PAR, NodeKind.SELECTOR}:
+        if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.PAR, NodeKind.EXPR, NodeKind.SELECTOR}:
             return obj
 
         if kind is NodeKind.DEFINITION:
@@ -1140,7 +1145,7 @@ def thaw_definition_surface_value(value: Any, *, memo: dict | None = None) -> An
         from .links import DefLink
 
         return DefLink.finalized(value.kind, thaw_definition_surface_value(value.target, memo=memo))
-    if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.SELECTOR, NodeKind.PAR}:
+    if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.SELECTOR, NodeKind.PAR, NodeKind.EXPR}:
         return value
     return value
 
@@ -1158,10 +1163,11 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
     from .params import Par
     from .quoted import QuotedDef, SelectorSpec
     from .selector import Selector
+    from .template import Expr
 
     if isinstance(value, Object):
         return value.definition
-    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, Par, ObjectRef, StateRef, StateSelectorRef)):
+    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, Par, Expr, ObjectRef, StateRef, StateSelectorRef)):
         return value
     kind = node_kind(value)
     if kind is NodeKind.NDARRAY:
@@ -1244,7 +1250,7 @@ def _freeze_concrete_value(value: Any, *, stack: set[int], path: tuple[str | int
             )
         finally:
             stack.remove(oid)
-    if kind is NodeKind.PAR:
+    if kind in {NodeKind.PAR, NodeKind.EXPR}:
         raise CannotConcretizeParameterizedDefinition(path, value)
     if kind is NodeKind.DEFINITION:
         raise TypeError(

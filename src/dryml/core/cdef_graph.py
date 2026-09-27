@@ -128,9 +128,11 @@ def _iter_direct_edges_from_value(
         return
     if isinstance(value, (QuotedDef, SelectorSpec)):
         return
-    if isinstance(value, Par):
+    from .template import Expr
+
+    if isinstance(value, (Par, Expr)):
         raise ConcreteDefinitionGraphError(
-            f"Unresolved Par found inside ConcreteDefinition graph at {path!s}."
+            f"Unresolved template expression found inside ConcreteDefinition graph at {path!s}."
         )
     for edge in iter_value_edges(value):
         yield from _iter_direct_edges_from_value(

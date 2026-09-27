@@ -152,6 +152,7 @@ class StableHashGraphHasher(GraphHasher):
             NodeKind.IMPORT_REF,
             NodeKind.SOURCE_SPEC,
             NodeKind.STATE_SELECTOR_REF,
+            NodeKind.EXPR,
         }
 
     def hash_atomic(self, obj, ctx: GraphCtx) -> str:
@@ -180,6 +181,7 @@ class StableHashGraphHasher(GraphHasher):
             NodeKind.SELECTOR_SPEC,
             NodeKind.SELECTOR,
             NodeKind.PAR,
+            NodeKind.EXPR,
             NodeKind.OBJECT,
         }
 

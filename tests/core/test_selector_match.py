@@ -1,6 +1,7 @@
 from tests.core import core_objects as objects
 import pytest
 from dryml.core import Missing, Present, Satisfies
+from dryml.core.params import Match, PresentMatcher
 from dryml.core.definition import Definition, SKIP_ARGS, selector_match
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
@@ -101,6 +102,16 @@ def test_u4_absent_semantic_parameter_parity_across_matchers(constraint, expecte
     assert core.Selector(selector).matches(target) is expected
     assert selector.match(target) is expected
     assert selector_match(selector, target) is expected
+
+
+def test_match_leaf_preserves_legacy_present_predicate_semantics():
+    """The new Match leaf follows the legacy predicate protocol during U1."""
+    target = Definition(SemanticSelectorFixture, value=7).concretize()
+
+    legacy = Definition(SemanticSelectorFixture, absent=Present()).match(target)
+    match = Definition(SemanticSelectorFixture, absent=Match(PresentMatcher())).match(target)
+
+    assert legacy is match is False
 
 
 def test_partial_selector_matches_v2_semantic_parameters_without_defaults():
