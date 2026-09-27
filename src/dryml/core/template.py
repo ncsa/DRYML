@@ -18,6 +18,9 @@ _MAX_EXPRESSION_DEPTH = 128
 _MAX_EXPRESSION_VALUES = 65_536
 _MAX_INTEGER_BITS = 1_024
 _MAX_REPEAT_COUNT = 1_024
+_MAX_NAMESPACE_COMPONENTS = 16
+_MAX_COMPONENT_LENGTH = 64
+_MAX_QUALIFIED_ROOT_LENGTH = 256
 
 
 def _validate_number(value: object) -> bool:
@@ -153,13 +156,16 @@ class Par(Expr):
         root, dot, suffix = name.partition(".")
         if path is not None and dot:
             raise TemplateError("dotted parameter names cannot be combined with an explicit path")
-        components = root.split("/")
-        if not root or any(not _COMPONENT.fullmatch(component) for component in components):
-            raise TemplateError("template parameter root contains an invalid qualified-name component")
+        _validate_root(root, "template parameter root")
         if path is None:
             if suffix:
                 path_components = suffix.split(".")
-                if any(not _COMPONENT.fullmatch(component) for component in path_components):
+                if any(
+                    not isinstance(component, str)
+                    or len(component) > _MAX_COMPONENT_LENGTH
+                    or not _COMPONENT.fullmatch(component)
+                    for component in path_components
+                ):
                     raise TemplateError("template parameter dotted path contains an invalid component")
                 normalized_path = GraphPath(tuple(Parameter(component) for component in path_components))
             else:
@@ -309,7 +315,7 @@ def _active_parameters(value: object) -> tuple[Par, ...]:
     return tuple(found)
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, eq=False)
 class Template:
     """Capture an immutable definition recipe without resolving its target.
 
@@ -334,7 +340,9 @@ class Template:
             raise TypeError("Template target must be a class, ImportRef, or SourceSpec; use Template.from_value for existing values.")
         from .definition import Definition
 
-        object.__setattr__(self, "_root", Definition(target, *args, **kwargs))
+        root = Definition(target, *args, **kwargs)
+        _validate_template_set_members(root)
+        object.__setattr__(self, "_root", root)
 
     @classmethod
     def from_value(cls, value: object, /) -> "Template":
@@ -355,7 +363,9 @@ class Template:
         from .canonical import freeze_def_value
 
         result = object.__new__(cls)
-        object.__setattr__(result, "_root", freeze_def_value(value))
+        root = freeze_def_value(value)
+        _validate_template_set_members(root)
+        object.__setattr__(result, "_root", root)
         return result
 
     @classmethod
@@ -547,10 +557,71 @@ class Template:
         return root
 
     def stable_hash(self) -> str:
-        """Return a deterministic hash for this frozen recipe root."""
-        from .utils.stable_hash import stable_hash_function
+        """Return a topology-sensitive deterministic digest for this recipe.
 
-        return stable_hash_function(self._root)
+        Raises:
+            TemplateError: If the recipe contains a nonportable value.
+        """
+        from .template_codec import stable_hash
+
+        return stable_hash(self)
+
+    def __stable_leaf_bytes__(self) -> bytes:
+        """Return a closed-codec leaf projection for enclosing CDef identity."""
+
+        return b"dryml-template:" + self.stable_hash().encode("ascii")
+
+    def __eq__(self, other: object) -> bool:
+        """Compare portable recipe meaning, including graph-local aliases.
+
+        Args:
+            other: Value to compare with this Template.
+
+        Returns:
+            ``True`` only for the same closed-codec recipe projection.
+
+        Raises:
+            TemplateError: If either Template is nonportable.
+        """
+        return isinstance(other, Template) and self.to_data() == other.to_data()
+
+    def __hash__(self) -> int:
+        """Return the portable topology-sensitive hash used by frozen values.
+
+        Raises:
+            TemplateError: If this Template is nonportable.
+        """
+        return int(self.stable_hash(), 16)
+
+    def to_data(self) -> dict[str, object]:
+        """Return the closed portable template payload without target resolution.
+
+        Returns:
+            Canonical ``dryml-template`` v1 data.
+
+        Raises:
+            TemplateError: If the recipe is nonportable or exceeds codec limits.
+        """
+        from .template_codec import template_to_data
+
+        return template_to_data(self)
+
+    @classmethod
+    def from_data(cls, data: Mapping[str, object], /) -> "Template":
+        """Decode a closed portable recipe without importing its target.
+
+        Args:
+            data: A canonical ``dryml-template`` v1 mapping.
+
+        Returns:
+            The decoded immutable Template.
+
+        Raises:
+            TemplateError: If data is malformed, unsupported, or noncanonical.
+        """
+        from .template_codec import template_from_data
+
+        return template_from_data(data)
 
 
 def _contains_expression(value: object) -> bool:
@@ -575,7 +646,15 @@ def _validate_root(name: object, label: str) -> str:
     if not isinstance(name, str) or "." in name:
         raise TemplateError(f"{label} must be a fully qualified template root")
     parts = name.split("/")
-    if not name or any(not _COMPONENT.fullmatch(part) for part in parts):
+    if (
+        not name
+        or len(parts) > _MAX_NAMESPACE_COMPONENTS
+        or len(name) > _MAX_QUALIFIED_ROOT_LENGTH
+        or any(
+            len(part) > _MAX_COMPONENT_LENGTH or not _COMPONENT.fullmatch(part)
+            for part in parts
+        )
+    ):
         raise TemplateError(f"{label} contains an invalid qualified-name component")
     return name
 
@@ -593,9 +672,62 @@ def _normalize_namespace(value: object, label: str) -> tuple[str, ...]:
         parts = value
     else:
         raise TemplateError(f"template {label} must be a string or tuple of components")
-    if any(not isinstance(part, str) or not _COMPONENT.fullmatch(part) for part in parts):
+    if (
+        len(parts) > _MAX_NAMESPACE_COMPONENTS
+        or sum(len(part) for part in parts) + max(len(parts) - 1, 0) > _MAX_QUALIFIED_ROOT_LENGTH
+        or any(
+            not isinstance(part, str)
+            or len(part) > _MAX_COMPONENT_LENGTH
+            or not _COMPONENT.fullmatch(part)
+            for part in parts
+        )
+    ):
         raise TemplateError(f"template {label} contains an invalid component")
     return parts
+
+
+def _validate_template_set_members(value: object) -> None:
+    """Reject symbolic or structural values whose unordered positions are unstable.
+
+    Template expressions carry addressable construction structure.  Allowing them
+    in a set would make canonical ordering part of that structure, so only
+    literal scalar/symbol members are admitted at public template construction.
+    """
+
+    from .definition import ConcreteDefinition, Definition
+    from .factory import FactorySpec
+    from .links import DefLink
+    from .quoted import QuotedDef, SelectorSpec
+    from .reference_values import ObjectRef, StateRef
+    from .selector import Selector
+    from .symbol import ImportRef, SourceSpec
+
+    allowed = (type(None), bool, int, float, str, bytes, ImportRef, SourceSpec)
+    structural = (
+        Expr, Template, Definition, ConcreteDefinition, FactorySpec, DefLink,
+        QuotedDef, SelectorSpec, Selector, ObjectRef, StateRef,
+    )
+    seen: set[int] = set()
+
+    def visit(current: object) -> None:
+        if isinstance(current, (set, frozenset, FrozenSet)):
+            for member in current:
+                if isinstance(member, structural) or not isinstance(member, allowed):
+                    raise TemplateError("template set members must be literal portable values")
+            return
+        if isinstance(current, Template):
+            return
+        children = _template_children(current)
+        if not children:
+            return
+        marker = id(current)
+        if marker in seen:
+            return
+        seen.add(marker)
+        for child in children:
+            visit(child)
+
+    visit(value)
 
 
 def _normalize_bindings(
@@ -615,7 +747,7 @@ def _normalize_bindings(
     for name, value in bindings.items():
         if not _COMPONENT.fullmatch(name):
             raise TemplateError(f"keyword binding {name!r} is not a valid root component")
-        normalized = "/".join((*namespace_parts, name))
+        normalized = _validate_root("/".join((*namespace_parts, name)), "keyword binding")
         if normalized in result:
             raise TemplateError(f"duplicate template binding for {normalized!r}")
         result[normalized] = value

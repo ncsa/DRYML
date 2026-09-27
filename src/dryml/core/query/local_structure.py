@@ -10,6 +10,7 @@ from ..object import Object
 from ..params import Par
 from ..quoted import QuotedDef, SelectorSpec
 from ..selector import Selector
+from ..template import Template
 from ..symbol import maybe_symbol_ref
 from ..utils.stable_hash import stable_hash_function
 from ..utils.types import is_nonclass_callable
@@ -96,6 +97,10 @@ def _walk(
             return
         else:
             return
+
+    # Ref-carried recipes are terminal data, never query graph structure.
+    if isinstance(value, Template):
+        return
 
     if isinstance(value, Selector):
         value = SelectorSpec(value)

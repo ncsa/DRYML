@@ -344,10 +344,11 @@ def _validate_target(target: Any, role: str, slot: str) -> None:
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectRef, StateRef
     from .selector import Selector
+    from .template import Template
 
     supported = (
         Definition, ConcreteDefinition, ObjectRef, StateRef, Object, AutoRef,
-        QuotedDef, Selector, SelectorSpec,
+        QuotedDef, Selector, SelectorSpec, Template,
     )
     if target not in supported:
         _reject_object_subclass(target, slot)
@@ -358,6 +359,8 @@ def _validate_target(target: Any, role: str, slot: str) -> None:
         raise SignatureError("AutoRef is only a reference target", slot)
     if target in (QuotedDef, Selector, SelectorSpec) and role != "ref":
         raise SignatureError("quotation targets are only reference data", slot)
+    if target is Template and role != "ref":
+        raise SignatureError("Template is only a reference target", slot)
 
 
 def _parse_slot(annotation: Any, slot: str) -> _Slot:
@@ -1057,7 +1060,13 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
             # Decoded and structural links already carry their edge authority.
             # Bound replay and unannotated constructor structure stay inert;
             # fresh explicit constructor roles still enforce their exact edge.
-            if preserve_finalized_links or (persist_role and not slot.explicit):
+            from .template import Template
+
+            if preserve_finalized_links:
+                return value, value
+            if persist_role and not slot.explicit:
+                if isinstance(value.target, Template):
+                    raise SignatureError("Template requires an explicit Ref[Template] declaration", name)
                 return value, value
             expected = EdgeKind.REF if slot.role == "ref" else EdgeKind.MATERIALIZE
             if value.kind is not expected:
@@ -1088,6 +1097,7 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
         from .definition import Definition
         from .quoted import QuotedDef, SelectorSpec
         from .selector import Selector
+        from .template import Template
 
         # Definition and selector roles carry expression data, not graph edges.
         # Quoting happens here, after the one owning signature has selected it.
@@ -1095,6 +1105,8 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
             return selected, DefLink.finalized(EdgeKind.REF, QuotedDef(selected))
         if slot.targets[0] is Selector and isinstance(selected, Selector):
             return selected, DefLink.finalized(EdgeKind.REF, SelectorSpec(selected))
+        if slot.targets[0] is Template and isinstance(selected, Template):
+            return selected, DefLink.finalized(EdgeKind.REF, selected)
         if selected is None or isinstance(selected, (QuotedDef, SelectorSpec)):
             return selected, selected
     if asserted or (persist_role and slot.role == "ref" and selected is not None):
@@ -1201,6 +1213,7 @@ def _select_exact(value: Any, target: Any, name: str,
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectRef, StateRef
     from .selector import Selector
+    from .template import Template
 
     if target is QuotedDef:
         return value if isinstance(value, QuotedDef) else QuotedDef(
@@ -1225,6 +1238,10 @@ def _select_exact(value: Any, target: Any, name: str,
             )
         )
         return SelectorSpec(selector)
+    if target is Template:
+        if isinstance(value, Template):
+            return value
+        raise _SelectionUnavailable()
     if isinstance(value, QuotedDef):
         if target is Definition:
             return value.value

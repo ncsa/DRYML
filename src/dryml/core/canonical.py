@@ -222,6 +222,7 @@ class NodeKind(Enum):
     SELECTOR = auto()
     PAR = auto()
     EXPR = auto()
+    TEMPLATE = auto()
     OBJECT = auto()
     REFERENCE_VALUE = auto()
     STATE_SELECTOR_REF = auto()
@@ -237,6 +238,7 @@ def node_kind(x: Any) -> NodeKind:
     from .quoted import QuotedDef, SelectorSpec
     from .selector import Selector
     from .template import Expr
+    from .template import Template
 
     if isinstance(x, type):
         return NodeKind.TYPE
@@ -295,6 +297,9 @@ def node_kind(x: Any) -> NodeKind:
 
     if isinstance(x, Expr):
         return NodeKind.EXPR
+
+    if isinstance(x, Template):
+        return NodeKind.TEMPLATE
 
     if isinstance(x, ConcreteDefinition):
         return NodeKind.CONCRETE_DEFINITION
@@ -696,6 +701,7 @@ class _ToCanonicalTransformer(GraphTransformer):
             from .cdef_graph import EdgeKind
             from .links import DefLink
             from .selector import Selector
+            from .template import Template
 
             if not obj.is_finalized:
                 raise TypeError(
@@ -703,6 +709,15 @@ class _ToCanonicalTransformer(GraphTransformer):
                 )
             if isinstance(obj.target, Selector):
                 raise CannotConcretizeSelectorReference(tuple(ctx.path), obj.target)
+
+            # A declared Ref[Template] is quotation data, not a construction
+            # dependency.  Keep its immutable recipe opaque at this boundary.
+            if isinstance(obj.target, Template):
+                if obj.kind is not EdgeKind.REF:
+                    raise TypeError(
+                        f"Template links must be Ref edges at {ctx.path_str()}."
+                    )
+                return DefLink.finalized(EdgeKind.REF, obj.target)
 
             target = self.transform(obj.target, ctx.child("target"))
             if obj.kind is EdgeKind.MATERIALIZE:
@@ -1261,6 +1276,7 @@ def _freeze_concrete_value(value: Any, *, stack: set[int], path: tuple[str | int
         from .cdef_graph import EdgeKind
         from .quoted import QuotedDef, SelectorSpec
         from .selector import Selector
+        from .template import Template
         if not value.is_finalized:
             raise TypeError(
                 f"Unresolved DefLink assertion cannot enter ConcreteDefinition at {_path_label(path)}."
@@ -1279,6 +1295,18 @@ def _freeze_concrete_value(value: Any, *, stack: set[int], path: tuple[str | int
             except Exception as error:
                 raise TypeError(
                     f"ConcreteDefinition quotation link at {_path_label(path)} must be stable-hashable."
+                ) from error
+            return value
+        if isinstance(value.target, Template):
+            if value.kind is not EdgeKind.REF:
+                raise TypeError(
+                    f"ConcreteDefinition template links at {_path_label(path)} must be Ref edges."
+                )
+            try:
+                value.target.to_data()
+            except Exception as error:
+                raise TypeError(
+                    f"ConcreteDefinition template link at {_path_label(path)} must be portable."
                 ) from error
             return value
         if not isinstance(value.target, ConcreteDefinition):
@@ -1330,11 +1358,12 @@ def freeze_link_target(value: Any) -> Any:
     from .object import Object
     from .quoted import QuotedDef, SelectorSpec
     from .selector import Selector
+    from .template import Template
 
     if isinstance(value, Object):
         return value.definition
     if isinstance(value, (
-        Definition, ConcreteDefinition, Selector, QuotedDef, SelectorSpec,
+        Definition, ConcreteDefinition, Selector, QuotedDef, SelectorSpec, Template,
         ObjectRef, StateRef, StateSelectorRef,
     )):
         return value

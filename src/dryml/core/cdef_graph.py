@@ -21,7 +21,7 @@ from .object import Object
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 
-CDEF_GRAPH_SCHEMA_VERSION = 6
+CDEF_GRAPH_SCHEMA_VERSION = 7
 
 
 class EdgeKind(Enum):
@@ -98,6 +98,8 @@ def iter_direct_cdef_edges(
 def _iter_direct_edges_from_value(
     value: Any, path: GraphPath
 ) -> Iterator[tuple[GraphPath, ConcreteDefinition, EdgeKind]]:
+    from .template import Template
+
     if isinstance(value, Object):
         raise ConcreteDefinitionGraphError(
             f"Runtime Object found inside ConcreteDefinition graph at {path!s}."
@@ -106,11 +108,16 @@ def _iter_direct_edges_from_value(
         raise ConcreteDefinitionGraphError(
             f"Plain Definition found inside ConcreteDefinition graph at {path!s}."
         )
+    if isinstance(value, Template):
+        raise ConcreteDefinitionGraphError(
+            f"Template found outside a Ref boundary at {path!s}."
+        )
     if isinstance(value, ConcreteDefinition):
         yield path, value, EdgeKind.MATERIALIZE
         return
     if isinstance(value, DefLink):
         from .reference_values import ObjectRef, StateRef
+        from .template import Template
 
         if isinstance(value.target, (ObjectRef, StateRef)):
             return
@@ -118,6 +125,12 @@ def _iter_direct_edges_from_value(
             if value.kind is not EdgeKind.REF:
                 raise ConcreteDefinitionGraphError(
                     f"Quotation DefLink at {path!s} must be a Ref boundary."
+                )
+            return
+        if isinstance(value.target, Template):
+            if value.kind is not EdgeKind.REF:
+                raise ConcreteDefinitionGraphError(
+                    f"Template DefLink at {path!s} must be a Ref boundary."
                 )
             return
         if not isinstance(value.target, ConcreteDefinition):

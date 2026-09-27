@@ -601,15 +601,22 @@ class _SelectorEncoder:
 
     def value(self, value: Any, path: str, depth: int = 0) -> dict[str, Any]:
         from .definition import ConcreteDefinition, Definition
+        from .factory import FactorySpec
         from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
         from .links import DefLink
-        from .params import Par
+        from .params import Match, Par
         from .quoted import QuotedDef, SelectorSpec
         from .reference_values import ObjectRef, StateRef
         from .selector import Selector
+        from .template import Template
+        from .template_selector import TemplateSelector
         from .symbol import ImportRef, SourceSpec
 
         self.budget.visit(path, depth)
+        if isinstance(value, Template):
+            return {"kind": "template", "payload": value.to_data()}
+        if isinstance(value, TemplateSelector):
+            return {"kind": "template-selector", "payload": value.to_data()}
         if isinstance(value, (Definition, ConcreteDefinition)):
             return self.definition(value, path, depth + 1)
         if isinstance(value, QuotedDef):
@@ -631,6 +638,15 @@ class _SelectorEncoder:
             return {"kind": "object-ref", "definition": self.definition(value.definition, path + ".definition", depth + 1), "objects": value.to_data()["objects"]}
         if isinstance(value, StateRef):
             return {"kind": "state-ref", "object": self.value(value.object, path + ".object", depth + 1), "states": value.to_data()["states"]}
+        if isinstance(value, FactorySpec):
+            return {
+                "kind": "factory",
+                "target": self.value(value.target, path + ".target", depth + 1),
+                "args": [self.value(item, f"{path}.args[{index}]", depth + 1) for index, item in enumerate(value.args)],
+                "kwargs": [[name, self.value(item, f"{path}.kwargs[{index}]", depth + 1)] for index, (name, item) in enumerate(value.kwargs.items())],
+            }
+        if isinstance(value, Match):
+            return self.par(value, path, depth + 1)
         if isinstance(value, Par):
             return self.par(value, path, depth + 1)
         if isinstance(value, (FrozenDict, dict)):
@@ -741,7 +757,14 @@ class _SelectorEncoder:
             gen = {"kind": "uniform-from-set", "values": [self.value(item, f"{path}.generator[{index}]", depth + 1) for index, item in enumerate(generator.values)]}
         else:
             raise _error(path, "generator is not portable")
-        return {"kind": "par", "name": value.name, "matcher": match, "generator": gen}
+        from .params import Match
+
+        return {
+            "kind": "match" if isinstance(value, Match) else "par",
+            "name": value.name,
+            "matcher": match,
+            "generator": gen,
+        }
 
     def selector(self, selector: Any, path: str, depth: int = 0) -> dict[str, Any]:
         return {"root": self.definition(selector.root, path + ".root", depth + 1), "strict": selector.strict, "cls_policy": selector.cls_policy, "nodes": self.nodes}
@@ -751,7 +774,7 @@ def _validate_par(value: Mapping[str, Any], path: str, validate_value: Any) -> N
     """Validate one closed Par descriptor without invoking matcher behavior."""
 
     _exact_keys(value, {"kind", "name", "matcher", "generator"}, path)
-    if value["kind"] != "par" or (value["name"] is not None and not isinstance(value["name"], str)):
+    if value["kind"] not in {"par", "match"} or (value["name"] is not None and not isinstance(value["name"], str)):
         raise _error(path, "parameter descriptor is invalid")
     matcher = value["matcher"]
     if not isinstance(matcher, Mapping) or not isinstance(matcher.get("kind"), str):
@@ -781,6 +804,8 @@ def _validate_par(value: Mapping[str, Any], path: str, validate_value: Any) -> N
         raise _error(path, "matcher is invalid")
 
     generator = value["generator"]
+    if value["kind"] == "match" and generator is not None:
+        raise _error(path, "Match descriptors cannot have generators")
     if generator is None:
         return
     if not isinstance(generator, Mapping) or not isinstance(generator.get("kind"), str):
@@ -1050,6 +1075,18 @@ def _validate_selector(value: Any, path: str) -> None:
             _exact_keys(current, {"kind", "selector"}, item_path)
             _validate_selector(current["selector"], item_path + ".selector")
             return
+        if kind in {"template", "template-selector"}:
+            _exact_keys(current, {"kind", "payload"}, item_path)
+            try:
+                if kind == "template":
+                    from .template import Template
+                    Template.from_data(current["payload"])
+                else:
+                    from .template_selector import TemplateSelector
+                    TemplateSelector.from_data(current["payload"])
+            except (TypeError, ValueError):
+                raise _error(item_path, "template payload is invalid") from None
+            return
         if kind in {"list", "tuple"}:
             _exact_keys(current, {"kind", "items"}, item_path)
             if not isinstance(current["items"], list) or len(current["items"]) > 4096:
@@ -1103,8 +1140,34 @@ def _validate_selector(value: Any, path: str) -> None:
                 raise _error(item_path, "link edge is invalid")
             item(current["target"], item_path + ".target", depth + 1)
             return
-        if kind == "par":
+        if kind in {"par", "match"}:
             _validate_par(current, item_path, lambda child, child_path: item(child, child_path, depth + 1))
+            return
+        if kind == "factory":
+            _exact_keys(current, {"kind", "target", "args", "kwargs"}, item_path)
+            item(current["target"], item_path + ".target", depth + 1)
+            target = current["target"]
+            if not (
+                    isinstance(target, Mapping)
+                    and (
+                        target.get("kind") == "symbol"
+                        or (target.get("kind") == "atom" and type(target.get("value")) is str)
+                    )
+            ):
+                raise _error(item_path, "factory target is invalid")
+            if not isinstance(current["args"], list) or len(current["args"]) > 4096:
+                raise _error(item_path, "factory arguments are invalid")
+            if not isinstance(current["kwargs"], list) or len(current["kwargs"]) > 4096:
+                raise _error(item_path, "factory keywords are invalid")
+            names = set()
+            for index, child in enumerate(current["args"]):
+                item(child, f"{item_path}.args[{index}]", depth + 1)
+            for index, pair in enumerate(current["kwargs"]):
+                pair_path = f"{item_path}.kwargs[{index}]"
+                if not isinstance(pair, list) or len(pair) != 2 or not isinstance(pair[0], str) or pair[0] in names:
+                    raise _error(pair_path, "factory keyword is invalid")
+                names.add(pair[0])
+                item(pair[1], pair_path, depth + 1)
             return
         if kind == "object-ref":
             _exact_keys(current, {"kind", "definition", "objects"}, item_path)
@@ -1367,16 +1430,19 @@ def _selector_from_data(value: Mapping[str, Any]):
     from .bound_args import BoundArguments
     from .cdef_graph import EdgeKind
     from .definition import ConcreteDefinition, Definition, SKIP_ARGS
+    from .factory import FactorySpec
     from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
     from .links import DefLink
     from .params import (
-        AnyMatcher, ChoiceMatcher, ExactMatcher, IntRangeMatcher, MissingMatcher,
+        AnyMatcher, ChoiceMatcher, ExactMatcher, IntRangeMatcher, Match, MissingMatcher,
         Par, PresentMatcher, SubclassMatcher, UniformFromSetGenerator,
         UniformIntRangeGenerator,
     )
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectId, ObjectRef, StateRef
     from .selector import Selector
+    from .template import Template
+    from .template_selector import TemplateSelector
     from .utils.graph.path import GraphPath
 
     nodes = {node["label"]: node for node in value["nodes"]}
@@ -1394,6 +1460,10 @@ def _selector_from_data(value: Mapping[str, Any]):
             return QuotedDef(item(current["value"]))
         if kind == "selector-spec":
             return SelectorSpec(_selector_from_data(current["selector"]))
+        if kind == "template":
+            return Template.from_data(current["payload"])
+        if kind == "template-selector":
+            return TemplateSelector.from_data(current["payload"])
         if kind == "list":
             return FrozenList(item(child) for child in current["items"])
         if kind == "tuple":
@@ -1404,7 +1474,7 @@ def _selector_from_data(value: Mapping[str, Any]):
             return FrozenDict((name, item(child)) for name, child in current["items"])
         if kind == "link":
             return DefLink.finalized(EdgeKind(current["edge"]), item(current["target"]))
-        if kind == "par":
+        if kind in {"par", "match"}:
             matcher_data = current["matcher"]
             matcher_kind = matcher_data["kind"]
             if matcher_kind == "present":
@@ -1430,7 +1500,13 @@ def _selector_from_data(value: Mapping[str, Any]):
                 generator = UniformFromSetGenerator(
                     item(child) for child in generator_data["values"]
                 )
-            return Par(current["name"], matcher, generator)
+            return Match(matcher, current["name"]) if kind == "match" else Par(current["name"], matcher, generator)
+        if kind == "factory":
+            return FactorySpec._from_template_parts(
+                item(current["target"]),
+                tuple(item(child) for child in current["args"]),
+                FrozenDict((name, item(child)) for name, child in current["kwargs"]),
+            )
         if kind == "object-ref":
             objects = {
                 GraphPath.from_data(entry["path"]): ObjectId.from_data(entry["object_id"])

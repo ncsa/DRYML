@@ -86,6 +86,25 @@ Fixture authority is checked out byte-for-byte via `.gitattributes`, without
 line-ending conversion. Git for Windows needs long-path support to check out the
 snapshot directory fixtures; CI enables `core.longpaths` for its Git processes.
 
+## Template V1
+
+`Template.to_data()` uses the closed `{"schema": "dryml-template", "version":
+1, ...}` graph format. It retains typed scalar values, symbolic targets, graph
+aliases, expression/repetition nodes, factories, exact references, and `Ref`
+recipe boundaries without importing a target, constructing an Object, or calling
+a factory. The format rejects cycles, unknown tags/versions, dangling or
+duplicate labels, non-finite values, live handles, custom providers, and payloads
+over 16 MiB. `TemplateSelector` uses the same format for its captured template
+and built-in integer-range or finite-choice domains; runtime providers and
+`TemplateGenerator` have no persistence format.
+
+Only a constructor slot explicitly annotated `Ref[Template]` may carry an
+unresolved Template into a CDef. The carried recipe is terminal CDef data and is
+opaque to materialization, Store authority traversal, and ordinary template
+rewrites unless a template operation explicitly opts into Ref traversal. Existing
+Store-v3 authority is unchanged; query sidecar version changes invalidate derived
+indexes only and never rewrite definitions or Store records.
+
 ## Repo Definition V1
 
 Repo definition v1 is the inert canonical-JSON envelope

@@ -303,6 +303,36 @@ class TemplateSelector:
 
         return self._prefilter
 
+    def to_data(self) -> dict[str, object]:
+        """Encode this selector's inert built-in domain specification.
+
+        Returns:
+            Closed ``dryml-template`` v1 selector data.
+
+        Raises:
+            TemplateError: If a runtime custom provider is present.
+        """
+        from .template_codec import selector_to_data
+
+        return selector_to_data(self)
+
+    @classmethod
+    def from_data(cls, data: Mapping[str, object], /) -> "TemplateSelector":
+        """Decode a portable exact selector without constructing candidates.
+
+        Args:
+            data: Closed ``dryml-template`` v1 selector data.
+
+        Returns:
+            A rebuilt exact TemplateSelector.
+
+        Raises:
+            TemplateError: If the payload or captured domains are invalid.
+        """
+        from .template_codec import selector_from_data
+
+        return selector_from_data(data)
+
     def matches(self, target: Definition | ConcreteDefinition | object, /) -> bool:
         """Return whether ``target`` has one exact captured support assignment.
 

@@ -13,14 +13,14 @@ import textwrap
 import pytest
 
 from dryml.core import (
-    AnyValue, Choice, ConcreteDefinition, Definition, Exact, IntRange, Mat, Missing, ObjectId,
+    AnyValue, Choice, ConcreteDefinition, Definition, Exact, F, IntRange, Mat, Match, Missing, ObjectId,
     ObjectRef, Par, Present, Ref, Repo, RepoDefinition, RepoDefinitionError,
     RepoReconstructionError, SelectorSpec,
     Satisfies, Selector, SKIP_ARGS, StateRef, SubclassOf, UniformFromSet,
     UniformIntRange,
 )
 from dryml.core.object import Object, Serializable
-from dryml.core.params import ExactMatcher, UniformIntRangeGenerator
+from dryml.core.params import AnyMatcher, ExactMatcher, UniformIntRangeGenerator
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
 from dryml.core.repo_plan import SaveRouting
@@ -148,6 +148,48 @@ def test_definition_supports_omitted_args_shared_and_parameter_variants(tmp_path
     assert route["strict"] is True
     assert len(route["nodes"]) == 2
     assert {node["node_kind"] for node in route["nodes"]} == {"definition"}
+
+
+def test_definition_round_trips_partial_and_concrete_factory_selectors_without_resolution(tmp_path):
+    """Closed route data retains factory call shape and Match predicate leaves."""
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    partial = F(
+        "unresolved_factory_target",
+        Match(AnyMatcher()),
+        "fixed",
+        required=Match(AnyMatcher()),
+    )
+    concrete = F("unresolved_factory_target", 7, flag=True)
+    partial_selector = Selector(Definition(DefinitionTarget, partial), cls_policy="exact")
+    concrete_selector = Selector(Definition(DefinitionTarget, concrete), cls_policy="exact")
+    repo = Repo(
+        store,
+        save_routing=SaveRouting(((partial_selector, store), (concrete_selector, store))),
+    )
+
+    data = repo.to_definition().to_data()
+    assert '"kind":"factory"' in RepoDefinition.from_data(data).to_json()
+    assert '"kind":"match"' in RepoDefinition.from_data(data).to_json()
+    restored = Repo.from_definition(RepoDefinition.from_data(data))
+    restored_partial, restored_concrete = (
+        route[0] for route in restored.save_routing.routes
+    )
+
+    assert restored_partial.matches(Definition(DefinitionTarget, F(
+        "unresolved_factory_target", 64, "fixed", required=False, extra="allowed",
+    )))
+    assert not restored_partial.matches(Definition(DefinitionTarget, F(
+        "unresolved_factory_target", 64, "other", required=False,
+    )))
+    assert not restored_partial.matches(Definition(DefinitionTarget, F(
+        "unresolved_factory_target", 64, "fixed",
+    )))
+    assert not restored_partial.matches(Definition(DefinitionTarget, F(
+        "other_target", 64, "fixed", required=False,
+    )))
+    assert restored_concrete.matches(Definition(DefinitionTarget, F("unresolved_factory_target", 7, flag=True)))
+    assert not restored_concrete.matches(Definition(DefinitionTarget, F("unresolved_factory_target", 7, flag=True, extra=False)))
 
 
 def test_definition_distinguishes_disabled_empty_and_shorthand_routing(tmp_path):

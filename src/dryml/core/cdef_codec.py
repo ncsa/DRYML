@@ -139,11 +139,16 @@ def decode_cdef_graph(data: Any) -> ConcreteDefinition:
                 raise CDefGraphCodecError(
                     f"CDef graph parameters for {label!r} must be a frozen mapping payload."
                 )
-            result = ConcreteDefinition._from_bound_record(
-                node["cls"],
-                BoundArguments(parameters.items()),
-                stateful_role=node["stateful_role"],
-            )
+            try:
+                result = ConcreteDefinition._from_bound_record(
+                    node["cls"],
+                    BoundArguments(parameters.items()),
+                    stateful_role=node["stateful_role"],
+                )
+            except (TypeError, ValueError) as error:
+                raise CDefGraphCodecError(
+                    f"CDef graph parameters for {label!r} are invalid."
+                ) from error
             built[label] = result
             return result
         finally:
@@ -351,6 +356,9 @@ def _encode_value(value: Any, labels: dict[object, str]) -> dict[str, Any]:
             "edge_kind": value.kind.value,
             "target": _encode_value(value.target, labels),
         }
+    from .template import Template
+    if isinstance(value, Template):
+        return {"kind": "template", "value": value.to_data()}
     if isinstance(value, FrozenDict):
         return {
             "kind": "dict",
@@ -405,6 +413,7 @@ def _decode_value(
     if kind == "link":
         _require_exact_keys(data, {"kind", "edge_kind", "target"}, "CDef link")
         from .cdef_graph import EdgeKind
+        from .template import Template
 
         try:
             edge_kind = EdgeKind(data["edge_kind"])
@@ -414,17 +423,26 @@ def _decode_value(
             ) from error
         target = _decode_value(data["target"], build, payloads)
         if not isinstance(target, (
-            ConcreteDefinition, ObjectRef, StateRef, QuotedDef, SelectorSpec,
+            ConcreteDefinition, ObjectRef, StateRef, QuotedDef, SelectorSpec, Template,
         )):
             raise CDefGraphCodecError(
                 "CDef link target must be a CDef, ObjectRef, StateRef, or "
-                "exact constructor-data quotation."
+            "exact constructor-data quotation, or Template."
             )
         if isinstance(target, (QuotedDef, SelectorSpec)) and edge_kind is not EdgeKind.REF:
             raise CDefGraphCodecError(
                 "CDef constructor-data quotation links must use a Ref edge."
             )
+        if isinstance(target, Template) and edge_kind is not EdgeKind.REF:
+            raise CDefGraphCodecError("CDef Template links must use a Ref edge.")
         return DefLink.finalized(edge_kind, target)
+    if kind == "template":
+        _require_exact_keys(data, {"kind", "value"}, "Template")
+        from .template import Template
+        try:
+            return Template.from_data(data["value"])
+        except Exception as error:
+            raise CDefGraphCodecError("CDef template payload is invalid.") from error
     if kind == "dict":
         _require_exact_keys(data, {"kind", "items"}, "CDef dict")
         if not isinstance(data["items"], list):

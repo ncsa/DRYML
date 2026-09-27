@@ -1,6 +1,6 @@
 import pytest
 
-from dryml.core import Object
+from dryml.core import F, Object
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core.definition import ConcreteDefinition
@@ -36,12 +36,22 @@ def test_cdef_codec_roundtrip():
     assert decode_cdef(encode_cdef(cdef)) == cdef
 
 
+def test_cdef_codec_roundtrips_inert_concrete_factory_values():
+    """Derived query payloads retain concrete FactorySpecs without resolution."""
+
+    cdef = CodecLeaf(F("unresolved_factory_target", 7, flag=True)).definition
+
+    decoded = decode_cdef(encode_cdef(cdef))
+
+    assert decoded.parameters["value"] == F("unresolved_factory_target", 7, flag=True)
+
+
 def test_reference_query_promotion_increments_its_index_codec_markers():
     """Reference index rows use a new semantic and feature codec boundary."""
 
-    assert CDEF_CODEC_VERSION == 3
-    assert FEATURE_CODEC_VERSION == 3
-    assert QUERY_INDEX_CODEC_VERSION == 5
+    assert CDEF_CODEC_VERSION == 4
+    assert FEATURE_CODEC_VERSION == 4
+    assert QUERY_INDEX_CODEC_VERSION == 6
 
 
 def test_cdef_codec_decodes_current_v2_record():
