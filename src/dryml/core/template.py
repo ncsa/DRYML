@@ -8,16 +8,25 @@ import math
 import re
 from typing import Any
 
-from .errors import TemplateError, UnresolvedTemplateError
+from .errors import TemplateError, TemplateLimitError, UnresolvedTemplateError
 from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .utils.graph.path import GraphPath, Parameter, normalize_path
 
 
 _COMPONENT = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
+_MAX_EXPRESSION_DEPTH = 128
+_MAX_EXPRESSION_VALUES = 65_536
+_MAX_INTEGER_BITS = 1_024
+_MAX_REPEAT_COUNT = 1_024
 
 
 def _validate_number(value: object) -> bool:
     return type(value) is int or (type(value) is float and math.isfinite(value))
+
+
+def _validate_integer_limit(value: object) -> None:
+    if type(value) is int and value.bit_length() > _MAX_INTEGER_BITS:
+        raise TemplateLimitError("template integer bit-length limit exceeded")
 
 
 def _operand(value: object) -> object:
@@ -222,6 +231,14 @@ class _RepeatExpr(Expr):
     count: int | Expr
     shared: bool = False
 
+    def __post_init__(self) -> None:
+        """Freeze the ordered group while retaining its list or tuple family."""
+
+        _validate_count(self.count)
+        from .canonical import freeze_def_value
+
+        object.__setattr__(self, "group", freeze_def_value(self.group))
+
     def _stable_value(self) -> object:
         return ("repeat", tuple(_stable_operand(value) for value in self.group), _stable_operand(self.count), self.shared)
 
@@ -381,12 +398,15 @@ class Template:
             **bindings: Unqualified static root bindings.
 
         Returns:
-            A rewritten template. Parameters introduced by a replacement template
-            remain unresolved until a later call.
+            A rewritten template with fully bound arithmetic and repetition
+            expressions evaluated. Parameters introduced by a replacement
+            template remain unresolved until a later call.
 
         Raises:
-            TemplateError: If names, values, paths, or traversal controls are
-                invalid, including any nested Distribution value.
+            TemplateError: If names, values, paths, traversal controls, or a
+                bound expression are invalid, including any nested Distribution
+                value. TemplateLimitError: If expression depth or expansion
+                exceeds a hard limit.
         """
 
         if type(traverse_refs) is not bool:
@@ -411,11 +431,13 @@ class Template:
                 )
             replacements[id(parameter)] = projected[key]
         return type(self)._from_root(
-            _rewrite_template_value(
-                self._root,
-                replacements=replacements,
-                remap=None,
-                traverse_refs=traverse_refs,
+            _evaluate_template_value(
+                _rewrite_template_value(
+                    self._root,
+                    replacements=replacements,
+                    remap=None,
+                    traverse_refs=traverse_refs,
+                )
             )
         )
 
@@ -468,15 +490,19 @@ class Template:
         )
 
     def resolve(self) -> object:
-        """Return the root when no active expression remains.
+        """Evaluate and return the root when no active expression remains.
 
         Raises:
             UnresolvedTemplateError: If a parameter, arithmetic, or repetition
                 expression still requires a later template operation.
+            TemplateError: If a fully bound expression is invalid.
+            TemplateLimitError: If expression depth or expansion exceeds a hard
+                limit.
         """
-        if not self.is_resolved:
+        root = _evaluate_template_value(self._root)
+        if _contains_expression(root):
             raise UnresolvedTemplateError("template contains unresolved expressions")
-        return self._root
+        return root
 
     def to_definition(self):
         """Return a resolved soft Definition root without concretizing it.
@@ -811,7 +837,9 @@ def _rewrite_template_value(
             count = rewrite(current.count)
             unchanged = all(new is old for new, old in zip(group, current.group)) and count is current.count
             result = current if unchanged else _RepeatExpr(
-                list(group) if isinstance(current.group, list) else group, count, current.shared
+                list(group) if isinstance(current.group, (list, FrozenList)) else group,
+                count,
+                current.shared,
             )
             memo[marker] = result
             return result
@@ -878,6 +906,263 @@ def _rewrite_template_value(
         return current
 
     return rewrite(value)
+
+
+@dataclass(slots=True)
+class _ExpressionBudget:
+    """Track one template evaluation's cumulative repeat expansion allowance."""
+
+    expansions: int = 0
+
+    def charge_expansion(self, count: int) -> None:
+        """Record generated ordered positions or fail before exceeding the hard cap."""
+
+        if self.expansions + count > _MAX_EXPRESSION_VALUES:
+            raise TemplateLimitError("template expansion limit exceeded")
+        self.expansions += count
+
+
+def _evaluate_template_value(value: object) -> object:
+    """Evaluate resolved expression leaves with one cumulative expansion budget."""
+
+    from .definition import ConcreteDefinition, Definition
+    from .factory import FactorySpec
+    from .links import DefLink
+
+    budget = _ExpressionBudget()
+    memo: dict[int, object] = {}
+
+    def evaluate(current: object, depth: int = 0) -> object:
+        if isinstance(current, Par):
+            return current
+        if isinstance(current, _BinaryExpr):
+            depth += 1
+            if depth > _MAX_EXPRESSION_DEPTH:
+                raise TemplateLimitError("template expression depth limit exceeded")
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            left = evaluate(current.left, depth)
+            right = evaluate(current.right, depth)
+            if isinstance(left, Expr) or isinstance(right, Expr):
+                result = current if left is current.left and right is current.right else _BinaryExpr(
+                    current.operation, left, right
+                )
+            else:
+                if not _validate_number(left) or not _validate_number(right):
+                    raise TemplateError("template arithmetic operands must be exact finite built-in numbers")
+                _validate_integer_limit(left)
+                _validate_integer_limit(right)
+                try:
+                    if current.operation == "mul":
+                        result = left * right
+                    elif current.operation == "truediv":
+                        result = left / right
+                    elif current.operation == "floordiv":
+                        result = left // right
+                    else:
+                        raise TemplateError("template arithmetic operation is unsupported")
+                except ZeroDivisionError as error:
+                    raise TemplateError("template arithmetic division by zero") from error
+                except OverflowError as error:
+                    raise TemplateError("template arithmetic result is not finite") from error
+                if not _validate_number(result):
+                    raise TemplateError("template arithmetic result must be a finite built-in number")
+                _validate_integer_limit(result)
+            memo[marker] = result
+            return result
+        if isinstance(current, _RepeatExpr):
+            depth += 1
+            if depth > _MAX_EXPRESSION_DEPTH:
+                raise TemplateLimitError("template expression depth limit exceeded")
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            count = evaluate(current.count, depth)
+            if isinstance(count, Expr):
+                group = tuple(evaluate(item, depth) for item in current.group)
+                result = current if (
+                    count is current.count
+                    and all(new is old for new, old in zip(group, current.group))
+                ) else _RepeatExpr(
+                    list(group) if isinstance(current.group, FrozenList) else group,
+                    count,
+                    current.shared,
+                )
+                memo[marker] = result
+                return result
+            if type(count) is not int or count < 0:
+                raise TemplateError("template repetition count must resolve to a nonnegative exact int")
+            if count > _MAX_REPEAT_COUNT:
+                raise TemplateLimitError("template repetition count limit exceeded")
+            budget.charge_expansion(count * len(current.group))
+            if current.shared:
+                group = tuple(evaluate(item, depth) for item in current.group)
+                items = group * count
+            else:
+                items = []
+                copied_groups = []
+                for _ in range(count):
+                    copy_memo: dict[int, object] = {}
+                    copied_groups.append(tuple(
+                        _copy_template_construction_value(item, copy_memo)
+                        for item in current.group
+                    ))
+                for group in copied_groups:
+                    items.extend(
+                        evaluate(item, depth) for item in group
+                    )
+                items = tuple(items)
+            result = FrozenList(items) if isinstance(current.group, FrozenList) else FrozenTuple(items)
+            memo[marker] = result
+            return result
+        if isinstance(current, (Template, DefLink, ConcreteDefinition)):
+            return current
+        if isinstance(current, FactorySpec):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            args = tuple(evaluate(item, depth) for item in current.args)
+            kwargs = FrozenDict((key, evaluate(item, depth)) for key, item in current.kwargs.items())
+            result = current if (
+                all(new is old for new, old in zip(args, current.args))
+                and all(kwargs[key] is item for key, item in current.kwargs.items())
+            ) else FactorySpec._from_template_parts(current.target, args, kwargs)
+            memo[marker] = result
+            return result
+        if isinstance(current, Definition):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            args = None if current.args is None else FrozenTuple(evaluate(item, depth) for item in current.args)
+            kwargs = FrozenDict((key, evaluate(item, depth)) for key, item in current.kwargs.items())
+            result = current if (
+                (args is None and current.args is None)
+                or (args is not None and all(new is old for new, old in zip(args, current.args)))
+            ) and all(kwargs[key] is item for key, item in current.kwargs.items()) else Definition._from_template_parts(
+                current.cls, args, kwargs
+            )
+            memo[marker] = result
+            return result
+        if isinstance(current, Mapping):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            items = [(key, evaluate(item, depth)) for key, item in current.items()]
+            result = current if all(new is current[key] for key, new in items) else (
+                FrozenDict(items) if isinstance(current, FrozenDict) else dict(items)
+            )
+            memo[marker] = result
+            return result
+        if isinstance(current, (list, FrozenList)):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            items = tuple(evaluate(item, depth) for item in current)
+            result = current if all(new is old for new, old in zip(items, current)) else FrozenList(items)
+            memo[marker] = result
+            return result
+        if isinstance(current, (tuple, FrozenTuple)):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            items = tuple(evaluate(item, depth) for item in current)
+            result = current if all(new is old for new, old in zip(items, current)) else FrozenTuple(items)
+            memo[marker] = result
+            return result
+        if isinstance(current, (set, frozenset, FrozenSet)):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            items = tuple(evaluate(item, depth) for item in current)
+            result = current if all(new is old for new, old in zip(items, current)) else FrozenSet(items)
+            memo[marker] = result
+            return result
+        return current
+
+    return evaluate(value)
+
+
+def _copy_template_construction_value(value: object, memo: dict[int, object]) -> object:
+    """Copy owned construction nodes while leaving explicit reference boundaries exact."""
+
+    from .bound_args import BoundArguments
+    from .definition import ConcreteDefinition, Definition
+    from .factory import FactorySpec
+    from .links import DefLink
+
+    if isinstance(value, (Template, DefLink)):
+        return value
+    marker = id(value)
+    if marker in memo:
+        return memo[marker]
+    if isinstance(value, ConcreteDefinition):
+        parameters = FrozenDict(
+            (key, _copy_template_construction_value(item, memo))
+            for key, item in value.parameters.items()
+        )
+        result = ConcreteDefinition._from_bound_record(
+            value.cls,
+            BoundArguments(parameters.items()),
+            stateful_role=value._stateful_role,
+        )
+        memo[marker] = result
+        return result
+    if isinstance(value, Definition):
+        args = None if value.args is None else FrozenTuple(
+            _copy_template_construction_value(item, memo) for item in value.args
+        )
+        kwargs = FrozenDict(
+            (key, _copy_template_construction_value(item, memo))
+            for key, item in value.kwargs.items()
+        )
+        result = Definition._from_template_parts(value.cls, args, kwargs)
+        memo[marker] = result
+        return result
+    if isinstance(value, FactorySpec):
+        args = tuple(_copy_template_construction_value(item, memo) for item in value.args)
+        kwargs = FrozenDict(
+            (key, _copy_template_construction_value(item, memo))
+            for key, item in value.kwargs.items()
+        )
+        result = FactorySpec._from_template_parts(value.target, args, kwargs)
+        memo[marker] = result
+        return result
+    if isinstance(value, _BinaryExpr):
+        result = _BinaryExpr(
+            value.operation,
+            _copy_template_construction_value(value.left, memo),
+            _copy_template_construction_value(value.right, memo),
+        )
+        memo[marker] = result
+        return result
+    if isinstance(value, _RepeatExpr):
+        group = tuple(_copy_template_construction_value(item, memo) for item in value.group)
+        result = _RepeatExpr(
+            list(group) if isinstance(value.group, FrozenList) else group,
+            _copy_template_construction_value(value.count, memo),
+            value.shared,
+        )
+        memo[marker] = result
+        return result
+    if isinstance(value, Mapping):
+        items = [(key, _copy_template_construction_value(item, memo)) for key, item in value.items()]
+        result = FrozenDict(items) if isinstance(value, FrozenDict) else dict(items)
+        memo[marker] = result
+        return result
+    if isinstance(value, (list, FrozenList)):
+        result = FrozenList(_copy_template_construction_value(item, memo) for item in value)
+        memo[marker] = result
+        return result
+    if isinstance(value, (tuple, FrozenTuple)):
+        result = FrozenTuple(_copy_template_construction_value(item, memo) for item in value)
+        memo[marker] = result
+        return result
+    if isinstance(value, (set, frozenset, FrozenSet)):
+        result = FrozenSet(_copy_template_construction_value(item, memo) for item in value)
+        memo[marker] = result
+        return result
+    return value
 
 
 __all__ = ["Expr", "Par", "Shared", "Template", "repeat"]
