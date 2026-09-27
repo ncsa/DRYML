@@ -947,6 +947,10 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
     if isinstance(selector, ConcreteDefinition):
             return isinstance(target, ConcreteDefinition) and cdef_equal(selector, target)
 
+    from ..factory import FactorySpec
+    if isinstance(selector, FactorySpec):
+        return _query_match_factory(selector, target, strict=strict, class_match=class_match)
+
     if isinstance(selector, DefLink):
         if selector.kind is EdgeKind.MATERIALIZE:
             target_value = target.target if isinstance(target, DefLink) and target.kind is EdgeKind.MATERIALIZE else target
@@ -1070,6 +1074,41 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
         ))
 
     return _query_match_leaf(selector, target, strict=strict, class_match=class_match)
+
+
+def _query_match_factory(selector, target, *, strict: bool, class_match: ClassMatchPolicy) -> bool:
+    """Verify exact or Match-bearing partial FactorySpec call patterns."""
+
+    from ..factory import FactorySpec
+    from ..params import Par
+
+    if not isinstance(target, FactorySpec):
+        return False
+    if not _query_match(selector.target, target.target, strict=strict, class_match=class_match):
+        return False
+    if len(selector.args) != len(target.args):
+        return False
+    if not all(_query_match(left, right, strict=strict, class_match=class_match) for left, right in zip(selector.args, target.args)):
+        return False
+
+    def patterned(value):
+        if isinstance(value, Par):
+            return True
+        if isinstance(value, FactorySpec):
+            return any(patterned(item) for item in (*value.args, *value.kwargs.values()))
+        if isinstance(value, (dict, FrozenDict)):
+            return any(patterned(item) for item in value.values())
+        if isinstance(value, (tuple, list, set, frozenset, FrozenTuple, FrozenList, FrozenSet)):
+            return any(patterned(item) for item in value)
+        return False
+
+    is_pattern = any(patterned(value) for value in (*selector.args, *selector.kwargs.values()))
+    if not is_pattern and tuple(selector.kwargs) != tuple(target.kwargs):
+        return False
+    return all(
+        key in target.kwargs and _query_match(value, target.kwargs[key], strict=strict, class_match=class_match)
+        for key, value in selector.kwargs.items()
+    )
 
 
 def _query_match_class(selector, target, *, strict: bool, class_match: ClassMatchPolicy) -> bool:

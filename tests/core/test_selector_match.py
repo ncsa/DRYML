@@ -467,3 +467,14 @@ def test_definition_selector_matches_class_arg_refs():
 
     assert isinstance(target.parameters["x"], ImportRef)
     assert selector(target)
+
+
+def test_selector_match_supports_partial_factory_patterns_without_resolution():
+    """Match-bearing FactorySpecs retain target, arity, fixed values, and keys."""
+    from dryml.core import AnyValue, F
+
+    selector = F("builtins:tuple", AnyValue(), "fixed", flag=AnyValue())
+
+    assert selector_match(selector, F("builtins:tuple", 64, "fixed", flag=False))
+    assert not selector_match(selector, F("builtins:tuple", 64, "other", flag=False))
+    assert not selector_match(selector, F("builtins:tuple", 64, "fixed"))

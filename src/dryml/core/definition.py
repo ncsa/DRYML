@@ -20,7 +20,7 @@ from .cdef_identity import (
 from .utils.types import is_nonclass_callable
 from .utils.general import get_class_str
 from .utils.graph import GraphCtx, GraphMatcher
-from .freeze import FrozenDict, FrozenTuple
+from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .errors import PathAccessError
 from .policies import CachePolicy
 from .canonical import (
@@ -1272,8 +1272,16 @@ class SelectorMatcher(GraphMatcher):
 
     def dispatch(self, selector: Any, target: Any, ctx: GraphCtx) -> bool:
         from .object import Object
+        from .factory import FactorySpec
+        from .params import Par
 
         dryml_obj_types = (Object, Definition, ConcreteDefinition)
+
+        if isinstance(selector, Par):
+            return selector.matches(target, present=True)
+
+        if isinstance(selector, FactorySpec):
+            return self._match_factory(selector, target, ctx)
 
         if isinstance(target, Definition):
             if self.strict and target.skip_args:
@@ -1376,6 +1384,40 @@ class SelectorMatcher(GraphMatcher):
             return condition
 
         return self.match_other(selector, target, ctx)
+
+    def _match_factory(self, selector, target, ctx: GraphCtx) -> bool:
+        """Match exact factories and projected partial factory call patterns."""
+
+        from .factory import FactorySpec
+        from .params import Par
+
+        if not isinstance(target, FactorySpec):
+            return False
+        if not self.match(selector.target, target.target, ctx.child("target")):
+            return False
+        if len(selector.args) != len(target.args):
+            return False
+        if any(not self.match(left, right, ctx.child(index)) for index, (left, right) in enumerate(zip(selector.args, target.args))):
+            return False
+
+        def patterned(value):
+            if isinstance(value, Par):
+                return True
+            if isinstance(value, FactorySpec):
+                return any(patterned(item) for item in (*value.args, *value.kwargs.values()))
+            if isinstance(value, Mapping):
+                return any(patterned(item) for item in value.values())
+            if isinstance(value, (tuple, list, set, frozenset, FrozenTuple, FrozenList, FrozenSet)):
+                return any(patterned(item) for item in value)
+            return False
+
+        is_pattern = any(patterned(value) for value in (*selector.args, *selector.kwargs.values()))
+        if not is_pattern and tuple(selector.kwargs) != tuple(target.kwargs):
+            return False
+        for key, value in selector.kwargs.items():
+            if key not in target.kwargs or not self.match(value, target.kwargs[key], ctx.child(key)):
+                return False
+        return True
 
     # ------------------------------------------------------------------
     # container overrides with diagnostics / selector semantics

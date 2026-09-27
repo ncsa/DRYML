@@ -36,7 +36,11 @@ class Distribution(Protocol):
         """Return exact membership, or ``None`` when membership is unavailable."""
 
     def bounds(self) -> tuple[int | float, int | float] | None:
-        """Return numeric support bounds when they are exact and available."""
+        """Return conservative numeric support bounds when available.
+
+        Bounds may reject values outside the closed interval but never establish
+        exact membership for values inside it.
+        """
 
 
 def _index(index: int, cardinality: int) -> int:

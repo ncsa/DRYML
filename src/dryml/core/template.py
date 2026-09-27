@@ -504,6 +504,31 @@ class Template:
             raise UnresolvedTemplateError("template contains unresolved expressions")
         return root
 
+    def as_selector(self, *, strict: bool = False):
+        """Project known structure into a deliberately loose ordinary Selector.
+
+        Args:
+            strict: Ordinary Selector strictness for retained known structure.
+
+        Returns:
+            A symbolic-class-exact Selector that omits unknown relationships.
+
+        Raises:
+            TemplateError: If this template does not have a soft Definition root.
+
+        This projection never samples domains, resolves targets, or asserts exact
+        parameter linkage, arithmetic, repetition topology, or factory builds.
+        """
+
+        from .template_selector import _loose_selector
+
+        selector = _loose_selector(self)
+        if strict:
+            from .selector import Selector
+
+            return Selector(selector.root, strict=True, cls_policy="exact")
+        return selector
+
     def to_definition(self):
         """Return a resolved soft Definition root without concretizing it.
 
