@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import chain, repeat
+
 import pytest
 
 from dryml.core import Definition, Object, Ref, Repo
@@ -114,6 +116,63 @@ def test_template_selector_query_witness_budget_never_returns_partial_results():
         repo.query(_selector(shared=True)).cached().max_witnesses(1).defs()
 
     assert len(repo.query(_selector(shared=True)).cached().max_witnesses(None).defs()) == 1
+
+
+def test_template_selector_witness_budget_counts_prefilter_rejections_and_duplicates(
+        tmp_path, monkeypatch):
+    """The default cap charges every authority visit before safe prefiltering."""
+
+    import dryml.core.query.query as query_module
+    from dryml.core.store.dir import DirStore
+
+    assert query_module._DEFAULT_TEMPLATE_WITNESS_LIMIT == 65_536
+    monkeypatch.setattr(query_module, "_DEFAULT_TEMPLATE_WITNESS_LIMIT", 2)
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    rejected = QueryTemplateLeaf(64, repo=repo)
+    leaf = QueryTemplateLeaf(64, repo=repo)
+    matching = QueryTemplateParent([leaf, leaf], repo=repo)
+    repo.save_object(rejected)
+    repo.save_object(matching)
+
+    def authority():
+        return chain(repeat(rejected.definition, 2), (matching.definition,))
+
+    monkeypatch.setattr(store, "iter_authoritative_root_definitions", authority)
+
+    query = repo.query(_selector(shared=True)).stored()
+    with pytest.raises(TemplateLimitError, match="witness limit"):
+        query.defs()
+
+    assert tuple(query.max_witnesses(3).defs()) == (matching.definition,)
+
+
+def test_nested_template_witness_budget_stops_authority_streaming(tmp_path, monkeypatch):
+    """Nested witness exhaustion does not pre-accumulate later Store roots."""
+
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    first_leaf = QueryTemplateLeaf(64, repo=repo)
+    first = QueryTemplateParent([first_leaf, first_leaf], repo=repo)
+    second_leaf = QueryTemplateLeaf(64, repo=repo)
+    second = QueryTemplateParent([second_leaf, second_leaf], repo=repo)
+    visited = []
+
+    def authority():
+        visited.append(first.definition)
+        yield first.definition
+        visited.append(second.definition)
+        yield second.definition
+
+    monkeypatch.setattr(store, "iter_authoritative_root_definitions", authority)
+
+    with pytest.raises(TemplateLimitError, match="witness limit"):
+        repo.query(_selector(shared=True)).nested().definitions().max_witnesses(1).defs()
+
+    assert visited == [first.definition]
 
 
 def test_template_selector_query_scans_stored_authority_and_controls_refinement(tmp_path):

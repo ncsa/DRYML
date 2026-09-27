@@ -52,7 +52,19 @@ class _QueryGenerationChanged(Exception):
 
 
 _MAX_NESTED_QUERY_RETRIES = 3
+_DEFAULT_TEMPLATE_WITNESS_LIMIT = 65_536
 _DEFAULT_MAX_WITNESSES = object()
+
+
+@dataclass(slots=True)
+class _TemplateWitnessBudget:
+    limit: int | None
+    visited: int = 0
+
+    def consume(self) -> None:
+        self.visited += 1
+        if self.limit is not None and self.visited > self.limit:
+            raise TemplateLimitError("template query witness limit exceeded")
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,8 +80,9 @@ class DefinitionQuery:
         repo: Managing Repo used for selector resolution and domain access.
         original: Resolved source retained for restore operations.
         selector: Current resolved structural selector.
-        max_witness_limit: Exact-template witness cap. The internal default is
-            65,536; ``None`` permits an unbounded authoritative scan.
+        max_witness_limit: Exact-template authoritative-visit cap. The internal
+            default is 65,536; visits consume it before safe prefilter rejection
+            or duplicate suppression, and ``None`` permits an unbounded scan.
         template_selector: Optional exact TemplateSelector residual applied
             after structural prefiltering. Residual queries reject rewrites
             that cannot preserve exact support semantics.
@@ -678,7 +691,8 @@ class DefinitionQuery:
             return self._execute_template_selector_nested()
 
         stats = QueryStats(refresh_action="template-witness-scan")
-        witnesses = self._template_definition_witnesses(stats)
+        witness_budget = self._template_witness_budget()
+        witnesses = self._template_definition_witnesses(stats, witness_budget)
         matches, replicas, verified_witnesses = self._verify_template_witnesses(witnesses, stats)
         stats.result_count = len(matches)
         explanation = stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
@@ -695,7 +709,18 @@ class DefinitionQuery:
             witness_complete=True,
         )
 
-    def _template_definition_witnesses(self, stats: QueryStats):
+    def _template_witness_budget(self) -> _TemplateWitnessBudget:
+        limit = (
+            _DEFAULT_TEMPLATE_WITNESS_LIMIT
+            if self.max_witness_limit is _DEFAULT_MAX_WITNESSES
+            else self.max_witness_limit
+        )
+        return _TemplateWitnessBudget(limit)
+
+    def _template_definition_witnesses(
+            self,
+            stats: QueryStats,
+            witness_budget: _TemplateWitnessBudget):
         """Stream complete roots after a conservative structural index prefilter."""
 
         if self.universe is not None:
@@ -704,7 +729,13 @@ class DefinitionQuery:
             if not self.universe.witness_complete:
                 raise QueryDomainError("TemplateSelector refinement requires complete immutable witness evidence.")
             replicas = self.universe.replicas or {}
-            return ((cdef, tuple(replicas.get(cdef, ()))) for cdef in self.universe.witnesses)
+
+            def universe_witnesses():
+                for cdef in self.universe.witnesses:
+                    witness_budget.consume()
+                    yield cdef, tuple(replicas.get(cdef, ()))
+
+            return universe_witnesses()
 
         indexed_candidates = None
         if (
@@ -741,12 +772,14 @@ class DefinitionQuery:
                             "TemplateSelector stored queries require authoritative root enumeration."
                         )
                     for cdef in self._iter_template_store_roots(store, iterate):
+                        witness_budget.consume()
                         if indexed_candidates is None or cdef in indexed_candidates:
                             yield cdef, (store,)
             if self.domain in {"cached", "known"}:
                 caches = (self.repo.strong_obj_cache, self.repo.weak_obj_cache)
                 for cache in caches:
                     for _, obj in cache.items():
+                        witness_budget.consume()
                         marker = id(obj)
                         if marker in seen_cached:
                             continue
@@ -780,16 +813,12 @@ class DefinitionQuery:
 
         from ..template_selector import _AssignmentBudget
 
-        unlimited = self.max_witness_limit is None
-        limit = 65_536 if self.max_witness_limit is _DEFAULT_MAX_WITNESSES else self.max_witness_limit
         assignment_budget = _AssignmentBudget(self.template_selector._max_assignments)
         merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
         replicas: dict[ConcreteDefinition, list[Any]] = {}
         verified_witnesses = []
         for cdef, stores in witnesses:
             stats.candidate_count += 1
-            if not unlimited and stats.candidate_count > limit:
-                raise TemplateLimitError("template query witness limit exceeded")
             matched = self._verify_cdefs(
                 (cdef,), stats=stats, template_budget=assignment_budget
             )
@@ -808,8 +837,7 @@ class DefinitionQuery:
         from ..cdef_graph import ConcreteDefinitionGraph
 
         stats = QueryStats(refresh_action="template-witness-scan")
-        unlimited = self.max_witness_limit is None
-        limit = 65_536 if self.max_witness_limit is _DEFAULT_MAX_WITNESSES else self.max_witness_limit
+        witness_budget = self._template_witness_budget()
         if self.universe is not None:
             if self.universe.kind != "occurrences" or not self.universe.witness_complete:
                 raise QueryDomainError("TemplateSelector refinement requires complete immutable witness evidence.")
@@ -819,30 +847,25 @@ class DefinitionQuery:
                 for item in self.universe.witnesses
             )
         else:
-            roots = []
-            for store in self.repo.stores:
-                iterate = getattr(store, "iter_authoritative_root_definitions", None)
-                if not callable(iterate):
-                    raise QueryDomainError(
-                        "TemplateSelector nested queries require authoritative root enumeration."
-                    )
-                roots.extend(
-                    (cdef, (store,))
-                    for cdef in self._iter_template_store_roots(store, iterate)
-                )
-            candidates = (
-                (root, stores, occurrence.path, occurrence.definition)
-                for root, stores in roots
-                for occurrence in ConcreteDefinitionGraph.from_root(root).iter_occurrences()
-            )
+            def authoritative_occurrences():
+                for store in self.repo.stores:
+                    iterate = getattr(store, "iter_authoritative_root_definitions", None)
+                    if not callable(iterate):
+                        raise QueryDomainError(
+                            "TemplateSelector nested queries require authoritative root enumeration."
+                        )
+                    for root in self._iter_template_store_roots(store, iterate):
+                        for occurrence in ConcreteDefinitionGraph.from_root(root).iter_occurrences():
+                            yield root, (store,), occurrence.path, occurrence.definition
+
+            candidates = authoritative_occurrences()
         occurrences = []
         owner_replicas: dict[ConcreteDefinition, list[Any]] = {}
         from ..template_selector import _AssignmentBudget
         assignment_budget = _AssignmentBudget(self.template_selector._max_assignments)
         for root, stores, path, candidate in candidates:
+            witness_budget.consume()
             stats.candidate_count += 1
-            if not unlimited and stats.candidate_count > limit:
-                raise TemplateLimitError("template query witness limit exceeded")
             if self._verify_cdefs(
                     (candidate,), stats=stats, template_budget=assignment_budget):
                 occurrences.append(DefinitionOccurrence(root, path, candidate))

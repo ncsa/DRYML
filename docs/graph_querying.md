@@ -21,10 +21,11 @@ Exact support remains residual because graph-distinct authoritative witnesses
 cannot be collapsed into structural index rows. Stored queries use the loose
 selector to prefilter indexed identities, then stream matching authoritative
 roots before residual verification. The default terminal limit is 65,536
-witnesses; lower it with `max_witnesses(n)` or explicitly disable it with
-`max_witnesses(None)`. Finite-support assignment work is also bounded
-cumulatively for the terminal and can raise `TemplateLimitError` before any
-partial result is returned.
+authoritative visits; prefilter rejections and duplicate source visits consume
+the budget before suppression. Lower it with `max_witnesses(n)` or explicitly
+disable it with `max_witnesses(None)`. Finite-support assignment work is also
+bounded cumulatively for the terminal and can raise `TemplateLimitError` before
+any partial result is returned.
 
 `require_indexed()` and `scan_policy("forbid")` reject exact support because the
 residual always needs complete witness verification. Exact selectors use exact
