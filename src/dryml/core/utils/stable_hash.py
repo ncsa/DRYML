@@ -192,7 +192,7 @@ class StableHashGraphHasher(GraphHasher):
         from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
         from ..links import DefLink
         from ..object import Object
-        from ..params import Par
+        from ..params import Match
         from ..quoted import QuotedDef, SelectorSpec
         from ..selector import Selector
 
@@ -240,7 +240,7 @@ class StableHashGraphHasher(GraphHasher):
             type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
             return self._hash_mapping(type_marker, {"root": obj.root, "strict": obj.strict, "cls_policy": obj.cls_policy}, ctx)
 
-        if isinstance(obj, Par):
+        if isinstance(obj, Match):
             type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
             return self._hash_mapping(type_marker, {"stable_key": obj.stable_key()}, ctx)
 

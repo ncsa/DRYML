@@ -19,7 +19,7 @@ before selection. An unannotated slot is `Mat` by default. Scalars and a directl
 supplied live `Object` continue to pass through naturally, while an unannotated
 `Definition`, `ConcreteDefinition`, `ObjectRef`, or `StateRef` is materialized.
 
-Supported exact targets are `Definition`, `ConcreteDefinition`, `ObjectRef`,
+Supported exact targets are `Definition`, `ConcreteDefinition`, `Template`, `ObjectRef`,
 `StateRef`, `Object`, `QuotedDef`, `Selector`, and `SelectorSpec` where applicable.
 Exact requests deliver that exact authority: a `StateRef` supplied to
 `Ref[ObjectRef]` delivers its `ObjectRef`, for example. `Ref[AutoRef]` retains an
@@ -54,6 +54,12 @@ declaring `Ref[Definition]` or `Ref[Selector]` receives the exact unwrapped type
 runtime. Persisted reconstruction does not rerun preparation, binding, or signature
 interpretation. Query indexing and matching treat these constructor markers as their
 quotation payloads rather than as graph boundaries.
+
+`Ref[Template]` is the exact declaration for carrying an unresolved definition
+recipe. It keeps the recipe as inert reference data while the receiving Object is
+constructed, saved, or restored; it does not resolve template parameters or
+materialize the recipe target. An unannotated or materializing slot rejects that
+unresolved value, and `Ref(value)` cannot bypass the declared role.
 
 A fresh constructor with an explicit Ref/Mat role validates finalized structural
 links against that role before canonicalization can erase their edge authority.

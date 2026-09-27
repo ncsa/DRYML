@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Protocol
-import random
 
 from .freeze import FrozenTuple
 
@@ -17,40 +16,8 @@ class Matcher(Protocol):
         ...
 
 
-class Generator(Protocol):
-    """Value generator used by SearchSpace sampling/grid expansion."""
-
-    def sample(self, rng: random.Random) -> Any:
-        ...
-
-    def support_matcher(self) -> Matcher:
-        ...
-
-    def grid(self) -> tuple[Any, ...]:
-        ...
-
-    def stable_key(self) -> Any:
-        ...
-
-
 @dataclass(frozen=True, slots=True)
-class Par:
-    """Parameterized placeholder with query matcher and optional generator."""
-
-    name: str | None
-    matcher: Matcher
-    generator: Generator | None = None
-
-    def matches(self, value: Any, *, present: bool = True) -> bool:
-        return self.matcher.matches(value, present=present)
-
-    def stable_key(self) -> Any:
-        gen_key = None if self.generator is None else self.generator.stable_key()
-        return ("par", self.name, self.matcher.stable_key(), gen_key)
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class Match(Par):
+class Match:
     """Independent query predicate leaf with optional descriptive metadata.
 
     Args:
@@ -58,13 +25,41 @@ class Match(Par):
         name: Optional metadata retained in the stable predicate identity. It
             does not bind a template parameter or connect query fields.
 
-    The class remains a legacy ``Par`` subclass during the staged migration so
-    existing selector walkers continue to recognize it without treating the
-    new template expression ``Par`` as a query predicate.
+    ``Match`` is independent from template expressions. Its optional name is
+    query metadata and never links fields or template bindings.
     """
 
+    matcher: Matcher
+    name: str | None = None
+
     def __init__(self, matcher: Matcher, name: str | None = None) -> None:
-        Par.__init__(self, name, matcher)
+        object.__setattr__(self, "matcher", matcher)
+        object.__setattr__(self, "name", name)
+
+    def matches(self, value: Any, *, present: bool = True) -> bool:
+        """Return whether the wrapped matcher accepts ``value``.
+
+        Args:
+            value: Candidate selector value.
+            present: Whether the candidate field exists.
+
+        Returns:
+            ``True`` when the wrapped matcher accepts the candidate.
+        """
+
+        return self.matcher.matches(value, present=present)
+
+    def stable_key(self) -> Any:
+        """Return the stable query identity supplied by the wrapped matcher.
+
+        Returns:
+            An immutable matcher-derived identity used by selector persistence.
+
+        Raises:
+            TypeError: If the wrapped matcher has no stable identity.
+        """
+
+        return ("match", self.name, self.matcher.stable_key())
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,83 +165,110 @@ class SatisfiesMatcher:
         raise TypeError("Anonymous Satisfies predicates are not stable-hashable; provide name=...")
 
 
-@dataclass(frozen=True, slots=True)
-class UniformIntRangeGenerator:
-    lo: int
-    hi: int
+def Present(name: str | None = None) -> Match:
+    """Return a predicate matching present values without creating a binding.
 
-    def sample(self, rng: random.Random) -> int:
-        return rng.randint(self.lo, self.hi)
+    Args:
+        name: Optional stable query metadata.
 
-    def support_matcher(self) -> Matcher:
-        return IntRangeMatcher(self.lo, self.hi)
-
-    def grid(self) -> tuple[int, ...]:
-        return tuple(range(self.lo, self.hi + 1))
-
-    def stable_key(self) -> Any:
-        return ("uniform-int-range", self.lo, self.hi)
+    Returns:
+        An independent ``Match`` leaf.
+    """
+    return Match(PresentMatcher(), name)
 
 
-@dataclass(frozen=True, slots=True)
-class UniformFromSetGenerator:
-    values: FrozenTuple
+def Missing(name: str | None = None) -> Match:
+    """Return a predicate matching absent values without creating a binding.
 
-    def __init__(self, values: Iterable[Any]):
-        from .canonical import freeze_def_value
+    Args:
+        name: Optional stable query metadata.
 
-        object.__setattr__(self, "values", FrozenTuple(freeze_def_value(v) for v in values))
-
-    def sample(self, rng: random.Random) -> Any:
-        return rng.choice(tuple(self.values))
-
-    def support_matcher(self) -> Matcher:
-        return ChoiceMatcher(self.values)
-
-    def grid(self) -> tuple[Any, ...]:
-        return tuple(self.values)
-
-    def stable_key(self) -> Any:
-        return ("uniform-from-set", self.values)
+    Returns:
+        An independent ``Match`` leaf.
+    """
+    return Match(MissingMatcher(), name)
 
 
-def Present(name: str | None = None) -> Par:
-    return Par(name, PresentMatcher())
+def AnyValue(name: str | None = None) -> Match:
+    """Return a predicate matching every present value.
+
+    Args:
+        name: Optional stable query metadata.
+
+    Returns:
+        An independent ``Match`` leaf.
+    """
+    return Match(AnyMatcher(), name)
 
 
-def Missing(name: str | None = None) -> Par:
-    return Par(name, MissingMatcher())
+def Exact(value: Any, name: str | None = None) -> Match:
+    """Return a predicate matching exactly one frozen value.
+
+    Args:
+        value: Supported value to freeze into the predicate.
+        name: Optional stable query metadata.
+
+    Returns:
+        An independent ``Match`` leaf.
+
+    Raises:
+        TypeError: If ``value`` is not a supported definition value.
+    """
+    return Match(ExactMatcher(value), name)
 
 
-def AnyValue(name: str | None = None) -> Par:
-    return Par(name, AnyMatcher())
+def Choice(values: Iterable[Any], name: str | None = None) -> Match:
+    """Return a predicate matching one of the supplied frozen values.
+
+    Args:
+        values: Supported values to freeze into the predicate.
+        name: Optional stable query metadata.
+
+    Returns:
+        An independent ``Match`` leaf.
+    """
+    return Match(ChoiceMatcher(values), name)
 
 
-def Exact(value: Any, name: str | None = None) -> Par:
-    return Par(name, ExactMatcher(value))
+def IntRange(lo: int, hi: int, name: str | None = None) -> Match:
+    """Return a predicate matching an inclusive integer range.
+
+    Args:
+        lo: Inclusive lower bound.
+        hi: Inclusive upper bound.
+        name: Optional stable query metadata.
+
+    Returns:
+        An independent ``Match`` leaf.
+    """
+    return Match(IntRangeMatcher(lo, hi), name)
 
 
-def Choice(values: Iterable[Any], name: str | None = None) -> Par:
-    return Par(name, ChoiceMatcher(values))
+def SubclassOf(cls: type, name: str | None = None) -> Match:
+    """Return a predicate matching subclasses of ``cls``.
+
+    Args:
+        cls: Required superclass.
+        name: Optional stable query metadata.
+
+    Returns:
+        An independent ``Match`` leaf.
+    """
+    return Match(SubclassMatcher(cls), name)
 
 
-def IntRange(lo: int, hi: int, name: str | None = None) -> Par:
-    return Par(name, IntRangeMatcher(lo, hi))
+def Satisfies(predicate: Callable[[Any], bool], name: str | None = None) -> Match:
+    """Return a trusted predicate leaf for ordinary selector matching.
 
+    Args:
+        predicate: Trusted callable evaluated by ordinary selector matching.
+        name: Optional stable query metadata; required for an anonymous callable
+            that must be stable-hashed.
 
-def SubclassOf(cls: type, name: str | None = None) -> Par:
-    return Par(name, SubclassMatcher(cls))
+    Returns:
+        An independent ``Match`` leaf.
 
-
-def Satisfies(predicate: Callable[[Any], bool], name: str | None = None) -> Par:
-    return Par(name, SatisfiesMatcher(predicate, name=name))
-
-
-def UniformIntRange(lo: int, hi: int, name: str | None = None) -> Par:
-    gen = UniformIntRangeGenerator(lo, hi)
-    return Par(name, gen.support_matcher(), gen)
-
-
-def UniformFromSet(values: Iterable[Any], name: str | None = None) -> Par:
-    gen = UniformFromSetGenerator(values)
-    return Par(name, gen.support_matcher(), gen)
+    Side Effects:
+        The predicate is not called until selector matching.
+    """
+    return Match(SatisfiesMatcher(predicate, name=name), name)

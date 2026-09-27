@@ -8,19 +8,20 @@ from dryml.core import (
     Definition,
     EdgeKind,
     Missing,
+    Par,
     Present,
     QuotedDef,
     Ref,
     Repo,
-    SearchSpace,
     Selector,
     SelectorSpec,
     Satisfies,
+    Template,
+    TemplateGenerator,
     UniformFromSet,
     UniformIntRange,
     definition_mode,
     selector_mode,
-    space_mode,
 )
 from dryml.core.object import Object
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
@@ -161,33 +162,34 @@ def test_quoted_selector_is_data_not_graph_edge():
     assert Selector(Definition(Nest3, models=quoted)).matches(cdef)
 
 
-def test_search_space_sample_grid_and_support_selector():
-    space = Definition(Cls1, UniformIntRange(1, 2), test=UniformFromSet(["a", "b"])).as_space()
+def test_template_generation_replaces_search_space():
+    generator = TemplateGenerator(
+        Template(Cls1, Par("value"), test=Par("label")),
+        value=UniformIntRange(1, 2),
+        label=UniformFromSet(["a", "b"]),
+    )
 
-    assert isinstance(space, SearchSpace)
-    assert isinstance(space.sample(), Definition)
-    assert len(list(space.grid())) == 4
-    support = space.support_selector()
-    assert isinstance(support, Selector)
+    assert isinstance(generator.sample(), Definition)
+    assert len(generator.grid()) == 4
+    support = generator.support_selector()
     assert support.matches(Definition(Cls1, 1, test="a").concretize())
 
 
-def test_definition_selector_and_space_modes():
+def test_definition_and_selector_modes():
     with definition_mode():
         d = Cls1(1)
     with selector_mode():
         s = Cls1(1)
-    with space_mode():
-        sp = Cls1(UniformIntRange(1, 2))
 
     assert isinstance(d, Definition)
     assert isinstance(s, Selector)
-    assert isinstance(sp, SearchSpace)
 
 
 def test_public_exports():
-    for name in ("Definition", "ConcreteDefinition", "Ref", "Mat", "Selector", "SelectorSpec", "QuotedDef", "Par", "SearchSpace"):
+    for name in ("Definition", "ConcreteDefinition", "Ref", "Mat", "Selector", "SelectorSpec", "QuotedDef", "Par", "Template", "TemplateGenerator"):
         assert hasattr(dryml, name)
+    assert not hasattr(dryml, "SearchSpace")
+    assert not hasattr(dryml, "space_mode")
 
 
 class FakeStore:

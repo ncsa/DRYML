@@ -15,7 +15,7 @@ from typing import Any, Iterable, Iterator
 from .cdef_identity import cdef_node_key, same_cdef, same_cdef_node
 from .definition import ConcreteDefinition, Definition
 from .links import DefLink
-from .params import Par
+from .params import Match
 from .quoted import QuotedDef, SelectorSpec
 from .object import Object
 from .utils.graph.path import GraphPath, graph_path_sort_key
@@ -143,7 +143,7 @@ def _iter_direct_edges_from_value(
         return
     from .template import Expr
 
-    if isinstance(value, (Par, Expr)):
+    if isinstance(value, (Match, Expr)):
         raise ConcreteDefinitionGraphError(
             f"Unresolved template expression found inside ConcreteDefinition graph at {path!s}."
         )

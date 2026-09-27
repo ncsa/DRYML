@@ -9,7 +9,6 @@ from dryml.core.object import (
     _register_class_validator,
     definition_mode,
     selector_mode,
-    space_mode,
 )
 
 
@@ -198,13 +197,10 @@ def test_abstract_object_inert_modes_do_not_construct_or_resolve():
         cdef = AbstractProbe("concrete")
     with selector_mode():
         selector = AbstractProbe("selector")
-    with space_mode():
-        space = AbstractProbe("space")
 
     assert isinstance(definition, Definition)
     assert cdef is not None
     assert selector is not None
-    assert space is not None
     assert AbstractProbe.effects == 0
 
 

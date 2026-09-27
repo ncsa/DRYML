@@ -69,7 +69,7 @@ class PathAccessError(KeyError):
 
 
 class CannotConcretizeParameterizedDefinition(TypeError):
-    def __init__(self, path, value, msg: str = "Cannot concretize unresolved Par"):
+    def __init__(self, path, value, msg: str = "Cannot concretize unresolved template expression"):
         self.path = tuple(path)
         self.value = value
         self.msg = msg

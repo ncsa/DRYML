@@ -116,8 +116,10 @@ settings. Paths are absolute persistent locations: a ZipStore descriptor never
 contains its temporary extraction directory.
 
 The selector grammar is closed and preserves Definition/CDef sharing, omitted
-positional arguments, links, selector-as-data wrappers, supported `Par` matcher
-and generator tags, symbol representation, and exact ObjectRef/StateRef leaves.
+positional arguments, links, selector-as-data wrappers, supported `Match` tags,
+symbol representation, and exact ObjectRef/StateRef leaves. Template expression
+and generator-domain payloads use the separate Template V1 codec above; retired
+SearchSpace generator tags are not accepted.
 It does not permit arbitrary Python objects or live Store handles. The codec
 rejects duplicate mapping keys, unknown fields/tags, invalid selector/reference
 depth 32, 65,536 nodes, 4,096 entries per container, 1 MiB strings, 4,096-bit

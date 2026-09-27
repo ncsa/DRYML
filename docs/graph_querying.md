@@ -6,6 +6,17 @@ Graph traversal records typed V2 `Parameter` and container paths. Materializing 
 
 Store indexes are acceleration only. Rebuild scans authoritative definition and reference records, announces visible progress, and can safely replace a missing or stale derived index. A query may fail closed when current metadata is incompatible; it never treats an incompatible index as empty or current authority.
 
+## Template Selectors
+
+`Template.as_selector()` creates a loose ordinary Selector that preserves known
+concrete structure but intentionally drops unknown parameter, arithmetic, and
+topology relationships. Use `TemplateGenerator.support_selector()` when a query
+must verify captured domain support, linked names, derived values, ordering, and
+shared-node topology exactly. Template support verification is residual to index
+prefiltering and never constructs candidate Objects or factory targets. A provider
+without exact verification raises an explicit unsupported-verification error; a
+numeric bound alone is never accepted as a match.
+
 ## Categorical Projection
 
 `DefinitionQuery.categorical(*, path="$", recursive=False, drop=(),

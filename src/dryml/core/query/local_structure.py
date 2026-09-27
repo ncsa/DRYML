@@ -7,7 +7,7 @@ from ..definition import ConcreteDefinition, Definition
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..links import DefLink
 from ..object import Object
-from ..params import Par
+from ..params import Match
 from ..quoted import QuotedDef, SelectorSpec
 from ..selector import Selector
 from ..template import Template
@@ -116,7 +116,7 @@ def _walk(
                 pass
         return
 
-    if isinstance(value, Par):
+    if isinstance(value, Match):
         return
 
     active_id = id(value) if _tracks_cycles(value) else None
@@ -395,7 +395,7 @@ def _tracks_cycles(value: Any) -> bool:
 
 
 def _can_match_absent(value: Any) -> bool:
-    return isinstance(value, Par) and value.matches(None, present=False)
+    return isinstance(value, Match) and value.matches(None, present=False)
 
 
 def _factory_has_pattern(value: Any, active: set[int] | None = None) -> bool:
@@ -403,7 +403,7 @@ def _factory_has_pattern(value: Any, active: set[int] | None = None) -> bool:
 
     from ..factory import FactorySpec
 
-    if isinstance(value, Par):
+    if isinstance(value, Match):
         return True
     if active is None:
         active = set()

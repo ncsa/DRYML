@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import random
+import importlib
 
 import pytest
 
-from dryml import Expr, Match, Shared, Template, repeat
-from dryml.core import Definition, F
+from dryml import Expr, Match, Par, Shared, Template, TemplateGenerator, repeat
+from dryml.core import Definition, F, Object, Ref
 from dryml.core.domains import UniformFromSet, UniformIntRange
 from dryml.core.errors import TemplateError, UnresolvedTemplateError
 from dryml.core.params import PresentMatcher
-from dryml.core.template import Par
 from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
@@ -34,6 +34,21 @@ class FactoryTarget:
     def __init__(self, value):
         type(self).calls.append(value)
         self.value = value
+
+
+class DocumentedModel:
+    """Inert target used by the executable templates guide example."""
+
+    def __init__(self, layers, width):
+        self.layers = layers
+        self.width = width
+
+
+class DocumentedRecipeConsumer(Object):
+    """Template guide consumer proving Ref recipe admission stays inert."""
+
+    def __init__(self, recipe: Ref[Template]):
+        self.recipe = recipe
 
 
 def test_template_direct_authoring_and_definition_conversion_are_inert():
@@ -153,3 +168,44 @@ def test_match_is_a_query_leaf_distinct_from_template_parameters():
     assert match.matches("value")
     assert not match.matches(None, present=False)
     assert not isinstance(match, Expr)
+    assert not isinstance(match, Par)
+
+
+def test_documented_authoring_example_captures_complete_definitions():
+    """The Templates guide's authoring flow remains executable and inert."""
+
+    group = [F("builtins:tuple", Par("width")), F("builtins:tuple")]
+    model = Template(DocumentedModel, group * Par("depth"), width=Par("width"))
+    bound = model.sub(width=64, depth=2)
+    generator = TemplateGenerator(
+        model,
+        width=UniformFromSet((32, 64)),
+        depth=UniformFromSet((1, 2)),
+    )
+
+    assert isinstance(bound.to_definition(), Definition)
+    assert len(generator.grid()) == 4
+    sample = generator.sample(random.Random(7))
+    assert generator.support_selector().matches(sample)
+    assert model.as_selector().matches(sample)
+    assert model.sub(sub_dict={"width": 64}, depth=2).is_resolved
+    consumer = Definition(DocumentedRecipeConsumer, recipe=model).concretize()
+    assert consumer.parameters["recipe"].target == model
+
+
+def test_retired_search_space_and_predicate_parameter_apis_are_absent():
+    """The pre-beta cutover rejects retired imports and constructor shapes."""
+
+    import dryml
+    import dryml.core.params as params
+
+    assert not hasattr(params, "Par")
+    assert not hasattr(dryml, "SearchSpace")
+    assert not hasattr(dryml, "space_mode")
+    assert not hasattr(Definition(TemplateModel, 1), "as_space")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("dryml.core.search_space")
+    with pytest.raises(TypeError):
+        Par("width", PresentMatcher())
+    with pytest.raises(TypeError):
+        UniformIntRange(1, 2, name="width")

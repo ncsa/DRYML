@@ -73,6 +73,16 @@ def test_definition_mode_false_forces_fresh_inside_definition_mode():
     assert obj.value == 1
 
 
+def test_retired_space_mode_is_rejected_without_affecting_supported_modes():
+    """Session validation rejects the removed mode while valid modes remain usable."""
+
+    with pytest.raises(ValueError, match="object_mode"):
+        dryml.configure(object_mode="space")
+
+    dryml.configure(object_mode="selector")
+    assert dryml.status()["object_mode"] == "selector"
+
+
 def test_load_or_build_constructor_uses_saved_structure_not_state(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)

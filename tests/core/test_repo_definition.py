@@ -14,13 +14,12 @@ import pytest
 
 from dryml.core import (
     AnyValue, Choice, ConcreteDefinition, Definition, Exact, F, IntRange, Mat, Match, Missing, ObjectId,
-    ObjectRef, Par, Present, Ref, Repo, RepoDefinition, RepoDefinitionError,
+    ObjectRef, Present, Ref, Repo, RepoDefinition, RepoDefinitionError,
     RepoReconstructionError, SelectorSpec,
-    Satisfies, Selector, SKIP_ARGS, StateRef, SubclassOf, UniformFromSet,
-    UniformIntRange,
+    Satisfies, Selector, SKIP_ARGS, StateRef, SubclassOf,
 )
 from dryml.core.object import Object, Serializable
-from dryml.core.params import AnyMatcher, ExactMatcher, UniformIntRangeGenerator
+from dryml.core.params import AnyMatcher, ExactMatcher
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
 from dryml.core.repo_plan import SaveRouting
@@ -132,14 +131,14 @@ def test_definition_round_trip_detaches_mixed_configuration(tmp_path):
 
 
 def test_definition_supports_omitted_args_shared_and_parameter_variants(tmp_path):
-    """The closed selector grammar retains partial spelling and supported Pars."""
+    """The closed selector grammar retains partial spelling and supported Matches."""
     store = DirStore(tmp_path / "store", query_index="none")
     shared = Definition(DefinitionTarget, "shared")
     root = Definition(
         DefinitionTarget,
         [shared, shared],
         present=Present("p"), any_value=AnyValue("a"), choices=Choice([1, 2]),
-        ranged=IntRange(1, 3), generated=UniformFromSet(["x", "y"]),
+        ranged=IntRange(1, 3), generated=Choice(["x", "y"]),
     )
     repo = Repo(store, save_routing=SaveRouting(((Selector(root, strict=True), store),)))
 
@@ -754,26 +753,11 @@ class _CustomExact(ExactMatcher):
         raise AssertionError("unsupported matcher must not call stable_key")
 
 
-class _CustomGenerator(UniformIntRangeGenerator):
-    def __repr__(self):
-        return "CUSTOM-REPR-MUST-NOT-LEAK"
-
-    def stable_key(self):
-        raise AssertionError("unsupported generator must not call stable_key")
-
-
-@pytest.mark.parametrize(
-    "parameter",
-    [
-        Par("custom", _CustomExact(1)),
-        Par("custom", ExactMatcher(1), _CustomGenerator(1, 2)),
-    ],
-)
-def test_definition_rejects_custom_matcher_and_generator_subclasses_without_repr(tmp_path, parameter):
-    """Only exact supported matcher/generator classes have portable semantics."""
+def test_definition_rejects_custom_matcher_subclasses_without_repr(tmp_path):
+    """Only exact supported Match matcher classes have portable semantics."""
 
     store = DirStore(tmp_path / "store", query_index="none")
-    selector = Selector(Definition(DefinitionTarget, parameter))
+    selector = Selector(Definition(DefinitionTarget, Match(_CustomExact(1), "custom")))
     with pytest.raises(RepoDefinitionError) as error:
         Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition()
     assert "CUSTOM-REPR-MUST-NOT-LEAK" not in str(error.value)
@@ -1287,16 +1271,6 @@ def test_definition_reconstructs_in_subprocess_from_a_different_directory(tmp_pa
             Definition(ReconstructionTarget, 3).concretize(),
         ),
         (
-            Selector(Definition(ReconstructionTarget, value=UniformIntRange(1, 2))),
-            Definition(ReconstructionTarget, 2).concretize(),
-            Definition(ReconstructionTarget, 3).concretize(),
-        ),
-        (
-            Selector(Definition(ReconstructionTarget, value=UniformFromSet(["one", "two"]))),
-            Definition(ReconstructionTarget, "two").concretize(),
-            Definition(ReconstructionTarget, "other").concretize(),
-        ),
-        (
             Selector(Definition(ReconstructionTarget, value=SubclassOf(SelectorParityBase))),
             Definition(ReconstructionTarget, SelectorParityChild).concretize(),
             Definition(ReconstructionTarget, ReconstructionTarget).concretize(),
@@ -1324,7 +1298,7 @@ def test_definition_reconstructs_in_subprocess_from_a_different_directory(tmp_pa
     ),
     ids=(
         "positional", "skip-args", "present", "missing", "any", "choice",
-        "int-range", "uniform-int-range", "uniform-from-set", "subclass",
+        "int-range", "subclass",
         "selector-class", "exact-class", "strict", "symbolic-class",
     ),
 )

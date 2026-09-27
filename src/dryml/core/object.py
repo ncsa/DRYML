@@ -17,9 +17,18 @@ if TYPE_CHECKING:
 
 
 def in_definition_mode() -> bool:
+    """Return whether construction currently produces inert declaration values.
+
+    Returns:
+        ``True`` for ``definition``, ``concrete``, and ``selector`` modes.
+
+    Side Effects:
+        Reads the context-local session configuration without changing it.
+    """
+
     from .session import current_object_mode
 
-    return current_object_mode() in {"definition", "concrete", "selector", "space"}
+    return current_object_mode() in {"definition", "concrete", "selector"}
 
 
 def definition_mode_concrete() -> bool:
@@ -33,14 +42,6 @@ def selector_mode(enabled: bool = True):
     from .session import config
 
     with config(object_mode="selector" if enabled else "fresh"):
-        yield
-
-
-@contextmanager
-def space_mode(enabled: bool = True):
-    from .session import config
-
-    with config(object_mode="space" if enabled else "fresh"):
         yield
 
 
@@ -179,8 +180,8 @@ class Dryml(ABCMeta):
                 normal user keyword rather than colliding with this metaclass.
 
         Returns:
-            An Object, Definition, ConcreteDefinition, Selector, or SearchSpace
-            according to the active object mode.
+            An Object, Definition, ConcreteDefinition, or Selector according to
+            the active object mode.
 
         Raises:
             TypeError: If constructor binding or runtime initialization fails.
@@ -205,9 +206,6 @@ class Dryml(ABCMeta):
 
         if __cdef__ is None and object_mode == "selector":
             return dryml_cls.defn(*args, **kwargs).as_selector()
-
-        if __cdef__ is None and object_mode == "space":
-            return dryml_cls.defn(*args, **kwargs).as_space()
 
         _admit_materialization_class(dryml_cls)
 

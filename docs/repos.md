@@ -117,7 +117,7 @@ workspace, or invokes user construction hooks. An abstract current class raises
 `TypeError` locally even when an older definition or StateRef exists. The
 preflight includes materializing CDef, ObjectRef, and StateRef closures, including
 reused exact nodes; `Ref` links and quotations remain inert data and are not
-resolved. Definition, CDef, selector, and search-space construction remains
+resolved. Definition, CDef, selector, and template construction remains
 non-materializing and may describe an abstract class.
 
 `Repo.reserve_state_graph(obj)` returns a process/thread-local, Store-neutral,

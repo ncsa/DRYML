@@ -10,7 +10,7 @@ from ..definition import ConcreteDefinition, Definition, selector_match
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..links import DefLink
 from ..object import Object
-from ..params import Par
+from ..params import Match
 from ..quoted import QuotedDef, SelectorSpec
 from ..selector import Selector
 from ..symbol import maybe_symbol_ref, resolve_symbol
@@ -1179,7 +1179,7 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
             tgt_value = tgt_value.root
         return _query_match(sel_value, tgt_value, strict=strict, class_match=class_match)
 
-    if isinstance(selector, Par):
+    if isinstance(selector, Match):
         return selector.matches(target, present=True)
 
     if isinstance(selector, Definition):
@@ -1219,7 +1219,7 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
                 selector_parameters.update(unknown_kwargs)
             for name, child in selector_parameters.items():
                 if name not in target.parameters:
-                    if isinstance(child, Par) and child.matches(None, present=False):
+                    if isinstance(child, Match) and child.matches(None, present=False):
                         continue
                     return False
                 if not _query_match(child, target.parameters[name], strict=strict, class_match=class_match):
@@ -1231,7 +1231,7 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
             target_parameters = _semantic_parameters(target)
             for name, child in selector.parameters.items():
                 if name not in target_parameters:
-                    if isinstance(child, Par) and child.matches(None, present=False):
+                    if isinstance(child, Match) and child.matches(None, present=False):
                         continue
                     return False
                 if not _query_match(child, target_parameters[name], strict=strict, class_match=class_match):
@@ -1244,7 +1244,7 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
                 return False
         for key, child in selector.kwargs.items():
             if key not in target.kwargs:
-                if isinstance(child, Par) and child.matches(None, present=False):
+                if isinstance(child, Match) and child.matches(None, present=False):
                     continue
                 return False
             if not _query_match(child, target.kwargs[key], strict=strict, class_match=class_match):
@@ -1256,7 +1256,7 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
             return False
         for key, child in selector.items():
             if key not in target:
-                if isinstance(child, Par) and child.matches(None, present=False):
+                if isinstance(child, Match) and child.matches(None, present=False):
                     continue
                 return False
             if not _query_match(child, target[key], strict=strict, class_match=class_match):
@@ -1287,7 +1287,7 @@ def _query_match_factory(selector, target, *, strict: bool, class_match: ClassMa
     """Verify exact or Match-bearing partial FactorySpec call patterns."""
 
     from ..factory import FactorySpec
-    from ..params import Par
+    from ..params import Match
 
     if not isinstance(target, FactorySpec):
         return False
@@ -1299,7 +1299,7 @@ def _query_match_factory(selector, target, *, strict: bool, class_match: ClassMa
         return False
 
     def patterned(value):
-        if isinstance(value, Par):
+        if isinstance(value, Match):
             return True
         if isinstance(value, FactorySpec):
             return any(patterned(item) for item in (*value.args, *value.kwargs.values()))

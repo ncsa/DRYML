@@ -73,6 +73,8 @@ _CORE_EXPORTS = {
     "Expr",
     "Shared",
     "Template",
+    "TemplateGenerator",
+    "TemplateSelector",
     "repeat",
     "Match",
     "Distribution",
@@ -90,11 +92,9 @@ _CORE_EXPORTS = {
     "Satisfies",
     "UniformIntRange",
     "UniformFromSet",
-    "SearchSpace",
     "SKIP_ARGS",
     "definition_mode",
     "selector_mode",
-    "space_mode",
 }
 
 
@@ -186,6 +186,8 @@ __all__ = [
     "Expr",
     "Shared",
     "Template",
+    "TemplateGenerator",
+    "TemplateSelector",
     "repeat",
     "Match",
     "Distribution",
@@ -203,9 +205,7 @@ __all__ = [
     "Satisfies",
     "UniformIntRange",
     "UniformFromSet",
-    "SearchSpace",
     "SKIP_ARGS",
     "definition_mode",
     "selector_mode",
-    "space_mode",
 ]

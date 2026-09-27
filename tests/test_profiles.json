@@ -6,6 +6,23 @@
         "package": "Artifact builds and installed-package checks remain available through ./tests.sh package and exhaustive modes."
       },
       "representative_functions": {
+        "tests/core/test_template_api.py": {
+          "rationale": "Retain the public authoring, independent Match, captured generation, and executable documentation transition surface.",
+          "functions": [
+            "test_template_direct_authoring_and_definition_conversion_are_inert",
+            "test_match_is_a_query_leaf_distinct_from_template_parameters",
+            "test_documented_authoring_example_captures_complete_definitions",
+            "test_retired_search_space_and_predicate_parameter_apis_are_absent"
+          ]
+        },
+        "tests/models/test_template_factory_groups.py": {
+          "rationale": "Retain build-only optional TensorFlow/PyTorch factory qualification; unavailable backends report skips without training or data loading.",
+          "functions": [
+            "test_tf_template_factory_groups_build_with_resolved_values_only",
+            "test_torch_template_factory_groups_build_with_resolved_values_only",
+            "test_shared_factory_repetition_does_not_tie_backend_instances"
+          ]
+        },
         "tests/core/test_live_reuse.py": {
           "rationale": "Retain matching, never-reuse, unique greedy restore, ambiguous fallback, and failed-restore eviction; exhaustive mode covers equivalent stale/equal-node combinations.",
           "functions": [

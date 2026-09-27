@@ -328,7 +328,7 @@ def _descriptor_set_fingerprint(
         finally:
             active.remove(label)
 
-    def par(current: Mapping[str, Any], depth: int) -> str:
+    def match(current: Mapping[str, Any], depth: int) -> str:
         matcher = current["matcher"]
         kind = matcher["kind"]
         if kind in {"present", "missing", "any"}:
@@ -341,15 +341,11 @@ def _descriptor_set_fingerprint(
             matcher_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(kind), _stable_leaf_hash(matcher["lo"]), _stable_leaf_hash(matcher["hi"])])
         else:
             matcher_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(kind), symbol(matcher["cls"])])
-        generator = current["generator"]
-        if generator is None:
-            generator_key = _stable_leaf_hash(None)
-        elif generator["kind"] == "uniform-int-range":
-            generator_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(generator["kind"]), _stable_leaf_hash(generator["lo"]), _stable_leaf_hash(generator["hi"])])
-        else:
-            generator_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash(generator["kind"]), _stable_sequence_hash("builtins.tuple", [item(child, depth + 1) for child in generator["values"]])])
-        stable_key = _stable_sequence_hash("builtins.tuple", [_stable_leaf_hash("par"), _stable_leaf_hash(current["name"]), matcher_key, generator_key])
-        return _stable_mapping_hash("dryml.core.params.Par", [("stable_key", stable_key)])
+        stable_key = _stable_sequence_hash(
+            "builtins.tuple",
+            [_stable_leaf_hash("match"), _stable_leaf_hash(current["name"]), matcher_key],
+        )
+        return _stable_mapping_hash("dryml.core.params.Match", [("stable_key", stable_key)])
 
     def cdef_graph_hash(root: str) -> str:
         """Recreate the token-free CDef graph digest from descriptor edges."""
@@ -475,8 +471,8 @@ def _descriptor_set_fingerprint(
             return _stable_mapping_hash("dryml.core.links.DefLink", [("kind", _stable_leaf_hash(current["edge"])), ("target", item(current["target"], depth + 1))])
         if kind == "quoted-definition":
             return _stable_mapping_hash("dryml.core.quoted.QuotedDef", [("value", item(current["value"], depth + 1))])
-        if kind == "par":
-            return par(current, depth + 1)
+        if kind == "match":
+            return match(current, depth + 1)
         if kind == "object-ref":
             return object_ref(current)
         if kind == "state-ref":
@@ -604,7 +600,7 @@ class _SelectorEncoder:
         from .factory import FactorySpec
         from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
         from .links import DefLink
-        from .params import Match, Par
+        from .params import Match
         from .quoted import QuotedDef, SelectorSpec
         from .reference_values import ObjectRef, StateRef
         from .selector import Selector
@@ -646,9 +642,7 @@ class _SelectorEncoder:
                 "kwargs": [[name, self.value(item, f"{path}.kwargs[{index}]", depth + 1)] for index, (name, item) in enumerate(value.kwargs.items())],
             }
         if isinstance(value, Match):
-            return self.par(value, path, depth + 1)
-        if isinstance(value, Par):
-            return self.par(value, path, depth + 1)
+            return self.match(value, path, depth + 1)
         if isinstance(value, (FrozenDict, dict)):
             from .utils.graph.path import canonical_key_bytes
 
@@ -725,11 +719,10 @@ class _SelectorEncoder:
         finally:
             self.active.remove(key)
 
-    def par(self, value: Any, path: str, depth: int = 0) -> dict[str, Any]:
+    def match(self, value: Any, path: str, depth: int = 0) -> dict[str, Any]:
         from .params import (
             AnyMatcher, ChoiceMatcher, ExactMatcher, IntRangeMatcher,
             MissingMatcher, PresentMatcher, SubclassMatcher,
-            UniformFromSetGenerator, UniformIntRangeGenerator,
         )
         matcher = value.matcher
         if type(matcher) is PresentMatcher:
@@ -748,22 +741,10 @@ class _SelectorEncoder:
             match = {"kind": "subclass", "cls": _symbol_data(matcher.cls, representation="live", path=path + ".subclass")}
         else:
             raise _error(path, "matcher is not portable")
-        generator = value.generator
-        if generator is None:
-            gen = None
-        elif type(generator) is UniformIntRangeGenerator:
-            gen = {"kind": "uniform-int-range", "lo": generator.lo, "hi": generator.hi}
-        elif type(generator) is UniformFromSetGenerator:
-            gen = {"kind": "uniform-from-set", "values": [self.value(item, f"{path}.generator[{index}]", depth + 1) for index, item in enumerate(generator.values)]}
-        else:
-            raise _error(path, "generator is not portable")
-        from .params import Match
-
         return {
-            "kind": "match" if isinstance(value, Match) else "par",
+            "kind": "match",
             "name": value.name,
             "matcher": match,
-            "generator": gen,
         }
 
     def selector(self, selector: Any, path: str, depth: int = 0) -> dict[str, Any]:
@@ -774,11 +755,11 @@ class _SelectorEncoder:
         return {"root": self.definition(selector.root, path + ".root", depth + 1), "strict": selector.strict, "cls_policy": selector.cls_policy, "nodes": self.nodes}
 
 
-def _validate_par(value: Mapping[str, Any], path: str, validate_value: Any) -> None:
-    """Validate one closed Par descriptor without invoking matcher behavior."""
+def _validate_match(value: Mapping[str, Any], path: str, validate_value: Any) -> None:
+    """Validate one closed Match descriptor without invoking matcher behavior."""
 
-    _exact_keys(value, {"kind", "name", "matcher", "generator"}, path)
-    if value["kind"] not in {"par", "match"} or (value["name"] is not None and not isinstance(value["name"], str)):
+    _exact_keys(value, {"kind", "name", "matcher"}, path)
+    if value["kind"] != "match" or (value["name"] is not None and not isinstance(value["name"], str)):
         raise _error(path, "parameter descriptor is invalid")
     matcher = value["matcher"]
     if not isinstance(matcher, Mapping) or not isinstance(matcher.get("kind"), str):
@@ -807,26 +788,6 @@ def _validate_par(value: Mapping[str, Any], path: str, validate_value: Any) -> N
     else:
         raise _error(path, "matcher is invalid")
 
-    generator = value["generator"]
-    if value["kind"] == "match" and generator is not None:
-        raise _error(path, "Match descriptors cannot have generators")
-    if generator is None:
-        return
-    if not isinstance(generator, Mapping) or not isinstance(generator.get("kind"), str):
-        raise _error(path, "generator is invalid")
-    if generator["kind"] == "uniform-int-range":
-        _exact_keys(generator, {"kind", "lo", "hi"}, path + ".generator")
-        if type(generator["lo"]) is not int or type(generator["hi"]) is not int or generator["lo"] > generator["hi"]:
-            raise _error(path, "generator bounds are invalid")
-        return
-    if generator["kind"] == "uniform-from-set":
-        _exact_keys(generator, {"kind", "values"}, path + ".generator")
-        if not isinstance(generator["values"], list) or len(generator["values"]) > 4096:
-            raise _error(path, "generator values are invalid")
-        for index, child in enumerate(generator["values"]):
-            validate_value(child, f"{path}.generator.values[{index}]")
-        return
-    raise _error(path, "generator is invalid")
 
 
 def _validate_reference_graph_path(value: Any, path: str) -> None:
@@ -1034,7 +995,7 @@ def _validate_selector(value: Any, path: str) -> None:
                         active_labels, depth + 1,
                     )
                 return
-            if kind == "par":
+            if kind == "match":
                 raise _error(value_path, "CDef graph contains a parameter placeholder")
 
         def visit_cdef(label: str, graph_path: GraphPath, value_path: str, active_labels: set[str], depth: int) -> None:
@@ -1152,8 +1113,8 @@ def _validate_selector(value: Any, path: str) -> None:
                 raise _error(item_path, "link edge is invalid")
             item(current["target"], item_path + ".target", depth + 1)
             return
-        if kind in {"par", "match"}:
-            _validate_par(current, item_path, lambda child, child_path: item(child, child_path, depth + 1))
+        if kind == "match":
+            _validate_match(current, item_path, lambda child, child_path: item(child, child_path, depth + 1))
             return
         if kind == "factory":
             _exact_keys(current, {"kind", "target", "args", "kwargs"}, item_path)
@@ -1447,8 +1408,7 @@ def _selector_from_data(value: Mapping[str, Any]):
     from .links import DefLink
     from .params import (
         AnyMatcher, ChoiceMatcher, ExactMatcher, IntRangeMatcher, Match, MissingMatcher,
-        Par, PresentMatcher, SubclassMatcher, UniformFromSetGenerator,
-        UniformIntRangeGenerator,
+        PresentMatcher, SubclassMatcher,
     )
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectId, ObjectRef, StateRef
@@ -1489,7 +1449,7 @@ def _selector_from_data(value: Mapping[str, Any]):
             return FrozenDict((name, item(child)) for name, child in current["items"])
         if kind == "link":
             return DefLink.finalized(EdgeKind(current["edge"]), item(current["target"]))
-        if kind in {"par", "match"}:
+        if kind == "match":
             matcher_data = current["matcher"]
             matcher_kind = matcher_data["kind"]
             if matcher_kind == "present":
@@ -1506,16 +1466,7 @@ def _selector_from_data(value: Mapping[str, Any]):
                 matcher = IntRangeMatcher(matcher_data["lo"], matcher_data["hi"])
             else:
                 matcher = SubclassMatcher(_symbol_from_data(matcher_data["cls"], require_live=True))
-            generator_data = current["generator"]
-            if generator_data is None:
-                generator = None
-            elif generator_data["kind"] == "uniform-int-range":
-                generator = UniformIntRangeGenerator(generator_data["lo"], generator_data["hi"])
-            else:
-                generator = UniformFromSetGenerator(
-                    item(child) for child in generator_data["values"]
-                )
-            return Match(matcher, current["name"]) if kind == "match" else Par(current["name"], matcher, generator)
+            return Match(matcher, current["name"])
         if kind == "factory":
             return FactorySpec._from_template_parts(
                 item(current["target"]),

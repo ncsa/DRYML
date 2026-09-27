@@ -312,9 +312,9 @@ def _selector_has_partial_factory(value: Any, active: set[int] | None = None) ->
 
     from ..factory import FactorySpec
     from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
-    from ..params import Par
+    from ..params import Match
 
-    if isinstance(value, Par):
+    if isinstance(value, Match):
         return False
     if active is None:
         active = set()
@@ -343,9 +343,9 @@ def _factory_pattern(value: Any, active: set[int]) -> bool:
 
     from ..factory import FactorySpec
     from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
-    from ..params import Par
+    from ..params import Match
 
-    if isinstance(value, Par):
+    if isinstance(value, Match):
         return True
     if isinstance(value, (dict, FrozenDict)):
         values = value.values()

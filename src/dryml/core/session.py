@@ -8,11 +8,11 @@ from threading import RLock, get_ident
 from typing import Any, Literal
 
 
-ObjectMode = Literal["fresh", "definition", "concrete", "selector", "space", "load_or_build"]
+ObjectMode = Literal["fresh", "definition", "concrete", "selector", "load_or_build"]
 CacheMode = Literal["none", "weak", "strong"]
 
 _UNSET = object()
-_OBJECT_MODES = {"fresh", "definition", "concrete", "selector", "space", "load_or_build"}
+_OBJECT_MODES = {"fresh", "definition", "concrete", "selector", "load_or_build"}
 _CACHE_MODES = {"none", "weak", "strong"}
 
 
@@ -293,7 +293,7 @@ def _validated_object_mode(value: str, *, internal_construction: bool = False) -
                 context={
                     "mode": "orchestrator",
                     "object_mode": mode,
-                    "fix": "use definition/concrete/selector/space modes, a fresh managed process, or a future explicit dispatch",
+                    "fix": "use definition/concrete/selector modes, a fresh managed process, or a future explicit dispatch",
                 },
             )
     return mode

@@ -565,15 +565,15 @@ class Definition(DefInterface, Mapping):
         from .selector import Selector
         return Selector(self, **policy)
 
-    def as_space(self):
-        from .search_space import SearchSpace
-        return SearchSpace.from_def(self)
-
     def as_template(self) -> "Template":
         """Convert this Definition into an inert reusable template.
 
         Returns:
             A Template retaining this Definition's frozen recipe exactly.
+
+        Raises:
+            TemplateError: If this Definition contains an unsupported template
+                value.
 
         Side Effects:
             None. The source is neither resolved nor constructed.
@@ -1273,11 +1273,11 @@ class SelectorMatcher(GraphMatcher):
     def dispatch(self, selector: Any, target: Any, ctx: GraphCtx) -> bool:
         from .object import Object
         from .factory import FactorySpec
-        from .params import Par
+        from .params import Match
 
         dryml_obj_types = (Object, Definition, ConcreteDefinition)
 
-        if isinstance(selector, Par):
+        if isinstance(selector, Match):
             return selector.matches(target, present=True)
 
         if isinstance(selector, FactorySpec):
@@ -1389,7 +1389,7 @@ class SelectorMatcher(GraphMatcher):
         """Match exact factories and projected partial factory call patterns."""
 
         from .factory import FactorySpec
-        from .params import Par
+        from .params import Match
 
         if not isinstance(target, FactorySpec):
             return False
@@ -1401,7 +1401,7 @@ class SelectorMatcher(GraphMatcher):
             return False
 
         def patterned(value):
-            if isinstance(value, Par):
+            if isinstance(value, Match):
                 return True
             if isinstance(value, FactorySpec):
                 return any(patterned(item) for item in (*value.args, *value.kwargs.values()))
@@ -1520,7 +1520,7 @@ class SelectorMatcher(GraphMatcher):
     # ------------------------------------------------------------------
 
     def _semantic_selector_parameters(self, definition: Definition):
-        """Bind known fields while retaining absent-field Par constraints."""
+        """Bind known fields while retaining absent-field Match constraints."""
 
         try:
             return definition.parameters
@@ -1562,12 +1562,12 @@ class SelectorMatcher(GraphMatcher):
         if isinstance(sel_def, Definition) and isinstance(tgt_def, ConcreteDefinition) and tgt_def._bound_args is not None:
             # V2 records have no raw invocation fields.  Bind only the values
             # supplied by the soft selector; defaults remain unconstrained.
-            from .params import Par
+            from .params import Match
 
             for name, child in self._semantic_selector_parameters(sel_def).items():
                 child_ctx = ctx.child(f"parameters[{name!r}]")
                 if name not in tgt_def.parameters:
-                    if isinstance(child, Par) and child.matches(None, present=False):
+                    if isinstance(child, Match) and child.matches(None, present=False):
                         continue
                     compare_failed = True
                     self._print(child_ctx, "Semantic parameter missing in target")
@@ -1584,12 +1584,12 @@ class SelectorMatcher(GraphMatcher):
 
         if isinstance(sel_def, Definition) and _is_prepared_selector_definition(sel_def):
             target_parameters = _semantic_parameters(tgt_def)
-            from .params import Par
+            from .params import Match
 
             for name, child in self._semantic_selector_parameters(sel_def).items():
                 child_ctx = ctx.child(f"parameters[{name!r}]")
                 if name not in target_parameters:
-                    if isinstance(child, Par) and child.matches(None, present=False):
+                    if isinstance(child, Match) and child.matches(None, present=False):
                         continue
                     compare_failed = True
                     self._print(child_ctx, "Semantic parameter missing in target")

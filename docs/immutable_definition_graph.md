@@ -16,3 +16,10 @@ the retained reference under its managed Repo.
 
 The signature boundary determines newly authored Ref/Mat edges; see
 [Signatures](signatures.md) for supported annotations and delivery behavior.
+
+Template repetition distinguishes construction topology from configuration.
+Repeated groups receive fresh CDef nodes by default while same-named template
+parameters retain one value; `Shared(...)` preserves node identity at matching
+positions. This does not make FactorySpec consumers share TensorFlow/Torch backend
+instances or weights. A declared `Ref[Template]` is terminal recipe data in this
+graph and can remain unresolved without becoming a materializing edge.

@@ -103,6 +103,15 @@ an unchanged factory declaration. `FactorySpec.build(namespace=...)` resolves an
 invokes the target at that explicit consumer boundary; resolution can import
 trusted target code.
 
+## Templates
+
+`Definition.as_template()` explicitly converts a soft definition into an inert
+`Template`; direct authoring uses `Template(Target, ...)`. Templates substitute
+only static values and defer generation to `TemplateGenerator`, whose completed
+sample/grid results are ordinary Definitions. This does not construct the target
+or factory. See [Definition Templates](templates.md) for namespaces, repetition,
+exact support selectors, and the intentional SearchSpace migration.
+
 ## Categorical Selectors
 
 `Definition.categorical(...)`, `ConcreteDefinition.categorical(...)`, and

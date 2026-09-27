@@ -234,7 +234,7 @@ def node_kind(x: Any) -> NodeKind:
     from .definition import ConcreteDefinition, Definition
     from .links import DefLink
     from .object import Object
-    from .params import Par
+    from .params import Match
     from .quoted import QuotedDef, SelectorSpec
     from .selector import Selector
     from .template import Expr
@@ -292,7 +292,7 @@ def node_kind(x: Any) -> NodeKind:
     if isinstance(x, Selector):
         return NodeKind.SELECTOR
 
-    if isinstance(x, Par):
+    if isinstance(x, Match):
         return NodeKind.PAR
 
     if isinstance(x, Expr):
@@ -1175,14 +1175,14 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
     from .definition import ConcreteDefinition, Definition
     from .links import DefLink
     from .object import Object
-    from .params import Par
+    from .params import Match
     from .quoted import QuotedDef, SelectorSpec
     from .selector import Selector
     from .template import Expr
 
     if isinstance(value, Object):
         return value.definition
-    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, Par, Expr, ObjectRef, StateRef, StateSelectorRef)):
+    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, Match, Expr, ObjectRef, StateRef, StateSelectorRef)):
         return value
     kind = node_kind(value)
     if kind is NodeKind.NDARRAY:
