@@ -8,13 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, Object, ObjectRef, Ref, Repo, StateRef, Template
+from dryml.core import ConcreteDefinition, Definition, F, Object, ObjectRef, Ref, Repo, StateRef, Template
 from dryml.core.cdef_codec import CDefGraphCodecError, decode_cdef_graph, encode_cdef_graph
 from dryml.core.errors import TemplateError
 from dryml.core.links import DefLink
 from dryml.core.repo_definition import RepoDefinition
 from dryml.core.store.dir import DirStore
 from dryml.core.template import Par
+from dryml.core.signatures import SignatureError
 from dryml.core.template_selector import TemplateGenerator, TemplateSelector
 from dryml.core.domains import UniformFromSet
 
@@ -158,7 +159,7 @@ def test_finalized_template_link_is_rechecked_at_fresh_declared_boundary():
 
     link = DefLink.finalized(Ref.kind, _recipe())
 
-    with pytest.raises(Exception):
+    with pytest.raises(SignatureError, match=r"explicit Ref\[Template\] declaration"):
         Definition(UndeclaredOwner, link).concretize()
 
 
@@ -175,6 +176,44 @@ def test_template_codec_rejects_unknown_tags_and_duplicate_labels():
         Template.from_data(unknown)
     with pytest.raises(TemplateError):
         Template.from_data(duplicate)
+
+
+def test_template_codec_rejects_invalid_binary_operands_and_factory_targets():
+    """Closed payloads cannot manufacture states bypassing public invariants."""
+
+    binary = _recipe().to_data()
+    binary_node = next(
+        record["value"] for record in binary["nodes"]
+        if record["value"]["tag"] == "binary"
+    )
+    binary_node["right"] = {"tag": "str", "value": "not-a-number"}
+
+    factory = Template.from_value(F("portable", 1)).to_data()
+    factory_node = next(
+        record["value"] for record in factory["nodes"]
+        if record["value"]["tag"] == "factory"
+    )
+    factory_node["target"] = {"tag": "int", "value": "1"}
+
+    with pytest.raises(TemplateError, match="binary operands"):
+        Template.from_data(binary)
+    with pytest.raises(TemplateError, match="factory target"):
+        Template.from_data(factory)
+
+
+def test_template_codec_normalizes_float_overflow_and_preserves_definition_aliases():
+    """Malformed floats fail closed and valid soft-call aliases round-trip."""
+
+    overflow = Template.from_value(1.0).to_data()
+    overflow["root"]["value"] = "0x1p+999999999999999999999"
+    with pytest.raises(TemplateError, match="float is invalid"):
+        Template.from_data(overflow)
+
+    definition = Definition(PortableLeaf, 1)
+    aliased = Template._from_root([definition, definition.args, definition.kwargs])
+    restored = Template.from_data(aliased.to_data())
+    assert restored.root[0].args is restored.root[1]
+    assert restored.root[0].kwargs is restored.root[2]
 
 
 def test_cdef_codec_rejects_template_payload_outside_ref_link():

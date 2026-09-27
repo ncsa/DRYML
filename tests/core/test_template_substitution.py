@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, F, Object, ObjectRef, Ref, StateRef
+from dryml.core import ConcreteDefinition, Definition, F, Mat, Object, ObjectRef, Ref, StateRef
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.domains import UniformFromSet
@@ -12,7 +12,6 @@ from dryml.core.errors import TemplateError, UnresolvedTemplateError
 from dryml.core.links import DefLink
 from dryml.core.symbol import ImportRef
 from dryml.core.template import Par, Template
-from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
 class SubstitutionLeaf(Object):
@@ -230,3 +229,35 @@ def test_ref_recipe_remains_single_pass_when_explicitly_traversed():
     assert result.names == ()
     assert result.root["recipe"].target.root["value"]["later"] == Par("width")
     assert recipe.root["value"] == Par("recipe")
+
+
+def test_materialize_links_participate_in_substitution():
+    """Owned construction links expose and evaluate their template parameters."""
+
+    child = Definition(SubstitutionLeaf, Par("width"))
+    template = Template.from_value({"child": Mat(child)})
+
+    assert template.names == ("width",)
+    result = template.sub(width=64)
+
+    assert result.root["child"].kind is EdgeKind.MATERIALIZE
+    assert result.root["child"].target.parameters["value"] == 64
+
+
+def test_traversed_finalized_ref_preserves_portability_and_cdef_authority():
+    """Explicit recipe traversal retains finalized links and exact CDef roots."""
+
+    recipe = Template.from_value({"value": Par("width") * 2})
+    link = DefLink.finalized(EdgeKind.REF, recipe)
+    cdef = ConcreteDefinition._from_bound_record(
+        SubstitutionRoot,
+        BoundArguments({"child": link}.items()),
+    )
+
+    result = Template.from_value(cdef).sub(width=32, traverse_refs=True)
+
+    assert isinstance(result.root, ConcreteDefinition)
+    rewritten = result.root.parameters["child"]
+    assert rewritten.is_finalized
+    assert rewritten.target.root["value"] == 64
+    assert Template.from_data(result.to_data()) == result

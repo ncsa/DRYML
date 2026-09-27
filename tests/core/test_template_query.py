@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core import Definition, Object, Repo
+from dryml.core import Definition, Object, Ref, Repo
 from dryml.core.domains import UniformFromSet
 from dryml.core.errors import TemplateLimitError
-from dryml.core.query.model import QueryDomainError
+from dryml.core.query.model import QueryDomainError, QueryIndexError
 from dryml.core.template import Par, Template
 from dryml.core.template_selector import TemplateGenerator
 from dryml.core.params import AnyValue
@@ -33,6 +33,13 @@ class FactoryQueryOwner(Object):
 
     def __init__(self, factory):
         self.factory = factory
+
+
+class RecipeQueryOwner(Object):
+    """Owner carrying an inert recipe through an explicit Ref boundary."""
+
+    def __init__(self, recipe: Ref[Template]):
+        self.recipe = recipe
 
 
 def _selector(*, shared: bool):
@@ -76,6 +83,22 @@ def test_template_selector_query_rejects_unsupported_structural_rewrites():
         query.restore()
     with pytest.raises(QueryDomainError):
         query.exact()
+
+
+def test_template_selector_rejects_malformed_store_root_enumeration(tmp_path, monkeypatch):
+    """Exact terminals fail closed when a Store emits non-CDef authority."""
+
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    monkeypatch.setattr(
+        store,
+        "iter_authoritative_root_definitions",
+        lambda: iter((Definition(QueryTemplateLeaf, 64),)),
+    )
+
+    with pytest.raises((QueryDomainError, QueryIndexError), match="not ConcreteDefinition|non-CDef"):
+        Repo(store).query(_selector(shared=True)).stored().defs()
 
 
 def test_template_selector_query_witness_budget_never_returns_partial_results():
@@ -133,6 +156,44 @@ def test_template_selector_query_scans_stored_authority_and_controls_refinement(
     assert routed.to_definition().to_data()["routing"]["routes"][0]["selector"]["kind"] == "template-selector"
 
 
+def test_template_selector_uses_index_prefilter_without_hydrate_index(tmp_path, monkeypatch):
+    """Stored exact queries retain topology without bypassing index candidates."""
+
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    leaf = QueryTemplateLeaf(64, repo=repo)
+    owner = QueryTemplateParent([leaf, leaf], repo=repo)
+    repo.save_object(owner)
+    monkeypatch.setattr(
+        store,
+        "hydrate_index",
+        lambda: pytest.fail("exact query bypassed the index prefilter"),
+    )
+
+    assert tuple(repo.query(_selector(shared=True)).stored().defs()) == (
+        owner.definition,
+    )
+
+
+def test_traversed_recipe_ref_has_direct_and_query_support_parity():
+    """Loose index projection cannot reject a recipe accepted by exact support."""
+
+    recipe = Template(QueryTemplateLeaf, Par("width"))
+    selector = TemplateGenerator(
+        Template(RecipeQueryOwner, Ref(recipe)),
+        width=UniformFromSet((64,)),
+        traverse_refs=True,
+    ).support_selector()
+    repo = Repo()
+    owner = RecipeQueryOwner(recipe.sub(width=64), repo=repo)
+    repo.add_objects(owner)
+
+    assert selector.matches(owner.definition)
+    assert tuple(repo.query(selector).cached().defs()) == (owner.definition,)
+
+
 @pytest.mark.parametrize("shared_first", [False, True])
 def test_template_selector_preserves_graph_witnesses_across_stores(tmp_path, shared_first):
     """Store partition and insertion order cannot choose the wrong topology witness."""
@@ -161,6 +222,88 @@ def test_template_selector_preserves_graph_witnesses_across_stores(tmp_path, sha
 
     assert tuple(results) == (shared.definition,)
     assert results.replicas(shared.definition) == (shared_store,)
+
+
+def test_occurrence_refinement_preserves_owner_replica_authority(tmp_path):
+    """Exact nested refinement and projection retain each owner's source Store."""
+
+    from dryml.core.store.dir import DirStore
+
+    first_store = DirStore(tmp_path / "first")
+    second_store = DirStore(tmp_path / "second")
+    first_repo = Repo(first_store)
+    second_repo = Repo(second_store)
+    first_leaf = QueryTemplateLeaf(64, repo=first_repo)
+    second_leaf = QueryTemplateLeaf(128, repo=second_repo)
+    first = QueryTemplateParent([first_leaf], repo=first_repo)
+    second = QueryTemplateParent([second_leaf], repo=second_repo)
+    first_repo.save_object(first)
+    second_repo.save_object(second)
+
+    selector = TemplateGenerator(
+        Template(QueryTemplateLeaf, Par("width")),
+        width=UniformFromSet((64, 128)),
+    ).support_selector()
+    repo = Repo(stores=(first_store, second_store))
+    occurrences = repo.query(selector).nested().execute().refine(selector)
+    owners = occurrences.owners()
+
+    assert owners.replicas(first.definition) == (first_store,)
+    assert owners.replicas(second.definition) == (second_store,)
+    loaded = tuple(owners.objects().values())
+    assert len(loaded) == 2
+    assert {item.children[0].width: item._store_affinity for item in loaded} == {
+        64: first_store,
+        128: second_store,
+    }
+
+
+def test_occurrence_projections_retain_exact_witnesses_for_refinement(tmp_path):
+    """Definitions and owners projected from exact occurrences remain refinable."""
+
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    leaf = QueryTemplateLeaf(64, repo=repo)
+    owner = QueryTemplateParent([leaf], repo=repo)
+    repo.save_object(owner)
+    leaf_selector = TemplateGenerator(
+        Template(QueryTemplateLeaf, Par("width")),
+        width=UniformFromSet((64,)),
+    ).support_selector()
+    owner_selector = TemplateGenerator(
+        Template(QueryTemplateParent, [Definition(QueryTemplateLeaf, Par("width"))]),
+        width=UniformFromSet((64,)),
+    ).support_selector()
+
+    occurrences = repo.query(leaf_selector).nested().execute()
+
+    assert tuple(occurrences.definitions().refine(leaf_selector)) == (leaf.definition,)
+    assert tuple(occurrences.owners().refine(owner_selector)) == (owner.definition,)
+
+
+def test_template_query_enforces_one_cumulative_assignment_budget():
+    """Per-witness exact proofs cannot multiply beyond the terminal hard cap."""
+
+    repo = Repo()
+    repo.add_objects(
+        QueryTemplateParent(
+            [QueryTemplateLeaf(64, repo=repo), QueryTemplateLeaf(64, repo=repo)],
+            repo=repo,
+        ),
+        QueryTemplateParent(
+            [QueryTemplateLeaf(64, repo=repo), QueryTemplateLeaf(64, repo=repo)],
+            repo=repo,
+        ),
+    )
+    child = Definition(QueryTemplateLeaf, Par("width") * 1)
+    selector = TemplateGenerator(
+        Template(QueryTemplateParent, [child, Definition(QueryTemplateLeaf, Par("width") * 1)]),
+        width=UniformFromSet((64,)),
+    ).support_selector(max_assignments=1)
+
+    with pytest.raises(TemplateLimitError, match="assignment limit"):
+        repo.query(selector).cached().defs()
 
 
 def test_query_backed_results_reject_exact_refinement_without_witness_evidence():

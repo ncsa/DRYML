@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core import Definition, F, Object
+from dryml.core import Definition, F, Mat, Object
 from dryml.core.cdef_identity import cdef_node_key
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.errors import TemplateError, TemplateLimitError
@@ -150,6 +150,20 @@ def test_repetition_keeps_explicit_ref_edges_and_factories_inert():
     assert result["factories"][0].args[0] == 64
     assert result["factories"][0] is not result["factories"][1]
     assert RepeatFactoryTarget.calls == 0
+
+
+def test_repetition_freshens_materialized_construction_links():
+    """Independent groups copy owned Mat targets while retaining linked values."""
+
+    child = Definition(RepeatLeaf, Par("width"))
+    template = Template.from_value(repeat([Mat(child)], 2))
+
+    result = template.sub(width=64).root
+
+    assert all(link.kind is EdgeKind.MATERIALIZE for link in result)
+    assert all(link.target.parameters["value"] == 64 for link in result)
+    assert result[0] is not result[1]
+    assert result[0].target is not result[1].target
 
 
 def test_repetition_limits_are_cumulative_and_leave_sources_unchanged():

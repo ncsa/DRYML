@@ -238,19 +238,27 @@ class _Encoder:
 
     def _node_value(self, value: object, depth: int) -> dict[str, object]:
         from .definition import ConcreteDefinition, Definition
-        from .factory import FactorySpec
+        from .factory import FactorySpec, _validated_factory_target
         from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
         from .links import DefLink
         from .quoted import QuotedDef, SelectorSpec
         from .reference_values import ObjectRef, StateRef
         from .selector import Selector
-        from .template import Par, Template, _BinaryExpr, _RepeatExpr
+        from .template import Expr, Par, Template, _BinaryExpr, _RepeatExpr, _validate_number
 
         if isinstance(value, Template):
             return {"tag": "template", "root": self.value(value.root, depth)}
         if isinstance(value, Par):
             return {"tag": "par", "name": value.name, "path": value.path.to_data()}
         if isinstance(value, _BinaryExpr):
+            if (
+                value.operation not in {"mul", "truediv", "floordiv"}
+                or not all(
+                    isinstance(item, Expr) or _validate_number(item)
+                    for item in (value.left, value.right)
+                )
+            ):
+                raise TemplateCodecError("template binary expression is invalid")
             return {"tag": "binary", "op": value.operation, "left": self.value(value.left, depth), "right": self.value(value.right, depth)}
         if isinstance(value, _RepeatExpr):
             return {"tag": "repeat", "group": self.value(value.group, depth), "count": self.value(value.count, depth), "shared": value.shared}
@@ -265,7 +273,11 @@ class _Encoder:
                     "kwargs": self.value(value.parameters if isinstance(value, ConcreteDefinition) else value.kwargs, depth),
                     "stateful_role": value._stateful_role if isinstance(value, ConcreteDefinition) else None}
         if isinstance(value, FactorySpec):
-            return {"tag": "factory", "target": self.value(value.target, depth), "args": self.value(value.args, depth), "kwargs": self.value(value.kwargs, depth)}
+            try:
+                target = _validated_factory_target(value.target)
+            except TypeError:
+                raise TemplateCodecError("template factory target is invalid") from None
+            return {"tag": "factory", "target": self.value(target, depth), "args": self.value(value.args, depth), "kwargs": self.value(value.kwargs, depth)}
         if isinstance(value, (FrozenDict, dict)):
             if len(value) > _MAX_ENTRIES or any(type(key) not in {str, int} for key in value):
                 raise TemplateCodecError("template map is unsupported")
@@ -362,7 +374,7 @@ def _decode_value(data: object, state: _DecodeState, depth: int) -> object:
         return value
     if tag == "float" and set(data) == {"tag", "value"} and isinstance(data["value"], str):
         try: value = float.fromhex(data["value"])
-        except ValueError: raise TemplateCodecError("template float is invalid") from None
+        except (ValueError, OverflowError): raise TemplateCodecError("template float is invalid") from None
         if not math.isfinite(value) or value.hex() != data["value"]: raise TemplateCodecError("template float is invalid")
         return value
     if tag == "str" and set(data) == {"tag", "value"} and isinstance(data["value"], str): return data["value"]
@@ -394,14 +406,14 @@ def _decode_value(data: object, state: _DecodeState, depth: int) -> object:
 def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
     from .bound_args import BoundArguments
     from .cdef_graph import EdgeKind
-    from .definition import ConcreteDefinition, Definition, SKIP_ARGS
-    from .factory import FactorySpec
+    from .definition import ConcreteDefinition, Definition
+    from .factory import FactorySpec, _validated_factory_target
     from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
     from .links import DefLink
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectId, ObjectRef, StateRef
     from .selector import Selector
-    from .template import Par, Template, _BinaryExpr, _RepeatExpr
+    from .template import Expr, Par, Template, _BinaryExpr, _RepeatExpr, _validate_number
     from .utils.graph.path import GraphPath
 
     if not isinstance(data, Mapping) or not isinstance(data.get("tag"), str): raise TemplateCodecError("template node is invalid")
@@ -411,7 +423,11 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
     if tag == "par" and set(data) == {"tag", "name", "path"}:
         try: return Par(data["name"], path=GraphPath.from_data(data["path"]))
         except Exception: raise TemplateCodecError("template parameter is invalid") from None
-    if tag == "binary" and set(data) == {"tag", "op", "left", "right"} and data["op"] in {"mul", "truediv", "floordiv"}: return _BinaryExpr(data["op"], value(data["left"]), value(data["right"]))
+    if tag == "binary" and set(data) == {"tag", "op", "left", "right"} and data["op"] in {"mul", "truediv", "floordiv"}:
+        left, right = value(data["left"]), value(data["right"])
+        if not all(isinstance(item, Expr) or _validate_number(item) for item in (left, right)):
+            raise TemplateCodecError("template binary operands are invalid")
+        return _BinaryExpr(data["op"], left, right)
     if tag == "repeat" and set(data) == {"tag", "group", "count", "shared"} and type(data["shared"]) is bool:
         group = value(data["group"])
         if not isinstance(group, (FrozenList, FrozenTuple)): raise TemplateCodecError("template repeat group is invalid")
@@ -428,13 +444,15 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
             return ConcreteDefinition._from_bound_record(cls, BoundArguments(kwargs.items()), stateful_role=data["stateful_role"])
         if data["stateful_role"] is not None: raise TemplateCodecError("template Definition is invalid")
         args = data["args"]
-        if args is None: return Definition(cls, SKIP_ARGS, **kwargs)
-        args = value(args)
-        if not isinstance(args, FrozenTuple): raise TemplateCodecError("template Definition args are invalid")
-        return Definition(cls, *args, **kwargs)
+        if args is not None:
+            args = value(args)
+            if not isinstance(args, FrozenTuple): raise TemplateCodecError("template Definition args are invalid")
+        return Definition._from_template_parts(cls, args, kwargs)
     if tag == "factory" and set(data) == {"tag", "target", "args", "kwargs"}:
         target, args, kwargs = value(data["target"]), value(data["args"]), value(data["kwargs"])
         if not isinstance(args, FrozenTuple) or not isinstance(kwargs, FrozenDict): raise TemplateCodecError("template factory is invalid")
+        try: target = _validated_factory_target(target)
+        except TypeError: raise TemplateCodecError("template factory target is invalid") from None
         return FactorySpec._from_template_parts(target, tuple(args), kwargs)
     if tag == "map" and set(data) == {"tag", "items"} and isinstance(data["items"], list):
         if len(data["items"]) > _MAX_ENTRIES: raise TemplateLimitError("template container entry limit exceeded")

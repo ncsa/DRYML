@@ -13,6 +13,19 @@ def _is_target_token(value: Any) -> bool:
     return isinstance(value, (str, ImportRef, SourceSpec)) or isinstance(value, type)
 
 
+def _validated_factory_target(value: Any) -> str | ImportRef | SourceSpec:
+    """Normalize one inert factory target without resolving or invoking it."""
+
+    symbol = maybe_symbol_ref(value)
+    if symbol is not None:
+        return symbol
+    if isinstance(value, (str, ImportRef, SourceSpec)):
+        return value
+    raise TypeError(
+        "FactorySpec target must be a class, short name, import path, ImportRef, or SourceSpec."
+    )
+
+
 def _freeze_factory_value(value: Any, path: tuple[str, ...] = ()) -> Any:
     from .definition import ConcreteDefinition, Definition
     from .object import Object
@@ -155,13 +168,7 @@ class FactorySpec:
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        symbol = maybe_symbol_ref(target)
-        if symbol is not None:
-            target = symbol
-        elif not isinstance(target, (str, ImportRef, SourceSpec)):
-            raise TypeError(
-                "FactorySpec target must be a class, short name, import path, ImportRef, or SourceSpec."
-            )
+        target = _validated_factory_target(target)
 
         object.__setattr__(self, "target", target)
         object.__setattr__(

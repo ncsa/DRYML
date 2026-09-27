@@ -271,9 +271,13 @@ def repeat(group: list | tuple, count: int | Expr | Shared, /) -> Expr:
 
 
 def _template_children(value: object) -> tuple[object, ...]:
+    from .cdef_graph import EdgeKind
     from .definition import ConcreteDefinition, Definition
     from .factory import FactorySpec
+    from .links import DefLink
 
+    if isinstance(value, DefLink):
+        return (value.target,) if value.kind is EdgeKind.MATERIALIZE else ()
     if isinstance(value, FactorySpec):
         return (*value.args, *value.kwargs.values())
     if isinstance(value, Definition):
@@ -446,7 +450,8 @@ class Template:
                     replacements=replacements,
                     remap=None,
                     traverse_refs=traverse_refs,
-                )
+                ),
+                traverse_refs=traverse_refs,
             )
         )
 
@@ -785,6 +790,7 @@ def _remap_root(name: str, prefix: tuple[str, ...], strip: tuple[str, ...]) -> s
 def _snapshot_parameters(value: object, *, traverse_refs: bool) -> tuple[Par, ...]:
     """Collect the pre-operation parameters allowed by one traversal boundary."""
 
+    from .cdef_graph import EdgeKind
     from .links import DefLink
 
     found: list[Par] = []
@@ -799,10 +805,12 @@ def _snapshot_parameters(value: object, *, traverse_refs: bool) -> tuple[Par, ..
         if isinstance(current, DefLink):
             if (
                 traverse_refs
-                and current.kind.name == "REF"
+                and current.kind is EdgeKind.REF
                 and isinstance(current.target, Template)
             ):
                 visit(current.target.root)
+            elif current.kind is EdgeKind.MATERIALIZE:
+                visit(current.target)
             return
         children = _template_children(current)
         if not children:
@@ -947,7 +955,9 @@ def _rewrite_template_value(
 ) -> object:
     """Perform one memoized copy-on-write traversal over pre-selected values."""
 
-    from .definition import Definition
+    from .bound_args import BoundArguments
+    from .cdef_graph import EdgeKind
+    from .definition import ConcreteDefinition, Definition
     from .factory import FactorySpec
     from .links import DefLink
 
@@ -964,17 +974,23 @@ def _rewrite_template_value(
         if isinstance(current, Template):
             return current
         if isinstance(current, DefLink):
-            if not (
-                traverse_refs
-                and current.kind.name == "REF"
-                and isinstance(current.target, Template)
-            ):
-                return current
             marker = id(current)
             if marker in memo:
                 return memo[marker]
-            target = Template._from_root(rewrite(current.target.root))
-            result = DefLink.assertion(current.kind, target)
+            if current.kind is EdgeKind.REF:
+                if not (traverse_refs and isinstance(current.target, Template)):
+                    return current
+                target = Template._from_root(rewrite(current.target.root))
+            elif current.kind is EdgeKind.MATERIALIZE:
+                target = rewrite(current.target)
+            else:
+                return current
+            if target is current.target:
+                result = current
+            elif current.is_finalized:
+                result = DefLink.finalized(current.kind, target)
+            else:
+                result = DefLink.assertion(current.kind, target)
             memo[marker] = result
             return result
         if isinstance(current, _BinaryExpr):
@@ -1010,6 +1026,23 @@ def _rewrite_template_value(
                 and all(kwargs[key] is value for key, value in current.kwargs.items())
             )
             result = current if unchanged else FactorySpec._from_template_parts(current.target, args, kwargs)
+            memo[marker] = result
+            return result
+        if isinstance(current, ConcreteDefinition):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            parameters = FrozenDict(
+                (key, rewrite(item)) for key, item in current.parameters.items()
+            )
+            unchanged = all(
+                parameters[key] is item for key, item in current.parameters.items()
+            )
+            result = current if unchanged else ConcreteDefinition._from_bound_record(
+                current.cls,
+                BoundArguments(parameters.items()),
+                stateful_role=current._stateful_role,
+            )
             memo[marker] = result
             return result
         if isinstance(current, Definition):
@@ -1078,10 +1111,12 @@ class _ExpressionBudget:
         self.expansions += count
 
 
-def _evaluate_template_value(value: object) -> object:
+def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> object:
     """Evaluate resolved expression leaves with one cumulative expansion budget."""
 
+    from .bound_args import BoundArguments
     from .definition import ConcreteDefinition, Definition
+    from .cdef_graph import EdgeKind
     from .factory import FactorySpec
     from .links import DefLink
 
@@ -1172,8 +1207,34 @@ def _evaluate_template_value(value: object) -> object:
             result = FrozenList(items) if isinstance(current.group, FrozenList) else FrozenTuple(items)
             memo[marker] = result
             return result
-        if isinstance(current, (Template, DefLink, ConcreteDefinition)):
+        if isinstance(current, Template):
             return current
+        if isinstance(current, DefLink):
+            if current.kind is EdgeKind.REF:
+                if not (traverse_refs and isinstance(current.target, Template)):
+                    return current
+                target = Template._from_root(evaluate(current.target.root, depth))
+            elif current.kind is EdgeKind.MATERIALIZE:
+                target = evaluate(current.target, depth)
+            else:
+                return current
+            if target is current.target:
+                return current
+            if current.is_finalized:
+                return DefLink.finalized(current.kind, target)
+            return DefLink.assertion(current.kind, target)
+        if isinstance(current, ConcreteDefinition):
+            parameters = FrozenDict(
+                (key, evaluate(item, depth))
+                for key, item in current.parameters.items()
+            )
+            if all(parameters[key] is item for key, item in current.parameters.items()):
+                return current
+            return ConcreteDefinition._from_bound_record(
+                current.cls,
+                BoundArguments(parameters.items()),
+                stateful_role=current._stateful_role,
+            )
         if isinstance(current, FactorySpec):
             marker = id(current)
             if marker in memo:
@@ -1244,11 +1305,25 @@ def _copy_template_construction_value(value: object, memo: dict[int, object]) ->
 
     from .bound_args import BoundArguments
     from .definition import ConcreteDefinition, Definition
+    from .cdef_graph import EdgeKind
     from .factory import FactorySpec
     from .links import DefLink
 
-    if isinstance(value, (Template, DefLink)):
+    if isinstance(value, Template):
         return value
+    if isinstance(value, DefLink):
+        if value.kind is EdgeKind.REF:
+            return value
+        marker = id(value)
+        if marker in memo:
+            return memo[marker]
+        target = _copy_template_construction_value(value.target, memo)
+        if value.is_finalized:
+            result = DefLink.finalized(value.kind, target)
+        else:
+            result = DefLink.assertion(value.kind, target)
+        memo[marker] = result
+        return result
     marker = id(value)
     if marker in memo:
         return memo[marker]

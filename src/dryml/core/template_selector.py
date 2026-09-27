@@ -286,7 +286,10 @@ class TemplateSelector:
         self._max_assignments = _validate_limit(
             max_assignments, label="max_assignments", maximum=_MAX_ASSIGNMENTS
         )
-        self._prefilter = _loose_selector(generator.template)
+        self._prefilter = _loose_selector(
+            generator.template,
+            traverse_refs=generator._traverse_refs,
+        )
 
     @property
     def prefilter(self):
@@ -340,6 +343,15 @@ class TemplateSelector:
             TemplateError: If a provider or a generated assignment is invalid.
         """
 
+        return self._matches(target, _AssignmentBudget(self._max_assignments))
+
+    def _matches(
+        self,
+        target: Definition | ConcreteDefinition | object,
+        budget: "_AssignmentBudget",
+    ) -> bool:
+        """Verify one candidate while charging a caller-owned finite budget."""
+
         from .object import Object
 
         if isinstance(target, Object):
@@ -350,7 +362,7 @@ class TemplateSelector:
         for name, value in inferred.items():
             if value is _INCONSISTENT:
                 return False
-            membership = self._membership(name, value)
+            membership = self._membership(name, value, budget)
             if membership is False:
                 return False
 
@@ -364,6 +376,7 @@ class TemplateSelector:
             total *= cardinality
             if total > self._max_assignments:
                 raise TemplateLimitError("template support verification assignment limit exceeded")
+        budget.charge(total)
 
         values = [
             tuple(_provider_value(self._generator.domains[name], name, index) for index in range(cardinality))
@@ -383,7 +396,7 @@ class TemplateSelector:
                 matched = True
         return matched
 
-    def _membership(self, name: str, value: object) -> bool:
+    def _membership(self, name: str, value: object, budget: "_AssignmentBudget") -> bool:
         """Prove visible-root membership without unnecessarily enumerating ranges."""
 
         provider = self._generator.domains[name]
@@ -401,6 +414,7 @@ class TemplateSelector:
         cardinality = _support_cardinality(provider, name)
         if cardinality > self._max_assignments:
             raise TemplateLimitError("template support membership scan limit exceeded")
+        budget.charge(cardinality)
         return any(_structural_value_equal(value, _provider_value(provider, name, index)) for index in range(cardinality))
 
     def _infer_visible_roots(self, target: Definition | ConcreteDefinition) -> dict[str, object]:
@@ -438,7 +452,15 @@ class TemplateSelector:
             from .links import DefLink
 
             if isinstance(source, DefLink):
-                if self._generator._traverse_refs and isinstance(candidate, DefLink):
+                from .cdef_graph import EdgeKind
+
+                if (
+                    isinstance(candidate, DefLink)
+                    and (
+                        source.kind is EdgeKind.MATERIALIZE
+                        or self._generator._traverse_refs
+                    )
+                ):
                     pairs(source.target, candidate.target)
                 return
             if isinstance(source, FactorySpec):
@@ -468,6 +490,20 @@ class TemplateSelector:
 _MISSING = object()
 _INCONSISTENT = object()
 _UNKNOWN = object()
+
+
+class _AssignmentBudget:
+    """Bound cumulative finite-support work for one verification terminal."""
+
+    def __init__(self, limit: int) -> None:
+        self.remaining = limit
+
+    def charge(self, count: int) -> None:
+        """Consume ``count`` assignments or fail before partial verification."""
+
+        if count > self.remaining:
+            raise TemplateLimitError("template support verification assignment limit exceeded")
+        self.remaining -= count
 
 
 def _topology_matches(generated: Definition, target: Definition | ConcreteDefinition) -> bool:
@@ -558,10 +594,11 @@ def _outside_bounds(value: object, bounds: tuple[int | float, int | float]) -> b
     return type(value) in {int, float} and (value < bounds[0] or value > bounds[1])
 
 
-def _loose_selector(template: Template):
+def _loose_selector(template: Template, *, traverse_refs: bool = False):
     """Project a soft template into an ordinary structural Selector."""
 
     from .factory import FactorySpec
+    from .cdef_graph import EdgeKind
     from .links import DefLink
     from .params import AnyValue
     from .selector import Selector
@@ -573,6 +610,20 @@ def _loose_selector(template: Template):
         if isinstance(value, Expr):
             return _UNKNOWN
         if isinstance(value, DefLink):
+            if value.kind is EdgeKind.MATERIALIZE:
+                target = project(value.target)
+                if target is _UNKNOWN:
+                    return _UNKNOWN
+                if value.is_finalized:
+                    return DefLink.finalized(value.kind, target)
+                return DefLink.assertion(value.kind, target)
+            if (
+                traverse_refs
+                and value.kind is EdgeKind.REF
+                and isinstance(value.target, Template)
+                and not value.target.is_resolved
+            ):
+                return _UNKNOWN
             return value
         if isinstance(value, FactorySpec):
             args = tuple(AnyValue() if (item := project(arg)) is _UNKNOWN else item for arg in value.args)

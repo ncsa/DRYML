@@ -48,6 +48,30 @@ def _merge_replica_maps(*maps: Mapping[ConcreteDefinition, tuple[Any, ...]]) -> 
 
 @dataclass(frozen=True, slots=True)
 class DefinitionResultSet:
+    """Immutable structural query results with replica and witness evidence.
+
+    Args:
+        repo: Repo used for refinement and optional materialization.
+        definitions: Structural result representatives.
+        materializable: Whether :meth:`objects` may construct these definitions.
+        domain: Human-readable source domain retained by refinements.
+        explanation: Optional terminal execution diagnostics.
+        replicas: Explicit definition-to-Store authority. Materializable results
+            require an entry for every definition; use an empty mapping for
+            nonmaterializable results.
+        witnesses: Graph-distinct CDefs retained for exact TemplateSelector
+            refinement before structural result deduplication.
+        witness_complete: Whether ``witnesses`` is complete immutable evidence
+            for this result universe.
+
+    Raises:
+        ValueError: If replica metadata is absent or incomplete.
+        QueryDomainError: On later exact refinement when witness evidence is not
+            complete.
+
+    Construction snapshots the supplied iterables and has no Store side effects.
+    """
+
     repo: Any
     _definitions: tuple[ConcreteDefinition, ...]
     materializable: bool = True
@@ -309,6 +333,29 @@ def _merge_store_tuple(left: tuple[Any, ...], right: tuple[Any, ...]) -> tuple[A
 
 @dataclass(frozen=True, slots=True)
 class OccurrenceResultSet:
+    """Nested definition occurrences with owner authority and exact witnesses.
+
+    Args:
+        repo: Repo used for refinement and owner materialization.
+        occurrences: Eager occurrence values, mutually exclusive with
+            ``occurrence_factory``.
+        occurrence_factory: Replayable lazy occurrence producer.
+        explanation: Optional terminal execution diagnostics.
+        owner_replicas: Owner-to-Store authority used by :meth:`owners`.
+        witnesses: Graph-distinct occurrences retained for exact TemplateSelector
+            refinement and projection.
+        witness_complete: Whether ``witnesses`` is complete immutable evidence
+            for this occurrence universe.
+
+    Raises:
+        ValueError: If both eager and lazy occurrence sources are supplied.
+        QueryDomainError: On later exact refinement when witness evidence is not
+            complete, or on direct occurrence materialization.
+
+    Eager inputs and witness evidence are snapshotted without Store side effects;
+    a lazy factory is invoked only by terminal iteration.
+    """
+
     repo: Any
     _occurrences: tuple[DefinitionOccurrence, ...] | None
     _occurrence_factory: Callable[[], Iterable[DefinitionOccurrence]] | None
@@ -379,6 +426,8 @@ class OccurrenceResultSet:
             domain="nested-definitions",
             explanation=self.explanation,
             replicas={},
+            witnesses=(occ.definition for occ in self._witnesses),
+            witness_complete=self._witness_complete,
         )
 
     def owners(self) -> DefinitionResultSet:
@@ -390,6 +439,8 @@ class OccurrenceResultSet:
             domain="owners",
             explanation=self.explanation,
             replicas=self._require_owner_replicas(),
+            witnesses=(occ.owner for occ in self._witnesses),
+            witness_complete=self._witness_complete,
         )
 
     def objects(self, **kwargs):

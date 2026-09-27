@@ -556,12 +556,13 @@ class Store(ABC):
         return ()
 
     # Query remains derived: it only scans immutable definitions.
-    def authoritative_root_definitions(self):
-        """Return complete query-root definitions reconstructed from authority.
+    def iter_authoritative_root_definitions(self):
+        """Yield complete query-root definitions reconstructed from authority.
 
-        Returns:
-            Deduplicated definitions named by stored-root, declaration, StateRef,
-            object-alias, or main-reference authority.
+        Yields:
+            Graph-distinct definitions named by stored-root, declaration,
+            StateRef, object-alias, or main-reference authority. Structurally
+            equal roots with different graph topology remain distinct.
 
         Raises:
             StoreAuthorityError: If a root reference targets missing definition
@@ -571,6 +572,54 @@ class Store(ABC):
             None. This method validates records without changing Store authority
             or derived index files.
         """
+        by_hash = {}
+
+        def unseen(definition):
+            bucket = by_hash.setdefault(definition.graph_hash(), [])
+            if any(existing.graph_equal(definition) for existing in bucket):
+                return False
+            bucket.append(definition)
+            return True
+
+        for root in self.iter_stored_root_records():
+            record = self.read_definition_record(root.definition_digest)
+            if record is None:
+                raise StoreAuthorityError(
+                    "Stored-root membership targets a missing DefinitionRecord."
+                )
+            if unseen(record.definition):
+                yield record.definition
+        for record in self.iter_declaration_records():
+            if unseen(record.object_ref.definition):
+                yield record.object_ref.definition
+        for record in self.iter_state_ref_records():
+            if unseen(record.state_ref.definition):
+                yield record.state_ref.definition
+        for record in self.iter_object_alias_records():
+            if unseen(record.object_ref.definition):
+                yield record.object_ref.definition
+        main = self.read_main_ref()
+        if main is not None:
+            record = self.read_definition_record(main.definition_digest)
+            if record is None:
+                raise StoreAuthorityError(
+                    "MainRefRecord targets a missing DefinitionRecord."
+                )
+            if unseen(record.definition):
+                yield record.definition
+
+    def authoritative_root_definitions(self):
+        """Return all graph-distinct authoritative query roots as a tuple.
+
+        Returns:
+            Deduplicated definitions after validating the complete immutable
+            definition-record collection and every root authority source.
+
+        Raises:
+            StoreAuthorityError: If referenced definition authority is missing
+                or malformed.
+        """
+
         records = {
             record.digest: record for record in self.iter_definition_records()
         }

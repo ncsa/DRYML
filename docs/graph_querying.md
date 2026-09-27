@@ -17,6 +17,22 @@ prefiltering and never constructs candidate Objects or factory targets. A provid
 without exact verification raises an explicit unsupported-verification error; a
 numeric bound alone is never accepted as a match.
 
+Exact support remains residual because graph-distinct authoritative witnesses
+cannot be collapsed into structural index rows. Stored queries use the loose
+selector to prefilter indexed identities, then stream matching authoritative
+roots before residual verification. The default terminal limit is 65,536
+witnesses; lower it with `max_witnesses(n)` or explicitly disable it with
+`max_witnesses(None)`. Finite-support assignment work is also bounded
+cumulatively for the terminal and can raise `TemplateLimitError` before any
+partial result is returned.
+
+`require_indexed()` and `scan_policy("forbid")` reject exact support because the
+residual always needs complete witness verification. Exact selectors use exact
+symbolic class matching and cannot be converted with `references()` or `where()`,
+or rewritten with `categorical()`, `restore()`, or `exact()`. Refining a fixed
+result with another exact selector is supported only when the result retained
+complete immutable witness evidence; otherwise it raises `QueryDomainError`.
+
 ## Categorical Projection
 
 `DefinitionQuery.categorical(*, path="$", recursive=False, drop=(),

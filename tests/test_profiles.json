@@ -12,6 +12,7 @@
             "test_template_direct_authoring_and_definition_conversion_are_inert",
             "test_match_is_a_query_leaf_distinct_from_template_parameters",
             "test_documented_authoring_example_captures_complete_definitions",
+            "test_factory_rejects_unresolved_expressions_before_target_invocation",
             "test_retired_search_space_and_predicate_parameter_apis_are_absent"
           ]
         },

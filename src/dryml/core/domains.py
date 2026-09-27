@@ -20,26 +20,75 @@ class Distribution(Protocol):
     """
 
     def sample(self, rng: random.Random, /) -> object:
-        """Draw one supported value using ``rng``."""
+        """Draw one supported value and advance the caller-owned ``rng``.
+
+        Args:
+            rng: Random generator that owns sampling state.
+
+        Returns:
+            One value from this distribution's support.
+
+        Raises:
+            Exception: Provider failures propagate to the template operation,
+                which normalizes them to ``TemplateError``.
+        """
 
     def cardinality(self) -> int | None:
-        """Return finite support size, or ``None`` when it cannot be indexed."""
+        """Return a positive finite support size, or ``None`` if unavailable.
+
+        Raises:
+            Exception: Provider failures propagate and are normalized by the
+                calling template operation.
+
+        This query must not sample values or mutate provider state.
+        """
 
     def value_at(self, index: int, /) -> object:
         """Return the value at a finite support index.
 
+        Args:
+            index: Zero-based exact integer less than :meth:`cardinality`.
+
+        Returns:
+            The stable support value at ``index``.
+
         Raises:
-            TemplateError: If ``index`` is invalid or outside finite support.
+            Exception: If ``index`` is invalid, outside finite support, or the
+                provider cannot read its support. Callers normalize failures.
+
+        Repeated calls for one index must not sample or advance hidden state.
         """
 
     def contains(self, value: object, /) -> bool | None:
-        """Return exact membership, or ``None`` when membership is unavailable."""
+        """Return exact membership, or ``None`` when it is unavailable.
+
+        Args:
+            value: Candidate support value to test without coercion.
+
+        Returns:
+            ``True`` or ``False`` for an exact answer, otherwise ``None``.
+
+        Raises:
+            Exception: Provider failures propagate and are normalized by the
+                calling template operation.
+
+        This query must not sample values or mutate provider state.
+        """
 
     def bounds(self) -> tuple[int | float, int | float] | None:
         """Return conservative numeric support bounds when available.
 
         Bounds may reject values outside the closed interval but never establish
         exact membership for values inside it.
+
+        Returns:
+            Inclusive finite numeric lower and upper bounds, or ``None``.
+
+        Raises:
+            Exception: Provider failures propagate and are normalized by the
+                calling template operation.
+
+        This query must not sample values or mutate provider state.
         """
 
 
