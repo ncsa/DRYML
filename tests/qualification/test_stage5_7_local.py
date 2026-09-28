@@ -9,6 +9,7 @@ import resource
 import subprocess
 import sys
 import time
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -32,6 +33,13 @@ from tests.qualification.stage5_7_workloads import (
 
 _TEST_ENVIRONMENT = {key: "test" for key in REQUIRED_ENVIRONMENT_KEYS}
 _QUALIFICATION_CASE_TIMEOUT_SECONDS = 300
+
+
+def _peak_rss_bytes() -> int:
+    """Return this fresh process's absolute maximum RSS in normalized bytes."""
+
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(value if sys.platform == "darwin" else value * 1024)
 
 
 def _authority(tmp_path):
@@ -294,6 +302,32 @@ def test_case_paths_accept_disjoint_fixture_tfds_and_output_roots(tmp_path):
     assert all(path.is_dir() for path in (paths.output_store, paths.work_dir, paths.evidence_dir))
 
 
+def test_local_cpu_and_recovery_gate_paths_are_disjoint_for_one_underlying_case(tmp_path):
+    """U10 local, U11 CPU, and recovery gates cannot collide for one case identity."""
+
+    _, _, manifest = _authority(tmp_path)
+    tfds_root = tmp_path / "tfds"
+    tfds_root.mkdir()
+    roots = tuple(tmp_path / name for name in ("output", "work", "evidence"))
+    for root in roots:
+        root.mkdir()
+    case = case_from_manifest(manifest, workload="W3", framework="torch", execution="subprocess")
+    primary = qualification_case_paths(
+        case, output_store_root=roots[0], work_root=roots[1], evidence_root=roots[2],
+        tfds_root=tfds_root, gate_id="local-qualification", create=True,
+    )
+    cpu = qualification_case_paths(
+        case, output_store_root=roots[0], work_root=roots[1], evidence_root=roots[2],
+        tfds_root=tfds_root, gate_id="cpu-matrix", create=True,
+    )
+    recovery = qualification_case_paths(
+        case, output_store_root=roots[0], work_root=roots[1], evidence_root=roots[2],
+        tfds_root=tfds_root, gate_id="recovery-step64", create=True,
+    )
+    assert len({primary.output_store, cpu.output_store, recovery.output_store}) == 3
+    assert case.case_id in primary.output_store.name and case.case_id in recovery.output_store.name
+
+
 def test_qualification_child_timeout_preserves_diagnostic_evidence_and_never_accepts_it(tmp_path, monkeypatch):
     """A timed-out child is reaped by subprocess.run and cannot yield a success record."""
 
@@ -310,7 +344,7 @@ def test_qualification_child_timeout_preserves_diagnostic_evidence_and_never_acc
 import os
 import time
 from pathlib import Path
-Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'qualification-evidence.json').write_text('{}', encoding='ascii')
+Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'worker-provisional.json').write_text('{}', encoding='ascii')
 time.sleep(10)
 """
     started = time.monotonic()
@@ -319,7 +353,7 @@ time.sleep(10)
             manifest, case, timeout_seconds=0.1, child_code=child_code,
         )
     assert time.monotonic() - started < 3
-    evidence_path = roots[2] / case.case_id / "qualification-evidence.json"
+    evidence_path = roots[2] / f"{case.case_id}--local-qualification" / "worker-provisional.json"
     assert evidence_path.read_text(encoding="ascii") == "{}"
 
 
@@ -378,6 +412,17 @@ def test_native_device_evidence_requires_matching_parameter_and_training_tensors
         native_device_evidence(KerasModel("/device:CPU:0"), training_tensors=(object(),))
 
 
+def test_peak_rss_is_absolute_and_cannot_be_reduced_by_a_preloaded_baseline(monkeypatch):
+    """Each fresh child reports its lifetime peak, never a delta from setup RSS."""
+
+    usage = type("Usage", (), {"ru_maxrss": 4096})()
+    monkeypatch.setattr(resource, "getrusage", lambda _: usage)
+    monkeypatch.setattr(sys, "platform", "linux")
+    preloaded_baseline = 8192 * 1024
+    assert preloaded_baseline > _peak_rss_bytes()
+    assert _peak_rss_bytes() == 4096 * 1024
+
+
 def test_native_device_evidence_traverses_tiny_torch_autoencoder_on_cpu():
     """Composite Torch evidence observes both graph children without private field walks."""
 
@@ -427,8 +472,17 @@ def test_formula_threshold_and_history_contracts_reject_unrun_or_fake_runner(tmp
 def test_evidence_record_is_closed_round_trippable_and_rejects_nonfinite_or_extra_fields(tmp_path):
     """Closed evidence rejects malformed records before association validation or publication."""
 
-    _, _, manifest = _authority(tmp_path)
+    manifest_path, _, manifest = _authority(tmp_path)
     case = case_from_manifest(manifest, workload="W3", framework="torch", execution="local")
+    roots = {name: tmp_path / name for name in ("output", "work", "evidence", "control")}
+    for root in roots.values():
+        root.mkdir()
+    from tests.qualification.stage5_7_workers import validate_request_evidence, worker_request
+    request = worker_request(
+        manifest, case, manifest_path=manifest_path, tfds_data_dir=tmp_path / "tfds",
+        output_store=roots["output"], work_dir=roots["work"], evidence_dir=roots["evidence"],
+        control_store=roots["control"],
+    )
     evidence = QualificationEvidence(
         case=case, final_experiment_ref=manifest.references.numpy, model_ref=manifest.references.parquet,
         test_ref=manifest.references.numpy, history_ref=manifest.references.parquet,
@@ -438,8 +492,26 @@ def test_evidence_record_is_closed_round_trippable_and_rejects_nonfinite_or_extr
         environment=manifest.environment,
         runtime={"backend": "torch", "device": "cpu", "worker_id": "test", "process_id": 1},
         elapsed_seconds=0.0, peak_rss_bytes=0, output_bytes=0,
+        worker={
+            "execution_backend": "worker-provisional", "semantic_backend": "local",
+            "isolation": {"kind": "worker-provisional", "parent_pid": 0},
+            "worker_pid": 1, "worker_identity": "test",
+            "runtime_allocation": {"resource_mode": "python", "allocation": "none", "admission": "in-process"},
+            "shared_authority": {"fixture_store": os.fspath(manifest.fixture_store), "control_store": os.fspath(roots["control"].resolve())},
+            "submitted": {"request_digest": request.request_id, "submission_id": "in-process:1", "result_ref": manifest.references.numpy.digest()},
+            "core_outcome": {"kind": "in-process", "publication_refs": (), "update_refs": ()},
+            "final_refs": {
+                "experiment": manifest.references.numpy.digest(), "model": manifest.references.parquet.digest(),
+                "test": manifest.references.numpy.digest(), "history": manifest.references.parquet.digest(),
+                "artifact": manifest.references.parquet.digest(),
+            },
+            "coordinator_validated_refs": None,
+        },
     )
     assert QualificationEvidence.from_data(evidence.to_data()) == evidence
+    validate_request_evidence(request, evidence)
+    with pytest.raises(FixtureManifestError, match="substituted"):
+        validate_request_evidence(request, replace(evidence, worker={**evidence.worker, "submitted": {**evidence.worker["submitted"], "request_digest": "other"}}))
     malformed = evidence.to_data()
     malformed["extra"] = True
     with pytest.raises(FixtureManifestError, match="extra"):
@@ -450,7 +522,7 @@ def test_evidence_record_is_closed_round_trippable_and_rejects_nonfinite_or_extr
             test_ref=manifest.references.numpy, history_ref=manifest.references.parquet,
             history_rows=evidence.history_rows, artifact_ref=manifest.references.parquet, artifact_value=float("nan"),
             formula=evidence.formula, environment=manifest.environment, runtime=evidence.runtime,
-            elapsed_seconds=0.0, peak_rss_bytes=0, output_bytes=0,
+            elapsed_seconds=0.0, peak_rss_bytes=0, output_bytes=0, worker=evidence.worker,
         )
 
 
@@ -471,7 +543,7 @@ def _real_manifest_or_unrun():
         pytest.skip(f"QualificationUnrun: {error}")
 
 
-def _real_runner(manifest, case):
+def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, control_store=None):
     """Run a real local Experiment/Artifact workflow after explicit test opt-in."""
 
     from dryml.core import Repo
@@ -505,9 +577,15 @@ def _real_runner(manifest, case):
         raise FixtureManifestError("Real case output Store/work directory must be distinct from fixture authority.")
     if not work_path.is_dir():
         raise QualificationUnrun("Selected real-case work directory is unavailable.")
+    control_path = Path(
+        control_store or os.environ.get("DRYML_STAGE5_7_CASE_CONTROL_STORE") or output_path
+    ).expanduser().resolve(strict=False)
+    if control_path == manifest.fixture_store or not control_path.is_dir():
+        raise FixtureManifestError("Real case control Store must be an existing non-fixture authority.")
     repo = Repo((DirStore(output_path), DirStore(manifest.fixture_store)))
+    control = DirStore.open_existing(control_path)
+    managed = ManagedConfig(state_repo=repo, control_store=control)
     started = time.monotonic()
-    peak_rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
     experiment = build_workload(repo, case, mnist_source=source)
     training_tensors = []
     native_models = tuple(
@@ -539,8 +617,144 @@ def _real_runner(manifest, case):
             lambda x, *args, _original=original_raw_call, **kwargs:
             capture_training_tensors(_original, x, *args, **kwargs)
         )
+    recovery_evidence = None
     try:
-        final = experiment.train(managed=ManagedConfig(state_repo=repo))
+        if recovery is None:
+            final = experiment.train(managed=managed)
+        else:
+            import dryml.models.experiment as experiment_module
+            from dryml.artifacts import Artifact
+            from tests.qualification.stage5_7_workers import _canonical_state_digest, _state_placement
+
+            original_boundary = experiment_module._experiment_boundary
+            triggered = []
+
+            def retained_facts(value, checkpoint, state_repo):
+                """Capture live or freshly restored step-64 recovery authority."""
+
+                model_state = value.model.obj.state_dict()
+                optimizer_state = value.train_fn.optimizer.obj.state_dict()
+                iterations = tuple(
+                    int(state["step"])
+                    for state in optimizer_state["state"].values()
+                    if "step" in state
+                )
+                history = ExperimentData.find(checkpoint.object_projection(), repo=state_repo)
+                if history is None:
+                    raise FixtureManifestError("Recovery checkpoint lacks a durable history row.")
+                rows = history.data[history.data["state_ref"] == checkpoint]
+                if len(rows) != 1:
+                    raise FixtureManifestError("Recovery checkpoint has no unique durable history occurrence.")
+                row = rows.iloc[0]
+                initial = row.artifact_inputs.get("test_mse") if isinstance(row.artifact_inputs, dict) else None
+                if initial is None:
+                    raise FixtureManifestError("Recovery interruption lacks the retained Artifact receiver.")
+                # The initial receiver plus managed completion authority is the
+                # only valid way to discover the durable completed result here.
+                completed = Artifact.recover(
+                    initial, repo=state_repo, control_store=control, reuse_live="never",
+                )
+                if not completed.ready or completed.last_state_ref is None:
+                    raise FixtureManifestError("Recovery interruption lacks a durable completed Artifact result.")
+                state = value.state
+                return {
+                    "model_digest": _canonical_state_digest(model_state),
+                    "model_placement": _state_placement(model_state),
+                    "optimizer_digest": _canonical_state_digest(optimizer_state),
+                    "optimizer_placement": _state_placement(optimizer_state),
+                    "optimizer_iterations": iterations, "epoch": state.epoch,
+                    "next_batch": state.next_batch, "step": state.step,
+                    "examples_seen": state.examples_seen, "loss_numerator": state.loss_numerator,
+                    "loss_denominator": state.loss_denominator, "checkpoint_ref": checkpoint.digest(),
+                    "history_occurrence": str(row.row_key),
+                    "artifact_status": f"{row.evaluation_status}:{completed.last_state_ref.digest()}",
+                }
+
+            live_facts = None
+
+            def interrupt_after_retained_step(boundary):
+                if (boundary == recovery.fail_boundary and not triggered
+                        and experiment.state.step == recovery.interrupt_after_step):
+                    triggered.append(boundary)
+                    checkpoint = experiment.train.status(
+                        state_repo=repo, control_store=control,
+                    ).checkpoint_state_ref
+                    if checkpoint is None:
+                        raise FixtureManifestError("Recovery interruption lacks a checkpoint receipt.")
+                    nonlocal live_facts
+                    live_facts = retained_facts(experiment, checkpoint, repo)
+                    probe = work_path / "recovery-live-probe.json"
+                    encoded = json.dumps(live_facts, sort_keys=True, default=list)
+                    if len(encoded.encode("utf-8")) > 1024 * 1024:
+                        raise FixtureManifestError("Recovery diagnostic probe exceeds its bounded size.")
+                    probe.write_text(encoded, encoding="utf-8")
+                    raise RuntimeError("stage5_7 deterministic recovery interruption")
+                original_boundary(boundary)
+
+            experiment_module._experiment_boundary = interrupt_after_retained_step
+            try:
+                with pytest.raises(RuntimeError, match="deterministic recovery interruption"):
+                    experiment.train(managed=managed)
+            finally:
+                experiment_module._experiment_boundary = original_boundary
+            checkpoint = experiment.train.status(
+                state_repo=repo, control_store=control,
+            ).checkpoint_state_ref
+            if checkpoint is None or experiment.state.step != recovery.interrupt_after_step:
+                raise FixtureManifestError("Recovery did not retain the required step-64 checkpoint.")
+            if live_facts is None:
+                raise FixtureManifestError("Recovery interruption did not capture live step-64 facts.")
+            # A new Repo guarantees this is a restoration comparison, not a live
+            # cache comparison. The outer worker process is already isolated.
+            repo.close(flush=False)
+            repo = Repo((DirStore(output_path), DirStore(manifest.fixture_store)))
+            managed = ManagedConfig(state_repo=repo, control_store=control)
+            retained = repo.load_state_ref(checkpoint, reuse_live="never", cache="none")
+            before = live_facts
+            restored = retained_facts(retained, checkpoint, repo)
+            if restored != before:
+                raise FixtureManifestError("Fresh Repo restore does not equal live step-64 facts.")
+            if before["step"] != recovery.interrupt_after_step or before["artifact_status"].split(":", 1)[0] not in {"pending", "failed"}:
+                raise FixtureManifestError("Recovery did not retain the required pending step-64 authority.")
+            repair_events = []
+
+            def record_repair_order(boundary):
+                if boundary == "completed_status_published" and retained.state.step == recovery.interrupt_after_step:
+                    repair_events.append("artifact_repaired")
+                original_boundary(boundary)
+
+            experiment_module._experiment_boundary = record_repair_order
+            import dryml.models.torch.base as torch_training
+            original_update = torch_training.record_train_update
+
+            def record_update(*args, **kwargs):
+                result = original_update(*args, **kwargs)
+                if retained.state.step == recovery.interrupt_after_step + 1:
+                    repair_events.append(f"optimizer_update:{retained.state.step}")
+                return result
+
+            torch_training.record_train_update = record_update
+            try:
+                final = retained.train(managed=managed)
+            finally:
+                experiment_module._experiment_boundary = original_boundary
+                torch_training.record_train_update = original_update
+            if tuple(repair_events)[:2] != ("artifact_repaired", "optimizer_update:65"):
+                raise FixtureManifestError("Recovery did not prove Artifact repair before optimizer update 65.")
+            repaired_history = ExperimentData.find(checkpoint.object_projection(), repo=repo)
+            repaired_rows = repaired_history.data[repaired_history.data["state_ref"] == checkpoint] if repaired_history is not None else ()
+            if len(repaired_rows) != 1 or str(repaired_rows.iloc[0].row_key) != before["history_occurrence"]:
+                raise FixtureManifestError("Recovery created a duplicate history row instead of repairing the retained occurrence.")
+            repaired_artifact = repaired_rows.iloc[0].eval_artifacts.get("test_mse")
+            if repaired_artifact is None or repaired_artifact.digest() != before["artifact_status"].split(":", 1)[1]:
+                raise FixtureManifestError("Recovery created a duplicate Artifact result instead of repairing the retained result.")
+            recovery_evidence = {
+                "checkpoint_step": recovery.interrupt_after_step,
+                "before": before,
+                "restored": restored,
+                "events": tuple(repair_events),
+                "final_refs": None,
+            }
     finally:
         for training_model, original_raw_call in original_raw_calls:
             training_model._call_raw = original_raw_call
@@ -567,6 +781,12 @@ def _real_runner(manifest, case):
         formula_value = mse_formula(np.asarray(predictions), np.asarray(observations))
     output_bytes = sum(path.stat().st_size for path in output_path.rglob("*") if path.is_file())
     observed_device = native_device_evidence(model, training_tensors=tuple(training_tensors))
+    final_refs = {
+        "experiment": final.digest(), "model": model_ref.digest(), "test": test_ref.digest(),
+        "history": history.last_state_ref.digest(), "artifact": artifact_ref.digest(),
+    }
+    if recovery_evidence is not None:
+        recovery_evidence["final_refs"] = final_refs
     return QualificationEvidence(
         case=case, final_experiment_ref=final, model_ref=model_ref, test_ref=test_ref,
         history_ref=history.last_state_ref,
@@ -576,11 +796,21 @@ def _real_runner(manifest, case):
         environment=manifest.environment,
         runtime={"backend": case.framework, "device": observed_device, "worker_id": f"pid:{os.getpid()}", "process_id": os.getpid()},
         elapsed_seconds=time.monotonic() - started,
-        peak_rss_bytes=max(
-            0,
-            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 - peak_rss_before,
-        ),
+        peak_rss_bytes=_peak_rss_bytes(),
         output_bytes=output_bytes,
+        worker={
+            "execution_backend": "worker-provisional",
+            "semantic_backend": "local" if case.execution in {"local", "managed-local"} else case.execution,
+            "isolation": {"kind": "worker-provisional", "parent_pid": os.getppid()},
+            "worker_pid": os.getpid(), "worker_identity": f"pid:{os.getpid()}",
+            "runtime_allocation": {"resource_mode": "worker", "allocation": "worker-local", "admission": "worker"},
+            "shared_authority": {"fixture_store": os.fspath(manifest.fixture_store), "control_store": os.fspath(control_path)},
+            "submitted": {"request_digest": case.case_id if worker_request_id is None else worker_request_id, "submission_id": f"worker:{os.getpid()}", "result_ref": final.digest()},
+            "core_outcome": {"kind": "worker-initial", "publication_refs": (), "update_refs": ()},
+            "final_refs": final_refs,
+            "coordinator_validated_refs": None,
+        },
+        recovery=recovery_evidence,
     )
 
 
@@ -599,11 +829,12 @@ def _real_runner_in_child(manifest, case, *, timeout_seconds=None, child_code=No
         work_root=os.environ["DRYML_STAGE5_7_WORK_DIR"],
         evidence_root=os.environ["DRYML_STAGE5_7_EVIDENCE_DIR"],
         tfds_root=manifest.tfds.data_dir,
+        gate_id="local-qualification",
         create=True,
     )
-    evidence_path = paths.evidence_dir / "qualification-evidence.json"
-    if evidence_path.exists():
-        raise FixtureManifestError("Refusing to replace existing case evidence.")
+    provisional_path = paths.evidence_dir / "worker-provisional.json"
+    if provisional_path.exists():
+        raise FixtureManifestError("Refusing to replace existing case provisional evidence.")
     code = """
 import json
 import os
@@ -614,7 +845,7 @@ from tests.qualification.stage5_7_workloads import QualificationCase
 manifest = _real_manifest_or_unrun()
 case = QualificationCase.from_data(json.loads(sys.argv[1]))
 evidence = _real_runner(manifest, case)
-Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'qualification-evidence.json').write_text(json.dumps(evidence.to_data()), encoding='ascii')
+Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'worker-provisional.json').write_text(json.dumps(evidence.to_data()), encoding='ascii')
 """ if child_code is None else child_code
     timeout = _QUALIFICATION_CASE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     if type(timeout) not in (int, float) or timeout <= 0:
@@ -640,9 +871,38 @@ Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'qualification-evidence.jso
     if result.returncode:
         raise FixtureManifestError("Isolated qualification child failed without evidence.")
     try:
-        return QualificationEvidence.from_data(json.loads(evidence_path.read_text(encoding="ascii")))
+        provisional = QualificationEvidence.from_data(json.loads(provisional_path.read_text(encoding="ascii")))
     except (OSError, json.JSONDecodeError, FixtureManifestError) as error:
-        raise FixtureManifestError("Isolated qualification child returned malformed evidence.") from error
+        raise FixtureManifestError("Isolated qualification child returned malformed provisional evidence.") from error
+    from tests.qualification.stage5_7_workers import _publish_final_evidence
+    from tests.qualification.stage5_7_workloads import validate_evidence
+
+    worker = dict(provisional.worker)
+    worker.update({
+        "execution_backend": "isolation-process", "semantic_backend": "local",
+        "isolation": {"kind": "fresh-os-process", "parent_pid": os.getpid()},
+        "worker_pid": provisional.runtime["process_id"],
+        "worker_identity": f"pid:{provisional.runtime['process_id']}",
+        "runtime_allocation": {
+            "resource_mode": "unmanaged-session", "allocation": "no-session-allocation",
+            "admission": "semantic-local-in-isolation-child",
+        },
+        "coordinator_validated_refs": {
+            "output_store": os.fspath(paths.output_store.resolve()),
+            "refs": dict(provisional.worker["final_refs"]),
+        },
+    })
+    accepted = replace(provisional, worker=worker)
+    validate_evidence(manifest, accepted, output_store=paths.output_store)
+    final_path = paths.evidence_dir / "qualification-evidence.json"
+    _publish_final_evidence(final_path, accepted)
+    try:
+        reopened = QualificationEvidence.from_data(json.loads(final_path.read_text(encoding="ascii")))
+    except (OSError, json.JSONDecodeError, FixtureManifestError) as error:
+        raise FixtureManifestError("Isolated qualification final evidence cannot be reopened.") from error
+    if reopened != accepted:
+        raise FixtureManifestError("Isolated qualification final evidence differs from accepted evidence.")
+    return accepted
 
 
 @pytest.mark.stage5_7_qualification

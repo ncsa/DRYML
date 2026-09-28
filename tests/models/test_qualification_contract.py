@@ -20,6 +20,7 @@ from tests.qualification.stage5_7_fixtures import (
 from tests.qualification.stage5_7_workloads import (
     QualificationCase, case_from_manifest, cpu_matrix, supplemental_tfds_torch_case,
 )
+from tests.qualification.stage5_7_workers import QualificationWorkerRequest, inspect_worker_transport
 
 
 def _manifest(tmp_path):
@@ -82,3 +83,24 @@ def test_fixture_manifest_portable_tfds_identity_excludes_local_root(tmp_path):
     assert set(data["tfds"]) == {"data_dir", "builder", "config", "version", "content_digest"}
     case = case_from_manifest(manifest, workload="W3", framework="torch", execution="local")
     assert str(tmp_path / "tfds") not in json.dumps(case.to_data())
+
+
+def test_worker_request_transport_is_closed_and_does_not_capture_core_authority(tmp_path):
+    """Worker routing carries paths/refs/config only, never a live Repo or Store."""
+
+    path, store_path, manifest = _manifest(tmp_path)
+    roots = {name: tmp_path / name for name in ("output", "work", "evidence", "control")}
+    for root in roots.values():
+        root.mkdir()
+    request = QualificationWorkerRequest(
+        case_from_manifest(manifest, workload="W3", framework="torch", execution="subprocess"),
+        str(path), str(tmp_path / "tfds"), str(roots["output"]), str(roots["work"]),
+        str(roots["evidence"]), str(roots["control"]), "core-subprocess", "worker-process-no-session-allocation",
+    )
+    transport = inspect_worker_transport(request)
+    assert QualificationWorkerRequest.from_data(transport) == request
+    encoded = json.dumps(transport, sort_keys=True)
+    assert str(store_path) in encoded
+    # Framework version keys and serialized reference class names are evidence,
+    # not live handles; JSON round-trip is the transport boundary.
+    assert "object at 0x" not in encoded

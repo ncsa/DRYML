@@ -392,6 +392,20 @@ def validate_tfds_authority(authority: TFDSAuthority) -> None:
         raise QualificationUnrun("Selected TFDS root does not match manifest MNIST authority.")
 
 
+def validate_tfds_content_authority(authority: TFDSAuthority) -> None:
+    """Verify prepared TFDS bytes without importing TFDS in an orchestrator.
+
+    The coordinator may inspect only the manifest-declared builder directory and
+    its content digest.  A worker later uses :func:`validate_tfds_authority` to
+    additionally reconstruct TFDS's builder metadata before it opens data.
+    """
+
+    data_path = authority.data_dir / authority.builder / authority.version
+    builder = type("PreparedBuilderPath", (), {"data_path": data_path})()
+    if _tfds_content_digest(builder) != authority.content_digest:
+        raise FixtureManifestError("Selected TFDS content drifted from manifest authority.")
+
+
 @dataclass(frozen=True, slots=True)
 class FixtureManifest:
     """Closed persistent authority for one fixed Stage 5+7 fixture set.
@@ -654,6 +668,39 @@ def validate_fixture_references(references: FixtureReferences, *, repo) -> None:
         _assert_exact_values(left, right)
 
 
+def validate_fixture_reference_metadata(references: FixtureReferences, *, store) -> None:
+    """Validate retained W3 receipt closure from Store metadata only.
+
+    This is the coordinator-side preflight.  It deliberately checks immutable
+    StateRef records, definition records, and snapshot metadata without opening
+    local-state payloads, restoring CachedDatasets, or iterating fixture data.
+    The worker repeats the payload/codec equivalence check immediately before it
+    materializes a selected workload.
+    """
+
+    from dryml.core.metadata import read_snapshot_metadata
+    from dryml.core.store.records import DefinitionRecord
+
+    for reference in (references.numpy, references.parquet):
+        record = store.read_state_ref_record(reference.digest())
+        if record is None or record.state_ref != reference:
+            raise FixtureManifestError("W3 fixture StateRef receipt is absent or inconsistent.")
+        definition = store.read_definition_record(DefinitionRecord(reference.object.definition).digest)
+        if definition is None:
+            raise FixtureManifestError("W3 fixture definition receipt is absent.")
+        for state_ref in reference.states.values():
+            # State hashes are not independently addressable StateRefs; the root
+            # record and snapshot metadata bind their complete exact closure.
+            if not isinstance(state_ref, str) or len(state_ref) != 64:
+                raise FixtureManifestError("W3 fixture StateRef closure is malformed.")
+        try:
+            metadata = read_snapshot_metadata(store.get_snapshot_directory(reference))
+        except Exception as error:
+            raise FixtureManifestError("W3 fixture snapshot metadata is absent or corrupt.") from error
+        if metadata.state_ref != reference:
+            raise FixtureManifestError("W3 fixture snapshot metadata names another receipt.")
+
+
 def preflight_manifest(manifest: FixtureManifest) -> None:
     """Open selected Store authority and validate retained fixture completion.
 
@@ -688,5 +735,5 @@ __all__ = [
     "BASELINE_PATH", "FixtureManifest", "FixtureManifestError", "FixtureReferences",
     "MANIFEST_FORMAT", "MANIFEST_VERSION", "QualificationUnrun", "REQUIRED_ENVIRONMENT_KEYS", "TFDSAuthority",
     "config_digest", "installed_environment", "load_baseline", "load_manifest", "preflight_manifest",
-    "prepare_manifest", "prepare_tfds_authority", "require_supported_pyarrow", "validate_fixture_references", "validate_tfds_authority", "verify_codec_equivalence",
+    "prepare_manifest", "prepare_tfds_authority", "require_supported_pyarrow", "validate_fixture_reference_metadata", "validate_fixture_references", "validate_tfds_authority", "validate_tfds_content_authority", "verify_codec_equivalence",
 ]

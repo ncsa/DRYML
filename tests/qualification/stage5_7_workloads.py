@@ -35,6 +35,10 @@ EXECUTION_MODES = ("local", "managed-local", "subprocess", "ray")
 CASE_KINDS = ("matrix", "tfds-tensorflow-to-torch")
 _METRIC_NAMES = {"W1": "accuracy", "W2": "reconstruction_mse", "W3": "test_mse"}
 _FORMULAS = {"W1": "categorical_accuracy", "W2": "normalized_pixel_mse", "W3": "noisy_observation_mse"}
+_EXECUTION_BACKENDS = {
+    "local": "core-local", "managed-local": "core-local",
+    "subprocess": "core-subprocess", "ray": "core-ray",
+}
 
 
 def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
@@ -356,6 +360,15 @@ def cpu_matrix(manifest: FixtureManifest) -> tuple[QualificationCase, ...]:
     )
     if len(cases) != 24:
         raise AssertionError("Stage 5+7 CPU matrix must contain exactly 24 cases.")
+    identities = {(case.workload, case.framework, case.execution) for case in cases}
+    if len(identities) != len(cases) or identities != {
+            (workload, framework, execution)
+            for workload in WORKLOADS for framework in FRAMEWORKS
+            for execution in EXECUTION_MODES
+    }:
+        raise AssertionError("Stage 5+7 CPU matrix must enumerate every cell exactly once.")
+    if len({case.case_id for case in cases}) != len(cases):
+        raise AssertionError("Stage 5+7 CPU matrix case IDs must be unique.")
     if any(case.tensorflow_mode or case.case_kind != "matrix" for case in cases):
         raise AssertionError("Stage 5+7 CPU matrix must contain only NumPy-delivery matrix cases.")
     return cases
@@ -372,7 +385,7 @@ class QualificationCasePaths:
 
 def qualification_case_paths(
         case: QualificationCase, *, output_store_root, work_root, evidence_root,
-        tfds_root, create: bool = False) -> QualificationCasePaths:
+        tfds_root, gate_id: str = "cpu-matrix", create: bool = False) -> QualificationCasePaths:
     """Derive non-replacing per-case paths below caller-provided qualification roots.
 
     All output roots, the read-only fixture Store, and prepared TFDS authority
@@ -393,7 +406,13 @@ def qualification_case_paths(
                     "Qualification output, fixture Store, and TFDS roots must be "
                     "disjoint without ancestor/descendant overlap."
                 )
-    paths = QualificationCasePaths(*(root / case.case_id for root in roots[:3]))
+    if (
+            type(gate_id) is not str or not gate_id
+            or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in gate_id)
+    ):
+        raise FixtureManifestError("Qualification gate ID must be a nonempty lower-case stable name.")
+    child = f"{case.case_id}--{gate_id}"
+    paths = QualificationCasePaths(*(root / child for root in roots[:3]))
     if any(path.exists() for path in (paths.output_store, paths.work_dir, paths.evidence_dir)):
         raise FixtureManifestError("Refusing to replace an existing qualification case path.")
     if create:
@@ -528,6 +547,8 @@ class QualificationEvidence:
     elapsed_seconds: float
     peak_rss_bytes: int
     output_bytes: int
+    worker: Mapping[str, object]
+    recovery: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         """Validate closed field types before any result can be serialized."""
@@ -552,6 +573,8 @@ class QualificationEvidence:
             raise FixtureManifestError("Qualification runtime evidence is incomplete.")
         if self.runtime["backend"] != self.case.framework or not self.runtime["device"] or not self.runtime["worker_id"] or self.runtime["process_id"] < 0:
             raise FixtureManifestError("Qualification runtime evidence disagrees with its request.")
+        self._validate_worker_evidence()
+        self._validate_recovery_evidence()
         expected_metric = _METRIC_NAMES[self.case.workload]
         for row in self.history_rows:
             if set(row) != {"state_ref", "evaluation_status", "eval_artifacts"} or row["state_ref"] != self.final_experiment_ref or row["evaluation_status"] != "completed":
@@ -570,6 +593,100 @@ class QualificationEvidence:
         object.__setattr__(self, "formula", _freeze_mapping(self.formula))
         object.__setattr__(self, "environment", _freeze_mapping(self.environment))
         object.__setattr__(self, "runtime", _freeze_mapping(self.runtime))
+        object.__setattr__(self, "worker", _freeze_mapping(self.worker))
+        if self.recovery is not None:
+            object.__setattr__(self, "recovery", _freeze_mapping(self.recovery))
+
+    def _validate_worker_evidence(self) -> None:
+        """Require detached Core Execute route, authority, and receipt facts."""
+
+        required = {
+            "execution_backend", "semantic_backend", "isolation", "worker_pid",
+            "worker_identity", "runtime_allocation", "shared_authority", "submitted",
+            "core_outcome", "final_refs", "coordinator_validated_refs",
+        }
+        if not isinstance(self.worker, Mapping) or set(self.worker) != required:
+            raise FixtureManifestError("Qualification worker evidence is incomplete.")
+        backend = self.worker["execution_backend"]
+        expected_backend = {
+            "local": "isolation-process", "managed-local": "isolation-process",
+            "subprocess": "subprocess", "ray": "ray",
+        }[self.case.execution]
+        provisional = self.worker["coordinator_validated_refs"] is None
+        if backend != expected_backend and not (provisional and backend == "worker-provisional"):
+            raise FixtureManifestError("Qualification worker backend does not match its observed route.")
+        expected_semantic = "local" if self.case.execution in {"local", "managed-local"} else self.case.execution
+        if self.worker["semantic_backend"] != expected_semantic:
+            raise FixtureManifestError("Qualification worker semantic backend is inconsistent.")
+        isolation = self.worker["isolation"]
+        if not isinstance(isolation, Mapping) or set(isolation) != {"kind", "parent_pid"} or not isinstance(isolation["kind"], str) or type(isolation["parent_pid"]) is not int:
+            raise FixtureManifestError("Qualification worker isolation evidence is malformed.")
+        if (self.case.execution in {"local", "managed-local"} and not provisional
+                and isolation["kind"] != "fresh-os-process"):
+            raise FixtureManifestError("Local qualification evidence lacks a fresh isolation process.")
+        if type(self.worker["worker_pid"]) is not int or self.worker["worker_pid"] < 0 or not isinstance(self.worker["worker_identity"], str) or not self.worker["worker_identity"]:
+            raise FixtureManifestError("Qualification worker identity evidence is malformed.")
+        allocation = self.worker["runtime_allocation"]
+        if not isinstance(allocation, Mapping) or set(allocation) != {"resource_mode", "allocation", "admission"} or not all(isinstance(allocation[name], str) and allocation[name] for name in allocation):
+            raise FixtureManifestError("Qualification worker allocation evidence is malformed.")
+        if not provisional and self.case.execution in {"local", "managed-local"}:
+            expected_mode = "managed-session" if self.case.execution == "managed-local" else "unmanaged-session"
+            if allocation["resource_mode"] != expected_mode:
+                raise FixtureManifestError("Local qualification allocation evidence disagrees with observed session mode.")
+            if self.case.execution == "local" and allocation["allocation"] != "no-session-allocation":
+                raise FixtureManifestError("Unmanaged local qualification reported a session allocation.")
+            if self.case.execution == "managed-local" and allocation["allocation"] == "no-session-allocation":
+                raise FixtureManifestError("Managed local qualification omitted its session allocation.")
+        if not provisional and self.case.execution in {"subprocess", "ray"}:
+            if allocation != {
+                    "resource_mode": "worker-process-no-session-allocation",
+                    "allocation": "worker-process-no-session-allocation",
+                    "admission": "admitted-without-session-allocation",
+            }:
+                raise FixtureManifestError("Core worker allocation evidence disagrees with its no-session route.")
+        authority = self.worker["shared_authority"]
+        if not isinstance(authority, Mapping) or set(authority) != {"fixture_store", "control_store"} or not all(isinstance(value, str) and value for value in authority.values()):
+            raise FixtureManifestError("Qualification worker shared authority evidence is malformed.")
+        submitted = self.worker["submitted"]
+        if not isinstance(submitted, Mapping) or set(submitted) != {"request_digest", "submission_id", "result_ref"} or not all(isinstance(submitted[name], str) and submitted[name] for name in submitted) or submitted["result_ref"] != self.final_experiment_ref.digest():
+            raise FixtureManifestError("Qualification worker submission receipts are inconsistent.")
+        outcome = self.worker["core_outcome"]
+        if not isinstance(outcome, Mapping) or set(outcome) != {"kind", "publication_refs", "update_refs"} or not isinstance(outcome["kind"], str) or not outcome["kind"] or not isinstance(outcome["publication_refs"], (tuple, list)) or not isinstance(outcome["update_refs"], (tuple, list)) or not all(isinstance(reference, str) and reference for reference in outcome["publication_refs"]) or not all(isinstance(reference, str) and reference for reference in outcome["update_refs"]):
+            raise FixtureManifestError("Qualification Core outcome evidence is malformed.")
+        final_refs = self.worker["final_refs"]
+        expected_refs = {
+            "experiment": self.final_experiment_ref.digest(), "model": self.model_ref.digest(),
+            "test": self.test_ref.digest(), "history": self.history_ref.digest(),
+            "artifact": self.artifact_ref.digest(),
+        }
+        if not isinstance(final_refs, Mapping) or dict(final_refs) != expected_refs:
+            raise FixtureManifestError("Qualification worker final reference evidence is inconsistent.")
+        coordinator_refs = self.worker["coordinator_validated_refs"]
+        if coordinator_refs is not None:
+            if not isinstance(coordinator_refs, Mapping) or set(coordinator_refs) != {"output_store", "refs"}:
+                raise FixtureManifestError("Qualification coordinator final-reference evidence is malformed.")
+            if not isinstance(coordinator_refs["output_store"], str) or not coordinator_refs["output_store"]:
+                raise FixtureManifestError("Qualification coordinator output Store evidence is malformed.")
+            if not isinstance(coordinator_refs["refs"], Mapping) or dict(coordinator_refs["refs"]) != expected_refs:
+                raise FixtureManifestError("Qualification coordinator final-reference evidence is inconsistent.")
+
+    def _validate_recovery_evidence(self) -> None:
+        """Validate optional fixed step-64 repair evidence for the recovery case."""
+
+        if self.recovery is None:
+            return
+        required = {"checkpoint_step", "before", "restored", "events", "final_refs"}
+        if (self.case.workload, self.case.framework, self.case.execution) != ("W3", "torch", "subprocess") or not isinstance(self.recovery, Mapping) or set(self.recovery) != required or self.recovery["checkpoint_step"] != 64:
+            raise FixtureManifestError("Qualification recovery evidence is malformed.")
+        retained_fields = {"model_digest", "model_placement", "optimizer_digest", "optimizer_placement", "optimizer_iterations", "epoch", "next_batch", "step", "examples_seen", "loss_numerator", "loss_denominator", "checkpoint_ref", "history_occurrence", "artifact_status"}
+        before, restored = self.recovery["before"], self.recovery["restored"]
+        if not isinstance(before, Mapping) or not isinstance(restored, Mapping) or set(before) != retained_fields or set(restored) != retained_fields or before != restored:
+            raise FixtureManifestError("Qualification recovery evidence does not retain exact restored authority facts.")
+        events = self.recovery["events"]
+        if not isinstance(events, (tuple, list)) or tuple(events)[:2] != ("artifact_repaired", "optimizer_update:65") or len(set(events)) != len(events):
+            raise FixtureManifestError("Qualification recovery did not repair the pending Artifact before update 65.")
+        if self.recovery["final_refs"] != self.worker["final_refs"]:
+            raise FixtureManifestError("Qualification recovery final references disagree with worker evidence.")
 
     def to_data(self) -> dict[str, object]:
         """Encode a machine-readable closed evidence record."""
@@ -586,6 +703,7 @@ class QualificationEvidence:
             "artifact_ref": _ref_to_json(self.artifact_ref), "artifact_value": self.artifact_value,
             "formula": dict(self.formula), "environment": dict(self.environment), "runtime": dict(self.runtime),
             "elapsed_seconds": self.elapsed_seconds, "peak_rss_bytes": self.peak_rss_bytes, "output_bytes": self.output_bytes,
+            "worker": dict(self.worker), "recovery": None if self.recovery is None else dict(self.recovery),
         }
 
     @classmethod
@@ -606,7 +724,7 @@ class QualificationEvidence:
         required = {
             "case", "final_experiment_ref", "model_ref", "test_ref", "history_ref", "history_rows",
             "artifact_ref", "artifact_value", "formula", "environment", "runtime", "elapsed_seconds",
-            "peak_rss_bytes", "output_bytes",
+            "peak_rss_bytes", "output_bytes", "worker", "recovery",
         }
         if not isinstance(value, Mapping) or set(value) != required or not isinstance(value["history_rows"], list):
             raise FixtureManifestError("Qualification evidence record has missing or extra fields.")
@@ -628,13 +746,23 @@ class QualificationEvidence:
                 _ref_from_json(value["history_ref"]), tuple(rows), _ref_from_json(value["artifact_ref"]),
                 value["artifact_value"], dict(value["formula"]), dict(value["environment"]),
                 dict(value["runtime"]), value["elapsed_seconds"], value["peak_rss_bytes"], value["output_bytes"],
+                dict(value["worker"]), None if value["recovery"] is None else dict(value["recovery"]),
             )
         except (TypeError, ValueError) as error:
             raise FixtureManifestError("Qualification evidence record is malformed.") from error
 
 
-def validate_evidence(manifest: FixtureManifest, evidence: QualificationEvidence, *, output_store=None) -> None:
-    """Validate all KTD11 association, formula, threshold, and resource gates."""
+def validate_evidence(
+        manifest: FixtureManifest, evidence: QualificationEvidence, *, output_store=None,
+        coordinator_results=None) -> None:
+    """Validate all KTD11 association, formula, threshold, and resource gates.
+
+    ``coordinator_results`` is the already scoped final Experiment receipt,
+    ExperimentData history, and scalar Artifact result.  It keeps orchestrator
+    validation from materializing the referenced model or test Dataset payload.
+    Standalone local qualification leaves it ``None`` and performs its ordinary
+    non-orchestrator full result validation.
+    """
 
     case = evidence.case
     if case.fixture_store != str(manifest.fixture_store) or case.manifest_digest != manifest.digest or case.config_digest != config_digest(manifest.baseline):
@@ -650,6 +778,11 @@ def validate_evidence(manifest: FixtureManifest, evidence: QualificationEvidence
         raise FixtureManifestError("Evidence model/test bindings disagree with final Experiment StateRef.")
     if case.workload == "W3" and evidence.test_ref != manifest.references.numpy:
         raise FixtureManifestError("W3 Experiment did not retain the manifest NumPy cache StateRef.")
+    coordinator_refs = evidence.worker["coordinator_validated_refs"]
+    if coordinator_refs is None:
+        raise FixtureManifestError("Worker provisional evidence has no coordinator final-reference authority.")
+    if output_store is None or coordinator_refs["output_store"] != os.fspath(Path(output_store).resolve()):
+        raise FixtureManifestError("Coordinator final-reference authority names another output Store.")
     metric_name = _METRIC_NAMES[case.workload]
     for row in evidence.history_rows:
         if set(row) != {"state_ref", "evaluation_status", "eval_artifacts"} or row["state_ref"] != evidence.final_experiment_ref or row["evaluation_status"] != "completed":
@@ -666,47 +799,53 @@ def validate_evidence(manifest: FixtureManifest, evidence: QualificationEvidence
     failed_gate = evidence.artifact_value < THRESHOLDS["W1"] if case.workload == "W1" else evidence.artifact_value > THRESHOLDS[case.workload]
     if failed_gate:
         raise FixtureManifestError(f"{case.workload} did not meet its fixed acceptance threshold.")
-    # Validate the retained history/result records rather than trusting runner-provided
-    # row copies. This is deliberately an execution-boundary Store read.
-    from dryml.artifacts import Value
-    from dryml.core import Repo
-    from dryml.core.store.dir import DirStore
-    from dryml.data import Dataset
-    from dryml.models import Experiment, ExperimentData, Model
+    # Validate retained history/result records rather than trusting runner-provided
+    # row copies. The coordinator supplies only its explicitly scoped lightweight
+    # loads; standalone local qualification retains its pre-existing full check.
+    if coordinator_results is None:
+        from dryml.artifacts import Value
+        from dryml.core import Repo
+        from dryml.core.store.dir import DirStore
+        from dryml.data import Dataset
+        from dryml.models import Experiment, ExperimentData, Model
 
-    stores = (DirStore(output_store), DirStore(manifest.fixture_store)) if output_store is not None else DirStore(manifest.fixture_store)
-    repo = Repo(stores)
-    try:
-        final_experiment = repo.load_state_ref(evidence.final_experiment_ref, reuse_live="never", cache="none")
-        model = repo.load_state_ref(evidence.model_ref, reuse_live="never", cache="none")
-        test_data = repo.load_state_ref(evidence.test_ref, reuse_live="never", cache="none")
-        history = repo.load_state_ref(evidence.history_ref, reuse_live="never", cache="none")
-        artifact = repo.load_state_ref(evidence.artifact_ref, reuse_live="never", cache="none")
-    except Exception as error:
-        raise FixtureManifestError("Qualification StateRef authority is absent or corrupt in the selected Store.") from error
-    if not isinstance(final_experiment, Experiment) or not isinstance(model, Model) or not isinstance(test_data, Dataset):
-        raise FixtureManifestError("Qualification final Experiment, projected model, or test Dataset type is invalid.")
-    if not isinstance(history, ExperimentData) or not isinstance(artifact, Value) or not artifact.ready:
-        raise FixtureManifestError("Qualification history or Artifact completion evidence is invalid.")
-    if (
-            final_experiment.last_state_ref != evidence.final_experiment_ref
-            or model.last_state_ref != evidence.model_ref
-            or test_data.last_state_ref != evidence.test_ref
-            or history.last_state_ref != evidence.history_ref
-            or artifact.last_state_ref != evidence.artifact_ref):
-        raise FixtureManifestError("Qualification receipt does not equal exact selected Store authority.")
-    if (
-            final_experiment.last_state_ref.at("model") != evidence.model_ref
-            or final_experiment.last_state_ref.reference_value_at("test_data") != evidence.test_ref):
-        raise FixtureManifestError("Loaded final Experiment bindings disagree with evidence authority.")
-    observed_parameters = _native_parameter_values(model)
-    observed_devices = {
-        _normalize_native_device(device)
-        for parameter in observed_parameters
-        if (device := _observed_native_device(parameter)) is not None
-    }
-    if len(observed_devices) != 1 or evidence.runtime["device"] != next(iter(observed_devices)):
-        raise FixtureManifestError("Qualification evidence device disagrees with saved native parameter placement.")
+        stores = (DirStore(output_store), DirStore(manifest.fixture_store)) if output_store is not None else DirStore(manifest.fixture_store)
+        repo = Repo(stores)
+        try:
+            final_experiment = repo.load_state_ref(evidence.final_experiment_ref, reuse_live="never", cache="none")
+            model = repo.load_state_ref(evidence.model_ref, reuse_live="never", cache="none")
+            test_data = repo.load_state_ref(evidence.test_ref, reuse_live="never", cache="none")
+            history = repo.load_state_ref(evidence.history_ref, reuse_live="never", cache="none")
+            artifact = repo.load_state_ref(evidence.artifact_ref, reuse_live="never", cache="none")
+        except Exception as error:
+            raise FixtureManifestError("Qualification StateRef authority is absent or corrupt in the selected Store.") from error
+        if not isinstance(final_experiment, Experiment) or not isinstance(model, Model) or not isinstance(test_data, Dataset):
+            raise FixtureManifestError("Qualification final Experiment, projected model, or test Dataset type is invalid.")
+        if not isinstance(history, ExperimentData) or not isinstance(artifact, Value) or not artifact.ready:
+            raise FixtureManifestError("Qualification history or Artifact completion evidence is invalid.")
+        if (
+                final_experiment.last_state_ref != evidence.final_experiment_ref
+                or model.last_state_ref != evidence.model_ref
+                or test_data.last_state_ref != evidence.test_ref
+                or history.last_state_ref != evidence.history_ref
+                or artifact.last_state_ref != evidence.artifact_ref):
+            raise FixtureManifestError("Qualification receipt does not equal exact selected Store authority.")
+        if (
+                final_experiment.last_state_ref.at("model") != evidence.model_ref
+                or final_experiment.last_state_ref.reference_value_at("test_data") != evidence.test_ref):
+            raise FixtureManifestError("Loaded final Experiment bindings disagree with evidence authority.")
+        observed_parameters = _native_parameter_values(model)
+        observed_devices = {
+            _normalize_native_device(device)
+            for parameter in observed_parameters
+            if (device := _observed_native_device(parameter)) is not None
+        }
+        if len(observed_devices) != 1 or evidence.runtime["device"] != next(iter(observed_devices)):
+            raise FixtureManifestError("Qualification evidence device disagrees with saved native parameter placement.")
+    else:
+        if not isinstance(coordinator_results, tuple) or len(coordinator_results) != 3:
+            raise FixtureManifestError("Coordinator result validation must supply exactly three selected results.")
+        _, history, artifact = coordinator_results
     stored_rows = history.data.to_dict("records")
     expected_rows = [
         {
@@ -762,7 +901,10 @@ def run_local_case(manifest: FixtureManifest, case: QualificationCase, *, opted_
     evidence = runner(case)
     if not isinstance(evidence, QualificationEvidence):
         raise FixtureManifestError("Local qualification runner did not return closed evidence.")
-    validate_evidence(manifest, evidence, output_store=_absolute_output_store(output_store) / case.case_id)
+    validate_evidence(
+        manifest, evidence,
+        output_store=_absolute_output_store(output_store) / f"{case.case_id}--local-qualification",
+    )
     return evidence
 
 
