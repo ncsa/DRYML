@@ -33,6 +33,13 @@ Batch values:
 - `Dynamic`: batched with unknown batch size
 - integer: fixed batch size
 
+When a Method is prepared from a known `TensorSpec`, `Dynamic` is a retained
+validation allowance rather than the size observed on its first value. For
+example, a `batch=Dynamic` prepared Method may accept batches of 64 and then 17;
+a fixed batch or fixed sample dimension rejects drift before the selected Method
+body runs. This validation remains local preparation behavior and does not infer
+or execute Dataset streams.
+
 ## DTypes
 
 DRYML normalizes dtype values through its core dtype system. Users can usually pass simple strings such as `"float32"`, `"int64"`, or backend dtype objects when supported. NumPy Unicode dtypes, regardless of their storage width, normalize to the canonical `"string"` dtype and convert back to `np.str_`. NumPy object dtypes retain the distinct `"object"` kind; byte strings are not implicitly decoded. Numerical reductions and classification label validation still reject object arrays.

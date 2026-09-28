@@ -172,9 +172,11 @@ class AutoEncoder(Model):
         encoder = select(self.encoder, input_spec, backend)
         encoded_spec = self.encoder.infer_output_spec(input_spec)
         decoder = select(self.decoder, encoded_spec, None)
+        prepared_encoder = encoder.prepared_invoker()
+        prepared_decoder = decoder.prepared_invoker()
 
         def invoke_autoencoder(x):
-            return decoder(encoder(x))
+            return prepared_decoder(prepared_encoder(x))
 
         return replace(implementation, _invoker=invoke_autoencoder)
 

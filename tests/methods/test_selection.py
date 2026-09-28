@@ -157,3 +157,39 @@ def test_find_implementation_preserves_legacy_spec_selected_batch_behavior():
 
     assert element_impl(element)[0] == "element"
     assert batched_impl(batched)[0] == "batched"
+
+
+def test_known_spec_preparation_rejects_strategy_and_selection_errors_before_bodies():
+    """Preparation uses the ordinary bounded selection failures without invoking candidates."""
+
+    class TorchOnly(Method):
+        calls = []
+
+        @traits(backend="torch")
+        def torch(self, value):
+            type(self).calls.append("torch")
+            return value
+
+    class Tied(Method):
+        calls = []
+
+        @traits(backend="numpy")
+        def first(self, value):
+            type(self).calls.append("first")
+            return value
+
+        @traits(backend="numpy")
+        def second(self, value):
+            type(self).calls.append("second")
+            return value
+
+    numpy = TensorSpec("float32", shape=(2,), backend="numpy")
+    with pytest.raises(ValueError, match="local"):
+        TorchOnly().learn(numpy, strategy="remote")
+    with pytest.raises(ImplementationSelectionError) as missing:
+        TorchOnly().learn(numpy)
+    assert missing.value.reason == "no_candidate"
+    with pytest.raises(ImplementationSelectionError) as tied:
+        Tied().learn(numpy)
+    assert tied.value.reason == "ambiguous"
+    assert TorchOnly.calls == Tied.calls == []

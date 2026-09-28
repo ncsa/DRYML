@@ -85,6 +85,40 @@ def test_simple_method_learning_reuses_its_direct_target_without_catalog_discove
     assert method.cached_signature == signature
 
 
+def test_known_spec_learning_selects_without_a_body_and_validates_dynamic_batches():
+    """Known specs prepare once, admit declared dynamic batches, and reject fixed drift."""
+
+    class Counting(Method):
+        def __init__(self):
+            self.calls = 0
+
+        @traits(backend="numpy", batch_mode="batched")
+        def numpy(self, value):
+            self.calls += 1
+            return value
+
+    method = Counting()
+    method.learn(TensorSpec("float32", shape=(3,), batch=Dynamic, backend="numpy"))
+
+    assert method.call_mode == "cached"
+    assert method.calls == 0
+    method.implementations = lambda: (_ for _ in ()).throw(AssertionError("must not rediscover"))
+    assert method(np.ones((64, 3), dtype=np.float32)).shape == (64, 3)
+    assert method(np.ones((17, 3), dtype=np.float32)).shape == (17, 3)
+    assert method.calls == 2
+
+    for changed in (
+        np.ones((17, 4), dtype=np.float32),
+        np.ones((17, 3, 1), dtype=np.float32),
+        np.ones((17, 3), dtype=np.float64),
+        TensorSpec("float32", shape=(3,), batch=17, backend="torch"),
+        {"value": np.ones((17, 3), dtype=np.float32)},
+    ):
+        with pytest.raises(ImplementationSelectionError):
+            method(changed)
+    assert method.calls == 2
+
+
 def test_default_batched_is_exact_eager_only_and_survives_eager_reset():
     """Batch defaults are local preferences, not cached or logical-call controls."""
 

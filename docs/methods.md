@@ -24,7 +24,9 @@ from dryml.methods import Accumulator, AccumulatorGroup, Method, Traits, traits
 
 `Backend` and `BatchMode` remain core vocabulary. The exact Methods public API
 is `Method`, `Accumulator`, `AccumulatorGroup`, `MethodImplementation`, `Traits`, `traits`, `MethodCallNode`,
-`MethodCallSignature`, `MethodCallMode`, `MethodCallNodeKind`, `MethodError`,
+`MethodCallSignature`, `MethodCallMode`, `MethodCallNodeKind`, `MethodGraph`,
+`MethodGraphNode`, `MethodGraphNodeKind`, `MethodPort`, `MethodPortKind`,
+`MethodError`,
 `ImplementationDeclarationError`, `ImplementationSelectionError`,
 `PreparedCallMismatchError`, `SelectionFailureReason`, and
 `SelectionTraitName`.
@@ -182,12 +184,32 @@ facts always win.
 
 `learn()` returns `None`, clears an old cache, and enters `"learning"` mode
 without selection, invocation, warmup, persistence, or optional-framework
-imports. The next supported call normalizes complete positional and keyword
-layout, selects under eager rules, and publishes an immutable
+imports when called with no arguments. The next supported call normalizes
+complete positional and keyword layout, selects under eager rules, and publishes an immutable
 `cached_signature` plus target before invocation. Selection/normalization
 failure stays learning without a partial cache; a selected target that fails
 still leaves the cache available. Unsupported opaque learning values raise
 `MethodError`; ordinary eager generic calls remain available.
+
+`learn(input_spec, *additional_input_specs, strategy="local",
+output_spec=None)` instead prepares a retained local invoker from known
+`SpecTree` facts before values exist. Only `"local"` is currently supported;
+another strategy raises `ValueError` before catalog selection or target
+execution. Known-spec preparation uses the ordinary selection and selected-call
+validation contracts, invokes no candidate body, opens no source, and retains no
+first-call signature. Declared `Dynamic` dimensions accept later concrete values;
+fixed rank, shape, dtype, backend, batch, and structure drift fail before the
+target body. `eager()` or another `learn()` invalidates all retained facts.
+
+`method.method_graph()` returns an immutable, process-local `MethodGraph` view.
+Its virtual source and Method nodes are occurrence-indexed and expose currently
+known element-port facts, selected local invokers, and an empty
+`conversion_edges` surface reserved for later handoff planning. Reusing one
+Method in a composition records independent occurrence selections without
+mutating that child's first-call cache. U4 does not open sources or execute
+streams: `MethodGraph.iterator()` raises `NotImplementedError` until the stream
+cursor layer supplies lifecycle behavior. The graph is neither a second cache nor
+a compiler, JIT, fusion, conversion, or global optimization API.
 
 Cached calls must exactly match the learned positional and keyword structure,
 dtype, shape, layout, backend, and observable batch facts. Matching calls invoke
@@ -199,7 +221,7 @@ carriers that preserve tensor, tuple, list, mapping, and mapping-order facts.
 
 `eager()` returns `None`, clears learning/cached state, and preserves an explicit
 `default_batched`. `learn()` from cached state similarly clears the old cache and
-preserves the default for exactly one new learning call.
+preserves the default for exactly one new learning call or known-spec preparation.
 
 ## Local State, Composition, And Migration
 

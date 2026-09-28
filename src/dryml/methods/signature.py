@@ -96,6 +96,31 @@ def spec_node(spec: SpecTree) -> MethodCallNode:
     return _node_from_spec(spec)
 
 
+def spec_from_node(node: MethodCallNode) -> SpecTree:
+    """Return a fresh public specification tree from immutable node facts.
+
+    Args:
+        node: A normalized immutable Method specification node.
+
+    Returns:
+        A newly structured ``SpecTree`` whose TensorSpec leaves remain immutable.
+
+    This reverses :func:`spec_node` for diagnostic and graph-view APIs without
+    selecting an implementation, invoking a target, or importing a backend.
+    """
+
+    if node.kind == "tensor":
+        return node.value  # type: ignore[return-value]
+    if node.kind == "tuple":
+        return tuple(spec_from_node(child) for child in node.value)  # type: ignore[union-attr]
+    if node.kind == "list":
+        return [spec_from_node(child) for child in node.value]  # type: ignore[union-attr]
+    return {
+        key: spec_from_node(child)
+        for key, child in node.value  # type: ignore[union-attr]
+    }
+
+
 def spec_nodes(
     input_spec: SpecTree | None,
     additional_input_specs: tuple[SpecTree, ...],

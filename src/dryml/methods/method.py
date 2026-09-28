@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import weakref
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from threading import Lock
 
@@ -15,11 +16,13 @@ from dryml.core.tensor_spec import BatchMode, SpecTree
 from .errors import ImplementationDeclarationError, ImplementationSelectionError, MethodError, PreparedCallMismatchError
 from .implementation import (
     MethodImplementation,
+    PreparedMethodInvoker,
     SelectedDescriptorAdapter,
     direct_invocation_active,
     ensure_supported_descriptor,
     invoke_descriptor,
 )
+from .ir import MethodGraph, MethodGraphNode, MethodPort
 from .signature import (
     MethodCallMode,
     MethodCallNode,
@@ -37,6 +40,10 @@ from .traits import METHOD_TRAITS_KEY, Traits
 _DIRECT_CALL_ATTR = "__dryml_method_direct_call__"
 _UNDECLARED = object()
 _ITERATION_INDEPENDENCE: weakref.WeakKeyDictionary[type, object] = weakref.WeakKeyDictionary()
+_PREPARATION_RECORDER: ContextVar[object | None] = ContextVar(
+    "dryml_method_preparation_recorder",
+    default=None,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +62,9 @@ class _PreparationState:
     mode: MethodCallMode = "eager"
     signature: MethodCallSignature | None = None
     cached: SelectedDescriptorAdapter | None = None
+    prepared: PreparedMethodInvoker | None = None
+    graph: MethodGraph | None = None
+    graph_nodes: tuple[MethodGraphNode, ...] = ()
 
 
 _STATE_LOCK = Lock()
@@ -340,22 +350,39 @@ class Method(Object):
         with _STATE_LOCK:
             return state.signature
 
-    def learn(self) -> None:
-        """Clear a prior cache and make the next alternative call learn exactly once.
+    def learn(
+        self,
+        input_spec: SpecTree | None = None,
+        *additional_input_specs: SpecTree,
+        strategy: str = "local",
+        output_spec: SpecTree | None = None,
+    ) -> None:
+        """Prepare local selection from specs or learn it from the first call.
 
-        Selection, target invocation, backend import, persistence, and output
-        inference do not occur until the next call supplies real arguments.
+        Args:
+            input_spec: Optional known first input specification. Omitting it
+                preserves the original first-supported-call learning behavior.
+            *additional_input_specs: Known later positional input specifications.
+            strategy: Preparation strategy. U4 supports only ``"local"``.
+            output_spec: Optional raw-result contract for known-spec preparation.
+
+        Raises:
+            ValueError: If an unsupported strategy is requested.
+            ImplementationSelectionError: If known facts cannot select one target.
 
         Side Effects:
-            Changes only this live instance's weak process-local mode and clears
-            any cached signature/target while preserving ``default_batched``.
+            Replaces retained process-local preparation facts. Known-spec
+            preparation binds no source and invokes no candidate body.
         """
 
-        state = _state_for(self)
-        with _STATE_LOCK:
-            state.mode = "learning"
-            state.signature = None
-            state.cached = None
+        if strategy != "local":
+            raise ValueError(f"Unsupported Method preparation strategy {strategy!r}; only 'local' is available.")
+        if input_spec is None:
+            if additional_input_specs or output_spec is not None:
+                raise ImplementationSelectionError("conflict")
+            self._clear_preparation("learning")
+            return
+        self._learn_graph(MethodGraph(self), input_spec, additional_input_specs, strategy, output_spec)
 
     def eager(self) -> None:
         """Clear learning/cached state and restore eager selection.
@@ -370,6 +397,130 @@ class Method(Object):
             state.mode = "eager"
             state.signature = None
             state.cached = None
+            state.prepared = None
+            state.graph = None
+            state.graph_nodes = ()
+
+    def method_graph(self) -> MethodGraph:
+        """Return this Method's inspectable local graph view without preparation.
+
+        Returns:
+            The retained graph view when this Method has one, otherwise a fresh
+            inert view. Creating the view does not select, invoke, or open data.
+        """
+
+        state = _state_for(self)
+        with _STATE_LOCK:
+            return state.graph if state.graph is not None else MethodGraph(self)
+
+    def _clear_preparation(self, mode: MethodCallMode) -> None:
+        """Replace all retained local preparation facts while preserving defaults."""
+
+        state = _state_for(self)
+        with _STATE_LOCK:
+            state.mode = mode
+            state.signature = None
+            state.cached = None
+            state.prepared = None
+            state.graph = None
+            state.graph_nodes = ()
+
+    def _learn_graph(
+        self,
+        graph: MethodGraph,
+        input_spec: SpecTree | None,
+        additional_input_specs: tuple[SpecTree, ...],
+        strategy: str,
+        output_spec: SpecTree | None,
+    ) -> None:
+        """Prepare one graph occurrence plan using this Method's weak state."""
+
+        if strategy != "local":
+            raise ValueError(f"Unsupported Method preparation strategy {strategy!r}; only 'local' is available.")
+        if input_spec is None:
+            self.learn(strategy=strategy)
+            return
+        self._clear_preparation("learning")
+        records: list[MethodGraphNode] = []
+
+        def record(
+            method: Method,
+            implementation: MethodImplementation,
+            input_nodes: tuple[MethodCallNode, ...],
+            inferred_output: MethodCallNode | None,
+        ) -> None:
+            records.append(
+                MethodGraphNode(
+                    occurrence=len(records) + 1,
+                    kind="method",
+                    method_type=type(method),
+                    inputs=tuple(MethodPort("element", node) for node in input_nodes),
+                    outputs=() if inferred_output is None else (MethodPort("element", inferred_output),),
+                    selected=implementation.prepared_invoker(),
+                    traits=implementation.traits,
+                )
+            )
+
+        token = _PREPARATION_RECORDER.set(record)
+        try:
+            implementation = self.find_implementation(
+                input_spec,
+                *additional_input_specs,
+                output_spec=output_spec,
+            )
+        finally:
+            _PREPARATION_RECORDER.reset(token)
+        invoker = implementation.prepared_invoker()
+        input_nodes = spec_nodes(input_spec, additional_input_specs)
+        try:
+            graph_output = spec_node(self.infer_output_spec(input_spec, *additional_input_specs))
+        except NotImplementedError:
+            graph_output = None
+        if output_spec is not None:
+            graph_output = spec_node(output_spec)
+        source = MethodGraphNode(
+            occurrence=0,
+            kind="source",
+            method_type=None,
+            outputs=tuple(MethodPort("element", node) for node in input_nodes),
+        )
+        if records:
+            # Composite selection records its owner before specializing child
+            # occurrences. Replace only that owner's unspecialized invoker.
+            records[0] = replace(records[0], selected=invoker, outputs=()
+                                if graph_output is None else (MethodPort("element", graph_output),))
+        else:
+            records.append(
+                MethodGraphNode(
+                    occurrence=1,
+                    kind="method",
+                    method_type=type(self),
+                    inputs=tuple(MethodPort("element", node) for node in input_nodes),
+                    outputs=() if graph_output is None else (MethodPort("element", graph_output),),
+                    selected=invoker,
+                    traits=implementation.traits,
+                )
+            )
+        state = _state_for(self)
+        with _STATE_LOCK:
+            state.mode = "cached"
+            state.signature = None
+            state.cached = None
+            state.prepared = invoker
+            state.graph = graph
+            state.graph_nodes = (source, *records)
+
+    def _graph_nodes_for(self, graph: MethodGraph) -> tuple[MethodGraphNode, ...]:
+        """Return graph facts only when this view owns the current preparation."""
+
+        state = _state_for(self)
+        with _STATE_LOCK:
+            if state.graph is graph:
+                return state.graph_nodes
+        return (
+            MethodGraphNode(0, "source", None),
+            MethodGraphNode(1, "method", type(self)),
+        )
 
     def compatible_implementations(
         self,
@@ -472,7 +623,7 @@ class Method(Object):
         except TypeError as error:
             raise ImplementationSelectionError("conflict") from error
         implementation = self._select(required_backend, required_batch)
-        return replace(
+        selected = replace(
             implementation,
             _input_specs=tuple(
                 complete_backend_constraint(input_node, required_backend)
@@ -480,6 +631,16 @@ class Method(Object):
             ),
             _output_spec=output_node,
         )
+        recorder = _PREPARATION_RECORDER.get()
+        if callable(recorder):
+            inferred_output = output_node
+            if inferred_output is None and input_spec is not None:
+                try:
+                    inferred_output = spec_node(self.infer_output_spec(input_spec, *additional_input_specs))
+                except NotImplementedError:
+                    pass
+            recorder(self, selected, input_nodes, inferred_output)
+        return selected
 
     def _prepare_implementation(
         self,
@@ -608,8 +769,11 @@ class Method(Object):
             mode = state.mode
             expected = state.signature
             cached = state.cached
+            prepared = state.prepared
             default_batched = None if mode == "cached" else state.default_batched
         if mode == "cached":
+            if prepared is not None:
+                return prepared.invoke(args, kwargs, on_raw_result=on_raw_result)
             if expected is None or cached is None:
                 raise MethodError("Method cached state is incomplete.")
             try:
@@ -659,6 +823,7 @@ class Method(Object):
                 state.mode = "cached"
                 state.signature = signature
                 state.cached = adapter
+                state.prepared = None
             return adapter.invoke_prepared(call_args, call_kwargs, on_raw_result=on_raw_result)
         implementation = receiver._select(backend, effective_batch)
         return (

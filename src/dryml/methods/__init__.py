@@ -16,6 +16,7 @@ from .errors import (
 )
 from .accumulator import Accumulator, AccumulatorGroup
 from .implementation import MethodImplementation
+from .ir import MethodGraph, MethodGraphNode, MethodGraphNodeKind, MethodPort, MethodPortKind
 from .method import Method
 from .signature import MethodCallMode, MethodCallNode, MethodCallNodeKind, MethodCallSignature
 from .traits import Traits, traits
@@ -24,6 +25,11 @@ __all__ = [
     "Traits",
     "traits",
     "MethodImplementation",
+    "MethodGraph",
+    "MethodGraphNode",
+    "MethodGraphNodeKind",
+    "MethodPort",
+    "MethodPortKind",
     "MethodCallMode",
     "MethodCallNodeKind",
     "MethodCallNode",

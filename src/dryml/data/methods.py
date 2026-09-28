@@ -202,9 +202,13 @@ class Project(Method):
             self.branches,
             select,
         )
+        prepared_branches = _map_method_tree(
+            selected_branches,
+            lambda method: method.prepared_invoker(),
+        )
 
         def invoke_project(x):
-            return _map_method_tree(selected_branches, lambda method: method(x))
+            return _map_method_tree(prepared_branches, lambda method: method(x))
 
         return replace(implementation, _invoker=invoke_project)
 
@@ -321,10 +325,11 @@ class Pipe(Method):
                 )
             )
             spec = method.infer_output_spec(spec)
+        prepared_methods = tuple(method.prepared_invoker() for method in selected_methods)
 
         def invoke_pipe(x):
             result = x
-            for method in selected_methods:
+            for method in prepared_methods:
                 result = method(result)
             return result
 

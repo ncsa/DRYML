@@ -155,7 +155,7 @@ def invoke_descriptor(
     return _bound_descriptor(descriptor, receiver, receiver_type, name=name)(*args, **kwargs)
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class SelectedDescriptorAdapter:
     """Run one selected descriptor through its core signature plan.
 
@@ -292,6 +292,59 @@ class SelectedDescriptorAdapter:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedMethodInvoker:
+    """Retain one selected Method adapter and its validation facts for reuse.
+
+    Args:
+        name: Selected declaration name for inspection and diagnostics.
+        traits: Traits selected for this invocation.
+        adapter: Reusable weak-receiver descriptor adapter.
+        input_specs: Immutable positional input constraints.
+        output_spec: Optional immutable raw-result constraint.
+
+    The invoker is process-local and deliberately not a persistence carrier. It
+    validates each call against declared dynamic/fixed facts before running the
+    selected target, avoiding both candidate rediscovery and first-call cache
+    mutation on child Methods.
+    """
+
+    name: str
+    traits: Traits
+    adapter: SelectedDescriptorAdapter
+    input_specs: tuple[MethodCallNode, ...]
+    output_spec: MethodCallNode | None
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        """Validate and invoke retained selection using logical call arguments."""
+
+        return self.invoke(tuple(args), dict(kwargs))
+
+    def invoke(
+        self,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+        *,
+        on_raw_result: Callable[[object], object] | None = None,
+    ) -> object:
+        """Validate one call, invoke its adapter, and validate its raw result.
+
+        Raises:
+            ImplementationSelectionError: If input or output facts drift before
+                the selected target is allowed to run.
+        """
+
+        _validate_input_specs(self.input_specs, args)
+        if self.output_spec is None:
+            return self.adapter.invoke(args, kwargs, on_raw_result=on_raw_result)
+
+        def validate_then_publish(result: object) -> object:
+            _validate_raw_result(self.output_spec, result)
+            return result if on_raw_result is None else on_raw_result(result)
+
+        return self.adapter.invoke(args, kwargs, on_raw_result=validate_then_publish)
+
+
+@dataclass(frozen=True, slots=True)
 class MethodImplementation:
     """One immutable, inspectable authored implementation and its invocation carrier.
 
@@ -343,6 +396,25 @@ class MethodImplementation:
             self._invoker,
         )
 
+    def prepared_invoker(self) -> PreparedMethodInvoker:
+        """Return one reusable local invoker retaining this selection's facts.
+
+        Returns:
+            An immutable process-local invoker with a weak Method receiver.
+
+        Raises:
+            ImplementationDeclarationError: If the selected declaration cannot
+                be bound. No target body runs during invoker construction.
+        """
+
+        return PreparedMethodInvoker(
+            self.name,
+            self.traits,
+            self.selected_adapter(),
+            self._input_specs,
+            self._output_spec,
+        )
+
     def __call__(self, *args: object, **kwargs: object) -> object:
         """Validate and invoke this target through its selected signature adapter.
 
@@ -361,9 +433,7 @@ class MethodImplementation:
             SignatureError: If selected argument or return normalization fails.
         """
 
-        self._validate_inputs(args)
-        on_raw_result = self._validate_raw_result if self._output_spec is not None else None
-        return self.selected_adapter().invoke(args, kwargs, on_raw_result=on_raw_result)
+        return self.prepared_invoker().invoke(args, kwargs)
 
     def invoke_with_raw_result(
         self, args: tuple[object, ...], kwargs: dict[str, object],
@@ -374,46 +444,49 @@ class MethodImplementation:
         Execute uses this owner seam after Method selection. It preserves the
         selected adapter's single argument and return boundaries.
         """
-        self._validate_inputs(args)
-        if self._output_spec is None:
-            return self.selected_adapter().invoke(args, kwargs, on_raw_result=on_raw_result)
-
-        def validate_then_publish(result: object) -> object:
-            self._validate_raw_result(result)
-            return on_raw_result(result)
-
-        return self.selected_adapter().invoke(args, kwargs, on_raw_result=validate_then_publish)
+        return self.prepared_invoker().invoke(args, kwargs, on_raw_result=on_raw_result)
 
     def _validate_inputs(self, args: tuple[object, ...]) -> None:
         """Reject a missing or incompatible retained positional input before invocation."""
 
-        if len(args) < len(self._input_specs):
-            raise ImplementationSelectionError("conflict")
-        try:
-            valid = all(
-                satisfies(constraint, runtime_node_for_constraint(args[index], constraint))
-                for index, constraint in enumerate(self._input_specs)
-            )
-        except TypeError as error:
-            raise ImplementationSelectionError("conflict") from error
-        if not valid:
-            raise ImplementationSelectionError("conflict")
+        _validate_input_specs(self._input_specs, args)
 
     def _validate_raw_result(self, result: object) -> object:
         """Validate one raw result and return it for adapter callback composition."""
 
-        if self._output_spec is None:
-            return result
-        try:
-            valid = satisfies(
-                self._output_spec,
-                runtime_node_for_constraint(result, self._output_spec),
-            )
-        except TypeError as error:
-            raise ImplementationSelectionError("conflict") from error
-        if not valid:
-            raise ImplementationSelectionError("conflict")
+        if self._output_spec is not None:
+            _validate_raw_result(self._output_spec, result)
         return result
+
+
+def _validate_input_specs(input_specs: tuple[MethodCallNode, ...], args: tuple[object, ...]) -> None:
+    """Reject missing or incompatible retained positional input facts."""
+
+    if len(args) < len(input_specs):
+        raise ImplementationSelectionError("conflict")
+    try:
+        valid = all(
+            satisfies(constraint, runtime_node_for_constraint(args[index], constraint))
+            for index, constraint in enumerate(input_specs)
+        )
+    except TypeError as error:
+        raise ImplementationSelectionError("conflict") from error
+    if not valid:
+        raise ImplementationSelectionError("conflict")
+
+
+def _validate_raw_result(output_spec: MethodCallNode, result: object) -> None:
+    """Reject a result that fails a retained output specification."""
+
+    try:
+        valid = satisfies(
+            output_spec,
+            runtime_node_for_constraint(result, output_spec),
+        )
+    except TypeError as error:
+        raise ImplementationSelectionError("conflict") from error
+    if not valid:
+        raise ImplementationSelectionError("conflict")
 
 
 __all__ = ["MethodImplementation"]
