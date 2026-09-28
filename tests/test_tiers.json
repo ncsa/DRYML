@@ -20,6 +20,7 @@
     "multi_framework": "heavy",
     "package": "medium",
     "paths": "smoke",
+    "qualification": "heavy",
     "ray": "heavy",
     "records": "medium",
     "requirements": "medium",
@@ -33,6 +34,8 @@
   },
   "default_tier": "medium",
   "node_tiers": {
+    "tests/models/test_qualification_contract.py::test_fixture_manifest_portable_tfds_identity_excludes_local_root": "medium",
+    "tests/models/test_qualification_contract.py::test_qualification_case_round_trip_retains_exact_w3_reference_without_live_handles": "medium",
     "tests/docs/test_dispatch_documentation.py::test_dispatch_docs_link_execution_and_current_generation_owners": "medium",
     "tests/docs/test_dispatch_documentation.py::test_dispatch_guide_documents_actual_defaults_and_boundaries": "medium",
     "tests/docs/test_dispatch_documentation.py::test_dispatch_public_surface_and_dataclass_fields_are_closed": "medium",

@@ -24,6 +24,13 @@
             "test_shared_factory_repetition_does_not_tie_backend_instances"
           ]
         },
+        "tests/models/test_qualification_contract.py": {
+          "rationale": "Retain the fresh-process manifest/case and minimal schema guard only; real TFDS/training qualification remains explicit opt-in.",
+          "functions": [
+            "test_qualification_case_round_trip_retains_exact_w3_reference_without_live_handles",
+            "test_fixture_manifest_portable_tfds_identity_excludes_local_root"
+          ]
+        },
         "tests/core/test_live_reuse.py": {
           "rationale": "Retain matching, never-reuse, unique greedy restore, ambiguous fallback, and failed-restore eviction; exhaustive mode covers equivalent stale/equal-node combinations.",
           "functions": [

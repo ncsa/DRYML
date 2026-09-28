@@ -34,6 +34,8 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 26. [Dispatch](dispatch.md)
 27. [Testing Workflow](testing.md)
 28. [Release Notes](release_notes.md)
+29. [Stage 5+7 Local Workflow Harness](stage5_7_workflows.md)
+30. [Stage 5+7 Verification](stage5_7_verification.md)
 
 ## Core Concepts
 

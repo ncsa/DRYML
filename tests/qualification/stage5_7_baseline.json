@@ -1,0 +1,41 @@
+{
+  "format": "dryml-stage5-7-baseline",
+  "version": 1,
+  "mnist": {
+    "train_split": "train[:4096]",
+    "test_split": "test[:1024]",
+    "normalization": "float32_divide_255",
+    "fixed_order": true
+  },
+  "w1": {
+    "architecture": "784-128-relu-10",
+    "epochs": 1,
+    "learning_rate": 0.001,
+    "threshold": 0.8
+  },
+  "w2": {
+    "architecture": "784-32-relu-784-sigmoid",
+    "epochs": 1,
+    "learning_rate": 0.001,
+    "threshold": 0.12
+  },
+  "w3": {
+    "architecture": "1-32-tanh-1",
+    "epochs": 10,
+    "learning_rate": 0.001,
+    "train_count": 4096,
+    "test_count": 1024,
+    "train_seed": 7102,
+    "test_seed": 7101,
+    "threshold": 0.05
+  },
+  "initialization": {
+    "tensorflow_seed": 7103,
+    "torch_seed": 7104
+  },
+  "batch_size": 64,
+  "checkpoint_every_steps": 32,
+  "cpu_budget_seconds": 300,
+  "cpu_peak_rss_bytes": 8589934592,
+  "case_store_budget_bytes": 4294967296
+}

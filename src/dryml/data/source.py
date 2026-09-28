@@ -228,8 +228,44 @@ class NpyFileDataset(SourceDataset):
 
 
 class TFDSAdapter(SourceDataset):
-    """
-    Adapter for tf.data.Dataset.
+    """Adapt one TFDS split to DRYML's re-iterable Dataset contract.
+
+    Args:
+        name: TFDS builder name accepted by :func:`tensorflow_datasets.load`.
+        split: Optional TFDS split expression.
+        batch_size: Optional TFDS batch size.
+        as_supervised: Request TFDS supervised ``(input, target)`` elements.
+        as_numpy: Yield NumPy values rather than native TensorFlow tensors.
+        assume_batched: Whether yielded elements are batched for spec inference;
+            defaults to whether ``batch_size`` is supplied.
+        spec: Optional explicit DRYML element specification.
+        data_dir: Optional local TFDS data root as a string path. ``None`` uses
+            TFDS's product default data directory.
+        download: Exact bool passed to TFDS. It defaults to ``True`` for product
+            compatibility; ``False`` requires a prepared local split and never
+            permits this adapter to request a download.
+        download_config: Optional TFDS ``DownloadConfig`` passed only when a
+            download/prepare operation is requested by TFDS.
+
+    Returns:
+        A Dataset whose iteration delegates to the loaded TFDS dataset. In NumPy
+        mode, iteration uses ``as_numpy_iterator``; otherwise it yields native
+        TensorFlow values.
+
+    Raises:
+        TypeError: If ``download`` is not an exact bool.
+        ImportError: If TensorFlow Datasets or the selected native spec backend is
+            unavailable.
+        Exception: Propagates TFDS loading, local filesystem, download, and split
+            validation failures. In particular, ``download=False`` fails for a
+            missing selected local dataset rather than fetching it.
+
+    Side Effects:
+        Imports TensorFlow Datasets and calls ``tfds.load``. With the default
+        ``download=True``, TFDS may access the network and create/update its data
+        directory; explicit ``data_dir`` confines that TFDS-managed filesystem
+        work to the supplied root. ``download_config`` is forwarded unchanged to
+        TFDS and can further control that preparation behavior.
 
     Notes
     -----
@@ -250,14 +286,28 @@ class TFDSAdapter(SourceDataset):
         as_numpy: bool = False,
         assume_batched: bool | None = None,
         spec: SpecTree | None = None,
+        data_dir: str | None = None,
+        download: bool = True,
+        download_config: object | None = None,
     ):
+        if type(download) is not bool:
+            raise TypeError("TFDSAdapter download must be an exact bool.")
         import tensorflow_datasets as tfds
 
+        load_kwargs = {
+            "split": split,
+            "batch_size": batch_size,
+            "as_supervised": as_supervised,
+            "data_dir": data_dir,
+            "download": download,
+        }
+        if download_config is not None:
+            load_kwargs["download_and_prepare_kwargs"] = {
+                "download_config": download_config,
+            }
         self.dataset = tfds.load(
             name,
-            split=split,
-            batch_size=batch_size,
-            as_supervised=as_supervised)
+            **load_kwargs)
         self.as_numpy = as_numpy
         self.assume_batched = (batch_size is not None) if assume_batched is None else assume_batched
 

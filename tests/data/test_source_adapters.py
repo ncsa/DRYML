@@ -85,6 +85,40 @@ def test_tfds_adapter_numpy_mode_infers_spec_and_iterates(monkeypatch):
     assert [int(y) for _, y in ds] == [0, 1]
 
 
+def test_tfds_adapter_forwards_selected_root_and_disables_download(monkeypatch, tmp_path):
+    """Qualification callers can force TFDS to use prepared local authority only."""
+
+    calls = _install_fake_tfds(monkeypatch, _FakeTFDS([
+        (np.zeros((2,), dtype=np.float32), np.int64(0)),
+    ]))
+
+    TFDSAdapter("mnist", split="test[:1]", as_supervised=True, as_numpy=True,
+                data_dir=str(tmp_path / "tfds"), download=False)
+
+    assert calls[0][1]["data_dir"] == str(tmp_path / "tfds")
+    assert calls[0][1]["download"] is False
+
+
+def test_tfds_adapter_forwards_download_config_only_when_supplied(monkeypatch):
+    """TFDS preparation controls remain caller-owned optional configuration."""
+
+    calls = _install_fake_tfds(monkeypatch, _FakeTFDS([
+        (np.zeros((2,), dtype=np.float32), np.int64(0)),
+    ]))
+    config = {"max_examples_per_split": 1}
+
+    TFDSAdapter("mnist", as_supervised=True, as_numpy=True, download_config=config)
+
+    assert calls[0][1]["download_and_prepare_kwargs"] == {"download_config": config}
+
+
+def test_tfds_adapter_rejects_non_bool_download_before_optional_import():
+    """The no-download switch is exact validation rather than truthiness."""
+
+    with pytest.raises(TypeError, match="exact bool"):
+        TFDSAdapter("mnist", download=0)
+
+
 def test_tfds_adapter_real_mnist_numpy_mode():
     pytest.importorskip("tensorflow_datasets")
 

@@ -5,7 +5,7 @@ import numpy as np
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import Chain, Dataset, Map, StreamDataset, Zip
+from dryml.data import Chain, Dataset, Map, Pipe, StreamDataset, Zip
 from dryml.methods import IteratorPort, Method, StreamNode, traits
 
 
@@ -57,6 +57,21 @@ class NumpyIdentity(Method):
 
     @traits(backend="numpy")
     def numpy(self, value):
+        return value
+
+    def infer_output_spec(self, input_spec):
+        return input_spec
+
+
+class BackendIdentity(Method):
+    """Select a matching dense backend so eager reset can prove reselection."""
+
+    @traits(backend="numpy")
+    def numpy(self, value):
+        return value
+
+    @traits(backend="torch")
+    def torch(self, value):
         return value
 
     def infer_output_spec(self, input_spec):
@@ -159,6 +174,64 @@ def test_graph_unknown_spec_discovery_buffers_each_reused_occurrence_independent
     assert list(graph.iterator()) == [(1, 1), (2, 2)]
     assert source.opens == 2
     assert source.yields == [(0, 1), (1, 1), (0, 2), (1, 2)]
+
+
+def test_graph_eager_resets_nested_method_selection_for_a_new_backend():
+    """A Map Pipe learned for NumPy is not left cached before Torch planning."""
+
+    torch = pytest.importorskip("torch")
+    import dryml.torch
+
+    source = TrackingDataset((np.asarray(1),), spec=TensorSpec("int64", shape=(), backend="numpy"))
+    selected = BackendIdentity()
+    pipe = Pipe(selected)
+    graph = Map(source, pipe).method_graph()
+    graph.learn()
+    assert pipe.call_mode == "cached"
+
+    graph.eager()
+    assert pipe.call_mode == "eager"
+    torch_source = TrackingDataset((), spec=TensorSpec("int64", shape=(), backend="torch"))
+    torch_source.values = (torch.tensor(1),)
+    graph = Map(torch_source, pipe).method_graph()
+    graph.learn()
+
+    assert pipe.call_mode == "cached"
+    assert next(graph.iterator()).device.type == "cpu"
+
+
+def test_graph_eager_resets_named_nested_zip_map_methods_for_a_new_backend():
+    """Mapping-backed nested Zip leaves are reset without losing graph inspection."""
+
+    torch = pytest.importorskip("torch")
+    import dryml.torch
+
+    first, second = BackendIdentity(), BackendIdentity()
+    first_pipe, second_pipe = Pipe(first), Pipe(second)
+    numpy = Zip({
+        "first": Map(TrackingDataset((np.asarray(1),)), first_pipe),
+        "nested": (Map(TrackingDataset((np.asarray(2),)), second_pipe),),
+    })
+    graph = numpy.method_graph()
+    graph.learn()
+    assert graph.nodes
+    assert first_pipe.call_mode == second_pipe.call_mode == "cached"
+
+    graph.eager()
+    assert graph.nodes == ()
+    assert first_pipe.call_mode == second_pipe.call_mode == "eager"
+
+    torch_first = TrackingDataset((), spec=TensorSpec("int64", shape=(), backend="torch"))
+    torch_second = TrackingDataset((), spec=TensorSpec("int64", shape=(), backend="torch"))
+    torch_first.values, torch_second.values = (torch.tensor(1),), (torch.tensor(2),)
+    torch_graph = Zip({
+        "first": Map(torch_first, first_pipe),
+        "nested": (Map(torch_second, second_pipe),),
+    }).method_graph()
+    torch_graph.learn()
+
+    assert torch_graph.nodes
+    assert next(torch_graph.iterator())["first"].device.type == "cpu"
 
 
 def test_graph_cursor_closes_once_on_explicit_close_and_preserves_body_failure():

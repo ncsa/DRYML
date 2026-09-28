@@ -507,9 +507,17 @@ def test_good_enough_policy_retains_required_boundary_proofs():
             "test_resume_uses_retained_checkpoint_authority_after_routes_change",
             "test_interrupted_completed_zip_commit_preserves_prior_checkpoint",
         },
+        "tests/models/test_qualification_contract.py": {
+            "test_qualification_case_round_trip_retains_exact_w3_reference_without_live_handles",
+        },
     }
     for path, functions in required.items():
         assert functions <= set(representatives[path]["functions"])
+
+    selected = test_buckets.select_profile_files(
+        test_buckets.load_baseline(test_buckets.DEFAULT_BASELINE), {"smoke", "medium"}, profile,
+    )
+    assert "./tests/models/test_qualification_contract.py" in selected
 
     assert (
         "tests/core/test_execute_managed_integration.py::"

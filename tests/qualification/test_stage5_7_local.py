@@ -1,0 +1,676 @@
+"""Routine contract tests plus explicitly marked real Stage 5+7 local gates."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import resource
+import subprocess
+import sys
+import time
+
+import numpy as np
+import pytest
+
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
+from dryml.data import ArrayDataset, Map
+from dryml.artifacts import CachedDataset
+from dryml.managed import ManagedConfig
+from tests.qualification.stage5_7_fixtures import (
+    FixtureManifest, FixtureManifestError, FixtureReferences, QualificationUnrun,
+    REQUIRED_ENVIRONMENT_KEYS, TFDSAuthority, _tfds_content_digest, config_digest, load_baseline, load_manifest,
+    prepare_manifest, verify_codec_equivalence,
+)
+from tests.qualification.stage5_7_workloads import (
+    QualificationCase, QualificationEvidence, accuracy_formula, build_workload, case_from_manifest, cpu_matrix,
+    mnist_pipeline, mse_formula, native_device_evidence, qualification_case_paths, require_real_qualification,
+    run_local_case, supplemental_tfds_torch_case, w1_label_methods,
+)
+
+
+_TEST_ENVIRONMENT = {key: "test" for key in REQUIRED_ENVIRONMENT_KEYS}
+_QUALIFICATION_CASE_TIMEOUT_SECONDS = 300
+
+
+def _authority(tmp_path):
+    """Create reference-only manifest authority without codec or framework work."""
+
+    store = tmp_path / "store"
+    repo = Repo(DirStore(store))
+    numpy_ref = repo.save_object(ArrayDataset({"x": np.asarray([[1.0]], dtype=np.float32), "y": np.asarray([[2.0]], dtype=np.float32)}))
+    parquet_ref = repo.save_object(ArrayDataset({"x": np.asarray([[1.0]], dtype=np.float32), "y": np.asarray([[3.0]], dtype=np.float32)}))
+    manifest = FixtureManifest(
+        store.resolve(), load_baseline(), FixtureReferences(numpy_ref, parquet_ref), _TEST_ENVIRONMENT,
+        TFDSAuthority(tmp_path / "tfds", "mnist", "default", "1.0.0", "0" * 64),
+    )
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest.to_data()), encoding="ascii")
+    return path, store, manifest
+
+
+@pytest.mark.parametrize("mutation", ("missing", "malformed", "version", "config", "environment", "extra"))
+def test_manifest_rejects_missing_malformed_version_config_environment_and_extra_fields(tmp_path, mutation):
+    """Manifest authority and mandatory environment compatibility fail before Store work."""
+
+    path, store, manifest = _authority(tmp_path)
+    if mutation == "missing":
+        path.unlink()
+    elif mutation == "malformed":
+        path.write_text("{", encoding="ascii")
+    else:
+        value = manifest.to_data()
+        if mutation == "version":
+            value["version"] = 2
+        elif mutation == "config":
+            value["baseline"] = {"changed": True}
+        elif mutation == "environment":
+            value["environment"]["python"] = "wrong"
+        else:
+            value["extra"] = True
+        path.write_text(json.dumps(value), encoding="ascii")
+    with pytest.raises(FixtureManifestError):
+        load_manifest(path, fixture_store=store, tfds_data_dir=tmp_path / "tfds", environment=_TEST_ENVIRONMENT)
+
+
+def test_manifest_uses_fixed_digest_selected_store_and_complete_environment(tmp_path):
+    """A manifest cannot drift its KTD11 config, Store, or version-key schema."""
+
+    path, store, manifest = _authority(tmp_path)
+    value = manifest.to_data()
+    assert value["config_digest"] == config_digest(load_baseline())
+    value["config_digest"] = "0" * 64
+    path.write_text(json.dumps(value), encoding="ascii")
+    with pytest.raises(FixtureManifestError, match="digest"):
+        load_manifest(path, fixture_store=store, tfds_data_dir=tmp_path / "tfds", environment=_TEST_ENVIRONMENT)
+    path.write_text(json.dumps(manifest.to_data()), encoding="ascii")
+    with pytest.raises(FixtureManifestError, match="Store"):
+        load_manifest(path, fixture_store=tmp_path / "other-store", tfds_data_dir=tmp_path / "tfds", environment=_TEST_ENVIRONMENT)
+    with pytest.raises(FixtureManifestError, match="keys"):
+        load_manifest(path, fixture_store=store, tfds_data_dir=tmp_path / "tfds", environment={"python": "test"})
+
+
+def test_preparation_requires_opt_in_and_never_overwrites_authority(tmp_path, monkeypatch):
+    """Preparation rejects before a builder can download, replace, or reuse a Store."""
+
+    calls = []
+    def build(store, baseline):
+        calls.append((store, baseline))
+        raise AssertionError("builder must not run without explicit permission")
+
+    with pytest.raises(QualificationUnrun):
+        prepare_manifest(tmp_path / "manifest.json", fixture_store=tmp_path / "store", build=build, environment=_TEST_ENVIRONMENT, tfds_data_dir=tmp_path / "tfds")
+    assert calls == []
+    monkeypatch.setattr(
+        "tests.qualification.stage5_7_fixtures.require_supported_pyarrow",
+        lambda: "25.0.1",
+    )
+    existing = tmp_path / "existing.json"
+    existing.write_text("{}", encoding="ascii")
+    with pytest.raises(FixtureManifestError, match="replace"):
+        prepare_manifest(existing, fixture_store=tmp_path / "store", build=build, environment=_TEST_ENVIRONMENT, tfds_data_dir=tmp_path / "tfds", allow_download=True)
+    populated = tmp_path / "populated"
+    populated.mkdir()
+    (populated / "user-data").write_text("keep", encoding="ascii")
+    with pytest.raises(FixtureManifestError, match="nonempty"):
+        prepare_manifest(tmp_path / "other.json", fixture_store=populated, build=build, environment=_TEST_ENVIRONMENT, tfds_data_dir=tmp_path / "tfds", allow_download=True)
+    assert calls == []
+
+
+def test_unsupported_pyarrow_fails_before_manifest_or_store_mutation(tmp_path, monkeypatch):
+    """The Parquet prerequisite rejects before locks, directories, or builders run."""
+
+    calls = []
+    monkeypatch.setattr(
+        "tests.qualification.stage5_7_fixtures.require_supported_pyarrow",
+        lambda: (_ for _ in ()).throw(QualificationUnrun("pyarrow unsupported")),
+    )
+
+    with pytest.raises(QualificationUnrun, match="pyarrow"):
+        prepare_manifest(
+            tmp_path / "new" / "manifest.json", fixture_store=tmp_path / "store",
+            build=lambda *_: calls.append(True), environment=_TEST_ENVIRONMENT,
+            tfds_data_dir=tmp_path / "tfds", allow_download=True,
+        )
+
+    assert calls == []
+    assert not (tmp_path / "new").exists()
+    assert not (tmp_path / "store").exists()
+
+
+def test_w3_codec_equivalence_requires_distinct_refs_order_shapes_dtypes_and_values(tmp_path):
+    """Float32/float64, order, shape, and value drift fail exact retained-cache checks."""
+
+    _, _, manifest = _authority(tmp_path)
+    calls = []
+    values = ({"x": np.asarray([1.0], dtype=np.float32), "y": np.asarray([2.0], dtype=np.float32)},)
+    def load(reference):
+        calls.append(reference)
+        return values
+    verify_codec_equivalence(manifest.references, load=load)
+    assert calls == [manifest.references.numpy, manifest.references.parquet]
+    with pytest.raises(FixtureManifestError, match="dtype"):
+        verify_codec_equivalence(manifest.references, load=lambda reference: values if reference == manifest.references.numpy else ({"x": np.asarray([1.0], dtype=np.float64), "y": np.asarray([2.0], dtype=np.float64)},))
+    with pytest.raises(FixtureManifestError, match="distinct"):
+        FixtureReferences(manifest.references.numpy, manifest.references.numpy)
+
+
+def test_tiny_local_cache_refs_are_genuinely_distinct_without_network(tmp_path):
+    """Routine fixture setup creates separate completed local cache StateRefs."""
+
+    repo = Repo(DirStore(tmp_path / "cache-store"))
+    arrays = {"x": np.asarray([[1.0]], dtype=np.float32), "y": np.asarray([[2.0]], dtype=np.float32)}
+    first = CachedDataset(ArrayDataset(arrays, validate_lengths=True)).compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
+    second = CachedDataset(ArrayDataset(arrays, validate_lengths=False)).compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
+    assert first != second
+    assert repo.load_state_ref(first, reuse_live="never").ready
+    assert repo.load_state_ref(second, reuse_live="never").ready
+
+
+def test_workload_graph_is_publicly_inspectable_prepared_and_executable(tmp_path):
+    """Canonical MethodGraph proves preprocessing and synthetic-consumer handoff path."""
+
+    source = ArrayDataset((np.zeros((2, 2, 2, 1), dtype=np.uint8), np.asarray([0, 1], dtype=np.int64)))
+    pipeline = mnist_pipeline(source)
+    graph = pipeline.method_graph()
+    graph.learn(strategy="local")
+    names = {node.method_type.__name__ for node in graph.method_nodes if node.method_type is not None}
+    assert {"Project", "Select", "ImageNormalize", "Flatten", "Cast"} <= names
+    # This is the public prepared iterator-to-consumer boundary, not private Pipe fields.
+    first = next(graph.iterator())
+    assert set(first) == {"x", "y"}
+    assert first["x"].dtype == np.dtype("float32") and first["x"].shape == (4,)
+    assert w1_label_methods()["prediction"].__class__.__name__ == "ArgMax"
+    torch = pytest.importorskip("torch")
+    from dryml import F
+    from dryml.models.torch import Sequential
+    consumer = Map(ArrayDataset(np.zeros((1, 4), dtype=np.float32)), Sequential(layer_defs=(F("Linear", 4, 1),)))
+    consumer_graph = consumer.method_graph()
+    consumer_graph.learn(strategy="local")
+    assert [edge.adapter for edge in consumer_graph.conversion_edges] == ["numpy_to_torch"]
+    assert next(consumer_graph.iterator()).device.type == "cpu"
+    _, _, manifest = _authority(tmp_path)
+    matrix = cpu_matrix(manifest)
+    assert len(matrix) == 24
+    assert all(case.case_kind == "matrix" and not case.tensorflow_mode for case in matrix)
+    supplemental = supplemental_tfds_torch_case(manifest)
+    assert supplemental.case_id not in {case.case_id for case in matrix}
+    assert supplemental.case_kind == "tfds-tensorflow-to-torch"
+    assert supplemental.tensorflow_mode
+    assert all(case.w3_test_ref == manifest.references.numpy for case in matrix if case.workload == "W3")
+
+
+def test_case_is_closed_and_carries_manifest_environment_seed_and_fixture_identity(tmp_path):
+    """Fresh request decoding rejects missing/extra fields and retains exact W3 identity."""
+
+    _, _, manifest = _authority(tmp_path)
+    case = case_from_manifest(manifest, workload="W3", framework="torch", execution="local")
+    assert QualificationCase.from_data(case.to_data()) == case
+    malformed = case.to_data()
+    malformed.pop("seed")
+    with pytest.raises(FixtureManifestError):
+        QualificationCase.from_data(malformed)
+    assert case.config_digest == config_digest(manifest.baseline)
+    assert dict(case.environment) == _TEST_ENVIRONMENT
+
+
+def test_case_paths_isolate_sequential_fake_cases_and_measure_only_each_store(tmp_path):
+    """Three case identities use non-replacing child paths and no cumulative Store size."""
+
+    _, _, manifest = _authority(tmp_path)
+    roots = tuple(tmp_path / name for name in ("output", "work", "evidence"))
+    for root in roots:
+        root.mkdir()
+    manifest.tfds.data_dir.mkdir()
+    cases = (
+        case_from_manifest(manifest, workload="W1", framework="tf", execution="local"),
+        case_from_manifest(manifest, workload="W2", framework="torch", execution="local"),
+        case_from_manifest(manifest, workload="W3", framework="tf", execution="local"),
+    )
+    paths = [qualification_case_paths(
+        case, output_store_root=roots[0], work_root=roots[1], evidence_root=roots[2],
+        tfds_root=manifest.tfds.data_dir, create=True,
+    ) for case in cases]
+    supplemental_paths = qualification_case_paths(
+        supplemental_tfds_torch_case(manifest), output_store_root=roots[0], work_root=roots[1],
+        evidence_root=roots[2], tfds_root=manifest.tfds.data_dir, create=True,
+    )
+    for index, path in enumerate(paths, start=1):
+        (path.output_store / "case.bin").write_bytes(b"x" * index)
+        (path.evidence_dir / "qualification-evidence.json").write_text("{}", encoding="ascii")
+    all_paths = (*paths, supplemental_paths)
+    assert len({path.output_store for path in all_paths}) == len(all_paths)
+    assert len({path.work_dir for path in all_paths}) == len(all_paths)
+    assert len({path.evidence_dir for path in all_paths}) == len(all_paths)
+    assert [sum(file.stat().st_size for file in path.output_store.rglob("*") if file.is_file()) for path in paths] == [1, 2, 3]
+    with pytest.raises(FixtureManifestError, match="replace"):
+        qualification_case_paths(
+            cases[0], output_store_root=roots[0], work_root=roots[1], evidence_root=roots[2],
+            tfds_root=manifest.tfds.data_dir,
+        )
+
+
+@pytest.mark.parametrize("root_name", ("evidence", "output", "work"))
+def test_case_paths_reject_fixture_or_tfds_containment_before_creating_children(tmp_path, root_name):
+    """Output roots cannot equal, contain, or sit below fixture/TFDS authority."""
+
+    _, store, manifest = _authority(tmp_path)
+    tfds_root = tmp_path / "tfds"
+    tfds_root.mkdir()
+    case = case_from_manifest(manifest, workload="W1", framework="torch", execution="local")
+    roots = {name: tmp_path / name for name in ("output", "work", "evidence")}
+    for root in roots.values():
+        root.mkdir()
+    if root_name == "evidence":
+        roots[root_name] = store
+    elif root_name == "output":
+        roots[root_name] = tmp_path
+    else:
+        roots[root_name] = tfds_root / "child"
+        roots[root_name].mkdir()
+    with pytest.raises(QualificationUnrun, match="disjoint"):
+        qualification_case_paths(
+            case, output_store_root=roots["output"], work_root=roots["work"],
+            evidence_root=roots["evidence"], tfds_root=tfds_root, create=True,
+        )
+    assert not any((root / case.case_id).exists() for root in roots.values() if root.exists())
+
+
+def test_case_paths_accept_disjoint_fixture_tfds_and_output_roots(tmp_path):
+    """Five separately rooted authorities create only their isolated case children."""
+
+    _, _, manifest = _authority(tmp_path)
+    tfds_root = tmp_path / "tfds"
+    tfds_root.mkdir()
+    roots = tuple(tmp_path / name for name in ("output", "work", "evidence"))
+    for root in roots:
+        root.mkdir()
+    case = case_from_manifest(manifest, workload="W3", framework="torch", execution="local")
+    paths = qualification_case_paths(
+        case, output_store_root=roots[0], work_root=roots[1], evidence_root=roots[2],
+        tfds_root=tfds_root, create=True,
+    )
+    assert all(path.is_dir() for path in (paths.output_store, paths.work_dir, paths.evidence_dir))
+
+
+def test_qualification_child_timeout_preserves_diagnostic_evidence_and_never_accepts_it(tmp_path, monkeypatch):
+    """A timed-out child is reaped by subprocess.run and cannot yield a success record."""
+
+    _, _, manifest = _authority(tmp_path)
+    manifest.tfds.data_dir.mkdir()
+    roots = tuple(tmp_path / name for name in ("output", "work", "evidence"))
+    for root in roots:
+        root.mkdir()
+    monkeypatch.setenv("DRYML_STAGE5_7_OUTPUT_STORE", os.fspath(roots[0]))
+    monkeypatch.setenv("DRYML_STAGE5_7_WORK_DIR", os.fspath(roots[1]))
+    monkeypatch.setenv("DRYML_STAGE5_7_EVIDENCE_DIR", os.fspath(roots[2]))
+    case = case_from_manifest(manifest, workload="W3", framework="torch", execution="local")
+    child_code = """
+import os
+import time
+from pathlib import Path
+Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'qualification-evidence.json').write_text('{}', encoding='ascii')
+time.sleep(10)
+"""
+    started = time.monotonic()
+    with pytest.raises(FixtureManifestError, match=case.case_id):
+        _real_runner_in_child(
+            manifest, case, timeout_seconds=0.1, child_code=child_code,
+        )
+    assert time.monotonic() - started < 3
+    evidence_path = roots[2] / case.case_id / "qualification-evidence.json"
+    assert evidence_path.read_text(encoding="ascii") == "{}"
+
+
+def test_tfds_content_digest_detects_bytes_but_ignores_metadata(tmp_path):
+    """Prepared TFDS authority hashes file content, not only names, sizes, or mtimes."""
+
+    root = tmp_path / "mnist"
+    root.mkdir()
+    data = root / "split.tfrecord"
+    data.write_bytes(b"abcd")
+    builder = type("Builder", (), {"data_path": root})()
+    original = _tfds_content_digest(builder)
+    os.utime(data, None)
+    assert _tfds_content_digest(builder) == original
+    data.write_bytes(b"wxyz")
+    assert _tfds_content_digest(builder) != original
+    (root / "linked").symlink_to(data)
+    with pytest.raises(QualificationUnrun, match="symlink"):
+        _tfds_content_digest(builder)
+
+
+def test_native_device_evidence_requires_matching_parameter_and_training_tensors():
+    """Synthetic TF-like and Torch-like devices prove closed CPU/GPU/mismatch gates."""
+
+    class Tensor:
+        def __init__(self, device):
+            self._device = device
+            self.device_reads = 0
+
+        @property
+        def device(self):
+            self.device_reads += 1
+            return self._device
+
+    class TorchModel:
+        def __init__(self, *devices):
+            self._parameters = tuple(Tensor(device) for device in devices)
+
+        def parameters(self):
+            return iter(self._parameters)
+
+    class KerasModel:
+        def __init__(self, *devices):
+            self.variables = tuple(Tensor(device) for device in devices)
+
+    assert native_device_evidence(TorchModel("cpu"), training_tensors=(Tensor("cpu"),)) == "cpu"
+    assert native_device_evidence(KerasModel("/device:GPU:0"), training_tensors=(Tensor("cuda:0"),)) == "gpu:0"
+    shared = Tensor("cpu")
+    shared_model = TorchModel()
+    shared_model._parameters = (shared, shared)
+    assert native_device_evidence(shared_model, training_tensors=(Tensor("cpu"),)) == "cpu"
+    assert shared.device_reads == 1
+    with pytest.raises(FixtureManifestError, match="mixed"):
+        native_device_evidence(TorchModel("cuda:0"), training_tensors=(Tensor("cpu"),))
+    with pytest.raises(FixtureManifestError, match="missing"):
+        native_device_evidence(KerasModel("/device:CPU:0"), training_tensors=(object(),))
+
+
+def test_native_device_evidence_traverses_tiny_torch_autoencoder_on_cpu():
+    """Composite Torch evidence observes both graph children without private field walks."""
+
+    torch = pytest.importorskip("torch")
+    from dryml import F
+    from dryml.models import AutoEncoder
+    from dryml.models.torch import Sequential
+
+    model = AutoEncoder(
+        Sequential(layer_defs=(F("Linear", 2, 1),)),
+        Sequential(layer_defs=(F("Linear", 1, 2),)),
+    )
+    assert native_device_evidence(model, training_tensors=(torch.zeros((1, 2)),)) == "cpu"
+
+
+def test_native_device_evidence_traverses_tiny_tf_autoencoder_on_cpu():
+    """Composite TensorFlow evidence observes both built graph children on CPU."""
+
+    tf = pytest.importorskip("tensorflow")
+    from dryml import F
+    from dryml.models import AutoEncoder
+    from dryml.models.tf import Sequential
+
+    model = AutoEncoder(
+        Sequential(layer_defs=(F("Dense", units=1),)),
+        Sequential(layer_defs=(F("Dense", units=2),)),
+    )
+    tensor = tf.zeros((1, 2))
+    model(tensor)
+    assert native_device_evidence(model, training_tensors=(tensor,)) == "cpu"
+
+
+def test_formula_threshold_and_history_contracts_reject_unrun_or_fake_runner(tmp_path):
+    """Routine tests do not replace real numerical qualification with fake evidence."""
+
+    _, _, manifest = _authority(tmp_path)
+    accuracy = accuracy_formula([1, 0, 1, 1, 1], [1, 0, 1, 1, 0])
+    assert accuracy == 0.8
+    assert mse_formula([1.0, 2.0], [1.0, 2.1]) > 0
+    case = case_from_manifest(manifest, workload="W3", framework="torch", execution="local")
+    with pytest.raises(QualificationUnrun):
+        run_local_case(manifest, case, opted_in=False, runner=lambda _: pytest.fail("runner was called"))
+    with pytest.raises(QualificationUnrun, match="explicit opt-in"):
+        require_real_qualification(False)
+
+
+def test_evidence_record_is_closed_round_trippable_and_rejects_nonfinite_or_extra_fields(tmp_path):
+    """Closed evidence rejects malformed records before association validation or publication."""
+
+    _, _, manifest = _authority(tmp_path)
+    case = case_from_manifest(manifest, workload="W3", framework="torch", execution="local")
+    evidence = QualificationEvidence(
+        case=case, final_experiment_ref=manifest.references.numpy, model_ref=manifest.references.parquet,
+        test_ref=manifest.references.numpy, history_ref=manifest.references.parquet,
+        history_rows=({"state_ref": manifest.references.numpy, "evaluation_status": "completed", "eval_artifacts": {"test_mse": manifest.references.parquet}},),
+        artifact_ref=manifest.references.parquet, artifact_value=0.01,
+        formula={"name": "noisy_observation_mse", "value": 0.01, "provenance": "independent_test"},
+        environment=manifest.environment,
+        runtime={"backend": "torch", "device": "cpu", "worker_id": "test", "process_id": 1},
+        elapsed_seconds=0.0, peak_rss_bytes=0, output_bytes=0,
+    )
+    assert QualificationEvidence.from_data(evidence.to_data()) == evidence
+    malformed = evidence.to_data()
+    malformed["extra"] = True
+    with pytest.raises(FixtureManifestError, match="extra"):
+        QualificationEvidence.from_data(malformed)
+    with pytest.raises(FixtureManifestError, match="finite"):
+        QualificationEvidence(
+            case=case, final_experiment_ref=manifest.references.numpy, model_ref=manifest.references.parquet,
+            test_ref=manifest.references.numpy, history_ref=manifest.references.parquet,
+            history_rows=evidence.history_rows, artifact_ref=manifest.references.parquet, artifact_value=float("nan"),
+            formula=evidence.formula, environment=manifest.environment, runtime=evidence.runtime,
+            elapsed_seconds=0.0, peak_rss_bytes=0, output_bytes=0,
+        )
+
+
+def _real_manifest_or_unrun():
+    """Load explicitly selected persistent authority for a marked numerical gate."""
+
+    manifest_path = os.environ.get("DRYML_STAGE5_7_MANIFEST")
+    fixture_store = os.environ.get("DRYML_STAGE5_7_FIXTURE_STORE")
+    if not manifest_path or not fixture_store:
+        pytest.skip("QualificationUnrun: set DRYML_STAGE5_7_MANIFEST and DRYML_STAGE5_7_FIXTURE_STORE")
+    from tests.qualification.stage5_7_fixtures import installed_environment
+    try:
+        tfds_data_dir = os.environ.get("DRYML_STAGE5_7_TFDS_DATA_DIR")
+        if not tfds_data_dir:
+            raise QualificationUnrun("set DRYML_STAGE5_7_TFDS_DATA_DIR")
+        return load_manifest(manifest_path, fixture_store=fixture_store, tfds_data_dir=tfds_data_dir, environment=installed_environment())
+    except QualificationUnrun as error:
+        pytest.skip(f"QualificationUnrun: {error}")
+
+
+def _real_runner(manifest, case):
+    """Run a real local Experiment/Artifact workflow after explicit test opt-in."""
+
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+    from dryml.data import TFDSAdapter
+    from dryml.data import Map
+    from dryml.managed import ManagedConfig
+    from dryml.models import ExperimentData
+    from tests.qualification.stage5_7_workloads import QualificationEvidence, _FORMULAS, _METRIC_NAMES, native_device_evidence
+
+    def source(split, tensorflow_mode):
+        return TFDSAdapter(
+            "mnist", split=split, as_supervised=True, as_numpy=not tensorflow_mode,
+            data_dir=os.fspath(manifest.tfds.data_dir), download=False,
+        )
+
+    def as_numpy(value):
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        if hasattr(value, "numpy"):
+            value = value.numpy()
+        return np.asarray(value)
+
+    output_store = os.environ.get("DRYML_STAGE5_7_CASE_OUTPUT_STORE")
+    work_dir = os.environ.get("DRYML_STAGE5_7_CASE_WORK_DIR")
+    if not output_store or not work_dir:
+        raise QualificationUnrun("qualification child lacks isolated output Store/work paths")
+    output_path = Path(output_store).expanduser().resolve(strict=False)
+    work_path = Path(work_dir).expanduser().resolve(strict=False)
+    if output_path == manifest.fixture_store or work_path == manifest.fixture_store:
+        raise FixtureManifestError("Real case output Store/work directory must be distinct from fixture authority.")
+    if not work_path.is_dir():
+        raise QualificationUnrun("Selected real-case work directory is unavailable.")
+    repo = Repo((DirStore(output_path), DirStore(manifest.fixture_store)))
+    started = time.monotonic()
+    peak_rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+    experiment = build_workload(repo, case, mnist_source=source)
+    training_tensors = []
+    native_models = tuple(
+        model for model in repo.iter_graph(experiment.model, missing="raise", order="post")
+        if getattr(model, "native_backend", None) == case.framework
+    )
+    if not native_models:
+        raise FixtureManifestError("Real runner cannot observe a native training model boundary.")
+    original_raw_calls = []
+
+    def capture_training_tensors(original_raw_call, x, *args, **kwargs):
+        if not training_tensors:
+            def collect(value):
+                if isinstance(value, dict):
+                    for item in value.values():
+                        collect(item)
+                elif isinstance(value, (tuple, list)):
+                    for item in value:
+                        collect(item)
+                else:
+                    training_tensors.append(value)
+            collect(x)
+        return original_raw_call(x, *args, **kwargs)
+
+    for training_model in native_models:
+        original_raw_call = training_model._call_raw
+        original_raw_calls.append((training_model, original_raw_call))
+        training_model._call_raw = (
+            lambda x, *args, _original=original_raw_call, **kwargs:
+            capture_training_tensors(_original, x, *args, **kwargs)
+        )
+    try:
+        final = experiment.train(managed=ManagedConfig(state_repo=repo))
+    finally:
+        for training_model, original_raw_call in original_raw_calls:
+            training_model._call_raw = original_raw_call
+    if not training_tensors:
+        raise FixtureManifestError("Real runner did not observe a native training tensor.")
+    history = ExperimentData.find(final.object_projection(), repo=repo)
+    if history is None or history.data.empty:
+        raise FixtureManifestError("Real runner did not publish ExperimentData history.")
+    row = history.data.iloc[-1]
+    artifact_ref = row.eval_artifacts[_METRIC_NAMES[case.workload]]
+    artifact_value = float(repo.load_state_ref(artifact_ref, reuse_live="never").value())
+    model_ref = final.at("model")
+    test_ref = final.reference_value_at("test_data")
+    model = repo.load_state_ref(model_ref, reuse_live="never")
+    test_data = repo.load_state_ref(test_ref, reuse_live="never")
+    predictions, observations = [], []
+    for sample in test_data:
+        prediction = model(sample["x"])
+        predictions.append(as_numpy(prediction))
+        observations.append(as_numpy(sample["y"]))
+    if case.workload == "W1":
+        formula_value = accuracy_formula(np.argmax(np.asarray(predictions), axis=-1), np.asarray(observations))
+    else:
+        formula_value = mse_formula(np.asarray(predictions), np.asarray(observations))
+    output_bytes = sum(path.stat().st_size for path in output_path.rglob("*") if path.is_file())
+    observed_device = native_device_evidence(model, training_tensors=tuple(training_tensors))
+    return QualificationEvidence(
+        case=case, final_experiment_ref=final, model_ref=model_ref, test_ref=test_ref,
+        history_ref=history.last_state_ref,
+        history_rows=({"state_ref": row.state_ref, "evaluation_status": row.evaluation_status, "eval_artifacts": dict(row.eval_artifacts)},),
+        artifact_ref=artifact_ref, artifact_value=artifact_value,
+        formula={"name": _FORMULAS[case.workload], "value": formula_value, "provenance": "direct_saved_model_prediction_v1"},
+        environment=manifest.environment,
+        runtime={"backend": case.framework, "device": observed_device, "worker_id": f"pid:{os.getpid()}", "process_id": os.getpid()},
+        elapsed_seconds=time.monotonic() - started,
+        peak_rss_bytes=max(
+            0,
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 - peak_rss_before,
+        ),
+        output_bytes=output_bytes,
+    )
+
+
+def _real_runner_in_child(manifest, case, *, timeout_seconds=None, child_code=None):
+    """Run one real case in a fresh process and return only closed evidence.
+
+    The child receives its manifest path/root/store selection through the explicit
+    opt-in environment, creates no shared fixture output, and writes its closed
+    evidence under the caller-selected case work directory for the parent to
+    validate against authoritative Stores.
+    """
+
+    paths = qualification_case_paths(
+        case,
+        output_store_root=os.environ["DRYML_STAGE5_7_OUTPUT_STORE"],
+        work_root=os.environ["DRYML_STAGE5_7_WORK_DIR"],
+        evidence_root=os.environ["DRYML_STAGE5_7_EVIDENCE_DIR"],
+        tfds_root=manifest.tfds.data_dir,
+        create=True,
+    )
+    evidence_path = paths.evidence_dir / "qualification-evidence.json"
+    if evidence_path.exists():
+        raise FixtureManifestError("Refusing to replace existing case evidence.")
+    code = """
+import json
+import os
+import sys
+from pathlib import Path
+from tests.qualification.test_stage5_7_local import _real_manifest_or_unrun, _real_runner
+from tests.qualification.stage5_7_workloads import QualificationCase
+manifest = _real_manifest_or_unrun()
+case = QualificationCase.from_data(json.loads(sys.argv[1]))
+evidence = _real_runner(manifest, case)
+Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'qualification-evidence.json').write_text(json.dumps(evidence.to_data()), encoding='ascii')
+""" if child_code is None else child_code
+    timeout = _QUALIFICATION_CASE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    if type(timeout) not in (int, float) or timeout <= 0:
+        raise ValueError("Qualification child timeout must be a positive number of seconds.")
+    environment = {
+        **os.environ,
+        "DRYML_STAGE5_7_CASE_OUTPUT_STORE": os.fspath(paths.output_store),
+        "DRYML_STAGE5_7_CASE_WORK_DIR": os.fspath(paths.work_dir),
+        "DRYML_STAGE5_7_CASE_EVIDENCE_DIR": os.fspath(paths.evidence_dir),
+        "PYTHONPATH": os.pathsep.join(filter(None, [
+            str(Path.cwd() / "src"), str(Path.cwd()), os.environ.get("PYTHONPATH"),
+        ])),
+    }
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code, json.dumps(case.to_data())],
+            capture_output=True, text=True, env=environment, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise FixtureManifestError(
+            f"Qualification case {case.case_id} timed out after {timeout} seconds."
+        ) from error
+    if result.returncode:
+        raise FixtureManifestError("Isolated qualification child failed without evidence.")
+    try:
+        return QualificationEvidence.from_data(json.loads(evidence_path.read_text(encoding="ascii")))
+    except (OSError, json.JSONDecodeError, FixtureManifestError) as error:
+        raise FixtureManifestError("Isolated qualification child returned malformed evidence.") from error
+
+
+@pytest.mark.stage5_7_qualification
+@pytest.mark.parametrize("workload", ("W1", "W2", "W3"))
+def test_stage5_7_real_local_workloads(workload):
+    """Explicit W1/W2/W3 gate; missing prerequisites are unrun, never a pass."""
+
+    manifest = _real_manifest_or_unrun()
+    case = case_from_manifest(manifest, workload=workload, framework="torch", execution="local")
+    try:
+        output_store = os.environ.get("DRYML_STAGE5_7_OUTPUT_STORE")
+        if not output_store or not os.environ.get("DRYML_STAGE5_7_WORK_DIR") or not os.environ.get("DRYML_STAGE5_7_EVIDENCE_DIR"):
+            raise QualificationUnrun("set qualification output Store, work, and evidence roots")
+        run_local_case(manifest, case, opted_in=True, runner=lambda request: _real_runner_in_child(manifest, request), output_store=output_store)
+    except QualificationUnrun as error:
+        pytest.skip(f"QualificationUnrun: {error}")
+
+
+@pytest.mark.stage5_7_qualification
+def test_stage5_7_real_tfds_tensorflow_to_torch_supplemental_case():
+    """Opt-in interoperability gate remains separately counted from 24 CPU cells."""
+
+    manifest = _real_manifest_or_unrun()
+    case = supplemental_tfds_torch_case(manifest)
+    try:
+        output_store = os.environ.get("DRYML_STAGE5_7_OUTPUT_STORE")
+        if not output_store or not os.environ.get("DRYML_STAGE5_7_WORK_DIR") or not os.environ.get("DRYML_STAGE5_7_EVIDENCE_DIR"):
+            raise QualificationUnrun("set qualification output Store, work, and evidence roots")
+        run_local_case(manifest, case, opted_in=True, runner=lambda request: _real_runner_in_child(manifest, request), output_store=output_store)
+    except QualificationUnrun as error:
+        pytest.skip(f"QualificationUnrun: {error}")

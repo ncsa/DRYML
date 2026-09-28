@@ -89,6 +89,18 @@ Common source dataset classes:
 - `TFDSAdapter`
 - `TorchDatasetAdapter`
 
+`TFDSAdapter` loads a selected TFDS split and delivers either native TensorFlow
+values or NumPy values. `data_dir` is an optional string local TFDS root; `None`
+uses TFDS's normal default. `download` is an exact boolean and defaults to
+`True` for compatibility, so ordinary use can cause TFDS download/network and
+filesystem preparation side effects. Set `download=False` with a prepared
+`data_dir` to require local-only loading: a missing split then fails through
+TFDS rather than downloading. `download_config` accepts a TFDS `DownloadConfig`
+object and is forwarded only when supplied, so callers can control TFDS
+preparation behavior. Adapter construction imports TFDS and propagates its
+import, split, local filesystem, and download failures; NumPy delivery avoids
+importing DRYML's TensorFlow spec backend.
+
 The historical modules `dryml.data.tf.dataset` and
 `dryml.data.torch.dataset` are unsupported legacy APIs. They are not current
 exports and are not compatible with this Dataset contract.

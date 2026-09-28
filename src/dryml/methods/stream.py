@@ -7,8 +7,8 @@ opens for one graph traversal.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, replace
 from typing import Any
 
 from dryml.core.cardinality import Cardinality
@@ -213,19 +213,69 @@ class StreamPlan:
             raise ValueError("Dataset graph output spec does not match its declared output spec.")
         self._root = root
         self._nodes = tuple(records)
-        self._conversion_edges = tuple(
-            node.selected.conversion_edge
-            for node in self._nodes
-            if getattr(node, "selected", None) is not None
-            and node.selected.conversion_edge is not None
-        )
+        edges = []
+        for node in self._nodes:
+            selected = getattr(node, "selected", None)
+            edge = None if selected is None else selected.conversion_edge
+            if edge is not None and edge not in edges:
+                edges.append(edge)
+        self._conversion_edges = tuple(edges)
 
     def eager(self) -> None:
-        """Discard retained immutable graph selections without touching sources."""
+        """Discard graph selections and reset every nested Method occurrence.
 
+        Map graph inspection prepares the actual Method instances. Resetting only
+        the plan leaves stale shared selection state for later backend graphs.
+        """
+
+        self._eager_dataset(self.dataset, set())
         self._root = None
         self._nodes = ()
         self._conversion_edges = ()
+
+    @classmethod
+    def _eager_dataset(cls, dataset: object, seen: set[int]) -> None:
+        """Reset each Method reachable through one stream Dataset graph once."""
+
+        identifier = id(dataset)
+        if identifier in seen:
+            return
+        seen.add(identifier)
+        method = getattr(dataset, "method", None)
+        if method is not None:
+            cls._eager_method(method, seen)
+        source = getattr(dataset, "src", None)
+        if source is not None:
+            cls._eager_dataset(source, seen)
+        for child in _iter_dataset_leaves(getattr(dataset, "sources", ())):
+            cls._eager_dataset(child, seen)
+
+    @classmethod
+    def _eager_method(cls, method: object, seen: set[int]) -> None:
+        """Reset one Method and nested Method fields retained by composition."""
+
+        identifier = id(method)
+        if identifier in seen:
+            return
+        seen.add(identifier)
+        eager = getattr(method, "eager", None)
+        if callable(eager):
+            eager()
+        for value in vars(method).values():
+            cls._eager_value(value, seen)
+
+    @classmethod
+    def _eager_value(cls, value: object, seen: set[int]) -> None:
+        """Traverse declared Method/container fields without probing opaque values."""
+
+        if hasattr(value, "eager") and hasattr(value, "method_graph"):
+            cls._eager_method(value, seen)
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                cls._eager_value(item, seen)
+        elif isinstance(value, (tuple, list)):
+            for item in value:
+                cls._eager_value(item, seen)
 
     def iterator(self) -> "StreamGraphCursor":
         """Return one isolated pull cursor over this prepared graph.
@@ -257,7 +307,14 @@ class StreamPlan:
             child = self._build(dataset.src, records)
             selected = None
             try:
-                selected = dataset.method.find_implementation(input_spec=dataset.src.spec).prepared_invoker()
+                # A Map is an iterator boundary around an element Method graph.  Keep
+                # the composed Method occurrences visible through the canonical
+                # MethodGraph rather than exposing composition-private fields.
+                element_graph = dataset.method.method_graph()
+                element_graph.learn(dataset.src.spec, strategy="local")
+                element_nodes = element_graph.method_nodes
+                records.extend(replace(node, occurrence=len(records)) for node in element_nodes)
+                selected = element_nodes[0].selected if element_nodes else None
             except ImplementationSelectionError as error:
                 if error.reason != "unknown_traits" or error.unknown_traits != ("backend",):
                     raise

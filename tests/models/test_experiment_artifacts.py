@@ -193,7 +193,7 @@ def test_terminal_checkpoint_binds_artifact_to_exact_experiment_state(tmp_path):
     exp = Experiment(
         CounterModel(), OneUpdate(),
         artifacts=TemplateBundle({"score": Template(SavedModelValue, Par("this.model"))}),
-        repo=repo,
+        repo=repo, checkpoint_every_steps=1,
     )
 
     final = exp.train(managed=ManagedConfig(state_repo=repo))
@@ -207,6 +207,43 @@ def test_terminal_checkpoint_binds_artifact_to_exact_experiment_state(tmp_path):
     assert SavedModelValue.calls == [final.at(GraphPath((Parameter("model"),)))]
     assert history.data.iloc[0].eval_artifacts == row.eval_artifacts
     assert SavedModelValue.calls[-1] == final.at(GraphPath((Parameter("model"),)))
+
+
+class FiveUpdates(TrainFunction):
+    """Trainer exposing five post-update safe points for cadence tests."""
+
+    def __call__(self, exp, *, callbacks=()):
+        for _ in range(5):
+            exp.model.value += 1
+            exp.state.record_update(examples=1, loss=1.0)
+            for callback in callbacks:
+                callback()
+
+
+@pytest.mark.parametrize("cadence, expected_rows", ((None, 1), (2, 3)))
+def test_experiment_checkpoint_cadence_filters_intermediates_but_keeps_terminal(
+        tmp_path, cadence, expected_rows):
+    """Only exact retained-step multiples checkpoint before the mandatory final row."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    exp = Experiment(CounterModel(), FiveUpdates(), checkpoint_every_steps=cadence, repo=repo)
+
+    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    history = ExperimentData.find(final.object_projection(), repo=repo).data
+
+    assert len(history) == expected_rows
+    assert list(history.examples_seen) == ([5] if cadence is None else [2, 4, 5])
+    assert exp.state.step == exp.model.value == 5
+
+
+@pytest.mark.parametrize("cadence", (0, -1, True, 1.5))
+def test_experiment_rejects_invalid_checkpoint_cadence_before_state_mutation(cadence):
+    """Cadence validation is exact and leaves model/training state untouched."""
+
+    model = CounterModel()
+    with pytest.raises((TypeError, ValueError)):
+        Experiment(model, TerminalOnly(), checkpoint_every_steps=cadence)
+    assert model.value == 0
 
 
 def test_empty_artifacts_still_publish_one_terminal_facts_only_row(tmp_path):

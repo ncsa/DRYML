@@ -334,13 +334,20 @@ experiment = Experiment(
     model=model,
     train_data=train_dataset,
     train_fn=train_fn,
+    checkpoint_every_steps=32,
     repo=repo,
 )
 
 repo.save_object(experiment)
 ```
 
-Exact constructor signatures vary by model and experiment class. Prefer backend-specific docs and docstrings for detailed parameters.
+`Experiment(..., checkpoint_every_steps=...)` accepts a positive exact integer
+for intermediate optimizer-step checkpoints, or `None` (the default) for
+terminal-only checkpointing. The terminal checkpoint and its Artifact evaluation
+always occur. Invalid cadence values fail during construction before model or
+training state mutation. Exact constructor signatures vary by model and
+experiment class. Prefer backend-specific docs and docstrings for detailed
+parameters.
 
 ## Evaluation Results
 

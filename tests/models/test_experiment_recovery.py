@@ -79,6 +79,17 @@ class TerminalTrainer(TrainFunction):
         exp.state.record_update(examples=1, loss=1.0)
 
 
+class CadencedRecoveryTrainer(TrainFunction):
+    """Advance to three retained steps without replaying restored updates."""
+
+    def __call__(self, exp, *, callbacks=()):
+        while exp.state.step < 3:
+            exp.model.value += 1
+            exp.state.record_update(examples=1, loss=1.0)
+            for callback in callbacks:
+                callback()
+
+
 class FailOnceValue(Value):
     """Terminal Artifact whose first managed invocation fails before a checkpoint."""
 
@@ -195,9 +206,9 @@ def test_failed_second_artifact_reuses_the_same_pending_history_occurrence(tmp_p
     assert repaired.state_ref == checkpoint
     assert repaired.evaluation_status == "completed"
     assert tuple(repaired.eval_artifacts) == ("first", "second", "third")
-    assert OrderedValue.events == [
-        "first", "second", "second", "third", "first", "second", "third",
-    ]
+    # The default cadence is terminal-only; retry repairs its retained row without
+    # scheduling a second intermediate/final pair for the one completed update.
+    assert OrderedValue.events == ["first", "second", "second", "third"]
 
 
 def test_completed_admission_race_adopts_receipt_without_rerunning_artifact(
@@ -262,6 +273,29 @@ def test_terminal_artifact_retry_replays_one_occurrence_without_retraining(tmp_p
     )
     assert repaired.evaluation_status == "completed"
     assert final == checkpoint
+
+
+def test_cadenced_checkpoint_retry_restores_step_and_finishes_without_duplicate_update(tmp_path):
+    """A failed step-two checkpoint retries before the remaining step and final row."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    FailOnceValue.calls = 0
+    exp = Experiment(
+        RecoveryModel(), CadencedRecoveryTrainer(), artifacts=Template(FailOnceValue),
+        checkpoint_every_steps=2, repo=repo,
+    )
+
+    with pytest.raises(RuntimeError, match="terminal artifact failed"):
+        exp.train(managed=ManagedConfig(state_repo=repo))
+    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
+    assert checkpoint is not None
+
+    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    history = ExperimentData.find(final.object_projection(), repo=repo).data
+
+    assert exp.model.value == exp.state.step == 3
+    assert list(history.examples_seen) == [2, 3]
+    assert len(history) == 2
 
 
 @pytest.mark.parametrize("stage", (

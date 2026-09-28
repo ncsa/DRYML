@@ -62,9 +62,12 @@ class Experiment(Serializable):
         test_data: Exact saved Dataset reference available to Artifact recipes as
             ``this.test_data``. Missing required data fails binding; it never falls
             back to training or validation data.
-        artifacts: One Template, ordered Template sequence, string-keyed Template
-            mapping, or ``None``. Recipes remain inert until a checkpoint binds
-            ``this`` to its exact Experiment StateRef.
+         artifacts: One Template, ordered Template sequence, string-keyed Template
+             mapping, or ``None``. Recipes remain inert until a checkpoint binds
+             ``this`` to its exact Experiment StateRef.
+         checkpoint_every_steps: Positive exact optimizer-step cadence for
+             intermediate checkpoints, or ``None`` to suppress intermediate
+             checkpoints. The terminal checkpoint always occurs.
         metrics: Legacy trainer-local metric configuration retained separately from
             checkpoint Artifacts.
         capabilities: Additional trainer-owned configuration.
@@ -79,7 +82,7 @@ class Experiment(Serializable):
             self, model, train_fn, train_data=None, val_data=None, *,
             test_data: Ref[StateRef | None] = None,
             artifacts: Ref[TemplateBundle | None] = None,
-            metrics=None, **capabilities):
+            metrics=None, checkpoint_every_steps: int | None = None, **capabilities):
         """Initialize inert training and exact-reference evaluation configuration.
 
         Args:
@@ -90,12 +93,19 @@ class Experiment(Serializable):
             test_data: Optional exact saved Dataset StateRef for Artifact binding.
             artifacts: Optional inert TemplateBundle of named Artifact recipes.
             metrics: Optional trainer-local metric configuration.
+            checkpoint_every_steps: Positive exact optimizer-step cadence, or
+                ``None`` for terminal-only checkpointing.
             capabilities: Additional trainer-specific configuration values.
 
         Side Effects:
             Creates fresh retained TrainState only. It does not materialize recipe
             inputs, compute Artifacts, save a Dataset, or select Store authority.
         """
+        if checkpoint_every_steps is not None:
+            if type(checkpoint_every_steps) is not int:
+                raise TypeError("Experiment checkpoint_every_steps must be an exact int or None.")
+            if checkpoint_every_steps <= 0:
+                raise ValueError("Experiment checkpoint_every_steps must be positive.")
         super().__init__()
         self.model = model
         self.train_fn = train_fn
@@ -104,6 +114,7 @@ class Experiment(Serializable):
         self.test_data = test_data
         self.artifacts = artifacts
         self.metrics = dict(metrics or {})
+        self.checkpoint_every_steps = checkpoint_every_steps
         self.capabilities = dict(capabilities)
         self.state = TrainState()
 
@@ -169,7 +180,7 @@ class Experiment(Serializable):
             return
         self.state.phase = TrainState.training
         try:
-            callbacks = (lambda: self._stage_checkpoint(managed),) if getattr(
+            callbacks = (self._checkpoint_bridge(managed),) if getattr(
                 self.train_fn, "supports_safe_points", True
             ) else ()
             self.train_fn(self, callbacks=callbacks)
@@ -179,6 +190,20 @@ class Experiment(Serializable):
         if self.state.phase == TrainState.training:
             self.state.phase = TrainState.trained
         self._stage_checkpoint(managed, terminal=True)
+
+    def _checkpoint_bridge(self, managed):
+        """Return a safe-point bridge that applies the retained checkpoint cadence.
+
+        The trainer calls this after a completed optimizer update. ``None`` leaves
+        intermediate safe points inert; the terminal checkpoint remains mandatory.
+        """
+
+        def checkpoint() -> None:
+            cadence = self.checkpoint_every_steps
+            if cadence is not None and self.state.step % cadence == 0:
+                self._stage_checkpoint(managed)
+
+        return checkpoint
 
     def _stage_checkpoint(self, managed, *, terminal: bool = False) -> StateRef:
         """Persist one retry-stable observation before entering a managed safe point."""
