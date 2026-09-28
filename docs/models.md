@@ -9,6 +9,8 @@ The Models API provides DRYML object abstractions for model composition, trainin
 Important public types:
 
 - `Model`
+- `ParameterCounts`
+- `MeasurementUnavailableError`
 - `AutoEncoder`
 - `TrainFunction`
 - `TrainState`
@@ -78,6 +80,96 @@ Calling the autoencoder applies encoder then decoder. Output-spec inference foll
 `TrainFunction` represents training behavior as a DRYML method. Backend-specific training functions implement the details for TensorFlow, PyTorch, sklearn, or other systems.
 
 Training functions should update model state and training metadata while keeping stable construction identity separate from runtime results.
+
+### Measurements
+
+`ParameterCounts(total, trainable)` reports scalar native parameter counts, not
+parameter tensors, buffers, or optimizer slots. A native parameter shared by
+multiple wrappers is counted once by object identity. A frozen parameter counts
+in `total`; it contributes to `trainable` only when at least one participating
+model path exposes that same native object as effectively trainable. Counts are
+available directly from `dryml.tf.measurements.parameter_counts(native_model)`
+and `dryml.torch.measurements.parameter_counts(native_model)`, without a DRYML
+runtime or wrapper. `Model.parameter_counts()` uses the existing DRYML graph
+traversal for composites and applies the same native identity deduplication.
+
+`MeasurementUnavailableError` means a native model is unbuilt, lazy, or has an
+unknown parameter shape. It is not equivalent to a valid built zero-parameter
+model, which returns `ParameterCounts(0, 0)`. Measurements read metadata only:
+they do not invoke a forward pass, build/compile a model, start a runtime, or
+save state.
+
+`dryml.models.measurements.dataset_size(dataset)` returns declared effective
+Dataset cardinality after selection/subsetting and unbatching but before trainer
+batching or epoch repetition. It returns `Cardinality.finite(n)`,
+`Cardinality.UNKNOWN`, or `Cardinality.INFINITE` without opening a cursor;
+unknown and infinite inputs are never scanned to manufacture a count. Unbatching
+an opaque natively batched source is unknown unless that source explicitly
+declares its example cardinality; its batch count is never reported as examples.
+
+### Retained Accounting
+
+`TrainState` retains `examples_seen`, a weighted loss numerator/denominator,
+the next unprocessed batch position, an invocation target epoch, a bounded
+pending epoch-postlude fact, and an immutable pending safe-point observation
+alongside model/optimizer progress. Supplied
+TensorFlow and Torch trainers advance these facts only after a successful
+optimizer update, so failed updates and evaluation do not add exposure. Repeated
+epochs add exposure rather than changing effective Dataset size. The reported
+observation loss is weighted by actual batch examples, including short final
+batches. A restored unfinished invocation completes its retained target rather
+than adding the configured epoch count again; a later call after completion is a
+fresh invocation.
+
+Its named persistence state rejects unknown fields and validates finite loss
+facts, exact nonnegative counters, lifecycle enums, pending-postlude coherence,
+and pending-observation type before installing restored progress. Historical
+three-slot `(epoch, step, phase)` payloads remain supported with zero/`None`
+defaults for U8 fields.
+
+TensorFlow `fit`, explicit TensorFlow loops, and Torch loops validate all DRYML
+callbacks before training work and invoke them only after this retained state is
+truthful. Keras uses DRYML-owned train-step facts for the actual completed-update
+mean loss and example count, before native user callbacks. Explicit TF and Torch
+accept only mean-reduced supplied losses; sum, unreduced, and indeterminate loss
+contracts fail before model or optimizer mutation. Restoration reopens
+deterministic prepared data and skips `next_batch` without reapplying completed
+updates. An update completing an epoch is normalized to the next epoch/batch-zero
+position before its callbacks. Explicit TensorFlow and Torch retain validation
+results before progress, so a progress failure does not repeat validation. Keras
+safe-point recovery is deliberately narrower: a DRYML safe-point callback cannot
+be combined with native Keras callbacks or validation, because their generic
+event/log replay cannot be truthful. Ordinary uninterrupted Keras callback and
+validation behavior remains native. Keras also requires exactly one optimizer
+update per batch callback (`steps_per_execution=1`, no gradient accumulation)
+and accounts for static regularizers and dynamic `add_loss` objectives in the
+exact differentiated scalar before advancing retained state. Setup
+failures that retain no update clear their new target, while Keras EarlyStopping
+completes its accepted shortened target. sklearn's one-shot trainer accepts the
+common callback keyword but rejects intermediate safe points before fitting
+because it has no per-update boundary.
+
+After a mid-epoch restore, native step/window observations remain available, but
+the trainers do not present the resumed suffix's loss or metric aggregate as a
+full-epoch metric.
+
+Training prepares declared x/y Dataset specs once in the trainer's inspectable
+`method_graph()`. Its producer/consumer specs and direct dense conversion edges
+are retained as Method-owned graph facts; each yielded value only executes those
+selected edges before native differentiation. Validation uses the same prepared
+edge contract. No per-yield route selection, implicit
+cross-backend generator conversion, or Dataset execution inside a tape/backward
+body is supported.
+
+Keras retained loss is the scalar objective differentiated for each accepted
+completed update, including built-in regularizers and dynamic `add_loss`
+contributions reported by nested layers. To keep its example-weighted aggregation
+truthful, supplied Keras `class_weight`, `sample_weight`, and `loss_weights` are
+rejected rather than reported with a different denominator. Mean-reduced
+unweighted losses are supported. Unknown-but-finite Keras streams may complete
+normally without DRYML safe-point callbacks; callbacks require a declared finite
+deterministic batch count, and infinite streams require an explicit finite bound
+before training starts.
 
 ## Experiments
 

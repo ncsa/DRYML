@@ -10,7 +10,7 @@ from dryml.core import Object, Repo
 from dryml.core.query import field
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
-from dryml.models import AutoEncoder, Experiment
+from dryml.models import AutoEncoder, Experiment, TrainState
 
 
 tf = pytest.importorskip("tensorflow")
@@ -33,6 +33,36 @@ class EffectfulKerasModel(tf.keras.Model):
     def call(self, x):
         self.calls += 1
         return x
+
+
+class ZeroKerasModel(tf.keras.Model):
+    def __init__(self):
+        super().__init__()
+        self.dense = tf.keras.layers.Dense(1, use_bias=False, kernel_initializer="zeros")
+
+    def call(self, x):
+        return self.dense(x)
+
+
+class NestedDynamicRegularizer(tf.keras.layers.Layer):
+    def __init__(self):
+        super().__init__()
+        self.normalizer = tf.keras.layers.BatchNormalization()
+
+    def call(self, value, training=None):
+        result = self.normalizer(value, training=training)
+        self.add_loss(tf.cast(0.25, result.dtype))
+        return result
+
+
+class NestedDynamicKerasModel(tf.keras.Model):
+    def __init__(self):
+        super().__init__()
+        self.dense = tf.keras.layers.Dense(1, use_bias=False, kernel_initializer="ones")
+        self.regularizer = NestedDynamicRegularizer()
+
+    def call(self, value, training=None):
+        return self.regularizer(self.dense(value), training=training)
 
 
 class FactoryTopology(Object):
@@ -63,6 +93,7 @@ def test_tf_basic_training_updates_experiment_state():
     assert history is not None
     assert exp.state.epoch == 1
     assert exp.state.step == 2
+    assert exp.state.examples_seen == 4
     assert exp.state.phase == "trained"
     assert float(optimizer.obj.learning_rate.numpy()) == pytest.approx(0.01)
 
@@ -98,6 +129,8 @@ def test_tf_model_and_optimizer_state_ref_round_trip(tmp_path):
     state = repo.save_object(exp, deep_capture=True)
     repo.close(flush=True)
     loaded = Repo(stores=tmp_path).load_state_ref(state, reuse_live="never")
+    assert loaded.state.examples_seen == 4
+    assert loaded.state.next_batch == 0
     loaded_predictions = loaded.model(tf.convert_to_tensor(x)).numpy()
     loaded_optimizer_wrapper = loaded.train_fn.optimizer
     loaded_optimizer = loaded_optimizer_wrapper.obj
@@ -499,6 +532,7 @@ def test_tf_basic_training_builds_keras_adapter_for_autoencoder():
     assert history is not None
     assert exp.state.epoch == 1
     assert exp.state.step == 2
+    assert exp.state.examples_seen == 4
     assert model.encoder.obj.trainable_variables
     assert model.decoder.obj.trainable_variables
 
@@ -540,12 +574,794 @@ def test_tf_training_gradient_tape_trains_autoencoder():
         verbose=0,
     )
     exp = Experiment(model, train_fn, train_data=_autoencoder_data())
+    observed = []
 
-    losses = exp.train()
+    losses = train_fn(exp, callbacks=(lambda: observed.append(exp.state.examples_seen),))
 
     assert len(losses) == 2
     assert exp.state.epoch == 1
     assert exp.state.step == 2
+    assert exp.state.examples_seen == 4
+    assert observed == [2, 4]
     assert model.encoder.obj.trainable_variables
     assert model.decoder.obj.trainable_variables
     assert get_default_repo() is None
+
+
+def test_tf_keras_callbacks_observe_post_update_retained_accounting():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
+    y = x * 2.0
+    exp = Experiment(
+        Model(TinyKerasModel),
+        BasicTraining(
+            optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01),
+            loss=Loss(tf.keras.losses.MeanSquaredError),
+            epochs=1,
+            batch_size=2,
+            verbose=0,
+        ),
+        train_data=ArrayDataset((x, y)),
+    )
+    observed = []
+
+    exp.train_fn(exp, callbacks=(lambda: observed.append((exp.state.step, exp.state.examples_seen)),))
+
+    assert observed == [(1, 2), (2, 4)]
+
+
+def _tf_accounting_experiment(*, repo=None, count=64, batch_size=1, trainer=None):
+    from dryml.models.tf import Loss, Model, Optimizer, Training
+
+    tf.keras.utils.set_random_seed(7103)
+    x = np.arange(count, dtype=np.float32).reshape(-1, 1) / 10.0
+    y = x * 2.0
+    model = Model(TinyKerasModel, repo=repo)
+    return Experiment(
+        model,
+        trainer or Training(
+            optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01, repo=repo),
+            loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+            epochs=1,
+            batch_size=batch_size,
+            verbose=0,
+            repo=repo,
+        ),
+        train_data=ArrayDataset((x, y), repo=repo),
+        repo=repo,
+    )
+
+
+def test_tf_interrupt_at_step_32_resumes_exact_remaining_epoch(tmp_path):
+    repo = Repo(stores=tmp_path)
+    interrupted = _tf_accounting_experiment(repo=repo)
+    seen = []
+
+    def interrupt_at_32():
+        seen.append((interrupted.state.step, interrupted.state.epoch, interrupted.state.next_batch))
+        if interrupted.state.step == 32:
+            raise RuntimeError("pause at retained step 32")
+
+    with pytest.raises(RuntimeError, match="step 32"):
+        interrupted.train_fn(interrupted, callbacks=(interrupt_at_32,))
+    checkpoint = repo.save_object(interrupted, deep_capture=True)
+    resumed = Repo(stores=tmp_path).load_state_ref(checkpoint, reuse_live="never")
+    remaining_losses = resumed.train()
+
+    baseline = _tf_accounting_experiment()
+    baseline_losses = baseline.train()
+
+    assert seen == [(step, 0, step) for step in range(1, 33)]
+    assert len(remaining_losses) == 32
+    assert len(baseline_losses) == 64
+    assert resumed.state.step == baseline.state.step == 64
+    assert resumed.state.examples_seen == baseline.state.examples_seen == 64
+    assert resumed.state.epoch == baseline.state.epoch == 1
+    assert resumed.state.next_batch == baseline.state.next_batch == 0
+    assert resumed.state.loss_denominator == baseline.state.loss_denominator == 64
+    for actual, expected in zip(resumed.model.obj.variables, baseline.model.obj.variables):
+        np.testing.assert_allclose(actual.numpy(), expected.numpy())
+    assert int(resumed.train_fn.optimizer.obj.iterations.numpy()) == int(
+        baseline.train_fn.optimizer.obj.iterations.numpy()
+    )
+
+
+def test_tf_trainers_accept_a_legacy_exhausted_saved_epoch_without_empty_data_error():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer, Training
+
+    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    for trainer_type in (BasicTraining, Training):
+        exp = Experiment(
+            Model(TinyKerasModel),
+            trainer_type(
+                optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+                loss=Loss(tf.keras.losses.MeanSquaredError),
+                epochs=1,
+                batch_size=1,
+                verbose=0,
+            ),
+            train_data=data,
+        )
+        exp.state.next_batch = 2
+        exp.state.target_epoch = 1
+
+        result = exp.train()
+
+        assert exp.state.epoch == 1
+        assert exp.state.next_batch == 0
+        assert exp.state.target_epoch is None
+        if trainer_type is Training:
+            assert result == []
+
+
+def test_keras_resume_later_epoch_and_short_final_batch_keep_target_and_actual_accounting(tmp_path):
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    tf.keras.utils.set_random_seed(7103)
+    x = np.zeros((5, 1), dtype=np.float32)
+    y = np.concatenate((np.ones((4, 1), dtype=np.float32), np.full((1, 1), 5.0, dtype=np.float32)))
+    train_fn = BasicTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0, repo=repo),
+        loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+        epochs=2,
+        batch_size=2,
+        verbose=0,
+        repo=repo,
+    )
+    interrupted = Experiment(Model(ZeroKerasModel, repo=repo), train_fn, train_data=ArrayDataset((x, y), repo=repo), repo=repo)
+    observed = []
+
+    def interrupt_in_second_epoch():
+        observed.append((interrupted.state.step, interrupted.state.epoch, interrupted.state.next_batch))
+        if interrupted.state.step == 4:
+            raise RuntimeError("pause in epoch two")
+
+    with pytest.raises(RuntimeError, match="epoch two"):
+        interrupted.train_fn(interrupted, callbacks=(interrupt_in_second_epoch,))
+    checkpoint = repo.save_object(interrupted, deep_capture=True)
+    resumed = Repo(stores=tmp_path).load_state_ref(checkpoint, reuse_live="never")
+    resumed_updates = []
+    resumed.train_fn(
+        resumed,
+        callbacks=(lambda: resumed_updates.append((resumed.state.step, resumed.state.epoch, resumed.state.next_batch)),),
+    )
+
+    assert observed[-1] == (4, 1, 1)
+    assert resumed_updates == [(5, 1, 2), (6, 2, 0)]
+    assert resumed.state.step == 6
+    assert resumed.state.examples_seen == 10
+    assert resumed.state.epoch == 2
+    assert resumed.state.next_batch == 0
+    assert resumed.state.target_epoch is None
+
+    short = Experiment(
+        Model(ZeroKerasModel),
+        BasicTraining(
+            optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+            loss=Loss(tf.keras.losses.MeanSquaredError),
+            epochs=1,
+            batch_size=2,
+            verbose=0,
+        ),
+        train_data=ArrayDataset((x, y)),
+    )
+    final_positions = []
+    short.train_fn(short, callbacks=(lambda: final_positions.append((short.state.epoch, short.state.next_batch)),))
+
+    assert short.state.examples_seen == 5
+    assert short.state.loss_denominator == 5
+    assert short.state.loss_numerator / short.state.loss_denominator == pytest.approx(29 / 5)
+    assert final_positions == [(0, 1), (0, 2), (1, 0)]
+
+
+def test_keras_preflights_callbacks_and_mean_loss_before_model_or_optimizer_mutation():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer, Training
+
+    model = Model(TinyKerasModel)
+    optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01)
+    exp = Experiment(
+        model,
+        BasicTraining(optimizer=optimizer, loss=Loss(tf.keras.losses.MeanSquaredError), batch_size=1, verbose=0),
+        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+    )
+    optimizer_values = [value.numpy().copy() for value in optimizer.obj.variables]
+
+    with pytest.raises(TypeError, match="callbacks"):
+        exp.train_fn(exp, callbacks=(lambda: None, object()))
+    assert model.obj.built is False
+    assert exp.state.step == exp.state.examples_seen == 0
+    for actual, expected in zip(optimizer.obj.variables, optimizer_values):
+        np.testing.assert_allclose(actual.numpy(), expected)
+
+    rejecting = BasicTraining(
+        optimizer=optimizer,
+        loss=Loss(tf.keras.losses.MeanSquaredError, reduction="sum"),
+        batch_size=1,
+        verbose=0,
+    )
+    with pytest.raises(ValueError, match="mean reduction"):
+        rejecting(exp)
+    assert model.obj.built is False
+    assert exp.state.step == exp.state.examples_seen == 0
+
+    rejecting_loop = Training(
+        optimizer=optimizer,
+        loss=Loss(tf.keras.losses.MeanSquaredError, reduction="sum"),
+        batch_size=1,
+        verbose=0,
+    )
+    with pytest.raises(ValueError, match="mean reduction"):
+        rejecting_loop(exp)
+    assert model.obj.built is False
+    assert exp.state.step == exp.state.examples_seen == 0
+
+
+def test_keras_internal_accounting_precedes_native_callbacks_and_uses_owned_train_step_loss():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    events = []
+
+    class NativeCallback(tf.keras.callbacks.Callback):
+        def __init__(self, state, sink):
+            super().__init__()
+            self.state = state
+            self.sink = sink
+
+        def on_train_batch_end(self, batch, logs=None):
+            del batch, logs
+            self.sink.append(("native", self.state.step, self.state.examples_seen))
+
+    x = np.zeros((3, 1), dtype=np.float32)
+    y = np.array([[1.0], [3.0], [5.0]], dtype=np.float32)
+    train_fn = BasicTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError),
+        batch_size=2,
+        verbose=0,
+    )
+    exp = Experiment(
+        Model(ZeroKerasModel),
+        train_fn,
+        train_data=ArrayDataset((x, y)),
+    )
+    train_fn.callbacks = (NativeCallback(exp.state, events),)
+
+    exp.train_fn(exp)
+
+    assert events == [
+        ("native", 1, 2),
+        ("native", 2, 3),
+    ]
+    assert exp.state.loss_numerator / exp.state.loss_denominator == pytest.approx(35 / 3)
+
+
+def test_tf_training_prepares_cross_backend_data_before_model_invocation(monkeypatch):
+    from dryml.models.tf import Loss, Model, Optimizer, Training
+    from dryml.models.utils import TrainingPreparation
+
+    events = []
+    original_prepare = TrainingPreparation.prepare
+
+    def prepared(self, *args, **kwargs):
+        events.append("prepare")
+        return original_prepare(self, *args, **kwargs)
+
+    monkeypatch.setattr(TrainingPreparation, "prepare", prepared)
+    model = Model(TinyKerasModel)
+    original_call = model.obj.call
+
+    def record_call(value):
+        events.append("model")
+        return original_call(value)
+
+    monkeypatch.setattr(model.obj, "call", record_call)
+    exp = Experiment(
+        model,
+        Training(
+            optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+            loss=Loss(tf.keras.losses.MeanSquaredError),
+            epochs=1,
+            batch_size=1,
+            verbose=0,
+        ),
+        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+    )
+
+    exp.train()
+
+    assert events[:2] == ["prepare", "model"]
+
+
+def test_tf_final_callback_resume_runs_one_validation_postlude_without_an_update(monkeypatch):
+    from dryml.models.tf import Loss, Model, Optimizer, Training
+    import dryml.models.tf.base as tf_base
+
+    postludes = []
+
+    class Progress:
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def update(self, *args, **kwargs):
+            del args, kwargs
+
+        def epoch_end(self, *args, **kwargs):
+            postludes.append("progress")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tf_base, "TrainingProgress", Progress)
+    trainer = Training(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=1, verbose=0,
+    )
+    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    exp = Experiment(Model(TinyKerasModel), trainer, train_data=data, val_data=data)
+    evaluations = []
+    monkeypatch.setattr(trainer, "_evaluate", lambda *args: evaluations.append("validation") or {})
+
+    def interrupt_final_callback():
+        if exp.state.step == 2:
+            assert (exp.state.epoch, exp.state.next_batch) == (1, 0)
+            raise RuntimeError("final callback")
+
+    with pytest.raises(RuntimeError, match="final callback"):
+        trainer(exp, callbacks=(interrupt_final_callback,))
+
+    assert exp.state.pending_epoch_postlude == 0
+    assert exp.state.step == 2
+    trainer(exp)
+    assert exp.state.target_epoch is None
+    assert exp.state.pending_epoch_postlude is None
+    assert exp.state.step == 2
+    assert evaluations == ["validation"]
+    assert postludes == ["progress"]
+
+    trainer(exp)
+    assert exp.state.step == 4
+
+
+def test_keras_rejects_unreplayable_native_callback_safe_point_before_training():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    events = []
+
+    class Native(tf.keras.callbacks.Callback):
+        def on_train_batch_end(self, batch, logs=None):
+            del logs
+            events.append(("batch", batch))
+
+        def on_epoch_end(self, epoch, logs=None):
+            del logs
+            events.append(("epoch", epoch))
+
+    trainer = BasicTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=1,
+        verbose=0,
+    )
+    trainer.callbacks = (Native(),)
+    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    exp = Experiment(Model(TinyKerasModel), trainer, train_data=data)
+
+    with pytest.raises(ValueError, match="does not support native callbacks"):
+        trainer(exp, callbacks=(lambda: None,))
+
+    assert events == []
+    assert int(trainer.optimizer.obj.iterations.numpy()) == 0
+    assert exp.state.target_epoch is None
+
+
+def test_keras_rejects_untruthful_objective_weights_before_training_mutation():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    model = Model(TinyKerasModel)
+    exp = Experiment(
+        model,
+        BasicTraining(
+            optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+            loss=Loss(tf.keras.losses.MeanSquaredError), batch_size=1, verbose=0,
+            fit_kwargs={"class_weight": {0: 1.0}},
+        ),
+        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+    )
+
+    with pytest.raises(ValueError, match="class_weight"):
+        exp.train()
+
+    assert model.obj.built is False
+    assert exp.state.target_epoch is None
+
+def test_keras_retains_exact_static_and_dynamic_regularized_objectives():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    class StaticRegularizer(tf.keras.Sequential):
+        def __init__(self):
+            super().__init__([
+                tf.keras.layers.Dense(
+                    1,
+                    use_bias=False,
+                    kernel_initializer="ones",
+                    kernel_regularizer=tf.keras.regularizers.L2(0.5),
+                ),
+            ])
+
+    def run(model_type, x, y, expected_loss):
+        model = Model(model_type)
+        optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0)
+        exp = Experiment(
+            model,
+            BasicTraining(
+                optimizer=optimizer,
+                loss=Loss(tf.keras.losses.MeanSquaredError),
+                batch_size=1,
+                verbose=0,
+            ),
+            train_data=ArrayDataset((x, y)),
+        )
+
+        exp.train()
+
+        assert exp.state.loss_numerator / exp.state.loss_denominator == pytest.approx(expected_loss)
+        assert (exp.state.step, exp.state.examples_seen) == (1, 1)
+        assert int(optimizer.obj.iterations.numpy()) == 1
+        return model, exp
+
+    run(
+        StaticRegularizer,
+        np.array([[2.0]], dtype=np.float32),
+        np.array([[0.0]], dtype=np.float32),
+        4.5,
+    )
+    dynamic_model, dynamic_exp = run(
+        NestedDynamicKerasModel,
+        np.array([[2.0]], dtype=np.float32),
+        np.array([[1.0]], dtype=np.float32),
+        1.25,
+    )
+    assert dynamic_model.obj.regularizer.normalizer.moving_mean.numpy()[0] != 0.0
+    assert dynamic_exp.state.phase == "trained"
+
+
+def test_keras_rejects_grouped_updates_before_mutation(monkeypatch):
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    data = ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32)))
+    model = Model(TinyKerasModel)
+    optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0)
+    exp = Experiment(
+        model,
+        BasicTraining(
+            optimizer=optimizer, loss=Loss(tf.keras.losses.MeanSquaredError),
+            compile_kwargs={"steps_per_execution": 2}, batch_size=1, verbose=0,
+        ),
+        train_data=data,
+    )
+    with pytest.raises(ValueError, match="steps_per_execution"):
+        exp.train()
+    assert model.obj.built is False
+    assert int(optimizer.obj.iterations.numpy()) == 0
+    assert exp.state.target_epoch is None
+
+    accumulation_optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0)
+    monkeypatch.setattr(accumulation_optimizer.obj, "gradient_accumulation_steps", 2, raising=False)
+    accumulating = Experiment(
+        Model(TinyKerasModel),
+        BasicTraining(
+            optimizer=accumulation_optimizer, loss=Loss(tf.keras.losses.MeanSquaredError), batch_size=1, verbose=0,
+        ),
+        train_data=data,
+    )
+    with pytest.raises(ValueError, match="gradient accumulation"):
+        accumulating.train()
+    assert int(accumulation_optimizer.obj.iterations.numpy()) == 0
+    assert accumulating.state.target_epoch is None
+
+def test_keras_rejects_dryml_and_native_callback_recovery_before_setup():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    events = []
+
+    class Native(tf.keras.callbacks.Callback):
+        def on_train_begin(self, logs=None):
+            del logs
+            events.append("native")
+
+    model = Model(TinyKerasModel)
+    optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0)
+    model._pending_restore_path = "/invalid/model/checkpoint"
+    optimizer._pending_restore_path = "/invalid/optimizer/checkpoint"
+    trainer = BasicTraining(
+        optimizer=optimizer,
+        loss=Loss(tf.keras.losses.MeanSquaredError),
+        batch_size=1,
+        verbose=0,
+    )
+    trainer.fit_kwargs["callbacks"] = [Native()]
+    exp = Experiment(
+        model,
+        trainer,
+        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+    )
+
+    with pytest.raises(ValueError, match="does not support native callbacks"):
+        trainer(exp, callbacks=(lambda: None,))
+
+    assert events == []
+    assert model._pending_restore_path == "/invalid/model/checkpoint"
+    assert optimizer._pending_restore_path == "/invalid/optimizer/checkpoint"
+    assert model.obj.built is False
+    assert int(optimizer.obj.iterations.numpy()) == 0
+    assert trainer.method_graph().conversion_edges == ()
+    assert exp.state.phase == TrainState.initial
+
+
+def test_training_preparation_resets_current_invocation_graph_facts():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+    from dryml.models.utils import TrainingPreparation
+
+    trainer = BasicTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError),
+        batch_size=1,
+        verbose=0,
+    )
+    first = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    second = ArrayDataset((np.zeros((2, 2), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    first_xy = trainer._xy_data(trainer._prepare_data(first, for_training=True))
+    second_xy = trainer._xy_data(trainer._prepare_data(second, for_training=True))
+
+    trainer._begin_training_preparation_generation()
+    training = TrainingPreparation.from_specs(trainer, first_xy.spec[0], first_xy.spec[1], "tf")
+    validation = TrainingPreparation.from_specs(trainer, second_xy.spec[0], second_xy.spec[1], "tf")
+    graph = trainer.method_graph()
+    assert graph.input_specs == (*training.producer_specs, *validation.producer_specs)
+
+    trainer._begin_training_preparation_generation()
+    current = TrainingPreparation.from_specs(trainer, second_xy.spec[0], second_xy.spec[1], "tf")
+    assert graph.input_specs == current.producer_specs
+    assert len(graph.source_nodes) == 1
+
+    exp = Experiment(Model(TinyKerasModel), trainer, train_data=first, val_data=first)
+    trainer(exp)
+    assert len(graph.source_nodes) == 2
+    exp.val_data = None
+    trainer(exp)
+    assert graph.input_specs == trainer.training_preparation.producer_specs
+    assert len(graph.source_nodes) == 1
+
+
+def test_keras_zero_epoch_does_not_emit_native_lifecycle_callbacks():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    events = []
+
+    class Native(tf.keras.callbacks.Callback):
+        def on_train_begin(self, logs=None):
+            events.append("begin")
+
+        def on_train_end(self, logs=None):
+            events.append("end")
+
+    trainer = BasicTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=0, batch_size=1, verbose=0,
+    )
+    trainer.callbacks = (Native(),)
+    exp = Experiment(Model(TinyKerasModel), trainer, train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))))
+
+    exp.train()
+
+    assert events == []
+    assert exp.state.target_epoch is None
+
+
+def test_tf_setup_failure_and_validation_failure_leave_only_recoverable_targets(monkeypatch):
+    from dryml.models.tf import Loss, Model, Optimizer, Training
+
+    trainer = Training(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=1, verbose=0,
+    )
+    exp = Experiment(Model(TinyKerasModel), trainer)
+    with pytest.raises(ValueError, match="train_data"):
+        exp.train()
+    assert exp.state.target_epoch is None
+
+    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    exp.train_data = data
+    exp.val_data = data
+    original_evaluate = trainer._evaluate
+    calls = []
+
+    def fail_once(*args):
+        calls.append("validation")
+        if len(calls) == 1:
+            raise RuntimeError("validation failed")
+        return original_evaluate(*args)
+
+    monkeypatch.setattr(trainer, "_evaluate", fail_once)
+    with pytest.raises(RuntimeError, match="validation failed"):
+        exp.train()
+    assert (exp.state.epoch, exp.state.next_batch, exp.state.pending_epoch_postlude) == (1, 0, 0)
+    assert exp.state.target_epoch == 1
+    assert exp.state.step == 2
+
+    exp.train()
+    assert exp.state.target_epoch is None
+    assert exp.state.step == 2
+    exp.train()
+    assert exp.state.step == 4
+
+
+def test_keras_early_stopping_completes_a_shortened_target():
+    from dryml.models.tf import BasicEarlyStoppingTraining, Loss, Model, Optimizer
+
+    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    exp = Experiment(
+        Model(ZeroKerasModel),
+        BasicEarlyStoppingTraining(
+            optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+            loss=Loss(tf.keras.losses.MeanSquaredError), epochs=5, batch_size=1,
+            patience=0, monitor="loss", verbose=0,
+        ),
+        train_data=data,
+    )
+
+    exp.train()
+
+    assert 0 < exp.state.epoch < 5
+    assert exp.state.target_epoch is None
+    previous_steps = exp.state.step
+    exp.train()
+    assert exp.state.step > previous_steps
+
+
+def test_keras_unknown_finite_stream_completes_without_callbacks_and_rejects_safe_points():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    class UnknownArrayDataset(ArrayDataset):
+        def __len__(self):
+            raise NotImplementedError
+
+    data = UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    trainer = BasicTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=2, batch_size=1, verbose=0,
+    )
+    exp = Experiment(Model(TinyKerasModel), trainer, train_data=data)
+
+    trainer(exp)
+    assert (exp.state.epoch, exp.state.next_batch, exp.state.target_epoch) == (2, 0, None)
+    assert exp.state.step == 4
+
+    blocked = Experiment(Model(TinyKerasModel), trainer, train_data=data)
+    with pytest.raises(ValueError, match="finite deterministic"):
+        trainer(blocked, callbacks=(lambda: None,))
+    assert blocked.state.target_epoch is None
+
+
+def test_keras_unknown_stream_retains_validation_postlude_before_failure():
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    class UnknownArrayDataset(ArrayDataset):
+        def __len__(self):
+            raise NotImplementedError
+
+    class ValidationFailsOnce(tf.keras.Model):
+        def __init__(self):
+            super().__init__()
+            self.dense = tf.keras.layers.Dense(1)
+            self.failed = False
+
+        def call(self, value, training=None):
+            if training is False and not self.failed:
+                self.failed = True
+                raise RuntimeError("validation postlude")
+            return self.dense(value)
+
+    data = UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0)
+    exp = Experiment(
+        Model(ValidationFailsOnce),
+        BasicTraining(
+            optimizer=optimizer, loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=1, verbose=0,
+        ),
+        train_data=data,
+        val_data=data,
+    )
+
+    with pytest.raises(RuntimeError, match="validation postlude"):
+        exp.train()
+    assert (exp.state.epoch, exp.state.next_batch, exp.state.pending_epoch_postlude) == (1, 0, 0)
+    assert exp.state.pending_epoch_postlude_phase == "start"
+    iterations = int(optimizer.obj.iterations.numpy())
+    assert iterations > 0
+
+    exp.train()
+    assert exp.state.target_epoch is None
+    assert exp.state.pending_epoch_postlude is None
+    assert int(optimizer.obj.iterations.numpy()) == iterations
+
+
+def test_keras_resume_skips_absent_validation_for_retained_validation_phase():
+    from types import SimpleNamespace
+
+    from dryml.models import TrainState
+    from dryml.models.tf.base import _resume_keras_postlude
+
+    class TrainingModel:
+        def evaluate(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("validation must not run without validation data")
+
+    state = TrainState(
+        epoch=1,
+        target_epoch=1,
+        pending_epoch_postlude=0,
+        pending_epoch_postlude_phase="validation",
+    )
+
+    _resume_keras_postlude(
+        SimpleNamespace(state=state),
+        TrainingModel(),
+        (),
+        validation_data=None,
+        validation_steps=None,
+        steps_per_epoch=1,
+    )
+
+    assert state.pending_epoch_postlude is None
+    assert state.pending_epoch_postlude_phase is None
+
+
+def test_tf_unknown_stream_retains_validation_metrics_across_progress_retry(monkeypatch):
+    from dryml.models.tf import Loss, Model, Optimizer, Training
+    import dryml.models.tf.base as tf_base
+
+    class UnknownArrayDataset(ArrayDataset):
+        def __len__(self):
+            raise NotImplementedError
+
+    class Progress:
+        attempts = 0
+        received = []
+
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def update(self, *args, **kwargs):
+            del args, kwargs
+
+        def epoch_end(self, *args, **kwargs):
+            type(self).attempts += 1
+            type(self).received.append(kwargs["metrics"])
+            if type(self).attempts == 1:
+                raise RuntimeError("progress postlude")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tf_base, "TrainingProgress", Progress)
+    trainer = Training(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=1, verbose=0,
+    )
+    data = UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    exp = Experiment(Model(TinyKerasModel), trainer, train_data=data, val_data=data)
+    evaluations = []
+    monkeypatch.setattr(trainer, "_evaluate", lambda *args: evaluations.append("validation") or {"loss": 3.0})
+
+    with pytest.raises(RuntimeError, match="progress postlude"):
+        exp.train()
+    assert evaluations == ["validation"]
+    retained_metrics = exp.state.pending_epoch_metrics
+    assert retained_metrics is not None
+    assert retained_metrics["val_loss"] == 3.0
+
+    exp.train()
+    assert evaluations == ["validation"]
+    assert Progress.received == [retained_metrics, retained_metrics]

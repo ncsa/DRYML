@@ -17,10 +17,13 @@ from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress, metric_value
 from dryml.models.utils import (
-    advance_train_state,
     finite_dataset_len,
     prepare_training_data,
+    record_train_update,
+    require_bounded_safe_points,
+    TrainingPreparation,
     validate_num_examples,
+    validate_training_callbacks,
 )
 from dryml.methods import ImplementationSelectionError, MethodError, traits
 
@@ -126,6 +129,15 @@ def _metric_results(metrics):
         if compute is not None:
             out[_metric_name(metric)] = metric_value(compute())
     return out
+
+
+def _require_mean_torch_loss(loss) -> None:
+    """Reject Torch losses that cannot truthfully report a mean contribution."""
+
+    if getattr(loss, "reduction", None) != "mean":
+        raise ValueError(
+            "Torch training accounting requires a loss with reduction='mean'."
+        )
 
 
 def _collect_trainable_parameters(target, *, repo):
@@ -453,7 +465,13 @@ class TrainFunction(BaseTrainFunction):
 
 
 class Training(TrainFunction):
-    """Train a torch model from an Experiment's supervised train_data."""
+    """Train a Torch model with retained update accounting and recovery.
+
+    DRYML callbacks are preflighted before mutable training work. Each successful
+    mean-reduced loss update records actual examples and the next batch before a
+    callback runs; a retained epoch target distinguishes resume from a fresh
+    later invocation.
+    """
 
     def __init__(
         self,
@@ -502,7 +520,7 @@ class Training(TrainFunction):
         self.shuffle_buffer_size = shuffle_buffer_size
         self.verbose = verbose
 
-    def __call__(self, exp):
+    def __call__(self, exp, *, callbacks=()):
         """Train one Experiment with the PyTorch optimizer loop.
 
         Args:
@@ -514,16 +532,23 @@ class Training(TrainFunction):
 
         Raises:
             ValueError: If the data is empty or the model exposes no trainable
-                PyTorch parameters.
+                PyTorch parameters, the loss is not mean-reduced, or retained
+                deterministic recovery cannot reach its invocation target.
             KeyError: If the model graph lacks a retained runtime binding.
+            TypeError: If supplied DRYML callbacks are invalid.
 
         Side Effects:
             Updates model parameters, optimizer state, metrics, progress output,
-            and ``exp.state``. Graph traversal uses a temporary explicit Repo
-            only for the duration of trainable-parameter collection.
+            and ``exp.state``. Dataset backend preparation completes before the
+            native forward/backward body; graph traversal uses a temporary
+            explicit Repo only for trainable-parameter collection.
         """
         import torch
 
+        callbacks = validate_training_callbacks(callbacks)
+        loss_fn = self._make_loss(torch, exp)
+        _require_mean_torch_loss(loss_fn)
+        self._begin_training_preparation_generation()
         train_data = prepare_training_data(
             exp.train_data,
             num_examples=self.num_examples,
@@ -533,14 +558,22 @@ class Training(TrainFunction):
         )
         if self.batch_size is not None:
             train_data = Batch(train_data, self.batch_size)
+        require_bounded_safe_points(train_data, callbacks)
         train_xy = Map(train_data, Project(Select(self.x_path), Select(self.y_path)))
+        self.training_preparation = TrainingPreparation.from_specs(
+            self, train_xy.spec[0], train_xy.spec[1], "torch"
+        )
 
         val_xy = None
+        self.validation_preparation = None
         if exp.val_data is not None:
             val_data = prepare_training_data(exp.val_data)
             if self.batch_size is not None:
                 val_data = Batch(val_data, self.batch_size)
             val_xy = Map(val_data, Project(Select(self.x_path), Select(self.y_path)))
+            self.validation_preparation = TrainingPreparation.from_specs(
+                self, val_xy.spec[0], val_xy.spec[1], "torch"
+            )
 
         device = _resolve_device(torch)
         if hasattr(exp.model, "to_device"):
@@ -548,16 +581,22 @@ class Training(TrainFunction):
         exp.model.prep_train()
 
         optimizer = self._make_optimizer(torch, exp.model, exp)
-        loss_fn = self._make_loss(torch, exp)
         metrics = self._metric_objects(exp)
         losses = []
         steps = 0
         steps_per_epoch = finite_dataset_len(train_data)
+        start_epoch = exp.state.epoch
+        fresh_target = exp.state.target_epoch is None
+        initial_step = exp.state.step
+        target_epoch = exp.state.begin_invocation(self.epochs)
         total_steps = None if steps_per_epoch is None else int(steps_per_epoch) * self.epochs
         progress = TrainingProgress(total=total_steps, verbose=self.verbose, desc="Torch training")
 
         try:
-            for epoch in range(self.epochs):
+            self._finish_pending_epoch(
+                torch, exp, val_xy, loss_fn, metrics, device, progress, target_epoch
+            )
+            for epoch in range(start_epoch, target_epoch):
                 for metric in metrics:
                     _reset_metric(metric)
                 metric_totals = {}
@@ -565,53 +604,102 @@ class Training(TrainFunction):
                 epoch_loss = 0.0
                 epoch_steps = 0
 
-                for x, y in train_xy:
-                    x = _tree_to_torch(x, torch, device=device)
-                    y = _tree_to_torch(y, torch, device=device)
+                cursor = train_xy.iterator()
+                resume_batch = exp.state.next_batch if epoch == start_epoch else 0
+                if resume_batch:
+                    cursor.skip(resume_batch)
+                try:
+                    for x, y in cursor:
+                        # The once-planned U6 handoff completes before native
+                        # forward/backward work; only device placement remains.
+                        x, y = self.training_preparation.prepare(x, y)
+                        x = _tree_to_torch(x, torch, device=device)
+                        y = _tree_to_torch(y, torch, device=device)
 
-                    optimizer.zero_grad()
-                    y_pred = exp.model(x)
-                    loss_value = loss_fn(y_pred, y)
-                    loss_value.backward()
-                    optimizer.step()
+                        optimizer.zero_grad()
+                        y_pred = exp.model(x)
+                        loss_value = loss_fn(y_pred, y)
+                        loss_value.backward()
+                        optimizer.step()
 
-                    batch_metrics = self._update_metrics(metrics, y_pred, y)
-                    for name, value in batch_metrics.items():
-                        metric_totals[name] = metric_totals.get(name, 0.0) + value
-                        metric_counts[name] = metric_counts.get(name, 0) + 1
+                        batch_metrics = self._update_metrics(metrics, y_pred, y)
+                        for name, value in batch_metrics.items():
+                            metric_totals[name] = metric_totals.get(name, 0.0) + value
+                            metric_counts[name] = metric_counts.get(name, 0) + 1
 
-                    loss_float = float(metric_value(loss_value))
-                    losses.append(loss_float)
-                    epoch_loss += loss_float
-                    epoch_steps += 1
-                    steps += 1
+                        loss_float = float(metric_value(loss_value))
+                        record_train_update(
+                            exp,
+                            x,
+                            loss_float,
+                            batched=self.batch_size is not None,
+                            complete_epoch=(
+                                steps_per_epoch is not None
+                                and exp.state.next_batch + 1 == steps_per_epoch
+                            ),
+                            callbacks=callbacks,
+                        )
+                        losses.append(loss_float)
+                        epoch_loss += loss_float
+                        epoch_steps += 1
+                        steps += 1
 
-                    step_metrics = {"loss": loss_float}
-                    step_metrics.update(batch_metrics)
-                    step_metrics.update(_metric_results(metrics))
-                    progress.update(1, step_metrics)
+                        step_metrics = {"loss": loss_float}
+                        step_metrics.update(batch_metrics)
+                        step_metrics.update(_metric_results(metrics))
+                        progress.update(1, step_metrics)
+                finally:
+                    cursor.close()
 
-                if epoch_steps == 0:
+                if epoch_steps == 0 and resume_batch == 0:
                     continue
 
-                epoch_metrics = {"loss": epoch_loss / epoch_steps}
-                epoch_metrics.update(_metric_results(metrics))
-                for name, total in metric_totals.items():
-                    epoch_metrics.setdefault(name, total / metric_counts[name])
+                # A resumed suffix cannot truthfully represent a full epoch mean.
+                epoch_metrics = {"loss": epoch_loss / epoch_steps} if epoch_steps and not resume_batch else {}
+                if not resume_batch:
+                    epoch_metrics.update(_metric_results(metrics))
+                    for name, total in metric_totals.items():
+                        epoch_metrics.setdefault(name, total / metric_counts[name])
 
-                if val_xy is not None:
-                    val_metrics = self._evaluate(torch, exp.model, val_xy, loss_fn, metrics, device=device)
-                    epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
-
-                progress.epoch_end(epoch + 1, epochs=self.epochs, metrics=epoch_metrics)
+                self._finish_epoch(
+                    torch,
+                    exp,
+                    epoch,
+                    epoch_metrics,
+                    val_xy,
+                    loss_fn,
+                    metrics,
+                    device,
+                    progress,
+                    target_epoch,
+                )
+        except BaseException:
+            if fresh_target:
+                try:
+                    exp.state.abandon_new_invocation(
+                        target_epoch,
+                        initial_epoch=start_epoch,
+                        initial_step=initial_step,
+                    )
+                except ValueError:
+                    pass
+            raise
         finally:
             progress.close()
             exp.model.prep_eval()
 
-        if steps == 0 and self.epochs > 0:
+        if steps == 0 and target_epoch > start_epoch and exp.state.epoch < target_epoch:
+            if fresh_target:
+                exp.state.abandon_new_invocation(
+                    target_epoch,
+                    initial_epoch=start_epoch,
+                    initial_step=initial_step,
+                )
             raise ValueError("Cannot train on an empty dataset.")
+        if exp.state.epoch < target_epoch:
+            raise ValueError("Torch training ended before its retained invocation target.")
+        exp.state.finish_invocation(target_epoch)
 
-        advance_train_state(exp, epochs=self.epochs, steps=steps)
         return losses
 
     def _capability(self, exp, name, default=None):
@@ -692,6 +780,46 @@ class Training(TrainFunction):
                 out[_metric_name(metric)] = float(metric_value(value))
         return out
 
+    def _finish_pending_epoch(self, torch, exp, val_xy, loss_fn, metrics, device, progress, target_epoch):
+        """Run a retained validation/progress postlude before later updates."""
+
+        epoch = exp.state.pending_epoch_postlude
+        if epoch is None:
+            return
+        epoch_metrics = dict(exp.state.pending_epoch_metrics or {})
+        if exp.state.pending_epoch_postlude_phase == "start":
+            if val_xy is not None:
+                val_metrics = self._evaluate(torch, exp.model, val_xy, loss_fn, metrics, device=device)
+                epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
+            exp.state.advance_epoch_postlude(epoch, "progress", metrics=epoch_metrics)
+        if exp.state.pending_epoch_postlude_phase == "progress":
+            progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
+            exp.state.finish_epoch_postlude(epoch)
+
+    def _finish_epoch(self, torch, exp, epoch, epoch_metrics, val_xy, loss_fn, metrics, device, progress, target_epoch):
+        """Complete one Torch epoch postlude without replaying its final update."""
+
+        if exp.state.epoch == epoch:
+            exp.state.finish_epoch(postlude_pending=True)
+        if exp.state.pending_epoch_postlude == epoch:
+            if exp.state.pending_epoch_postlude_phase == "start":
+                if val_xy is not None:
+                    val_metrics = self._evaluate(torch, exp.model, val_xy, loss_fn, metrics, device=device)
+                    epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
+                exp.state.advance_epoch_postlude(epoch, "progress", metrics=epoch_metrics)
+            if exp.state.pending_epoch_postlude_phase == "progress":
+                progress.epoch_end(
+                    epoch + 1,
+                    epochs=target_epoch,
+                    metrics=exp.state.pending_epoch_metrics or epoch_metrics,
+                )
+                exp.state.finish_epoch_postlude(epoch)
+            return
+        if val_xy is not None:
+            val_metrics = self._evaluate(torch, exp.model, val_xy, loss_fn, metrics, device=device)
+            epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
+        progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
+
     def _evaluate(self, torch, model, val_xy, loss_fn, metrics, *, device):
         for metric in metrics:
             _reset_metric(metric)
@@ -701,6 +829,7 @@ class Training(TrainFunction):
         steps = 0
         with torch.no_grad():
             for x, y in val_xy:
+                x, y = self.validation_preparation.prepare(x, y)
                 x = _tree_to_torch(x, torch, device=device)
                 y = _tree_to_torch(y, torch, device=device)
                 y_pred = model(x)

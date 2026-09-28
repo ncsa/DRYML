@@ -66,6 +66,8 @@ class _PreparationState:
     graph: MethodGraph | None = None
     graph_nodes: tuple[MethodGraphNode, ...] = ()
     conversion_edges: tuple[object, ...] = ()
+    training_graph_nodes: tuple[MethodGraphNode, ...] = ()
+    training_conversion_edges: tuple[object, ...] = ()
 
 
 _STATE_LOCK = Lock()
@@ -402,6 +404,8 @@ class Method(Object):
             state.graph = None
             state.graph_nodes = ()
             state.conversion_edges = ()
+            state.training_graph_nodes = ()
+            state.training_conversion_edges = ()
 
     def method_graph(self) -> MethodGraph:
         """Return this Method's inspectable local graph view without preparation.
@@ -427,6 +431,8 @@ class Method(Object):
             state.graph = None
             state.graph_nodes = ()
             state.conversion_edges = ()
+            state.training_graph_nodes = ()
+            state.training_conversion_edges = ()
 
     def _learn_graph(
         self,
@@ -524,7 +530,7 @@ class Method(Object):
         state = _state_for(self)
         with _STATE_LOCK:
             if state.graph is graph:
-                return state.graph_nodes
+                return (*state.graph_nodes, *state.training_graph_nodes)
         return (
             MethodGraphNode(0, "source", None),
             MethodGraphNode(1, "method", type(self)),
@@ -535,7 +541,73 @@ class Method(Object):
 
         state = _state_for(self)
         with _STATE_LOCK:
-            return state.conversion_edges if state.graph is graph else ()
+            if state.graph is graph:
+                return (*state.conversion_edges, *state.training_conversion_edges)
+            return ()
+
+    def _begin_training_preparation_generation(self) -> MethodGraph:
+        """Reset this invocation's dynamic training handoff facts.
+
+        Returns:
+            The inspectable Method graph receiving the invocation's train and
+            optional validation handoff facts.
+
+        Side Effects:
+            Clears only dynamic training-preparation nodes and conversion edges.
+            Existing Method selection and static graph facts remain available.
+        """
+
+        state = _state_for(self)
+        with _STATE_LOCK:
+            if state.graph is None:
+                state.graph = MethodGraph(self)
+            state.training_graph_nodes = ()
+            state.training_conversion_edges = ()
+            return state.graph
+
+    def _retain_preparation_graph(
+        self,
+        input_specs: tuple[SpecTree, ...],
+        conversion_edges: tuple[object | None, ...],
+    ) -> MethodGraph:
+        """Record already-selected local handoffs in this Method's graph state.
+
+        Args:
+            input_specs: Complete producer specifications for the prepared ports.
+            conversion_edges: Per-port direct conversion facts, or ``None`` for
+                directly compatible ports.
+
+        Returns:
+            The immutable graph view that owns the retained handoff facts.
+
+        Side Effects:
+            Replaces this Method's process-local preparation state without
+            selecting or invoking an implementation. Consumers with multi-port
+            native boundaries use this internal seam after their own explicit
+            port selection, rather than maintaining a parallel graph carrier.
+        """
+
+        input_nodes = tuple(spec_node(spec) for spec in input_specs)
+        source = MethodGraphNode(
+            occurrence=0,
+            kind="source",
+            method_type=None,
+            outputs=tuple(MethodPort("element", node) for node in input_nodes),
+        )
+        node = MethodGraphNode(
+            occurrence=1,
+            kind="method",
+            method_type=type(self),
+            inputs=tuple(MethodPort("element", node) for node in input_nodes),
+        )
+        edges = tuple(edge for edge in conversion_edges if edge is not None)
+        state = _state_for(self)
+        with _STATE_LOCK:
+            if state.graph is None:
+                state.graph = MethodGraph(self)
+            state.training_graph_nodes = (*state.training_graph_nodes, source, node)
+            state.training_conversion_edges = (*state.training_conversion_edges, *edges)
+            return state.graph
 
     def compatible_implementations(
         self,

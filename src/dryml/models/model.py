@@ -28,6 +28,27 @@ class Model(Method):
     def prep_eval(self):
         pass
 
+    def parameter_counts(self):
+        """Measure distinct native scalar parameters for this model graph.
+
+        Returns:
+            A dependency-light :class:`ParameterCounts` value containing total
+            and effective-trainable scalar counts.
+
+        Raises:
+            MeasurementUnavailableError: If a participating native model is
+                unbuilt, lazy, or has unknown parameter shape metadata.
+            TypeError: If the graph lacks one supported native backend.
+
+        Side Effects:
+            Traverses the existing DRYML object graph when this is composite, but
+            never invokes, builds, saves, or initializes a model/runtime.
+        """
+
+        from .measurements import model_parameter_counts
+
+        return model_parameter_counts(self)
+
     def infer_output_spec(self, input_spec, *additional_input_specs):
         """Infer a Model result spec from one input without executing the model.
 

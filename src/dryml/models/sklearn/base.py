@@ -146,7 +146,30 @@ class BasicTraining(TrainFunction):
         self.fit_args = tuple(fit_args)
         self.fit_kwargs = dict(fit_kwargs or {})
 
-    def __call__(self, exp):
+    def __call__(self, exp, *, callbacks=()):
+        """Fit the estimator once, rejecting unsupported intermediate safe points.
+
+        Args:
+            exp: Experiment supplying the estimator and training data.
+            callbacks: Requested optimizer-update safe points.
+
+        Returns:
+            The wrapped estimator's ``fit`` result.
+
+        Raises:
+            NotImplementedError: If intermediate callbacks are requested because
+                sklearn's one-shot fit has no truthful per-update boundary.
+
+        Side Effects:
+            Fits the estimator and advances its coarse Experiment TrainState on
+            success. It does not retain per-update exposure accounting.
+        """
+
+        from dryml.models.utils import validate_training_callbacks
+
+        callbacks = validate_training_callbacks(callbacks)
+        if callbacks:
+            raise NotImplementedError("sklearn training does not support intermediate safe points.")
         train_data = prepare_training_data(
             exp.train_data,
             num_examples=self.num_examples,

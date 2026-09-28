@@ -61,6 +61,13 @@ def test_basic_sklearn_training_updates_model_and_experiment_state():
     np.testing.assert_allclose(model(np.array([[3.0, 13.0]], dtype=np.float32)), np.array([4.0]), atol=1e-6)
 
 
+def test_sklearn_training_rejects_unsupported_intermediate_safe_points():
+    model = RegressionModel(linear_model.LinearRegression)
+
+    with pytest.raises(NotImplementedError, match="intermediate safe points"):
+        BasicTraining()(Experiment(model, BasicTraining(), train_data=_train_data()), callbacks=(lambda: None,))
+
+
 def test_experiment_save_load_restores_train_state_and_model(tmp_path):
     model = RegressionModel(linear_model.LinearRegression)
     exp = Experiment(model, BasicTraining(), train_data=_train_data())

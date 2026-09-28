@@ -4,8 +4,11 @@ __all__ = [
     "ExperimentData",
     "ExperimentDataError",
     "Model",
+    "MeasurementUnavailableError",
+    "ParameterCounts",
     "TrainFunction",
     "TrainState",
+    "TrainingObservation",
 ]
 
 
@@ -35,8 +38,11 @@ def __getattr__(name):
         "ExperimentDataError": (".experiment_data", "ExperimentDataError"),
         "AutoEncoder": (".model", "AutoEncoder"),
         "Model": (".model", "Model"),
+        "MeasurementUnavailableError": (".measurements", "MeasurementUnavailableError"),
+        "ParameterCounts": (".measurements", "ParameterCounts"),
         "TrainFunction": (".train_func", "TrainFunction"),
         "TrainState": (".train_spec", "TrainState"),
+        "TrainingObservation": (".measurements", "TrainingObservation"),
     }
     try:
         module_name, attribute = modules[name]
