@@ -13,6 +13,7 @@ Important public types:
 - `TrainFunction`
 - `TrainState`
 - `Experiment`
+- `ExperimentData`
 
 Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBoost, and other frameworks.
 
@@ -82,6 +83,45 @@ A typical experiment graph might include:
 - artifacts
 
 Because this graph is made of DRYML objects, it can be saved, queried, loaded, and reused.
+
+## Experiment History
+
+`ExperimentData` is an ordinary persisted Object containing checkpoint history for
+one default-policy projected `Experiment` `ObjectRef`. Its constructor accepts only
+that non-materializing `Ref[ObjectRef]` subject; it does not own an Experiment,
+model, or Dataset payload. Exact checkpoint and Artifact `StateRef` values remain
+in rows, so reading history never restores those referenced payloads.
+
+`ExperimentData.find(experiment, repo=..., store=...)` returns a fresh current
+history object or `None` only when the subject has no history identity. Corrupt,
+ambiguous, incomplete, or alias-less published authority raises an authority/load
+error. `get_or_create(...)` selects one writable Store, creates the first empty
+snapshot through the Store-local `experiment_data_current_v1` CAS alias, and may
+recover only one valid empty alias-less initial snapshot. It never chooses an
+arbitrary matching query result.
+
+`add_row(...)` validates an exact checkpoint and optional predecessor projection,
+then returns an opaque row key. Supplying a callback occurrence key makes identical
+retries idempotent; an omitted key generates a UUID and has no retry-identity
+guarantee. `update_row(...)` merges ordered expected Artifact inputs/results and
+supported scalar cells. It rejects conflicting immutable facts, replacement of a
+completed result, reserved scalar names, and completed status without every expected
+result. Pending or failed rows may become completed only after every expected result
+is present.
+
+Call `publish(repo=..., store=...)` after local row changes. It fresh-loads the
+current history, reapplies idempotent changes, saves an immutable snapshot, and
+CAS-advances the selected Store alias, retrying stale writers at most eight times.
+Failed publication preserves local queued changes and can leave a safe immutable
+orphan snapshot. `data` lazily imports pandas and returns a recursively detached
+DataFrame: missing cells are `pd.NA`, explicit nulls are `None`, and arbitrarily
+large integer facts remain integers. The authoritative payload is closed
+`experiment_data.json` format `dryml-experiment-data` version 1, not pandas pickle
+or pandas JSON inference.
+
+Use `ExperimentData.scalar_column(artifact, field=None)` when turning a configured
+Artifact name and optional top-level scalar field into a history column. It escapes
+backslashes and dots in components and rejects built-in history-field collisions.
 
 ## Backend Wrappers
 

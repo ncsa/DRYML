@@ -1104,6 +1104,40 @@ print(json.dumps({
     assert data["heavy"] == []
 
 
+def test_source_models_history_export_is_pandas_and_backend_lazy() -> None:
+    """Expose ExperimentData without importing its pandas analysis dependency."""
+
+    root = Path(__file__).parents[2]
+    env = dict(os.environ)
+    source_path = str(root / "src")
+    env["PYTHONPATH"] = source_path + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+import dryml.models
+from dryml.models import ExperimentData
+print(json.dumps({
+    'exported': 'ExperimentData' in dryml.models.__all__,
+    'heavy': sorted(name for name in ('pandas', 'tensorflow', 'torch') if name in sys.modules),
+    'name': ExperimentData.__name__,
+}))
+""",
+        ],
+        cwd="/tmp/dryml",
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(result.stdout) == {
+        "exported": True, "heavy": [], "name": "ExperimentData",
+    }
+
+
 def test_installed_stage_four_dataset_exports_are_optional_backend_safe(
     installed_python: Path,
 ) -> None:
