@@ -33,11 +33,11 @@ def test_sklearn_basic_mnist_classifier_with_tfds_adapter():
     model = ClassifierModel(linear_model.SGDClassifier, loss="log_loss", max_iter=_MNIST_SKLEARN_MAX_ITER, tol=None, random_state=1)
     exp = Experiment(model, BasicTraining(), train_data=train_ds, val_data=val_ds)
 
-    exp.train()
+    exp.train_fn(exp)
 
     assert categorical_accuracy(model, val_ds, batch_size=64) > 0.1
     assert Map(val_ds, Select(0), model).spec == TensorSpec("float64", shape=(10,), backend="numpy")
-    assert exp.state.phase == "trained"
+    assert exp.state.phase is None
 
 
 def test_tf_basic_mnist_classifier_with_tfds_adapter():
@@ -58,11 +58,11 @@ def test_tf_basic_mnist_classifier_with_tfds_adapter():
     )
     exp = Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
 
-    exp.train()
+    exp.train_fn(exp)
 
     assert categorical_accuracy(model, val_ds, batch_size=64) > 0.1
     assert Map(val_ds, Select(0), model).spec == TensorSpec("float32", shape=(10,), backend="tf")
-    assert exp.state.phase == "trained"
+    assert exp.state.phase is None
 
 
 def test_torch_basic_mnist_classifier_with_tfds_adapter():
@@ -85,8 +85,8 @@ def test_torch_basic_mnist_classifier_with_tfds_adapter():
     exp = Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
 
     with default_repo(Repo()):
-        exp.train()
+        exp.train_fn(exp)
 
     assert categorical_accuracy(model, val_ds, batch_size=64) > 0.1
     assert Map(val_ds, Select(0), model).spec == TensorSpec("float32", shape=(10,), backend="torch")
-    assert exp.state.phase == "trained"
+    assert exp.state.phase is None

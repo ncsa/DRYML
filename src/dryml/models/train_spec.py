@@ -5,6 +5,8 @@ from dataclasses import MISSING, dataclass, fields
 from math import isfinite
 from typing import ClassVar
 
+from dryml.core.reference_values import StateRef
+
 from .measurements import TrainingObservation
 
 
@@ -20,7 +22,9 @@ class TrainState:
     validation/progress/native-callback work remaining after a normalized final
     update. ``pending_epoch_metrics`` preserves completed validation facts for a
     retrying progress boundary. U9 owns publication of ``pending_observation``
-    to ExperimentData.
+    to ExperimentData. Its accompanying time, predecessor, attempt, and terminal
+    fields are captured before the managed checkpoint, so retry reuses one history
+    occurrence rather than assigning fresh facts after publication.
     """
 
     initial: ClassVar[str | None] = None
@@ -41,6 +45,11 @@ class TrainState:
     pending_epoch_metrics: dict[str, float] | None = None
     safe_point_sequence: int = 0
     pending_observation: TrainingObservation | None = None
+    pending_observation_time: int | None = None
+    pending_observation_prev_state_ref: StateRef | None = None
+    pending_observation_prev_row_key: str | None = None
+    pending_observation_attempt_id: str | None = None
+    pending_observation_terminal: bool = False
 
     @property
     def is_initial(self) -> bool:
@@ -74,6 +83,11 @@ class TrainState:
                 and self.pending_epoch_metrics == other.pending_epoch_metrics
                 and self.safe_point_sequence == other.safe_point_sequence
                 and self.pending_observation == other.pending_observation
+                and self.pending_observation_time == other.pending_observation_time
+                and self.pending_observation_prev_state_ref == other.pending_observation_prev_state_ref
+                and self.pending_observation_prev_row_key == other.pending_observation_prev_row_key
+                and self.pending_observation_attempt_id == other.pending_observation_attempt_id
+                and self.pending_observation_terminal == other.pending_observation_terminal
             )
         if isinstance(other, str) or other is None:
             return self.phase == other
@@ -202,6 +216,23 @@ class TrainState:
         observation = values["pending_observation"]
         if observation is not None and type(observation) is not TrainingObservation:
             raise TypeError("TrainState pending_observation must be a TrainingObservation or None.")
+        observation_time = counter("pending_observation_time", nullable=True)
+        predecessor = values["pending_observation_prev_state_ref"]
+        if predecessor is not None and type(predecessor) is not StateRef:
+            raise TypeError("TrainState pending_observation_prev_state_ref must be a StateRef or None.")
+        predecessor_key = values["pending_observation_prev_row_key"]
+        if predecessor_key is not None and (type(predecessor_key) is not str or not predecessor_key):
+            raise TypeError("TrainState pending_observation_prev_row_key must be a nonempty string or None.")
+        attempt_id = values["pending_observation_attempt_id"]
+        if attempt_id is not None and (type(attempt_id) is not str or not attempt_id):
+            raise TypeError("TrainState pending_observation_attempt_id must be a nonempty string or None.")
+        if type(values["pending_observation_terminal"]) is not bool:
+            raise TypeError("TrainState pending_observation_terminal must be an exact bool.")
+        if observation is None:
+            if any(value is not None for value in (observation_time, predecessor, predecessor_key, attempt_id)):
+                raise ValueError("TrainState pending observation details require an observation.")
+            if values["pending_observation_terminal"]:
+                raise ValueError("TrainState terminal observation marker requires an observation.")
 
     def advance_epoch(self, n: int = 1):
         self.epoch += n

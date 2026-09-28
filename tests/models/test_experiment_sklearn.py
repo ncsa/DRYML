@@ -1,11 +1,13 @@
 import numpy as np
 import pytest
 
-from dryml.core import Repo
+from dryml.core import Repo, StateRef
+from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArrayDataset
 from dryml.models import Experiment
 from dryml.models.sklearn import BasicTraining, ClassifierModel, Model, RegressionModel
+from dryml.managed import ManagedConfig
 
 
 linear_model = pytest.importorskip("sklearn.linear_model")
@@ -42,14 +44,16 @@ def _train_data():
     return ArrayDataset((x, y))
 
 
-def test_basic_sklearn_training_updates_model_and_experiment_state():
+def test_basic_sklearn_training_updates_model_and_experiment_state(tmp_path):
     model = RegressionModel(linear_model.LinearRegression)
-    exp = Experiment(model, BasicTraining(), train_data=_train_data())
+    repo = Repo(DirStore(tmp_path / "store"))
+    exp = Experiment(model, BasicTraining(), train_data=_train_data(), repo=repo)
 
-    result = exp.train()
+    result = exp.train(managed=ManagedConfig(state_repo=repo))
 
     assert model.obj is model.estimator
-    assert result is model.estimator
+    assert isinstance(result, StateRef)
+    assert result == exp.train.status(state_repo=repo).final_state_ref
     assert exp.state.epoch == 1
     assert exp.state.step == 3
     assert exp.state.phase == "trained"
@@ -70,10 +74,9 @@ def test_sklearn_training_rejects_unsupported_intermediate_safe_points():
 
 def test_experiment_save_load_restores_train_state_and_model(tmp_path):
     model = RegressionModel(linear_model.LinearRegression)
-    exp = Experiment(model, BasicTraining(), train_data=_train_data())
-    exp.train()
-
     repo = Repo(stores=tmp_path)
+    exp = Experiment(model, BasicTraining(), train_data=_train_data(), repo=repo)
+    exp.train(managed=ManagedConfig(state_repo=repo))
     state = repo.save_object(exp, alias="exp")
     repo.set_state_alias("checkpoint", state)
     repo.close(flush=True)

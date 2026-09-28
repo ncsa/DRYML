@@ -116,6 +116,44 @@ def _admit_materialization_class(cls: type) -> None:
         )
 
 
+def _normalize_definition_arguments(cls: type, args: tuple, kwargs: dict) -> tuple[tuple, dict]:
+    """Apply one optional class-owned inert definition normalization hook.
+
+    The hook is intentionally narrow: only an Object class may provide it, and it
+    receives constructor values before every public ``defn``/``d`` or live-object
+    canonicalization boundary. It must return a positional tuple and keyword dict
+    without materializing Object payloads.
+
+    Args:
+        cls: Object class owning the optional normalization hook.
+        args: Unnormalized positional constructor values.
+        kwargs: Unnormalized keyword constructor values.
+
+    Returns:
+        Normalized positional and keyword constructor values.
+
+    Raises:
+        TypeError: If a hook returns an unsupported result shape.
+
+    Side Effects:
+        Runs only the class hook when present. Core does not interpret the values
+        or import an owning domain package.
+    """
+
+    normalizer = getattr(cls, "__dryml_normalize_definition_arguments__", None)
+    if normalizer is None:
+        return args, kwargs
+    normalized = normalizer(args, kwargs)
+    if (
+            not isinstance(normalized, tuple) or len(normalized) != 2
+            or not isinstance(normalized[0], tuple) or not isinstance(normalized[1], dict)):
+        raise TypeError(
+            "__dryml_normalize_definition_arguments__ must return a "
+            "(tuple, dict) pair."
+        )
+    return normalized
+
+
 class Dryml(ABCMeta):
     """Capture Object construction calls and apply the active repository mode."""
 
@@ -196,7 +234,6 @@ class Dryml(ABCMeta):
         session_config = get_config()
         object_mode = _construction_object_mode()
         active_repo = repo if repo is not None else session_config.repo
-
         if __cdef__ is None and object_mode == "definition":
             defn = dryml_cls.defn(*args, **kwargs)
             return defn
@@ -206,6 +243,9 @@ class Dryml(ABCMeta):
 
         if __cdef__ is None and object_mode == "selector":
             return dryml_cls.defn(*args, **kwargs).as_selector()
+
+        if __cdef__ is None:
+            args, kwargs = _normalize_definition_arguments(dryml_cls, args, kwargs)
 
         _admit_materialization_class(dryml_cls)
 
@@ -362,7 +402,26 @@ class Object(metaclass=Dryml):
 
     @classmethod
     def defn(cls, *args, **kwargs) -> "Definition":
+        """Return this class's normalized inert constructor definition.
+
+        Args:
+            *args: Constructor positional values.
+            **kwargs: Constructor keyword values.
+
+        Returns:
+            A soft :class:`Definition` with any class-owned canonicalization
+            applied exactly as for direct live construction.
+
+        Raises:
+            TypeError: If the class-owned normalizer rejects its public inputs.
+
+        Side Effects:
+            Runs only the class-owned inert normalizer. It never materializes the
+            Object or resolves referenced payloads.
+        """
+
         from .definition import Definition
+        args, kwargs = _normalize_definition_arguments(cls, args, kwargs)
         return Definition(cls, *args, **kwargs)
 
     # Alias for defn

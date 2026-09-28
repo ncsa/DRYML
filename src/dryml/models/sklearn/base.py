@@ -124,6 +124,8 @@ class RegressionModel(Model):
 class BasicTraining(TrainFunction):
     """Fit an sklearn-style estimator from an Experiment's train_data."""
 
+    supports_safe_points = False
+
     def __init__(
         self,
         *,

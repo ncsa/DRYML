@@ -186,6 +186,46 @@ A typical experiment graph might include:
 
 Because this graph is made of DRYML objects, it can be saved, queried, loaded, and reused.
 
+`Experiment.train(managed=...)` is a resumable managed operation whose successful
+result is the exact terminal `StateRef`, not the trainer's backend return. It adds
+one invocation-local observer ahead of caller `ManagedConfig.callbacks` without
+changing the caller's configuration or callback list. The observer uses this fixed
+order for every training safe point and for the terminal state:
+
+1. The managed lifecycle publishes and associates the exact Experiment checkpoint.
+2. Experiment writes or reopens its retry-stable pending `ExperimentData` row.
+3. It binds every Artifact recipe's `this` to that checkpoint, then evaluates or
+   recovers Artifacts in configured order, publishing each completed result.
+4. It publishes the row's `completed` status. An Artifact failure stops later
+   Artifacts and attempts to record `failed` status with completed predecessors.
+5. Caller observers run in their original order; a requested interruption is then
+   decided by managed lifecycle handling.
+
+`this.model` and `this.test_data` therefore come from the exact saved Experiment
+checkpoint. `test_data` must be an exact saved Dataset reference; a missing value
+or invalid recipe binding fails rather than falling back to training or validation
+data. Empty Artifact configuration still creates a completed facts-only row.
+
+Before changing training phase, model, progress, or checkpoint state,
+`Experiment.train` preflights every inert Artifact recipe. Active roots may only
+be `this`; the framework validates the symbolic checkpoint binding, concrete
+Artifact definition, and a resumable managed `compute` operation with no required
+ordinary arguments and a final `StateRef` receipt. This validation neither builds
+an Artifact nor loads or computes model/Dataset payloads. Fully resolved recipes
+with no `this` root are retained unchanged.
+
+Pending observations retain their occurrence key, UTC-millisecond timestamp,
+trajectory predecessor, and terminal marker in `TrainState` before checkpoint
+publication. Retrying the same checkpoint updates that row instead of duplicating
+it; revisiting the same StateRef through a later trajectory creates a distinct row.
+History remains readable if a referenced checkpoint payload later becomes
+unavailable, but explicitly loading that checkpoint still fails.
+
+For completed `Value` Artifacts, history scalar columns retain finite Python
+scalars and lossless zero-dimensional native values. Conversion is bounded and
+lazy (`item()` and, where needed, zero-dimensional `numpy()`); non-scalar values
+are omitted from scalar columns while their Artifact StateRef remains available.
+
 ## Experiment History
 
 `ExperimentData` is an ordinary persisted Object containing checkpoint history for
@@ -193,6 +233,8 @@ one default-policy projected `Experiment` `ObjectRef`. Its constructor accepts o
 that non-materializing `Ref[ObjectRef]` subject; it does not own an Experiment,
 model, or Dataset payload. Exact checkpoint and Artifact `StateRef` values remain
 in rows, so reading history never restores those referenced payloads.
+The closed reference codec also retains supported frozen dense constructor arrays
+losslessly, without opening the referenced checkpoint payload.
 
 `ExperimentData.find(experiment, repo=..., store=...)` returns a fresh current
 history object or `None` only when the subject has no history identity. Corrupt,

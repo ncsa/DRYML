@@ -8,8 +8,10 @@ import pytest
 from dryml import F
 from dryml.core import Object, Repo
 from dryml.core.query import field
+from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
+from dryml.managed import ManagedConfig
 from dryml.models import AutoEncoder, Experiment, TrainState
 
 
@@ -86,7 +88,7 @@ def test_tf_basic_training_updates_experiment_state():
     train_fn = BasicTraining(optimizer=optimizer, loss=loss, epochs=1, batch_size=2, verbose=0)
     exp = Experiment(model, train_fn, train_data=ds)
 
-    history = exp.train()
+    history = train_fn(exp)
 
     assert model.obj is model.mdl
     assert optimizer.obj is not None
@@ -94,8 +96,32 @@ def test_tf_basic_training_updates_experiment_state():
     assert exp.state.epoch == 1
     assert exp.state.step == 2
     assert exp.state.examples_seen == 4
-    assert exp.state.phase == "trained"
+    assert exp.state.phase is None
     assert float(optimizer.obj.learning_rate.numpy()) == pytest.approx(0.01)
+
+
+def test_tf_managed_experiment_smoke_returns_its_terminal_receipt(tmp_path):
+    """A tiny CPU-managed Keras run publishes one terminal Experiment receipt."""
+
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    dataset = ArrayDataset((
+        np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32),
+        np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32),
+    ))
+    model = Model(TinyKerasModel)
+    train_fn = BasicTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01),
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=2, verbose=0,
+    )
+    exp = Experiment(model, train_fn, train_data=dataset, repo=repo)
+
+    final = exp.train(managed=ManagedConfig(state_repo=repo))
+
+    assert final == exp.train.status(state_repo=repo).final_state_ref
+    assert exp.state.phase == TrainState.trained
+    assert exp.state.examples_seen == 4
 
 
 def test_tf_model_and_optimizer_state_ref_round_trip(tmp_path):
@@ -121,7 +147,7 @@ def test_tf_model_and_optimizer_state_ref_round_trip(tmp_path):
         repo=repo,
     )
     exp = Experiment(model, train_fn, train_data=ds, repo=repo)
-    exp.train()
+    exp.train_fn(exp)
     expected_predictions = model.obj(tf.convert_to_tensor(x)).numpy()
     expected_iterations = int(optimizer.obj.iterations.numpy())
     expected_optimizer = [value.numpy().copy() for value in optimizer.obj.variables]
@@ -196,15 +222,15 @@ def test_tf_low_level_training_resumes_model_and_optimizer_state(tmp_path):
         train_data=ArrayDataset((x, y), repo=repo),
         repo=repo,
     )
-    exp.train()
+    exp.train_fn(exp)
     state = repo.save_object(exp, deep_capture=True)
 
-    exp.train()
+    exp.train_fn(exp)
     expected_predictions = model(tf.convert_to_tensor(x)).numpy()
     expected_optimizer = [value.numpy().copy() for value in optimizer.obj.variables]
 
     loaded = Repo(stores=tmp_path).load_state_ref(state, reuse_live="never")
-    loaded.train()
+    loaded.train_fn(loaded)
     loaded_predictions = loaded.model(tf.convert_to_tensor(x)).numpy()
     loaded_optimizer = loaded.train_fn.optimizer.obj.variables
 
@@ -527,7 +553,7 @@ def test_tf_basic_training_builds_keras_adapter_for_autoencoder():
         loss=Wrapper(tf.keras.losses.MeanSquaredError),
     )
 
-    history = exp.train()
+    history = train_fn(exp)
 
     assert history is not None
     assert exp.state.epoch == 1
@@ -552,7 +578,7 @@ def test_tf_basic_training_repeats_finite_dataset_for_multiple_epochs():
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        history = exp.train()
+        history = train_fn(exp)
 
     assert len(history.epoch) == 2
     assert exp.state.epoch == 2
@@ -647,10 +673,10 @@ def test_tf_interrupt_at_step_32_resumes_exact_remaining_epoch(tmp_path):
         interrupted.train_fn(interrupted, callbacks=(interrupt_at_32,))
     checkpoint = repo.save_object(interrupted, deep_capture=True)
     resumed = Repo(stores=tmp_path).load_state_ref(checkpoint, reuse_live="never")
-    remaining_losses = resumed.train()
+    remaining_losses = resumed.train_fn(resumed)
 
     baseline = _tf_accounting_experiment()
-    baseline_losses = baseline.train()
+    baseline_losses = baseline.train_fn(baseline)
 
     assert seen == [(step, 0, step) for step in range(1, 33)]
     assert len(remaining_losses) == 32
@@ -686,7 +712,7 @@ def test_tf_trainers_accept_a_legacy_exhausted_saved_epoch_without_empty_data_er
         exp.state.next_batch = 2
         exp.state.target_epoch = 1
 
-        result = exp.train()
+        result = exp.train_fn(exp)
 
         assert exp.state.epoch == 1
         assert exp.state.next_batch == 0
@@ -869,7 +895,7 @@ def test_tf_training_prepares_cross_backend_data_before_model_invocation(monkeyp
         train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
     )
 
-    exp.train()
+    exp.train_fn(exp)
 
     assert events[:2] == ["prepare", "model"]
 
@@ -970,7 +996,7 @@ def test_keras_rejects_untruthful_objective_weights_before_training_mutation():
     )
 
     with pytest.raises(ValueError, match="class_weight"):
-        exp.train()
+        exp.train_fn(exp)
 
     assert model.obj.built is False
     assert exp.state.target_epoch is None
@@ -1003,7 +1029,7 @@ def test_keras_retains_exact_static_and_dynamic_regularized_objectives():
             train_data=ArrayDataset((x, y)),
         )
 
-        exp.train()
+        exp.train_fn(exp)
 
         assert exp.state.loss_numerator / exp.state.loss_denominator == pytest.approx(expected_loss)
         assert (exp.state.step, exp.state.examples_seen) == (1, 1)
@@ -1023,7 +1049,7 @@ def test_keras_retains_exact_static_and_dynamic_regularized_objectives():
         1.25,
     )
     assert dynamic_model.obj.regularizer.normalizer.moving_mean.numpy()[0] != 0.0
-    assert dynamic_exp.state.phase == "trained"
+    assert dynamic_exp.state.phase is None
 
 
 def test_keras_rejects_grouped_updates_before_mutation(monkeypatch):
@@ -1041,7 +1067,7 @@ def test_keras_rejects_grouped_updates_before_mutation(monkeypatch):
         train_data=data,
     )
     with pytest.raises(ValueError, match="steps_per_execution"):
-        exp.train()
+        exp.train_fn(exp)
     assert model.obj.built is False
     assert int(optimizer.obj.iterations.numpy()) == 0
     assert exp.state.target_epoch is None
@@ -1056,7 +1082,7 @@ def test_keras_rejects_grouped_updates_before_mutation(monkeypatch):
         train_data=data,
     )
     with pytest.raises(ValueError, match="gradient accumulation"):
-        accumulating.train()
+        accumulating.train_fn(accumulating)
     assert int(accumulation_optimizer.obj.iterations.numpy()) == 0
     assert accumulating.state.target_epoch is None
 
@@ -1153,7 +1179,7 @@ def test_keras_zero_epoch_does_not_emit_native_lifecycle_callbacks():
     trainer.callbacks = (Native(),)
     exp = Experiment(Model(TinyKerasModel), trainer, train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))))
 
-    exp.train()
+    exp.train_fn(exp)
 
     assert events == []
     assert exp.state.target_epoch is None
@@ -1168,7 +1194,7 @@ def test_tf_setup_failure_and_validation_failure_leave_only_recoverable_targets(
     )
     exp = Experiment(Model(TinyKerasModel), trainer)
     with pytest.raises(ValueError, match="train_data"):
-        exp.train()
+        exp.train_fn(exp)
     assert exp.state.target_epoch is None
 
     data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
@@ -1185,15 +1211,15 @@ def test_tf_setup_failure_and_validation_failure_leave_only_recoverable_targets(
 
     monkeypatch.setattr(trainer, "_evaluate", fail_once)
     with pytest.raises(RuntimeError, match="validation failed"):
-        exp.train()
+        exp.train_fn(exp)
     assert (exp.state.epoch, exp.state.next_batch, exp.state.pending_epoch_postlude) == (1, 0, 0)
     assert exp.state.target_epoch == 1
     assert exp.state.step == 2
 
-    exp.train()
+    exp.train_fn(exp)
     assert exp.state.target_epoch is None
     assert exp.state.step == 2
-    exp.train()
+    exp.train_fn(exp)
     assert exp.state.step == 4
 
 
@@ -1211,12 +1237,12 @@ def test_keras_early_stopping_completes_a_shortened_target():
         train_data=data,
     )
 
-    exp.train()
+    exp.train_fn(exp)
 
     assert 0 < exp.state.epoch < 5
     assert exp.state.target_epoch is None
     previous_steps = exp.state.step
-    exp.train()
+    exp.train_fn(exp)
     assert exp.state.step > previous_steps
 
 
@@ -1275,13 +1301,13 @@ def test_keras_unknown_stream_retains_validation_postlude_before_failure():
     )
 
     with pytest.raises(RuntimeError, match="validation postlude"):
-        exp.train()
+        exp.train_fn(exp)
     assert (exp.state.epoch, exp.state.next_batch, exp.state.pending_epoch_postlude) == (1, 0, 0)
     assert exp.state.pending_epoch_postlude_phase == "start"
     iterations = int(optimizer.obj.iterations.numpy())
     assert iterations > 0
 
-    exp.train()
+    exp.train_fn(exp)
     assert exp.state.target_epoch is None
     assert exp.state.pending_epoch_postlude is None
     assert int(optimizer.obj.iterations.numpy()) == iterations
@@ -1356,12 +1382,12 @@ def test_tf_unknown_stream_retains_validation_metrics_across_progress_retry(monk
     monkeypatch.setattr(trainer, "_evaluate", lambda *args: evaluations.append("validation") or {"loss": 3.0})
 
     with pytest.raises(RuntimeError, match="progress postlude"):
-        exp.train()
+        exp.train_fn(exp)
     assert evaluations == ["validation"]
     retained_metrics = exp.state.pending_epoch_metrics
     assert retained_metrics is not None
     assert retained_metrics["val_loss"] == 3.0
 
-    exp.train()
+    exp.train_fn(exp)
     assert evaluations == ["validation"]
     assert Progress.received == [retained_metrics, retained_metrics]

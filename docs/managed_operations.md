@@ -227,6 +227,22 @@ associated checkpoint, records `callback_error` best-effort, and is re-raised;
 there is no retry or rollback of external effects. Final completion is not a
 callback boundary.
 
+`Experiment.train` is the scoped exception to the usual absence of a terminal
+callback boundary: it explicitly stages and checkpoints its terminal training
+state inside its own managed body. Its private observer runs first after that
+checkpoint is published and associated, writes the pending ExperimentData row,
+then evaluates checkpoint-bound Artifacts in declaration order and records their
+terminal row status. Only then do caller callbacks run in their original order,
+followed by the normal interruption decision. This is Experiment policy, not a
+generic managed final-hook protocol. A callback failure retains the associated
+checkpoint and any independently published Artifact/history state; it never
+reports overall managed completion.
+
+Experiment validates its configured Artifact quotations before it changes training
+phase or invokes the trainer. This is Experiment-owned inert definition checking,
+not a managed lifecycle hook: it may inspect recipe roots and managed declarations
+but does not construct Artifacts, materialize training inputs, or publish state.
+
 Status, interruption, resume, and recovery locate retained StateRefs across the
 caller-supplied state Repo rather than re-evaluating current routing. One complete,
 non-conflicting exact closure is sufficient; identical replicas are accepted, but

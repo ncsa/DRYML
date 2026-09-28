@@ -7,6 +7,8 @@ imports pandas only when callers request tabular analysis.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import json
 import math
@@ -173,6 +175,7 @@ def _decode_ref(value: object, *, nullable: bool = False) -> StateRef | None:
 def _reference_to_json(value: object) -> dict[str, object]:
     """Encode a strict StateRef.to_data tree without relying on JSON inference."""
 
+    from dryml.core.freeze import FrozenNDArray
     from dryml.core.symbol import ImportRef
 
     if isinstance(value, ImportRef):
@@ -187,6 +190,15 @@ def _reference_to_json(value: object) -> dict[str, object]:
         return {"type": "float", "value": value}
     if type(value) is str:
         return {"type": "str", "value": value}
+    if isinstance(value, FrozenNDArray):
+        if value.dtype.hasobject or value.dtype.fields is not None:
+            raise ExperimentDataError("StateRef records cannot encode object or structured frozen arrays.")
+        return {
+            "type": "frozen_ndarray",
+            "dtype": value.dtype.str,
+            "shape": list(value.shape),
+            "bytes": base64.b64encode(value.tobytes(order="C")).decode("ascii"),
+        }
     if isinstance(value, list):
         return {"type": "list", "items": [_reference_to_json(item) for item in value]}
     if isinstance(value, Mapping):
@@ -204,6 +216,7 @@ def _reference_to_json(value: object) -> dict[str, object]:
 def _reference_from_json(value: object) -> object:
     """Rebuild the exact StateRef.to_data tree before strict reference decoding."""
 
+    from dryml.core.freeze import FrozenNDArray
     from dryml.core.symbol import ImportRef
 
     if not isinstance(value, Mapping) or not isinstance(value.get("type"), str):
@@ -222,8 +235,27 @@ def _reference_from_json(value: object) -> object:
     if tag == "import_ref" and set(value) == {"type", "module", "qualname"}:
         try:
             return ImportRef(value["module"], value["qualname"])
-        except (TypeError, ValueError) as error:
+        except (binascii.Error, TypeError, ValueError) as error:
             raise ExperimentDataError("StateRef record has an invalid import reference.") from error
+    if tag == "frozen_ndarray" and set(value) == {"type", "dtype", "shape", "bytes"}:
+        if type(value["dtype"]) is not str or not isinstance(value["shape"], list) or type(value["bytes"]) is not str:
+            raise ExperimentDataError("Frozen array StateRef record has invalid fields.")
+        if any(type(size) is not int or size < 0 for size in value["shape"]):
+            raise ExperimentDataError("Frozen array StateRef shape is invalid.")
+        try:
+            import numpy as np
+
+            dtype = np.dtype(value["dtype"])
+            raw = base64.b64decode(value["bytes"], validate=True)
+            if dtype.hasobject or dtype.fields is not None or dtype.str != value["dtype"]:
+                raise ValueError("unsupported dtype")
+            size = math.prod(value["shape"])
+            if size * dtype.itemsize != len(raw):
+                raise ValueError("byte length")
+            array = np.frombuffer(raw, dtype=dtype).reshape(tuple(value["shape"]))
+        except (TypeError, ValueError) as error:
+            raise ExperimentDataError("Frozen array StateRef record is malformed.") from error
+        return FrozenNDArray.from_array(array)
     if tag == "list" and set(value) == {"type", "items"} and isinstance(value["items"], list):
         return [_reference_from_json(item) for item in value["items"]]
     if tag == "dict" and set(value) == {"type", "items"} and isinstance(value["items"], list):

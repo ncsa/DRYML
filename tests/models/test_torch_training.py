@@ -6,6 +6,7 @@ from dryml import F
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
 from dryml.core import Repo
+from dryml.managed import ManagedConfig
 from dryml.models import AutoEncoder, Experiment
 
 
@@ -45,13 +46,13 @@ def test_torch_basic_training_updates_experiment_state():
     )
     exp = Experiment(model, train_fn, train_data=ds)
 
-    losses = exp.train()
+    losses = train_fn(exp)
 
     assert len(losses) == 4
     assert exp.state.epoch == 2
     assert exp.state.step == 4
     assert exp.state.examples_seen == 8
-    assert exp.state.phase == "trained"
+    assert exp.state.phase is None
     assert optimizer.obj is not None
     assert optimizer.obj.param_groups[0]["lr"] == 0.01
     assert get_default_repo() is None
@@ -77,7 +78,7 @@ def test_torch_model_and_optimizer_state_ref_round_trip(tmp_path):
         repo=repo,
     )
     exp = Experiment(model, train_fn, train_data=ds, repo=repo)
-    exp.train()
+    exp.train(managed=ManagedConfig(state_repo=repo))
     expected_model = {
         key: value.detach().clone() for key, value in model.obj.state_dict().items()
     }
@@ -284,12 +285,12 @@ def test_torch_autoencoder_optimizer_targets_composite_model():
         1 for _ in decoder.trainable_parameters("torch")
     )
     actual_params = sum(len(group["params"]) for group in optimizer.obj.param_groups)
-    losses = exp.train()
+    losses = train_fn(exp)
 
     assert not hasattr(model, "trainable_parameters")
     assert actual_params == expected_params
     assert len(losses) == 4
-    assert exp.state.phase == "trained"
+    assert exp.state.phase is None
 
 
 def test_torch_optimizer_targets_pipe_graph_without_pipe_trainable_parameters():
@@ -336,7 +337,7 @@ def test_torch_training_restore_skips_completed_batch_and_keeps_exposure(tmp_pat
     checkpoint = repo.save_object(exp, deep_capture=True)
     restored = Repo(stores=tmp_path).load_state_ref(checkpoint, reuse_live="never")
 
-    restored.train()
+    restored.train_fn(restored)
 
     assert restored.state.step == 2
     assert restored.state.examples_seen == 4
@@ -380,10 +381,10 @@ def test_torch_interrupt_at_step_32_resumes_exact_remaining_epoch(tmp_path):
         interrupted.train_fn(interrupted, callbacks=(interrupt_at_32,))
     checkpoint = repo.save_object(interrupted, deep_capture=True)
     resumed = Repo(stores=tmp_path).load_state_ref(checkpoint, reuse_live="never")
-    remaining_losses = resumed.train()
+    remaining_losses = resumed.train_fn(resumed)
 
     baseline = _torch_accounting_experiment()
-    baseline_losses = baseline.train()
+    baseline_losses = baseline.train_fn(baseline)
 
     assert seen == [(step, 0, step) for step in range(1, 33)]
     assert len(remaining_losses) == 32
@@ -404,7 +405,7 @@ def test_torch_accepts_a_legacy_exhausted_saved_epoch_without_empty_data_error()
     exp.state.next_batch = 2
     exp.state.target_epoch = 1
 
-    losses = exp.train()
+    losses = exp.train_fn(exp)
 
     assert losses == []
     assert exp.state.epoch == 1
@@ -507,7 +508,7 @@ def test_torch_training_prepares_cross_backend_data_before_model_invocation(monk
         train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
     )
 
-    exp.train()
+    exp.train_fn(exp)
 
     assert events[:2] == ["prepare", "model"]
 
@@ -585,7 +586,7 @@ def test_torch_training_plans_cross_backend_handoffs_once(monkeypatch):
         train_data=ArrayDataset((np.zeros((3, 1), dtype=np.float32), np.zeros((3, 1), dtype=np.float32))),
     )
 
-    exp.train()
+    trainer(exp)
 
     assert len(planned) == 2
     assert len(trainer.training_preparation.conversion_edges) == 2
@@ -633,12 +634,12 @@ def test_torch_unknown_stream_retains_validation_metrics_across_progress_retry(m
     monkeypatch.setattr(trainer, "_evaluate", lambda *args, **kwargs: evaluations.append("validation") or {"loss": 3.0})
 
     with pytest.raises(RuntimeError, match="progress postlude"):
-        exp.train()
+        trainer(exp)
     assert evaluations == ["validation"]
     retained_metrics = exp.state.pending_epoch_metrics
     assert retained_metrics is not None
     assert retained_metrics["val_loss"] == 3.0
 
-    exp.train()
+    trainer(exp)
     assert evaluations == ["validation"]
     assert Progress.received == [retained_metrics, retained_metrics]
