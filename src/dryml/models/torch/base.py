@@ -6,9 +6,10 @@ import weakref
 from dataclasses import replace
 
 from dryml.core.factory import FactorySpec
+from dryml.core.backend import Backend
 from dryml.core.object import Serializable
 from dryml.core.repo import manage_repo
-from dryml.core.tensor_spec import TensorSpec, iter_specs, match_input_batch
+from dryml.core.tensor_spec import TensorSpec, iter_specs, map_spec_tree, match_input_batch
 from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.data import Batch, Map, Project, Select
@@ -240,6 +241,8 @@ class Model(BaseModel, Serializable):
     recognized static module metadata can infer an output spec.
     """
 
+    native_backend = "torch"
+
     def __init__(self, cls, *args, output_spec=None, **kwargs):
         self.cls = validate_class(cls)
         self.module_args = args
@@ -257,19 +260,29 @@ class Model(BaseModel, Serializable):
         x = _tree_to_torch(x, torch, device=device)
         return self.obj(x, *args, **kwargs)
 
-    @traits()
+    def _runtime_selection_facts(self, args, kwargs):
+        """Select Torch's legacy eager wrapper path without value probing.
+
+        Spec-driven preparation still declares and applies required data-boundary
+        handoffs before this raw model body is reached.
+        """
+
+        del args, kwargs
+        return Backend.torch, None
+
+    @traits(backend="torch")
     def raw_call(self, x, *args, **kwargs):
         """Invoke the raw module when direct-call batching intent is unknown."""
 
         return self._call_raw(x, *args, **kwargs)
 
-    @traits(batch_mode="batched")
+    @traits(backend="torch", batch_mode="batched")
     def batched_call(self, x, *args, **kwargs):
         """Invoke one selected already-batched module input without adaptation."""
 
         return self._call_raw(x, *args, **kwargs)
 
-    @traits(batch_mode="element")
+    @traits(backend="torch", batch_mode="element")
     def element_call(self, x, *args, **kwargs):
         """Invoke an element directly when no supplied spec selected adaptation."""
 
@@ -410,7 +423,10 @@ class Model(BaseModel, Serializable):
         if additional_input_specs:
             raise TypeError("Torch Model accepts exactly one input specification.")
         if self.output_spec is not None:
-            return super().infer_output_spec(input_spec)
+            return map_spec_tree(super().infer_output_spec(input_spec), lambda spec: TensorSpec(
+                spec.dtype, shape=spec.shape, batch=spec.batch, backend="torch",
+                layout=spec.layout, axis_names=spec.axis_names, batch_axis_name=spec.batch_axis_name,
+            ))
 
         import torch
         if not isinstance(input_spec, TensorSpec) or input_spec.shape is None:

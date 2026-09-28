@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import Dynamic, SpecTree, batch_spec_tree, unbatch_spec_tree
-from dryml.data.collate import default_collate
+from dryml.data.collate import collate_for_spec, default_collate
 from dryml.data.dataset import Dataset, DatasetCursor, DatasetExhaustedError
-from dryml.data.split import default_split
+from dryml.data.split import default_split, split_for_spec
 
 
 def _as_cardinality(value):
@@ -68,7 +68,10 @@ class Batch(Dataset):
         return batch
 
     def _resolve_collate(self, first_batch):
-        return default_collate
+        """Select one declared-backend collator, retaining generic fallback."""
+
+        del first_batch
+        return collate_for_spec(self.src.spec) or default_collate
 
 
 class Unbatch(Dataset):
@@ -87,7 +90,7 @@ class Unbatch(Dataset):
     def _resolve_split(self):
         """Return the selected split invoker once per qualified graph cursor."""
 
-        return default_split
+        return split_for_spec(self.src.spec) or default_split
 
 
 class Take(Dataset):

@@ -51,6 +51,16 @@ model = Model(output_spec=TensorSpec("float32", shape=(10,)))
 
 When the input spec is batched and the output spec is unbatched, DRYML can batch the output spec automatically. A non-dropping data batch has dynamic batch-size metadata because its final batch may be shorter than the requested size. TensorFlow and PyTorch selected element calls add and remove a one-item batch axis; selected batched calls do not add a second axis, while ordinary direct calls retain the wrapper's raw model behavior.
 
+Prepared TensorFlow and PyTorch models declare their native input and output
+backends. A dense Dataset or inference-data boundary can therefore retain one
+visible CPU host-copy handoff before invocation instead of relying on an eager
+wrapper conversion. This applies only to data/inference values. TensorFlow/Torch
+model-component composition never inserts a bridge: mixed-framework
+`AutoEncoder` preparation fails before source acquisition. Same-framework
+AutoEncoder calls remain native and retain connected gradients. TensorFlow tape
+participation cannot generally be detected, so invoking Dataset preprocessing as
+a differentiable or compiled body is unsupported.
+
 ## AutoEncoder
 
 `AutoEncoder` composes an encoder model and decoder model.

@@ -6,6 +6,65 @@ from typing import Any
 import numpy as np
 
 from dryml.core.utils.types import is_namedtuple
+from dryml.core.tensor_spec import iter_specs
+
+
+def collate_for_spec(spec):
+    """Return one native dense collator for a uniform declared backend.
+
+    Args:
+        spec: Declared element specification tree for one Batch source.
+
+    Returns:
+        A selected collator, or ``None`` when the generic Python fallback is the
+        only supported path.
+
+    Side Effects:
+        Imports only the declared TensorFlow or Torch endpoint when selecting its
+        existing stack operation; no optional framework is imported for NumPy or
+        fallback selection.
+    """
+
+    backends = {tensor_spec.backend for tensor_spec in iter_specs(spec)}
+    if len(backends) != 1:
+        return None
+    backend = next(iter(backends))
+    if backend is None:
+        return None
+    if backend.value == "numpy":
+        return lambda items: _native_collate(items, np.stack, axis=0)
+    if backend.value == "torch":
+        import torch
+
+        return lambda items: _native_collate(items, torch.stack, axis=0)
+    if backend.value == "tf":
+        import tensorflow as tf
+
+        return lambda items: _native_collate(items, tf.stack, axis=0)
+    return None
+
+
+def _native_collate(items, stack, *, axis):
+    """Apply one selected backend stack leafwise while retaining tree validation."""
+
+    first = items[0]
+    if isinstance(first, dict):
+        if any(not isinstance(item, dict) or item.keys() != first.keys() for item in items[1:]):
+            raise TypeError("All dict items must have identical keys for collation.")
+        return {key: _native_collate([item[key] for item in items], stack, axis=axis) for key in first}
+    if is_namedtuple(first):
+        if any(not is_namedtuple(item) or type(item) is not type(first) for item in items[1:]):
+            raise TypeError("All namedtuple items must have identical types for collation.")
+        return type(first)(*(_native_collate([item[index] for item in items], stack, axis=axis) for index in range(len(first))))
+    if isinstance(first, tuple):
+        if any(not isinstance(item, tuple) or len(item) != len(first) for item in items[1:]):
+            raise TypeError("All tuple items must have identical lengths for collation.")
+        return tuple(_native_collate([item[index] for item in items], stack, axis=axis) for index in range(len(first)))
+    if isinstance(first, list):
+        if any(not isinstance(item, list) or len(item) != len(first) for item in items[1:]):
+            raise TypeError("All list items must have identical lengths for collation.")
+        return [_native_collate([item[index] for item in items], stack, axis=axis) for index in range(len(first))]
+    return stack(items, dim=axis) if getattr(stack, "__module__", "").startswith("torch") else stack(items, axis=axis)
 
 
 def default_collate(items: list[Any]) -> Any:

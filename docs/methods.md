@@ -26,7 +26,7 @@ from dryml.methods import Accumulator, AccumulatorGroup, Method, Traits, traits
 is `Method`, `Accumulator`, `AccumulatorGroup`, `MethodImplementation`, `Traits`, `traits`, `MethodCallNode`,
 `MethodCallSignature`, `MethodCallMode`, `MethodCallNodeKind`, `MethodGraph`,
 `MethodGraphNode`, `MethodGraphNodeKind`, `MethodPort`, `MethodPortKind`,
-`IteratorPort`, `StreamNode`, `StreamGraphCursor`,
+`IteratorPort`, `StreamNode`, `StreamGraphCursor`, `ConversionEdge`,
 `MethodError`,
 `ImplementationDeclarationError`, `ImplementationSelectionError`,
 `PreparedCallMismatchError`, `SelectionFailureReason`, and
@@ -205,7 +205,7 @@ target body. `eager()` or another `learn()` invalidates all retained facts.
 `method.method_graph()` returns an immutable, process-local `MethodGraph` view.
 Its virtual source and Method nodes are occurrence-indexed and expose currently
 known element-port facts, selected local invokers, and an empty
-`conversion_edges` surface reserved for later handoff planning. Reusing one
+`conversion_edges` surface containing selected dense handoff facts. Reusing one
 Method in a composition records independent occurrence selections without
 mutating that child's first-call cache. Element-only Method graphs reject
 `iterator()`. A Dataset supplies the iterator-port form through
@@ -217,8 +217,16 @@ from an element Method is still one output element. `IteratorPort` and
 `StreamNode` provide the bounded deterministic custom authoring seam; their
 declarations include ordered inputs, pure spec/cardinality transforms, pull
 policy, and maximum buffered items. The graph is neither a second cache nor a
-compiler, JIT, fusion, conversion, async scheduler, key join, or global
-optimization API.
+compiler, JIT, fusion, async scheduler, key join, or global optimization API.
+
+For a complete dense NumPy, TensorFlow, or Torch source spec, preparation first
+selects a directly compatible candidate. Only when none exists can it retain one
+direct CPU host-copy handoff to a uniquely most-specific target backend. Each
+`ConversionEdge` exposes producer/consumer specs, adapter name, exact
+dtype/shape/batch preservation, and CPU device policy. Ties remain selection
+errors; there is no framework preference, route search, cost ranking, or
+multi-edge conversion. Planning imports neither optional framework and invokes
+no adapter.
 
 Dataset graph cursors own source and selected-output resources, close acquired
 resources once in reverse acquisition order, and preserve a primary acquisition
@@ -226,6 +234,14 @@ or body error if cleanup also fails. Each reused Dataset occurrence opens its ow
 cursor and unknown-spec discovery buffer. Planning never opens a source; first
 value discovery happens only in the owning graph cursor and retains at most one
 prefetched value per occurrence.
+
+Dense handoffs preserve mapping/tuple/list structure and exact representable
+bool or fixed-width numeric dtype, shape, values, and batch meaning through an
+owned writable contiguous host copy. They normalize read-only, transposed, and
+negative-stride source arrays by copying. Object/string/complex/bfloat,
+sparse/ragged/quantized, mixed-backend, non-CPU, and inexact values are rejected
+before the selected target runs. A Torch tensor with `requires_grad=True` cannot
+cross a framework boundary and is never detached implicitly.
 
 Cached calls must exactly match the learned positional and keyword structure,
 dtype, shape, layout, backend, and observable batch facts. Matching calls invoke

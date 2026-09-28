@@ -93,6 +93,13 @@ Useful helpers include:
 
 Backend integrations can convert a `TensorSpec` into framework-specific shapes, signatures, arrays, or tensors. The spec itself should stay semantic and portable.
 
+Prepared local Method graphs use a complete backend field as a declared boundary,
+not as a claim about an arbitrary runtime value. Supported dense CPU NumPy,
+TensorFlow, and Torch handoffs preserve the semantic spec exactly while changing
+that field on the consumer side. GPU transfers, sparse/ragged/quantized tensors,
+object/string/complex/bfloat values, and implicit lossy dtype changes are outside
+this handoff contract.
+
 ## Equality
 
 Ordinary `TensorSpec` equality is backend-neutral semantic equality. Otherwise

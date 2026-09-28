@@ -16,6 +16,7 @@ from .errors import (
 )
 from .accumulator import Accumulator, AccumulatorGroup
 from .implementation import MethodImplementation
+from .conversion import ConversionEdge
 from .ir import MethodGraph, MethodGraphNode, MethodGraphNodeKind, MethodPort, MethodPortKind
 from .method import Method
 from .stream import IteratorPort, StreamGraphCursor, StreamNode
@@ -26,6 +27,7 @@ __all__ = [
     "Traits",
     "traits",
     "MethodImplementation",
+    "ConversionEdge",
     "MethodGraph",
     "MethodGraphNode",
     "MethodGraphNodeKind",

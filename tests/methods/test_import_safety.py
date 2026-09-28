@@ -16,6 +16,7 @@ _EXPECTED_METHOD_EXPORTS = {
     "MethodCallNode",
     "MethodCallNodeKind",
     "MethodCallSignature",
+    "ConversionEdge",
     "MethodError",
     "MethodImplementation",
     "IteratorPort",
@@ -43,7 +44,7 @@ import dryml.methods
 
 assert set(dryml.methods.__all__) == {
     'Accumulator', 'AccumulatorGroup', 'ImplementationDeclarationError',
-    'ImplementationSelectionError', 'Method', 'MethodGraph', 'MethodGraphNode',
+    'ImplementationSelectionError', 'Method', 'MethodGraph', 'MethodGraphNode', 'ConversionEdge',
     'MethodGraphNodeKind',
     'MethodCallMode', 'MethodCallNode', 'MethodCallNodeKind',
     'MethodCallSignature', 'MethodError', 'MethodImplementation', 'IteratorPort', 'MethodPort',

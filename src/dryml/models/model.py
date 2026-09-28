@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from dryml.core.backend import Backend
 from dryml.core.tensor_spec import Dynamic, batch_spec_tree, iter_specs
 from dryml.methods import ImplementationSelectionError, Method
 
@@ -155,6 +156,20 @@ class AutoEncoder(Model):
 
         if input_spec is None:
             return implementation
+        encoder_backend = getattr(self.encoder, "native_backend", None)
+        decoder_backend = getattr(self.decoder, "native_backend", None)
+        if encoder_backend is not None and decoder_backend is not None and encoder_backend != decoder_backend:
+            raise ImplementationSelectionError("conflict")
+        edge = None
+        native_input_spec = input_spec
+        if encoder_backend is not None:
+            target_backend = Backend(encoder_backend)
+            source_backends = {spec.backend for spec in iter_specs(input_spec)}
+            if source_backends != {target_backend}:
+                from dryml.methods.conversion import make_edge
+
+                edge = make_edge(input_spec, target_backend)
+                native_input_spec = edge.consumer_spec
         if learning:
             def select(model, spec, selected_backend):
                 return model._prepare_implementation(
@@ -169,16 +184,27 @@ class AutoEncoder(Model):
                     backend=selected_backend,
                     batch_mode=batch_mode,
                 )
-        encoder = select(self.encoder, input_spec, backend)
-        encoded_spec = self.encoder.infer_output_spec(input_spec)
-        decoder = select(self.decoder, encoded_spec, None)
+        selected_backend = encoder_backend if encoder_backend is not None else backend
+        encoder = select(self.encoder, native_input_spec, selected_backend)
+        encoded_spec = self.encoder.infer_output_spec(native_input_spec)
+        decoder = select(self.decoder, encoded_spec, decoder_backend)
+        if decoder.conversion_edge is not None:
+            raise ImplementationSelectionError("conflict")
         prepared_encoder = encoder.prepared_invoker()
         prepared_decoder = decoder.prepared_invoker()
 
         def invoke_autoencoder(x):
+            if edge is not None:
+                from dryml.methods.conversion import convert
+
+                x = convert(edge, x)
             return prepared_decoder(prepared_encoder(x))
 
-        return replace(implementation, _invoker=invoke_autoencoder)
+        return replace(
+            implementation,
+            _invoker=invoke_autoencoder,
+            conversion_edge=edge or encoder.conversion_edge,
+        )
 
     def infer_output_spec(self, input_spec, *additional_input_specs):
         """Infer an AutoEncoder result from exactly one input specification.

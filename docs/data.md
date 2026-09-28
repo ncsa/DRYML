@@ -68,6 +68,17 @@ unknown-spec discovery buffers; it is not teeing, memoization, or deduplication.
 `skip()` has the normal exact cursor contract, and reopening a graph creates a
 fresh traversal rather than serializing an iterator or generator frame.
 
+Prepared Dataset boundaries may retain one dense NumPy/TensorFlow/Torch handoff
+edge when a downstream Method has no direct compatible implementation. The
+adapter is applied while advancing the Dataset cursor, before native model
+forward/loss/backward/tape or compiled work begins. Dataset preprocessing is
+therefore data-only: it is not an end-to-end autodiff, tracing, or `tf.function`
+contract. Batch and Unbatch select the existing declared-backend stack/split
+operation once when available; their generic Python fallback remains equivalent
+for order, short batches, cardinality, and cursor cleanup. Zip and Chain retain
+the Python fallback unless compatible source-native composition is explicitly
+provided by all inputs.
+
 ## Source Datasets
 
 Common source dataset classes:

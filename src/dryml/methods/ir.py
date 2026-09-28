@@ -118,13 +118,11 @@ class MethodGraph:
 
     @property
     def conversion_edges(self) -> tuple[object, ...]:
-        """Return retained conversion edges, which are empty until U6.
+        """Return immutable local dense handoff facts selected during preparation."""
 
-        The empty immutable surface reserves graph capacity for explicit local
-        conversion facts without letting U4 select or execute a conversion.
-        """
-
-        return ()
+        if self._stream_plan is not None:
+            return self._stream_plan.conversion_edges
+        return self._owner()._graph_conversion_edges_for(self)
 
     @property
     def input_specs(self) -> tuple[SpecTree, ...]:

@@ -65,6 +65,7 @@ class _PreparationState:
     prepared: PreparedMethodInvoker | None = None
     graph: MethodGraph | None = None
     graph_nodes: tuple[MethodGraphNode, ...] = ()
+    conversion_edges: tuple[object, ...] = ()
 
 
 _STATE_LOCK = Lock()
@@ -400,6 +401,7 @@ class Method(Object):
             state.prepared = None
             state.graph = None
             state.graph_nodes = ()
+            state.conversion_edges = ()
 
     def method_graph(self) -> MethodGraph:
         """Return this Method's inspectable local graph view without preparation.
@@ -424,6 +426,7 @@ class Method(Object):
             state.prepared = None
             state.graph = None
             state.graph_nodes = ()
+            state.conversion_edges = ()
 
     def _learn_graph(
         self,
@@ -509,6 +512,11 @@ class Method(Object):
             state.prepared = invoker
             state.graph = graph
             state.graph_nodes = (source, *records)
+            state.conversion_edges = tuple(
+                node.selected.conversion_edge
+                for node in records
+                if node.selected is not None and node.selected.conversion_edge is not None
+            )
 
     def _graph_nodes_for(self, graph: MethodGraph) -> tuple[MethodGraphNode, ...]:
         """Return graph facts only when this view owns the current preparation."""
@@ -521,6 +529,13 @@ class Method(Object):
             MethodGraphNode(0, "source", None),
             MethodGraphNode(1, "method", type(self)),
         )
+
+    def _graph_conversion_edges_for(self, graph: MethodGraph) -> tuple[object, ...]:
+        """Return immutable handoff facts owned by the current graph preparation."""
+
+        state = _state_for(self)
+        with _STATE_LOCK:
+            return state.conversion_edges if state.graph is graph else ()
 
     def compatible_implementations(
         self,
@@ -622,7 +637,17 @@ class Method(Object):
             output_node = None if output_spec is None else spec_node(output_spec)
         except TypeError as error:
             raise ImplementationSelectionError("conflict") from error
-        implementation = self._select(required_backend, required_batch)
+        direct_candidates = self._compatible(required_backend, required_batch)
+        if direct_candidates:
+            implementation = self._select(required_backend, required_batch)
+        else:
+            implementation = self._select_converted(
+                input_spec,
+                additional_input_specs,
+                input_nodes,
+                required_batch,
+                output_node,
+            )
         selected = replace(
             implementation,
             _input_specs=tuple(
@@ -641,6 +666,70 @@ class Method(Object):
                     pass
             recorder(self, selected, input_nodes, inferred_output)
         return selected
+
+    def _select_converted(
+        self,
+        input_spec: SpecTree | None,
+        additional_input_specs: tuple[SpecTree, ...],
+        input_nodes: tuple[MethodCallNode, ...],
+        required_batch: BatchMode | None,
+        output_node: MethodCallNode | None,
+    ) -> MethodImplementation:
+        """Select one direct dense adapter only after direct selection has no candidate.
+
+        The conversion is intentionally unary and local.  Multi-input operations
+        need an explicit per-port contract rather than an inferred tree rewrite.
+        """
+
+        if input_spec is None or additional_input_specs or not input_nodes:
+            raise ImplementationSelectionError("no_candidate")
+        from .conversion import make_edge
+
+        source_backend, _ = node_facts(input_nodes[0])
+        if source_backend is None:
+            raise ImplementationSelectionError("no_candidate")
+        choices: list[tuple[MethodImplementation, object]] = []
+        for candidate in self.implementations():
+            target_backend = candidate.traits.backend
+            if target_backend is None or candidate.traits.batch_mode not in (None, required_batch):
+                continue
+            try:
+                edge = make_edge(input_spec, target_backend)
+            except TypeError:
+                continue
+            choices.append((candidate, edge))
+        if not choices:
+            raise ImplementationSelectionError("no_candidate")
+        specificity = lambda choice: int(choice[0].traits.backend is not None) + int(choice[0].traits.batch_mode is not None)
+        best = max(specificity(choice) for choice in choices)
+        winners = tuple(choice for choice in choices if specificity(choice) == best)
+        if len(winners) != 1:
+            raise ImplementationSelectionError("ambiguous")
+        candidate, edge = winners[0]
+        from .signature import spec_nodes
+
+        consumer_nodes = spec_nodes(edge.consumer_spec, ())
+        inner = replace(
+            candidate,
+            _input_specs=tuple(
+                complete_backend_constraint(node, candidate.traits.backend)
+                for node in consumer_nodes
+            ),
+            _output_spec=output_node,
+        )
+        prepared = inner.prepared_invoker()
+
+        def invoke_converted(value: object, *args: object, **kwargs: object) -> object:
+            from .conversion import convert
+
+            return prepared(convert(edge, value), *args, **kwargs)
+
+        return replace(
+            inner,
+            _input_specs=input_nodes,
+            _invoker=invoke_converted,
+            conversion_edge=edge,
+        )
 
     def _prepare_implementation(
         self,

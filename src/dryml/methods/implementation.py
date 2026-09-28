@@ -313,6 +313,7 @@ class PreparedMethodInvoker:
     adapter: SelectedDescriptorAdapter
     input_specs: tuple[MethodCallNode, ...]
     output_spec: MethodCallNode | None
+    conversion_edge: object | None = None
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         """Validate and invoke retained selection using logical call arguments."""
@@ -370,6 +371,7 @@ class MethodImplementation:
     _output_spec: MethodCallNode | None = field(default=None, repr=False, compare=False)
     _direct: bool = field(default=False, repr=False, compare=False)
     _invoker: Callable[..., object] | None = field(default=None, repr=False, compare=False)
+    conversion_edge: object | None = field(default=None, compare=False)
 
     def selected_adapter(self) -> SelectedDescriptorAdapter:
         """Create a reusable signature adapter for this already-selected carrier.
@@ -413,6 +415,7 @@ class MethodImplementation:
             self.selected_adapter(),
             self._input_specs,
             self._output_spec,
+            self.conversion_edge,
         )
 
     def __call__(self, *args: object, **kwargs: object) -> object:

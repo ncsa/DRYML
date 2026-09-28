@@ -5,6 +5,55 @@ from typing import Any
 import numpy as np
 
 from dryml.core.utils.types import is_namedtuple
+from dryml.core.tensor_spec import iter_specs
+
+
+def split_for_spec(spec):
+    """Return one native dense splitter for a uniform declared backend.
+
+    The returned splitter preserves the existing tree order and cardinality. It
+    falls back to :func:`default_split` for unknown, mixed, or unsupported specs.
+    """
+
+    backends = {tensor_spec.backend for tensor_spec in iter_specs(spec)}
+    if len(backends) != 1:
+        return None
+    backend = next(iter(backends))
+    if backend is None or backend.value == "numpy":
+        return default_split
+    if backend.value == "torch":
+        import torch
+
+        return lambda batch: _native_split(batch, torch.unbind)
+    if backend.value == "tf":
+        import tensorflow as tf
+
+        return lambda batch: _native_split(batch, tf.unstack)
+    return None
+
+
+def _native_split(batch, unstack):
+    """Split selected backend tensor leaves and rebuild the existing tree shape."""
+
+    if isinstance(batch, dict):
+        parts = {key: _native_split(value, unstack) for key, value in batch.items()}
+        length = len(next(iter(parts.values()))) if parts else 0
+        if any(len(value) != length for value in parts.values()):
+            raise TypeError("All dict fields must have the same batch length for splitting.")
+        return [{key: parts[key][index] for key in parts} for index in range(length)]
+    if isinstance(batch, tuple):
+        parts = [_native_split(value, unstack) for value in batch]
+        length = len(parts[0]) if parts else 0
+        if any(len(value) != length for value in parts):
+            raise TypeError("All tuple fields must have the same batch length for splitting.")
+        return [tuple(value[index] for value in parts) for index in range(length)]
+    if isinstance(batch, list):
+        parts = [_native_split(value, unstack) for value in batch]
+        length = len(parts[0]) if parts else 0
+        if any(len(value) != length for value in parts):
+            raise TypeError("All list fields must have the same batch length for splitting.")
+        return [[value[index] for value in parts] for index in range(length)]
+    return list(unstack(batch, dim=0) if getattr(unstack, "__module__", "").startswith("torch") else unstack(batch, axis=0))
 
 
 def _leaf_batch_len(x: Any) -> int:
