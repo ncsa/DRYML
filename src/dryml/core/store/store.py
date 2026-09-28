@@ -539,6 +539,64 @@ class Store(ABC):
     def write_state_alias(self, record: StateAliasRecord) -> StateAliasRecord:
         """Atomically replace one mutable StateRef alias record."""
 
+    def compare_and_set_state_alias(
+            self, record: StateAliasRecord, *, expected_state_ref_digest: str | None,
+    ) -> StateAliasRecord:
+        """Replace a scoped state alias only when its current target matches.
+
+        Args:
+            record: Replacement alias record whose exact StateRef target is already
+                published in this Store.
+            expected_state_ref_digest: Expected current StateRef digest, or
+                ``None`` when the alias must be absent.
+
+        Returns:
+            The replacement record after it is durably accepted by this Store.
+
+        Raises:
+            TypeError: If ``record`` or the expected digest has an unsupported
+                type.
+            StoreAliasConflictError: If the current alias does not match the
+                expectation. No replacement occurs in that case.
+            StoreAuthorityError: If the existing alias or replacement target is
+                malformed, scoped differently, or absent from this Store.
+
+        Side Effects:
+            Holds this backend's cooperating-writer fence across the current read,
+            comparison, target validation, and replacement. It changes only one
+            mutable alias record and never removes immutable snapshots.
+        """
+
+        if not isinstance(record, StateAliasRecord):
+            raise TypeError("record must be a StateAliasRecord.")
+        if expected_state_ref_digest is not None:
+            if (
+                    type(expected_state_ref_digest) is not str
+                    or len(expected_state_ref_digest) != 64
+                    or any(char not in "0123456789abcdef" for char in expected_state_ref_digest)
+            ):
+                raise TypeError("expected_state_ref_digest must be a StateRef digest or None.")
+        self.preflight_publication("compare and set state alias")
+        with self.writer_lock():
+            current = self.read_state_alias(record.object_ref.digest(), record.alias)
+            if current is not None and current.object_ref != record.object_ref:
+                raise StoreAuthorityError("State alias scope does not match its direct record path.")
+            if current is not None:
+                current_target = self.read_state_ref_record(current.state_ref_digest)
+                if current_target is None or current_target.state_ref.object != record.object_ref:
+                    raise StoreAuthorityError(
+                        "Current state alias points to missing or incompatible StateRef authority."
+                    )
+            current_digest = None if current is None else current.state_ref_digest
+            if current_digest != expected_state_ref_digest:
+                raise StoreAliasConflictError("State alias current target does not match expected target.")
+            target = self.read_state_ref_record(record.state_ref_digest)
+            if target is None or target.state_ref.object != record.object_ref:
+                raise StoreAuthorityError(
+                    "State alias replacement requires same-Store exact StateRef authority."
+                )
+            return self.write_state_alias(record)
+
     def iter_object_alias_records(self) -> Iterable[ObjectAliasRecord]:
         """Yield complete object aliases for derived-index rebuilds.
 

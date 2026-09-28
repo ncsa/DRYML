@@ -3,9 +3,10 @@ import pytest
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from tests.core import core_objects as objects
-from dryml.core import ObjectRef
+from dryml.core import ObjectRef, Serializable
 from dryml.core.repo import Repo, RepoLoadError, make_store
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DefinitionRecord
 
 
 def _require_writable_reference_store(primary_store_set):
@@ -17,6 +18,21 @@ def _require_writable_reference_store(primary_store_set):
 def _require_writable(repo):
     if not repo.default_store.publication_capabilities.writable:
         pytest.skip("reference publication requires a writable Store")
+
+
+class CurrentAliasValue(Serializable):
+    def __init__(self, value):
+        self.value = value
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        from pathlib import Path
+
+        Path(dest_dir, "value.txt").write_text(str(self.value), encoding="ascii")
+
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
+        from pathlib import Path
+
+        self.value = int(Path(src_dir, "value.txt").read_text(encoding="ascii"))
 
 
 def test_repo_object_alias_resolves_typed_reference_for_structural_load(primary_store_set):
@@ -145,3 +161,34 @@ def test_dirstore_object_alias_replaces_only_its_current_record(tmp_path):
     record = DirStore(store_path, query_index="memory").read_object_alias("current")
     assert isinstance(record.object_ref, ObjectRef)
     assert record.object_ref == replacement.object
+
+
+def test_selected_state_alias_ignores_conflicting_unselected_replica(tmp_path):
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    first_repo = Repo(first)
+    first_state = first_repo.save_object(
+        CurrentAliasValue(1, repo=first_repo), deep_capture=True,
+    )
+    second.publish_snapshot(
+        first_state,
+        evidence=first.read_snapshot_metadata(first_state.digest()),
+        local_states={
+            path: first.open_local_state(first_state, path)
+            for path in first_state.states
+        },
+    )
+    second.write_definition_record(DefinitionRecord(first_state.definition))
+    second_repo = Repo(second)
+    second_value = second_repo.load_state_ref(first_state, reuse_live="never", cache="none")
+    second_value.value = 2
+    second_state = second_repo.save_object(second_value, store=second, deep_capture=True)
+    first_repo.set_state_alias("current", first_state)
+    second_repo.set_state_alias("current", second_state)
+    repo = Repo([first, second])
+
+    with pytest.raises(RepoLoadError, match="conflicts"):
+        repo.resolve_state_alias(first_state.object, "current")
+    assert repo.resolve_state_alias(
+        first_state.object, "current", store=first,
+    ) == first_state

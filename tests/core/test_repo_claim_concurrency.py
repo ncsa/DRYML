@@ -91,3 +91,16 @@ def test_backward_clock_movement_delays_takeover_until_the_stored_deadline(tmp_p
 
     with pytest.raises(RepoLoadError, match="active first-construction claim"):
         second._acquire_claim(reference, second.default_store)
+
+
+def test_get_or_declare_does_not_replace_an_active_initialization_claim(tmp_path):
+    store = DirStore(tmp_path / "store")
+    first = Repo(store, owner_token_factory=lambda: "first")
+    reference = first.get_or_declare_object_ref(ContendedValue().definition, store=store)
+    lease = first._acquire_claim(reference, store)
+    second = Repo(DirStore(store.base_dir), owner_token_factory=lambda: "second")
+
+    assert second.get_or_declare_object_ref(
+        ContendedValue().definition, store=second.default_store,
+    ) == reference
+    assert store.read_claim_record(reference.digest()).owner == lease.owner

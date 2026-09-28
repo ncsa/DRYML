@@ -21,7 +21,9 @@ from ..paths import local_path_key
 from .definition import Definition, ConcreteDefinition
 from .cdef_graph import ConcreteDefinitionGraph
 from .object import Object
-from .store.store import Store, StoreAuthorityError, StoreCapabilityError
+from .store.store import (
+    Store, StoreAliasConflictError, StoreAuthorityError, StoreCapabilityError,
+)
 from .policies import CachePolicy, LiveReusePolicy, RepoGraphOptions
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
@@ -1453,6 +1455,32 @@ class Repo:
         candidates[0].preflight_publication(operation)
         return candidates[0]
 
+    def _selected_writable_physical_store(self, store, operation: str) -> Store:
+        """Select one connected writable physical Store for current-state CAS.
+
+        Ordinary reference mutation retains its historical handle-level selection.
+        Current-state coordination instead collapses identical direct physical
+        handles, so replicas do not manufacture another mutable authority.
+        """
+
+        if store is not None:
+            selected = self._connected_metadata_store(store)
+            selected.preflight_publication(operation)
+            return selected
+        candidates = {}
+        for candidate in self.stores:
+            if not candidate.publication_capabilities.writable:
+                continue
+            key = self._physical_store_key(candidate)
+            candidates.setdefault(("opaque", id(candidate)) if key is None else key, candidate)
+        if len(candidates) != 1:
+            raise RepoSaveError(
+                f"{operation} requires an explicit Store or exactly one writable physical Repo Store."
+            )
+        selected = next(iter(candidates.values()))
+        selected.preflight_publication(operation)
+        return selected
+
     def _connected_metadata_store(self, store: Store) -> Store:
         """Require one already-connected Store without opening or registering it."""
 
@@ -1802,6 +1830,10 @@ class Repo:
                 if state_scope is not None else store.read_object_alias(alias)
             )
             if record is not None:
+                if state_scope is not None and record.object_ref != state_scope:
+                    raise StoreAuthorityError(
+                        "State alias scope does not match its direct record path."
+                    )
                 records.append((store, record))
         return records
 
@@ -2007,20 +2039,39 @@ class Repo:
             raise RepoLoadError("State alias points to missing or incompatible StateRef authority.")
         return state.state_ref
 
-    def resolve_state_alias(self, object_ref, alias: str):
+    def _read_state_alias_in_store(self, store, object_ref, alias: str):
+        """Read and validate one selected Store's complete current state alias."""
+
+        record = store.read_state_alias(object_ref.digest(), alias)
+        if record is None:
+            raise KeyError(f"Repo has no alias {alias!r}.")
+        if record.object_ref != object_ref:
+            raise StoreAuthorityError("State alias scope does not match its requested ObjectRef.")
+        state = store.read_state_ref_record(record.state_ref_digest)
+        if state is None or state.state_ref.object != object_ref:
+            raise StoreAuthorityError("State alias points to missing or incompatible StateRef authority.")
+        return state.state_ref
+
+    def resolve_state_alias(self, object_ref, alias: str, *, store=None):
         """Resolve one ObjectRef-scoped state alias to an exact StateRef.
 
         Args:
             object_ref: Complete ObjectRef scope for the state alias.
             alias: Non-empty Store-local state alias.
+            store: Optional connected Store whose current authority is selected.
+                Without it, identical replicas are accepted while conflicting
+                connected Store values raise an explicit conflict.
 
         Returns:
             The immutable StateRef selected from non-conflicting Stores.
 
         Raises:
-            TypeError: If ``object_ref`` is not an ObjectRef.
+            TypeError: If ``object_ref`` is not an ObjectRef or ``store`` is not
+                a connected Store handle.
             KeyError: If no connected Store defines the scoped alias.
-            RepoLoadError: If replica authority conflicts or is incomplete.
+            RepoLoadError: If unselected replica authority conflicts.
+            StoreAuthorityError: If selected alias scope or target authority is
+                malformed or incomplete.
 
         Side Effects:
             None. Alias resolution reads authority only and never restores state.
@@ -2029,7 +2080,159 @@ class Repo:
 
         if not isinstance(object_ref, ObjectRef):
             raise TypeError("resolve_state_alias requires an ObjectRef scope.")
+        self._validate_alias(alias)
+        if store is not None:
+            selected = self._connected_metadata_store(store)
+            with selected.authority_read_fence():
+                return self._read_state_alias_in_store(selected, object_ref, alias)
         return self.resolve_state_selector(StateSelectorRef(object_ref, alias))
+
+    def get_or_declare_object_ref(self, cdef: ConcreteDefinition, *, store=None):
+        """Return one selected Store's unique declaration or register it atomically.
+
+        Args:
+            cdef: Concrete definition whose existing declaration is sought.
+            store: Optional connected writable Store. Omit it only when exactly one
+                writable physical Store is connected.
+
+        Returns:
+            The unique complete ObjectRef declared for ``cdef`` in the selected
+            Store. A missing declaration is allocated and registered through the
+            normal DefinitionRecord, ClaimRecord, and DeclarationRecord boundary.
+
+        Raises:
+            TypeError: If ``cdef`` is not concrete or ``store`` is invalid.
+            ValueError: If a new declaration has no allocatable durable lineage.
+            RepoLoadError: If matching declarations or their claims are malformed
+                or ambiguous.
+            RepoSaveError: If no unique writable physical Store is selected.
+
+        Side Effects:
+            May allocate and register one ObjectRef under the selected Store's
+            writer fence. It does not construct a live object or publish a state.
+        """
+
+        from .store.records import ClaimRecord
+
+        if not isinstance(cdef, ConcreteDefinition):
+            raise TypeError("get_or_declare_object_ref requires a ConcreteDefinition.")
+        selected = self._selected_writable_physical_store(store, "get or declare ObjectRef")
+        with selected.writer_lock():
+            matches = [
+                record.object_ref for record in selected.iter_declaration_records()
+                if record.object_ref.definition.graph_equal(cdef)
+            ]
+            if len(matches) > 1:
+                raise RepoLoadError("Selected Store has multiple declarations for this definition.")
+            if matches:
+                reference = matches[0]
+                claim = selected.read_claim_record(reference.digest())
+                if not isinstance(claim, ClaimRecord) or claim.object_digest != reference.digest():
+                    raise RepoLoadError("Selected declaration lacks compatible ClaimRecord authority.")
+                return reference
+            reference = self._declaration_reference(cdef, None)
+            return self._register_declaration(reference, selected)
+
+    def _fresh_state_alias_target(self, store, object_ref, alias: str):
+        """Read one current alias from fresh physical authority after an uncertain write."""
+
+        from .store.zip import ZipStore
+
+        if type(store) is ZipStore:
+            if store.archive_path is None:
+                raise StoreAuthorityError("File-like ZipStore cannot provide fresh mutable authority.")
+            if not os.path.exists(store.archive_path):
+                return None
+            fresh = ZipStore.open_existing(store.archive_path)
+            try:
+                with fresh.authority_read_fence():
+                    try:
+                        return self._read_state_alias_in_store(fresh, object_ref, alias)
+                    except KeyError:
+                        return None
+            finally:
+                fresh.close()
+        with store.authority_read_fence():
+            try:
+                return self._read_state_alias_in_store(store, object_ref, alias)
+            except KeyError:
+                return None
+
+    def _reconcile_current_state_alias(
+            self, store, proposed, alias: str, expected_digest: str | None,
+    ):
+        """Classify a possibly acknowledged CAS only from current physical authority."""
+
+        observed = self._fresh_state_alias_target(store, proposed.object, alias)
+        if observed == proposed:
+            return proposed
+        observed_digest = None if observed is None else observed.digest()
+        if observed_digest == expected_digest:
+            raise RepoSaveError(
+                "Current state alias remains at its expected predecessor; reload and reapply the mutation."
+            )
+        raise StoreAliasConflictError(
+            "Current state alias changed to another authoritative target during publication."
+        )
+
+    def save_object_if_current(self, obj, *, alias: str, expected, store=None):
+        """Save an immutable snapshot and CAS-advance one selected current-state alias.
+
+        Args:
+            obj: Live Object to snapshot through the ordinary Repo save path.
+            alias: Non-empty state alias scoped by the snapshot's ObjectRef.
+            expected: Exact predecessor StateRef, or ``None`` when the alias must
+                be absent. A mismatched current alias never falls back to LWW.
+            store: Optional connected writable Store. Omit it only when exactly one
+                writable physical Store is connected.
+
+        Returns:
+            The newly published exact StateRef after CAS, required buffered commit,
+            and fresh alias/target read-back all succeed.
+
+        Raises:
+            TypeError: If the object, alias, expected StateRef, or Store is invalid.
+            StoreAliasConflictError: If another valid alias target wins the CAS.
+            RepoSaveError: If publication outcome remains at the predecessor and a
+                consumer must reload and reapply, or normal snapshot publication
+                fails.
+            StoreAuthorityError: If current alias or snapshot authority is malformed.
+
+        Side Effects:
+            Publishes an immutable snapshot before changing the Store-local alias.
+            A failed CAS can retain that safe unreferenced snapshot. Path-backed
+            ZipStores commit the selected transaction before success is reported.
+        """
+
+        from .reference_values import StateRef
+        from dryml.runtime import materialization_admission
+
+        if not isinstance(obj, Object):
+            raise TypeError("save_object_if_current requires a live Object.")
+        self._validate_alias(alias)
+        if expected is not None and not isinstance(expected, StateRef):
+            raise TypeError("expected must be an exact StateRef or None.")
+        selected = self._selected_writable_physical_store(store, "save current state")
+        if expected is not None and expected.object != obj.object_ref:
+            raise ValueError("expected StateRef must have the same ObjectRef scope as obj.")
+        with materialization_admission(operation="repo_save_object_if_current"):
+            proposed = self.save_object(obj, store=selected)
+        expected_digest = None if expected is None else expected.digest()
+        from .store.records import StateAliasRecord
+
+        record = StateAliasRecord(alias, proposed.object, proposed.digest())
+        try:
+            selected.compare_and_set_state_alias(
+                record, expected_state_ref_digest=expected_digest,
+            )
+            selected.commit()
+        except StoreAliasConflictError:
+            raise
+        except Exception:
+            return self._reconcile_current_state_alias(
+                selected, proposed, alias, expected_digest,
+            )
+        return self._reconcile_current_state_alias(selected, proposed, alias, expected_digest)
 
     def reference_evidence(self, cdef: ConcreteDefinition) -> ReferenceEvidence:
         """Read matching declaration and StateRef facts under one stable cut.

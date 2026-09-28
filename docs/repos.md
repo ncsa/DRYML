@@ -135,6 +135,32 @@ the latter's `federated` option controls its dependency-copy behavior and is not
 save-routing compatibility spelling. Read-only query federation is also separate
 from routed saving.
 
+## Current-State Coordination
+
+`Store.compare_and_set_state_alias(record, expected_state_ref_digest=...)` is the
+Store-local current-state primitive. It holds one physical Store writer fence while
+it reads the scoped alias, compares the expected digest (`None` means absent),
+checks that the replacement `StateRef` is complete same-Store authority, and
+replaces the alias. A mismatch raises `StoreAliasConflictError` without changing
+the alias. It does not introduce another alias record format or a cross-Store
+transaction.
+
+`Repo.resolve_state_alias(object_ref, alias, store=...)` reads one selected Store
+when `store` is supplied; otherwise it retains normal identical-replica resolution
+and rejects conflicts. `Repo.get_or_declare_object_ref(cdef, store=...)` selects a
+unique existing declaration or creates it through the existing declaration and
+first-construction-claim fence. `Repo.save_object_if_current(obj, alias=...,
+expected=..., store=...)` first publishes the immutable snapshot, then CAS-advances
+the scoped state alias. These mutation APIs select one writable physical Store,
+defaulting only when the connected writable physical destination is unique.
+
+A CAS loser can leave its already published immutable snapshot as a safe orphan;
+DRYML never deletes it to simulate rollback. Buffered ZipStore coordination commits
+before success and reads a freshly reopened archive to reconcile errors after a
+possible archive replacement. A proposed current target is idempotent success; an
+unchanged predecessor requires a consumer reload/reapply; another valid target is
+a conflict. Malformed alias scope or missing target remains an authority error.
+
 ## Persistent Metadata
 
 `Repo.get_metadata()`, `set_metadata()`, and `delete_metadata()` read, replace,

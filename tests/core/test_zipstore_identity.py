@@ -29,7 +29,9 @@ from dryml.core.store.records import (
     DeclarationRecord, DefinitionRecord, MainRefRecord, ObjectAliasRecord,
     StateAliasRecord,
 )
-from dryml.core.store.store import StoreAuthorityError, StoreCapabilityError
+from dryml.core.store.store import (
+    StoreAliasConflictError, StoreAuthorityError, StoreCapabilityError,
+)
 from dryml.core.store.zip import ZipStore, ZipStoreConflictError
 
 
@@ -767,3 +769,42 @@ def test_same_handle_commit_does_not_clear_a_concurrent_mutation(tmp_path, monke
         assert set(reopened.iter_definition_records()) == {first, second}
     finally:
         reopened.close()
+
+
+def test_stale_zip_current_state_writer_must_reopen_and_reapply(tmp_path):
+    path = tmp_path / "current.zip"
+    initial_store = ZipStore(path)
+    initial_repo = Repo(initial_store)
+    initial = initial_repo.save(
+        ZipPayloadObject("initial", repo=initial_repo), deep_capture=True,
+    )
+    initial_repo.set_state_alias("history", initial, store=initial_store)
+    initial_store.commit()
+    winner_store = ZipStore.open_existing(path)
+    stale_store = ZipStore.open_existing(path)
+    winner_repo = Repo(winner_store)
+    stale_repo = Repo(stale_store)
+    try:
+        winner = winner_repo.load_state_ref(initial, reuse_live="never", cache="none")
+        winner.value = "winner"
+        current = winner_repo.save_object_if_current(
+            winner, alias="history", expected=initial, store=winner_store,
+        )
+        stale = stale_repo.load_state_ref(initial, reuse_live="never", cache="none")
+        stale.value = "stale"
+
+        with pytest.raises(StoreAliasConflictError, match="another authoritative"):
+            stale_repo.save_object_if_current(
+                stale, alias="history", expected=initial, store=stale_store,
+            )
+        reopened = ZipStore.open_existing(path)
+        try:
+            assert reopened.read_state_alias(
+                initial.object.digest(), "history",
+            ).state_ref_digest == current.digest()
+        finally:
+            reopened.close()
+    finally:
+        initial_store.close()
+        winner_store.close()
+        stale_store.close()

@@ -95,3 +95,15 @@ def test_declaration_rejects_graphs_with_only_imported_lineage(tmp_path):
 
     with pytest.raises(ValueError, match="no new durable lineage"):
         repo.declare_object(cdef)
+
+
+def test_get_or_declare_reuses_the_selected_store_claimed_declaration(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    cdef = DeclaredValue(1).definition
+
+    reference = repo.get_or_declare_object_ref(cdef, store=store)
+    lease = repo._acquire_claim(reference, store)
+
+    assert repo.get_or_declare_object_ref(cdef, store=store) == reference
+    assert store.read_claim_record(reference.digest()).generation == lease.generation
