@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, F, Mat, Object, ObjectRef, Ref, StateRef
+from dryml.core import ConcreteDefinition, Definition, F, Mat, Object, ObjectId, ObjectRef, Ref, Serializable, StateRef
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.domains import UniformFromSet
@@ -12,6 +12,7 @@ from dryml.core.errors import TemplateError, UnresolvedTemplateError
 from dryml.core.links import DefLink
 from dryml.core.symbol import ImportRef
 from dryml.core.template import Par, Template
+from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
 class SubstitutionLeaf(Object):
@@ -26,6 +27,21 @@ class SubstitutionRoot(Object):
 
     def __init__(self, child):
         self.child = child
+
+
+class SubstitutionCheckpoint(Serializable):
+    """Stateful binding root with exact model and reference-data fields."""
+
+    def __init__(self, model, test_data: Ref[StateRef]):
+        self.model = model
+        self.test_data = test_data
+
+
+class CheckpointLeaf(Serializable):
+    """Stateful child used to distinguish checkpoint-local state selections."""
+
+    def __init__(self, value):
+        self.value = value
 
 
 class SubstitutionTarget:
@@ -169,6 +185,47 @@ def test_live_projection_lowers_selected_objects_without_state_lookup_or_save(mo
     assert result.root["child"] == child.object_ref
     assert isinstance(result.root["child"], ObjectRef)
     assert result.root["state"] is state
+
+
+def test_checkpoint_binding_keeps_model_and_ref_test_data_at_the_exact_state():
+    """StateRef path binding crosses Mat edges but returns terminal Ref data unchanged."""
+
+    leaf = Definition(CheckpointLeaf, "model").concretize()
+    model_object = ObjectRef(leaf, {GraphPath(): ObjectId(("model",))})
+    model_a = StateRef(model_object, {GraphPath(): "pkl-" + "a" * 64})
+    model_b = StateRef(model_object, {GraphPath(): "pkl-" + "b" * 64})
+    test_leaf = Definition(CheckpointLeaf, "test").concretize()
+    test_object = ObjectRef(test_leaf, {GraphPath(): ObjectId(("test",))})
+    test_data = StateRef(test_object, {GraphPath(): "pkl-" + "c" * 64})
+    model_path = GraphPath((Parameter("model"),))
+
+    def checkpoint(model, namespace):
+        definition = Definition(
+            SubstitutionCheckpoint,
+            Mat(model),
+            test_data=Ref(test_data),
+        ).concretize()
+        object_ref = ObjectRef(
+            definition,
+            {GraphPath(): ObjectId((namespace,)), model_path: model.object_id},
+        )
+        return StateRef(
+            object_ref,
+            {GraphPath(): "pkl-" + "d" * 64, model_path: model.states[GraphPath()]},
+        )
+
+    template = Template.from_value(
+        {"model": Par("this.model"), "test_data": Par("this.test_data")}
+    )
+
+    bound_a = template.sub(this=checkpoint(model_a, "checkpointa"))
+    bound_b = template.sub(this=checkpoint(model_b, "checkpointb"))
+
+    assert bound_a.root["model"] == model_a
+    assert bound_b.root["model"] == model_b
+    assert bound_a.root["model"] != bound_b.root["model"]
+    assert bound_a.root["test_data"] is test_data
+    assert bound_b.root["test_data"] is test_data
 
 
 def test_substitution_paths_fail_without_mutating_the_source_template():

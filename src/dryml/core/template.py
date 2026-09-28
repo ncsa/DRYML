@@ -880,7 +880,15 @@ def _project_binding(value: object, path: GraphPath, root: str) -> object:
         if path:
             if isinstance(value, Object):
                 value = value.graph_at(path)
-            elif isinstance(value, (ObjectRef, StateRef)):
+            elif isinstance(value, StateRef):
+                try:
+                    value = value.at(path)
+                except ValueError as materializing_error:
+                    try:
+                        value = value.reference_value_at(path)
+                    except ValueError:
+                        raise materializing_error
+            elif isinstance(value, ObjectRef):
                 value = value.at(path)
             elif isinstance(value, ConcreteDefinition):
                 value = value.graph_path(path)

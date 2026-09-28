@@ -907,6 +907,30 @@ class ConcreteDefinition(DefInterface, Mapping):
 
         return copy_cdef_graph(self)
 
+    def object_projection(self, *, traverse_refs: bool = False) -> "ConcreteDefinition":
+        """Return this CDef with nested StateRefs weakened to ObjectRefs.
+
+        Args:
+            traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
+                Ref-held exact references are projected regardless of this flag.
+
+        Returns:
+            An import-free, non-materializing CDef preserving graph topology,
+            edge roles, and all ObjectIds carried by nested references.
+
+        Raises:
+            TypeError: If ``traverse_refs`` is not a bool.
+            ValueError: If the graph contains an unsupported cycle.
+
+        Side Effects:
+            None. The source graph remains unchanged; no Objects, Stores, or
+            identities are created.
+        """
+
+        from .cdef_codec import object_projection_cdef
+
+        return object_projection_cdef(self, traverse_refs=traverse_refs)
+
     def graph_equal(self, other: object) -> bool:
         """Compare rooted CDef topology while ignoring private node tokens.
 

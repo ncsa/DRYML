@@ -52,6 +52,19 @@ def test_reference_values_reject_missing_duplicate_and_malformed_state_entries()
         StateRef(ObjectRef(root, {child_path: object_id}), {child_path: "bad"})
 
 
+def test_malformed_occurrence_maps_leave_the_caller_mapping_unchanged():
+    leaf = Definition(ReferenceLeaf).concretize()
+    root = Definition(ReferenceWrapper, leaf, child_alias=leaf).concretize()
+    alias_path = GraphPath((Parameter("child_alias"),))
+    supplied = {alias_path: ObjectId(("input",))}
+    expected = dict(supplied)
+
+    with pytest.raises(ValueError, match="primary paths"):
+        ObjectRef(root, supplied)
+
+    assert supplied == expected
+
+
 def test_materializing_exact_references_expand_but_ref_edges_do_not():
     leaf = Definition(ReferenceLeaf).concretize()
     leaf_ref = ObjectRef(leaf, {GraphPath(): ObjectId(("imported",))})

@@ -89,6 +89,12 @@ An unresolved recipe can be carried only by a constructor slot declared
 pass `traverse_refs=True` to enter pre-existing carried recipes. Ref opacity does
 not make undeclared slots valid and does not cause recursive same-call binding.
 
+The same boundary applies to recursive `object_projection()`: ordinary Ref-held
+`StateRef` values are weakened to their `ObjectRef` associations, while a
+Ref-held Template stays unchanged unless `traverse_refs=True`. Opting in retains
+the recipe's `Par` expressions and only weakens supported exact references; it
+does not resolve or construct the recipe.
+
 ```python
 from dryml.core import Definition, Object, Ref
 

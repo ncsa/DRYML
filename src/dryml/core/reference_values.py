@@ -19,7 +19,7 @@ from typing import Any, Iterator
 from uuid import UUID, uuid4
 
 from .freeze import FrozenDict
-from .utils.graph.path import GraphPath, GraphPathLike, graph_path_sort_key, normalize_path
+from .utils.graph.path import GraphPath, GraphPathLike, Kwarg, Parameter, graph_path_sort_key, normalize_path
 from .utils.stable_hash import stable_int_hash
 
 
@@ -318,6 +318,33 @@ class ObjectRef:
 
         return _project_object_ref(self, normalize_path(path))
 
+    def object_projection(self, *, traverse_refs: bool = False) -> "ObjectRef":
+        """Return this reference with nested StateRefs weakened to ObjectRefs.
+
+        Args:
+            traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
+                Ref-held exact references are projected regardless of this flag.
+
+        Returns:
+            A non-materializing ObjectRef retaining this reference's ObjectIds,
+            graph topology, and edge roles.
+
+        Raises:
+            TypeError: If ``traverse_refs`` is not a bool.
+            ValueError: If the graph contains an unsupported cycle.
+
+        Side Effects:
+            None. The source reference and its authoritative ObjectId mapping are
+            not changed, and no Store is consulted.
+        """
+
+        from .cdef_codec import object_projection_cdef
+
+        return ObjectRef(
+            object_projection_cdef(self.definition, traverse_refs=traverse_refs),
+            self.objects,
+        )
+
     def _identity_data(self) -> dict[str, Any]:
         return {
             "definition_graph": self.definition.graph_hash(),
@@ -438,6 +465,95 @@ class StateRef:
         projected = self.object.at(normalized)
         states = _project_mapping(self.object.definition, self.object.objects, self.states, normalized)
         return StateRef(projected, states)
+
+    def object_projection(self, *, traverse_refs: bool = False) -> ObjectRef:
+        """Return this StateRef's recursive non-state association projection.
+
+        Args:
+            traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
+                Ref-held exact references are projected regardless of this flag.
+
+        Returns:
+            An ObjectRef retaining every ObjectId and all supported graph roles
+            while recursively removing StateRef selections.
+
+        Raises:
+            TypeError: If ``traverse_refs`` is not a bool.
+            ValueError: If the graph contains an unsupported cycle.
+
+        Side Effects:
+            None. This does not read state, materialize an Object, or allocate an
+            ObjectId. ``.object`` remains the existing shallow projection.
+        """
+
+        return self.object.object_projection(traverse_refs=traverse_refs)
+
+    def reference_value_at(self, path: GraphPathLike = "$") -> ObjectRef | "StateRef":
+        """Return terminal Ref-held exact reference data at a graph path.
+
+        Args:
+            path: Path through semantic CDef parameters and supported containers.
+                Earlier edges may be materializing, but the final edge must be a
+                Ref whose target is an ObjectRef or StateRef.
+
+        Returns:
+            The exact terminal ObjectRef or StateRef without weakening, loading,
+            or materializing it.
+
+        Raises:
+            ValueError: If the path is missing, crosses a Ref boundary, does not
+                end at Ref-held reference data, or uses an unsupported traversal.
+
+        Side Effects:
+            None. This accessor performs graph inspection only; it neither reads
+            state nor invokes arbitrary attributes or descriptors.
+        """
+
+        from .cdef_graph import EdgeKind
+        from .definition import ConcreteDefinition
+        from .links import DefLink
+        from .utils.graph.value import get_subtree
+
+        normalized = normalize_path(path)
+        if not normalized:
+            raise ValueError("Reference value paths must end at terminal Ref-held reference data.")
+        current: Any = self.definition
+        for index, segment in enumerate(normalized):
+            terminal = index == len(normalized) - 1
+            if isinstance(segment, Kwarg) and isinstance(current, ConcreteDefinition):
+                segment = Parameter(segment.name)
+            try:
+                selected = get_subtree(current, GraphPath((segment,)))
+            except Exception as error:
+                raise ValueError(f"Reference value path {normalized!s} is invalid.") from error
+            if isinstance(selected, DefLink):
+                if selected.kind is EdgeKind.REF:
+                    if not terminal:
+                        raise ValueError("Reference value paths cannot traverse a Ref boundary.")
+                    if isinstance(selected.target, (ObjectRef, StateRef)):
+                        return selected.target
+                    raise ValueError(
+                        "Reference value paths must end at terminal Ref-held reference data."
+                    )
+                if selected.kind is not EdgeKind.MATERIALIZE:
+                    raise ValueError("Reference value path has an unsupported edge role.")
+                if terminal:
+                    raise ValueError(
+                        "Reference value paths must end at terminal Ref-held reference data."
+                    )
+                selected = selected.target
+            elif terminal:
+                raise ValueError(
+                    "Reference value paths must end at terminal Ref-held reference data."
+                )
+
+            if isinstance(selected, (ObjectRef, StateRef)):
+                # Canonical CDefs erase materializing reference assertions while
+                # retaining Ref boundaries as links, so a direct exact reference
+                # here is an already-normalized materializing edge.
+                current = selected.definition
+                continue
+            current = selected
 
     def digest(self) -> str:
         """Return a deterministic digest for this complete state identity."""

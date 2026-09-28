@@ -191,6 +191,231 @@ def copy_cdef_graph(root: ConcreteDefinition) -> ConcreteDefinition:
     return decode_cdef_graph(encode_cdef_graph(root))
 
 
+def object_projection_cdef(
+        root: ConcreteDefinition, *, traverse_refs: bool = False) -> ConcreteDefinition:
+    """Recursively weaken StateRefs in a CDef graph to ObjectRefs.
+
+    Args:
+        root: Exact CDef graph to rewrite without resolving its class authority.
+        traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
+            Ref-held exact references are always rewritten.
+
+    Returns:
+        A graph-isomorphic CDef whose supported nested StateRefs are ObjectRefs.
+
+    Raises:
+        TypeError: If ``root`` is not a CDef or ``traverse_refs`` is not bool.
+        ValueError: If an unsupported cyclic construction graph is encountered.
+
+    Side Effects:
+        None. The projection does not resolve imports, materialize objects, read
+        Stores, or allocate ObjectIds.
+    """
+
+    if not isinstance(root, ConcreteDefinition):
+        raise TypeError(f"Expected ConcreteDefinition, got {type(root).__name__}.")
+    if type(traverse_refs) is not bool:
+        raise TypeError("traverse_refs must be a bool.")
+
+    from .definition import Definition
+    from .cdef_graph import EdgeKind
+    from .factory import FactorySpec
+    from .template import Template, _BinaryExpr, _RepeatExpr
+
+    memo: dict[int, Any] = {}
+    active: set[int] = set()
+
+    def rewrite_reference(ref: ObjectRef) -> ObjectRef:
+        marker = id(ref)
+        if marker in memo:
+            return memo[marker]
+        if marker in active:
+            raise ValueError("Object projection does not support cyclic reference graphs.")
+        active.add(marker)
+        try:
+            result = ObjectRef(rewrite(ref.definition), ref.objects)
+            memo[marker] = result
+            return result
+        finally:
+            active.remove(marker)
+
+    def rewrite_template(template: Template) -> Template:
+        marker = id(template)
+        if marker in memo:
+            return memo[marker]
+        if marker in active:
+            raise ValueError("Object projection does not support cyclic Template graphs.")
+        active.add(marker)
+        try:
+            root_value = rewrite(template.root)
+            result = template if root_value is template.root else Template._from_root(root_value)
+            memo[marker] = result
+            return result
+        finally:
+            active.remove(marker)
+
+    def rewrite(current: Any) -> Any:
+        if isinstance(current, StateRef):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            result = rewrite_reference(current.object)
+            memo[marker] = result
+            return result
+        if isinstance(current, ObjectRef):
+            return rewrite_reference(current)
+        if isinstance(current, Template):
+            return current
+        if isinstance(current, DefLink):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            if (
+                current.kind is EdgeKind.REF
+                and isinstance(current.target, Template)
+            ):
+                if not traverse_refs:
+                    return current
+                target = rewrite_template(current.target)
+            else:
+                target = rewrite(current.target)
+            result = current if target is current.target else (
+                DefLink.finalized(current.kind, target)
+                if current.is_finalized
+                else DefLink.assertion(current.kind, target)
+            )
+            memo[marker] = result
+            return result
+        if isinstance(current, ConcreteDefinition):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            if marker in active:
+                raise ValueError("Object projection does not support cyclic CDef graphs.")
+            active.add(marker)
+            try:
+                parameters = FrozenDict(
+                    (name, rewrite(value))
+                    for name, value in current.parameters.items()
+                )
+                result = current if all(
+                    parameters[name] is value
+                    for name, value in current.parameters.items()
+                ) else ConcreteDefinition._from_bound_record(
+                    current.cls,
+                    BoundArguments(parameters.items()),
+                    stateful_role=current._stateful_role,
+                )
+                memo[marker] = result
+                return result
+            finally:
+                active.remove(marker)
+        if isinstance(current, Definition):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            args = (
+                None if current.args is None
+                else FrozenTuple(rewrite(value) for value in current.args)
+            )
+            kwargs = FrozenDict(
+                (name, rewrite(value)) for name, value in current.kwargs.items()
+            )
+            result = current if (
+                (args is None and current.args is None)
+                or (args is not None and all(
+                    new is old for new, old in zip(args, current.args)
+                ))
+            ) and all(kwargs[name] is value for name, value in current.kwargs.items()) else (
+                Definition._from_template_parts(current.cls, args, kwargs)
+            )
+            memo[marker] = result
+            return result
+        if isinstance(current, FactorySpec):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            args = FrozenTuple(rewrite(value) for value in current.args)
+            kwargs = FrozenDict(
+                (name, rewrite(value)) for name, value in current.kwargs.items()
+            )
+            result = current if all(
+                new is old for new, old in zip(args, current.args)
+            ) and all(kwargs[name] is value for name, value in current.kwargs.items()) else (
+                FactorySpec._from_template_parts(current.target, args, kwargs)
+            )
+            memo[marker] = result
+            return result
+        if isinstance(current, _BinaryExpr):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            left, right = rewrite(current.left), rewrite(current.right)
+            result = current if left is current.left and right is current.right else (
+                _BinaryExpr(current.operation, left, right)
+            )
+            memo[marker] = result
+            return result
+        if isinstance(current, _RepeatExpr):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            group = tuple(rewrite(value) for value in current.group)
+            count = rewrite(current.count)
+            result = current if all(
+                new is old for new, old in zip(group, current.group)
+            ) and count is current.count else _RepeatExpr(
+                list(group) if isinstance(current.group, FrozenList) else group,
+                count,
+                current.shared,
+            )
+            memo[marker] = result
+            return result
+        if isinstance(current, (FrozenDict, dict)):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            items = [(key, rewrite(value)) for key, value in current.items()]
+            result = current if all(
+                value is current[key] for key, value in items
+            ) else (FrozenDict(items) if isinstance(current, FrozenDict) else dict(items))
+            memo[marker] = result
+            return result
+        if isinstance(current, (FrozenList, list)):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            values = tuple(rewrite(value) for value in current)
+            result = current if all(
+                new is old for new, old in zip(values, current)
+            ) else FrozenList(values)
+            memo[marker] = result
+            return result
+        if isinstance(current, (FrozenTuple, tuple)):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            values = tuple(rewrite(value) for value in current)
+            result = current if all(
+                new is old for new, old in zip(values, current)
+            ) else FrozenTuple(values)
+            memo[marker] = result
+            return result
+        if isinstance(current, (FrozenSet, frozenset, set)):
+            marker = id(current)
+            if marker in memo:
+                return memo[marker]
+            values = tuple(rewrite(value) for value in current)
+            result = current if all(
+                new is old for new, old in zip(values, current)
+            ) else FrozenSet(values)
+            memo[marker] = result
+            return result
+        return current
+
+    return rewrite(root)
+
+
 def validate_cdef_stateful_role(cdef: ConcreteDefinition, cls: type) -> None:
     """Validate recorded role authority against an already-resolved class.
 
