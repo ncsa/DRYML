@@ -287,9 +287,9 @@ class Definition(DefInterface, Mapping):
     @staticmethod
     def _freeze_value(value):
         from .canonical import freeze_def_value
-        from .template import Template
+        from .template import Template, TemplateBundle
 
-        if isinstance(value, Template):
+        if isinstance(value, (Template, TemplateBundle)):
             return value
         return freeze_def_value(value)
 

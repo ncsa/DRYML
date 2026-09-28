@@ -205,7 +205,7 @@ def test_fold_resumes_saved_carry_and_position_without_rerunning_initializer(tmp
         fold.compute(checkpoint_every=3, managed=ManagedConfig(state_repo=repo))
     assert ResumeInitial.calls == 1
 
-    assert fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=repo)) is None
+    assert fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=repo)) == fold.last_state_ref
     assert fold.value() == 6.0
     assert fold.processed_count == 3
     assert ResumeInitial.calls == 1
@@ -233,7 +233,7 @@ def test_fold_eof_checkpoint_retries_finalization_without_loading_source(tmp_pat
         raise AssertionError("exhausted resume loaded its source")
 
     monkeypatch.setattr(Fold, "_load_source", fail_source_load)
-    assert fold.compute(checkpoint_every=100, managed=ManagedConfig(state_repo=store)) is None
+    assert fold.compute(checkpoint_every=100, managed=ManagedConfig(state_repo=store)) == fold.last_state_ref
     assert fold.value() == 6.0
     assert fold.processed_count == 2
     assert ResumeFinish.calls == 1
@@ -359,7 +359,7 @@ store = DirStore.open_existing(sys.argv[1])
 record = store.read_state_ref_record(sys.argv[2])
 repo = Repo._for_state_io((store,))
 fold = repo.load_state_ref(record.state_ref, reuse_live='never')
-assert fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=repo)) is None
+assert fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=repo)) == fold.last_state_ref
 assert fold.value() == 6.0
 assert fold.processed_count == 3
 assert fold.compute.status(state_repo=repo).state == 'completed'

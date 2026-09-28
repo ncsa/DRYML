@@ -218,7 +218,7 @@ def test_fold_consumes_one_iterator_once_and_reuses_selected_dynamic_batch_carri
     fold = _fold(source, accumulator=accumulator)
     store = DirStore(tmp_path / "store")
 
-    assert fold.compute(managed=ManagedConfig(state_repo=store)) is None
+    assert fold.compute(managed=ManagedConfig(state_repo=store)) == fold.last_state_ref
     assert fold.value() == 12.0
     assert (CountingDataset.iterations, CountingDataset.yields, CountingDataset.closed) == (1, 2, 1)
     assert accumulator.calls == 2
@@ -289,7 +289,7 @@ def test_fold_rejects_empty_and_source_failures_without_replacing_old_result(tmp
     finally:
         FinishTotal.fail_globally = False
 
-    assert fold.compute(managed=ManagedConfig(state_repo=store)) is None
+    assert fold.compute(managed=ManagedConfig(state_repo=store)) == fold.last_state_ref
     assert fold.value() == 1.0
     assert CountingDataset.iterations == 2
 
@@ -622,7 +622,7 @@ def test_fold_uses_one_managed_owner_and_services_interrupt_at_checkpoint(tmp_pa
     assert status.checkpoint_state_ref is not None
     assert fold.ready is False
 
-    assert fold.compute(managed=ManagedConfig(state_repo=store)) is None
+    assert fold.compute(managed=ManagedConfig(state_repo=store)) == fold.last_state_ref
     assert fold.value() == 1.0
     assert CountingDataset.iterations == 1
 

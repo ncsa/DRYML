@@ -143,6 +143,15 @@ class StateGraphReservation(AbstractContextManager):
 
             raise RepoSaveError("State graph reservation does not cover this exact live graph.")
 
+    def _covers_object_ids(self, object_ids: Iterable[object]) -> None:
+        """Require this active token to cover the supplied state identities."""
+
+        self._require_owner()
+        if not set(object_ids).issubset(self._object_ids):
+            from .repo import RepoSaveError
+
+            raise RepoSaveError("State graph reservation does not cover these ObjectIds.")
+
 
 def reserve(object_ref, nodes: Iterable[object], object_ids: Iterable[object]) -> StateGraphReservation:
     """Acquire a nonblocking all-or-nothing reservation for preflighted nodes."""

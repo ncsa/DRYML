@@ -29,7 +29,7 @@ def _validated_factory_target(value: Any) -> str | ImportRef | SourceSpec:
 def _freeze_factory_value(value: Any, path: tuple[str, ...] = ()) -> Any:
     from .definition import ConcreteDefinition, Definition
     from .object import Object
-    from .template import Template
+    from .template import Template, TemplateBundle
 
     if isinstance(value, (Object, Definition, ConcreteDefinition)):
         loc = "/".join(path) or "<root>"
@@ -38,7 +38,7 @@ def _freeze_factory_value(value: Any, path: tuple[str, ...] = ()) -> Any:
             "Pass plain runtime construction values instead."
         )
 
-    if isinstance(value, Template):
+    if isinstance(value, (Template, TemplateBundle)):
         return value
 
     symbol = maybe_symbol_ref(value)

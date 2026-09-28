@@ -75,6 +75,65 @@ def template_from_data(data: Mapping[str, object]) -> Any:
     return Template._from_root(root)
 
 
+def template_bundle_to_data(bundle: Any) -> dict[str, object]:
+    """Encode one TemplateBundle as a single aggregate closed v1 graph payload.
+
+    The shared encoder applies its byte, depth, node, and entry limits across all
+    recipes rather than resetting the budget for each individual recipe.
+
+    Args:
+        bundle: Immutable TemplateBundle to encode.
+
+    Returns:
+        Canonical ``dryml-template`` v1 aggregate data.
+
+    Raises:
+        TypeError: If ``bundle`` is not a TemplateBundle.
+        TemplateError: If any recipe is nonportable or the aggregate exceeds a
+            codec limit.
+
+    Side Effects:
+        None. Encoding never resolves a target.
+    """
+
+    from .template import TemplateBundle
+
+    if not isinstance(bundle, TemplateBundle):
+        raise TypeError("template_bundle_to_data requires a TemplateBundle")
+    return _encode("template-bundle", bundle.recipes)
+
+
+def template_bundle_from_data(data: Mapping[str, object]) -> Any:
+    """Decode one canonical aggregate TemplateBundle without target resolution.
+
+    Args:
+        data: Canonical ``dryml-template`` v1 aggregate data.
+
+    Returns:
+        The decoded immutable TemplateBundle.
+
+    Raises:
+        TemplateError: If data is malformed, unsupported, noncanonical, or
+            exceeds an aggregate codec limit.
+
+    Side Effects:
+        None. Decoding does not import or invoke recipe targets.
+    """
+
+    from .freeze import FrozenDict
+    from .template import Template, TemplateBundle
+
+    kind, root = _decode(data)
+    if kind != "template-bundle" or not isinstance(root, FrozenDict):
+        raise TemplateCodecError("template bundle payload kind is invalid")
+    if any(type(name) is not str or not isinstance(recipe, Template) for name, recipe in root.items()):
+        raise TemplateCodecError("template bundle recipes are invalid")
+    try:
+        return TemplateBundle._from_recipes(root)
+    except (TypeError, TemplateError) as error:
+        raise TemplateCodecError("template bundle recipes are invalid") from error
+
+
 def selector_to_data(selector: Any) -> dict[str, object]:
     """Encode an exact TemplateSelector with built-in immutable domains only.
 
@@ -176,6 +235,14 @@ class _Encoder:
         self.nodes: list[dict[str, object]] = []
         self.labels: dict[int, str] = {}
         self.active: set[int] = set()
+        self.entries = 0
+
+    def consume_entries(self, count: int) -> None:
+        """Apply one cumulative container-entry charge to this payload."""
+
+        self.entries += count
+        if self.entries > _MAX_ENTRIES:
+            raise TemplateLimitError("template aggregate entry limit exceeded")
 
     def finish(self, kind: str, root: object, *, extra: dict[str, object] | None = None) -> dict[str, object]:
         result: dict[str, object] = {"schema": TEMPLATE_CODEC_SCHEMA, "version": TEMPLATE_CODEC_VERSION,
@@ -212,6 +279,7 @@ class _Encoder:
         if isinstance(value, ImportRef):
             return {"tag": "import", "module": value.module, "qualname": value.qualname}
         if isinstance(value, SourceSpec):
+            self.consume_entries(len(value.imports))
             return {"tag": "source", "kind": value.kind, "source": value.source, "name": value.name,
                     "imports": [[name, self.value(ref, depth + 1)] for name, ref in value.imports.items()]}
         return self.node(value, depth)
@@ -244,12 +312,16 @@ class _Encoder:
         from .quoted import QuotedDef, SelectorSpec
         from .reference_values import ObjectRef, StateRef
         from .selector import Selector
-        from .template import Expr, Par, Template, _BinaryExpr, _RepeatExpr, _validate_number
+        from .template import Expr, Par, Template, TemplateBundle, _BinaryExpr, _RepeatExpr, _validate_number
 
         if isinstance(value, Template):
             return {"tag": "template", "root": self.value(value.root, depth)}
+        if isinstance(value, TemplateBundle):
+            return {"tag": "template-bundle", "recipes": self.value(value.recipes, depth)}
         if isinstance(value, Par):
-            return {"tag": "par", "name": value.name, "path": value.path.to_data()}
+            path = value.path.to_data()
+            self.consume_entries(len(path["segments"]))
+            return {"tag": "par", "name": value.name, "path": path}
         if isinstance(value, _BinaryExpr):
             if (
                 value.operation not in {"mul", "truediv", "floordiv"}
@@ -281,14 +353,17 @@ class _Encoder:
         if isinstance(value, (FrozenDict, dict)):
             if len(value) > _MAX_ENTRIES or any(type(key) not in {str, int} for key in value):
                 raise TemplateCodecError("template map is unsupported")
+            self.consume_entries(len(value))
             return {"tag": "map", "items": [[self.value(key, depth), self.value(item, depth)] for key, item in value.items()]}
         if isinstance(value, (FrozenList, list, FrozenTuple, tuple)):
             if len(value) > _MAX_ENTRIES:
                 raise TemplateLimitError("template container entry limit exceeded")
+            self.consume_entries(len(value))
             return {"tag": "list" if isinstance(value, (FrozenList, list)) else "tuple", "items": [self.value(item, depth) for item in value]}
         if isinstance(value, (FrozenSet, set, frozenset)):
             if len(value) > _MAX_ENTRIES:
                 raise TemplateLimitError("template container entry limit exceeded")
+            self.consume_entries(len(value))
             if any(not _portable_set_member(item) for item in value):
                 raise TemplateCodecError("template set members must be literal portable values")
             items = [self.value(item, depth) for item in value]
@@ -303,9 +378,13 @@ class _Encoder:
         if isinstance(value, Selector):
             return {"tag": "selector", "root": self.value(value.root, depth), "strict": value.strict, "cls_policy": value.cls_policy}
         if isinstance(value, ObjectRef):
-            return {"tag": "object-ref", "definition": self.value(value.definition, depth), "objects": value.to_data()["objects"]}
+            objects = value.to_data()["objects"]
+            self.consume_entries(len(objects))
+            return {"tag": "object-ref", "definition": self.value(value.definition, depth), "objects": objects}
         if isinstance(value, StateRef):
-            return {"tag": "state-ref", "object": self.value(value.object, depth), "states": value.to_data()["states"]}
+            states = value.to_data()["states"]
+            self.consume_entries(len(states))
+            return {"tag": "state-ref", "object": self.value(value.object, depth), "states": states}
         raise TemplateCodecError("template value type is not portable")
 
 
@@ -317,6 +396,14 @@ def _encode(kind: str, root: object) -> dict[str, object]:
 class _DecodeState:
     def __init__(self, records: dict[str, Mapping[str, object]]) -> None:
         self.records, self.built, self.active = records, {}, set()
+        self.entries = 0
+
+    def consume_entries(self, count: int) -> None:
+        """Apply one cumulative container-entry charge to this payload."""
+
+        self.entries += count
+        if self.entries > _MAX_ENTRIES:
+            raise TemplateLimitError("template aggregate entry limit exceeded")
 
 
 def _decode(data: Mapping[str, object], *, extra: set[str] | None = None):
@@ -387,6 +474,7 @@ def _decode_value(data: object, state: _DecodeState, depth: int) -> object:
         except Exception: raise TemplateCodecError("template import is invalid") from None
     if tag == "source" and set(data) == {"tag", "kind", "source", "name", "imports"} and isinstance(data["imports"], list):
         from .symbol import SourceSpec
+        state.consume_entries(len(data["imports"]))
         try: return SourceSpec(data["kind"], data["source"], data["name"], {name: _decode_value(ref, state, depth + 1) for name, ref in data["imports"]})
         except Exception: raise TemplateCodecError("template source is invalid") from None
     if tag == "ref" and set(data) == {"tag", "label"} and isinstance(data["label"], str):
@@ -413,15 +501,25 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectId, ObjectRef, StateRef
     from .selector import Selector
-    from .template import Expr, Par, Template, _BinaryExpr, _RepeatExpr, _validate_number
+    from .template import Expr, Par, Template, TemplateBundle, _BinaryExpr, _RepeatExpr, _validate_number
     from .utils.graph.path import GraphPath
 
     if not isinstance(data, Mapping) or not isinstance(data.get("tag"), str): raise TemplateCodecError("template node is invalid")
     tag = data["tag"]
     value = lambda item: _decode_value(item, state, depth + 1)
     if tag == "template" and set(data) == {"tag", "root"}: return Template._from_root(value(data["root"]))
+    if tag == "template-bundle" and set(data) == {"tag", "recipes"}:
+        recipes = value(data["recipes"])
+        if not isinstance(recipes, FrozenDict) or any(type(name) is not str or not isinstance(recipe, Template) for name, recipe in recipes.items()):
+            raise TemplateCodecError("template bundle recipes are invalid")
+        try: return TemplateBundle._from_recipes(recipes)
+        except (TypeError, TemplateError): raise TemplateCodecError("template bundle recipes are invalid") from None
     if tag == "par" and set(data) == {"tag", "name", "path"}:
-        try: return Par(data["name"], path=GraphPath.from_data(data["path"]))
+        path = data["path"]
+        if not isinstance(path, Mapping) or not isinstance(path.get("segments"), list):
+            raise TemplateCodecError("template parameter is invalid")
+        state.consume_entries(len(path["segments"]))
+        try: return Par(data["name"], path=GraphPath.from_data(path))
         except Exception: raise TemplateCodecError("template parameter is invalid") from None
     if tag == "binary" and set(data) == {"tag", "op", "left", "right"} and data["op"] in {"mul", "truediv", "floordiv"}:
         left, right = value(data["left"]), value(data["right"])
@@ -456,11 +554,13 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
         return FactorySpec._from_template_parts(target, tuple(args), kwargs)
     if tag == "map" and set(data) == {"tag", "items"} and isinstance(data["items"], list):
         if len(data["items"]) > _MAX_ENTRIES: raise TemplateLimitError("template container entry limit exceeded")
+        state.consume_entries(len(data["items"]))
         items = [(value(pair[0]), value(pair[1])) for pair in data["items"] if isinstance(pair, list) and len(pair) == 2]
         if len(items) != len(data["items"]) or any(type(key) not in {str, int} for key, _ in items) or len({key for key, _ in items}) != len(items): raise TemplateCodecError("template map is invalid")
         return FrozenDict(items)
     if tag in {"list", "tuple", "set"} and set(data) == {"tag", "items"} and isinstance(data["items"], list):
         if len(data["items"]) > _MAX_ENTRIES: raise TemplateLimitError("template container entry limit exceeded")
+        state.consume_entries(len(data["items"]))
         items = [value(item) for item in data["items"]]
         if tag == "set" and any(not _portable_set_member(item) for item in items):
             raise TemplateCodecError("template set members must be literal portable values")
@@ -477,9 +577,15 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
         try: return Selector(value(data["root"]), strict=data["strict"], cls_policy=data["cls_policy"])
         except Exception: raise TemplateCodecError("template selector is invalid") from None
     if tag == "object-ref" and set(data) == {"tag", "definition", "objects"}:
+        if not isinstance(data["objects"], list):
+            raise TemplateCodecError("template object reference is invalid")
+        state.consume_entries(len(data["objects"]))
         try: return ObjectRef(value(data["definition"]), {GraphPath.from_data(item["path"]): ObjectId.from_data(item["object_id"]) for item in data["objects"]})
         except Exception: raise TemplateCodecError("template object reference is invalid") from None
     if tag == "state-ref" and set(data) == {"tag", "object", "states"}:
+        if not isinstance(data["states"], list):
+            raise TemplateCodecError("template state reference is invalid")
+        state.consume_entries(len(data["states"]))
         try: return StateRef(value(data["object"]), {GraphPath.from_data(item["path"]): item["state"] for item in data["states"]})
         except Exception: raise TemplateCodecError("template state reference is invalid") from None
     raise TemplateCodecError("template node tag is invalid")

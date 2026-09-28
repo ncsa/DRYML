@@ -344,11 +344,11 @@ def _validate_target(target: Any, role: str, slot: str) -> None:
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectRef, StateRef
     from .selector import Selector
-    from .template import Template
+    from .template import Template, TemplateBundle
 
     supported = (
         Definition, ConcreteDefinition, ObjectRef, StateRef, Object, AutoRef,
-        QuotedDef, Selector, SelectorSpec, Template,
+        QuotedDef, Selector, SelectorSpec, Template, TemplateBundle,
     )
     if target not in supported:
         _reject_object_subclass(target, slot)
@@ -359,8 +359,8 @@ def _validate_target(target: Any, role: str, slot: str) -> None:
         raise SignatureError("AutoRef is only a reference target", slot)
     if target in (QuotedDef, Selector, SelectorSpec) and role != "ref":
         raise SignatureError("quotation targets are only reference data", slot)
-    if target is Template and role != "ref":
-        raise SignatureError("Template is only a reference target", slot)
+    if target in (Template, TemplateBundle) and role != "ref":
+        raise SignatureError("Template quotations are only reference targets", slot)
 
 
 def _parse_slot(annotation: Any, slot: str) -> _Slot:
@@ -1060,13 +1060,15 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
             # Decoded and structural links already carry their edge authority.
             # Bound replay and unannotated constructor structure stay inert;
             # fresh explicit constructor roles still enforce their exact edge.
-            from .template import Template
+            from .template import Template, TemplateBundle
 
             if preserve_finalized_links:
                 return value, value
             if persist_role and not slot.explicit:
                 if isinstance(value.target, Template):
                     raise SignatureError("Template requires an explicit Ref[Template] declaration", name)
+                if isinstance(value.target, TemplateBundle):
+                    raise SignatureError("TemplateBundle requires an explicit Ref[TemplateBundle] declaration", name)
                 return value, value
             expected = EdgeKind.REF if slot.role == "ref" else EdgeKind.MATERIALIZE
             if value.kind is not expected:
@@ -1097,7 +1099,7 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
         from .definition import Definition
         from .quoted import QuotedDef, SelectorSpec
         from .selector import Selector
-        from .template import Template
+        from .template import Template, TemplateBundle
 
         # Definition and selector roles carry expression data, not graph edges.
         # Quoting happens here, after the one owning signature has selected it.
@@ -1106,6 +1108,8 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
         if slot.targets[0] is Selector and isinstance(selected, Selector):
             return selected, DefLink.finalized(EdgeKind.REF, SelectorSpec(selected))
         if slot.targets[0] is Template and isinstance(selected, Template):
+            return selected, DefLink.finalized(EdgeKind.REF, selected)
+        if slot.targets[0] is TemplateBundle and isinstance(selected, TemplateBundle):
             return selected, DefLink.finalized(EdgeKind.REF, selected)
         if selected is None or isinstance(selected, (QuotedDef, SelectorSpec)):
             return selected, selected
@@ -1213,7 +1217,7 @@ def _select_exact(value: Any, target: Any, name: str,
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectRef, StateRef
     from .selector import Selector
-    from .template import Template
+    from .template import Template, TemplateBundle
 
     if target is QuotedDef:
         return value if isinstance(value, QuotedDef) else QuotedDef(
@@ -1240,6 +1244,10 @@ def _select_exact(value: Any, target: Any, name: str,
         return SelectorSpec(selector)
     if target is Template:
         if isinstance(value, Template):
+            return value
+        raise _SelectionUnavailable()
+    if target is TemplateBundle:
+        if isinstance(value, TemplateBundle):
             return value
         raise _SelectionUnavailable()
     if isinstance(value, QuotedDef):

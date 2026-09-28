@@ -261,6 +261,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "Expr",
     "Shared",
     "Template",
+    "TemplateBundle",
     "TemplateGenerator",
     "TemplateSelector",
     "TemplateError",
@@ -1093,7 +1094,7 @@ print(json.dumps({
     )
     data = json.loads(result.stdout)
     assert data["artifacts"] == [
-        "Artifact", "ArtifactNotReadyError", "CacheCodec", "CacheIntegrityError",
+        "Artifact", "ArtifactNotReadyError", "ArtifactRecoveryError", "CacheCodec", "CacheIntegrityError",
         "CachedDataset", "Fold", "Value", "mean", "quantile",
     ]
     assert data["metrics"] == [

@@ -61,6 +61,11 @@ constructed, saved, or restored; it does not resolve template parameters or
 materialize the recipe target. An unannotated or materializing slot rejects that
 unresolved value, and `Ref(value)` cannot bypass the declared role.
 
+`Ref[TemplateBundle]` is the corresponding exact declaration for a named ordered
+collection of Template recipes. It is quotation data, not a container-role
+extension: raw bundles and materializing roles fail, and persistence or worker
+transport never resolves a recipe or its parameters.
+
 `StateRef.reference_value_at(path)` is the narrow graph-inspection accessor for a
 terminal `Ref` field containing an exact `ObjectRef` or `StateRef`. It may pass
 through preceding materializing graph edges but never crosses a Ref boundary,

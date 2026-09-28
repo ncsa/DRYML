@@ -109,7 +109,7 @@ class Fold(Value[ResultT], Generic[ResultT]):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, store_parameter="store")
+    @managed_operation(resumable=True, return_state_ref=True, store_parameter="store")
     def compute(
             self, *, checkpoint_every: int = 1000, store=None,
             managed: ManagedContext) -> None:
@@ -131,6 +131,11 @@ class Fold(Value[ResultT], Generic[ResultT]):
                 selected or its input/output validation fails.
             Exception: Propagates source, Method, result-validation, interruption,
                 and managed-publication failures without exposing a partial result.
+
+        Returns:
+            The managed boundary returns this invocation's exact completed
+            :class:`~dryml.core.StateRef` after final publication. The authored
+            body returns ``None``.
 
         Side Effects:
             Materializes a fresh source cursor unless resuming exhausted progress,
@@ -414,13 +419,15 @@ class Fold(Value[ResultT], Generic[ResultT]):
         source_ref = self.src
         repo = managed.state_repo
         if isinstance(source_ref, StateRef):
-            source = repo.load_state_ref(source_ref)
+            source = repo.load_state_ref(source_ref, reuse_live="never", cache="none")
         elif isinstance(source_ref, ObjectRef):
             source = repo.build_object_ref(source_ref)
         elif isinstance(source_ref, ConcreteDefinition):
-            source = repo._load_structural(source_ref, require_store=False)
+            source = repo._load_structural(source_ref, require_store=False, cache="none")
         elif isinstance(source_ref, Definition):
-            source = repo._load_structural(source_ref.concretize(repo=repo), require_store=False)
+            source = repo._load_structural(
+                source_ref.concretize(repo=repo), require_store=False, cache="none",
+            )
         else:
             raise TypeError("Fold source reference is not a supported DRYML reference.")
         if not isinstance(source, Dataset):

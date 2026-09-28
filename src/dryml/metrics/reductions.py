@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from functools import wraps
+from inspect import signature
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
 
 from dryml.artifacts import Fold, mean
-from dryml.core import AutoRef, ConcreteDefinition, Ref, function
+from dryml.core import AutoRef, ConcreteDefinition, F, Par, Ref, Template, function
 from dryml.core.tensor_spec import SpecTree, TensorSpec
 from dryml.data import Abs, Diff, Map, Pipe, Project, Select, Squared
 from dryml.data.reduction_methods import (
@@ -19,6 +22,99 @@ from dryml.methods import Accumulator, Method
 
 Label: TypeAlias = int | str
 F1Average: TypeAlias = Literal["binary", "micro", "macro", "weighted", "none"]
+
+
+def _contains_template_value(value: object) -> bool:
+    """Return whether supported metric input structure contains Template or Par."""
+
+    if isinstance(value, (Template, Par)):
+        return True
+    if isinstance(value, Mapping):
+        return any(
+            _contains_template_value(item)
+            for pair in value.items()
+            for item in pair
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_template_value(item) for item in value)
+    return False
+
+
+def _metric_factory(target):
+    """Lift only supplied metric helpers into inert factory Templates.
+
+    Concrete calls retain the existing signature-normalized Fold construction.
+    Symbolic calls retain their full authored call and defer value-dependent
+    validation until Template binding resolves it; this is deliberately not a
+    general function-lifting facility.
+    """
+
+    concrete = function(target)
+
+    @wraps(target)
+    def wrapped(*args, **kwargs):
+        if _contains_template_value((args, kwargs)):
+            bound = signature(target).bind(*args, **kwargs)
+            bound.apply_defaults()
+            _validate_known_metric_arguments(target.__name__, bound.arguments)
+            # The module export is the lifted wrapper. Resolving this import later
+            # re-enters the concrete branch after binding rather than retaining a
+            # private undecorated function that has no importable symbol.
+            return Template.from_value(F(f"{target.__module__}:{target.__name__}", *args, **kwargs))
+        return concrete(*args, **kwargs)
+
+    return wrapped
+
+
+def _validate_known_metric_arguments(name: str, arguments: Mapping[str, object]) -> None:
+    """Validate literal metric controls while retaining symbolic dependencies."""
+
+    if "mode" in arguments and not isinstance(arguments["mode"], (Template, Par)):
+        mode = arguments["mode"]
+        if mode not in ("global", "coordinate"):
+            raise ValueError("mode must be 'global' or 'coordinate'.")
+    if "classes" in arguments:
+        _validate_known_classes(arguments["classes"])
+    if name == "classifier_f1":
+        _validate_known_f1_controls(
+            arguments["average"], arguments["positive_index"],
+        )
+
+
+def _validate_known_classes(classes: object) -> None:
+    """Reject fixed class-domain errors while allowing symbolic tuple members."""
+
+    if isinstance(classes, (Template, Par)):
+        return
+    if not isinstance(classes, tuple) or not classes:
+        _classes(classes)
+    known = tuple(label for label in classes if not _contains_template_value(label))
+    if known:
+        kind = type(known[0])
+        if kind not in (int, str) or any(type(label) is not kind for label in known):
+            raise TypeError("classes must contain homogeneous exact int or str labels.")
+        if len(set(known)) != len(known):
+            raise ValueError("classes must not contain duplicates.")
+    if len(known) == len(classes):
+        _classes(classes)
+
+
+def _validate_known_f1_controls(average: object, positive_index: object) -> None:
+    """Validate F1 facts that do not depend on unresolved direct controls."""
+
+    average_symbolic = isinstance(average, (Template, Par))
+    positive_symbolic = isinstance(positive_index, (Template, Par))
+    if not average_symbolic and average not in ("binary", "micro", "macro", "weighted", "none"):
+        raise ValueError("average must be binary, micro, macro, weighted, or none.")
+    if not positive_symbolic and positive_index is not None and (
+            type(positive_index) is not int or positive_index < 0):
+        raise ValueError("binary F1 requires a nonnegative exact int positive_index.")
+    if average_symbolic or positive_symbolic:
+        return
+    if average == "binary" and positive_index is None:
+        raise ValueError("binary F1 requires a nonnegative exact int positive_index.")
+    if average != "binary" and positive_index is not None:
+        raise ValueError("positive_index is valid only for binary F1.")
 
 
 def _classes(classes: tuple[Label, ...]) -> tuple[Label, ...]:
@@ -450,8 +546,8 @@ def _error_source(test_ds: object, model: object, *, x: Path, y: Path, error: ty
     return Map.defn(evaluation, Pipe.defn(Diff.defn(x="prediction", y="target"), error.defn())).concretize()
 
 
-@function
-def regressor_mae(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", y: Path = "y", mode: ReductionMode) -> Fold:
+@_metric_factory
+def regressor_mae(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", y: Path = "y", mode: ReductionMode) -> Fold | Template:
     """Declare an inert streaming MAE Fold over one model evaluation graph.
 
     Args:
@@ -462,7 +558,8 @@ def regressor_mae(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", 
         mode: Global or coordinate-wise mean population definition.
 
     Returns:
-        An uncomputed Fold using U6's native mean carry.
+        An uncomputed Fold using U6's native mean carry, or an inert Template
+        when any supplied argument contains a Template parameter.
 
     Raises:
         TypeError: If references or paths cannot form the declared Method graph.
@@ -476,8 +573,8 @@ def regressor_mae(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", 
     return mean(_error_source(test_ds, model, x=x, y=y, error=Abs), mode=mode)
 
 
-@function
-def regressor_mse(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", y: Path = "y", mode: ReductionMode) -> Fold:
+@_metric_factory
+def regressor_mse(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", y: Path = "y", mode: ReductionMode) -> Fold | Template:
     """Declare an inert streaming MSE Fold over one model evaluation graph.
 
     Args:
@@ -488,7 +585,8 @@ def regressor_mse(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", 
         mode: Global or coordinate-wise mean population definition.
 
     Returns:
-        An uncomputed Fold using U6's native mean carry.
+        An uncomputed Fold using U6's native mean carry, or an inert Template
+        when any supplied argument contains a Template parameter.
 
     Raises:
         TypeError: If references or paths cannot form the declared Method graph.
@@ -518,8 +616,8 @@ def _classifier_fold(test_ds: object, model: object, *, classes: tuple[Label, ..
     )
 
 
-@function
-def classifier_confusion_matrix(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[Label, ...], prediction_labels: Method, target_labels: Method, x: Path = "x", y: Path = "y") -> Fold:
+@_metric_factory
+def classifier_confusion_matrix(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[Label, ...], prediction_labels: Method, target_labels: Method, x: Path = "x", y: Path = "y") -> Fold | Template:
     """Declare an inert fixed-domain confusion-matrix Fold without label guessing.
 
     Args:
@@ -532,7 +630,8 @@ def classifier_confusion_matrix(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, c
         y: Source path selecting target values.
 
     Returns:
-        An uncomputed Fold whose result is a truth-row, prediction-column matrix.
+        An uncomputed Fold whose result is a truth-row, prediction-column matrix,
+        or an inert Template when any supplied argument is symbolic.
 
     Raises:
         TypeError: If references, labels, or Methods are unsupported.
@@ -545,8 +644,8 @@ def classifier_confusion_matrix(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, c
     return _classifier_fold(test_ds, model, classes=classes, prediction_labels=prediction_labels, target_labels=target_labels, x=x, y=y, finalize=None)
 
 
-@function
-def classifier_accuracy(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[Label, ...], prediction_labels: Method, target_labels: Method, x: Path = "x", y: Path = "y") -> Fold:
+@_metric_factory
+def classifier_accuracy(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[Label, ...], prediction_labels: Method, target_labels: Method, x: Path = "x", y: Path = "y") -> Fold | Template:
     """Declare an inert confusion-based accuracy Fold without a second evaluation loop.
 
     Args:
@@ -559,7 +658,8 @@ def classifier_accuracy(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: 
         y: Source path selecting target values.
 
     Returns:
-        An uncomputed Fold whose result is native scalar accuracy.
+        An uncomputed Fold whose result is native scalar accuracy, or an inert
+        Template when any supplied argument is symbolic.
 
     Raises:
         TypeError: If references, labels, or Methods are unsupported.
@@ -572,8 +672,8 @@ def classifier_accuracy(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: 
     return _classifier_fold(test_ds, model, classes=classes, prediction_labels=prediction_labels, target_labels=target_labels, x=x, y=y, finalize=AccuracyFromConfusion())
 
 
-@function
-def classifier_f1(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[Label, ...], prediction_labels: Method, target_labels: Method, average: F1Average, positive_index: int | None = None, x: Path = "x", y: Path = "y") -> Fold:
+@_metric_factory
+def classifier_f1(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[Label, ...], prediction_labels: Method, target_labels: Method, average: F1Average, positive_index: int | None = None, x: Path = "x", y: Path = "y") -> Fold | Template:
     """Declare an inert confusion-based F1 Fold using explicit label conversion.
 
     Args:
@@ -588,7 +688,8 @@ def classifier_f1(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[
         y: Source path selecting target values.
 
     Returns:
-        An uncomputed Fold with scalar or per-class native F1 result semantics.
+        An uncomputed Fold with scalar or per-class native F1 result semantics,
+        or an inert Template when any supplied argument is symbolic.
 
     Raises:
         TypeError: If references, labels, or Methods are unsupported.

@@ -602,6 +602,7 @@ def execute_exact_state_load_plan(
         _retained_graph_reservations: list[tuple[Object, object]] | None = None,
         _failure_targets: list[Object] | None = None,
         _restore_started: list[bool] | None = None,
+        _identity_reservation=None,
         class_manifest: _NodeBindings | None = None):
     """Realize a verified StateRef dependency-first without partial cache publication.
 
@@ -618,6 +619,8 @@ def execute_exact_state_load_plan(
             and evicts these candidates if any nested seed or parent fails.
         _retained_reservations: Internal realization-scoped list of reused live
             candidates reserved until the complete outer graph is realized.
+        _identity_reservation: Optional internal token already owning every
+            ObjectId in this exact load closure.
 
     Returns:
         A live root matching ``plan.state_ref``.
@@ -676,7 +679,8 @@ def execute_exact_state_load_plan(
 
     def eligible(cdef, action, dependencies):
         candidates = []
-        for candidate in repo._all_live_candidates():
+        for candidate in repo._all_live_candidates(
+                reservation=_identity_reservation):
             if not isinstance(candidate, Serializable):
                 continue
             if candidate.object_id != action.object_id or not candidate.definition.graph_equal(cdef):
@@ -715,7 +719,11 @@ def execute_exact_state_load_plan(
         # Competing instances can share an ObjectId. Reserve that identity only
         # after ambiguity is resolved, or our own token hides later candidates.
         try:
-            graph_reservation = reserve_node(candidate)
+            if _identity_reservation is None:
+                graph_reservation = reserve_node(candidate)
+            else:
+                _identity_reservation._covers_object_ids((candidate.object_id,))
+                graph_reservation = None
         except RepoSaveError:
             candidate._save_load_reservation.release()
             return None
@@ -761,7 +769,8 @@ def execute_exact_state_load_plan(
                     if retained is not None:
                         candidate, graph_reservation = retained
                         retained_reservations.append(candidate)
-                        retained_graph_reservations.append((candidate, graph_reservation))
+                        if graph_reservation is not None:
+                            retained_graph_reservations.append((candidate, graph_reservation))
                         retain_failure_target(candidate)
                         if reuse_live == "greedy" and candidate._last_state_hash != action.state_hash:
                             greedy_touched.append((candidate, action.path))
@@ -832,6 +841,7 @@ def execute_exact_state_load_plan(
                                 _retained_graph_reservations=retained_graph_reservations,
                                 _failure_targets=failure_targets,
                                 _restore_started=restore_started,
+                                _identity_reservation=_identity_reservation,
                                 class_manifest=class_manifest,
                             )
                         raise RepoLoadError(

@@ -89,6 +89,13 @@ An unresolved recipe can be carried only by a constructor slot declared
 pass `traverse_refs=True` to enter pre-existing carried recipes. Ref opacity does
 not make undeclared slots valid and does not cause recursive same-call binding.
 
+`TemplateBundle` carries an ordered named collection of inert recipes for an
+artifact owner. It accepts one `Template`, a list/tuple (named `artifact_0`,
+`artifact_1`, and so on), or a string-keyed mapping whose insertion order and
+punctuation-bearing nonempty names are retained. Bundles are accepted only through
+`Ref[TemplateBundle]`, encode all recipes in one bounded closed payload, and have
+the same default Ref traversal barrier as `Template`.
+
 The same boundary applies to recursive `object_projection()`: ordinary Ref-held
 `StateRef` values are weakened to their `ObjectRef` associations, while a
 Ref-held Template stays unchanged unless `traverse_refs=True`. Opting in retains

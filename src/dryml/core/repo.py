@@ -66,6 +66,24 @@ def _unique_objects(objects):
     return tuple(unique)
 
 
+def _matches_exact_live_graph(candidate, state_ref) -> bool:
+    """Return whether one live root still matches every exact saved state node."""
+
+    if candidate.object_ref != state_ref.object or candidate.last_state_ref != state_ref:
+        return False
+    try:
+        for path, object_id in state_ref.object.objects.items():
+            node = candidate.graph_at(path)
+            if (
+                    node.object_id != object_id
+                    or getattr(node, "_last_state_hash", None) != state_ref.states[path]
+            ):
+                return False
+    except (AttributeError, KeyError, LookupError):
+        return False
+    return True
+
+
 def _fork_rekey_reference(reference, namespace, *, record_candidate=None):
     """Rekey an exact reference graph, including materializing embedded refs.
 
@@ -1250,20 +1268,32 @@ class Repo:
             if not getattr(candidate, "_restore_failed", False) and not is_reserved(candidate)
         )
 
-    def _all_live_candidates(self) -> tuple[Object, ...]:
+    def _all_live_candidates(self, *, reservation=None) -> tuple[Object, ...]:
         """Return all distinct cached live Objects without structural lookup.
 
         Exact StateRef reuse filters this complete live set by ObjectId, graph
         topology, bindings, and reservation availability.  It intentionally does
-        not use CDef equality as an identity key.
+        not use CDef equality as an identity key. An internal exact-load identity
+        reservation may expose only candidates covered by that caller-owned token.
         """
         from .state import is_reserved
+
+        def available(obj):
+            if not is_reserved(obj):
+                return True
+            if reservation is None:
+                return False
+            try:
+                reservation._covers_object_ids((obj.object_id,))
+            except RepoSaveError:
+                return False
+            return True
 
         return _unique_objects(
             obj for obj in (
                 tuple(obj for _, obj in self.strong_obj_cache.items())
                 + tuple(obj for _, obj in self.weak_obj_cache.items())
-            ) if not getattr(obj, "_restore_failed", False) and not is_reserved(obj)
+            ) if not getattr(obj, "_restore_failed", False) and available(obj)
         )
 
     def _evict_live(self, obj: Object) -> None:
@@ -4666,6 +4696,36 @@ class Repo:
             return execute_exact_state_load_plan(
                 self, plan, reuse_live=reuse_live, cache=cache,
             )
+
+    def _load_state_ref_with_identity_reservation(
+            self, state_ref, *, reuse_live: LiveReusePolicy = "matching",
+            cache: CachePolicy = "weak") -> Object:
+        """Exactly load one state while atomically owning all target ObjectIds."""
+
+        from dryml.runtime import materialization_admission
+        from .materialization import build_exact_state_load_plan, execute_exact_state_load_plan
+        from .reference_values import StateRef
+        from .state import reserve
+
+        if not isinstance(state_ref, StateRef):
+            raise TypeError("exact identity reservation requires a StateRef.")
+        with materialization_admission(operation="repo_load_state_ref"):
+            plan = build_exact_state_load_plan(self, state_ref, _defer_payload=True)
+            with reserve(
+                    state_ref.object, (), state_ref.object.objects.values(),
+            ) as reservation:
+                if reuse_live == "matching":
+                    matching = tuple(
+                        candidate for candidate in self._all_live_candidates(
+                            reservation=reservation,
+                        ) if _matches_exact_live_graph(candidate, state_ref)
+                    )
+                    if len(matching) == 1:
+                        return matching[0]
+                return execute_exact_state_load_plan(
+                    self, plan, reuse_live=reuse_live, cache=cache,
+                    _identity_reservation=reservation,
+                )
 
     def restore_state_ref_into(
             self, obj: Object, state_ref, *, reservation=None,

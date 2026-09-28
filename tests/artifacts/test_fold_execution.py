@@ -135,7 +135,11 @@ def _run_managed(artifact, *, placement: str, repo: Repo, control_store: DirStor
 
     config = ManagedConfig(state_repo=repo, control_store=control_store)
     if placement == "direct":
-        assert artifact.compute(managed=config) is None
+        result = artifact.compute(managed=config)
+        if isinstance(artifact, Fold):
+            assert result == artifact.last_state_ref
+        else:
+            assert result is None
     else:
         spool.mkdir()
         repo.save_object(artifact, deep_capture=True)
@@ -147,13 +151,19 @@ def _run_managed(artifact, *, placement: str, repo: Repo, control_store: DirStor
         )
         try:
             future = executor.submit(artifact.compute, kwargs={"managed": config})
-            assert future.result(timeout=15) is None
+            result = future.result(timeout=15)
+            if isinstance(artifact, Fold):
+                assert isinstance(result, StateRef)
+            else:
+                assert result is None
             future.cleanup(timeout=5)
         finally:
             executor.close(cancel=True, timeout=10)
     status = artifact.compute.status(state_repo=repo, control_store=control_store)
     assert status.state == "completed"
     assert isinstance(status.final_state_ref, StateRef)
+    if isinstance(artifact, Fold):
+        assert result == status.final_state_ref
     return status.final_state_ref
 
 

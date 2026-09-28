@@ -98,7 +98,8 @@ def _walk(
             return
 
     # Ref-carried recipes are terminal data, never query graph structure.
-    if isinstance(value, Template):
+    from ..template import TemplateBundle
+    if isinstance(value, (Template, TemplateBundle)):
         return
 
     if isinstance(value, Selector):

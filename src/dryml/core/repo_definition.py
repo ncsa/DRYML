@@ -604,13 +604,15 @@ class _SelectorEncoder:
         from .quoted import QuotedDef, SelectorSpec
         from .reference_values import ObjectRef, StateRef
         from .selector import Selector
-        from .template import Template
+        from .template import Template, TemplateBundle
         from .template_selector import TemplateSelector
         from .symbol import ImportRef, SourceSpec
 
         self.budget.visit(path, depth)
         if isinstance(value, Template):
             return {"kind": "template", "payload": value.to_data()}
+        if isinstance(value, TemplateBundle):
+            return {"kind": "template-bundle", "payload": value.to_data()}
         if isinstance(value, TemplateSelector):
             return {"kind": "template-selector", "payload": value.to_data()}
         if isinstance(value, (Definition, ConcreteDefinition)):
@@ -1048,12 +1050,15 @@ def _validate_selector(value: Any, path: str) -> None:
             _exact_keys(current, {"kind", "selector"}, item_path)
             _validate_selector(current["selector"], item_path + ".selector")
             return
-        if kind in {"template", "template-selector"}:
+        if kind in {"template", "template-bundle", "template-selector"}:
             _exact_keys(current, {"kind", "payload"}, item_path)
             try:
                 if kind == "template":
                     from .template import Template
                     Template.from_data(current["payload"])
+                elif kind == "template-bundle":
+                    from .template import TemplateBundle
+                    TemplateBundle.from_data(current["payload"])
                 else:
                     from .template_selector import TemplateSelector
                     TemplateSelector.from_data(current["payload"])
@@ -1413,7 +1418,7 @@ def _selector_from_data(value: Mapping[str, Any]):
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectId, ObjectRef, StateRef
     from .selector import Selector
-    from .template import Template
+    from .template import Template, TemplateBundle
     from .template_selector import TemplateSelector
     from .utils.graph.path import GraphPath
 
@@ -1437,6 +1442,8 @@ def _selector_from_data(value: Mapping[str, Any]):
             return SelectorSpec(_selector_from_data(current["selector"]))
         if kind == "template":
             return Template.from_data(current["payload"])
+        if kind == "template-bundle":
+            return TemplateBundle.from_data(current["payload"])
         if kind == "template-selector":
             return TemplateSelector.from_data(current["payload"])
         if kind == "list":

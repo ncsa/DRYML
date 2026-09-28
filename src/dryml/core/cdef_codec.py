@@ -220,7 +220,7 @@ def object_projection_cdef(
     from .definition import Definition
     from .cdef_graph import EdgeKind
     from .factory import FactorySpec
-    from .template import Template, _BinaryExpr, _RepeatExpr
+    from .template import Template, TemplateBundle, _BinaryExpr, _RepeatExpr
 
     memo: dict[int, Any] = {}
     active: set[int] = set()
@@ -254,6 +254,23 @@ def object_projection_cdef(
         finally:
             active.remove(marker)
 
+    def rewrite_bundle(bundle: TemplateBundle) -> TemplateBundle:
+        """Rewrite quoted recipes only after the caller crosses their Ref barrier."""
+
+        marker = id(bundle)
+        if marker in memo:
+            return memo[marker]
+        if marker in active:
+            raise ValueError("Object projection does not support cyclic TemplateBundle graphs.")
+        active.add(marker)
+        try:
+            recipes = FrozenDict((name, rewrite_template(recipe)) for name, recipe in bundle.recipes.items())
+            result = bundle if all(recipes[name] is recipe for name, recipe in bundle.recipes.items()) else TemplateBundle._from_recipes(recipes)
+            memo[marker] = result
+            return result
+        finally:
+            active.remove(marker)
+
     def rewrite(current: Any) -> Any:
         if isinstance(current, StateRef):
             marker = id(current)
@@ -266,17 +283,19 @@ def object_projection_cdef(
             return rewrite_reference(current)
         if isinstance(current, Template):
             return current
+        if isinstance(current, TemplateBundle):
+            return current
         if isinstance(current, DefLink):
             marker = id(current)
             if marker in memo:
                 return memo[marker]
             if (
                 current.kind is EdgeKind.REF
-                and isinstance(current.target, Template)
+                and isinstance(current.target, (Template, TemplateBundle))
             ):
                 if not traverse_refs:
                     return current
-                target = rewrite_template(current.target)
+                target = rewrite_template(current.target) if isinstance(current.target, Template) else rewrite_bundle(current.target)
             else:
                 target = rewrite(current.target)
             result = current if target is current.target else (
@@ -581,9 +600,11 @@ def _encode_value(value: Any, labels: dict[object, str]) -> dict[str, Any]:
             "edge_kind": value.kind.value,
             "target": _encode_value(value.target, labels),
         }
-    from .template import Template
+    from .template import Template, TemplateBundle
     if isinstance(value, Template):
         return {"kind": "template", "value": value.to_data()}
+    if isinstance(value, TemplateBundle):
+        return {"kind": "template-bundle", "value": value.to_data()}
     if isinstance(value, FrozenDict):
         return {
             "kind": "dict",
@@ -638,7 +659,7 @@ def _decode_value(
     if kind == "link":
         _require_exact_keys(data, {"kind", "edge_kind", "target"}, "CDef link")
         from .cdef_graph import EdgeKind
-        from .template import Template
+        from .template import Template, TemplateBundle
 
         try:
             edge_kind = EdgeKind(data["edge_kind"])
@@ -648,18 +669,18 @@ def _decode_value(
             ) from error
         target = _decode_value(data["target"], build, payloads)
         if not isinstance(target, (
-            ConcreteDefinition, ObjectRef, StateRef, QuotedDef, SelectorSpec, Template,
+            ConcreteDefinition, ObjectRef, StateRef, QuotedDef, SelectorSpec, Template, TemplateBundle,
         )):
             raise CDefGraphCodecError(
                 "CDef link target must be a CDef, ObjectRef, StateRef, or "
-            "exact constructor-data quotation, or Template."
+            "exact constructor-data quotation, Template, or TemplateBundle."
             )
         if isinstance(target, (QuotedDef, SelectorSpec)) and edge_kind is not EdgeKind.REF:
             raise CDefGraphCodecError(
                 "CDef constructor-data quotation links must use a Ref edge."
             )
-        if isinstance(target, Template) and edge_kind is not EdgeKind.REF:
-            raise CDefGraphCodecError("CDef Template links must use a Ref edge.")
+        if isinstance(target, (Template, TemplateBundle)) and edge_kind is not EdgeKind.REF:
+            raise CDefGraphCodecError("CDef Template quotation links must use a Ref edge.")
         return DefLink.finalized(edge_kind, target)
     if kind == "template":
         _require_exact_keys(data, {"kind", "value"}, "Template")
@@ -668,6 +689,13 @@ def _decode_value(
             return Template.from_data(data["value"])
         except Exception as error:
             raise CDefGraphCodecError("CDef template payload is invalid.") from error
+    if kind == "template-bundle":
+        _require_exact_keys(data, {"kind", "value"}, "TemplateBundle")
+        from .template import TemplateBundle
+        try:
+            return TemplateBundle.from_data(data["value"])
+        except Exception as error:
+            raise CDefGraphCodecError("CDef template bundle payload is invalid.") from error
     if kind == "dict":
         _require_exact_keys(data, {"kind", "items"}, "CDef dict")
         if not isinstance(data["items"], list):

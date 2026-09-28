@@ -91,6 +91,24 @@ also retain source, declared/refined spec, backend/device, and Method-definition
 evidence. They contain no source payload, iterator, selected callable, or runtime
 context.
 
+Fold's managed `compute` operation returns its exact completed `StateRef` after
+final publication and association. The authored Fold body still returns `None`.
+This receipt can be retained for result-only recovery: restoring a completed Fold
+validates its Value payload without loading its source Dataset or invoking its
+declared Methods.
+
+`Artifact.find_completed_state_ref(recipe, repo=..., control_store=...)` queries
+immutable recipe-state and managed completion authority without constructing a
+candidate. It returns one exact completed receipt or `None`; multiple distinct
+completed results for the same recipe raise `ArtifactRecoveryError` rather than
+choosing arbitrarily. `Artifact.load_completed(...)` then restores that one ready
+result, reusing an exact matching live object by default. `Artifact.recover(
+initial_state_ref, ...)` uses the initial receiver's immutable identity to return
+its completed result when available, or restores the initial receiver so the same
+managed operation can resume after failure. Missing or corrupt exact authority is
+an error, never a request to recompute. Fold loads a StateRef source freshly and
+without caching during compute, so it does not borrow or mutate a live input cache.
+
 Compatible recovery restores the same carry, reselects implementations without
 executing the initializer, opens a fresh independent source cursor, and skips
 exactly `processed_count` yields before continuing. Fold checkpoints actual EOF
@@ -150,6 +168,12 @@ likewise accept non-materializing Dataset/model references and require explicit
 prediction and target label Methods. They never decode logits, probabilities,
 or one-hot values implicitly. A caller can use `ArgMax` or another declared
 Method in the supplied conversion graph when that conversion is intended.
+All five supplied metric helpers return an inert `Template` when any supported
+argument contains `Template` or `Par`; concrete-only calls continue to return an
+uncomputed Fold. Invalid known literal controls fail while authoring the symbolic
+call, while checks that depend on unresolved values run when the bound factory is
+built. Symbolic lifting itself constructs no helper Method and performs no input
+work.
 Incoming `StateRef` inputs remain exact nested references in that declared graph:
 a later model save does not replace the selected snapshot. Factory construction
 never saves an unpersisted source or model. A completed metric Fold can restore

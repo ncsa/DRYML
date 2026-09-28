@@ -276,6 +276,8 @@ def _template_children(value: object) -> tuple[object, ...]:
     from .factory import FactorySpec
     from .links import DefLink
 
+    if isinstance(value, TemplateBundle):
+        return tuple(value.recipes.values())
     if isinstance(value, DefLink):
         return (value.target,) if value.kind is EdgeKind.MATERIALIZE else ()
     if isinstance(value, FactorySpec):
@@ -628,6 +630,150 @@ class Template:
         return template_from_data(data)
 
 
+@dataclass(frozen=True, slots=True, init=False, eq=False)
+class TemplateBundle:
+    """Retain named inert Template recipes as one ordered quotation value.
+
+    Args:
+        recipes: One Template, an ordered list or tuple of Templates, or a
+            string-keyed mapping of Templates. Positional recipes are named
+            ``artifact_N`` in order; mapping insertion order is retained.
+
+    The bundle validates and freezes names and recipes only. It never resolves
+    parameters, invokes factories, constructs artifacts, or materializes inputs.
+    A bundle is admitted to a concrete definition only through
+    ``Ref[TemplateBundle]``.
+    """
+
+    _recipes: FrozenDict
+
+    def __init__(self, recipes: "Template | list[Template] | tuple[Template, ...] | Mapping[str, Template]", /) -> None:
+        if isinstance(recipes, Template):
+            items = (("artifact_0", recipes),)
+        elif isinstance(recipes, (list, tuple)):
+            items = tuple((f"artifact_{index}", recipe) for index, recipe in enumerate(recipes))
+        elif isinstance(recipes, Mapping):
+            items = tuple(recipes.items())
+        else:
+            raise TypeError("TemplateBundle requires a Template, ordered Template sequence, or string-keyed Template mapping.")
+        object.__setattr__(self, "_recipes", self._validated_recipes(items))
+
+    @staticmethod
+    def _validated_recipes(items: object) -> FrozenDict:
+        try:
+            pairs = tuple(items)
+        except TypeError as error:
+            raise TypeError("TemplateBundle recipes must be ordered name/Template pairs.") from error
+        if len(pairs) > 4_096:
+            raise TemplateLimitError("template bundle entry limit exceeded")
+        result = []
+        names = set()
+        for item in pairs:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise TypeError("TemplateBundle recipes must be ordered name/Template pairs.")
+            name, recipe = item
+            if not isinstance(name, str) or not name:
+                raise TypeError("TemplateBundle recipe names must be nonempty strings.")
+            if name in names:
+                raise TemplateError("TemplateBundle recipe names must be unique.")
+            if not isinstance(recipe, Template):
+                raise TypeError("TemplateBundle recipes must be Template instances.")
+            names.add(name)
+            result.append((name, recipe))
+        return FrozenDict(result)
+
+    @classmethod
+    def _from_recipes(cls, recipes: Mapping[str, Template]) -> "TemplateBundle":
+        """Wrap codec- or rewrite-owned frozen recipes after invariant checks."""
+
+        result = object.__new__(cls)
+        object.__setattr__(result, "_recipes", cls._validated_recipes(tuple(recipes.items())))
+        return result
+
+    @property
+    def recipes(self) -> FrozenDict:
+        """Return the frozen ordered mapping from artifact name to Template.
+
+        Returns:
+            The immutable name-to-recipe mapping in declared order.
+
+        Side Effects:
+            None. Access does not resolve or copy a recipe.
+        """
+
+        return self._recipes
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Return artifact names in declared processing order.
+
+        Returns:
+            The immutable ordered tuple of bundle names.
+
+        Side Effects:
+            None.
+        """
+
+        return tuple(self._recipes)
+
+    def to_data(self) -> dict[str, object]:
+        """Return one aggregate closed v1 quotation payload for all recipes.
+
+        Returns:
+            Canonical ``dryml-template`` v1 aggregate data.
+
+        Raises:
+            TemplateError: If a recipe is nonportable or the aggregate exceeds
+                a codec limit.
+
+        Side Effects:
+            None. Encoding never resolves a recipe target.
+        """
+
+        from .template_codec import template_bundle_to_data
+
+        return template_bundle_to_data(self)
+
+    @classmethod
+    def from_data(cls, data: Mapping[str, object], /) -> "TemplateBundle":
+        """Decode one canonical bundle payload without resolving any recipe.
+
+        Args:
+            data: Canonical aggregate ``dryml-template`` v1 data.
+
+        Returns:
+            The decoded immutable bundle.
+
+        Raises:
+            TemplateError: If data is malformed, unsupported, noncanonical, or
+                exceeds an aggregate codec limit.
+
+        Side Effects:
+            None. Decoding does not import or invoke recipe targets.
+        """
+
+        from .template_codec import template_bundle_from_data
+
+        return template_bundle_from_data(data)
+
+    def __stable_leaf_bytes__(self) -> bytes:
+        """Return the closed aggregate quotation identity for enclosing CDefs."""
+
+        from .template_codec import _canonical_bytes
+
+        return b"dryml-template-bundle:" + _canonical_bytes(self.to_data())
+
+    def __eq__(self, other: object) -> bool:
+        """Compare canonical aggregate quotation meaning."""
+
+        return isinstance(other, TemplateBundle) and self.to_data() == other.to_data()
+
+    def __hash__(self) -> int:
+        """Return the canonical aggregate quotation hash."""
+
+        return hash(self.__stable_leaf_bytes__())
+
+
 def _contains_expression(value: object) -> bool:
     seen: set[int] = set()
 
@@ -719,7 +865,7 @@ def _validate_template_set_members(value: object) -> None:
                 if isinstance(member, structural) or not isinstance(member, allowed):
                     raise TemplateError("template set members must be literal portable values")
             return
-        if isinstance(current, Template):
+        if isinstance(current, (Template, TemplateBundle)):
             return
         children = _template_children(current)
         if not children:
@@ -806,9 +952,13 @@ def _snapshot_parameters(value: object, *, traverse_refs: bool) -> tuple[Par, ..
             if (
                 traverse_refs
                 and current.kind is EdgeKind.REF
-                and isinstance(current.target, Template)
+                and isinstance(current.target, (Template, TemplateBundle))
             ):
-                visit(current.target.root)
+                if isinstance(current.target, Template):
+                    visit(current.target.root)
+                else:
+                    for recipe in current.target.recipes.values():
+                        visit(recipe.root)
             elif current.kind is EdgeKind.MATERIALIZE:
                 visit(current.target)
             return
@@ -841,6 +991,10 @@ def _validate_distribution_free(value: object) -> None:
             raise TemplateError("Template.sub does not accept Distribution values")
         if isinstance(current, Template):
             visit(current.root)
+            return
+        if isinstance(current, TemplateBundle):
+            for recipe in current.recipes.values():
+                visit(recipe.root)
             return
         if isinstance(current, DefLink):
             visit(current.target)
@@ -921,7 +1075,7 @@ def _freeze_binding_value(value: object) -> object:
     def lower(current: object) -> object:
         if isinstance(current, Object):
             return current.object_ref
-        if isinstance(current, Template):
+        if isinstance(current, (Template, TemplateBundle)):
             return current
         if isinstance(current, Mapping):
             marker = id(current)
@@ -986,9 +1140,15 @@ def _rewrite_template_value(
             if marker in memo:
                 return memo[marker]
             if current.kind is EdgeKind.REF:
-                if not (traverse_refs and isinstance(current.target, Template)):
+                if not (traverse_refs and isinstance(current.target, (Template, TemplateBundle))):
                     return current
-                target = Template._from_root(rewrite(current.target.root))
+                if isinstance(current.target, Template):
+                    target = Template._from_root(rewrite(current.target.root))
+                else:
+                    target = TemplateBundle._from_recipes(FrozenDict(
+                        (name, Template._from_root(rewrite(recipe.root)))
+                        for name, recipe in current.target.recipes.items()
+                    ))
             elif current.kind is EdgeKind.MATERIALIZE:
                 target = rewrite(current.target)
             else:
@@ -1215,13 +1375,19 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
             result = FrozenList(items) if isinstance(current.group, FrozenList) else FrozenTuple(items)
             memo[marker] = result
             return result
-        if isinstance(current, Template):
+        if isinstance(current, (Template, TemplateBundle)):
             return current
         if isinstance(current, DefLink):
             if current.kind is EdgeKind.REF:
-                if not (traverse_refs and isinstance(current.target, Template)):
+                if not (traverse_refs and isinstance(current.target, (Template, TemplateBundle))):
                     return current
-                target = Template._from_root(evaluate(current.target.root, depth))
+                if isinstance(current.target, Template):
+                    target = Template._from_root(evaluate(current.target.root, depth))
+                else:
+                    target = TemplateBundle._from_recipes(FrozenDict(
+                        (name, Template._from_root(evaluate(recipe.root, depth)))
+                        for name, recipe in current.target.recipes.items()
+                    ))
             elif current.kind is EdgeKind.MATERIALIZE:
                 target = evaluate(current.target, depth)
             else:
@@ -1404,4 +1570,4 @@ def _copy_template_construction_value(value: object, memo: dict[int, object]) ->
     return value
 
 
-__all__ = ["Expr", "Par", "Shared", "Template", "repeat"]
+__all__ = ["Expr", "Par", "Shared", "Template", "TemplateBundle", "repeat"]
