@@ -98,6 +98,8 @@ def _sum_cardinality(cardinalities):
 class Zip(Dataset):
     """Combine one or more datasets in parallel into matching element trees."""
 
+    _stream_operator = "zip"
+
     def __init__(self, *sources, **named_sources):
         self.sources = _pack_tree(sources, named_sources)
         if not tuple(_iter_dataset_leaves(self.sources)):
@@ -138,6 +140,8 @@ class Zip(Dataset):
 
 class Chain(Dataset):
     """Yield all elements from each source dataset in sequence."""
+
+    _stream_operator = "chain"
 
     def __init__(self, *sources: Dataset):
         if not sources:

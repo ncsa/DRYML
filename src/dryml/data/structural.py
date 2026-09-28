@@ -14,6 +14,7 @@ def _as_cardinality(value):
 
 
 class Batch(Dataset):
+    _stream_operator = "batch"
     def __init__(self, src: Dataset, batch_size: int, *, drop_remainder: bool = False):
         if batch_size <= 0:
             raise ValueError("batch_size must be positive.")
@@ -71,6 +72,7 @@ class Batch(Dataset):
 
 
 class Unbatch(Dataset):
+    _stream_operator = "unbatch"
     def __init__(self, src: Dataset):
         self.src = src
         super().__init__(spec=unbatch_spec_tree(src.spec))
@@ -81,6 +83,11 @@ class Unbatch(Dataset):
 
     def __len__(self) -> Cardinality:
         return Cardinality.UNKNOWN
+
+    def _resolve_split(self):
+        """Return the selected split invoker once per qualified graph cursor."""
+
+        return default_split
 
 
 class Take(Dataset):

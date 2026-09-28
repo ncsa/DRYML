@@ -18,6 +18,7 @@ from .accumulator import Accumulator, AccumulatorGroup
 from .implementation import MethodImplementation
 from .ir import MethodGraph, MethodGraphNode, MethodGraphNodeKind, MethodPort, MethodPortKind
 from .method import Method
+from .stream import IteratorPort, StreamGraphCursor, StreamNode
 from .signature import MethodCallMode, MethodCallNode, MethodCallNodeKind, MethodCallSignature
 from .traits import Traits, traits
 
@@ -30,6 +31,9 @@ __all__ = [
     "MethodGraphNodeKind",
     "MethodPort",
     "MethodPortKind",
+    "IteratorPort",
+    "StreamGraphCursor",
+    "StreamNode",
     "MethodCallMode",
     "MethodCallNodeKind",
     "MethodCallNode",

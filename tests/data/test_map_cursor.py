@@ -147,3 +147,18 @@ def test_unknown_backend_selection_is_not_started_by_zero_skip():
     assert method.calls == []
     assert next(cursor) == 1
     assert method.calls == [1]
+
+
+def test_prepared_map_graph_skip_and_replay_keep_iteration_dependent_calls():
+    """Graph cursors replay fresh sources and do not omit dependent skipped calls."""
+    method = CountingMethod(independent=False)
+    graph = Map(_array_source(), method).method_graph()
+    graph.learn()
+    first = graph.iterator()
+    first.skip(2)
+    assert int(next(first)) == 12
+    first.close()
+
+    second = graph.iterator()
+    assert int(next(second)) == 10
+    assert method.calls == [0, 1, 2, 0]

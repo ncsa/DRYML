@@ -18,7 +18,7 @@ from .signature import MethodCallNode, spec_from_node
 from .traits import Traits
 
 MethodGraphNodeKind = Literal["source", "method"]
-MethodPortKind = Literal["element", "stream"]
+MethodPortKind = Literal["element", "iterator"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,12 +26,12 @@ class MethodPort:
     """One immutable graph port and its currently known element specification.
 
     Args:
-        kind: ``"element"`` for U4's ordinary call ports or ``"stream"`` for
-            a future iterator port declaration.
+        kind: ``"element"`` for ordinary call ports or ``"iterator"`` for an
+            explicit ordered stream iterator port.
         spec: Immutable normalized element facts, or ``None`` when unknown.
 
-    U4 creates element ports only. Stream-port execution, cursor ownership, and
-    conversion edges are deliberately deferred to later units.
+    U4 creates element ports only. U5 adds iterator ports and graph-owned cursor
+    execution; conversion edges remain deliberately deferred.
     """
 
     kind: MethodPortKind
@@ -63,30 +63,32 @@ class MethodGraphNode:
     outputs: tuple[MethodPort, ...] = ()
     selected: PreparedMethodInvoker | None = None
     traits: Traits | None = None
+    stream_node: object | None = None
 
 
 class MethodGraph:
-    """A read-only Method-family view backed by its owner's preparation state.
+    """A read-only Method-family or Dataset-stream graph view.
 
     Args:
-        owner: The Method whose local preparation state owns this graph's facts.
+        owner: The weakly held Method or Dataset owner of this graph's facts.
+        stream_plan: Optional Dataset-owned local stream preparation plan.
 
-    Constructing a graph is inert. :meth:`learn` delegates to the owner's normal
-    Method preparation machinery, retaining occurrence-local selections without
-    changing child Method first-call caches. U4 supports element ports only;
-    :meth:`iterator` is intentionally unavailable until stream execution exists.
+    Constructing a graph is inert. Method graphs delegate to the owner's normal
+    preparation state; Dataset graphs retain qualified iterator-port facts only
+    after :meth:`learn`. Neither form opens a source during construction.
     """
 
-    __slots__ = ("_owner_ref", "__weakref__")
+    __slots__ = ("_owner_ref", "_stream_plan", "__weakref__")
 
-    def __init__(self, owner: object) -> None:
-        """Create an inert view of one weakly held Method owner.
+    def __init__(self, owner: object, *, stream_plan: object | None = None) -> None:
+        """Create an inert view of one weakly held Method or Dataset owner.
 
         Raises:
             TypeError: If ``owner`` cannot support a weak reference.
         """
 
         object.__setattr__(self, "_owner_ref", weakref.ref(owner))
+        object.__setattr__(self, "_stream_plan", stream_plan)
 
     def __setattr__(self, name: str, value: object) -> None:
         """Reject mutation after construction so graph structure remains stable."""
@@ -97,6 +99,8 @@ class MethodGraph:
     def nodes(self) -> tuple[MethodGraphNode, ...]:
         """Return immutable source and Method occurrence facts known to this view."""
 
+        if self._stream_plan is not None:
+            return self._stream_plan.nodes
         owner = self._owner()
         return owner._graph_nodes_for(self)
 
@@ -126,7 +130,12 @@ class MethodGraph:
     def input_specs(self) -> tuple[SpecTree, ...]:
         """Return fresh public copies of the graph's known root input specs."""
 
-        return tuple(spec_from_node(port.spec) for port in self.source_nodes[0].outputs if port.spec is not None)
+        return tuple(
+            spec_from_node(port.spec)
+            for source in self.source_nodes
+            for port in source.outputs
+            if port.spec is not None
+        )
 
     def learn(
         self,
@@ -135,44 +144,62 @@ class MethodGraph:
         strategy: str = "local",
         output_spec: SpecTree | None = None,
     ) -> None:
-        """Prepare this graph through the owner's existing Method state.
+        """Prepare this graph through its Method or Dataset local state.
 
         Args:
-            input_spec: Optional first known input specification.
-            *additional_input_specs: Known later positional specifications.
-            strategy: Preparation strategy; U4 supports only ``"local"``.
-            output_spec: Optional raw-result validation specification.
+            input_spec: Optional first known input specification or Dataset source
+                assertion.
+            *additional_input_specs: Later positional specs or Dataset source
+                assertions.
+            strategy: Preparation strategy; only ``"local"`` is supported.
+            output_spec: Optional Method raw-result validation or Dataset output
+                assertion.
 
         Raises:
             ValueError: If a strategy other than ``"local"`` is requested.
-            MethodError: If the weak owner is no longer live.
+            MethodError: If a Method owner is no longer live.
+            NotImplementedError: If a Dataset pipeline has an unqualified stream
+                operator.
 
         Side Effects:
-            Stores immutable occurrence selections in the owner's process-local
-            preparation state. It invokes no candidate or source.
+            Stores immutable occurrence selections in local preparation state. It
+            invokes no candidate body or Dataset source.
         """
 
+        if self._stream_plan is not None:
+            self._stream_plan.learn(input_spec, additional_input_specs, strategy=strategy, output_spec=output_spec)
+            return
         self._owner()._learn_graph(self, input_spec, additional_input_specs, strategy, output_spec)
 
     def eager(self) -> None:
         """Invalidate this graph's retained local preparation facts.
 
         Side Effects:
-            Delegates to the owner Method's normal eager reset. The graph remains
-            inspectable but no longer exposes selected invokers.
+            Delegates to the owner Method's normal eager reset or clears Dataset
+            graph selections. The graph remains inspectable but no longer exposes
+            retained selected invokers.
         """
 
+        if self._stream_plan is not None:
+            self._stream_plan.eager()
+            return
         self._owner().eager()
 
     def iterator(self):
-        """Reject stream execution until U5 owns cursor lifecycle behavior.
+        """Open one isolated cursor for a prepared Dataset iterator-port graph.
 
         Raises:
-            NotImplementedError: U4 supplies graph facts only, not stream
-                execution or Dataset cursor ownership.
+            NotImplementedError: If this is an element-only Method graph.
+            RuntimeError: If a Dataset graph was not prepared with :meth:`learn`.
+
+        Side Effects:
+            The returned cursor opens sources lazily and owns every acquired
+            source/output iterator for exactly one traversal.
         """
 
-        raise NotImplementedError("MethodGraph iterator execution is provided by U5.")
+        if self._stream_plan is None:
+            raise NotImplementedError("MethodGraph iterator execution requires Dataset iterator ports.")
+        return self._stream_plan.iterator()
 
     def _owner(self):
         owner = self._owner_ref()

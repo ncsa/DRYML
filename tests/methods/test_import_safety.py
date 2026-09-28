@@ -18,11 +18,14 @@ _EXPECTED_METHOD_EXPORTS = {
     "MethodCallSignature",
     "MethodError",
     "MethodImplementation",
+    "IteratorPort",
     "MethodPort",
     "MethodPortKind",
     "PreparedCallMismatchError",
     "SelectionFailureReason",
     "SelectionTraitName",
+    "StreamGraphCursor",
+    "StreamNode",
     "Traits",
     "traits",
 }
@@ -43,9 +46,10 @@ assert set(dryml.methods.__all__) == {
     'ImplementationSelectionError', 'Method', 'MethodGraph', 'MethodGraphNode',
     'MethodGraphNodeKind',
     'MethodCallMode', 'MethodCallNode', 'MethodCallNodeKind',
-    'MethodCallSignature', 'MethodError', 'MethodImplementation', 'MethodPort',
+    'MethodCallSignature', 'MethodError', 'MethodImplementation', 'IteratorPort', 'MethodPort',
     'MethodPortKind',
     'PreparedCallMismatchError', 'SelectionFailureReason', 'SelectionTraitName',
+    'StreamGraphCursor', 'StreamNode',
     'Traits', 'traits',
 }
 assert not {'Method', 'Traits', 'traits'} & set(dryml.code.__all__)

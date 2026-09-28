@@ -3,7 +3,7 @@ import pytest
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import ArrayDataset, Dataset, DatasetExhaustedError, NpyFileDataset, Skip, Take
+from dryml.data import ArrayDataset, Dataset, DatasetExhaustedError, NpyFileDataset, Skip, Take, Zip
 
 
 class TrackingDataset(Dataset):
@@ -147,3 +147,19 @@ def test_take_closes_an_open_source_cursor_explicitly_and_skip_remains_forgiving
 
     assert source.closes == [0]
     assert list(Skip(source, 10)) == []
+
+
+def test_prepared_graph_cursor_skip_preserves_exact_position_and_exhaustion_counts():
+    """Graph cursors retain the DatasetCursor exact skip contract independently."""
+    left = TrackingDataset([0, 1])
+    right = TrackingDataset([10, 11])
+    graph = Zip(left, right).method_graph()
+    graph.learn()
+    cursor = graph.iterator()
+
+    cursor.skip(1)
+    assert cursor.position == 1
+    assert next(cursor) == (1, 11)
+    with pytest.raises(DatasetExhaustedError) as error:
+        cursor.skip(1)
+    assert (error.value.requested, error.value.yielded) == (1, 0)

@@ -130,6 +130,8 @@ class Dataset(Object, Generic[T]):
         super().__init__()
         self._spec = spec
 
+    _stream_operator = "source"
+
     @property
     def spec(self) -> SpecTree:
         if self._spec is None:
@@ -161,6 +163,27 @@ class Dataset(Object, Generic[T]):
         """
 
         return DatasetCursor(iter(self))
+
+    def method_graph(self):
+        """Return an inert local stream graph for this Dataset pipeline.
+
+        Returns:
+            A :class:`dryml.methods.MethodGraph` whose :meth:`learn` prepares the
+            qualified stream subset and whose :meth:`iterator` opens a fresh graph
+            cursor.
+
+        Raises:
+            NotImplementedError: During planning if this pipeline includes an
+                operator outside the qualified stream subset.
+
+        Side Effects:
+            Constructing the graph opens no source and retains no cursor state.
+        """
+
+        from dryml.methods import MethodGraph
+        from dryml.methods.stream import StreamPlan
+
+        return MethodGraph(self, stream_plan=StreamPlan(self))
 
     def peek(self) -> T:
         """
@@ -306,6 +329,8 @@ class Map(Dataset):
     without source consumption.
     """
 
+    _stream_operator = "map"
+
     def __init__(self, src: Dataset, *methods):
         if not methods:
             raise ValueError("Map requires at least one Method.")
@@ -338,3 +363,61 @@ class Map(Dataset):
 
     def __len__(self) -> Cardinality:
         return self.src.__len__()
+
+
+class StreamDataset(Dataset):
+    """Compose one bounded custom :class:`StreamNode` with Dataset sources.
+
+    Args:
+        *sources: Ordered Dataset inputs borrowed by the node implementation.
+
+    Attributes:
+        node: Class-level explicit deterministic stream declaration with bounded
+            buffering.
+
+    Iteration uses the Dataset MethodGraph path, so each traversal opens fresh
+    source occurrences and the graph cursor owns all acquired resources.  The
+    node's output spec is inferred without opening or consuming a source. Invalid
+    declarations, source count, or source types raise ``TypeError``/``ValueError``
+    before iteration.
+    """
+
+    _stream_operator = "custom"
+    node = None
+
+    def __init_subclass__(cls, **kwargs):
+        """Mark each author subclass as an explicit custom stream participant."""
+
+        super().__init_subclass__(**kwargs)
+        cls._stream_operator = "custom"
+
+    def __init__(self, *sources: Dataset):
+        from dryml.methods.stream import StreamNode
+
+        node = type(self).node
+        if not isinstance(node, StreamNode):
+            raise TypeError("StreamDataset subclasses must declare a StreamNode class attribute.")
+        if len(sources) != len(node.inputs):
+            raise ValueError("StreamDataset source count must match StreamNode inputs.")
+        if not all(isinstance(source, Dataset) for source in sources):
+            raise TypeError("StreamDataset sources must be Dataset instances.")
+        self.node = node
+        self.sources = tuple(sources)
+        super().__init__(spec=node.output_spec(tuple(source.spec for source in self.sources)))
+
+    def __iter__(self):
+        """Return a fresh graph cursor for ordinary local iteration."""
+
+        graph = self.method_graph()
+        graph.learn()
+        return graph.iterator()
+
+    def iterator(self):
+        """Return a fresh closeable graph cursor for this custom stream node."""
+
+        return iter(self)
+
+    def __len__(self) -> Cardinality:
+        """Return the node-declared output cardinality without source traversal."""
+
+        return self.node.output_cardinality(tuple(source.__len__() for source in self.sources))

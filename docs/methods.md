@@ -26,6 +26,7 @@ from dryml.methods import Accumulator, AccumulatorGroup, Method, Traits, traits
 is `Method`, `Accumulator`, `AccumulatorGroup`, `MethodImplementation`, `Traits`, `traits`, `MethodCallNode`,
 `MethodCallSignature`, `MethodCallMode`, `MethodCallNodeKind`, `MethodGraph`,
 `MethodGraphNode`, `MethodGraphNodeKind`, `MethodPort`, `MethodPortKind`,
+`IteratorPort`, `StreamNode`, `StreamGraphCursor`,
 `MethodError`,
 `ImplementationDeclarationError`, `ImplementationSelectionError`,
 `PreparedCallMismatchError`, `SelectionFailureReason`, and
@@ -206,10 +207,25 @@ Its virtual source and Method nodes are occurrence-indexed and expose currently
 known element-port facts, selected local invokers, and an empty
 `conversion_edges` surface reserved for later handoff planning. Reusing one
 Method in a composition records independent occurrence selections without
-mutating that child's first-call cache. U4 does not open sources or execute
-streams: `MethodGraph.iterator()` raises `NotImplementedError` until the stream
-cursor layer supplies lifecycle behavior. The graph is neither a second cache nor
-a compiler, JIT, fusion, conversion, or global optimization API.
+mutating that child's first-call cache. Element-only Method graphs reject
+`iterator()`. A Dataset supplies the iterator-port form through
+`dataset.method_graph()`: it is inert until `learn(strategy="local")` records
+its qualified stream plan, then `iterator()` returns an independent pull cursor.
+The qualified stream subset is Map, Batch, Unbatch, Zip, and Chain. Ports carry
+element specs separately from iterator consumption/emission, so a list returned
+from an element Method is still one output element. `IteratorPort` and
+`StreamNode` provide the bounded deterministic custom authoring seam; their
+declarations include ordered inputs, pure spec/cardinality transforms, pull
+policy, and maximum buffered items. The graph is neither a second cache nor a
+compiler, JIT, fusion, conversion, async scheduler, key join, or global
+optimization API.
+
+Dataset graph cursors own source and selected-output resources, close acquired
+resources once in reverse acquisition order, and preserve a primary acquisition
+or body error if cleanup also fails. Each reused Dataset occurrence opens its own
+cursor and unknown-spec discovery buffer. Planning never opens a source; first
+value discovery happens only in the owning graph cursor and retains at most one
+prefetched value per occurrence.
 
 Cached calls must exactly match the learned positional and keyword structure,
 dtype, shape, layout, backend, and observable batch facts. Matching calls invoke

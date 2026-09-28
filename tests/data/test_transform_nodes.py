@@ -181,6 +181,21 @@ def test_elementwise_dataset_resolves_dispatch_once_per_iterator():
     assert transform.dispatch_count == 2
 
 
+def test_prepared_map_graph_retains_one_selected_invoker_without_per_yield_discovery():
+    """Graph preparation selects once and iteration invokes the retained carrier."""
+    transform = CountingCast("float32")
+    src = ListDataset(
+        [np.array([1], dtype=np.int32), np.array([2], dtype=np.int32)],
+        TensorSpec("int32", shape=(1,), backend="numpy"),
+    )
+    graph = Map(src, transform).method_graph()
+
+    graph.learn()
+    assert transform.dispatch_count == 1
+    assert [item.dtype for item in graph.iterator()] == [np.dtype("float32")] * 2
+    assert transform.dispatch_count == 1
+
+
 def test_map_selects_before_consuming_complete_specs():
     transform = CountingCast("float32")
     src = OneShotDataset(
@@ -573,6 +588,32 @@ def test_unbatch_infer_output_spec_and_iteration():
 
     assert ds.spec == TensorSpec("int32", shape=(2,), backend="numpy")
     assert [item.tolist() for item in out] == [[1, 2], [3, 4], [5, 6]]
+
+
+def test_prepared_graph_batch_unbatch_retains_partial_drop_and_list_element_semantics():
+    """Qualified graph iteration preserves the characterized structural behavior."""
+    src = ListDataset(
+        [np.array([1], dtype=np.int32), np.array([2], dtype=np.int32), np.array([3], dtype=np.int32)],
+        TensorSpec("int32", shape=(1,), backend="numpy"),
+    )
+    graph = Unbatch(Batch(src, 2)).method_graph()
+    graph.learn()
+    assert [item.tolist() for item in graph.iterator()] == [[1], [2], [3]]
+
+    dropped = Batch(src, 2, drop_remainder=True).method_graph()
+    dropped.learn()
+    assert [item.tolist() for item in dropped.iterator()] == [[[1], [2]]]
+
+    class ListValue(Method):
+        def __call__(self, value):
+            return [int(value[0])]
+
+        def infer_output_spec(self, input_spec):
+            return input_spec
+
+    listed = Map(src, ListValue()).method_graph()
+    listed.learn()
+    assert list(listed.iterator()) == [[1], [2], [3]]
 
 
 def test_take_skip_and_repeat_cardinality_and_iteration():

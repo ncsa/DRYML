@@ -40,6 +40,34 @@ cardinality `n`. It yields exactly `n` values or raises `DatasetExhaustedError`
 after its available prefix; `Take(source, 0)` does not open the source. The
 older `Skip(source, n)` remains forgiving when a source ends before its prefix.
 
+### Prepared Stream Graphs
+
+`dataset.method_graph()` returns an inert `MethodGraph` view for a Dataset
+pipeline. It does not open, peek, select from, or otherwise consume a source.
+Call `graph.learn(strategy="local")` before `graph.iterator()`; preparation
+records qualified local selections from declared specs and opens no sources.
+`graph.iterator()` then returns an independent closeable graph cursor. Optional
+positional specs supplied to `learn` are assertions of the graph's declared
+source specs, and `output_spec` is an assertion of its declared result spec.
+Mismatched assertions, unsupported strategies, unqualified operators, and
+Method-selection failures raise before source execution.
+
+The initial prepared subset is `Map`, `Batch`, `Unbatch`, `Zip`, and `Chain`.
+It preserves their ordinary order and cardinality rules: Map emits one result
+per input, Batch retains short final batches unless `drop_remainder=True`,
+Unbatch emits split items in order, Zip stops at the shortest source with its
+existing left-to-right positional over-pull, and Chain opens/advances sources in
+declaration order. Other Dataset operators keep their eager behavior but reject
+graph planning explicitly.
+
+One graph cursor owns all source and selected output iterator resources it
+acquires. It closes them once in reverse acquisition order on exhaustion,
+explicit close, acquisition/body failure, or a consumer body error. Reusing one
+Dataset occurrence in branches opens independent cursors and independent
+unknown-spec discovery buffers; it is not teeing, memoization, or deduplication.
+`skip()` has the normal exact cursor contract, and reopening a graph creates a
+fresh traversal rather than serializing an iterator or generator frame.
+
 ## Source Datasets
 
 Common source dataset classes:
@@ -159,6 +187,16 @@ Structural dataset nodes change iteration structure rather than individual value
 - `Skip`
 - `Shuffle`
 - `Repeat`
+
+For bounded custom synchronous behavior, subclass `StreamDataset` and declare a
+class-level `dryml.methods.StreamNode`. The declaration names ordered
+`IteratorPort` inputs/output, pure element-spec and cardinality transforms,
+deterministic pull policy, and an exact maximum buffered-item count. Its
+implementation receives borrowed input iterators and returns an iterator; a list
+returned by an element `Map` Method remains one element and is not implicitly
+expanded into stream outputs. Custom declarations are process-local trusted code,
+not a generator serializer, async scheduler, key join, whole-stream collector,
+or JIT interface.
 
 Example:
 
