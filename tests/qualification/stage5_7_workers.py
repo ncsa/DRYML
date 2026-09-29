@@ -25,7 +25,7 @@ from .stage5_7_fixtures import (
     FixtureManifestError, QualificationUnrun, installed_environment, load_manifest,
     preflight_manifest, validate_fixture_reference_metadata,
 )
-from .stage5_7_workloads import QualificationCase, cpu_matrix
+from .stage5_7_workloads import QualificationCase, accelerated_cases, cpu_matrix, selected_gpu_device
 
 
 _ROUTES = {
@@ -37,7 +37,7 @@ _ROUTES = {
 _REQUEST_FIELDS = frozenset({
     "case", "manifest_path", "tfds_data_dir", "output_store", "work_dir",
     "evidence_dir", "control_store", "execution_backend", "resource_mode",
-    "ray_address", "recovery", "gate_id",
+    "ray_address", "recovery", "gate_id", "gpu_device",
 })
 _STATE_DIGEST_MAX_DEPTH = 32
 _STATE_DIGEST_MAX_NODES = 100_000
@@ -270,6 +270,7 @@ class QualificationWorkerRequest:
     ray_address: str | None = None
     recovery: RecoveryControl | None = None
     gate_id: str = "cpu-matrix"
+    gpu_device: str | None = None
 
     def __post_init__(self) -> None:
         """Validate route identity and detach every request field from callers."""
@@ -279,8 +280,14 @@ class QualificationWorkerRequest:
         for name in ("manifest_path", "tfds_data_dir", "output_store", "work_dir", "evidence_dir", "control_store"):
             object.__setattr__(self, name, _path(getattr(self, name), name.replace("_", " ")))
         expected_backend, expected_mode = _ROUTES[self.case.execution]
+        if self.case.accelerator == "gpu":
+            expected_backend, expected_mode = "core-subprocess", "worker-process-one-gpu"
         if (self.execution_backend, self.resource_mode) != (expected_backend, expected_mode):
             raise FixtureManifestError("Qualification worker route disagrees with its matrix execution mode.")
+        if self.case.accelerator == "gpu":
+            object.__setattr__(self, "gpu_device", selected_gpu_device(self.gpu_device))
+        elif self.gpu_device is not None:
+            raise FixtureManifestError("Only accelerated qualification requests may carry a GPU device.")
         if self.case.execution == "ray":
             if type(self.ray_address) is not str or not self.ray_address:
                 raise QualificationUnrun("Same-host Ray qualification requires DRYML_STAGE5_7_RAY_ADDRESS.")
@@ -290,7 +297,11 @@ class QualificationWorkerRequest:
             if not isinstance(self.recovery, RecoveryControl) or (
                     self.case.workload, self.case.framework, self.case.execution) != ("W3", "torch", "subprocess"):
                 raise FixtureManifestError("Only the Torch W3 subprocess case may carry recovery controls.")
-        expected_gate = "recovery-step64" if self.recovery is not None else "cpu-matrix"
+        expected_gate = (
+            "recovery-step64" if self.recovery is not None else
+            f"gpu-{self.case.framework}-{self.case.workload.lower()}" if self.case.accelerator == "gpu" else
+            "cpu-matrix"
+        )
         if self.gate_id != expected_gate:
             raise FixtureManifestError("Qualification request gate identity disagrees with its recovery control.")
 
@@ -310,7 +321,7 @@ class QualificationWorkerRequest:
             "control_store": self.control_store, "execution_backend": self.execution_backend,
             "resource_mode": self.resource_mode, "ray_address": self.ray_address,
             "recovery": None if self.recovery is None else self.recovery.to_data(),
-            "gate_id": self.gate_id,
+            "gate_id": self.gate_id, "gpu_device": self.gpu_device,
         }
 
     @classmethod
@@ -323,27 +334,32 @@ class QualificationWorkerRequest:
             QualificationCase.from_data(value["case"]), value["manifest_path"], value["tfds_data_dir"],
             value["output_store"], value["work_dir"], value["evidence_dir"], value["control_store"],
             value["execution_backend"], value["resource_mode"], value["ray_address"],
-            None if value["recovery"] is None else RecoveryControl.from_data(value["recovery"]), value["gate_id"],
+            None if value["recovery"] is None else RecoveryControl.from_data(value["recovery"]), value["gate_id"], value["gpu_device"],
         )
 
 
 def worker_request(manifest, case: QualificationCase, *, manifest_path, tfds_data_dir,
-                   output_store, work_dir, evidence_dir, control_store,
-                   ray_address: str | None = None,
-                   recovery: RecoveryControl | None = None) -> QualificationWorkerRequest:
+                    output_store, work_dir, evidence_dir, control_store,
+                    ray_address: str | None = None,
+                    recovery: RecoveryControl | None = None,
+                    gpu_device: str | None = None) -> QualificationWorkerRequest:
     """Build one selected primary or recovery request without probing other cells.
 
     Missing Ray configuration therefore classifies only the selected Ray cell as
     :class:`QualificationUnrun`; local and subprocess requests remain constructible.
     """
 
-    if case not in cpu_matrix(manifest):
-        raise FixtureManifestError("Qualification worker request must select a primary matrix case.")
+    if case not in (*cpu_matrix(manifest), *accelerated_cases(manifest)):
+        raise FixtureManifestError("Qualification worker request must select a declared qualification case.")
+    accelerated = case.accelerator == "gpu"
     return QualificationWorkerRequest(
         case, os.fspath(manifest_path), os.fspath(tfds_data_dir), os.fspath(output_store),
         os.fspath(work_dir), os.fspath(evidence_dir), os.fspath(control_store),
-        *_ROUTES[case.execution], ray_address if case.execution == "ray" else None,
-        recovery=recovery, gate_id="recovery-step64" if recovery is not None else "cpu-matrix",
+        *( ("core-subprocess", "worker-process-one-gpu") if accelerated else _ROUTES[case.execution] ),
+        ray_address if case.execution == "ray" else None,
+        recovery=recovery,
+        gate_id=("recovery-step64" if recovery is not None else f"gpu-{case.framework}-{case.workload.lower()}" if accelerated else "cpu-matrix"),
+        gpu_device=gpu_device,
     )
 
 
@@ -424,6 +440,12 @@ def _preflight_coordinator_request(request: QualificationWorkerRequest) -> None:
         )
         if manifest.digest != request.case.manifest_digest:
             raise FixtureManifestError("Qualification worker request manifest digest drifted.")
+        if request.case.accelerator == "gpu":
+            # Probe in a disposable process before this coordinator creates a
+            # case child or submits the actual worker. Missing hardware is unrun,
+            # while post-launch placement contradictions remain hard failures.
+            from .stage5_7_workloads import preflight_gpu_framework
+            preflight_gpu_framework(request.case.framework, visible_device=request.gpu_device)
         # The orchestrator validates manifest-bound bytes and Store receipts but
         # deliberately does not import TFDS.  The worker reconstructs TFDS before
         # opening payloads through preflight_manifest().
@@ -503,24 +525,31 @@ def run_real_worker_request(data: Mapping[str, object]) -> Mapping[str, object]:
     from .stage5_7_workloads import QualificationEvidence, validate_evidence
     from tests.qualification.test_stage5_7_local import _real_runner
 
-    try:
-        manifest = load_manifest(
-            request.manifest_path, fixture_store=request.case.fixture_store,
-            tfds_data_dir=request.tfds_data_dir, environment=installed_environment(),
-        )
-        preflight_manifest(manifest)
-    except QualificationUnrun as error:
-        raise FixtureManifestError(
-            f"Qualification worker prerequisite drifted after coordinator preflight: {error}"
-        ) from error
     previous = {
         name: os.environ.get(name)
         for name in (
             "DRYML_STAGE5_7_CASE_OUTPUT_STORE", "DRYML_STAGE5_7_CASE_WORK_DIR",
-            "DRYML_STAGE5_7_CASE_CONTROL_STORE",
+            "DRYML_STAGE5_7_CASE_CONTROL_STORE", "DRYML_STAGE5_7_GPU_DEVICE",
+            "CUDA_VISIBLE_DEVICES",
         )
     }
     try:
+        if request.gpu_device is not None:
+            # TFDS may import TensorFlow while validating its prepared builder.
+            # Install the selected visibility before every worker-side preflight,
+            # not only immediately before model construction.
+            os.environ["DRYML_STAGE5_7_GPU_DEVICE"] = request.gpu_device
+            os.environ["CUDA_VISIBLE_DEVICES"] = request.gpu_device
+        try:
+            manifest = load_manifest(
+                request.manifest_path, fixture_store=request.case.fixture_store,
+                tfds_data_dir=request.tfds_data_dir, environment=installed_environment(),
+            )
+            preflight_manifest(manifest)
+        except QualificationUnrun as error:
+            raise FixtureManifestError(
+                f"Qualification worker prerequisite drifted after coordinator preflight: {error}"
+            ) from error
         os.environ["DRYML_STAGE5_7_CASE_OUTPUT_STORE"] = request.output_store
         os.environ["DRYML_STAGE5_7_CASE_WORK_DIR"] = request.work_dir
         os.environ["DRYML_STAGE5_7_CASE_CONTROL_STORE"] = request.control_store
@@ -641,6 +670,13 @@ def _request_environment(request: QualificationWorkerRequest):
         "DRYML_STAGE5_7_CASE_CONTROL_STORE": request.control_store,
         "DRYML_STAGE5_7_CASE_RESOURCE_MODE": request.resource_mode,
     }
+    if request.gpu_device is not None:
+        # This runs in the isolated worker before the real runner imports a
+        # framework, so a requested GPU can never silently fall back to CPU.
+        names.update({
+            "DRYML_STAGE5_7_GPU_DEVICE": request.gpu_device,
+            "CUDA_VISIBLE_DEVICES": request.gpu_device,
+        })
     previous = {name: os.environ.get(name) for name in names}
     try:
         os.environ.update(names)
@@ -812,7 +848,9 @@ def _observed_local_evidence(evidence, request: QualificationWorkerRequest, obse
         "core_outcome": {"kind": "not-core-local", "publication_refs": (), "update_refs": ()},
         "coordinator_validated_refs": None,
     })
-    return data_replace(evidence, worker=worker)
+    runtime = dict(evidence.runtime)
+    runtime.update({"process_id": observation["pid"], "worker_id": f"pid:{observation['pid']}"})
+    return data_replace(evidence, worker=worker, runtime=runtime)
 
 
 def _observed_core_evidence(evidence, request: QualificationWorkerRequest, snapshot):
@@ -829,7 +867,8 @@ def _observed_core_evidence(evidence, request: QualificationWorkerRequest, snaps
         raise FixtureManifestError("Core Execute worker identity does not identify the selected backend.")
     if snapshot.evidence is None or backend.report is None:
         raise FixtureManifestError("Core Execute completed without authority/admission evidence.")
-    if request.resource_mode != "worker-process-no-session-allocation" or backend.allocation is not None:
+    expected_resource_mode = "worker-process-one-gpu" if request.case.accelerator == "gpu" else "worker-process-no-session-allocation"
+    if request.resource_mode != expected_resource_mode or backend.allocation is not None:
         raise FixtureManifestError("Core worker session allocation disagrees with its submitted route facts.")
     worker = dict(evidence.worker)
     worker.update({
@@ -839,9 +878,9 @@ def _observed_core_evidence(evidence, request: QualificationWorkerRequest, snaps
         "worker_pid": pid,
         "worker_identity": worker_id,
         "runtime_allocation": {
-            "resource_mode": "worker-process-no-session-allocation",
-            "allocation": "worker-process-no-session-allocation",
-            "admission": "admitted-without-session-allocation",
+            "resource_mode": expected_resource_mode,
+            "allocation": "worker-process-one-gpu" if request.case.accelerator == "gpu" else "worker-process-no-session-allocation",
+            "admission": "admitted-with-one-gpu-visibility" if request.case.accelerator == "gpu" else "admitted-without-session-allocation",
         },
         "submitted": {
             "request_digest": request.request_id, "submission_id": backend.submission_id,
@@ -858,7 +897,9 @@ def _observed_core_evidence(evidence, request: QualificationWorkerRequest, snaps
         },
         "coordinator_validated_refs": None,
     })
-    return data_replace(evidence, worker=worker)
+    runtime = dict(evidence.runtime)
+    runtime.update({"process_id": pid, "worker_id": worker_id})
+    return data_replace(evidence, worker=worker, runtime=runtime)
 
 
 def _validate_coordinator_reference_metadata(evidence, *, output_store) -> None:
@@ -1075,6 +1116,24 @@ def validate_request_evidence(request: QualificationWorkerRequest, evidence) -> 
         raise FixtureManifestError("Qualification result request or shared Store authority was substituted.")
     if submitted["result_ref"] != evidence.final_experiment_ref.digest():
         raise FixtureManifestError("Qualification result receipt is not bound to its final Experiment reference.")
+    if (
+            evidence.runtime["process_id"] != evidence.worker["worker_pid"]
+            or evidence.runtime["worker_id"] != evidence.worker["worker_identity"]
+    ):
+        raise FixtureManifestError("Qualification runtime PID or worker identity is stale or substituted.")
+    if request.case.accelerator == "gpu":
+        allocation = evidence.device_evidence["allocation"] if evidence.device_evidence is not None else None
+        if allocation is None or allocation["visible_device"] != request.gpu_device:
+            raise FixtureManifestError("Qualification GPU evidence selector does not equal the submitted request.")
+        expected_allocation = {
+            "resource_mode": "worker-process-one-gpu",
+            "allocation": "worker-process-one-gpu",
+            "admission": "admitted-with-one-gpu-visibility",
+        }
+        if evidence.worker["runtime_allocation"] != expected_allocation:
+            raise FixtureManifestError("Qualification GPU worker allocation was substituted.")
+    elif evidence.device_evidence is not None or evidence.runtime["device"] != "cpu":
+        raise FixtureManifestError("CPU qualification evidence must remain closed to CPU execution.")
 
 
 def run_worker_request(data: Mapping[str, object]) -> Mapping[str, object]:

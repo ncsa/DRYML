@@ -1,9 +1,11 @@
 # Stage 5+7 Verification
 
-Status: persistent-fixture, local, and worker-routing harnesses are implemented.
+Status: persistent-fixture, local, worker-routing, cross-framework, and GPU
+qualification harnesses are implemented.
 Routine fake-matrix, Core subprocess transport, coordinator sentinel, authority,
 and recovery-schema tests pass; all numerical qualification gates, including the
-24-cell CPU matrix and step-64 Torch/W3 recovery, remain unrun.
+24-cell CPU matrix, TFDS TensorFlow-to-Torch delivery, step-64 Torch/W3
+recovery, TensorFlow/W1 GPU, and Torch/W3 GPU gates remain unrun.
 
 The Stage 5+7 release matrix is not part of routine test collection. Real W1-W3
 training, TFDS access, subprocess/Ray execution, and GPU evidence require an
@@ -94,6 +96,18 @@ reference. `supplemental_tfds_torch_case(manifest)` is a separately counted W1
 TensorFlow-mode TFDS-to-Torch interoperability gate; it is not a twenty-fifth
 matrix cell and does not change primary Torch delivery.
 
+`test_stage5_7_accelerated.py` owns exactly three opt-in real gates: the
+TensorFlow-mode TFDS-to-Torch W1 interoperability gate plus TensorFlow/W1 and
+Torch/W3 GPU gates. `accelerated_cases(manifest)` emits the latter two separately
+identified subprocess requests, each with one caller-selected GPU visibility
+entry. Their case identities and `<case_id>--gpu-tf-w1` or
+`<case_id>--gpu-torch-w3` paths cannot collide with local, CPU-matrix, or recovery
+evidence. The TFDS supplemental W1 source remains in TensorFlow mode through
+graph-visible `Select`, `ImageNormalize`, `Flatten`, `Cast`, and `Project` Methods
+until the `TrainingPreparation`-retained `tf_to_torch` training boundary; callers
+do not add NumPy, DLPack, or conversion-lambda glue. Its saved accuracy Artifact
+uses the same W1 `>= 0.80` contract as the primary cases.
+
 `tests/qualification/stage5_7_workers.py` builds one selected primary case into a closed
 JSON worker request. The request carries only case/manifest identities, exact W3
 references encoded by the case, selected authority paths, execution backend,
@@ -152,6 +166,24 @@ absolute normalized `ru_maxrss`, including framework setup, not a delta from a
 preloaded baseline. No real case was run
 for this change.
 
+The two GPU gates retain the same W1/W3 numerical gates, 300-second deadline,
+8 GiB peak-RSS budget, and 4 GiB case-Store budget. Before a worker case path or
+submission exists, a disposable process applies the caller-selected
+`DRYML_STAGE5_7_GPU_DEVICE` visibility control and verifies exactly one usable
+framework GPU. Missing hardware is `QualificationUnrun`; after launch, CPU,
+mixed, unknown, or contradictory placement is a failure. Accepted accelerated
+evidence records the selected visibility entry plus normalized `gpu:0` claim,
+native model-parameter placement, actual training tensor placement, forward
+execution result placement, runtime/backend/PID, and U11 worker allocation and
+submission facts. Availability APIs alone cannot satisfy this evidence contract.
+TensorFlow captures its actual Keras accounting `train_step` inputs, prediction,
+and parameters through an unset-by-default process-local observation scope, not a
+model-wrapper call. Torch formula validation prepares the exact-loaded final model
+with its public runtime device API before inference and rejects a non-GPU result.
+Cross-framework GPU transfer and differentiable mixed-framework model composition
+remain explicitly unsupported; same-framework native composition retains normal
+gradients.
+
 ## Opt-In Runs
 
 Use targeted test paths and add `--stage5-7-qualification` only after preparing
@@ -179,6 +211,13 @@ The worker matrix additionally requires an existing
 `DRYML_STAGE5_7_CONTROL_STORE`. Its six Ray cells require an existing
 same-host `DRYML_STAGE5_7_RAY_ADDRESS`; no address leaves those cells unrun while
 the 18 non-Ray cells remain eligible.
+
+The accelerated gates additionally require a caller-selected decimal
+`DRYML_STAGE5_7_GPU_DEVICE`; the harness neither provisions a GPU nor falls back
+to CPU. Run only their explicit path with `--stage5-7-qualification`. Collection
+without that option, or collection-only with it, does not inspect hardware or
+initialize TensorFlow, Torch, or TFDS. No accelerated qualification evidence has
+been recorded by this change.
 
 Configured output Store, work, and evidence paths are distinct existing roots,
 not case destinations. They must be non-symlink paths with no equality or

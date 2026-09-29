@@ -18,7 +18,7 @@ from tests.qualification.stage5_7_fixtures import (
     FixtureManifest, FixtureReferences, REQUIRED_ENVIRONMENT_KEYS, TFDSAuthority, load_baseline,
 )
 from tests.qualification.stage5_7_workloads import (
-    QualificationCase, case_from_manifest, cpu_matrix, supplemental_tfds_torch_case,
+    QualificationCase, accelerated_cases, case_from_manifest, cpu_matrix, supplemental_tfds_torch_case,
 )
 from tests.qualification.stage5_7_workers import QualificationWorkerRequest, inspect_worker_transport
 
@@ -59,6 +59,11 @@ def test_qualification_case_round_trip_retains_exact_w3_reference_without_live_h
     assert all(case.case_kind == "matrix" and not case.tensorflow_mode for case in matrix)
     assert supplemental.case_kind == "tfds-tensorflow-to-torch" and supplemental.tensorflow_mode
     assert supplemental.case_id not in {case.case_id for case in matrix}
+    accelerated = accelerated_cases(manifest)
+    assert {(case.workload, case.framework, case.execution, case.accelerator) for case in accelerated} == {
+        ("W1", "tf", "subprocess", "gpu"), ("W3", "torch", "subprocess", "gpu"),
+    }
+    assert not {case.case_id for case in accelerated} & {case.case_id for case in (*matrix, supplemental)}
 
     code = """
 import json

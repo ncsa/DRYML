@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import MappingProxyType
@@ -90,6 +91,124 @@ def initialize_cpu_framework(framework: str, seed: int) -> None:
         torch.use_deterministic_algorithms(True)
     else:  # pragma: no cover - QualificationCase validates the framework first.
         raise FixtureManifestError("Unsupported qualification framework.")
+
+
+def selected_gpu_device(value: str | None = None) -> str:
+    """Return one caller-selected physical GPU visibility selector.
+
+    GPU qualification is deliberately bound to one numeric CUDA visibility entry.
+    The isolated worker normalizes that selected physical device to native
+    ``gpu:0`` evidence after it establishes visibility, so records never claim an
+    unobserved physical-device spelling.
+
+    Args:
+        value: Optional caller-selected CUDA device index. When omitted, reads
+            ``DRYML_STAGE5_7_GPU_DEVICE``.
+
+    Returns:
+        The nonnegative decimal device index selected by the caller.
+
+    Raises:
+        QualificationUnrun: If no single valid GPU selector was supplied before
+            framework initialization.
+    """
+
+    selected = os.environ.get("DRYML_STAGE5_7_GPU_DEVICE") if value is None else value
+    if type(selected) is not str or not selected.isdecimal():
+        raise QualificationUnrun(
+            "GPU qualification requires one caller-selected DRYML_STAGE5_7_GPU_DEVICE."
+        )
+    return selected
+
+
+def initialize_gpu_framework(framework: str, seed: int, *, visible_device: str | None = None) -> str:
+    """Establish one-GPU deterministic native initialization before model creation.
+
+    Args:
+        framework: ``"tf"`` or ``"torch"`` native backend selected by the case.
+        seed: Fixed KTD11 framework seed.
+        visible_device: Optional caller-selected physical CUDA device index.
+
+    Returns:
+        The normalized native GPU evidence name, always ``"gpu:0"`` after the
+        selected device is made solely visible to the isolated worker.
+
+    Raises:
+        QualificationUnrun: If controls were applied too late or the selected
+            worker has no usable single GPU before workload launch.
+        FixtureManifestError: If ``framework`` is unsupported.
+
+    Side Effects:
+        Sets CUDA visibility before importing the selected optional framework,
+        then enables that framework's deterministic controls.
+    """
+
+    module_name = "tensorflow" if framework == "tf" else "torch"
+    if module_name in sys.modules:
+        raise QualificationUnrun(f"{module_name} was initialized before GPU qualification controls.")
+    selected = selected_gpu_device(visible_device)
+    os.environ["CUDA_VISIBLE_DEVICES"] = selected
+    if framework == "tf":
+        import tensorflow as tf
+
+        physical = tuple(tf.config.list_physical_devices("GPU"))
+        if len(physical) != 1:
+            raise QualificationUnrun("TensorFlow selected worker has no single usable GPU before launch.")
+        tf.keras.utils.set_random_seed(seed)
+        tf.config.experimental.enable_op_determinism()
+    elif framework == "torch":
+        import torch
+
+        if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+            raise QualificationUnrun("PyTorch selected worker has no single usable GPU before launch.")
+        torch.cuda.set_device(0)
+        torch.manual_seed(seed)
+        torch.use_deterministic_algorithms(True)
+    else:  # pragma: no cover - QualificationCase validates the framework first.
+        raise FixtureManifestError("Unsupported qualification framework.")
+    return "gpu:0"
+
+
+def preflight_gpu_framework(framework: str, *, visible_device: str | None = None) -> None:
+    """Require a selected worker GPU in a disposable pre-launch probe process.
+
+    Args:
+        framework: Native framework requested by the fixed accelerated case.
+        visible_device: Optional caller-selected physical CUDA device index.
+
+    Raises:
+        QualificationUnrun: If the selected framework/GPU combination is absent
+            before an isolated qualification worker or output path is launched.
+
+    Side Effects:
+        Starts a short probe process with the same visibility control that the
+        worker will receive. The coordinator imports no optional framework.
+    """
+
+    if framework not in FRAMEWORKS:
+        raise FixtureManifestError("Unsupported qualification framework.")
+    selected = selected_gpu_device(visible_device)
+    code = (
+        "import sys\n"
+        "name, selected = sys.argv[1:]\n"
+        "if name == 'tf':\n"
+        " import tensorflow as tf\n"
+        " ok = len(tf.config.list_physical_devices('GPU')) == 1\n"
+        "else:\n"
+        " import torch\n"
+        " ok = torch.cuda.is_available() and torch.cuda.device_count() == 1\n"
+        "raise SystemExit(0 if ok else 3)\n"
+    )
+    environment = {**os.environ, "CUDA_VISIBLE_DEVICES": selected}
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code, framework, selected], env=environment,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise QualificationUnrun("Selected GPU worker could not complete pre-launch framework probing.") from error
+    if result.returncode:
+        raise QualificationUnrun("Selected GPU worker has no single usable framework GPU before launch.")
 
 
 def _normalize_native_device(value: object) -> str:
@@ -228,6 +347,85 @@ def native_device_evidence(model, *, training_tensors: Sequence[object] = ()) ->
     return next(iter(normalized))
 
 
+def native_device_observations(
+        model, *, training_tensors: Sequence[object] = (), execution_tensors: Sequence[object] = (),
+) -> Mapping[str, object]:
+    """Return closed placement facts from native parameters, training, and execution.
+
+    Args:
+        model: Native or DRYML-wrapped native model whose trainable parameters
+            prove persisted model placement.
+        training_tensors: Actual native tensors consumed at the training call.
+        execution_tensors: Native forward-call results observed at that boundary.
+
+    Returns:
+        A closed mapping containing all normalized placements and their one shared
+        observed device.
+
+    Raises:
+        FixtureManifestError: If a required observation is absent, ambiguous, or
+            mixed. Availability APIs alone are intentionally insufficient.
+    """
+
+    parameters = _native_parameter_values(model)
+    groups = {
+        "native_parameters": tuple(parameters),
+        "training_tensors": tuple(training_tensors),
+        "execution_tensors": tuple(execution_tensors),
+    }
+    if any(not values for values in groups.values()):
+        raise FixtureManifestError(
+            "Qualification device evidence requires native parameters, training tensors, and execution tensors."
+        )
+    normalized = {}
+    for name, values in groups.items():
+        devices = tuple(_observed_native_device(value) for value in values)
+        if any(device is None for device in devices):
+            raise FixtureManifestError("Qualification native device evidence is missing.")
+        normalized[name] = tuple(_normalize_native_device(device) for device in devices)
+    observed = {device for values in normalized.values() for device in values}
+    if len(observed) != 1:
+        raise FixtureManifestError("Qualification native parameters/training/execution tensors have mixed devices.")
+    return MappingProxyType({**normalized, "observed_device": next(iter(observed))})
+
+
+def prepare_exact_model_for_formula(model, case: "QualificationCase") -> None:
+    """Prepare an exact-loaded accelerated model for its requested formula device.
+
+    Args:
+        model: Exact-loaded DRYML model selected from the final Experiment receipt.
+        case: Immutable qualification case identifying the native backend and
+            whether the caller requested the one-GPU gate.
+
+    Raises:
+        FixtureManifestError: If an accelerated model lacks the supported runtime
+            preparation API.
+
+    Side Effects:
+        Uses the model's public preparation/device API before formula inference.
+        CPU cases are unchanged. This never reaches through a private native
+        ``.obj`` field or chooses a physical GPU independently of the request.
+    """
+
+    if case.accelerator != "gpu":
+        return
+    selected_gpu_device()  # Reject a stale or missing worker selector before inference.
+    if case.framework == "torch":
+        import torch
+
+        prepare = getattr(model, "to_device", None)
+        if not callable(prepare):
+            raise FixtureManifestError("Exact-loaded Torch formula model lacks runtime device preparation.")
+        prepare(torch.device("cuda:0"))
+    elif case.framework == "tf":
+        prepare = getattr(model, "prep_eval", None)
+        if not callable(prepare):
+            raise FixtureManifestError("Exact-loaded TensorFlow formula model lacks runtime preparation.")
+        prepare()
+    else:  # pragma: no cover - QualificationCase validates framework values.
+        raise FixtureManifestError("Accelerated formula model selects an unsupported backend.")
+
+
 def _ref_to_json(reference: StateRef) -> dict[str, object]:
     """Encode one exact StateRef using the shared closed JSON grammar."""
 
@@ -263,20 +461,28 @@ class QualificationCase:
     w3_test_ref: StateRef | None = None
     case_kind: str = "matrix"
     tensorflow_mode: bool = False
+    accelerator: str = "cpu"
 
     def __post_init__(self) -> None:
         """Reject incomplete, floating, or drifted request data at construction."""
 
         if self.workload not in WORKLOADS or self.framework not in FRAMEWORKS or self.execution not in EXECUTION_MODES:
             raise FixtureManifestError("Qualification case selects an unsupported workload, framework, or execution mode.")
-        if self.case_kind not in CASE_KINDS or type(self.tensorflow_mode) is not bool:
+        if self.case_kind not in (*CASE_KINDS, "accelerated") or type(self.tensorflow_mode) is not bool or self.accelerator not in {"cpu", "gpu"}:
             raise FixtureManifestError("Qualification case has an invalid matrix or delivery identity.")
-        if self.case_kind == "matrix" and self.tensorflow_mode:
+        if self.case_kind == "matrix" and (self.tensorflow_mode or self.accelerator != "cpu"):
             raise FixtureManifestError("Primary CPU matrix cases must retain NumPy delivery.")
         if self.case_kind == "tfds-tensorflow-to-torch" and (
                 (self.workload, self.framework, self.execution, self.tensorflow_mode)
                 != ("W1", "torch", "local", True)):
             raise FixtureManifestError("The TFDS-to-Torch supplemental case has a fixed identity.")
+        if self.case_kind == "accelerated" and (
+                self.accelerator != "gpu" or self.tensorflow_mode
+                or self.execution != "subprocess"
+                or (self.workload, self.framework) not in {("W1", "tf"), ("W3", "torch")}):
+            raise FixtureManifestError("Accelerated qualification has only the fixed TensorFlow W1 and Torch W3 GPU cases.")
+        if self.case_kind != "accelerated" and self.accelerator != "cpu":
+            raise FixtureManifestError("Only accelerated qualification cases may request a GPU.")
         if type(self.fixture_store) is not str or not self.fixture_store:
             raise FixtureManifestError("Qualification case lacks fixture Store authority.")
         if any(type(value) is not str or len(value) != 64 for value in (self.manifest_digest, self.config_digest)):
@@ -307,14 +513,14 @@ class QualificationCase:
             "fixture_store": self.fixture_store, "manifest_digest": self.manifest_digest,
             "config_digest": self.config_digest, "environment": dict(self.environment),
             "seed": dict(self.seed), "w3_test_ref": None if self.w3_test_ref is None else _ref_to_json(self.w3_test_ref),
-            "case_kind": self.case_kind, "tensorflow_mode": self.tensorflow_mode,
+            "case_kind": self.case_kind, "tensorflow_mode": self.tensorflow_mode, "accelerator": self.accelerator,
         }
 
     @classmethod
     def from_data(cls, value: Mapping[str, object]) -> "QualificationCase":
         """Decode the closed case grammar without Store or framework access."""
 
-        required = {"workload", "framework", "execution", "fixture_store", "manifest_digest", "config_digest", "environment", "seed", "w3_test_ref", "case_kind", "tensorflow_mode"}
+        required = {"workload", "framework", "execution", "fixture_store", "manifest_digest", "config_digest", "environment", "seed", "w3_test_ref", "case_kind", "tensorflow_mode", "accelerator"}
         if not isinstance(value, Mapping) or set(value) != required:
             raise FixtureManifestError("Stage 5+7 case record is malformed.")
         reference = None if value["w3_test_ref"] is None else _ref_from_json(value["w3_test_ref"])
@@ -322,7 +528,7 @@ class QualificationCase:
             return cls(
                 value["workload"], value["framework"], value["execution"], value["fixture_store"],
                 value["manifest_digest"], value["config_digest"], dict(value["environment"]),
-                dict(value["seed"]), reference, value["case_kind"], value["tensorflow_mode"],
+                dict(value["seed"]), reference, value["case_kind"], value["tensorflow_mode"], value["accelerator"],
             )
         except (TypeError, ValueError) as error:
             raise FixtureManifestError("Stage 5+7 case record is malformed.") from error
@@ -349,6 +555,27 @@ def supplemental_tfds_torch_case(manifest: FixtureManifest) -> QualificationCase
         config_digest(manifest.baseline), dict(manifest.environment), _case_seed(manifest, "torch"),
         None, "tfds-tensorflow-to-torch", True,
     )
+
+
+def accelerated_cases(manifest: FixtureManifest) -> tuple[QualificationCase, QualificationCase]:
+    """Return the two separately counted fixed one-GPU qualification requests.
+
+    The cases deliberately use the existing isolated subprocess execution route,
+    but their accelerator-bearing identities and gate paths cannot collide with
+    the CPU matrix, local gate, supplemental delivery case, or recovery gate.
+    """
+
+    cases = tuple(
+        QualificationCase(
+            workload, framework, "subprocess", str(manifest.fixture_store), manifest.digest,
+            config_digest(manifest.baseline), dict(manifest.environment), _case_seed(manifest, framework),
+            manifest.references.numpy if workload == "W3" else None, "accelerated", False, "gpu",
+        )
+        for workload, framework in (("W1", "tf"), ("W3", "torch"))
+    )
+    if len({case.case_id for case in cases}) != 2:
+        raise AssertionError("Accelerated qualification case IDs must be unique.")
+    return cases
 
 
 def cpu_matrix(manifest: FixtureManifest) -> tuple[QualificationCase, ...]:
@@ -549,6 +776,7 @@ class QualificationEvidence:
     output_bytes: int
     worker: Mapping[str, object]
     recovery: Mapping[str, object] | None = None
+    device_evidence: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         """Validate closed field types before any result can be serialized."""
@@ -573,6 +801,7 @@ class QualificationEvidence:
             raise FixtureManifestError("Qualification runtime evidence is incomplete.")
         if self.runtime["backend"] != self.case.framework or not self.runtime["device"] or not self.runtime["worker_id"] or self.runtime["process_id"] < 0:
             raise FixtureManifestError("Qualification runtime evidence disagrees with its request.")
+        self._validate_device_evidence()
         self._validate_worker_evidence()
         self._validate_recovery_evidence()
         expected_metric = _METRIC_NAMES[self.case.workload]
@@ -596,6 +825,35 @@ class QualificationEvidence:
         object.__setattr__(self, "worker", _freeze_mapping(self.worker))
         if self.recovery is not None:
             object.__setattr__(self, "recovery", _freeze_mapping(self.recovery))
+
+    def _validate_device_evidence(self) -> None:
+        """Require claimed accelerated placement to equal actual native observations."""
+
+        if self.case.accelerator == "cpu":
+            if self.device_evidence is not None:
+                raise FixtureManifestError("CPU qualification must not claim accelerated device evidence.")
+            if self.runtime["device"] != "cpu":
+                raise FixtureManifestError("CPU qualification runtime evidence must remain on CPU.")
+            return
+        required = {"allocation", "native_parameters", "training_tensors", "execution_tensors", "observed_device"}
+        evidence = self.device_evidence
+        if not isinstance(evidence, Mapping) or set(evidence) != required:
+            raise FixtureManifestError("Accelerated qualification device evidence is incomplete.")
+        allocation = evidence["allocation"]
+        if not isinstance(allocation, Mapping) or set(allocation) != {"visible_device", "claimed_device"}:
+            raise FixtureManifestError("Accelerated qualification allocation evidence is incomplete.")
+        if type(allocation["visible_device"]) is not str or not allocation["visible_device"].isdecimal() or allocation["claimed_device"] != "gpu:0":
+            raise FixtureManifestError("Accelerated qualification allocation evidence is invalid.")
+        groups = ("native_parameters", "training_tensors", "execution_tensors")
+        if any(not isinstance(evidence[name], (tuple, list)) or not evidence[name] or any(item != "gpu:0" for item in evidence[name]) for name in groups):
+            raise FixtureManifestError("Accelerated qualification native placement evidence is missing, mixed, or non-GPU.")
+        if evidence["observed_device"] != "gpu:0" or self.runtime["device"] != evidence["observed_device"]:
+            raise FixtureManifestError("Accelerated qualification claimed GPU disagrees with observed native placement.")
+        object.__setattr__(self, "device_evidence", MappingProxyType({
+            "allocation": MappingProxyType(dict(allocation)),
+            **{name: tuple(evidence[name]) for name in groups},
+            "observed_device": evidence["observed_device"],
+        }))
 
     def _validate_worker_evidence(self) -> None:
         """Require detached Core Execute route, authority, and receipt facts."""
@@ -638,11 +896,20 @@ class QualificationEvidence:
             if self.case.execution == "managed-local" and allocation["allocation"] == "no-session-allocation":
                 raise FixtureManifestError("Managed local qualification omitted its session allocation.")
         if not provisional and self.case.execution in {"subprocess", "ray"}:
-            if allocation != {
+            expected = (
+                {
+                    "resource_mode": "worker-process-one-gpu",
+                    "allocation": "worker-process-one-gpu",
+                    "admission": "admitted-with-one-gpu-visibility",
+                }
+                if self.case.accelerator == "gpu" else
+                {
                     "resource_mode": "worker-process-no-session-allocation",
                     "allocation": "worker-process-no-session-allocation",
                     "admission": "admitted-without-session-allocation",
-            }:
+                }
+            )
+            if allocation != expected:
                 raise FixtureManifestError("Core worker allocation evidence disagrees with its no-session route.")
         authority = self.worker["shared_authority"]
         if not isinstance(authority, Mapping) or set(authority) != {"fixture_store", "control_store"} or not all(isinstance(value, str) and value for value in authority.values()):
@@ -704,6 +971,13 @@ class QualificationEvidence:
             "formula": dict(self.formula), "environment": dict(self.environment), "runtime": dict(self.runtime),
             "elapsed_seconds": self.elapsed_seconds, "peak_rss_bytes": self.peak_rss_bytes, "output_bytes": self.output_bytes,
             "worker": dict(self.worker), "recovery": None if self.recovery is None else dict(self.recovery),
+            "device_evidence": None if self.device_evidence is None else {
+                "allocation": dict(self.device_evidence["allocation"]),
+                "native_parameters": list(self.device_evidence["native_parameters"]),
+                "training_tensors": list(self.device_evidence["training_tensors"]),
+                "execution_tensors": list(self.device_evidence["execution_tensors"]),
+                "observed_device": self.device_evidence["observed_device"],
+            },
         }
 
     @classmethod
@@ -724,7 +998,7 @@ class QualificationEvidence:
         required = {
             "case", "final_experiment_ref", "model_ref", "test_ref", "history_ref", "history_rows",
             "artifact_ref", "artifact_value", "formula", "environment", "runtime", "elapsed_seconds",
-            "peak_rss_bytes", "output_bytes", "worker", "recovery",
+            "peak_rss_bytes", "output_bytes", "worker", "recovery", "device_evidence",
         }
         if not isinstance(value, Mapping) or set(value) != required or not isinstance(value["history_rows"], list):
             raise FixtureManifestError("Qualification evidence record has missing or extra fields.")
@@ -747,6 +1021,7 @@ class QualificationEvidence:
                 value["artifact_value"], dict(value["formula"]), dict(value["environment"]),
                 dict(value["runtime"]), value["elapsed_seconds"], value["peak_rss_bytes"], value["output_bytes"],
                 dict(value["worker"]), None if value["recovery"] is None else dict(value["recovery"]),
+                None if value["device_evidence"] is None else dict(value["device_evidence"]),
             )
         except (TypeError, ValueError) as error:
             raise FixtureManifestError("Qualification evidence record is malformed.") from error
@@ -962,7 +1237,10 @@ def build_workload(repo, case: QualificationCase, *, mnist_source: Callable[[str
     from dryml.metrics import classifier_accuracy, regressor_mse
     from dryml.models import Experiment
 
-    initialize_cpu_framework(case.framework, case.seed["framework"])
+    if case.accelerator == "gpu":
+        initialize_gpu_framework(case.framework, case.seed["framework"])
+    else:
+        initialize_cpu_framework(case.framework, case.seed["framework"])
     model, trainer = _model_and_training(case.framework, case.workload)
     if case.workload in {"W1", "W2"}:
         if mnist_source is None:
@@ -985,7 +1263,7 @@ def build_workload(repo, case: QualificationCase, *, mnist_source: Callable[[str
 
 __all__ = [
     "CASE_KINDS", "EXECUTION_MODES", "FRAMEWORKS", "QualificationCase", "QualificationCasePaths", "QualificationEvidence", "THRESHOLDS", "WORKLOADS",
-    "accuracy_formula", "build_w3_fixtures", "build_workload", "case_from_manifest", "cpu_matrix",
-    "initialize_cpu_framework", "mnist_pipeline", "mse_formula", "native_device_evidence", "polynomial_samples", "qualification_case_paths", "require_real_qualification", "run_local_case",
+    "accelerated_cases", "accuracy_formula", "build_w3_fixtures", "build_workload", "case_from_manifest", "cpu_matrix",
+    "initialize_cpu_framework", "initialize_gpu_framework", "mnist_pipeline", "mse_formula", "native_device_evidence", "native_device_observations", "polynomial_samples", "preflight_gpu_framework", "prepare_exact_model_for_formula", "qualification_case_paths", "require_real_qualification", "run_local_case", "selected_gpu_device",
     "supplemental_tfds_torch_case", "validate_evidence", "w1_label_methods",
 ]

@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import shutil
 import weakref
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 
 from dryml.core.object import Serializable
@@ -26,6 +28,39 @@ from dryml.models.utils import (
 )
 from dryml.tf.tensor_spec import output_signature as tf_output_signature
 from dryml.methods import ImplementationSelectionError, MethodError, traits
+
+
+_KERAS_TRAIN_STEP_OBSERVER = ContextVar("dryml_keras_train_step_observer", default=None)
+
+
+@contextmanager
+def observe_keras_train_step(observer):
+    """Temporarily receive facts from BasicTraining's owned Keras update boundary.
+
+    Args:
+        observer: Callable receiving keyword-only ``x``, ``y``, ``prediction``,
+            and ``parameters`` values from each completed Keras train step.
+
+    Yields:
+        ``None`` while the process-local observation is active.
+
+    Raises:
+        TypeError: If ``observer`` is not callable.
+
+    Side Effects:
+        Installs a process-local diagnostic observer. The observer is unset by
+        default and does not alter model outputs, gradients, or public training
+        behavior. Traced Keras steps invoke it through a control-only callback
+        after the native update inputs and prediction exist.
+    """
+
+    if not callable(observer):
+        raise TypeError("Keras train-step observer must be callable.")
+    token = _KERAS_TRAIN_STEP_OBSERVER.set(observer)
+    try:
+        yield
+    finally:
+        _KERAS_TRAIN_STEP_OBSERVER.reset(token)
 
 
 def _unwrap_backend_obj(obj):
@@ -274,6 +309,8 @@ def _freeze_native_keras_callbacks(tf, configured, fit_kwargs) -> tuple:
 def _keras_accounting_model(tf, model):
     """Wrap one Keras model with owned post-update accounting facts."""
 
+    observer = _KERAS_TRAIN_STEP_OBSERVER.get()
+
     class AccountingModel(tf.keras.Model):
         def __init__(self, base):
             super().__init__(name=f"dryml_accounting_{base.name}")
@@ -287,14 +324,37 @@ def _keras_accounting_model(tf, model):
 
         def train_step(self, data):
             x, y, sample_weight = tf.keras.utils.unpack_x_y_sample_weight(data)
+            observed_variables = self.base.trainable_variables
+            observe_step = observer is not None and bool(observed_variables)
+            if observe_step:
+                first_variable = observed_variables[0]
+                device = getattr(first_variable, "device", None) or first_variable.handle.device
+                with tf.device(device):
+                    # These identities are the values actually consumed below;
+                    # their placement therefore records the native training
+                    # boundary rather than a diagnostic callback kernel.
+                    x = tf.nest.map_structure(tf.identity, x)
+                    y = tf.nest.map_structure(tf.identity, y)
+                    if sample_weight is not None:
+                        sample_weight = tf.nest.map_structure(tf.identity, sample_weight)
             with tf.GradientTape() as tape:
-                y_pred = self.base(x, training=True)
-                loss = self.compiled_loss(
-                    y,
-                    y_pred,
-                    sample_weight=sample_weight,
-                    regularization_losses=self.base.losses,
-                )
+                if observe_step:
+                    with tf.device(device):
+                        y_pred = self.base(x, training=True)
+                        loss = self.compiled_loss(
+                            y,
+                            y_pred,
+                            sample_weight=sample_weight,
+                            regularization_losses=self.base.losses,
+                        )
+                else:
+                    y_pred = self.base(x, training=True)
+                    loss = self.compiled_loss(
+                        y,
+                        y_pred,
+                        sample_weight=sample_weight,
+                        regularization_losses=self.base.losses,
+                    )
             variables = self.base.trainable_variables
             gradients = tape.gradient(loss, variables)
             self.optimizer.apply_gradients(
@@ -302,10 +362,21 @@ def _keras_accounting_model(tf, model):
                 for gradient, variable in zip(gradients, variables)
                 if gradient is not None
             )
+            if observe_step:
+                # Invoke the opt-in diagnostic while tracing/eagerly executing
+                # this actual train step. Passing through tf.py_function would
+                # replace these values with tensors on the callback kernel's
+                # device and make placement evidence untruthful.
+                observer(
+                    x=x,
+                    y=y,
+                    prediction=y_pred,
+                    parameters=tuple(variables),
+                )
+            self.completed_loss.assign(tf.cast(loss, tf.float64))
             self.compiled_metrics.update_state(y, y_pred, sample_weight=sample_weight)
             # This is the exact scalar differentiated by the completed update,
             # including regularization and dynamic add_loss contributions.
-            self.completed_loss.assign(tf.cast(loss, tf.float64))
             first = tf.nest.flatten(x)[0]
             self.completed_examples.assign(tf.cast(tf.shape(first)[0], tf.int64))
             self.has_completed_step.assign(True)

@@ -100,6 +100,40 @@ def test_tf_basic_training_updates_experiment_state():
     assert float(optimizer.obj.learning_rate.numpy()) == pytest.approx(0.01)
 
 
+def test_tf_basic_training_observes_native_accounting_train_step_devices():
+    """The opt-in observer receives real Keras train-step values, not wrapper calls."""
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+    from dryml.models.tf.base import observe_keras_train_step
+
+    observed = []
+    trainer = BasicTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=2, verbose=0,
+    )
+    exp = Experiment(
+        Model(TinyKerasModel), trainer,
+        train_data=ArrayDataset((
+            np.asarray([[0.0], [1.0]], dtype=np.float32),
+            np.asarray([[0.0], [2.0]], dtype=np.float32),
+        )),
+    )
+
+    with observe_keras_train_step(lambda **facts: observed.append(facts)):
+        trainer(exp)
+
+    assert observed
+    facts = observed[-1]
+    assert facts["parameters"]
+    training_values = (
+        *tf.nest.flatten(facts["x"]),
+        *tf.nest.flatten(facts["y"]),
+        *tf.nest.flatten(facts["prediction"]),
+    )
+    assert all("CPU" in value.device.upper() for value in training_values)
+    assert all(getattr(getattr(value, "op", None), "type", None) != "EagerPyFunc" for value in training_values)
+    assert all("CPU" in (getattr(value, "device", None) or value.handle.device).upper() for value in facts["parameters"])
+
+
 def test_tf_managed_experiment_smoke_returns_its_terminal_receipt(tmp_path):
     """A tiny CPU-managed Keras run publishes one terminal Experiment receipt."""
 

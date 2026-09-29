@@ -141,6 +141,61 @@ def test_autoencoder_rejects_mixed_native_components_and_keeps_torch_gradients()
     assert error.value.reason == "conflict"
 
 
+def test_tf_autoencoder_keeps_native_gradients_through_supported_composition():
+    """Same-framework TensorFlow composition remains differentiable end to end."""
+    tf = pytest.importorskip("tensorflow")
+    import dryml.tf
+    from dryml.models import AutoEncoder
+    from dryml.models.tf import Model as TFModel
+
+    same = AutoEncoder(
+        TFModel(tf.keras.layers.Dense, 2, use_bias=False, output_spec=TensorSpec("float32", shape=(2,))),
+        TFModel(tf.keras.layers.Dense, 1, use_bias=False, output_spec=TensorSpec("float32", shape=(1,))),
+    )
+    value = tf.constant([[1.0, 2.0]], dtype=tf.float32)
+    with tf.GradientTape() as tape:
+        tape.watch(value)
+        result = same.find_implementation(TensorSpec("float32", shape=(2,), batch=1, backend="tf"))(value)
+        loss = tf.reduce_sum(result)
+    gradients = tape.gradient(loss, (*same.encoder.obj.trainable_variables, *same.decoder.obj.trainable_variables))
+    assert all(gradient is not None for gradient in gradients)
+
+
+@pytest.mark.parametrize("source", ("tf", "torch"))
+def test_gpu_cross_framework_handoffs_reject_before_any_host_copy(monkeypatch, source):
+    """GPU-like source tensors fail before detach, NumPy, DLPack, or host fallback."""
+    import dryml.methods.conversion as conversion
+
+    class Sentinel:
+        __module__ = "tensorflow" if source == "tf" else "torch"
+        layout = object()
+
+        def __init__(self):
+            self.device = "/device:GPU:0" if source == "tf" else type("Device", (), {"type": "cuda"})()
+
+        def numpy(self):
+            raise AssertionError("conversion attempted NumPy host copying")
+
+        def detach(self):
+            raise AssertionError("conversion attempted detaching")
+
+        def cpu(self):
+            raise AssertionError("conversion attempted CPU fallback")
+
+    value = Sentinel()
+    if source == "tf":
+        fake_tf = type("TF", (), {"is_tensor": staticmethod(lambda candidate: candidate is value), "RaggedTensor": (), "SparseTensor": ()})()
+        monkeypatch.setattr(conversion, "import_module", lambda _: fake_tf)
+        edge = conversion.make_edge(TensorSpec("float32", shape=(2,), backend="tf"), "torch")
+    else:
+        Sentinel.layout = object()
+        fake_torch = type("Torch", (), {"Tensor": Sentinel, "strided": Sentinel.layout})()
+        monkeypatch.setattr(conversion, "import_module", lambda _: fake_torch)
+        edge = conversion.make_edge(TensorSpec("float32", shape=(2,), backend="torch"), "tf")
+
+    with pytest.raises(TypeError):
+        conversion.convert(edge, value)
+
 def _spec_leaves(tree):
     if isinstance(tree, TensorSpec):
         yield tree

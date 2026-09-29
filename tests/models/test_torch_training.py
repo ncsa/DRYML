@@ -26,6 +26,14 @@ class EffectfulModule(torch.nn.Module):
         return value
 
 
+def _tiny_tensorflow_pairs():
+    """Yield fixed TensorFlow examples for the real cross-backend trainer path."""
+    import tensorflow as tf
+
+    yield tf.constant([0.0], dtype=tf.float32), tf.constant([0.0], dtype=tf.float32)
+    yield tf.constant([1.0], dtype=tf.float32), tf.constant([2.0], dtype=tf.float32)
+
+
 def test_torch_basic_training_updates_experiment_state():
     from dryml.core.repo import get_default_repo
     from dryml.models.torch import Model, Optimizer, Training
@@ -511,6 +519,34 @@ def test_torch_training_prepares_cross_backend_data_before_model_invocation(monk
     exp.train_fn(exp)
 
     assert events[:2] == ["prepare", "model"]
+
+
+def test_torch_training_prepares_tensorflow_data_through_its_retained_method_edge():
+    """TensorFlow batches reach the real Torch loop through TrainingPreparation."""
+    tf = pytest.importorskip("tensorflow")
+    import dryml.tf
+    from dryml.core import TensorSpec
+    from dryml.core.cardinality import Cardinality
+    from dryml.data import GeneratorDataset
+    from dryml.models.torch import Model, Optimizer, Training
+
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = Training(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0,
+    )
+    exp = Experiment(
+        model, trainer,
+        train_data=GeneratorDataset(
+            _tiny_tensorflow_pairs, cardinality=Cardinality.finite(2),
+            spec=(TensorSpec("float32", shape=(1,), backend="tf"), TensorSpec("float32", shape=(1,), backend="tf")),
+        ),
+    )
+
+    trainer(exp)
+
+    assert [edge.adapter for edge in trainer.method_graph().conversion_edges] == ["tf_to_torch", "tf_to_torch"]
+    assert all(parameter.grad is not None for parameter in model.obj.parameters())
 
 
 def test_torch_final_callback_resume_runs_one_validation_postlude_without_an_update(monkeypatch):

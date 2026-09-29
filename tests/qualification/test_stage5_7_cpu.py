@@ -419,10 +419,11 @@ def test_core_snapshot_without_allocation_reports_worker_process_truthfully(tmp_
     class Evidence:
         worker: dict
         final_experiment_ref: Reference
+        runtime: dict
 
     requests, *_ = _requests(tmp_path)
     request = next(item for item in requests if item.case.execution == "subprocess")
-    evidence = Evidence({}, Reference("result"))
+    evidence = Evidence({}, Reference("result"), {"process_id": 1, "worker_id": "pid:1"})
     snapshot = SimpleNamespace(
         backend=SimpleNamespace(
             worker_id="subprocess:17", pid=17, allocation=None, submission_id="submission",
@@ -436,6 +437,7 @@ def test_core_snapshot_without_allocation_reports_worker_process_truthfully(tmp_
         "allocation": "worker-process-no-session-allocation",
         "admission": "admitted-without-session-allocation",
     }
+    assert observed.runtime == {"process_id": 17, "worker_id": "subprocess:17"}
 
 
 def test_canonical_state_digest_is_stable_bounded_and_device_independent_for_arrays_and_scalars():

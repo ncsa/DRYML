@@ -9,6 +9,7 @@ import resource
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 
 import numpy as np
@@ -542,7 +543,6 @@ def _real_manifest_or_unrun():
     except QualificationUnrun as error:
         pytest.skip(f"QualificationUnrun: {error}")
 
-
 def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, control_store=None):
     """Run a real local Experiment/Artifact workflow after explicit test opt-in."""
 
@@ -552,20 +552,16 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     from dryml.data import Map
     from dryml.managed import ManagedConfig
     from dryml.models import ExperimentData
-    from tests.qualification.stage5_7_workloads import QualificationEvidence, _FORMULAS, _METRIC_NAMES, native_device_evidence
+    from tests.qualification.stage5_7_workloads import (
+        QualificationEvidence, _FORMULAS, _METRIC_NAMES, native_device_evidence,
+        prepare_exact_model_for_formula,
+    )
 
     def source(split, tensorflow_mode):
         return TFDSAdapter(
             "mnist", split=split, as_supervised=True, as_numpy=not tensorflow_mode,
             data_dir=os.fspath(manifest.tfds.data_dir), download=False,
         )
-
-    def as_numpy(value):
-        if hasattr(value, "detach"):
-            value = value.detach().cpu()
-        if hasattr(value, "numpy"):
-            value = value.numpy()
-        return np.asarray(value)
 
     output_store = os.environ.get("DRYML_STAGE5_7_CASE_OUTPUT_STORE")
     work_dir = os.environ.get("DRYML_STAGE5_7_CASE_WORK_DIR")
@@ -587,40 +583,55 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     managed = ManagedConfig(state_repo=repo, control_store=control)
     started = time.monotonic()
     experiment = build_workload(repo, case, mnist_source=source)
-    training_tensors = []
+    training_tensors, execution_tensors = [], []
     native_models = tuple(
         model for model in repo.iter_graph(experiment.model, missing="raise", order="post")
         if getattr(model, "native_backend", None) == case.framework
     )
     if not native_models:
         raise FixtureManifestError("Real runner cannot observe a native training model boundary.")
-    original_raw_calls = []
+    def collect(destination, value):
+        if isinstance(value, dict):
+            for item in value.values():
+                collect(destination, item)
+        elif isinstance(value, (tuple, list)):
+            for item in value:
+                collect(destination, item)
+        else:
+            destination.append(value)
 
-    def capture_training_tensors(original_raw_call, x, *args, **kwargs):
+    def observe_tf_train_step(*, x, y, prediction, parameters):
+        del parameters
         if not training_tensors:
-            def collect(value):
-                if isinstance(value, dict):
-                    for item in value.values():
-                        collect(item)
-                elif isinstance(value, (tuple, list)):
-                    for item in value:
-                        collect(item)
-                else:
-                    training_tensors.append(value)
-            collect(x)
-        return original_raw_call(x, *args, **kwargs)
+            collect(training_tensors, (x, y))
+        if not execution_tensors:
+            collect(execution_tensors, prediction)
 
-    for training_model in native_models:
-        original_raw_call = training_model._call_raw
-        original_raw_calls.append((training_model, original_raw_call))
-        training_model._call_raw = (
-            lambda x, *args, _original=original_raw_call, **kwargs:
-            capture_training_tensors(_original, x, *args, **kwargs)
-        )
+    original_torch_forwards = []
+    if case.framework == "torch":
+        for training_model in native_models:
+            original_forward = training_model.obj.forward
+
+            def capture_torch_forward(x, *args, _forward=original_forward, **kwargs):
+                if not training_tensors:
+                    collect(training_tensors, x)
+                result = _forward(x, *args, **kwargs)
+                if not execution_tensors:
+                    collect(execution_tensors, result)
+                return result
+
+            original_torch_forwards.append((training_model, original_forward))
+            training_model.obj.forward = capture_torch_forward
+    observer_scope = nullcontext()
+    if case.framework == "tf":
+        from dryml.models.tf.base import observe_keras_train_step
+
+        observer_scope = observe_keras_train_step(observe_tf_train_step)
     recovery_evidence = None
     try:
         if recovery is None:
-            final = experiment.train(managed=managed)
+            with observer_scope:
+                final = experiment.train(managed=managed)
         else:
             import dryml.models.experiment as experiment_module
             from dryml.artifacts import Artifact
@@ -756,10 +767,10 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
                 "final_refs": None,
             }
     finally:
-        for training_model, original_raw_call in original_raw_calls:
-            training_model._call_raw = original_raw_call
-    if not training_tensors:
-        raise FixtureManifestError("Real runner did not observe a native training tensor.")
+        for training_model, original_forward in original_torch_forwards:
+            training_model.obj.forward = original_forward
+    if not training_tensors or not execution_tensors:
+        raise FixtureManifestError("Real runner did not observe native training and execution tensors.")
     history = ExperimentData.find(final.object_projection(), repo=repo)
     if history is None or history.data.empty:
         raise FixtureManifestError("Real runner did not publish ExperimentData history.")
@@ -770,17 +781,34 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     test_ref = final.reference_value_at("test_data")
     model = repo.load_state_ref(model_ref, reuse_live="never")
     test_data = repo.load_state_ref(test_ref, reuse_live="never")
+    prepare_exact_model_for_formula(model, case)
     predictions, observations = [], []
     for sample in test_data:
         prediction = model(sample["x"])
-        predictions.append(as_numpy(prediction))
-        observations.append(as_numpy(sample["y"]))
+        if case.accelerator == "gpu":
+            if native_device_evidence(model, training_tensors=(prediction,)) != "gpu:0":
+                raise FixtureManifestError("Exact-loaded formula model did not remain on the selected GPU.")
+        prediction = prediction.detach().cpu() if hasattr(prediction, "detach") else prediction
+        observation = sample["y"].detach().cpu() if hasattr(sample["y"], "detach") else sample["y"]
+        predictions.append(np.asarray(prediction))
+        observations.append(np.asarray(observation))
     if case.workload == "W1":
         formula_value = accuracy_formula(np.argmax(np.asarray(predictions), axis=-1), np.asarray(observations))
     else:
         formula_value = mse_formula(np.asarray(predictions), np.asarray(observations))
     output_bytes = sum(path.stat().st_size for path in output_path.rglob("*") if path.is_file())
     observed_device = native_device_evidence(model, training_tensors=tuple(training_tensors))
+    device_evidence = None
+    if case.accelerator == "gpu":
+        from tests.qualification.stage5_7_workloads import native_device_observations, selected_gpu_device
+
+        observations = native_device_observations(
+            model, training_tensors=tuple(training_tensors), execution_tensors=tuple(execution_tensors),
+        )
+        device_evidence = {
+            "allocation": {"visible_device": selected_gpu_device(), "claimed_device": "gpu:0"},
+            **dict(observations),
+        }
     final_refs = {
         "experiment": final.digest(), "model": model_ref.digest(), "test": test_ref.digest(),
         "history": history.last_state_ref.digest(), "artifact": artifact_ref.digest(),
@@ -811,6 +839,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
             "coordinator_validated_refs": None,
         },
         recovery=recovery_evidence,
+        device_evidence=device_evidence,
     )
 
 
@@ -912,21 +941,6 @@ def test_stage5_7_real_local_workloads(workload):
 
     manifest = _real_manifest_or_unrun()
     case = case_from_manifest(manifest, workload=workload, framework="torch", execution="local")
-    try:
-        output_store = os.environ.get("DRYML_STAGE5_7_OUTPUT_STORE")
-        if not output_store or not os.environ.get("DRYML_STAGE5_7_WORK_DIR") or not os.environ.get("DRYML_STAGE5_7_EVIDENCE_DIR"):
-            raise QualificationUnrun("set qualification output Store, work, and evidence roots")
-        run_local_case(manifest, case, opted_in=True, runner=lambda request: _real_runner_in_child(manifest, request), output_store=output_store)
-    except QualificationUnrun as error:
-        pytest.skip(f"QualificationUnrun: {error}")
-
-
-@pytest.mark.stage5_7_qualification
-def test_stage5_7_real_tfds_tensorflow_to_torch_supplemental_case():
-    """Opt-in interoperability gate remains separately counted from 24 CPU cells."""
-
-    manifest = _real_manifest_or_unrun()
-    case = supplemental_tfds_torch_case(manifest)
     try:
         output_store = os.environ.get("DRYML_STAGE5_7_OUTPUT_STORE")
         if not output_store or not os.environ.get("DRYML_STAGE5_7_WORK_DIR") or not os.environ.get("DRYML_STAGE5_7_EVIDENCE_DIR"):
