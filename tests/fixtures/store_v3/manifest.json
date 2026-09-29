@@ -1,0 +1,564 @@
+{
+  "authority_sha256": {
+    "definitions/07/0746655b1dee7313e9a6a93c965d9b4435271302ab664e150d30e13e18f4663e.record": "8c44ec8c527397ff1ed154623b0fad9e2ef521e9c6e9d94924b973d3ebdfe51a",
+    "definitions/26/26fd1b8cf085cd2b4465e19b38e40d081be1834ea910b5ad71fad7f5c18e0c43.record": "2345e9a6363370882ddb3ed0e46ab37d19fff696a2df09421e9b8d8042fbb275",
+    "definitions/34/343611b352ef78b2881d2befc774c6a3b02baa914b2de1022e86c06f9fcbcda8.record": "b1e769bf082ac668ccb4139c5864a9920ef422ab3f86cf3177b17a44665c082f",
+    "definitions/58/58b845459410ad6bdee11316300e96813887e6be52a77eef7d3078ee9dd27c7e.record": "ae65e6c0184e99f7de8142b52a9af3163d014e7b73a81443abe4fed07b15fca8",
+    "lineage/08/088ca003a49f4db8d2bf7f7807dff6f408ef686faa7013693ed501a443606666.record": "baee74bdc0c844996b90a4d33ecafa0f8b30b78d6b61efc0d97f120d3150dfc8",
+    "lineage/40/4089583ebfb2143fd47261eb100e1a08467312191e3cdcb08ca9a1be102b3ec1.record": "9e899b6aa47a8f656f782d8ca0a080f157e3ee40cde5e8ebd9ef64285070213b",
+    "lineage/cb/cb15cff1fd436776a42cd6bac0dab5f0f9dd762af05bf6e573ad0670c5ec363a.record": "f5c627b7136a6c2384b00a442e996f9c611aaf872794341d2d154c7a3c31987e",
+    "lineage/e8/e83caa7e9bcc1f9d17d53097c62760f3c0fded9e82b4dafc15a1dfdbcd28aa84.record": "b5a68e3713490abefc1ab81112f0231fa773b87bca4370792d128bf81235c88b",
+    "metadata/object/cb/cb15cff1fd436776a42cd6bac0dab5f0f9dd762af05bf6e573ad0670c5ec363a.record": "b0aee230ab0810c289d09debf3538a311cb18dd3c78b23392d3f36e8a8c67959",
+    "metadata/object/e8/e83caa7e9bcc1f9d17d53097c62760f3c0fded9e82b4dafc15a1dfdbcd28aa84.record": "d7e71d18402699224f44535678ead11a88525d92998956af585b166a0b8c5601",
+    "metadata/state/ac/ac60033f88e48295f95b681e5b516547d1e4f9c8146a8309ae8836c2ef78b2c5.record": "c44dc742cb56e7f8722f95c9815c5885801a4eb8fbac5416e8fd278f72637a7d",
+    "snapshots/32/32ed25c1074652c237ace270342de88df584ccbba5c626bfb571c89dc3258921/local-state/44cf9a530aa84a0953551b0f89b2858c8876a745e66bbbb30b28357c082588bb/pkl-3272e5cdeca8f095ddc7a6ce3d001dd87ba35fab93fcdfaad5cdf0e385ddd949/data/value.txt": "e4100678965089249e6f94ee91251d27d64388d69fe78a97e3140730bdfcfd53",
+    "snapshots/32/32ed25c1074652c237ace270342de88df584ccbba5c626bfb571c89dc3258921/local-state/44cf9a530aa84a0953551b0f89b2858c8876a745e66bbbb30b28357c082588bb/pkl-3272e5cdeca8f095ddc7a6ce3d001dd87ba35fab93fcdfaad5cdf0e385ddd949/def.pkl": "2345e9a6363370882ddb3ed0e46ab37d19fff696a2df09421e9b8d8042fbb275",
+    "snapshots/32/32ed25c1074652c237ace270342de88df584ccbba5c626bfb571c89dc3258921/local-state/44cf9a530aa84a0953551b0f89b2858c8876a745e66bbbb30b28357c082588bb/pkl-3272e5cdeca8f095ddc7a6ce3d001dd87ba35fab93fcdfaad5cdf0e385ddd949/manifest.record": "bf231e1f273d28c0834f731ee7ec0e4d23b099bbbe52ad463adcab664dc2b2d1",
+    "snapshots/32/32ed25c1074652c237ace270342de88df584ccbba5c626bfb571c89dc3258921/metadata.json": "cfab08d38231d06a3205e023d22d2e52454582d17a6eb00385870c7e6064795f",
+    "snapshots/32/32ed25c1074652c237ace270342de88df584ccbba5c626bfb571c89dc3258921/placement.json": "1c687532149dbf1a9009a5e2fd3c869cc59c163ee666b5cf4f340bc44e8e308d",
+    "snapshots/32/32ed25c1074652c237ace270342de88df584ccbba5c626bfb571c89dc3258921/snapshot.json": "816b37ef486599583299ff83a5212fb65d71642d8efaef471ffb56929d9ad871",
+    "snapshots/32/32ed25c1074652c237ace270342de88df584ccbba5c626bfb571c89dc3258921/state-ref.record": "fd8054b13d819147664872cd24af458063f57d2ddb1e9f8bf267abddcc1e2470",
+    "snapshots/46/4651a0612ba9953aa651d73e09bc7ee9b21816b7ab5897e33cb6dc3c2fd2a51c/local-state/d31a1c1a9a315cf2cab34b3cc32c1867c8dd9efb0346e23ef0ad2eb2a01c32e1/pkl-cbede5e142d957efe9a600444480c4743bc80d7c8890c2df0916d3077946e0aa/data/value.txt": "afe1b0b740d8939d38291273366d1681748826d9f251270800c8f64e9c872c89",
+    "snapshots/46/4651a0612ba9953aa651d73e09bc7ee9b21816b7ab5897e33cb6dc3c2fd2a51c/local-state/d31a1c1a9a315cf2cab34b3cc32c1867c8dd9efb0346e23ef0ad2eb2a01c32e1/pkl-cbede5e142d957efe9a600444480c4743bc80d7c8890c2df0916d3077946e0aa/def.pkl": "8c44ec8c527397ff1ed154623b0fad9e2ef521e9c6e9d94924b973d3ebdfe51a",
+    "snapshots/46/4651a0612ba9953aa651d73e09bc7ee9b21816b7ab5897e33cb6dc3c2fd2a51c/local-state/d31a1c1a9a315cf2cab34b3cc32c1867c8dd9efb0346e23ef0ad2eb2a01c32e1/pkl-cbede5e142d957efe9a600444480c4743bc80d7c8890c2df0916d3077946e0aa/manifest.record": "4edb7dd13af3f3863f36391874a9671cc95a38b9215b904deb7f00a25297fe8c",
+    "snapshots/46/4651a0612ba9953aa651d73e09bc7ee9b21816b7ab5897e33cb6dc3c2fd2a51c/metadata.json": "d2c25332ca4140db1bdc9280017e80a8ba2d263195247c610229f68a31878121",
+    "snapshots/46/4651a0612ba9953aa651d73e09bc7ee9b21816b7ab5897e33cb6dc3c2fd2a51c/placement.json": "edb6af9374f9f8b54972bccd7c13e6c247c867d1bf817ddb420db7de8129318f",
+    "snapshots/46/4651a0612ba9953aa651d73e09bc7ee9b21816b7ab5897e33cb6dc3c2fd2a51c/snapshot.json": "f63eaa4723a95263933ac0585c5c58576951f6af166d2e37ca036b94054e183d",
+    "snapshots/46/4651a0612ba9953aa651d73e09bc7ee9b21816b7ab5897e33cb6dc3c2fd2a51c/state-ref.record": "5695a871b602cc6cbf9aeaac068b25107bbc691cdc1cad64589ca409903faa95",
+    "snapshots/4e/4e33965b0719a34c1c41e6931b97c15e9900a12286c00a73e1500d7f604d8160/local-state/2a5beb1ce32f723ea47121f8db31ffb7c9d3e57995e59e04374bdd6518740dbf/pkl-fc098ca44a1116ddd75f2514e801d5804d6aea57c43cbb96f24408cbe09f281d/data/value.txt": "36032ce79e742f011311b74abab15f53be5405af5a0e44d744afbba44602d308",
+    "snapshots/4e/4e33965b0719a34c1c41e6931b97c15e9900a12286c00a73e1500d7f604d8160/local-state/2a5beb1ce32f723ea47121f8db31ffb7c9d3e57995e59e04374bdd6518740dbf/pkl-fc098ca44a1116ddd75f2514e801d5804d6aea57c43cbb96f24408cbe09f281d/def.pkl": "ae65e6c0184e99f7de8142b52a9af3163d014e7b73a81443abe4fed07b15fca8",
+    "snapshots/4e/4e33965b0719a34c1c41e6931b97c15e9900a12286c00a73e1500d7f604d8160/local-state/2a5beb1ce32f723ea47121f8db31ffb7c9d3e57995e59e04374bdd6518740dbf/pkl-fc098ca44a1116ddd75f2514e801d5804d6aea57c43cbb96f24408cbe09f281d/manifest.record": "3ae5a951c96ba2e09b5f7b436b1b3e09e1293052cb53ab49b04915269df36a50",
+    "snapshots/4e/4e33965b0719a34c1c41e6931b97c15e9900a12286c00a73e1500d7f604d8160/metadata.json": "79cf803a46676dfa6224544bb605cd2d1d31fc256f5509ff5c1f40f72cdbdc2b",
+    "snapshots/4e/4e33965b0719a34c1c41e6931b97c15e9900a12286c00a73e1500d7f604d8160/placement.json": "612beb4571aee296d1a03640de13653c86ef54a17fd25e86c22526d1f92b4146",
+    "snapshots/4e/4e33965b0719a34c1c41e6931b97c15e9900a12286c00a73e1500d7f604d8160/snapshot.json": "15333e21075fa94c867a6bfdd880dc02f8be7c34012fcde386f555bf259c555e",
+    "snapshots/4e/4e33965b0719a34c1c41e6931b97c15e9900a12286c00a73e1500d7f604d8160/state-ref.record": "91f98cfddc6985ba57c4c856b3a2d905b0a5c421b17c3469f3766403e383be78",
+    "snapshots/ac/ac60033f88e48295f95b681e5b516547d1e4f9c8146a8309ae8836c2ef78b2c5/metadata.json": "09c958a216f6fc067c1214d2fe4813aedbbf5fcb1eed378a2071891a44c25e90",
+    "snapshots/ac/ac60033f88e48295f95b681e5b516547d1e4f9c8146a8309ae8836c2ef78b2c5/placement.json": "13976ca005130e03096a96ba3ebe541a22019c0fe07af336a645803bdf7b67e1",
+    "snapshots/ac/ac60033f88e48295f95b681e5b516547d1e4f9c8146a8309ae8836c2ef78b2c5/snapshot.json": "2b736345a3fe48df9484e9a579264f1c380fbf126b87a06e6a1c8809c45a0fb1",
+    "snapshots/ac/ac60033f88e48295f95b681e5b516547d1e4f9c8146a8309ae8836c2ef78b2c5/state-ref.record": "90dc11aced8237127e21dc612d6c78d69e2d88893555e08c9e68890437eccc39",
+    "store-format.record": "69e31d818b135ff5bb1d6fe1e646e6ee66c5c39331ef7a5636d97ac5a65be515",
+    "stored-roots/07/0746655b1dee7313e9a6a93c965d9b4435271302ab664e150d30e13e18f4663e.record": "29508536043562df233ad68da5680e7ad76fde557a979792b581426fffdf06db",
+    "stored-roots/26/26fd1b8cf085cd2b4465e19b38e40d081be1834ea910b5ad71fad7f5c18e0c43.record": "60c0d876f3814a063baa779ce80a2591d34253a78e142d0cfeb017e04594ed27",
+    "stored-roots/34/343611b352ef78b2881d2befc774c6a3b02baa914b2de1022e86c06f9fcbcda8.record": "5ebce1926ee90657d65c2901360cf9e2bca1554502d9271bbf246b9efe48a1a2",
+    "stored-roots/58/58b845459410ad6bdee11316300e96813887e6be52a77eef7d3078ee9dd27c7e.record": "b78c167d656eb60443eca209b51465ef3507732671a278f6d915ff47b34f9c2f"
+  },
+  "compatibility_scope": "framework-owned Store v3 records and placement; author payload codecs are excluded",
+  "fixture_version": 1,
+  "record_contract_version": "1.1",
+  "saved_at_unix_seconds": 1706933106.25,
+  "snapshots": {
+    "conflict": {
+      "captured_object_annotations": [
+        "map",
+        []
+      ],
+      "captured_state_annotations": null,
+      "children": [],
+      "current_object_annotations": [
+        "map",
+        []
+      ],
+      "current_state_annotations": null,
+      "diagnostics": [
+        [
+          "dryml.environments.requirement_conflict",
+          "conflicting environment requirement constraints"
+        ]
+      ],
+      "environment": {
+        "contract_version": "1.1",
+        "id": "envrec-v1.1-042ce47ccc6a9ff6cc1fc76b1705d9057843a6c9830d7f78807e77a3d8fe03a2",
+        "kind": "environment_record",
+        "metadata": {},
+        "payload": {
+          "details": {
+            "environment_name": "dryml-public-fixture",
+            "root": "/opt/dryml-fixture"
+          },
+          "distributions": {
+            "syntheticpkg": {
+              "editable": false,
+              "installer": "fixture",
+              "location": "/opt/dryml-fixture/lib/python/site-packages",
+              "metadata_name": null,
+              "name": "syntheticpkg",
+              "normalized_name": "syntheticpkg",
+              "version": "2.1.0"
+            }
+          },
+          "dryml": {
+            "execution_protocol": "3",
+            "features": [
+              "metadata"
+            ],
+            "git_revision": "fixture-revision",
+            "schema_versions": {
+              "store": "3"
+            },
+            "version": "0.3.0b1"
+          },
+          "kind": "synthetic",
+          "platform": {
+            "implementation_name": "cpython",
+            "implementation_version": "3.12.1",
+            "machine": "fixture64",
+            "os_name": "posix",
+            "platform": "FixtureOS-1.0-fixture64",
+            "platform_python_implementation": "CPython",
+            "release": "1.0",
+            "sys_platform": "fixtureos",
+            "system": "FixtureOS",
+            "version": "fixture-kernel"
+          },
+          "python": {
+            "base_prefix": "/opt/python",
+            "executable": "/opt/dryml-fixture/bin/python",
+            "implementation": "CPython",
+            "prefix": "/opt/dryml-fixture",
+            "version": "3.12.1"
+          },
+          "tags": [
+            "fixture"
+          ]
+        },
+        "schema": "dryml.environment_record.v1.1"
+      },
+      "environment_status": "known",
+      "lineages": {
+        "$": {
+          "created_at_unix_seconds": 1706846709.25,
+          "creation_status": "known",
+          "object_ref_digest": "e83caa7e9bcc1f9d17d53097c62760f3c0fded9e82b4dafc15a1dfdbcd28aa84"
+        }
+      },
+      "local_paths": [
+        {
+          "data": {
+            "schema_version": 3,
+            "segments": []
+          },
+          "display": "$"
+        }
+      ],
+      "object_ref_digest": "e83caa7e9bcc1f9d17d53097c62760f3c0fded9e82b4dafc15a1dfdbcd28aa84",
+      "requirements": null,
+      "requirements_coverage": "complete",
+      "requirements_status": "conflict",
+      "saved_at_unix_seconds": 1706933106.25,
+      "state_ref_digest": "4e33965b0719a34c1c41e6931b97c15e9900a12286c00a73e1500d7f604d8160"
+    },
+    "empty": {
+      "captured_object_annotations": null,
+      "captured_state_annotations": null,
+      "children": [],
+      "current_object_annotations": null,
+      "current_state_annotations": null,
+      "diagnostics": [],
+      "environment": {
+        "contract_version": "1.1",
+        "id": "envrec-v1.1-042ce47ccc6a9ff6cc1fc76b1705d9057843a6c9830d7f78807e77a3d8fe03a2",
+        "kind": "environment_record",
+        "metadata": {},
+        "payload": {
+          "details": {
+            "environment_name": "dryml-public-fixture",
+            "root": "/opt/dryml-fixture"
+          },
+          "distributions": {
+            "syntheticpkg": {
+              "editable": false,
+              "installer": "fixture",
+              "location": "/opt/dryml-fixture/lib/python/site-packages",
+              "metadata_name": null,
+              "name": "syntheticpkg",
+              "normalized_name": "syntheticpkg",
+              "version": "2.1.0"
+            }
+          },
+          "dryml": {
+            "execution_protocol": "3",
+            "features": [
+              "metadata"
+            ],
+            "git_revision": "fixture-revision",
+            "schema_versions": {
+              "store": "3"
+            },
+            "version": "0.3.0b1"
+          },
+          "kind": "synthetic",
+          "platform": {
+            "implementation_name": "cpython",
+            "implementation_version": "3.12.1",
+            "machine": "fixture64",
+            "os_name": "posix",
+            "platform": "FixtureOS-1.0-fixture64",
+            "platform_python_implementation": "CPython",
+            "release": "1.0",
+            "sys_platform": "fixtureos",
+            "system": "FixtureOS",
+            "version": "fixture-kernel"
+          },
+          "python": {
+            "base_prefix": "/opt/python",
+            "executable": "/opt/dryml-fixture/bin/python",
+            "implementation": "CPython",
+            "prefix": "/opt/dryml-fixture",
+            "version": "3.12.1"
+          },
+          "tags": [
+            "fixture"
+          ]
+        },
+        "schema": "dryml.environment_record.v1.1"
+      },
+      "environment_status": "known",
+      "lineages": {
+        "$": {
+          "created_at_unix_seconds": 1706846707.25,
+          "creation_status": "known",
+          "object_ref_digest": "088ca003a49f4db8d2bf7f7807dff6f408ef686faa7013693ed501a443606666"
+        }
+      },
+      "local_paths": [
+        {
+          "data": {
+            "schema_version": 3,
+            "segments": []
+          },
+          "display": "$"
+        }
+      ],
+      "object_ref_digest": "088ca003a49f4db8d2bf7f7807dff6f408ef686faa7013693ed501a443606666",
+      "requirements": null,
+      "requirements_coverage": "complete",
+      "requirements_status": "empty",
+      "saved_at_unix_seconds": 1706933106.25,
+      "state_ref_digest": "4651a0612ba9953aa651d73e09bc7ee9b21816b7ab5897e33cb6dc3c2fd2a51c"
+    },
+    "unavailable_routed": {
+      "captured_object_annotations": null,
+      "captured_state_annotations": [
+        "map",
+        [
+          [
+            "route",
+            [
+              "map",
+              [
+                [
+                  "kind",
+                  [
+                    "str",
+                    "exact-child"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ]
+      ],
+      "children": [
+        {
+          "path": "$[@param(\"child\")]",
+          "path_data": {
+            "schema_version": 3,
+            "segments": [
+              {
+                "kind": "parameter",
+                "name": "child"
+              }
+            ]
+          },
+          "state_ref_digest": "32ed25c1074652c237ace270342de88df584ccbba5c626bfb571c89dc3258921"
+        }
+      ],
+      "current_object_annotations": null,
+      "current_state_annotations": [
+        "map",
+        [
+          [
+            "route",
+            [
+              "map",
+              [
+                [
+                  "kind",
+                  [
+                    "str",
+                    "exact-child"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ]
+      ],
+      "diagnostics": [
+        [
+          "dryml.environments.requirement_collection_unavailable",
+          "environment requirement collection unavailable"
+        ]
+      ],
+      "environment": {
+        "contract_version": "1.1",
+        "id": "envrec-v1.1-042ce47ccc6a9ff6cc1fc76b1705d9057843a6c9830d7f78807e77a3d8fe03a2",
+        "kind": "environment_record",
+        "metadata": {},
+        "payload": {
+          "details": {
+            "environment_name": "dryml-public-fixture",
+            "root": "/opt/dryml-fixture"
+          },
+          "distributions": {
+            "syntheticpkg": {
+              "editable": false,
+              "installer": "fixture",
+              "location": "/opt/dryml-fixture/lib/python/site-packages",
+              "metadata_name": null,
+              "name": "syntheticpkg",
+              "normalized_name": "syntheticpkg",
+              "version": "2.1.0"
+            }
+          },
+          "dryml": {
+            "execution_protocol": "3",
+            "features": [
+              "metadata"
+            ],
+            "git_revision": "fixture-revision",
+            "schema_versions": {
+              "store": "3"
+            },
+            "version": "0.3.0b1"
+          },
+          "kind": "synthetic",
+          "platform": {
+            "implementation_name": "cpython",
+            "implementation_version": "3.12.1",
+            "machine": "fixture64",
+            "os_name": "posix",
+            "platform": "FixtureOS-1.0-fixture64",
+            "platform_python_implementation": "CPython",
+            "release": "1.0",
+            "sys_platform": "fixtureos",
+            "system": "FixtureOS",
+            "version": "fixture-kernel"
+          },
+          "python": {
+            "base_prefix": "/opt/python",
+            "executable": "/opt/dryml-fixture/bin/python",
+            "implementation": "CPython",
+            "prefix": "/opt/dryml-fixture",
+            "version": "3.12.1"
+          },
+          "tags": [
+            "fixture"
+          ]
+        },
+        "schema": "dryml.environment_record.v1.1"
+      },
+      "environment_status": "known",
+      "lineages": {
+        "$": {
+          "created_at_unix_seconds": null,
+          "creation_status": "unknown",
+          "object_ref_digest": "4089583ebfb2143fd47261eb100e1a08467312191e3cdcb08ca9a1be102b3ec1"
+        },
+        "$[@param(\"child\")]": {
+          "created_at_unix_seconds": 1706846708.25,
+          "creation_status": "known",
+          "object_ref_digest": "cb15cff1fd436776a42cd6bac0dab5f0f9dd762af05bf6e573ad0670c5ec363a"
+        }
+      },
+      "local_paths": [],
+      "object_ref_digest": "4089583ebfb2143fd47261eb100e1a08467312191e3cdcb08ca9a1be102b3ec1",
+      "requirements": null,
+      "requirements_coverage": "incomplete",
+      "requirements_status": "unavailable",
+      "saved_at_unix_seconds": 1706933106.25,
+      "state_ref_digest": "ac60033f88e48295f95b681e5b516547d1e4f9c8146a8309ae8836c2ef78b2c5"
+    },
+    "value": {
+      "captured_object_annotations": [
+        "map",
+        [
+          [
+            "nested",
+            [
+              "map",
+              [
+                [
+                  "stage",
+                  [
+                    "str",
+                    "beta"
+                  ]
+                ],
+                [
+                  "values",
+                  [
+                    "list",
+                    [
+                      [
+                        "int",
+                        "1"
+                      ],
+                      [
+                        "bool",
+                        true
+                      ],
+                      [
+                        "null"
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ],
+          [
+            "tuple",
+            [
+              "tuple",
+              [
+                [
+                  "str",
+                  "preserved"
+                ],
+                [
+                  "int",
+                  "2"
+                ]
+              ]
+            ]
+          ]
+        ]
+      ],
+      "captured_state_annotations": [
+        "map",
+        []
+      ],
+      "children": [],
+      "current_object_annotations": [
+        "map",
+        [
+          [
+            "current",
+            [
+              "str",
+              "edited-after-capture"
+            ]
+          ]
+        ]
+      ],
+      "current_state_annotations": null,
+      "diagnostics": [],
+      "environment": {
+        "contract_version": "1.1",
+        "id": "envrec-v1.1-042ce47ccc6a9ff6cc1fc76b1705d9057843a6c9830d7f78807e77a3d8fe03a2",
+        "kind": "environment_record",
+        "metadata": {},
+        "payload": {
+          "details": {
+            "environment_name": "dryml-public-fixture",
+            "root": "/opt/dryml-fixture"
+          },
+          "distributions": {
+            "syntheticpkg": {
+              "editable": false,
+              "installer": "fixture",
+              "location": "/opt/dryml-fixture/lib/python/site-packages",
+              "metadata_name": null,
+              "name": "syntheticpkg",
+              "normalized_name": "syntheticpkg",
+              "version": "2.1.0"
+            }
+          },
+          "dryml": {
+            "execution_protocol": "3",
+            "features": [
+              "metadata"
+            ],
+            "git_revision": "fixture-revision",
+            "schema_versions": {
+              "store": "3"
+            },
+            "version": "0.3.0b1"
+          },
+          "kind": "synthetic",
+          "platform": {
+            "implementation_name": "cpython",
+            "implementation_version": "3.12.1",
+            "machine": "fixture64",
+            "os_name": "posix",
+            "platform": "FixtureOS-1.0-fixture64",
+            "platform_python_implementation": "CPython",
+            "release": "1.0",
+            "sys_platform": "fixtureos",
+            "system": "FixtureOS",
+            "version": "fixture-kernel"
+          },
+          "python": {
+            "base_prefix": "/opt/python",
+            "executable": "/opt/dryml-fixture/bin/python",
+            "implementation": "CPython",
+            "prefix": "/opt/dryml-fixture",
+            "version": "3.12.1"
+          },
+          "tags": [
+            "fixture"
+          ]
+        },
+        "schema": "dryml.environment_record.v1.1"
+      },
+      "environment_status": "known",
+      "lineages": {
+        "$": {
+          "created_at_unix_seconds": 1706846708.25,
+          "creation_status": "known",
+          "object_ref_digest": "cb15cff1fd436776a42cd6bac0dab5f0f9dd762af05bf6e573ad0670c5ec363a"
+        }
+      },
+      "local_paths": [
+        {
+          "data": {
+            "schema_version": 3,
+            "segments": []
+          },
+          "display": "$"
+        }
+      ],
+      "object_ref_digest": "cb15cff1fd436776a42cd6bac0dab5f0f9dd762af05bf6e573ad0670c5ec363a",
+      "requirements": {
+        "contract_version": "1.1",
+        "id": "envreq-v1.1-336c5f84d45b218093664dc6fdab838db5cbd3161b3fb50df5c1f483004f9746",
+        "kind": "environment_requirement",
+        "metadata": {},
+        "payload": {
+          "capabilities": [],
+          "details": {
+            "sources": [
+              "1: fixture-value"
+            ]
+          },
+          "dryml_protocol": null,
+          "excludes": [],
+          "python": ">=3.11",
+          "requirements": [
+            "syntheticpkg>=2"
+          ],
+          "schema_versions": {},
+          "tags": []
+        },
+        "schema": "dryml.environment_requirement.v1.1"
+      },
+      "requirements_coverage": "complete",
+      "requirements_status": "value",
+      "saved_at_unix_seconds": 1706933106.25,
+      "state_ref_digest": "32ed25c1074652c237ace270342de88df584ccbba5c626bfb571c89dc3258921"
+    }
+  },
+  "store_format_version": 3,
+  "zip_sha256": "a6de14fa1c5f65b72243ac5db073f41f9b0ae1033cc0caedd5c5b66b354513ff"
+}

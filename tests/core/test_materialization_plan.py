@@ -1,0 +1,374 @@
+import pytest
+from abc import abstractmethod
+
+from dryml.core import ConcreteDefinition, Definition, Object, Repo, Serializable
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.links import DefLink
+from dryml.core.materialization import MaterializationAction, build_materialization_plan, execute_materialization_plan, from_canonical_local
+from dryml.core.repo import RepoLoadError
+from dryml.core.store.dir import DirStore
+
+pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
+
+class MaterialLeaf(Object):
+    constructed = []
+
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+        type(self).constructed.append(name)
+
+
+class MaterialParent(Object):
+    def __init__(self, left, right=None):
+        super().__init__()
+        self.left = left
+        self.right = right
+
+
+class MaterialChainNode(Object):
+    constructed = []
+
+    def __init__(self, name, child=None, ref=None):
+        super().__init__()
+        self.name = name
+        self.child = child
+        self.ref = ref
+        type(self).constructed.append(name)
+
+
+class MaterialSerializable(Serializable):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+
+class BadRestoreSerializable(Serializable):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        pass
+
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
+        raise RuntimeError("restore boom")
+
+
+class FailingMaterial(Object):
+    def __init__(self, child=None):
+        super().__init__()
+        self.child = child
+        raise RuntimeError("construct boom")
+
+
+class UserTypeErrorMaterial(Object):
+    def __init__(self):
+        raise TypeError("user constructor error")
+
+
+class AbstractMaterialNode(Object):
+    @abstractmethod
+    def required(self):
+        """Return the required implementation result."""
+
+
+def test_materialization_preflights_every_materializing_class_before_dependencies():
+    repo = Repo()
+    abstract_child = Definition(AbstractMaterialNode).concretize(repo=repo)
+    root = Definition(
+        MaterialParent, Definition(MaterialLeaf, "earlier"), abstract_child,
+    ).concretize(repo=repo)
+    MaterialLeaf.constructed.clear()
+
+    with pytest.raises(TypeError, match="required"):
+        repo.load_or_build(root)
+
+    assert MaterialLeaf.constructed == []
+    assert repo._num_constructions == 0
+
+
+def test_materialization_preflight_does_not_resolve_ref_targets():
+    repo = Repo()
+    hidden = Definition(AbstractMaterialNode).concretize(repo=repo)
+    root = Definition(
+        MaterialChainNode,
+        "root",
+        ref=DefLink.finalized(EdgeKind.REF, hidden),
+    ).concretize(repo=repo)
+    MaterialChainNode.constructed.clear()
+
+    loaded = repo.load_or_build(root)
+
+    assert loaded.name == "root"
+    assert loaded.ref == hidden
+    assert MaterialChainNode.constructed == ["root"]
+
+
+def test_materialization_uses_the_preflighted_class_identity(monkeypatch):
+    from dryml.core import materialization as materialization_mod
+
+    repo = Repo()
+    cdef = Definition(MaterialLeaf, "resolved-once").concretize(repo=repo)
+    original_resolve = materialization_mod.resolve_symbol
+    calls = 0
+
+    def count_resolve(value):
+        nonlocal calls
+        calls += 1
+        return original_resolve(value)
+
+    monkeypatch.setattr(materialization_mod, "resolve_symbol", count_resolve)
+
+    assert repo.load_or_build(cdef).name == "resolved-once"
+    assert calls == 1
+
+
+def test_materialization_plan_does_not_construct():
+    repo = Repo()
+    cdef = Definition(MaterialLeaf, "planned").concretize(repo=repo)
+    MaterialLeaf.constructed.clear()
+
+    plan = build_materialization_plan(
+        repo,
+        cdef,
+        cache="weak",
+        memo={},
+        path=[""],
+    )
+
+    assert plan.order == (cdef,)
+    assert MaterialLeaf.constructed == []
+    assert repo._num_constructions == 0
+
+
+def test_materialization_action_is_definition_only_and_captures_cache_policy(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = MaterialSerializable("stored", repo=repo)
+    repo.save_object(obj)
+    cdef = obj.definition
+    repo.clear_cache(strong=True, weak=True)
+
+    plan = build_materialization_plan(
+        repo,
+        cdef,
+        cache="strong",
+        memo={},
+        path=[""],
+    )
+
+    action = plan.actions[cdef]
+    assert action.kind == "construct"
+    assert action.cache == "strong"
+    assert not hasattr(action, "obj")
+
+
+def test_executor_reuses_the_cached_node_selected_by_the_plan(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = MaterialSerializable("cached", repo=repo)
+    repo.save_object(obj)
+    repo.pin(obj)
+    cdef = obj.definition
+    plan = build_materialization_plan(
+        repo,
+        cdef,
+        cache="weak",
+        memo={},
+        path=[""],
+    )
+
+    assert plan.actions[cdef].reuse_source == "cache"
+    assert execute_materialization_plan(repo, plan, memo={}, root=cdef) is obj
+
+
+def test_materialization_shared_child_constructed_once():
+    repo = Repo()
+    child_def = Definition(MaterialLeaf, "shared")
+    parent_def = Definition(MaterialParent, child_def, right=child_def)
+    MaterialLeaf.constructed.clear()
+
+    parent = repo.load_or_build(parent_def)
+
+    assert parent.left is parent.right
+    assert MaterialLeaf.constructed.count("shared") == 1
+    assert repo._num_constructions == 2
+
+
+def test_materialization_stops_at_ref_edge_before_materialized_subgraph():
+    repo = Repo()
+    d_def = Definition(MaterialChainNode, "D")
+    c_def = Definition(
+        MaterialChainNode, "C", ref=DefLink.finalized(EdgeKind.REF, d_def)
+    )
+    b_def = Definition(
+        MaterialChainNode, "B", child=DefLink.finalized(EdgeKind.MATERIALIZE, c_def)
+    )
+    a_def = Definition(
+        MaterialChainNode, "A", ref=DefLink.finalized(EdgeKind.REF, b_def)
+    )
+    a_cdef = a_def.concretize(repo=repo)
+    b_cdef = a_cdef.kwargs["ref"].target
+
+    MaterialChainNode.constructed.clear()
+    plan = build_materialization_plan(
+        repo,
+        a_cdef,
+        cache="weak",
+        memo={},
+        path=[""],
+    )
+    obj = repo.load_or_build(a_cdef)
+
+    assert plan.order == (a_cdef,)
+    assert MaterialChainNode.constructed == ["A"]
+    assert obj.name == "A"
+    assert obj.ref == b_cdef
+    assert isinstance(obj.ref, ConcreteDefinition)
+    assert repo._num_constructions == 1
+
+
+def test_materialization_new_still_shares_within_one_pass():
+    repo = Repo()
+    child_def = Definition(MaterialLeaf, "new-shared")
+    parent_def = Definition(MaterialParent, child_def, right=child_def).concretize(repo=repo)
+
+    parent = repo.load_or_build(parent_def, cache="none")
+
+    assert parent.left is parent.right
+    assert parent.definition not in repo.strong_obj_cache
+
+
+def test_cached_parent_prunes_missing_child_from_structural_plan():
+    repo = Repo()
+    child = MaterialSerializable("missing", repo=repo)
+    parent = MaterialParent(child, repo=repo)
+    repo.pin(parent)
+    repo.weak_obj_cache.pop(child.definition, None)
+    repo.strong_obj_cache.pop(child.definition, None)
+
+    assert repo.load_or_build(parent.definition) is parent
+
+
+def test_restore_failure_does_not_pollute_memo(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = BadRestoreSerializable("bad", repo=repo)
+    state = repo.save_object(obj)
+    cdef = obj.definition
+    repo.clear_cache(strong=True, weak=True)
+    memo = {}
+
+    with pytest.raises(RepoLoadError, match="Exact restore"):
+        repo.load_state_ref(state, reuse_live="never")
+
+    assert cdef not in memo
+    assert cdef not in repo.strong_obj_cache
+    assert cdef not in repo.weak_obj_cache
+
+
+def test_constructor_failure_does_not_publish_cache_entry():
+    repo = Repo()
+    cdef = Definition(FailingMaterial).concretize(repo=repo)
+
+    with pytest.raises(RepoLoadError, match="Error constructing"):
+        repo.load_or_build(cdef, cache="strong")
+
+    assert cdef not in repo.strong_obj_cache
+    assert cdef not in repo.weak_obj_cache
+
+
+def test_user_constructor_type_error_remains_a_repo_load_error():
+    repo = Repo()
+    cdef = Definition(UserTypeErrorMaterial).concretize(repo=repo)
+
+    with pytest.raises(RepoLoadError, match="user constructor error"):
+        repo.load_or_build(cdef)
+
+
+def test_cached_reuse_preflights_class_without_reresolving_during_execution(monkeypatch):
+    from dryml.core import materialization as materialization_mod
+
+    repo = Repo()
+    obj = MaterialLeaf("cached", repo=repo)
+    repo.pin(obj)
+
+    original_resolve = materialization_mod.resolve_symbol
+    calls = 0
+
+    def count_resolve(value):
+        nonlocal calls
+        calls += 1
+        return original_resolve(value)
+
+    monkeypatch.setattr(materialization_mod, "resolve_symbol", count_resolve)
+
+    assert repo.load_or_build(obj.definition) is obj
+    assert calls == 1
+
+
+def test_executor_honors_materialization_action_kind():
+    repo = Repo()
+    cdef = Definition(MaterialLeaf, "planned").concretize(repo=repo)
+    memo = {}
+    plan = build_materialization_plan(
+        repo,
+        cdef,
+        cache="weak",
+        memo=memo,
+        path=[""],
+    )
+    plan.actions[cdef] = MaterializationAction(cdef, "reuse", "$")
+
+    with pytest.raises(RepoLoadError, match="cached reuse"):
+        execute_materialization_plan(repo, plan, memo=memo, root=cdef)
+
+
+def test_executor_replans_when_planned_weak_cache_reuse_expires():
+    import gc
+
+    repo = Repo()
+    obj = MaterialLeaf("expired", repo=repo)
+    cdef = obj.definition
+    repo.cache_weak(obj)
+    plan = build_materialization_plan(
+        repo,
+        cdef,
+        cache="weak",
+        memo={},
+        path=[""],
+    )
+    assert plan.actions[cdef].reuse_source == "cache"
+
+    del obj
+    gc.collect()
+
+    rebuilt = execute_materialization_plan(repo, plan, memo={}, root=cdef)
+    assert rebuilt.definition == cdef
+
+
+def test_parent_failure_leaves_successful_child_cached():
+    repo = Repo()
+    child_def = Definition(MaterialLeaf, "child")
+    parent_def = Definition(FailingMaterial, child_def).concretize(repo=repo)
+    child_cdef = parent_def.parameters["child"]
+
+    with pytest.raises(RepoLoadError, match="Error constructing"):
+        repo.load_or_build(parent_def, cache="strong")
+
+    assert child_cdef in repo.strong_obj_cache
+    assert parent_def not in repo.strong_obj_cache
+
+
+def test_from_canonical_local_uses_shared_decoder_resolver():
+    repo = Repo()
+    child = MaterialLeaf("child")
+    replacement = object()
+    value = FrozenDict({"child": child.definition, "items": FrozenTuple((child.definition,))})
+
+    decoded = from_canonical_local(value, resolve_cdef=lambda cdef: replacement, repo=repo)
+
+    assert decoded == {"child": replacement, "items": (replacement,)}

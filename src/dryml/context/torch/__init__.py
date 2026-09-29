@@ -1,5 +1,3 @@
-from dryml.context.torch.context import TorchComputeContext
+from .context import TorchComputeContext
 
-__all__ = [
-    TorchComputeContext
-]
+__all__ = ["TorchComputeContext"]

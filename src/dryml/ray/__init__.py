@@ -1,5 +1,9 @@
-from dryml.ray import tune
+"""Lazy Ray integration helpers.
 
-__all__ = [
-    tune
-]
+Importing this package does not import Ray itself. Ray is required only when a
+helper invokes Ray APIs.
+"""
+
+from . import tune
+
+__all__ = ["tune"]

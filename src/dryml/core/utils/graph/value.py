@@ -1,0 +1,356 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Any, Iterable
+
+from ...cdef_identity import V2_IDENTITY_VERSION
+from ...definition import ConcreteDefinition, Definition
+from ...freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+from ...utils.stable_hash import stable_hash_function
+from .path import (
+    Arg,
+    DefinitionPathLike,
+    GraphPath,
+    Index,
+    Key,
+    Kwarg,
+    Parameter,
+    PathSegment,
+    QueryPathError,
+    SetMember,
+    normalize_path,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ValueEdge:
+    segment: PathSegment
+    value: Any
+
+
+def set_member_segment(value: Any, *, ordinal: int = 0) -> SetMember:
+    return SetMember(stable_hash_function(value), ordinal)
+
+
+def iter_set_members(values: Iterable[Any]) -> tuple[tuple[SetMember, Any], ...]:
+    buckets: dict[str, list[Any]] = defaultdict(list)
+    for value in values:
+        try:
+            fp = stable_hash_function(value)
+        except TypeError as e:
+            raise QueryPathError(
+                "Cannot build stable set path for a non-stably-hashable set member."
+            ) from e
+        buckets[fp].append(value)
+
+    out: list[tuple[SetMember, Any]] = []
+    for fp in sorted(buckets):
+        repr_groups: dict[str, list[Any]] = defaultdict(list)
+        for value in buckets[fp]:
+            repr_groups[repr(value)].append(value)
+        ambiguous = [values for values in repr_groups.values() if len(values) > 1 and any(value != values[0] for value in values[1:])]
+        if ambiguous:
+            raise QueryPathError(
+                "Cannot build deterministic set paths for unequal members with the same stable hash and repr."
+            )
+        bucket = sorted(buckets[fp], key=repr)
+        for ordinal, value in enumerate(bucket):
+            out.append((SetMember(fp, ordinal), value))
+    return tuple(out)
+
+
+def resolve_set_member(values: Iterable[Any], segment: SetMember) -> Any:
+    matches = [value for seg, value in iter_set_members(values) if seg == segment]
+    if not matches:
+        raise QueryPathError(f"Set member {segment!s} was not found.")
+    if len(matches) > 1:
+        raise QueryPathError(f"Set member {segment!s} is ambiguous.")
+    return matches[0]
+
+
+def iter_value_edges(value: Any) -> tuple[ValueEdge, ...]:
+    from ...links import DefLink
+
+    if isinstance(value, DefLink) and value.is_finalized:
+        return iter_value_edges(value.target)
+    if isinstance(value, ConcreteDefinition):
+        return tuple(ValueEdge(Parameter(name), child) for name, child in value.parameters.items())
+
+    if isinstance(value, (Definition, ConcreteDefinition)):
+        edges: list[ValueEdge] = []
+        if value.args is not None:
+            for idx, child in enumerate(value.args):
+                edges.append(ValueEdge(Arg(idx), child))
+        for key, child in value.kwargs.items():
+            edges.append(ValueEdge(Kwarg(key), child))
+        return tuple(edges)
+
+    if isinstance(value, (FrozenDict, dict)):
+        from .path import canonical_key_bytes
+
+        return tuple(
+            ValueEdge(Key(key), child)
+            for key, child in sorted(value.items(), key=lambda item: canonical_key_bytes(item[0]))
+        )
+
+    if isinstance(value, (FrozenList, FrozenTuple, list, tuple)):
+        return tuple(ValueEdge(Index(idx), child) for idx, child in enumerate(value))
+
+    if isinstance(value, (FrozenSet, set, frozenset)):
+        return tuple(ValueEdge(seg, child) for seg, child in iter_set_members(value))
+
+    return ()
+
+
+def get_subtree(obj: Any, path: DefinitionPathLike = "$") -> Any:
+    norm = normalize_path(path)
+    cur = obj
+    for idx, seg in enumerate(norm):
+        try:
+            cur = _get_child(cur, seg)
+        except Exception as e:
+            failing = GraphPath(norm.segments[:idx + 1])
+            raise QueryPathError(f"Failed to resolve segment {seg!s} at {failing!s}.") from e
+    return cur
+
+
+def replace_subtree(
+        obj: Any,
+        path: DefinitionPathLike,
+        replacement: Any,
+        *,
+        _origins: Any = None) -> Any:
+    """Replace one structural occurrence while preserving CDef named authority.
+
+    Args:
+        obj: Root value containing the selected occurrence.
+        path: Path to replace.
+        replacement: New value for the selected occurrence.
+    Returns:
+        A copy-on-write root with only the selected occurrence replaced.
+
+    Raises:
+        QueryPathError: If ``path`` cannot resolve a selected occurrence or a set
+            member cannot be addressed deterministically.
+        TypeError: If a path segment is incompatible with the encountered value.
+
+    Side Effects:
+        Does not mutate ``obj``. CDef ancestors are rebuilt from their stored
+        named parameters, preserving their named authority; only the addressed
+        occurrence is replaced.
+    """
+
+    norm = normalize_path(path)
+    if len(norm) == 0:
+        return replacement
+    seg = norm[0]
+    rest = GraphPath(norm.segments[1:])
+    child = get_subtree(obj, GraphPath((seg,)))
+    new_child = replace_subtree(
+        child, rest, replacement, _origins=_origins,
+    )
+    return _replace_child(obj, seg, new_child, _origins=_origins)
+
+
+def _get_child(obj: Any, seg: PathSegment) -> Any:
+    from ...links import DefLink
+
+    if isinstance(obj, DefLink) and obj.is_finalized:
+        return _get_child(obj.target, seg)
+    if isinstance(obj, ConcreteDefinition):
+        if isinstance(seg, Parameter):
+            return obj.parameters[seg.name]
+        raise TypeError(f"{seg!s} is not valid on a concrete definition; use Parameter.")
+
+    if isinstance(obj, (Definition, ConcreteDefinition)):
+        if isinstance(seg, Kwarg):
+            return obj.kwargs[seg.name]
+        if isinstance(seg, Arg):
+            if obj.args is None:
+                raise KeyError(seg.index)
+            return obj.args[seg.index]
+        raise TypeError(f"{seg!s} is not valid on a definition.")
+
+    if isinstance(obj, (dict, FrozenDict)):
+        if isinstance(seg, Key):
+            return obj[seg.key]
+        if isinstance(seg, Kwarg):
+            return obj[seg.name]
+        raise TypeError(f"{seg!s} is not valid on a mapping.")
+
+    if isinstance(obj, (list, tuple, FrozenList, FrozenTuple)):
+        if isinstance(seg, Index):
+            return obj[seg.index]
+        raise TypeError(f"{seg!s} is not valid on a sequence.")
+
+    if isinstance(obj, (set, frozenset, FrozenSet)):
+        if isinstance(seg, SetMember):
+            return resolve_set_member(obj, seg)
+        if isinstance(seg, Index):
+            # Compatibility for old user-authored paths. Graph-generated paths
+            # use SetMember because numeric set positions are not semantic.
+            return iter_set_members(obj)[seg.index][1]
+        raise TypeError(f"{seg!s} is not valid on a set.")
+
+    raise TypeError(f"Cannot traverse into {type(obj).__name__}.")
+
+
+def _replace_child(
+        obj: Any,
+        seg: PathSegment,
+        child: Any,
+        *,
+        _origins: Any = None) -> Any:
+    from ...links import DefLink
+
+    if isinstance(obj, DefLink) and obj.is_finalized:
+        return DefLink.finalized(
+            obj.kind,
+            _replace_child(
+                obj.target, seg, child, _origins=_origins,
+            ),
+        )
+    if isinstance(obj, ConcreteDefinition):
+        if not isinstance(seg, Parameter):
+            raise QueryPathError(f"{seg!s} is not valid on a concrete definition; use Parameter.")
+        if seg.name not in obj.parameters:
+            raise QueryPathError(f"Missing parameter {seg.name!r} while replacing {seg!s}.")
+        from ...bound_args import BoundArguments
+
+        parameters = dict(obj.parameters)
+        parameters[seg.name] = child
+        if any(_contains_soft_definition(value) for value in parameters.values()):
+            from ...symbol import symbol_ref
+
+            cls = obj.cls if not isinstance(obj.cls, type) else symbol_ref(obj.cls)
+            return Definition._from_prepared_parameters(cls, parameters)
+        return ConcreteDefinition._from_bound_record(
+            obj.cls,
+            BoundArguments(parameters),
+            stateful_role=obj._stateful_role,
+        )
+
+    if isinstance(obj, (Definition, ConcreteDefinition)):
+        args = None if obj.args is None else list(obj.args)
+        kwargs = dict(obj.kwargs)
+        if isinstance(seg, Kwarg):
+            if seg.name not in kwargs:
+                raise QueryPathError(f"Missing kwarg {seg.name!r} while replacing {seg!s}.")
+            kwargs[seg.name] = child
+        elif isinstance(seg, Arg):
+            if args is None:
+                raise QueryPathError(f"Cannot replace arg {seg.index}; definition skips args.")
+            args[seg.index] = child
+        else:
+            raise QueryPathError(f"{seg!s} is not valid on a definition.")
+
+        if args is None:
+            return Definition._from_prepared_parameters(obj.cls, kwargs)
+        return Definition(obj.cls, *args, **kwargs)
+
+    if isinstance(obj, list):
+        if not isinstance(seg, Index):
+            raise QueryPathError(f"{seg!s} is not valid on a list.")
+        out = list(obj)
+        out[seg.index] = child
+        return out
+
+    if isinstance(obj, tuple) and not isinstance(obj, (FrozenList, FrozenTuple)):
+        if not isinstance(seg, Index):
+            raise QueryPathError(f"{seg!s} is not valid on a tuple.")
+        out = list(obj)
+        out[seg.index] = child
+        return tuple(out)
+
+    if isinstance(obj, FrozenList):
+        if not isinstance(seg, Index):
+            raise QueryPathError(f"{seg!s} is not valid on a FrozenList.")
+        out = list(obj)
+        out[seg.index] = child
+        return FrozenList(out)
+
+    if isinstance(obj, FrozenTuple):
+        if not isinstance(seg, Index):
+            raise QueryPathError(f"{seg!s} is not valid on a FrozenTuple.")
+        out = list(obj)
+        out[seg.index] = child
+        return FrozenTuple(out)
+
+    if isinstance(obj, dict):
+        key = _mapping_key_from_segment(seg)
+        if key not in obj:
+            raise QueryPathError(f"Missing mapping key {key!r} while replacing {seg!s}.")
+        out = dict(obj)
+        out[key] = child
+        return out
+
+    if isinstance(obj, FrozenDict):
+        key = _mapping_key_from_segment(seg)
+        if key not in obj:
+            raise QueryPathError(f"Missing mapping key {key!r} while replacing {seg!s}.")
+        out = dict(obj.items())
+        out[key] = child
+        return FrozenDict(out)
+
+    if isinstance(obj, set):
+        return _replace_set_member(obj, seg, child, set, _origins=_origins)
+
+    if isinstance(obj, frozenset) and not isinstance(obj, FrozenSet):
+        return _replace_set_member(obj, seg, child, frozenset, _origins=_origins)
+
+    if isinstance(obj, FrozenSet):
+        return _replace_set_member(obj, seg, child, FrozenSet, _origins=_origins)
+
+    raise QueryPathError(f"Cannot replace a child on {type(obj).__name__}.")
+
+
+def _contains_soft_definition(value: Any) -> bool:
+    from ...canonical import (
+        CANONICAL_DICT_KINDS,
+        CANONICAL_SEQ_KINDS,
+        NodeKind,
+        iter_value_children,
+        node_kind,
+    )
+
+    from ...links import DefLink
+
+    if isinstance(value, DefLink) and value.is_finalized:
+        return _contains_soft_definition(value.target)
+    kind = node_kind(value)
+    if kind is NodeKind.DEFINITION:
+        return True
+    if kind in CANONICAL_SEQ_KINDS | CANONICAL_DICT_KINDS:
+        return any(_contains_soft_definition(item) for _, item in iter_value_children(value))
+    return False
+
+
+def _mapping_key_from_segment(seg: PathSegment) -> Any:
+    if isinstance(seg, Key):
+        return seg.key
+    if isinstance(seg, Kwarg):
+        return seg.name
+    raise QueryPathError(f"{seg!s} is not valid on a mapping.")
+
+
+def _replace_set_member(
+        obj: Iterable[Any], seg: PathSegment, child: Any, factory, *, _origins: Any = None):
+    if not isinstance(seg, SetMember):
+        raise QueryPathError("Replacing set members requires a stable SetMember path segment.")
+    old = resolve_set_member(obj, seg)
+    out = set(obj)
+    out.remove(old)
+    try:
+        out.add(child)
+    except TypeError as e:
+        raise QueryPathError("Replacement set member must be hashable.") from e
+    if len(out) != len(set(obj)):
+        raise QueryPathError("Replacement collapsed two distinct set members.")
+    result = factory(out)
+    if _origins is not None:
+        _origins.record_set_members(
+            result,
+            [(child, old), *((value, value) for value in obj if value is not old)],
+        )
+    return result

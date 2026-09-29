@@ -1,0 +1,29 @@
+{
+  "fixtures": {
+    "artifact_value/value.pkl": {
+      "format": "dryml.artifacts.value",
+      "sha256": "7b350edcbe51b2f7eb414fdd08232746a87c4e1f5c1f60b3643ec3433605e398",
+      "version": 1
+    },
+    "experiment_data.json": {
+      "format": "dryml-experiment-data",
+      "sha256": "13bfd7e3af13c66f70731053b27575fd63252f3922b45a45beec6cbcec260409",
+      "version": 1
+    },
+    "template_bundle.json": {
+      "format": "dryml-template",
+      "kind": "template-bundle",
+      "sha256": "3ebccb530ab19e9b67df79884b3dd91d3e9aa3f490caac60b166cbeee53b4d23",
+      "version": 1
+    },
+    "train_state.json": {
+      "fixture": "dryml-train-state-named-state-vector",
+      "fixture_version": 1,
+      "sha256": "76512b9d6e00d77d50c1f1422dc85b866ff4b0d9db1fdb50796bf04dd929aef9"
+    }
+  },
+  "generator": "generate.py",
+  "provenance": "Closed code-free reader vectors; TrainState is a named __setstate__ compatibility vector, not a portable pickle codec claim.",
+  "schema": "dryml-qualification-reader-fixtures",
+  "version": 1
+}

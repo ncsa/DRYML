@@ -1,0 +1,1664 @@
+"""Verify public exports and passive imports from the installed wheel."""
+
+from __future__ import annotations
+
+import dataclasses
+import importlib
+import importlib.util
+import inspect
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+_EXPECTED_CODE_EXPORTS = [
+    "AccessCollection",
+    "AnalysisErrorCode",
+    "AnalysisKernel",
+    "AnalysisResult",
+    "CallableInfo",
+    "CodeAnalysisError",
+    "CodeFact",
+    "CodeFacts",
+    "CodeTarget",
+    "CodeTargetInput",
+    "Diagnostic",
+    "DescriptorTarget",
+    "FactRecord",
+    "ImportTarget",
+    "InspectionCapture",
+    "InspectionTarget",
+    "InvalidKernelError",
+    "InvalidTargetError",
+    "InvocationOutcome",
+    "KernelCall",
+    "KernelDependencyError",
+    "KernelExecutionError",
+    "KernelOutcome",
+    "MissingOutputError",
+    "ProgramGraph",
+    "SourceInfo",
+    "SourceTarget",
+    "SourceUnavailableError",
+    "StaticDependencies",
+    "StaticDependenciesKernel",
+    "TargetInfo",
+    "TraversalKernel",
+    "analyze",
+    "analyze_callable",
+    "capture_inspection",
+    "extract_source",
+    "get_source_info",
+    "probe",
+    "trace",
+]
+
+_EXPECTED_CODE_MODULE_EXPORTS = {
+    "dryml.code.algorithms": [
+        "LexicalDependencies",
+        "LexicalDependency",
+        "LexicalDependencyKernel",
+        "collect_lexical_dependencies",
+    ],
+    "dryml.code.analysis": ["AnalysisResult", "InvocationOutcome", "analyze"],
+    "dryml.code.ast_tools": [
+        "AccessCollection",
+        "AttrAccess",
+        "MethodCall",
+        "collect_accesses_from_source",
+        "parse_source",
+    ],
+    "dryml.code.callable_info": ["CallableInfo", "analyze_callable"],
+    "dryml.code.errors": [
+        "AnalysisErrorCode",
+        "CodeAnalysisError",
+        "InvalidKernelError",
+        "InvalidTargetError",
+        "KernelDependencyError",
+        "KernelExecutionError",
+        "MissingOutputError",
+        "SourceUnavailableError",
+    ],
+    "dryml.code.facts": [
+        "CodeFact",
+        "CodeFacts",
+        "Diagnostic",
+        "FactRecord",
+        "FactScalar",
+        "FactValue",
+        "SourceLocation",
+    ],
+    "dryml.code.graph": [
+        "ProgramEdge",
+        "ProgramEdgeKind",
+        "ProgramGraph",
+        "ProgramNode",
+        "ProgramNodeKind",
+        "build_program_graph",
+    ],
+    "dryml.code.inspection":
+    ["InspectionCapture", "InspectionTarget", "capture_inspection"],
+    "dryml.code.kernels": [
+        "AnalysisKernel",
+        "KernelCall",
+        "KernelContext",
+        "KernelMode",
+        "KernelOutcome",
+        "TraversalKernel",
+    ],
+    "dryml.code.probe": ["probe"],
+    "dryml.code.source": ["SourceInfo", "extract_source", "get_source_info"],
+    "dryml.code.static_dependencies":
+    ["StaticDependencies", "StaticDependenciesKernel"],
+    "dryml.code.targets": [
+        "CodeTarget",
+        "CodeTargetInput",
+        "DescriptorKind",
+        "DescriptorTarget",
+        "ImportTarget",
+        "SourceTarget",
+        "TargetInfo",
+        "TargetKind",
+        "normalize_target",
+    ],
+    "dryml.code.trace": ["trace"],
+}
+
+_EXPECTED_CODE_DATACLASS_FIELDS = {
+    "dryml.code.callable_info.CallableInfo": [
+        "original",
+        "func",
+        "bound_self",
+        "signature",
+        "qualname",
+        "module",
+        "is_bound_method",
+        "is_function",
+        "is_callable_instance",
+    ],
+    "dryml.code.source.SourceInfo": ["source", "filename", "start_line"],
+    "dryml.code.ast_tools.AttrAccess":
+    ["root", "chain", "ctx", "lineno", "col_offset"],
+    "dryml.code.ast_tools.MethodCall":
+    ["root", "chain", "lineno", "col_offset"],
+    "dryml.code.ast_tools.AccessCollection": ["attr_accesses", "method_calls"],
+    "dryml.code.targets.SourceTarget":
+    ["source", "name", "filename", "start_line"],
+    "dryml.code.targets.ImportTarget": ["path"],
+    "dryml.code.targets.DescriptorTarget": ["owner", "name"],
+    "dryml.code.targets.TargetInfo": [
+        "kind",
+        "name",
+        "module",
+        "qualname",
+        "owner_module",
+        "owner_qualname",
+        "descriptor_kind",
+        "filename",
+        "start_line",
+        "import_path",
+    ],
+    "dryml.code.targets.CodeTarget": [
+        "info",
+        "original",
+        "callable",
+        "owner",
+        "descriptor",
+        "source",
+        "import_path",
+    ],
+    "dryml.code.inspection.InspectionTarget": ["snapshot", "target_id"],
+    "dryml.code.inspection.InspectionCapture": [
+        "target",
+        "_associations",
+        "_target_index",
+        "_carrier_ids",
+    ],
+    "dryml.code.static_dependencies.StaticDependencies":
+    ["targets", "complete", "diagnostics"],
+    "dryml.code.graph.ProgramNode": ["id", "kind", "value", "source"],
+    "dryml.code.graph.ProgramEdge": ["source", "target", "kind"],
+    "dryml.code.graph.ProgramGraph":
+    ["target", "nodes", "edges", "diagnostics"],
+    "dryml.code.facts.SourceLocation": ["filename", "line", "column"],
+    "dryml.code.facts.CodeFact": ["kind", "value", "source"],
+    "dryml.code.facts.CodeFacts": ["values"],
+    "dryml.code.facts.FactRecord":
+    ["fact", "producer", "graph_digest", "origin"],
+    "dryml.code.facts.Diagnostic":
+    ["code", "message", "severity", "kernel", "source"],
+    "dryml.code.kernels.KernelCall": ["kernel", "input"],
+    "dryml.code.kernels.KernelOutcome": [
+        "kernel",
+        "graph_digest",
+        "status",
+        "value",
+        "diagnostics",
+        "skipped_for",
+    ],
+    "dryml.code.analysis.InvocationOutcome": ["status", "diagnostic"],
+    "dryml.code.analysis.AnalysisResult": [
+        "target",
+        "base_graph",
+        "graph",
+        "outcomes",
+        "facts",
+        "diagnostics",
+        "invocation",
+    ],
+    "dryml.code.algorithms.LexicalDependency": ["name", "source"],
+    "dryml.code.algorithms.LexicalDependencies": ["dependencies"],
+}
+
+_EXPECTED_CODE_SIGNATURES = {
+    "dryml.code.callable_info.analyze_callable":
+    "(obj: 'Callable[..., Any]') -> 'CallableInfo'",
+    "dryml.code.source.get_source_info":
+    "(obj: 'object') -> 'SourceInfo | None'",
+    "dryml.code.source.extract_source":
+    "(target: 'CodeTargetInput') -> 'SourceInfo'",
+    "dryml.code.ast_tools.parse_source":
+    "(source: 'str | SourceInfo') -> 'ast.Module'",
+    "dryml.code.ast_tools.collect_accesses_from_source":
+    "(source: 'str | SourceInfo') -> 'AccessCollection'",
+    "dryml.code.targets.normalize_target":
+    "(target: 'CodeTargetInput') -> 'CodeTarget | InspectionTarget'",
+    "dryml.code.inspection.capture_inspection":
+    "(target: 'CodeTargetInput') -> 'InspectionCapture'",
+    "dryml.code.graph.build_program_graph":
+    "(target: 'CodeTargetInput') -> 'ProgramGraph'",
+    "dryml.code.analysis.analyze":
+    "(target: 'CodeTargetInput', calls: "
+    "'Iterable[KernelCall[Any, Any]]') -> 'AnalysisResult'",
+    "dryml.code.probe.probe":
+    "(target: 'CodeTargetInput', calls: "
+    "'Iterable[KernelCall[Any, Any]]') -> 'AnalysisResult'",
+    "dryml.code.trace.trace":
+    "(target: 'CodeTargetInput', calls: 'Iterable[KernelCall[Any, Any]]', "
+    "*, args: 'tuple[Any, ...]' = (), kwargs: 'Mapping[str, Any] | None' = "
+    "None, max_events: 'int' = 100000) -> 'AnalysisResult'",
+    "dryml.code.algorithms.collect_lexical_dependencies":
+    "(target: 'CodeTargetInput') -> 'LexicalDependencies'",
+}
+
+_EXPECTED_ROOT_EXPORTS = {
+    "AnyValue",
+    "AutoRef",
+    "Choice",
+    "ConcreteDefinition",
+    "categorical_definition",
+    "Definition",
+    "Distribution",
+    "Exact",
+    "F",
+    "FactorySpec",
+    "IntRange",
+    "Mat",
+    "Match",
+    "Missing",
+    "Par",
+    "Expr",
+    "Shared",
+    "Template",
+    "TemplateBundle",
+    "TemplateGenerator",
+    "TemplateSelector",
+    "TemplateError",
+    "TemplateLimitError",
+    "UnresolvedTemplateError",
+    "UnsupportedTemplateVerificationError",
+    "Present",
+    "QuotedDef",
+    "Ref",
+    "SignatureError",
+    "SKIP_ARGS",
+    "Satisfies",
+    "Selector",
+    "SelectorSpec",
+    "SubclassOf",
+    "UniformFromSet",
+    "UniformIntRange",
+    "annotations",
+    "artifacts",
+    "config",
+    "configure",
+    "context",
+    "core",
+    "definition_mode",
+    "dispatch",
+    "env",
+    "environments",
+    "execute",
+    "filesystem",
+    "freeze",
+    "function",
+    "load_object",
+    "load_state_ref",
+    "locking",
+    "methods",
+    "managed",
+    "Object",
+    "ObjectId",
+    "ObjectRef",
+    "paths",
+    "Repo",
+    "save_object",
+    "Serializable",
+    "StateRef",
+    "StateSelectorRef",
+    "StoreReport",
+    "object_namespace",
+    "normalize_args",
+    "normalize_return",
+    "reset_config",
+    "requirements",
+    "selector_mode",
+    "session",
+    "status",
+    "signature_context",
+    "runtime",
+    "repeat",
+    "world",
+    "worlds",
+}
+
+_EXPECTED_MANAGED_EXPORTS = {
+    "InterruptRequestResult",
+    "ManagedConfig",
+    "ManagedContext",
+    "ManagedConfigError",
+    "ManagedConflictError",
+    "ManagedContextError",
+    "ManagedControlError",
+    "ManagedDeclarationError",
+    "ManagedError",
+    "ManagedInterrupted",
+    "ManagedPublicationError",
+    "ManagedRecoveryError",
+    "ManagedRerunRequiredError",
+    "ManagedStatus",
+    "ManagedStoreError",
+    "argument_digest",
+    "managed_operation",
+    "operation_digest",
+}
+
+_EXPECTED_REQUIREMENT_EXPORTS = {
+    "AdmissionReport",
+    "RequirementBarrierError",
+    "RequirementCombinationError",
+    "RequirementCombiner",
+    "RequirementDeclaration",
+    "RequirementError",
+    "RequirementIssue",
+    "RequirementReport",
+    "RequirementResult",
+    "RequirementSource",
+    "combine_requirements",
+    "require_admission",
+}
+
+_EXPECTED_ENVIRONMENT_EXPORTS = {
+    "COMPATIBILITY_REPORT_SCHEMA_VERSION",
+    "ENVIRONMENT_LOCK_REF_SCHEMA_VERSION",
+    "ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION",
+    "ENVIRONMENT_RECORD_SCHEMA_VERSION",
+    "ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION",
+    "ENVIRONMENT_SPEC_SCHEMA_VERSION",
+    "CompatibilityIssue",
+    "CompatibilityReport",
+    "CondaEnvironmentSpec",
+    "ContainerEnvironmentSpec",
+    "CurrentEnvironmentSpec",
+    "DrymlEnvironmentError",
+    "DrymlRuntimeRecord",
+    "EnvironmentCompatibilityError",
+    "EnvironmentFeatureUnavailable",
+    "EnvironmentInternTable",
+    "EnvironmentLockRef",
+    "EnvironmentProbeError",
+    "EnvironmentRecord",
+    "EnvironmentRegistry",
+    "EnvironmentRegistryEntry",
+    "EnvironmentRegistryError",
+    "EnvironmentRequirement",
+    "EnvironmentRequirementError",
+    "EnvironmentRequirementsKernel",
+    "EnvironmentSerializationError",
+    "EnvironmentSpecError",
+    "EnvironmentProbeResult",
+    "PackageRecord",
+    "PlatformRecord",
+    "PythonExecutableSpec",
+    "PythonRecord",
+    "coerce_policy",
+    "current",
+    "inspect_current",
+    "malformed_report",
+    "marker_environment_from_record",
+    "normalize_distribution_name",
+    "normalize_requirement_string",
+    "probe",
+    "probe_conda",
+    "probe_current",
+    "probe_python",
+    "req",
+    "requirements_for",
+    "requirements_for_method",
+    "reset_current",
+    "ResolvedEnvironmentSelection",
+    "compare_selection",
+    "resolve_environment_spec",
+    "set_current",
+    "software_digest",
+    "spec_from_data",
+    "unavailable_report",
+    "use",
+}
+
+_EXPECTED_WORLD_EXPORTS = {
+    "CountConstraint",
+    "LocalResourceInventory",
+    "ProcessAllocation",
+    "ProcessSpec",
+    "ResourceRequirement",
+    "ResourceSpec",
+    "ResourceValidationError",
+    "RoleRequirement",
+    "RoleSpec",
+    "WorldAllocation",
+    "WorldCompatibilityError",
+    "WorldCompatibilityIssue",
+    "WorldCompatibilityReport",
+    "WorldError",
+    "WorldRequirement",
+    "WorldRequirementError",
+    "WorldRequirementsKernel",
+    "WorldSpec",
+    "WorldSpecValidationError",
+    "WorldSynthesisDiagnostic",
+    "WorldSynthesisResult",
+    "assign_local_world",
+    "canonical_byte_size",
+    "check_allocation_satisfies_requirement",
+    "check_selected_process_satisfies_requirement",
+    "check_world_spec_satisfies_requirement",
+    "current",
+    "local_inventory",
+    "parse_byte_size",
+    "req",
+    "requirements_for",
+    "requirements_for_method",
+    "reset_current",
+    "set_current",
+    "synthesize",
+    "use",
+}
+
+_RETIRED_ENVIRONMENT_SURFACE = {
+    "ENVIRONMENT_FRAGMENT_SCHEMA_VERSION",
+    "FRAGMENT_ATTR",
+    "RequirementFragment",
+    "add_req",
+    "compose_fragments",
+    "fragments_for_class",
+    "override_req",
+    "requirements_for_class",
+}
+
+_EXPECTED_METHOD_EXPORTS = (
+    "Traits",
+    "traits",
+    "MethodImplementation",
+    "ConversionEdge",
+    "MethodGraph",
+    "MethodGraphNode",
+    "MethodGraphNodeKind",
+    "MethodPort",
+    "MethodPortKind",
+    "IteratorPort",
+    "StreamGraphCursor",
+    "StreamNode",
+    "MethodCallMode",
+    "MethodCallNodeKind",
+    "MethodCallNode",
+    "MethodCallSignature",
+    "Method",
+    "Accumulator",
+    "AccumulatorGroup",
+    "MethodError",
+    "ImplementationDeclarationError",
+    "ImplementationSelectionError",
+    "PreparedCallMismatchError",
+    "SelectionFailureReason",
+    "SelectionTraitName",
+)
+
+_EXPECTED_MODELS_EXPORTS = (
+    "AutoEncoder",
+    "Experiment",
+    "ExperimentData",
+    "ExperimentDataError",
+    "Model",
+    "MeasurementUnavailableError",
+    "model_parameter_counts",
+    "ParameterCounts",
+    "parameter_counts_from_parameters",
+    "TrainFunction",
+    "TrainState",
+    "TrainingObservation",
+)
+
+_EXPECTED_ANNOTATION_EXPORTS = {
+    "ANNOTATION_ATTR",
+    "AnnotatedMember",
+    "Annotation",
+    "AnnotationError",
+    "AnnotationValidationError",
+    "UnsupportedAnnotationTargetError",
+    "annotations_for_class",
+    "annotations_for_members",
+    "annotations_for_method",
+    "attach_annotation",
+    "collect_annotations",
+    "own_annotations",
+}
+
+_EXPECTED_EXECUTE_EXPORTS = {
+    "ActiveAllocation", "AdmissionError", "AdmissionReport", "Backend",
+    "BackendConfig", "BackendUnavailableError", "CleanupError",
+    "DiscoverySnapshot", "EnvironmentCandidate", "ExecutionDeadlineExceeded",
+    "ExecutionError", "ExecutionFuture", "ExecutionIssue", "ExecutionOutput",
+    "ExecutionSnapshot", "ExecutionUncertainError", "Executor", "ExecutorView",
+    "FeasiblePlan", "OutputSnapshot", "RemoteExecutionError", "ResourceAmounts",
+    "ResourceSnapshot", "WorkerSetup", "WorkerSetupContext", "WorkerSetupFactory",
+    "run", "submit",
+}
+
+_EXPECTED_EXECUTE_SPECIALIZATIONS = {
+    "dryml.execute.subprocess": {"SubProcessBackend", "SubProcessConfig", "SubProcessFuture"},
+    "dryml.execute.ray": {"RayBackend", "RayBackendConfig", "RayFuture"},
+}
+
+_EXPECTED_DISPATCH_EXPORTS = {
+    "BackendChoice", "DispatchCoverageWarning", "DispatchError",
+    "DispatchReport", "DispatchView", "InProcess", "ProbeOptions",
+    "backends", "explain", "register_backend", "run",
+    "set_execute_backend_default", "set_probe_default",
+    "set_worker_environment_default", "set_worker_python_default",
+    "set_worker_world_default", "submit", "unregister_backend",
+    "with_options",
+}
+
+_EXPECTED_DISPATCH_DATACLASS_FIELDS = {
+    "ProbeOptions": [
+        "placement", "backend", "environment", "world", "environment_spec",
+        "execution_timeout", "max_targets", "max_depth",
+    ],
+    "DispatchReport": [
+        "workload_placement", "workload_backend", "supported_methods",
+        "probe_placement", "probe_backend", "probe_reason", "coverage",
+        "environment", "world", "eligible", "diagnostics", "warnings",
+    ],
+}
+
+_EXPECTED_CORE_EXECUTE_EXPORTS = {
+    "CoreExecutionError", "CoreExecutionFuture", "CoreExecutionSnapshot",
+    "CoreOptions", "CoreOutcomeEvidence", "CorePublicationEvidence",
+    "CoreRefreshEvidence", "Executor", "ExecutorView", "PreparedCoreCall",
+    "SharedDirStoreStrategy", "run", "submit",
+}
+
+_EXPECTED_CORE_EXECUTE_MODULE_EXPORTS = {
+    "CoreAdaptationOutcome", "CoreExecutionError", "CoreExecutionFuture",
+    "CoreExecutionSnapshot", "CoreOptions", "CoreOutcomeEvidence",
+    "CorePublicationEvidence", "CoreRefreshEvidence", "ExecutionContext",
+    "Executor", "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy",
+    "core_worker_setup", "current_context", "decode_core_outcome",
+    "prepare_shared_storage", "run", "submit", "worker_context",
+}
+
+
+def test_installed_root_exports_and_version_match_metadata(
+    installed_python: Path,
+) -> None:
+    """Inspect exact root exports from the installed artifact."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import importlib.metadata
+import json
+import dryml
+import dryml.core
+print(json.dumps({
+    "exports": sorted(dryml.__all__),
+     "root_core_conveniences": all(
+         getattr(dryml, name) is getattr(dryml.core, name)
+         for name in dryml.core.__all__
+         if name in dryml.__all__
+      ),
+     "factory_aliases": dryml.F is dryml.FactorySpec is dryml.core.F is dryml.core.FactorySpec,
+     "root_methods": dryml.methods is __import__("dryml.methods", fromlist=["*"]),
+      "root_managed": dryml.managed is __import__("dryml.managed", fromlist=["*"]),
+      "managed_exports": sorted(dryml.managed.__all__),
+      "state_graph_reservation": {
+          "core": "StateGraphReservation" in dryml.core.__all__,
+          "root": hasattr(dryml, "StateGraphReservation"),
+      },
+      "root_locking": dryml.locking is __import__("dryml.locking", fromlist=["*"]),
+      "root_filesystem": dryml.filesystem is __import__("dryml.filesystem", fromlist=["*"]),
+      "root_paths": dryml.paths is __import__("dryml.paths", fromlist=["*"]),
+     "aliases": {
+         "env": dryml.env is dryml.environments,
+         "world": dryml.world is dryml.worlds,
+         "requirements": dryml.requirements.__name__,
+     },
+    "module": dryml.__file__,
+    "version": dryml.__version__,
+    "metadata_version": importlib.metadata.version("dryml"),
+}))
+""",
+    )
+    data = json.loads(result.stdout)
+    assert set(data["exports"]) == _EXPECTED_ROOT_EXPORTS
+    assert data["root_core_conveniences"]
+    assert data["factory_aliases"]
+    assert data["root_methods"]
+    assert data["root_managed"]
+    assert set(data["managed_exports"]) == _EXPECTED_MANAGED_EXPORTS
+    assert data["state_graph_reservation"] == {"core": True, "root": False}
+    assert data["root_locking"]
+    assert data["root_filesystem"]
+    assert data["root_paths"]
+    assert data["aliases"] == {"env": True, "world": True, "requirements": "dryml.requirements"}
+    assert data["version"] == data["metadata_version"] == "0.3.0b1"
+    assert "site-packages" in data["module"].replace("\\", "/")
+
+
+def test_installed_declaration_imports_are_passive(
+    installed_python: Path,
+) -> None:
+    """Ensure root and declaration imports do not load optional frameworks."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import importlib.util
+import json
+import importlib
+import sys
+import dryml
+import dryml.annotations
+import dryml.environments
+import dryml.formats
+import dryml.jax
+import dryml.ray
+import dryml.runtime
+import dryml.session
+import dryml.tf
+import dryml.torch
+import dryml.worlds
+assert set(dryml.annotations.__all__) == {
+    "Annotation", "ANNOTATION_ATTR", "attach_annotation", "own_annotations",
+    "collect_annotations", "annotations_for_class", "annotations_for_method",
+    "AnnotatedMember", "annotations_for_members",
+    "AnnotationError", "AnnotationValidationError", "UnsupportedAnnotationTargetError",
+}
+assert dryml.env is dryml.environments
+assert dryml.world is dryml.worlds
+assert "requirements" in dryml.__all__
+assert "default" not in dryml.runtime.__all__
+for name in ("decorators", "env", "world", "runtime", "merge", "namespaces", "storage"):
+    try:
+        importlib.import_module(f"dryml.annotations.{name}")
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise AssertionError(f"retired annotation module remains importable: {name}")
+try:
+    retired = importlib.util.find_spec("dryml.core2") is not None
+except ModuleNotFoundError:
+    retired = False
+print(json.dumps({
+    "heavy": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib", "ray") if name in sys.modules),
+    "retired": retired,
+}))
+""",
+    )
+    assert json.loads(result.stdout) == {"heavy": [], "retired": False}
+
+
+def test_installed_requirement_domain_surface_has_no_defaults_or_fragment_shims(
+    installed_python: Path,
+) -> None:
+    """Require the installed wheel to retain only public domain requirement APIs."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import importlib.util
+import inspect
+import json
+
+import dryml
+from dryml import env, world
+
+retired_modules = (
+    'dryml.env', 'dryml.world', 'dryml.environments.fragments',
+    'dryml.environments.fragment', 'dryml.runtime.default',
+)
+print(json.dumps({
+    'requirements': sorted(dryml.requirements.__all__),
+    'environment': sorted(env.__all__),
+    'world': sorted(world.__all__),
+    'environment_key_exported': 'ENVIRONMENT_REQUIREMENT_KEY' in env.__all__,
+    'world_key_exported': 'WORLD_REQUIREMENT_KEY' in world.__all__,
+    'selectors': {
+        'env': all(hasattr(env, name) for name in ('current', 'set_current', 'reset_current', 'use')),
+        'world': all(hasattr(world, name) for name in ('current', 'set_current', 'reset_current', 'use')),
+    },
+    'defaults': {
+        'env': [name for name in ('default', 'default_for', 'set_default', 'reset_default', 'use_default') if hasattr(env, name)],
+        'world': [name for name in ('default', 'default_for', 'set_default', 'reset_default', 'use_default') if hasattr(world, name)],
+        'runtime': hasattr(dryml.runtime, 'default'),
+    },
+    'retired': [name for name in %r if hasattr(env, name)],
+    'retired_modules': [
+        name for name in retired_modules if importlib.util.find_spec(name) is not None
+    ],
+    'signatures': {
+        'env.req': str(inspect.signature(env.req)),
+        'env.requirements_for': str(inspect.signature(env.requirements_for)),
+        'env.requirements_for_method': str(inspect.signature(env.requirements_for_method)),
+        'world.req': str(inspect.signature(world.req)),
+        'world.requirements_for': str(inspect.signature(world.requirements_for)),
+        'world.requirements_for_method': str(inspect.signature(world.requirements_for_method)),
+    },
+}))
+""" % (tuple(sorted(_RETIRED_ENVIRONMENT_SURFACE)),),
+    )
+    data = json.loads(result.stdout)
+    assert set(data["requirements"]) == _EXPECTED_REQUIREMENT_EXPORTS
+    assert set(data["environment"]) == _EXPECTED_ENVIRONMENT_EXPORTS
+    assert set(data["world"]) == _EXPECTED_WORLD_EXPORTS
+    assert not data["environment_key_exported"]
+    assert not data["world_key_exported"]
+    assert data["selectors"] == {"env": True, "world": True}
+    assert data["defaults"] == {"env": [], "world": [], "runtime": False}
+    assert data["retired"] == []
+    assert data["retired_modules"] == []
+    assert data["signatures"] == {
+        "env.req": "(*, python: 'str | None' = None, requirements: 'Iterable[str]' = (), excludes: 'Iterable[str]' = (), capabilities: 'Iterable[str]' = (), tags: 'Iterable[str]' = (), dryml_protocol: 'str | None' = None, schema_versions: 'Mapping[str, str] | None' = None, source: 'RequirementSource | str | None' = None) -> 'Callable[[T], T]'",
+        "env.requirements_for": "(target: 'object') -> 'RequirementResult[EnvironmentRequirement]'",
+        "env.requirements_for_method": "(owner: 'type | object', method_name: 'str') -> 'RequirementResult[EnvironmentRequirement]'",
+        "world.req": "(*, role: 'str' = 'main', roles: 'Mapping[str, RoleRequirement | Mapping[str, Any]] | None' = None, replicas: 'CountConstraint | int | Mapping[str, int | None] | None' = None, cpus: 'CountConstraint | int | Mapping[str, int | None] | None' = None, memory: 'CountConstraint | int | str | Mapping[str, int | str | None] | None' = None, accelerators: 'Mapping[str, CountConstraint | int | Mapping[str, int | None]] | None' = None, accelerator_memory: 'Mapping[str, CountConstraint | int | str | Mapping[str, int | str | None]] | None' = None, devices: 'Mapping[str, CountConstraint | int | Mapping[str, int | None]] | None' = None, named: 'Mapping[str, CountConstraint | int | Mapping[str, int | None]] | None' = None, topology: 'Mapping[str, Any] | None' = None, source: 'RequirementSource | str | None' = None) -> 'Callable[[T], T]'",
+        "world.requirements_for": "(target: 'object') -> 'RequirementResult[WorldRequirement]'",
+        "world.requirements_for_method": "(owner: 'type | object', method_name: 'str') -> 'RequirementResult[WorldRequirement]'",
+    }
+
+
+def test_installed_stage_four_exports_resolve_with_exact_root_aliases(
+    installed_python: Path,
+) -> None:
+    """Exercise every installed Stage 4 export and its lazy root-owner identity."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+
+import dryml
+from dryml import annotations, env, environments, requirements, world, worlds
+
+modules = {
+    'annotations': annotations,
+    'requirements': requirements,
+    'environments': environments,
+    'worlds': worlds,
+}
+retired = {
+    'annotations': ('decorators', 'env', 'world', 'runtime', 'merge', 'namespaces', 'storage'),
+    'environments': %r,
+    'worlds': ('default', 'default_for', 'set_default', 'reset_default', 'use_default'),
+}
+print(json.dumps({
+    'exports': {key: list(module.__all__) for key, module in modules.items()},
+    'resolved': {
+        key: all(getattr(module, name) is module.__dict__[name] for name in module.__all__)
+        for key, module in modules.items()
+    },
+    'unique': {
+        key: len(module.__all__) == len(set(module.__all__))
+        for key, module in modules.items()
+    },
+    'aliases': {
+        'env': env is environments is dryml.env is dryml.environments,
+        'world': world is worlds is dryml.world is dryml.worlds,
+        'requirements': requirements is dryml.requirements,
+        'root_exports': all(name in dryml.__all__ for name in ('env', 'environments', 'world', 'worlds', 'requirements')),
+    },
+    'retired': {
+        key: [name for name in names if hasattr(modules[key], name)]
+        for key, names in retired.items()
+    },
+}))
+""" % (tuple(sorted(_RETIRED_ENVIRONMENT_SURFACE)),),
+    )
+    data = json.loads(result.stdout)
+    assert set(data["exports"]["annotations"]) == _EXPECTED_ANNOTATION_EXPORTS
+    assert set(data["exports"]["requirements"]) == _EXPECTED_REQUIREMENT_EXPORTS
+    assert set(data["exports"]["environments"]) == _EXPECTED_ENVIRONMENT_EXPORTS
+    assert set(data["exports"]["worlds"]) == _EXPECTED_WORLD_EXPORTS
+    assert data["resolved"] == {
+        "annotations": True,
+        "requirements": True,
+        "environments": True,
+        "worlds": True,
+    }
+    assert data["unique"] == {
+        "annotations": True,
+        "requirements": True,
+        "environments": True,
+        "worlds": True,
+    }
+    assert data["aliases"] == {
+        "env": True,
+        "world": True,
+        "requirements": True,
+        "root_exports": True,
+    }
+    assert data["retired"] == {"annotations": [], "environments": [], "worlds": []}
+
+
+def test_installed_root_entry_points_are_effect_free_and_domain_isolated(
+    installed_python: Path,
+) -> None:
+    """Probe each installed root requirement entry point in a fresh interpreter."""
+
+    actions = (
+        ("import dryml.requirements", ("dryml.environments", "dryml.worlds")),
+        ("assert dryml.env is dryml.environments", ("dryml.worlds",)),
+        ("assert dryml.world is dryml.worlds", ("dryml.environments",)),
+        (
+            "from dryml import env, world\nassert env is dryml.environments\nassert world is dryml.worlds",
+            (),
+        ),
+    )
+    for action, inverse in actions:
+        result = _installed_probe(
+            installed_python,
+            """
+import json
+import os
+import platform
+import socket
+import subprocess
+import sys
+
+effects = []
+def blocked(name):
+    def call(*args, **kwargs):
+        effects.append(name)
+        raise AssertionError(f"unexpected {name}")
+    return call
+
+os.cpu_count = blocked("cpu_count")
+platform.system = blocked("platform.system")
+socket.socket = blocked("socket.socket")
+subprocess.Popen = blocked("subprocess.Popen")
+
+import dryml
+%s
+
+forbidden = %r + %r
+print(json.dumps({
+    "effects": effects,
+    "loaded": sorted(
+        name for name in sys.modules
+        if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
+    ),
+}))
+""" % (
+                action,
+                (
+                    "dryml.artifacts", "dryml.context", "dryml.core", "dryml.dispatch",
+                    "dryml.execute", "dryml.runtime", "dryml.session", "tensorflow",
+                    "torch", "jax", "jaxlib", "ray",
+                ),
+                inverse,
+            ),
+        )
+        assert json.loads(result.stdout) == {"effects": [], "loaded": []}
+
+
+def test_source_requirement_domain_surface_matches_installed_contract() -> None:
+    """Keep source exports aligned with the installed requirement-domain manifest."""
+
+    import dryml
+
+    assert set(dryml.requirements.__all__) == _EXPECTED_REQUIREMENT_EXPORTS
+    assert set(dryml.env.__all__) == _EXPECTED_ENVIRONMENT_EXPORTS
+    assert set(dryml.world.__all__) == _EXPECTED_WORLD_EXPORTS
+
+
+def test_installed_methods_manifest_and_retired_imports(
+    installed_python: Path,
+) -> None:
+    """Require the wheel to publish only the new Method owner and its API."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import importlib
+import importlib.util
+import json
+
+import dryml.code
+import dryml.methods
+
+retired_imports = []
+for name in ('Method', 'Traits', 'traits'):
+    try:
+        getattr(dryml.code, name)
+    except AttributeError:
+        pass
+    else:
+        retired_imports.append(name)
+print(json.dumps({
+    'exports': list(dryml.methods.__all__),
+    'code_exports': sorted(set(dryml.code.__all__) & {'Method', 'Traits', 'traits'}),
+    'retired_imports': retired_imports,
+    'retired_modules': [
+        module for module in ('dryml.code.method', 'dryml.code.traits')
+        if importlib.util.find_spec(module) is not None
+    ],
+}))
+""",
+    )
+    assert json.loads(result.stdout) == {
+        "exports": list(_EXPECTED_METHOD_EXPORTS),
+        "code_exports": [],
+        "retired_imports": [],
+        "retired_modules": [],
+    }
+
+
+def test_source_methods_manifest_matches_installed_contract() -> None:
+    """Keep the source Method manifest aligned with the installed wheel contract."""
+
+    import dryml.methods
+
+    assert tuple(dryml.methods.__all__) == _EXPECTED_METHOD_EXPORTS
+
+
+def test_installed_code_analysis_contract_and_removed_apis(
+    installed_python: Path,
+) -> None:
+    """Require the installed Stage 3 code-analysis package to match its contract."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import dataclasses
+import importlib
+import importlib.util
+import inspect
+import json
+
+import dryml.code
+
+modules = {
+    name: list(importlib.import_module(name).__all__)
+    for name in %s
+}
+fields = {}
+for dotted in %s:
+    module_name, class_name = dotted.rsplit('.', 1)
+    fields[dotted] = [field.name for field in dataclasses.fields(
+        getattr(importlib.import_module(module_name), class_name)
+    )]
+signatures = {}
+for dotted in %s:
+    module_name, function_name = dotted.rsplit('.', 1)
+    signatures[dotted] = str(inspect.signature(
+        getattr(importlib.import_module(module_name), function_name)
+    ))
+removed_attributes = (
+    'AttrAccess', 'MethodCall', 'collect_accesses_from_source', 'parse_source',
+    'ProgramNode', 'ProgramEdge', 'ProgramNodeKind', 'ProgramEdgeKind',
+    'build_program_graph', 'TargetKind', 'DescriptorKind', 'normalize_target',
+    'KernelContext', 'KernelMode', 'FactScalar', 'FactValue', 'SourceLocation',
+    'LexicalDependency', 'LexicalDependencies', 'LexicalDependencyKernel',
+    'collect_lexical_dependencies', 'func_source_extract', 'CompilerInfo',
+    'Method', 'Traits', 'traits', 'AnnotationFact', 'RequirementFact',
+    'MethodContractFact', 'ShapeFact', 'CodeTargetSpec', 'FunctionAnalyzer',
+    'register_analyzer', 'get_analyzer', 'available_analyzers', 'CodeProbeRequest',
+    'CodeProbeResult', 'normalize_probe_request', 'probe_target',
+    'probe_target_in_subprocess', 'request_from_data', 'result_from_data',
+    'run_probe_request',
+)
+removed_modules = (
+    'dryml.code.compiler_info', 'dryml.code.method', 'dryml.code.traits',
+    'dryml.code.probe_worker', 'dryml.code.transformation',
+    'dryml.code.algorithms.direct_annotations',
+    'dryml.code.algorithms.method_contracts',
+)
+print(json.dumps({
+    'exports': list(dryml.code.__all__),
+    'modules': modules,
+    'fields': fields,
+    'signatures': signatures,
+    'removed_attributes': [name for name in removed_attributes if hasattr(dryml.code, name)],
+    'removed_modules': [name for name in removed_modules if importlib.util.find_spec(name) is not None],
+}))
+""" % (
+            repr(tuple(_EXPECTED_CODE_MODULE_EXPORTS)),
+            repr(tuple(_EXPECTED_CODE_DATACLASS_FIELDS)),
+            repr(tuple(_EXPECTED_CODE_SIGNATURES)),
+        ),
+    )
+    data = json.loads(result.stdout)
+    _assert_code_analysis_contract(data)
+
+
+def test_source_tree_code_analysis_contract_and_removed_apis() -> None:
+    """Require the source-tree Stage 3 code-analysis package to match its contract."""
+
+    import dryml.code
+
+    modules = {
+        name: list(importlib.import_module(name).__all__)
+        for name in _EXPECTED_CODE_MODULE_EXPORTS
+    }
+    fields = {}
+    for dotted in _EXPECTED_CODE_DATACLASS_FIELDS:
+        module_name, class_name = dotted.rsplit(".", 1)
+        fields[dotted] = [
+            field.name
+            for field in dataclasses.fields(
+                getattr(importlib.import_module(module_name), class_name)
+            )
+        ]
+    signatures = {}
+    for dotted in _EXPECTED_CODE_SIGNATURES:
+        module_name, function_name = dotted.rsplit(".", 1)
+        signatures[dotted] = str(
+            inspect.signature(getattr(importlib.import_module(module_name), function_name))
+        )
+    _assert_code_analysis_contract({
+        "exports": list(dryml.code.__all__),
+        "modules": modules,
+        "fields": fields,
+        "signatures": signatures,
+        "removed_attributes": [
+            name
+            for name in (
+                "AttrAccess", "MethodCall", "collect_accesses_from_source",
+                "parse_source", "ProgramNode", "ProgramEdge", "ProgramNodeKind",
+                "ProgramEdgeKind", "build_program_graph", "TargetKind",
+                "DescriptorKind", "normalize_target", "KernelContext", "KernelMode",
+                "FactScalar", "FactValue", "SourceLocation", "LexicalDependency",
+                "LexicalDependencies", "LexicalDependencyKernel",
+                "collect_lexical_dependencies", "func_source_extract", "CompilerInfo",
+                "Method", "Traits", "traits", "AnnotationFact", "RequirementFact",
+                "MethodContractFact", "ShapeFact", "CodeTargetSpec", "FunctionAnalyzer",
+                "register_analyzer", "get_analyzer", "available_analyzers",
+                "CodeProbeRequest", "CodeProbeResult", "normalize_probe_request",
+                "probe_target", "probe_target_in_subprocess", "request_from_data",
+                "result_from_data", "run_probe_request",
+            )
+            if hasattr(dryml.code, name)
+        ],
+        "removed_modules": [
+            name
+            for name in (
+                "dryml.code.compiler_info", "dryml.code.method", "dryml.code.traits",
+                "dryml.code.probe_worker", "dryml.code.transformation",
+                "dryml.code.algorithms.direct_annotations",
+                "dryml.code.algorithms.method_contracts",
+            )
+            if importlib.util.find_spec(name) is not None
+        ],
+    })
+
+
+def test_source_artifact_and_metric_imports_remain_optional_backend_safe() -> None:
+    """Import lightweight Stage 3 result APIs in a fresh interpreter without plugins."""
+
+    root = Path(__file__).parents[2]
+    env = dict(os.environ)
+    source_path = str(root / "src")
+    env["PYTHONPATH"] = source_path + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+import dryml.core
+import dryml.methods
+import dryml.artifacts
+import dryml.metrics
+print(json.dumps({
+    'artifacts': sorted(dryml.artifacts.__all__),
+    'metrics': sorted(dryml.metrics.__all__),
+    'heavy': sorted(
+        name
+        for name in ('pyarrow', 'netCDF4', 'tensorflow', 'torch', 'jax', 'jaxlib', 'ray')
+        if name in sys.modules
+    ),
+}))
+""",
+        ],
+        cwd="/tmp/dryml",
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["artifacts"] == [
+        "Artifact", "ArtifactNotReadyError", "ArtifactRecoveryError", "CacheCodec", "CacheIntegrityError",
+        "CachedDataset", "Fold", "Value", "mean", "quantile",
+    ]
+    assert data["metrics"] == [
+        "AccuracyFromConfusion", "ConfusionCounts", "ConfusionInitial", "F1Average", "F1FromConfusion",
+        "Label", "categorical_accuracy", "classifier_accuracy", "classifier_confusion_matrix",
+        "classifier_f1", "mean_squared_error", "regressor_mae", "regressor_mse",
+    ]
+    assert data["heavy"] == []
+
+
+def test_source_models_history_export_is_pandas_and_backend_lazy() -> None:
+    """Expose ExperimentData without importing analysis or optional backends."""
+
+    root = Path(__file__).parents[2]
+    env = dict(os.environ)
+    source_path = str(root / "src")
+    env["PYTHONPATH"] = source_path + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+import dryml.models
+from dryml.models import ExperimentData
+print(json.dumps({
+    'exported': 'ExperimentData' in dryml.models.__all__,
+    'heavy': sorted(name for name in ('pandas', 'tensorflow', 'tensorflow_datasets', 'torch') if name in sys.modules),
+    'name': ExperimentData.__name__,
+}))
+""",
+        ],
+        cwd="/tmp/dryml",
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(result.stdout) == {
+        "exported": True, "heavy": [], "name": "ExperimentData",
+    }
+
+
+def test_installed_models_history_surface_is_pandas_and_backend_lazy(
+    installed_python: Path,
+) -> None:
+    """Keep installed history discovery independent of pandas and ML backends."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+import sys
+
+import dryml.models
+from dryml.models import (
+    ExperimentData, ExperimentDataError, TrainingObservation,
+    model_parameter_counts, parameter_counts_from_parameters,
+)
+
+print(json.dumps({
+    'exports': list(dryml.models.__all__),
+    'types': [ExperimentData.__name__, ExperimentDataError.__name__, TrainingObservation.__name__],
+    'functions': [model_parameter_counts.__name__, parameter_counts_from_parameters.__name__],
+    'name': ExperimentData.__name__,
+    'heavy': sorted(
+        name for name in ('pandas', 'tensorflow', 'tensorflow_datasets', 'torch')
+        if name in sys.modules
+    ),
+}))
+""",
+    )
+    assert json.loads(result.stdout) == {
+        "exports": list(_EXPECTED_MODELS_EXPORTS),
+        "types": ["ExperimentData", "ExperimentDataError", "TrainingObservation"],
+        "functions": ["model_parameter_counts", "parameter_counts_from_parameters"],
+        "name": "ExperimentData",
+        "heavy": [],
+    }
+
+
+def test_source_models_manifest_matches_installed_contract() -> None:
+    """Keep model exports and lazy measurement conveniences explicit."""
+
+    import dryml.models
+
+    assert tuple(dryml.models.__all__) == _EXPECTED_MODELS_EXPORTS
+
+
+def test_installed_stage_four_dataset_exports_are_optional_backend_safe(
+    installed_python: Path,
+) -> None:
+    """Expose installed cache/cursor APIs without importing optional backends."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+import sys
+from dryml.artifacts import CacheCodec, CacheIntegrityError, CachedDataset
+from dryml.data import DatasetCursor, DatasetExhaustedError
+print(json.dumps({
+    'artifacts': [CachedDataset.__name__, CacheIntegrityError.__name__, str(CacheCodec)],
+    'data': [DatasetCursor.__name__, DatasetExhaustedError.__name__],
+    'optional': sorted(
+        name for name in ('pyarrow', 'netCDF4', 'tensorflow', 'torch', 'jax', 'jaxlib')
+        if name in sys.modules
+    ),
+}))
+""",
+    )
+    data = json.loads(result.stdout)
+    assert data["artifacts"][0:2] == ["CachedDataset", "CacheIntegrityError"]
+    assert "numpy" in data["artifacts"][2]
+    assert data["data"] == ["DatasetCursor", "DatasetExhaustedError"]
+    assert data["optional"] == []
+
+
+def _assert_code_analysis_contract(data: dict[str, object]) -> None:
+    """Compare one source-tree or installed contract probe with Stage 3 values."""
+
+    assert data["exports"] == _EXPECTED_CODE_EXPORTS
+    assert data["modules"] == _EXPECTED_CODE_MODULE_EXPORTS
+    assert data["fields"] == _EXPECTED_CODE_DATACLASS_FIELDS
+    assert data["signatures"] == _EXPECTED_CODE_SIGNATURES
+    assert data["removed_attributes"] == []
+    assert data["removed_modules"] == []
+
+
+def test_installed_code_and_core_imports_are_passive(
+    installed_python: Path,
+) -> None:
+    """Ensure installed code, core, and symbol imports do not load consumers."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+import sys
+
+import dryml.code
+import dryml.core
+import dryml.core.symbol
+
+forbidden = (
+    'dryml.annotations', 'dryml.artifacts', 'dryml.data', 'dryml.dispatch',
+    'dryml.environments', 'dryml.execute', 'dryml.managed', 'dryml.methods',
+    'dryml.models', 'dryml.runtime', 'dryml.session', 'dryml.worlds',
+    'tensorflow', 'torch', 'jax', 'jaxlib', 'ray',
+)
+print(json.dumps(sorted(
+    name for name in sys.modules if name.startswith(forbidden)
+)))
+""",
+    )
+    assert json.loads(result.stdout) == []
+
+
+def test_installed_execute_surface_is_explicit_and_optional_backend_safe(
+    installed_python: Path,
+) -> None:
+    """Require installed Execute exports, signatures, and retired modules to match."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import importlib
+import importlib.util
+import inspect
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+import dryml.execute as execute
+import dryml.execute.ray as ray_execute
+import dryml.execute.subprocess as subprocess_execute
+
+with tempfile.TemporaryDirectory() as directory:
+    executor = execute.Executor(subprocess_execute.SubProcessConfig(
+        spool_directory=Path(directory),
+    ))
+    try:
+        subprocess_result = executor.run(sum, [2, 3, 5])
+    finally:
+        executor.close(cancel=True, timeout=10)
+
+print(json.dumps({
+    "exports": sorted(execute.__all__),
+    "specializations": {
+        "dryml.execute.subprocess": sorted(subprocess_execute.__all__),
+        "dryml.execute.ray": sorted(ray_execute.__all__),
+    },
+    "parameters": {
+        "run": list(inspect.signature(execute.run).parameters),
+        "submit": list(inspect.signature(execute.submit).parameters),
+        "Executor.run": list(inspect.signature(execute.Executor.run).parameters),
+        "Executor.submit": list(inspect.signature(execute.Executor.submit).parameters),
+    },
+    "ray_loaded": "ray" in sys.modules,
+    "subprocess_result": subprocess_result,
+    "optional_loaded": sorted(
+        name for name in ("tensorflow", "torch", "jax", "jaxlib", "ray")
+        if name in sys.modules
+    ),
+    "retired": [
+        name for name in (
+            "dryml.execute.orchestrator", "dryml.execute.protocol",
+            "dryml.execute.transfer", "dryml.execute.worker",
+        ) if importlib.util.find_spec(name) is not None
+    ],
+}))
+""",
+    )
+    data = json.loads(result.stdout)
+    assert set(data["exports"]) == _EXPECTED_EXECUTE_EXPORTS
+    assert {
+        name: set(exports)
+        for name, exports in data["specializations"].items()
+    } == _EXPECTED_EXECUTE_SPECIALIZATIONS
+    assert data["parameters"] == {
+        "run": [
+            "fn", "args", "backend", "kwargs", "environment",
+            "environment_spec", "world", "execution_timeout", "stream_output",
+            "done_callbacks", "output", "worker_setup"
+        ],
+        "submit": [
+            "fn", "args", "backend", "kwargs", "environment",
+            "environment_spec", "world", "execution_timeout", "stream_output",
+            "done_callbacks", "output", "worker_setup"
+        ],
+        "Executor.run": [
+            "self", "fn", "args", "kwargs", "environment", "environment_spec",
+            "world", "execution_timeout", "stream_output", "done_callbacks",
+            "output", "worker_setup"
+        ],
+        "Executor.submit": [
+            "self", "fn", "args", "kwargs", "environment", "environment_spec",
+            "world", "execution_timeout", "stream_output", "done_callbacks",
+            "output", "worker_setup"
+        ],
+    }
+    assert not data["ray_loaded"]
+    assert data["subprocess_result"] == 10
+    assert data["optional_loaded"] == []
+    assert data["retired"] == []
+
+
+def test_source_execute_surface_matches_installed_manifest() -> None:
+    """Keep source Execute exports aligned with the installed wheel contract."""
+
+    import dryml.execute as execute
+    import dryml.execute.ray as ray_execute
+    import dryml.execute.subprocess as subprocess_execute
+
+    assert set(execute.__all__) == _EXPECTED_EXECUTE_EXPORTS
+    assert set(subprocess_execute.__all__) == _EXPECTED_EXECUTE_SPECIALIZATIONS["dryml.execute.subprocess"]
+    assert set(ray_execute.__all__) == _EXPECTED_EXECUTE_SPECIALIZATIONS["dryml.execute.ray"]
+
+
+def test_installed_dispatch_surface_is_lazy_and_matches_the_public_contract(
+    installed_python: Path,
+) -> None:
+    """Require the installed Dispatch facade to expose only its public API."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import dataclasses
+import inspect
+import json
+import sys
+
+import dryml.dispatch as dispatch
+
+print(json.dumps({
+    "exports": sorted(dispatch.__all__),
+    "fields": {
+        name: [
+            field.name for field in dataclasses.fields(getattr(dispatch, name))
+        ]
+        for name in ("ProbeOptions", "DispatchReport")
+    },
+    "signatures": {
+        name: str(inspect.signature(getattr(dispatch, name)))
+        for name in ("explain", "run", "submit", "with_options")
+    },
+    "heavy": sorted(
+        name
+        for name in ("ray", "tensorflow", "torch", "jax", "jaxlib")
+        if name in sys.modules
+    ),
+}))
+""",
+    )
+    data = json.loads(result.stdout)
+    assert set(data["exports"]) == _EXPECTED_DISPATCH_EXPORTS
+    assert data["fields"] == _EXPECTED_DISPATCH_DATACLASS_FIELDS
+    assert data["signatures"] == {
+        "explain": ("(fn: 'Any', /, *args: 'Any', **kwargs: 'Any') -> "
+                    "'DispatchReport'"),
+        "run":
+        "(fn: 'Any', /, *args: 'Any', **kwargs: 'Any') -> 'Any'",
+        "submit":
+        "(fn: 'Any', /, *args: 'Any', **kwargs: 'Any') -> 'Any'",
+        "with_options":
+        ("(*, env: \"EnvironmentRequirement | None | Literal['inherit']\" "
+         "= 'inherit', world: \"WorldRequirement | None | "
+         "Literal['inherit']\" = 'inherit', python: \"EnvironmentSpec | "
+         "None | Literal['inherit']\" = 'inherit', backend: \"BackendConfig "
+         "| InProcess | str | None | Literal['inherit']\" = 'inherit', "
+         "core: \"object | None | Literal['inherit']\" = 'inherit', probe: "
+         "\"ProbeOptions | Literal['inherit']\" = 'inherit', _parent: "
+         "'DispatchView | None' = None) -> 'DispatchView'"),
+    }
+    assert data["heavy"] == []
+
+
+def test_source_dispatch_surface_matches_installed_manifest() -> None:
+    """Keep source Dispatch exports and value shapes aligned with the wheel."""
+
+    import dryml.dispatch as dispatch
+
+    assert set(dispatch.__all__) == _EXPECTED_DISPATCH_EXPORTS
+    assert {
+        name: [
+            field.name for field in dataclasses.fields(getattr(dispatch, name))
+        ]
+        for name in _EXPECTED_DISPATCH_DATACLASS_FIELDS
+    } == _EXPECTED_DISPATCH_DATACLASS_FIELDS
+
+
+def test_installed_generic_and_core_execute_paths_expose_environment_spec(
+    installed_python: Path,
+) -> None:
+    """Require generic/core Execute paths to retain one exact pin control."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import inspect
+import json
+
+import dryml.core.execute as core_execute
+import dryml.execute as execute
+
+targets = (
+    execute.submit, execute.run, execute.Executor.submit, execute.Executor.run,
+    execute.Executor.with_options, execute.Executor.discover,
+    core_execute.submit, core_execute.run, core_execute.Executor.submit,
+    core_execute.Executor.run, core_execute.Executor.with_options,
+    core_execute.Executor.discover,
+)
+from dryml.core.execute import ExecutorView as CoreExecutorView
+from dryml.execute.executor import ExecutorView
+from dryml.execute.models import SubmittedCall
+
+constructors = (ExecutorView, CoreExecutorView, SubmittedCall)
+print(json.dumps({
+    "operations": [
+        "environment_spec" in inspect.signature(target).parameters
+        for target in targets
+    ],
+    "constructors": {
+        constructor.__module__ + "." + constructor.__qualname__: [
+            (parameter.name, parameter.default is None)
+            for parameter in inspect.signature(constructor).parameters.values()
+        ]
+        for constructor in constructors
+    },
+}))
+""",
+    )
+    assert json.loads(result.stdout) == {
+        "operations": [True] * 12,
+        "constructors": {
+            "dryml.execute.executor.ExecutorView": [
+                ["executor", False], ["environment", False], ["world", False],
+                ["execution_timeout", False], ["stream_output", False],
+                ["done_callbacks", False], ["output", False],
+                ["worker_setup", False], ["environment_spec", True],
+            ],
+            "dryml.core.execute.ExecutorView": [
+                ["executor", False], ["core", False], ["environment", False],
+                ["world", False], ["execution_timeout", False],
+                ["stream_output", False], ["done_callbacks", False],
+                ["output", False], ["environment_spec", True],
+            ],
+            "dryml.execute.models.SubmittedCall": [
+                ["submission_id", False], ["admission_deadline", False],
+                ["payload", False], ["environment", False], ["world", False],
+                ["execution_timeout", False], ["stream_output", False],
+                ["output", False], ["worker_setup", True],
+                ["environment_spec", True],
+            ],
+        },
+    }
+
+
+def test_installed_core_execute_surface_stays_in_the_core_namespace(
+    installed_python: Path,
+) -> None:
+    """Require installed core Execute exports without promoting them to dryml root."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+import importlib
+import sys
+
+import dryml
+import dryml.core
+
+before = set(sys.modules)
+core_execute = importlib.import_module("dryml.core.execute")
+print(json.dumps({
+    "core_exports": sorted(set(dryml.core.__all__) & set(%r)),
+    "module_exports": sorted(core_execute.__all__),
+    "root_pollution": sorted(set(dryml.__all__) & set(%r)),
+    "ray_loaded": "ray" in sys.modules,
+    "optional_loaded": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib") if name in sys.modules),
+    "core_loaded_execute": "dryml.execute" in sys.modules,
+    "core_import_was_passive": "dryml.execute" not in before,
+}))
+""" % (tuple(sorted(_EXPECTED_CORE_EXECUTE_EXPORTS)), tuple(sorted(_EXPECTED_CORE_EXECUTE_EXPORTS))),
+    )
+    data = json.loads(result.stdout)
+    assert set(data["core_exports"]) == _EXPECTED_CORE_EXECUTE_EXPORTS
+    assert set(data["module_exports"]) == _EXPECTED_CORE_EXECUTE_MODULE_EXPORTS
+    assert data["root_pollution"] == []
+    assert data["ray_loaded"] is False
+    assert data["optional_loaded"] == []
+    assert data["core_import_was_passive"] is True
+    assert data["core_loaded_execute"] is True
+
+
+def test_source_core_execute_surface_stays_in_the_core_namespace() -> None:
+    """Keep source core Execute exports aligned with the installed namespace contract."""
+
+    import dryml
+    import dryml.core
+    core_execute = importlib.import_module("dryml.core.execute")
+
+    assert set(dryml.core.__all__) & _EXPECTED_CORE_EXECUTE_EXPORTS == _EXPECTED_CORE_EXECUTE_EXPORTS
+    assert set(core_execute.__all__) == _EXPECTED_CORE_EXECUTE_MODULE_EXPORTS
+    assert not set(dryml.__all__) & _EXPECTED_CORE_EXECUTE_EXPORTS
+
+
+def test_installed_sdist_wheel_exercises_current_reference_authority(
+    installed_python: Path,
+) -> None:
+    """Probe graph references, exact persistence, and retired authority in isolation."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+import pickle
+import sys
+import tempfile
+from pathlib import Path
+
+import dryml
+from dryml.core.store.dir import DirStore
+from dryml.core.store.store import StoreAuthorityError
+
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    (root / "probe_value.py").write_text(
+        "from pathlib import Path\\n"
+        "from dryml import Serializable\\n\\n"
+        "class Value(Serializable):\\n"
+        "    def __init__(self, value):\\n"
+        "        self.value = value\\n\\n"
+        "    def save_state_to_dir_imp(self, dest_dir, *, codec):\\n"
+        "        Path(dest_dir, 'value.txt').write_text(str(self.value), encoding='ascii')\\n\\n"
+        "    def restore_state_from_dir_imp(self, src_dir, *, codec):\\n"
+        "        self.value = int(Path(src_dir, 'value.txt').read_text(encoding='ascii'))\\n",
+        encoding="ascii",
+    )
+    sys.path.insert(0, str(root))
+    from probe_value import Value
+    store = DirStore(root / "store")
+    repo = dryml.Repo(store)
+    value = Value(7, repo=repo)
+    state = value.save(repo=repo)
+    definition = pickle.loads(pickle.dumps(value.definition))
+    load_store = DirStore(root / "store")
+    load_repo = dryml.Repo(load_store)
+    loaded = dryml.load_state_ref(state, repo=load_repo, reuse_live="never")
+    old = root / "old"
+    (old / "objects" / "legacy").mkdir(parents=True)
+    (old / "objects" / "legacy" / "definition.pkl").write_bytes(b"retired")
+    try:
+        DirStore(old)
+    except StoreAuthorityError:
+        old_authority_rejected = True
+    else:
+        old_authority_rejected = False
+    load_repo.close(flush=False)
+    repo.close(flush=False)
+    load_store.close()
+    store.close()
+    assert store._query_index_instance is None
+    assert load_store._query_index_instance is None
+    print(json.dumps({
+        "graph_round_trip": definition.graph_equal(value.definition),
+        "object_paths": len(state.object.objects),
+        "state_paths": len(state.states),
+        "loaded_value": loaded.value,
+        "old_authority_rejected": old_authority_rejected,
+    }))
+""",
+    )
+    assert json.loads(result.stdout) == {
+        "graph_round_trip": True,
+        "object_paths": 1,
+        "state_paths": 1,
+        "loaded_value": 7,
+        "old_authority_rejected": True,
+    }
+
+
+def _installed_probe(
+    python: Path, code: str
+) -> subprocess.CompletedProcess[str]:
+    """Run a probe outside the checkout with inherited source paths removed."""
+
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    return subprocess.run(
+        [str(python), "-c", code],
+        cwd="/tmp/dryml",
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )

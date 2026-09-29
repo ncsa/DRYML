@@ -1,0 +1,204 @@
+# World And Runtime
+
+DRYML separates portable declarations from observations and process effects.
+No declaration API launches work or reserves host resources.
+
+## Layers
+
+| Layer | Primary values | Responsibility |
+| --- | --- | --- |
+| Environment declaration | `EnvironmentRequirement`, `EnvironmentSpec` | Describe software constraints or a selector |
+| Compatibility | Environment/world/runtime reports | Compare supplied evidence without activating it |
+| Requested world | `WorldRequirement`, `WorldSpec` | Describe roles, replicas, and requested resources |
+| Exact allocation | `WorldAllocation`, `ProcessAllocation` | Bind roles and ranks to exact local resources |
+| Runtime declaration | `RuntimeContextSpec` | Describe effect-free visibility/framework intent |
+| Runtime activation | `RuntimeState`, session generation | Publish `NONE`, `INLINE`, or `ORCHESTRATOR` state |
+| Controls and adapters | Publication statuses | Report visibility, affinity, memory, and framework outcomes |
+
+`dryml.annotations` carries consumer-owned process-local key/value metadata. It
+has no built-in environment, world, or runtime semantics or resolution, and
+does not serialize or persist annotations. See [Annotations](annotations.md).
+
+## Passive Hard World Declarations
+
+`dryml.worlds.req(...)` attaches one process-local hard `WorldRequirement` to a
+class, standalone function, method definition, supported `staticmethod` or
+`classmethod`, or supported custom descriptor. It returns the exact target
+unchanged and never wraps or calls it, probes a host, reserves resources, or
+activates runtime/session state. `dryml.world` is the lazy alias for the plural
+world owner.
+
+```python
+from dryml import world
+
+
+@world.req(cpus=2)
+class Worker:
+    def run(self):
+        pass
+
+
+result = world.requirements_for_method(Worker, "run")
+assert result.has_value
+```
+
+`requirements_for(target)` combines direct or inherited declarations, while
+`requirements_for_method(owner, method_name)` combines inherited class
+declarations with one statically selected method. Instance owners use their
+exact class without reading instance state or binding a descriptor. A
+`RequirementResult` is empty when no world declaration exists, valued with one
+complete `WorldRequirement` when compatible, or valueless with a bounded
+conflict report.
+
+World diagnostic paths preserve ordinary dotted spellings such as
+`roles.main.resources.cpus`. To keep legal dotted role or resource names
+unambiguous, those individual segments use deterministic JSON-style brackets,
+for example `roles["trainer.gpu"].resources.named["license.v2"]`. This syntax
+applies only to diagnostics; world declaration and resource-name contracts are
+unchanged.
+
+### Scheduled Code Collection
+
+`WorldRequirementsKernel()` is a lazily exported, no-argument `dryml.code`
+analysis kernel. Submit it with `KernelCall(WorldRequirementsKernel(), None)`
+and `KernelCall(StaticDependenciesKernel(), None)`. The ordinary scheduler calls
+its `run` method with the canonical live or detached target; it resolves targets
+through the required static dependency output and invokes the existing world
+combiner once. The result is the normal `RequirementResult[WorldRequirement]`,
+including its existing empty, compatible, and source-attributed conflict forms.
+
+Live collection preserves class/MRO and selected-method rules: class declarations
+precede the one normal-MRO-selected method, and unrelated siblings are excluded.
+It never binds arbitrary descriptors or reads instance state. Coordinator-only
+private factories can bind transportable owner-codec declaration views to one
+inspection snapshot. Views have a closed target-to-occurrence mapping and reject
+missing, malformed, oversized, invalid-source, or wrong-snapshot content.
+
+Omitted flattened constraints are unconstrained, so an omitted constraint such
+as a replica count is not invented by `cpus=2`. Supplying `roles=` selects the complete multi-role form and
+rejects simultaneous flattened fields rather than silently merging grammars.
+World combination is independent of environment combination and ignores
+environment annotations. Hard declarations are not defaults, selection,
+automatic enforcement, code inference, dispatch, or active runtime/session
+state. Compatibility returns a domain report whose policy-independent
+`admission_ok` may be passed to the explicit shared admission barrier; neither
+declaration nor reporting admits or runs work automatically.
+
+## Planning A Local World
+
+```python
+from dryml.worlds import (
+    CountConstraint,
+    ResourceRequirement,
+    RoleRequirement,
+    WorldRequirement,
+    assign_local_world,
+    local_inventory,
+    synthesize,
+)
+
+requirement = WorldRequirement({
+    "main": RoleRequirement(
+        replicas=CountConstraint(min=1, max=1),
+        resources=ResourceRequirement(cpus=CountConstraint(min=2)),
+    ),
+})
+inventory = local_inventory()
+result = synthesize(requirement, inventory=inventory)
+if not result.ok:
+    raise RuntimeError(result.diagnostics)
+requested = result.world
+allocation = assign_local_world(requested, inventory=inventory)
+```
+
+Synthesis chooses the deterministic smallest feasible local shape. Assignment
+produces disjoint exact CPU and accelerator bindings and rejects oversubscription
+in this public scope. Unknown capacity, unsupported topology, and incompatible
+per-device memory fail honestly. Planning does not create a process, worker,
+reservation, dispatch handle, or remote backend.
+
+## Runtime Publication
+
+`python` publishes `NONE` with inherited visibility and no allocation.
+`managed` publishes `INLINE` with exactly one selected process allocation.
+`orchestrator` publishes `ORCHESTRATOR`, hides workload accelerators, and
+enforces definition-only core behavior.
+
+Publication validates the creating PID before locks, stages reversible effects,
+checks fresh inventory dimensions, and atomically commits one immutable
+generation. An admitted operation holds a generation lease, so an incompatible
+transition receives `PublicationBusyError`. Uncertain irreversible effects or
+failed rollback publish terminal failure and require process restart.
+
+`check_selected_process_satisfies_requirement(role, process, requirement)`
+compares a valued hard world requirement with explicit role and
+`ProcessAllocation` evidence supplied by the session-generation owner. It is
+intentionally not a full-world checker: it rejects missing, wrong, or additional
+required roles; replica constraints that do not admit exactly one selected process;
+unsupported topology and named/device constraints; and insufficient or unknown
+CPU, memory, accelerator, or per-accelerator-memory evidence. `role` and
+`process` must be absent together, and absence is accepted only when no effective
+world requirement exists. The checker neither imports Session nor converts host
+inventory or a planned world into synthetic selected-process evidence.
+
+Dispatch uses this checker only for explicit in-process execution under a held
+Session generation. A requested worker world or host inventory is not selected
+process evidence, and a valued world requirement therefore fails local admission
+without a matching role-qualified allocation. Backend-hosted Dispatch hands its
+independent worker requirement to Execute; it does not reserve, widen, or grow
+the configured request.
+
+## Execution Worker Activation
+
+`runtime.activation_scope(spec, grant)` activates a disposable Execute worker
+from a healthy, effect-free `NONE` baseline before any Store reconstruction or
+workload deserialization. `ExecutionGrant` retains either exact subprocess CPU
+and world-allocation evidence or Ray logical CPU capacity plus native evidence.
+Ray grants never gain CPU affinity or a `world_allocation_id`; exact-only runtime
+intent fails instead. A subprocess that has no `WorldAllocation` receives a
+baseline grant with no invented physical controls. Logical capacity can only
+bound registered framework-owned thread planning; generic `OMP_NUM_THREADS`
+controls are not synthesized. Preinitialized core session state or watched
+framework roots fail before Store opening. The scope restores journal-owned
+reversible effects. A watched framework import marks the worker terminal after
+restoration, so worker retirement rather than a claimed pristine reset remains
+the teardown guarantee.
+
+Core Execute enters this one runtime scope before Repo reconstruction, callable
+deserialization, signature/Method/managed activation, or materialization. Each
+accepted subprocess or Ray call uses at most one worker runtime boundary. A
+subprocess can report exact allocation identity and CPU IDs; Ray uses one-attempt
+workers and reports only logical scheduler capacity plus native evidence. A caller
+timeout, cancellation request, forced termination, or incomplete cleanup never
+proves a restored worker or successful workload.
+
+## Process Controls
+
+The status vocabulary is closed to `undeclared`, `not-applicable`,
+`pending-import`, `visibility-enforced`, `framework-configured`, `enforced`,
+`declarative`, `unsupported`, and `failed`.
+
+| Adapter | Visibility | Threads | Process memory | Accelerator memory |
+| --- | --- | --- | --- | --- |
+| Plain controls | Mandatory environment visibility; affinity may be unsupported | Best effort | Platform best effort or declarative | Not applicable |
+| TensorFlow | Mandatory before import | Best effort after import | Declarative unless process-enforced | Best effort per device |
+| Torch | Mandatory before import | Best effort after import | Declarative unless process-enforced | Best effort per known device |
+| JAX/JAXlib | Mandatory shared group | Unsupported unless proven | Declarative | Best effort for supported uniform fractions |
+
+Framework factories are lazy. Registration freezes on the first active
+managed/orchestrator publication or watched-root observation. Late registration,
+overlapping roots, direct callable factories, and roots already imported or
+observed fail explicitly. A late framework import that defeats mandatory
+visibility requires a fresh process.
+
+## Authority And Lock Order
+
+Store and query-index authority is independent of runtime publication. The
+effective order is PID check, publication transition or generation lease,
+watched-import epoch, framework registry/adapter state, process-effect ownership,
+then any admitted core/Store operation. Code must not call session publication
+while holding Store/index authority. Derived runtime status never replaces CDef,
+Store, alias, revision, Object-state, or query-index recovery authority.
+
+See [Sessions](session.md), [Environments](environments.md), and
+[V1.1 Formats](formats.md).

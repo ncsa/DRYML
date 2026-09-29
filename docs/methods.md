@@ -1,0 +1,329 @@
+# Methods
+
+`dryml.methods` owns DRYML's logical callable IR. A `Method` is a CDef-backed
+logical operation: its configured identity is stable, while its selected
+implementation and preparation cache are local runtime details. This package
+does not own code-analysis policy, dispatch, managed lifecycle, persistence,
+records, or backend warmup.
+
+Stage 3 supplies `dryml.code` as a local analysis foundation for generic static
+evidence. It does not add Method-specific analysis policy, cross-process Method
+probing, or source transformation. Those capabilities remain deferred beyond
+the Stage 2 local Method contract; any future process isolation and invocation
+policy belongs to `dryml.execute` and `dryml.dispatch`, not to Methods or the
+generic analysis package.
+
+Import the public API from this package. `dryml.code.Method`,
+`dryml.code.Traits`, and `dryml.code.traits` were removed without aliases.
+
+```python
+from dryml.core.backend import Backend
+from dryml.core.tensor_spec import BatchMode, TensorSpec
+from dryml.methods import Accumulator, AccumulatorGroup, Method, Traits, traits
+```
+
+`Backend` and `BatchMode` remain core vocabulary. The exact Methods public API
+is `Method`, `Accumulator`, `AccumulatorGroup`, `MethodImplementation`, `Traits`, `traits`, `MethodCallNode`,
+`MethodCallSignature`, `MethodCallMode`, `MethodCallNodeKind`, `MethodGraph`,
+`MethodGraphNode`, `MethodGraphNodeKind`, `MethodPort`, `MethodPortKind`,
+`IteratorPort`, `StreamNode`, `StreamGraphCursor`, `ConversionEdge`,
+`MethodError`,
+`ImplementationDeclarationError`, `ImplementationSelectionError`,
+`PreparedCallMismatchError`, `SelectionFailureReason`, and
+`SelectionTraitName`.
+
+## Authoring And Direct Calls
+
+A simple Method declares one ordinary `__call__` implementation. Its positional
+and keyword arguments are logical arguments forwarded unchanged, and its return
+value is the implementation result. `infer_output_spec(input_spec,
+*additional_input_specs)` accepts one or more normalized positional `SpecTree`
+values, returns a normalized output `SpecTree` without executing user or model
+code, and raises `NotImplementedError` if that pure contract is not supplied.
+
+```python
+import numpy as np
+
+from dryml.core import TensorSpec
+from dryml.methods import Method
+
+
+class AddOne(Method):
+    def __call__(self, value):
+        return value + 1
+
+    def infer_output_spec(self, input_spec):
+        return input_spec
+
+
+method = AddOne()
+assert method(np.array([1, 2])).tolist() == [2, 3]
+assert method.infer_output_spec(TensorSpec("int64", shape=(2,))) == TensorSpec(
+    "int64", shape=(2,)
+)
+```
+
+Use either a direct `__call__` declaration or trait-decorated alternatives in a
+class, never both. Direct declarations retain normal descriptor and cooperative
+`super().__call__` behavior. Method identity excludes selected targets,
+arguments, cache state, persistence state, and dispatch/lifecycle state.
+
+An intermediate Method interface may declare `__call__` with standard
+`@abstractmethod`. A concrete direct override satisfies that obligation normally.
+Alternatively, a subclass with a nonempty, statically valid catalog of concrete
+trait alternatives satisfies only that logical-call obligation; catalog targets
+are not invoked during class finalization. Abstract placeholders never become
+executable alternatives, and any other abstract member remains required. The
+root `Method`, runtime-only subclasses, and optional `infer_output_spec` remain
+concrete.
+
+## Closed Traits And Catalogs
+
+`Traits(backend=None, batch_mode=None)` is an immutable closed declaration for
+one implementation. `backend` accepts `Backend` or its string spelling;
+`batch_mode` accepts `BatchMode` or `"element"`/`"batched"`. Omitted traits are
+unspecified. Invalid values raise `ValueError` or `TypeError`; invalid decorator
+declarations raise `ImplementationDeclarationError`.
+
+The `traits(...)` decorator attaches passive metadata and returns its exact
+target without wrapping, binding, backend imports, or extensible trait keys.
+Repeated, malformed, shadowed, ambiguous, or unsupported descriptor evidence
+raises `ImplementationDeclarationError` during catalog validation.
+
+```python
+from dryml.methods import Method, traits
+
+
+class Double(Method):
+    @traits(backend="numpy")
+    def numpy(self, value):
+        return value * 2
+```
+
+`implementations()` returns every authored `MethodImplementation` in stable
+order. Each immutable carrier has `name`, the exact raw authored `target`, and
+complete `traits`; inspection does not bind, select, invoke, warm, or import a
+candidate. Catalog inspection is an ordinary local operation that may enter
+Object/runtime machinery. It is unsupported inside an active orchestrator in
+Stage 2. Stage 3's generic in-process static analysis does not change that
+constraint: cross-process Method probing remains deferred.
+
+`compatible_implementations(input_spec=None, *additional_input_specs,
+backend=None, batch_mode=None)` accepts optional positional input `SpecTree`
+constraints and core trait constraints, returns every compatible candidate in
+deterministic order, and never ranks or selects. Additional input specs require
+the first spec and validate selected calls but do not influence ranking.
+It returns an empty tuple for no compatible entries and raises
+`ImplementationSelectionError(reason="conflict")` for malformed or
+contradictory constraints.
+
+`find_implementation(..., output_spec=None)` uses the same inputs to return one
+uniquely most-specific callable `MethodImplementation`. `output_spec` is an
+optional raw-result contract; it does not rank candidates or trigger inference.
+The API raises
+`ImplementationSelectionError` with `reason` `"no_candidate"`, `"ambiguous"`,
+`"unknown_traits"`, or `"conflict"` before a target runs. For
+`"unknown_traits"`, `unknown_traits` names missing `"backend"` and/or
+`"batch_mode"` facts.
+
+```python
+import numpy as np
+
+from dryml.core import TensorSpec
+
+input_spec = TensorSpec("float32", shape=(2,), batch=4, backend="numpy")
+implementation = Double().find_implementation(input_spec=input_spec)
+assert implementation(np.ones((4, 2), dtype=np.float32)).shape == (4, 2)
+```
+
+The selected carrier validates every retained positional input spec before the
+target runs. Known structure, mapping key/order, dtype, shape, layout, backend,
+and batch facts must agree; unknown and `Dynamic` facts accept concrete values.
+Missing or conflicting constrained input raises `ImplementationSelectionError`
+before the target. A retained `output_spec` validates the target's raw result
+before return normalization or an Execute raw-result callback can observe it.
+Unconstrained later positional and keyword arguments are forwarded unchanged.
+Calling a selected carrier never discovers candidates or reads/mutates Method
+preparation state.
+
+## Accumulators
+
+`Accumulator[ObservationT, StateT]` is an abstract two-input Method for one
+streaming transition: `__call__(observation, state) -> state`. Its first input
+is the observation and drives backend/batch selection; its second input is an
+explicit invocation-owned carry validated independently, including backend.
+`infer_output_spec(observation_spec, state_spec)` is mandatory and pure. An
+Accumulator has no reset, checkpoint, merge, or mutable carry field.
+
+`AccumulatorGroup(accumulators)` composes a non-empty list, tuple, or
+string-keyed mapping of Accumulators. A selected group accepts matching carry
+and result structures, sends one observation to every branch, preserves the
+declared structure/names, and retains its child selections for that invocation.
+Reusing a child declaration creates no shared execution state: callers supply
+distinct carry entries. Group inference and selection do not run transition
+targets or change child learning/cached mode.
+
+Fold owns invocation and publication around these Methods. Initializer,
+Accumulator, and finalizer declarations are visible in the Fold definition before
+execution, but their selected carriers and carry values are worker-local. A direct
+or supported same-host Execute worker can select and invoke them without making a
+Method selection cache, source Dataset, or carry part of the final result payload.
+
+## Eager, Learning, And Cached Calls
+
+Alternative-backed Methods begin with `call_mode == "eager"`. Each direct call
+derives observable backend and batch facts, selects a unique safe candidate, and
+invokes it locally. Direct calls do not imply dispatch, sessions, persistence,
+managed execution, code transformation, or backend warmup.
+
+Dense runtime arrays do not reveal element-versus-batched intent. While eager,
+`default_batched` accepts exact `True`, exact `False`, or `None`. It fills only
+an otherwise unknown batch fact: `True` requests batched, `False` element, and
+`None` leaves selection unknown. Invalid values raise `TypeError`; mutation
+while learning/cached raises `RuntimeError` without changing state. Observable
+facts always win.
+
+`learn()` returns `None`, clears an old cache, and enters `"learning"` mode
+without selection, invocation, warmup, persistence, or optional-framework
+imports when called with no arguments. The next supported call normalizes
+complete positional and keyword layout, selects under eager rules, and publishes an immutable
+`cached_signature` plus target before invocation. Selection/normalization
+failure stays learning without a partial cache; a selected target that fails
+still leaves the cache available. Unsupported opaque learning values raise
+`MethodError`; ordinary eager generic calls remain available.
+
+`learn(input_spec, *additional_input_specs, strategy="local",
+output_spec=None)` instead prepares a retained local invoker from known
+`SpecTree` facts before values exist. Only `"local"` is currently supported;
+another strategy raises `ValueError` before catalog selection or target
+execution. Known-spec preparation uses the ordinary selection and selected-call
+validation contracts, invokes no candidate body, opens no source, and retains no
+first-call signature. Declared `Dynamic` dimensions accept later concrete values;
+fixed rank, shape, dtype, backend, batch, and structure drift fail before the
+target body. `eager()` or another `learn()` invalidates all retained facts.
+
+`method.method_graph()` returns an immutable, process-local `MethodGraph` view.
+Its virtual source and Method nodes are occurrence-indexed and expose currently
+known element-port facts, selected local invokers, and an empty
+`conversion_edges` surface containing selected dense handoff facts. Reusing one
+Method in a composition records independent occurrence selections without
+mutating that child's first-call cache. Element-only Method graphs reject
+`iterator()`. A Dataset supplies the iterator-port form through
+`dataset.method_graph()`: it is inert until `learn(strategy="local")` records
+its qualified stream plan, then `iterator()` returns an independent pull cursor.
+The qualified stream subset is Map, Batch, Unbatch, Zip, and Chain. Ports carry
+element specs separately from iterator consumption/emission, so a list returned
+from an element Method is still one output element. `IteratorPort` and
+`StreamNode` provide the bounded deterministic custom authoring seam; their
+declarations include ordered inputs, pure spec/cardinality transforms, pull
+policy, and maximum buffered items. The graph is neither a second cache nor a
+compiler, JIT, fusion, async scheduler, key join, or global optimization API.
+
+For a complete dense NumPy, TensorFlow, or Torch source spec, preparation first
+selects a directly compatible candidate. Only when none exists can it retain one
+direct CPU host-copy handoff to a uniquely most-specific target backend. Each
+`ConversionEdge` exposes producer/consumer specs, adapter name, exact
+dtype/shape/batch preservation, and CPU device policy. Ties remain selection
+errors; there is no framework preference, route search, cost ranking, or
+multi-edge conversion. Planning imports neither optional framework and invokes
+no adapter.
+
+Dataset graph cursors own source and selected-output resources, close acquired
+resources once in reverse acquisition order, and preserve a primary acquisition
+or body error if cleanup also fails. Each reused Dataset occurrence opens its own
+cursor and unknown-spec discovery buffer. Planning never opens a source; first
+value discovery happens only in the owning graph cursor and retains at most one
+prefetched value per occurrence.
+
+Dense handoffs preserve mapping/tuple/list structure and exact representable
+bool or fixed-width numeric dtype, shape, values, and batch meaning through an
+owned writable contiguous host copy. They normalize read-only, transposed, and
+negative-stride source arrays by copying. Object/string/complex/bfloat,
+sparse/ragged/quantized, mixed-backend, non-CPU, and inexact values are rejected
+before the selected target runs. A Torch tensor with `requires_grad=True` cannot
+cross a framework boundary and is never detached implicitly.
+
+Cached calls must exactly match the learned positional and keyword structure,
+dtype, shape, layout, backend, and observable batch facts. Matching calls invoke
+the retained implementation with no catalog discovery, ranking, output
+inference, or default lookup. A mismatch raises
+`PreparedCallMismatchError(expected, observed)` before user code and preserves
+the cache. `MethodCallNode` and `MethodCallSignature` are immutable diagnostic
+carriers that preserve tensor, tuple, list, mapping, and mapping-order facts.
+
+`eager()` returns `None`, clears learning/cached state, and preserves an explicit
+`default_batched`. `learn()` from cached state similarly clears the old cache and
+preserves the default for exactly one new learning call or known-spec preparation.
+
+## Local State, Composition, And Migration
+
+`default_batched`, `call_mode`, and `cached_signature` are process-local state
+of one live Method instance. They are excluded from CDef identity, Object state,
+serialization, records, persistent compilation caches, and transport. Freshly
+realized loads and forked children are eager with default `None`; loading that
+reuses the identical live object preserves its local state. Concurrent cached
+reads do not mutate state. Concurrent mode/default mutation of one Method is
+unsupported and requires caller coordination.
+
+`Map` selects a local callable once from a complete source spec. `Project`
+selects each branch, `Pipe` threads pure intermediate specs, and `AutoEncoder`
+selects encoder then decoder from threaded specs. This is local structural
+selection, not global pipeline optimization, adapter insertion, or shared-node
+planning.
+
+A restored CachedDataset supplies its persisted codec-output spec through the
+ordinary Dataset API. Map selects from that spec exactly as it does for another
+source; there is no cache-aware Method selection or codec branch.
+
+## Iteration Independence
+
+`Method.iteration_independent` is an explicit, side-effect-free declaration used
+only by Dataset cursors. It is false by default. A true declaration asserts that
+omitting calls for discarded inputs cannot affect later values or omit required
+effects; it is not inferred from purity or a selected implementation. Concrete
+subclasses must re-declare a positive value because changing a subclass otherwise
+resets the capability to false. `Pipe` is independent only when every child is,
+and `Project` only when every branch leaf is. Select, Cast, Scale, Flatten, and
+ArgMax explicitly qualify; generic/custom Methods remain conservative.
+This capability can accelerate positional cache or Fold resume by skipping a
+discarded mapped prefix at the source cursor. It does not restore Method state,
+infer purity, or change the already selected implementation; false or unresolved
+capability retains normal prefix execution.
+
+```python
+import numpy as np
+
+from dryml.core import TensorSpec
+from dryml.data import ArrayDataset, Map, Scale
+
+dataset = ArrayDataset(
+    np.array([[1.0, 2.0]], dtype=np.float32),
+    spec=TensorSpec("float32", shape=(2,), backend="numpy"),
+)
+assert next(iter(Map(dataset, Scale(mean=0.0, std=0.5)))).tolist() == [2.0, 4.0]
+```
+
+Migrate `from dryml.code import Method, Traits, traits` to
+`from dryml.methods import Method, Traits, traits`; import enums from core.
+There are no `bind_first`, `resolve_impl`, `resolve_impl_for`, `get_impl`, or
+`get_impl_func` compatibility APIs. Use direct calls,
+`compatible_implementations()`, or `find_implementation()` instead.
+
+## Errors
+
+`MethodError` is the bounded contract base error.
+`ImplementationDeclarationError` reports invalid authoring/catalog evidence.
+`ImplementationSelectionError` reports pre-invocation selection or retained
+input validation through `reason` and `unknown_traits`.
+`PreparedCallMismatchError` exposes immutable `expected` and `observed`
+signatures. These failures occur before a rejected candidate runs.
+
+## Related Docs
+
+- [Signatures](signatures.md) documents the selected implementation's Ref/Mat
+  argument and return boundary, including return-error timing and Repo effects.
+- [Tensor Specs](tensor_specs.md)
+- [Data API](data.md)
+- [Models API](models.md)
+- [Annotations](annotations.md)
+- [Code Analysis](code_analysis.md)

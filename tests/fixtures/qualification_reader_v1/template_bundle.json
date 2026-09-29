@@ -1,0 +1,1 @@
+{"schema":"dryml-template","version":1,"kind":"template-bundle","root":{"tag":"ref","label":"n0"},"nodes":[{"label":"n1","value":{"tag":"template","root":{"tag":"int","value":"1"}}},{"label":"n0","value":{"tag":"map","items":[[{"tag":"str","value":"score"},{"tag":"ref","label":"n1"}]]}}]}

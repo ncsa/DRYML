@@ -1,0 +1,304 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+from ..definition import ConcreteDefinition
+from ..reference_values import ObjectId, ObjectRef, StateRef
+from ..utils.general import pickler, unpickler
+from .model import FeatureToken
+from .path import GRAPH_PATH_SCHEMA_VERSION, GraphPath
+
+
+CDEF_CODEC_VERSION = 4
+FEATURE_CODEC_VERSION = 4
+PATH_CODEC_VERSION = GRAPH_PATH_SCHEMA_VERSION
+QUERY_INDEX_CODEC_VERSION = 6
+REFERENCE_CODEC_VERSION = 1
+METADATA_QUERY_CODEC_VERSION = 1
+_MAX_METADATA_QUERY_BYTES = 131_072
+
+
+class QueryCodecError(ValueError):
+    pass
+
+
+class QueryIndexCodec:
+    """Facade for the versioned query-index encoders.
+
+    The backend code primarily uses the module-level functions for clarity.
+    This facade gives the persisted query-index contract one named codec
+    surface and exposes the aggregate codec version used by schema metadata.
+    """
+
+    version = QUERY_INDEX_CODEC_VERSION
+    cdef_version = CDEF_CODEC_VERSION
+    feature_version = FEATURE_CODEC_VERSION
+    path_version = PATH_CODEC_VERSION
+    reference_version = REFERENCE_CODEC_VERSION
+    metadata_query_version = METADATA_QUERY_CODEC_VERSION
+
+    def encode_cdef(self, cdef: ConcreteDefinition) -> bytes:
+        """Encode a concrete definition for persistent query-index storage."""
+
+        return encode_cdef(cdef)
+
+    def decode_cdef(self, blob: bytes) -> ConcreteDefinition:
+        """Decode a concrete definition from persistent query-index storage."""
+
+        return decode_cdef(blob)
+
+    def encode_feature_token(self, token: FeatureToken) -> bytes:
+        """Encode a feature token for persistent query-index storage."""
+
+        return encode_feature_token(token)
+
+    def decode_feature_token(self, blob: bytes) -> FeatureToken:
+        """Decode a feature token from persistent query-index storage."""
+
+        return decode_feature_token(blob)
+
+    def encode_graph_path(self, path: GraphPath) -> bytes:
+        """Encode a graph path for persistent query-index storage."""
+
+        return encode_graph_path(path)
+
+    def decode_graph_path(self, blob: bytes) -> GraphPath:
+        """Decode a graph path from persistent query-index storage."""
+
+        return decode_graph_path(blob)
+
+    def digest_blob(self, blob: bytes) -> bytes:
+        """Return the stable digest used for encoded query-index blobs."""
+
+        return digest_blob(blob)
+
+    def encode_reference(self, value: ObjectId | ObjectRef | StateRef) -> bytes:
+        """Encode a canonical lightweight reference value for an index row."""
+
+        return encode_reference(value)
+
+    def decode_reference(self, blob: bytes) -> ObjectId | ObjectRef | StateRef:
+        """Decode a canonical lightweight reference value from an index row."""
+
+        return decode_reference(blob)
+
+    def encode_metadata_predicate(self, value) -> bytes:
+        """Encode a bounded metadata predicate without display parsing.
+
+        Args:
+            value: MetadataPredicate to encode.
+
+        Returns:
+            Versioned query codec bytes.
+
+        Raises:
+            TypeError: If ``value`` is not a MetadataPredicate.
+            QueryCodecError: If predicate data violates canonical query bounds.
+
+        Side Effects:
+            None. Encoding reads only detached predicate data.
+        """
+
+        return encode_metadata_predicate(value)
+
+    def decode_metadata_predicate(self, blob: bytes):
+        """Decode one bounded metadata predicate from a query codec envelope.
+
+        Args:
+            blob: Versioned metadata-predicate codec bytes.
+
+        Returns:
+            A validated MetadataPredicate.
+
+        Raises:
+            QueryCodecError: If the envelope or predicate data is malformed,
+                unsupported, noncanonical, or oversized.
+
+        Side Effects:
+            None. Decoding validates only the supplied bytes.
+        """
+
+        return decode_metadata_predicate(blob)
+
+
+def encode_cdef(cdef: ConcreteDefinition) -> bytes:
+    if not isinstance(cdef, ConcreteDefinition):
+        raise TypeError(f"encode_cdef expected ConcreteDefinition, got {type(cdef).__name__}.")
+    return _pack("cdef", CDEF_CODEC_VERSION, cdef)
+
+
+def decode_cdef(blob: bytes) -> ConcreteDefinition:
+    value = _unpack(blob, expected_kind="cdef", expected_version=CDEF_CODEC_VERSION)
+    if not isinstance(value, ConcreteDefinition):
+        raise QueryCodecError(f"Decoded CDef payload has type {type(value).__name__}, expected ConcreteDefinition.")
+    return value
+
+
+def encode_feature_token(token: FeatureToken) -> bytes:
+    if not isinstance(token, FeatureToken):
+        raise TypeError(f"encode_feature_token expected FeatureToken, got {type(token).__name__}.")
+    payload = {
+        "kind": token.kind,
+        "path": None if token.path is None else token.path.to_data(),
+        "payload": token.payload,
+    }
+    return _pack("feature-token", FEATURE_CODEC_VERSION, payload)
+
+
+def decode_feature_token(blob: bytes) -> FeatureToken:
+    value = _unpack(blob, expected_kind="feature-token", expected_version=FEATURE_CODEC_VERSION)
+    if not isinstance(value, dict):
+        raise QueryCodecError(f"Decoded feature token payload has type {type(value).__name__}, expected dict.")
+    path_data = value.get("path")
+    path = None if path_data is None else GraphPath.from_data(path_data)
+    token = FeatureToken(value.get("kind"), path, value.get("payload"))
+    if not isinstance(token.kind, str):
+        raise QueryCodecError("Decoded feature token kind must be a string.")
+    return token
+
+
+def encode_graph_path(path: GraphPath) -> bytes:
+    if not isinstance(path, GraphPath):
+        raise TypeError(f"encode_graph_path expected GraphPath, got {type(path).__name__}.")
+    return _pack("graph-path", PATH_CODEC_VERSION, path.to_data())
+
+
+def decode_graph_path(blob: bytes) -> GraphPath:
+    value = _unpack(blob, expected_kind="graph-path", expected_version=PATH_CODEC_VERSION)
+    try:
+        return GraphPath.from_data(value)
+    except Exception as exc:
+        raise QueryCodecError("Decoded graph path payload is invalid.") from exc
+
+
+def encode_reference(value: ObjectId | ObjectRef | StateRef) -> bytes:
+    """Encode one complete reference identity without loading Objects or state."""
+
+    if isinstance(value, ObjectId):
+        kind, data = "object-id", value.to_data()
+    elif isinstance(value, ObjectRef):
+        kind, data = "object-ref", value.to_data()
+    elif isinstance(value, StateRef):
+        kind, data = "state-ref", value.to_data()
+    else:
+        raise TypeError(f"encode_reference expected ObjectId, ObjectRef, or StateRef, got {type(value).__name__}.")
+    return _pack("reference", REFERENCE_CODEC_VERSION, {"kind": kind, "value": data})
+
+
+def decode_reference(blob: bytes) -> ObjectId | ObjectRef | StateRef:
+    """Decode one complete lightweight reference identity from index bytes."""
+
+    value = _unpack(blob, expected_kind="reference", expected_version=REFERENCE_CODEC_VERSION)
+    if not isinstance(value, dict) or set(value) != {"kind", "value"}:
+        raise QueryCodecError("Decoded reference payload must contain kind and value.")
+    decoders = {"object-id": ObjectId.from_data, "object-ref": ObjectRef.from_data, "state-ref": StateRef.from_data}
+    decoder = decoders.get(value["kind"])
+    if decoder is None:
+        raise QueryCodecError(f"Unknown reference kind {value['kind']!r}.")
+    try:
+        return decoder(value["value"])
+    except Exception as exc:
+        raise QueryCodecError("Decoded reference value is invalid.") from exc
+
+
+def encode_metadata_predicate(value) -> bytes:
+    """Encode one immutable metadata predicate in the query codec envelope.
+
+    Args:
+        value: MetadataPredicate to encode.
+
+    Returns:
+        Versioned query codec bytes.
+
+    Raises:
+        TypeError: If ``value`` is not a MetadataPredicate.
+        QueryCodecError: If predicate data violates canonical query bounds.
+
+    Side Effects:
+        None. Encoding reads only detached predicate data.
+    """
+
+    from .metadata import MetadataPredicate
+
+    if not isinstance(value, MetadataPredicate):
+        raise TypeError(f"encode_metadata_predicate expected MetadataPredicate, got {type(value).__name__}.")
+    from .metadata import _canonical_bytes
+
+    blob = _canonical_bytes({
+        "kind": "metadata-predicate",
+        "version": METADATA_QUERY_CODEC_VERSION,
+        "payload": value.to_data(),
+    })
+    if len(blob) > _MAX_METADATA_QUERY_BYTES:
+        raise QueryCodecError("Metadata predicate codec data exceeds size bound.")
+    return blob
+
+
+def decode_metadata_predicate(blob: bytes):
+    """Decode one immutable metadata predicate from query codec bytes.
+
+    Args:
+        blob: Versioned metadata-predicate codec envelope.
+
+    Returns:
+        A validated MetadataPredicate.
+
+    Raises:
+        QueryCodecError: If the envelope or predicate data is malformed,
+            unsupported, noncanonical, or oversized.
+
+    Side Effects:
+        None. Decoding validates only the supplied bytes.
+    """
+
+    from .metadata import MetadataPredicate, _canonical_bytes
+
+    if not isinstance(blob, bytes):
+        raise TypeError(f"codec blob must be bytes, got {type(blob).__name__}.")
+    if len(blob) > _MAX_METADATA_QUERY_BYTES:
+        raise QueryCodecError("Metadata predicate codec data exceeds size bound.")
+    try:
+        envelope = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise QueryCodecError("Could not decode metadata predicate codec data.") from exc
+    if not isinstance(envelope, dict) or set(envelope) != {"kind", "version", "payload"}:
+        raise QueryCodecError("Metadata predicate codec envelope is malformed.")
+    if envelope["kind"] != "metadata-predicate":
+        raise QueryCodecError("Expected a metadata-predicate codec envelope.")
+    if type(envelope["version"]) is not int or envelope["version"] != METADATA_QUERY_CODEC_VERSION:
+        raise QueryCodecError("Unsupported metadata predicate codec version.")
+    if _canonical_bytes(envelope) != blob:
+        raise QueryCodecError("Metadata predicate codec data is noncanonical.")
+    return MetadataPredicate.from_data(envelope["payload"])
+
+
+def digest_blob(blob: bytes) -> bytes:
+    if not isinstance(blob, bytes):
+        raise TypeError(f"digest_blob expected bytes, got {type(blob).__name__}.")
+    return hashlib.sha256(blob).digest()
+
+
+def _pack(kind: str, version: int, payload: Any) -> bytes:
+    return pickler({"kind": kind, "version": version, "payload": payload})
+
+
+def _unpack(blob: bytes, *, expected_kind: str, expected_version: int) -> Any:
+    if not isinstance(blob, bytes):
+        raise TypeError(f"codec blob must be bytes, got {type(blob).__name__}.")
+    try:
+        envelope = unpickler(blob)
+    except Exception as exc:
+        raise QueryCodecError("Could not decode query-index blob.") from exc
+    if not isinstance(envelope, dict):
+        raise QueryCodecError(f"Decoded codec envelope has type {type(envelope).__name__}, expected dict.")
+    kind = envelope.get("kind")
+    if kind != expected_kind:
+        raise QueryCodecError(f"Expected {expected_kind!r} blob, got {kind!r}.")
+    version = envelope.get("version")
+    if version != expected_version:
+        raise QueryCodecError(f"Unsupported {expected_kind} codec version {version!r}.")
+    if "payload" not in envelope:
+        raise QueryCodecError("Decoded codec envelope is missing 'payload'.")
+    return envelope["payload"]

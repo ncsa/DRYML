@@ -1,0 +1,137 @@
+from pathlib import Path
+
+import hashlib
+import dill
+import pytest
+
+from dryml.core import Object
+from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DefinitionRecord, LocalStateManifest, StoreRecordError
+from dryml.core.store.store import StoreAuthorityError
+
+
+class ManifestObject(Object):
+    pass
+
+
+def _stage(store, record, payload=b"payload"):
+    stage = Path(store.base_dir) / ".staging" / "state"
+    data = stage / "data" / "nested"
+    data.mkdir(parents=True)
+    (data / "value.bin").write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    definition_bytes = record.to_bytes()
+    manifest = LocalStateManifest("Codec1", record.graph_hash, record.digest, hashlib.sha256(definition_bytes).hexdigest(), (("nested/value.bin", len(payload), digest),))
+    (stage / "def.pkl").write_bytes(definition_bytes)
+    (stage / "manifest.record").write_bytes(manifest.to_bytes())
+    return stage, manifest
+
+
+def test_local_state_preparation_validates_manifest_and_owned_staging(tmp_path):
+    store = DirStore(tmp_path / "store")
+    record = DefinitionRecord(ManifestObject().definition)
+    stage, manifest = _stage(store, record)
+
+    source = store.prepare_local_state(stage, manifest)
+
+    assert source.manifest == manifest
+    assert source.manifest.version == 3
+    assert source.manifest.deferred_paths == ()
+    assert Path(source.handle).is_dir()
+
+
+def test_empty_data_root_is_a_valid_complete_local_state(tmp_path):
+    store = DirStore(tmp_path / "store")
+    record = DefinitionRecord(ManifestObject().definition)
+    stage = Path(store.create_local_state_staging())
+    definition_bytes = record.to_bytes()
+    manifest = LocalStateManifest("Codec1", record.graph_hash, record.digest, hashlib.sha256(definition_bytes).hexdigest(), ())
+    (stage / "def.pkl").write_bytes(definition_bytes)
+    (stage / "manifest.record").write_bytes(manifest.to_bytes())
+
+    source = store.prepare_local_state(stage, manifest)
+
+    assert Path(source.handle).is_dir()
+
+
+def test_manifest_rejects_empty_nested_directories_and_extra_files(tmp_path):
+    store = DirStore(tmp_path / "store")
+    record = DefinitionRecord(ManifestObject().definition)
+    stage, manifest = _stage(store, record)
+    (stage / "data" / "empty").mkdir()
+
+    with pytest.raises(StoreAuthorityError, match="empty nested"):
+        store.prepare_local_state(stage, manifest)
+
+    with pytest.raises(StoreRecordError, match="codec"):
+        LocalStateManifest("not-valid!", record.graph_hash, record.digest, "0" * 64, ())
+
+
+def test_manifest_rejects_symlinked_payload_entries(tmp_path):
+    store = DirStore(tmp_path / "store")
+    record = DefinitionRecord(ManifestObject().definition)
+    stage, manifest = _stage(store, record)
+    (stage / "data" / "link").symlink_to(stage / "data" / "nested" / "value.bin")
+
+    with pytest.raises(StoreAuthorityError, match="unsupported file"):
+        store.prepare_local_state(stage, manifest)
+
+
+def test_manifest_rejects_reencoded_or_modified_definition_bytes(tmp_path):
+    store = DirStore(tmp_path / "store")
+    record = DefinitionRecord(ManifestObject().definition)
+    stage, manifest = _stage(store, record)
+
+    # The graph record still decodes to valid logical authority, but byte-level
+    # local-state authority must retain the exact adjacent def.pkl payload.
+    encoded = record.to_bytes()
+    prefix = b"DRYML-STORE-RECORD/definition/1\n"
+    (stage / "def.pkl").write_bytes(prefix + dill.dumps(dill.loads(encoded[len(prefix):]), protocol=4))
+    with pytest.raises(StoreAuthorityError, match="definition file bytes"):
+        store.prepare_local_state(stage, manifest)
+
+    (stage / "def.pkl").write_bytes(encoded + b"\n")
+    with pytest.raises(StoreAuthorityError, match="definition file bytes"):
+        store.prepare_local_state(stage, manifest)
+
+
+def test_v3_deferred_paths_must_be_sorted_unique_and_in_the_payload_inventory(tmp_path):
+    store = DirStore(tmp_path / "store")
+    record = DefinitionRecord(ManifestObject().definition)
+    stage, manifest = _stage(store, record)
+    files = manifest.files
+
+    for deferred_paths in (
+            ("nested/value.bin", "nested/value.bin"),
+            ("../nested/value.bin",),
+            ("missing",),
+    ):
+        with pytest.raises(StoreRecordError):
+            LocalStateManifest(
+                manifest.codec, manifest.graph_hash, manifest.definition_digest,
+                manifest.definition_file_digest, files, deferred_paths,
+            )
+
+    sorted_files = (("another", 0, "0" * 64), *files)
+    with pytest.raises(StoreRecordError, match="sorted"):
+        LocalStateManifest(
+            manifest.codec, manifest.graph_hash, manifest.definition_digest,
+            manifest.definition_file_digest, sorted_files,
+            ("nested/value.bin", "another"),
+        )
+
+    deferred = LocalStateManifest(
+        manifest.codec, manifest.graph_hash, manifest.definition_digest,
+        manifest.definition_file_digest, files, ("nested/value.bin",),
+    )
+    (stage / "data" / "extra").write_bytes(b"extra")
+    with pytest.raises(StoreRecordError, match="empty nested|exactly match"):
+        deferred.validate_payload(stage / "data", defer_payload=True)
+    (stage / "data" / "extra").unlink()
+    (stage / "data" / "nested" / "value.bin").unlink()
+    with pytest.raises(StoreRecordError, match="empty nested|exactly match"):
+        deferred.validate_payload(stage / "data", defer_payload=True)
+    (stage / "data" / "nested").rmdir()
+    (stage / "data" / "nested").symlink_to(stage / "data")
+    with pytest.raises(StoreRecordError, match="unsupported directory"):
+        deferred.validate_payload(stage / "data", defer_payload=True)

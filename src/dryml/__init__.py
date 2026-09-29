@@ -1,46 +1,213 @@
-from dryml.config import ObjectDef, Meta, \
-    IncompleteDefinitionError, ComputeModeAlreadyActiveError, \
-    ComputeModeLoadError, ComputeModeNotActiveError, \
-    ComputeModeSaveError, MissingIdError
-from dryml.object import Object, ObjectFile, ObjectFactory, \
-    load_object, save_object, change_object_cls, \
-    Wrapper, Callable, get_contained_objects, \
-    build_obj_tree
-from dryml.selector import Selector
-from dryml.repo import Repo
-from dryml.collections import List, Tuple, Dict
-from dryml.workshop import Workshop
-from dryml.context import compute_context, compute
-import dryml.context as context
+"""Dependency-light root exports for DRYML declarations, core identities, and packages.
 
-__version__ = "0.2.2"
+Core conveniences and public package modules, including :mod:`dryml.methods`,
+resolve lazily through ``__getattr__`` so importing :mod:`dryml` does not load
+their implementation, runtime state, or optional frameworks.
+"""
+
+import importlib
+
+from ._framework_imports import install_builtin_roots, install_passive_finder
+
+install_builtin_roots()
+install_passive_finder()
+
+__version__ = "0.3.0b1"
+
+_SUBMODULE_EXPORTS = {
+    "context": "dryml.context",
+    "core": "dryml.core",
+    "artifacts": "dryml.artifacts",
+    "execute": "dryml.execute",
+    "dispatch": "dryml.dispatch",
+    "env": "dryml.environments",
+    "environments": "dryml.environments",
+    "requirements": "dryml.requirements",
+    "worlds": "dryml.worlds",
+    "runtime": "dryml.runtime",
+    "world": "dryml.worlds",
+    "session": "dryml.session",
+    "annotations": "dryml.annotations",
+    "methods": "dryml.methods",
+    "managed": "dryml.managed",
+    "locking": "dryml.locking",
+    "filesystem": "dryml.filesystem",
+    "paths": "dryml.paths",
+}
+
+_CORE_EXPORTS = {
+    "config",
+    "configure",
+    "reset_config",
+    "status",
+    "freeze",
+    "F",
+    "FactorySpec",
+    "Definition",
+    "ConcreteDefinition",
+    "categorical_definition",
+    "Object",
+    "Serializable",
+    "Repo",
+    "Ref",
+    "Mat",
+    "AutoRef",
+    "normalize_args",
+    "normalize_return",
+    "signature_context",
+    "function",
+    "SignatureError",
+    "ObjectId",
+    "ObjectRef",
+    "StateRef",
+    "StateSelectorRef",
+    "StoreReport",
+    "load_object",
+    "load_state_ref",
+    "save_object",
+    "object_namespace",
+    "Selector",
+    "SelectorSpec",
+    "QuotedDef",
+    "Par",
+    "Expr",
+    "Shared",
+    "Template",
+    "TemplateBundle",
+    "TemplateGenerator",
+    "TemplateSelector",
+    "repeat",
+    "Match",
+    "Distribution",
+    "TemplateError",
+    "UnresolvedTemplateError",
+    "TemplateLimitError",
+    "UnsupportedTemplateVerificationError",
+    "Present",
+    "Missing",
+    "AnyValue",
+    "Exact",
+    "Choice",
+    "IntRange",
+    "SubclassOf",
+    "Satisfies",
+    "UniformIntRange",
+    "UniformFromSet",
+    "SKIP_ARGS",
+    "definition_mode",
+    "selector_mode",
+}
+
+
+def __getattr__(name: str) -> object:
+    """Resolve one documented lazy root export.
+
+    Args:
+        name: A name listed in :data:`__all__`.
+
+    Returns:
+        The requested public package module or core-owned convenience value.
+
+    Raises:
+        AttributeError: If ``name`` is not a documented root export.
+
+    Side Effects:
+        Imports the owning lightweight package or core module on first access and
+        caches the resolved value in this module. Importing :mod:`dryml` alone
+        does not resolve these exports.
+    """
+
+    if name in _SUBMODULE_EXPORTS:
+        module = importlib.import_module(_SUBMODULE_EXPORTS[name])
+        globals()[name] = module
+        return module
+    if name in _CORE_EXPORTS:
+        if name in {"config", "configure", "reset_config", "status"}:
+            module = importlib.import_module("dryml.core.session")
+        else:
+            module = importlib.import_module("dryml.core")
+        value = getattr(module, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module 'dryml' has no attribute {name!r}")
 
 __all__ = [
-    Object,
-    ObjectFile,
-    ObjectDef,
-    Meta,
-    ObjectFactory,
-    Selector,
-    Repo,
-    List,
-    Tuple,
-    Dict,
-    Wrapper,
-    Callable,
-    Workshop,
-    load_object,
-    save_object,
-    change_object_cls,
-    context,
-    IncompleteDefinitionError,
-    ComputeModeAlreadyActiveError,
-    ComputeModeLoadError,
-    ComputeModeNotActiveError,
-    ComputeModeSaveError,
-    MissingIdError,
-    build_obj_tree,
-    compute_context,
-    compute,
-    get_contained_objects,
+    "context",
+    "core",
+    "artifacts",
+    "execute",
+    "dispatch",
+    "env",
+    "environments",
+    "requirements",
+    "worlds",
+    "runtime",
+    "world",
+    "session",
+    "annotations",
+    "methods",
+    "managed",
+    "locking",
+    "filesystem",
+    "paths",
+    "config",
+    "configure",
+    "reset_config",
+    "status",
+    "freeze",
+    "F",
+    "FactorySpec",
+    "Definition",
+    "ConcreteDefinition",
+    "categorical_definition",
+    "Object",
+    "Serializable",
+    "Repo",
+    "Ref",
+    "Mat",
+    "AutoRef",
+    "normalize_args",
+    "normalize_return",
+    "signature_context",
+    "function",
+    "SignatureError",
+    "ObjectId",
+    "ObjectRef",
+    "StateRef",
+    "StateSelectorRef",
+    "StoreReport",
+    "load_object",
+    "load_state_ref",
+    "save_object",
+    "object_namespace",
+    "Selector",
+    "SelectorSpec",
+    "QuotedDef",
+    "Par",
+    "Expr",
+    "Shared",
+    "Template",
+    "TemplateBundle",
+    "TemplateGenerator",
+    "TemplateSelector",
+    "repeat",
+    "Match",
+    "Distribution",
+    "TemplateError",
+    "UnresolvedTemplateError",
+    "TemplateLimitError",
+    "UnsupportedTemplateVerificationError",
+    "Present",
+    "Missing",
+    "AnyValue",
+    "Exact",
+    "Choice",
+    "IntRange",
+    "SubclassOf",
+    "Satisfies",
+    "UniformIntRange",
+    "UniformFromSet",
+    "SKIP_ARGS",
+    "definition_mode",
+    "selector_mode",
 ]

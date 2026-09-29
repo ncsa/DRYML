@@ -1,40 +1,88 @@
-from typing import Optional, Union
-from dryml.context import ComputeContext
-from dryml.context.context_tracker import ResourceRequest
+from __future__ import annotations
+
+import os
+import sys
+
+from ..context_tracker import ContextBootstrapError
+from ..plain.context import PlainComputeContext
+from dryml.core.utils.general import module_is_available
 
 
-class TorchComputeContext(ComputeContext):
-    def __init__(
-            self,
-            resource_request: Optional[Union[ResourceRequest, dict]] = {}):
-        super().__init__(resource_request=resource_request)
+class TorchComputeContext(PlainComputeContext):
+    name = "torch"
 
-    def acquire_context(self):
-        # Let parent handle allocation
-        super().acquire_context()
+    def check_compatible_env(self):
+        if not module_is_available('torch'):
+            raise ContextBootstrapError("Torch not available")
 
-        # Get allocated gpus
-        alloc_gpus = self.allocation.gpus
+    def bootstrap_env(self) -> dict[str, str]:
+        env = super().bootstrap_env()
 
-        # check if we need to set memory limits on any of these gpus
-        need_mem_limit = False
-        for gpu_key in alloc_gpus:
-            if self.allocation[gpu_key] < 1.:
-                need_mem_limit = True
-                break
+        if self.allocation is None:
+            raise ContextBootstrapError("No allocation available")
 
-        if need_mem_limit:
-            print("WARNING, currently there is no way to "
-                  "limit memory used by torch.")
+        if self.allocation.gpu_ids:
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.allocation.gpu_ids))
 
-    def compute_devices(self):
-        device_list = list(map(
-            lambda n: n.replace('gpu/', 'cuda:'),
-            self.allocation.gpus))
-        if len(device_list) == 0:
-            device_list = ['cpu']
-        return device_list
+        return env
 
-    def release_context(self):
-        # Let parent handle releasing allocation
-        super().release_context()
+    def validate_current(self) -> None:
+        super().validate_current()
+
+        if self.allocation is None:
+            raise ContextBootstrapError("No allocation available")
+
+        if "torch" not in sys.modules:
+            return
+
+        env = self.bootstrap_env()
+
+        if "CUDA_VISIBLE_DEVICES" in env:
+            if os.environ.get("CUDA_VISIBLE_DEVICES") != env["CUDA_VISIBLE_DEVICES"]:
+                raise ContextBootstrapError(
+                    "Cannot change CUDA_VISIBLE_DEVICES after torch is imported"
+                )
+
+    def apply_current(self) -> None:
+        if self.allocation is None:
+            raise ContextBootstrapError("No allocation available")
+        if self._applied:
+            return
+
+        super().apply_current()
+        try:
+            import torch
+
+            visible_gpu_count = len(self.allocation.gpu_ids)
+            for local_idx in range(visible_gpu_count):
+                frac = self.allocation.assigned.get(
+                    f"gpu/{self.allocation.gpu_ids[local_idx]}",
+                    1.0,
+                )
+                if frac < 1.0:
+                    torch.cuda.memory.set_per_process_memory_fraction(
+                        frac,
+                        device=local_idx,
+                    )
+        except Exception:
+            super().unapply_current()
+            raise
+
+    def unapply_current(self) -> None:
+        if not self._applied:
+            return
+
+        try:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+        finally:
+            super().unapply_current()
+
+    def compute_devices(self) -> list[str]:
+        if self.allocation is None or self.allocation.num_gpus == 0:
+            return ["cpu"]
+        return [f"cuda:{i}" for i in range(self.allocation.num_gpus)]

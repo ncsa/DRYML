@@ -1,0 +1,171 @@
+"""Verify that core's public facade defers heavyweight implementation modules."""
+
+from __future__ import annotations
+
+import importlib
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+
+_EXPECTED_CORE_EXPORTS = (
+    "load_object", "save_object", "load_state_ref", "LiveReusePolicy",
+    "StoreReport", "SavePublication", "SavedSnapshot", "PublicationPhase", "PublicationStatus",
+    "SaveRouting", "StateGraphReservation", "Object", "Serializable", "Compute", "Definition",
+    "categorical_definition", "ConcreteDefinition", "DefLink", "Ref", "Mat", "AutoRef",
+    "normalize_args", "normalize_return", "signature_context", "function", "SignatureError",
+    "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace",
+    "freeze", "QuotedDef", "SelectorSpec", "Selector",
+    "selector", "Par", "Expr", "Shared", "Template", "TemplateBundle", "TemplateGenerator", "TemplateSelector", "repeat", "Match", "Distribution", "TemplateError", "UnresolvedTemplateError", "TemplateLimitError", "UnsupportedTemplateVerificationError", "Present", "Missing", "AnyValue", "Exact", "Choice",
+    "IntRange", "SubclassOf", "Satisfies", "UniformIntRange", "UniformFromSet",
+    "SKIP_ARGS", "Repo", "MetadataConflictError", "RepoDefinition", "RepoDefinitionError", "RepoReconstructionError", "configure", "reset_config", "status",
+    "definition_mode", "selector_mode", "dtype", "DType",
+    "ConfigRef", "F", "FactorySpec", "ConfigError", "CONFIG_MISSING", "as_tensor_spec",
+    "SpecHint", "TensorSpec", "ImportRef", "SourceSpec", "symbol_ref",
+    "resolve_symbol", "CDefEdge", "CDefNode", "CDefOccurrence",
+    "ConcreteDefinitionGraph", "ConcreteDefinitionGraphCycleError",
+    "ConcreteDefinitionGraphError", "EdgeKind", "iter_direct_cdef_edges", "Arg",
+    "DefinitionPath", "DefinitionQuery", "DefinitionResultSet", "GraphPathError",
+    "Index", "Key", "Kwarg", "Parameter", "ObjectResultSet",
+    "ObjectRefResultSet", "OccurrenceResultSet", "ReferenceOccurrence",
+    "ReferenceQuery", "ReferenceResultSet", "MetadataField", "MetadataPredicate", "field", "QueryCardinalityError", "QueryDomainError",
+    "QueryError", "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember",
+    "StateRefResultSet", "CoreExecutionError", "CoreExecutionFuture", "CoreExecutionSnapshot",
+    "CoreOptions", "CoreOutcomeEvidence", "CorePublicationEvidence", "CoreRefreshEvidence",
+    "Executor", "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy", "run", "submit",
+    "SaveAnnotations", "LineageMetadata", "SnapshotCapture", "SnapshotMetadata",
+    "encode_metadata_mapping", "decode_metadata_mapping", "timestamp_to_seconds",
+    "timestamp_from_seconds", "encode_current_annotations", "decode_current_annotations",
+    "encode_lineage_metadata", "decode_lineage_metadata", "encode_snapshot_metadata",
+    "decode_snapshot_metadata", "read_snapshot_metadata", "MetadataScalar", "MetadataValue",
+    "MetadataMapping", "MetadataTarget", "MetadataDiagnostic", "EnvironmentStatus",
+    "RequirementStatus", "EvidenceCoverage",
+)
+
+_EXPORT_MODULES = {
+    **dict.fromkeys(("Object", "Serializable", "Compute", "definition_mode", "selector_mode"), "dryml.core.object"),
+    **dict.fromkeys(("ConcreteDefinition", "Definition", "categorical_definition", "SKIP_ARGS", "freeze"), "dryml.core.definition"),
+    "DefLink": "dryml.core.links",
+    **dict.fromkeys(("AutoRef", "Mat", "Ref", "SignatureError", "function", "normalize_args", "normalize_return", "signature_context"), "dryml.core.signatures"),
+    **dict.fromkeys(("ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace"), "dryml.core.reference_values"),
+    **dict.fromkeys(("AnyValue", "Choice", "Exact", "IntRange", "Match", "Missing", "Present", "Satisfies", "SubclassOf"), "dryml.core.params"),
+    **dict.fromkeys(("Distribution", "UniformFromSet", "UniformIntRange"), "dryml.core.domains"),
+    **dict.fromkeys(("TemplateError", "UnresolvedTemplateError", "TemplateLimitError", "UnsupportedTemplateVerificationError"), "dryml.core.errors"),
+    **dict.fromkeys(("Expr", "Par", "Shared", "Template", "TemplateBundle", "repeat"), "dryml.core.template"),
+    **dict.fromkeys(("TemplateGenerator", "TemplateSelector"), "dryml.core.template_selector"),
+    **dict.fromkeys(("QuotedDef", "SelectorSpec"), "dryml.core.quoted"),
+    **dict.fromkeys(("Selector", "selector"), "dryml.core.selector"),
+    **dict.fromkeys(("Repo", "MetadataConflictError", "load_object", "load_state_ref", "save_object"), "dryml.core.repo"),
+    **dict.fromkeys(("RepoDefinition", "RepoDefinitionError", "RepoReconstructionError"), "dryml.core.repo_definition"),
+    "LiveReusePolicy": "dryml.core.policies",
+    **dict.fromkeys(("StoreReport", "SavePublication", "SavedSnapshot", "PublicationPhase", "PublicationStatus", "SaveRouting"), "dryml.core.repo_plan"),
+    "StateGraphReservation": "dryml.core.state",
+    **dict.fromkeys(("dtype", "DType"), "dryml.core.dtype"),
+    **dict.fromkeys(("SpecHint", "TensorSpec", "as_tensor_spec"), "dryml.core.tensor_spec"),
+    **dict.fromkeys(("CONFIG_MISSING", "ConfigError", "ConfigRef"), "dryml.core.config"),
+    **dict.fromkeys(("F", "FactorySpec"), "dryml.core.factory"),
+    **dict.fromkeys(("configure", "reset_config", "status"), "dryml.core.session"),
+    **dict.fromkeys(("ImportRef", "SourceSpec", "resolve_symbol", "symbol_ref"), "dryml.core.symbol"),
+    **dict.fromkeys(("CDefEdge", "CDefNode", "CDefOccurrence", "ConcreteDefinitionGraph", "ConcreteDefinitionGraphCycleError", "ConcreteDefinitionGraphError", "EdgeKind", "iter_direct_cdef_edges"), "dryml.core.cdef_graph"),
+    **dict.fromkeys(("Arg", "DefinitionPath", "DefinitionQuery", "DefinitionResultSet", "GraphPathError", "Index", "Key", "Kwarg", "Parameter", "ObjectResultSet", "ObjectRefResultSet", "OccurrenceResultSet", "ReferenceOccurrence", "ReferenceQuery", "ReferenceResultSet", "MetadataField", "MetadataPredicate", "field", "QueryCardinalityError", "QueryDomainError", "QueryError", "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember", "StateRefResultSet"), "dryml.core.query"),
+    **dict.fromkeys(("CoreExecutionError", "CoreExecutionFuture", "CoreExecutionSnapshot", "CoreOptions", "CoreOutcomeEvidence", "CorePublicationEvidence", "CoreRefreshEvidence", "Executor", "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy", "run", "submit"), "dryml.core.execute"),
+    **dict.fromkeys(("SaveAnnotations", "LineageMetadata", "SnapshotCapture", "SnapshotMetadata", "encode_metadata_mapping", "decode_metadata_mapping", "timestamp_to_seconds", "timestamp_from_seconds", "encode_current_annotations", "decode_current_annotations", "encode_lineage_metadata", "decode_lineage_metadata", "encode_snapshot_metadata", "decode_snapshot_metadata", "read_snapshot_metadata", "MetadataScalar", "MetadataValue", "MetadataMapping", "MetadataTarget", "MetadataDiagnostic", "EnvironmentStatus", "RequirementStatus", "EvidenceCoverage"), "dryml.core.metadata"),
+}
+
+
+def _run_import_probe(code: str) -> subprocess.CompletedProcess[str]:
+    """Run an isolated source-tree import probe in a fresh Python process."""
+
+    source = Path(__file__).resolve().parents[2] / "src"
+    environment = os.environ | {"PYTHONPATH": os.pathsep.join((str(source), os.environ.get("PYTHONPATH", "")))}
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.parametrize("module_name", ("dryml.core.object", "dryml.core.tensor_spec", "dryml.core.signatures", "dryml.core.template"))
+def test_narrow_core_module_imports_do_not_load_heavy_packages(module_name: str) -> None:
+    """Narrow core modules load without persistence, runtime, consumer, or backend imports."""
+
+    _run_import_probe(
+        f"""
+import importlib
+import sys
+
+importlib.import_module({module_name!r})
+forbidden_prefixes = (
+    "dryml.core.query", "dryml.core.repo", "dryml.core.repo_plan", "dryml.core.session",
+    "dryml.core.store", "dryml.artifacts", "dryml.code", "dryml.data", "dryml.dispatch",
+    "dryml.environments", "dryml.execute", "dryml.managed", "dryml.models", "dryml.runtime",
+    "dryml.session", "dryml.worlds", "tensorflow", "torch", "jax", "jaxlib", "ray",
+)
+loaded = [name for name in sys.modules if name.startswith(forbidden_prefixes)]
+assert not loaded, loaded
+"""
+    )
+
+
+def test_core_exports_resolve_from_owning_modules_and_cache() -> None:
+    """Every supported facade export retains direct-import identity and is cached."""
+
+    core = importlib.import_module("dryml.core")
+    assert tuple(core.__all__) == _EXPECTED_CORE_EXPORTS
+    assert set(_EXPORT_MODULES) == set(_EXPECTED_CORE_EXPORTS)
+
+    for name in _EXPECTED_CORE_EXPORTS:
+        direct = getattr(importlib.import_module(_EXPORT_MODULES[name]), name)
+        resolved = getattr(core, name)
+        assert resolved is direct
+        assert core.__dict__[name] is direct
+
+
+def test_core_missing_names_and_star_import_preserve_python_import_behavior() -> None:
+    """Unknown names fail normally and star imports expose exactly the public manifest."""
+
+    core = importlib.import_module("dryml.core")
+    with pytest.raises(AttributeError, match="has no attribute 'missing_core_export'"):
+        getattr(core, "missing_core_export")
+    with pytest.raises(ImportError, match="cannot import name 'missing_core_export'"):
+        exec("from dryml.core import missing_core_export", {})
+
+    namespace: dict[str, object] = {}
+    exec("from dryml.core import *", namespace)
+    assert {name for name in namespace if name != "__builtins__"} == set(_EXPECTED_CORE_EXPORTS)
+
+
+def test_core_and_symbol_imports_keep_code_lazy_until_source_capture() -> None:
+    """Core imports stay passive; only source capture loads the lexical leaf."""
+
+    _run_import_probe(
+        """
+import sys
+import dryml.core
+import dryml.core.symbol
+assert not any(name == "dryml.code" or name.startswith("dryml.code.") for name in sys.modules)
+"""
+    )
+
+    symbol_source = (Path(__file__).resolve().parents[2] / "src" / "dryml" / "core" / "symbol.py").read_text(encoding="utf-8")
+    assert "from dryml.code.targets" not in symbol_source
+    assert "_collect_source_dependencies" in symbol_source
+    _run_import_probe(
+        """
+import sys
+import dryml.core.symbol as symbol
+
+symbol._collect_source_imports(object(), "def local(value):\\n    return value + 1", None)
+loaded = {name for name in sys.modules if name.startswith("dryml.")}
+allowed = {"dryml", "dryml._framework_imports", "dryml.core", "dryml.core.symbol"}
+assert all(name in allowed or name.startswith("dryml.code") for name in loaded), loaded
+assert "dryml.code.algorithms.lexical_dependencies" in loaded
+forbidden = ("dryml.data", "dryml.environments", "dryml.execute", "dryml.runtime", "dryml.worlds", "tensorflow", "torch", "jax", "ray")
+assert not [name for name in sys.modules if name.startswith(forbidden)]
+"""
+    )

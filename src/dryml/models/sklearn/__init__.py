@@ -1,11 +1,19 @@
-from dryml.models.sklearn.base import Model, \
-    ClassifierModel, RegressionModel, BasicTraining, \
-    Trainable
+from dryml.models.sklearn.base import (
+    BasicTraining,
+    Classifier,
+    ClassifierModel,
+    Model,
+    Regression,
+    RegressionModel,
+    Wrapper,
+)
 
 __all__ = [
-    Model,
-    ClassifierModel,
-    RegressionModel,
-    BasicTraining,
-    Trainable,
+    "BasicTraining",
+    "Classifier",
+    "ClassifierModel",
+    "Model",
+    "Regression",
+    "RegressionModel",
+    "Wrapper",
 ]

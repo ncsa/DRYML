@@ -1,15 +1,72 @@
-from dryml.data.dataset import Dataset, NotIndexedError, \
-    NotSupervisedError
-from dryml.data.numpy_dataset import NumpyDataset
-import dryml.data.util as util
-import dryml.data.transforms as transforms
+from dryml.data.dataset import Dataset, DatasetCursor, DatasetExhaustedError, Map, StreamDataset
+from dryml.data.source import ArrayDataset, GeneratorDataset, NpyFileDataset, TFDSAdapter, TorchDatasetAdapter
+from dryml.data.combine import Chain, Zip
+from dryml.data.methods import ArgMax, Cast, Flatten, Pipe, Project, Scale, Select
+from dryml.data.reduction_methods import (
+    Abs,
+    ArrayMean,
+    ArrayQuantile,
+    Diff,
+    Equal,
+    MeanFinalize,
+    MeanInitial,
+    MeanUpdate,
+    ReductionMode,
+    ReservoirInitial,
+    ReservoirQuantile,
+    ReservoirUpdate,
+    Squared,
+)
+from dryml.data.structural import Batch, Repeat, Shuffle, Skip, Take, Unbatch
+from dryml.data.util import (
+    Collect,
+    collect_xy,
+    collate_xy,
+    iter_xy,
+)
 
 
 __all__ = [
-    Dataset,
-    NotIndexedError,
-    NotSupervisedError,
-    NumpyDataset,
-    util,
-    transforms,
+    "Dataset",
+    "DatasetCursor",
+    "DatasetExhaustedError",
+    "GeneratorDataset",
+    "ArrayDataset",
+    "NpyFileDataset",
+    "TFDSAdapter",
+    "TorchDatasetAdapter",
+    "Map",
+    "StreamDataset",
+    "Pipe",
+    "Project",
+    "Select",
+    "ArgMax",
+    "Cast",
+    "Flatten",
+    "Scale",
+    "Zip",
+    "Chain",
+    "Batch",
+    "Unbatch",
+    "Take",
+    "Skip",
+    "Shuffle",
+    "Repeat",
+    "iter_xy",
+    "collect_xy",
+    "collate_xy",
+    "Collect",
+    "Abs",
+    "ArrayMean",
+    "ArrayQuantile",
+    "Diff",
+    "Equal",
+    "MeanFinalize",
+    "MeanInitial",
+    "MeanUpdate",
+    "ReductionMode",
+    "ReservoirInitial",
+    "ReservoirQuantile",
+    "ReservoirUpdate",
+    "Squared",
 ]

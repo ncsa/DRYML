@@ -1,0 +1,87 @@
+"""Passive immutable key/value carriers for live annotation targets."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any
+
+from .errors import AnnotationValidationError
+
+_KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
+_MAX_KEY_LENGTH = 128
+
+
+def _validate_key(key: str) -> None:
+    """Validate one consumer-selected annotation key.
+
+    Args:
+        key: Exact built-in ASCII string used for exact collection filtering.
+
+    Raises:
+        AnnotationValidationError: If the key is not an exact built-in string or
+            is not a 1-128 character ASCII identifier matching the kernel
+            grammar.
+    """
+
+    if (
+        type(key) is not str
+        or not 1 <= len(key) <= _MAX_KEY_LENGTH
+        or not key.isascii()
+        or _KEY_PATTERN.fullmatch(key) is None
+    ):
+        raise AnnotationValidationError("annotation key is invalid", context={"key": key})
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class Annotation:
+    """One process-local, identity-based consumer annotation entry.
+
+    Args:
+        key: A validated exact built-in consumer-selected classification key.
+        value: An opaque consumer-owned value retained without copying,
+            comparison, hashing, serialization, or deep-freezing.
+
+    Raises:
+        AnnotationValidationError: If ``key`` is not an exact built-in string or
+            does not satisfy the generic annotation-key grammar.
+
+    Side Effects:
+        None. Values remain process-local until attached to a target by the
+        separate attachment API.
+    """
+
+    key: str
+    value: Any
+
+    def __post_init__(self) -> None:
+        """Validate the carrier key without inspecting the opaque value."""
+
+        _validate_key(self.key)
+
+
+@dataclass(frozen=True, slots=True)
+class AnnotatedMember:
+    """One statically discovered annotated class-member declaration.
+
+    Args:
+        owner: The exact class namespace that declared ``name``.
+        name: The declared member name.
+        descriptor: The raw unbound object stored in ``owner``'s namespace.
+        annotations: Direct annotations collected from ``descriptor`` in
+            descriptor order. Known ``staticmethod`` and ``classmethod``
+            descriptors also contribute their underlying function annotations.
+
+    Side Effects:
+        None. This immutable evidence carrier retains live objects without
+        binding descriptors, invoking hooks, copying, or interpreting consumer
+        annotation values.
+    """
+
+    owner: type
+    name: str
+    descriptor: object
+    annotations: tuple[Annotation, ...]
+
+
+__all__ = ["AnnotatedMember", "Annotation"]

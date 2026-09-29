@@ -1,0 +1,585 @@
+"""Closed static normalization for generic code-analysis targets."""
+
+from __future__ import annotations
+
+import ast
+import importlib
+import types
+from dataclasses import dataclass
+from typing import (TYPE_CHECKING, Any, Callable, Literal, TypeAlias, Union,
+                    get_args)
+
+from .callable_info import _function_from_descriptor, _function_slot, _module_namespace, _raw_call_descriptor, _type_slot, analyze_callable
+from .errors import InvalidTargetError, SourceUnavailableError
+from .facts import _sanitize_filename
+from .source import SourceInfo, _bounded_parse, get_source_info
+
+if TYPE_CHECKING:
+    from .inspection import InspectionTarget
+
+
+TargetKind: TypeAlias = Literal["function", "bound_method", "callable_instance", "descriptor", "class", "import", "source"]
+"""Closed target categories accepted by static analysis."""
+
+DescriptorKind: TypeAlias = Literal["function", "staticmethod", "classmethod"]
+"""Built-in descriptor wrappers admitted without binding."""
+
+_TARGET_KINDS = frozenset(get_args(TargetKind))
+_DESCRIPTOR_KINDS = frozenset(get_args(DescriptorKind))
+
+
+def _metadata(func: types.FunctionType) -> tuple[str | None, str | None, str | None]:
+    """Return safe raw function name, module, and qualified name."""
+
+    raw_name = _function_slot(func, "__name__")
+    raw_module = _function_slot(func, "__module__")
+    raw_qualname = _function_slot(func, "__qualname__")
+    name = raw_name if type(raw_name) is str else None
+    module = raw_module if _is_module_name(raw_module) else None
+    qualname = raw_qualname if type(raw_qualname) is str else None
+    return name, module, qualname
+
+
+def _class_metadata(cls: type) -> tuple[str | None, str | None, str | None]:
+    """Read class metadata while bypassing custom metaclass attribute hooks."""
+
+    name = _type_slot(cls, "__name__")
+    module = _type_slot(cls, "__module__")
+    qualname = _type_slot(cls, "__qualname__")
+    return (
+        name if type(name) is str else None,
+        module if _is_module_name(module) else None,
+        qualname if type(qualname) is str else None,
+    )
+
+
+def _is_class(value: object) -> bool:
+    """Return whether a value is a class without reading its ``__class__`` hook."""
+
+    return issubclass(type(value), type)
+
+
+def _is_module_name(value: object) -> bool:
+    """Return whether a value is a non-empty dotted Python identifier."""
+
+    return type(value) is str and bool(value) and all(part.isidentifier() for part in value.split("."))
+
+
+def _safe_filename(module: str | None, filename: str | None) -> str | None:
+    """Convert raw source provenance to a logical module name or basename."""
+
+    if _is_module_name(module):
+        return module
+    return _sanitize_filename(filename)
+
+
+def _descriptor(owner: type, name: str) -> tuple[object, type] | None:
+    """Find an owner-MRO descriptor without binding or invoking it."""
+
+    for base in _type_slot(owner, "__mro__"):  # type: ignore[union-attr]
+        namespace = _type_slot(base, "__dict__")
+        if name in namespace:
+            return namespace[name], base
+    return None
+
+
+def _descriptor_kind(descriptor: object) -> DescriptorKind | None:
+    """Classify an admitted raw descriptor without calling descriptor hooks."""
+
+    if type(descriptor) is types.FunctionType:
+        return "function"
+    if type(descriptor) is staticmethod and type(descriptor.__func__) is types.FunctionType:
+        return "staticmethod"
+    if type(descriptor) is classmethod and type(descriptor.__func__) is types.FunctionType:
+        return "classmethod"
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceTarget:
+    """Static source target that is parsed but never compiled or executed.
+
+    Args:
+        source: Python source containing exactly one supported top-level subject.
+        name: Optional selected function or class name.
+        filename: Optional request-local source filename.
+        start_line: Optional one-based source origin line.
+
+    Raises:
+        ValueError: If carrier field types are invalid.
+
+    Side Effects:
+        None. Validation does not parse or execute the source.
+    """
+
+    source: str
+    name: str | None = None
+    filename: str | None = None
+    start_line: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate static carrier types before later source parsing."""
+
+        if type(self.source) is not str or (self.name is not None and type(self.name) is not str):
+            raise ValueError("source target is invalid")
+        if self.filename is not None and type(self.filename) is not str:
+            raise ValueError("source target filename is invalid")
+        if self.start_line is not None and (type(self.start_line) is not int or self.start_line < 1):
+            raise ValueError("source target start line is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ImportTarget:
+    """Explicit import target using the ``module[:qualname]`` grammar.
+
+    Args:
+        path: Module path alone or module path followed by a static qualname.
+
+    Raises:
+        ValueError: If ``path`` is not an exact built-in string.
+
+    Side Effects:
+        None. Import occurs only during normalization.
+    """
+
+    path: str
+
+    def __post_init__(self) -> None:
+        """Validate only the carrier type; grammar validation is typed analysis."""
+
+        if type(self.path) is not str:
+            raise ValueError("import target path is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class DescriptorTarget:
+    """Raw owner/name reference resolved through class dictionaries and MRO.
+
+    Args:
+        owner: Class declaring or inheriting the target descriptor.
+        name: Descriptor name to resolve without binding.
+
+    Raises:
+        ValueError: If the descriptor carrier fields are invalid.
+
+    Side Effects:
+        None. Descriptor binding and dynamic class lookup are never performed.
+    """
+
+    owner: type
+    name: str
+
+    def __post_init__(self) -> None:
+        """Validate descriptor carrier types without inspecting owner members."""
+
+        if not _is_class(self.owner) or type(self.name) is not str or not self.name:
+            raise ValueError("descriptor target is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class TargetInfo:
+    """Immutable metadata-only provenance for one normalized code target.
+
+    Args:
+        kind: Closed normalized target kind.
+        name: Optional callable, class, descriptor, or selected-source name.
+        module: Optional target module name.
+        qualname: Optional target qualified name.
+        owner_module: Optional descriptor or receiver owner module name.
+        owner_qualname: Optional descriptor or receiver owner qualified name.
+        descriptor_kind: Optional admitted raw descriptor category.
+        filename: Sanitized logical module name or source basename.
+        start_line: Optional one-based source origin line.
+        import_path: Optional caller-specified explicit import path.
+
+    Raises:
+        ValueError: If framework-owned metadata is invalid or contains an
+            absolute filesystem path.
+
+    Side Effects:
+        None. It retains no live target handle.
+    """
+
+    kind: TargetKind
+    name: str | None
+    module: str | None
+    qualname: str | None
+    owner_module: str | None
+    owner_qualname: str | None
+    descriptor_kind: DescriptorKind | None
+    filename: str | None
+    start_line: int | None
+    import_path: str | None
+
+    def __post_init__(self) -> None:
+        """Validate immutable metadata and sanitize any source path."""
+
+        if self.kind not in _TARGET_KINDS:
+            raise ValueError("target kind is invalid")
+        for value in (self.name, self.module, self.qualname, self.owner_module, self.owner_qualname, self.filename, self.import_path):
+            if value is not None and type(value) is not str:
+                raise ValueError("target metadata is invalid")
+        if (self.module is not None and not _is_module_name(self.module)) or (
+            self.owner_module is not None and not _is_module_name(self.owner_module)
+        ):
+            raise ValueError("target module metadata is invalid")
+        if self.descriptor_kind is not None and self.descriptor_kind not in _DESCRIPTOR_KINDS:
+            raise ValueError("descriptor kind is invalid")
+        if self.start_line is not None and (type(self.start_line) is not int or self.start_line < 1):
+            raise ValueError("target source line is invalid")
+        # ``None`` is meaningful for detached projections: they retain module
+        # identity without carrying source-location provenance.
+        if self.filename is not None:
+            object.__setattr__(self, "filename",
+                               _safe_filename(self.module, self.filename))
+
+
+@dataclass(frozen=True, slots=True)
+class CodeTarget:
+    """Request-local normalized target plus immutable metadata provenance.
+
+    Args:
+        info: Metadata-only normalized target provenance.
+        original: Optional original live target handle.
+        callable: Optional admitted raw callable function.
+        owner: Optional receiver or descriptor owner class.
+        descriptor: Optional raw unbound descriptor.
+        source: Optional request-local static source.
+        import_path: Optional explicit import path used for admission.
+
+    Raises:
+        ValueError: If framework-owned fields are not exact supported carriers.
+
+    Side Effects:
+        None. Live fields are request-local and must not be copied into graphs or
+        returned framework provenance.
+    """
+
+    info: TargetInfo
+    original: object | None
+    callable: Callable[..., Any] | None
+    owner: type | None
+    descriptor: object | None
+    source: SourceInfo | None
+    import_path: str | None
+
+    def __post_init__(self) -> None:
+        """Validate framework-owned container fields without inspecting handles."""
+
+        if type(self.info) is not TargetInfo or (self.owner is not None and not _is_class(self.owner)):
+            raise ValueError("code target is invalid")
+        if self.source is not None and type(self.source) is not SourceInfo:
+            raise ValueError("code target source is invalid")
+        if self.import_path is not None and type(self.import_path) is not str:
+            raise ValueError("code target import path is invalid")
+
+
+CodeTargetInput: TypeAlias = Union[CodeTarget, SourceTarget, ImportTarget,
+                                   DescriptorTarget, Callable[..., Any], type,
+                                   "InspectionTarget"]
+"""Supported normalized wrappers and live Python target forms."""
+
+
+def _normal_function(func: types.FunctionType,
+                     *,
+                     include_source: bool = True) -> CodeTarget:
+    """Normalize a direct Python function after safe callable admission."""
+
+    info = analyze_callable(func)
+    name, module, qualname = _metadata(func)
+    source = get_source_info(func) if include_source else None
+    return CodeTarget(
+        TargetInfo(
+            "function", name, module, qualname, None, None, None,
+            _safe_filename(module,
+                           source.filename if source is not None else None),
+            source.start_line if source is not None else None, None),
+        func,
+        info.func,
+        None,
+        None,
+        source,
+        None,
+    )
+
+
+def _bound_method(method: types.MethodType,
+                  *,
+                  include_source: bool = True) -> CodeTarget:
+    """Normalize a bound Python method without inspecting its receiver state."""
+
+    info = analyze_callable(method)
+    name, module, qualname = _metadata(info.func)
+    owner = type(info.bound_self)
+    _, owner_module, owner_qualname = _class_metadata(owner)
+    source = get_source_info(info.func) if include_source else None
+    return CodeTarget(
+        TargetInfo(
+            "bound_method", name, module, qualname, owner_module,
+            owner_qualname, None,
+            _safe_filename(module,
+                           source.filename if source is not None else None),
+            source.start_line if source is not None else None, None),
+        method,
+        info.func,
+        owner,
+        None,
+        source,
+        None,
+    )
+
+
+def _callable_instance(instance: object,
+                       *,
+                       include_source: bool = True) -> CodeTarget:
+    """Normalize a supported instance through its raw class ``__call__`` only."""
+
+    info = analyze_callable(instance)  # type: ignore[arg-type]
+    owner = type(instance)
+    _, owner_module, owner_qualname = _class_metadata(owner)
+    name, module, qualname = _metadata(info.func)  # type: ignore[arg-type]
+    source = get_source_info(
+        info.func) if include_source else None  # type: ignore[arg-type]
+    return CodeTarget(
+        TargetInfo(
+            "callable_instance", name, module, qualname, owner_module,
+            owner_qualname, None,
+            _safe_filename(module,
+                           source.filename if source is not None else None),
+            source.start_line if source is not None else None, None),
+        instance,
+        info.func,
+        owner,
+        _raw_call_descriptor(owner),
+        source,
+        None,
+    )
+
+
+def _class_target(cls: type, *, include_source: bool = True) -> CodeTarget:
+    """Normalize a class solely as a static source subject."""
+
+    name, module, qualname = _class_metadata(cls)
+    source = get_source_info(cls) if include_source else None
+    return CodeTarget(
+        TargetInfo(
+            "class", name, module, qualname, None, None, None,
+            _safe_filename(module,
+                           source.filename if source is not None else None),
+            source.start_line if source is not None else None, None),
+        cls,
+        None,
+        None,
+        None,
+        source,
+        None,
+    )
+
+
+def _descriptor_target(target: DescriptorTarget,
+                       *,
+                       include_source: bool = True) -> CodeTarget:
+    """Normalize an admitted raw descriptor using static MRO lookup."""
+
+    found = _descriptor(target.owner, target.name)
+    if found is None:
+        raise InvalidTargetError("descriptor target is unavailable")
+    descriptor, declaring_owner = found
+    kind = _descriptor_kind(descriptor)
+    func = _function_from_descriptor(descriptor)
+    if kind is None or func is None:
+        raise InvalidTargetError("unsupported descriptor target")
+    analyze_callable(func)
+    _, module, qualname = _metadata(func)
+    _, owner_module, owner_qualname = _class_metadata(declaring_owner)
+    source = get_source_info(func) if include_source else None
+    return CodeTarget(
+        TargetInfo(
+            "descriptor", target.name, module, qualname, owner_module,
+            owner_qualname, kind,
+            _safe_filename(module,
+                           source.filename if source is not None else None),
+            source.start_line if source is not None else None, None),
+        None,
+        func,
+        target.owner,
+        descriptor,
+        source,
+        None,
+    )
+
+
+def _source_target(target: SourceTarget) -> CodeTarget:
+    """Parse and admit exactly one unambiguous static source subject."""
+
+    tree, limited = _bounded_parse(target.source, target.filename)
+    if limited:
+        return CodeTarget(
+            TargetInfo("source", target.name, None, None, None, None, None,
+                       None, target.start_line, None),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    if tree is None:
+        raise SourceUnavailableError("source is invalid", code="source.invalid") from None
+    candidates: list[tuple[str | None, ast.AST]] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            candidates.append((node.name, node))
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Lambda):
+            candidates.append((None, node.value))
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Lambda):
+            candidates.append((node.targets[0].id, node.value))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and isinstance(node.value, ast.Lambda):
+            candidates.append((node.target.id, node.value))
+    if target.name is not None:
+        candidates = [candidate for candidate in candidates if candidate[0] == target.name]
+    if len(candidates) != 1 or len(tree.body) != 1:
+        raise InvalidTargetError("source target is ambiguous")
+    name, _ = candidates[0]
+    source = SourceInfo(target.source, target.filename, target.start_line)
+    return CodeTarget(
+        TargetInfo("source", name, None, None, None, None, None, _safe_filename(None, target.filename), target.start_line, None),
+        None,
+        None,
+        None,
+        None,
+        source,
+        None,
+    )
+
+
+def _parse_import_path(path: str) -> tuple[str, tuple[str, ...]]:
+    """Validate and split the exact explicit import grammar."""
+
+    if path.count(":") > 1:
+        raise InvalidTargetError("invalid import target")
+    module, separator, qualname = path.partition(":")
+    if not module or any(not segment.isidentifier() for segment in module.split(".")):
+        raise InvalidTargetError("invalid import target")
+    if separator:
+        if not qualname or any(not segment or segment == "<locals>" or not segment.isidentifier() for segment in qualname.split(".")):
+            raise InvalidTargetError("invalid import target")
+    return module, tuple(qualname.split(".")) if separator else ()
+
+
+def _static_member(value: object, name: str) -> object | None:
+    """Traverse one imported qualified-name segment without dynamic lookup."""
+
+    if isinstance(value, types.ModuleType):
+        namespace = _module_namespace(value)
+        return namespace.get(name)
+    if _is_class(value):
+        found = _descriptor(value, name)
+        return found[0] if found is not None else None
+    return None
+
+
+def _import_target(target: ImportTarget,
+                   *,
+                   include_source: bool = True) -> CodeTarget:
+    """Import only the requested module then traverse its qualname statically."""
+
+    module_name, segments = _parse_import_path(target.path)
+    try:
+        resolved: object = importlib.import_module(module_name)
+    except Exception:
+        raise InvalidTargetError("import target could not be resolved", code="target.import_failed") from None
+    parent: object | None = None
+    final_segment: str | None = None
+    for segment in segments:
+        parent = resolved
+        final_segment = segment
+        resolved = _static_member(resolved, segment)
+        if resolved is None:
+            raise InvalidTargetError("import target could not be resolved")
+    if not segments:
+        return CodeTarget(TargetInfo("import", None, module_name, None, None, None, None, module_name, None, target.path), resolved, None, None, None, None, target.path)
+    if _is_class(parent) and final_segment is not None:
+        found = _descriptor(parent, final_segment)
+        if found is not None and _descriptor_kind(found[0]) is not None:
+            normalized = _descriptor_target(DescriptorTarget(
+                parent, final_segment),
+                                            include_source=include_source)
+        else:
+            normalized = _normalize_target(resolved,
+                                           include_source=include_source)
+    else:
+        normalized = _normalize_target(
+            resolved, include_source=include_source
+        )  # Static traversal has already selected the raw member.
+    return CodeTarget(
+        TargetInfo("import", normalized.info.name, normalized.info.module, normalized.info.qualname, normalized.info.owner_module, normalized.info.owner_qualname, normalized.info.descriptor_kind, normalized.info.filename, normalized.info.start_line, target.path),
+        normalized.original,
+        normalized.callable,
+        normalized.owner,
+        normalized.descriptor,
+        normalized.source,
+        target.path,
+    )
+
+
+def normalize_target(target: CodeTargetInput) -> CodeTarget | InspectionTarget:
+    """Normalize one supported static code target through a closed whitelist.
+
+    Args:
+        target: Existing normalized target, explicit source/import/descriptor
+            wrapper, Python function, bound Python method, class, or admitted
+            callable instance.
+
+    Returns:
+        Request-local target handles paired with immutable metadata-only
+        provenance.
+
+    Raises:
+        InvalidTargetError: If a target form is unsupported, dynamic, malformed,
+            or cannot be resolved through the explicit import boundary.
+        SourceUnavailableError: If explicit source is malformed.
+
+    Side Effects:
+        Explicit import targets may execute the selected module's top-level code.
+        All other forms avoid target execution, class construction, descriptor
+        binding, dynamic lookup, and custom reflection hooks.
+    """
+
+    return _normalize_target(target, include_source=True)
+
+
+def _normalize_target(target: CodeTargetInput, *,
+                      include_source: bool) -> CodeTarget | InspectionTarget:
+    """Normalize a target with private control over eager source retrieval."""
+
+    from .inspection import InspectionTarget
+
+    if type(target) in (CodeTarget, InspectionTarget):
+        return target
+    if type(target) is SourceTarget:
+        return _source_target(target)
+    if type(target) is ImportTarget:
+        return _import_target(target, include_source=include_source)
+    if type(target) is DescriptorTarget:
+        return _descriptor_target(target, include_source=include_source)
+    if type(target) is types.FunctionType:
+        return _normal_function(target, include_source=include_source)
+    if type(target) is types.MethodType and type(target.__func__) is types.FunctionType:
+        return _bound_method(target, include_source=include_source)
+    if _is_class(target):
+        return _class_target(target, include_source=include_source)
+    return _callable_instance(target, include_source=include_source)
+
+
+__all__ = [
+    "CodeTarget",
+    "CodeTargetInput",
+    "DescriptorKind",
+    "DescriptorTarget",
+    "ImportTarget",
+    "SourceTarget",
+    "TargetInfo",
+    "TargetKind",
+    "normalize_target",
+]

@@ -1,9 +1,9 @@
 flake8
 pytest
 pytest-cov
-tensorflow
-ray
-scikit-learn
-xgboost
-torch<=2.3
+pytest-timeout
+build
+setuptools>=42
+wheel
 GPUtil
+PyYAML

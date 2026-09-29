@@ -1,0 +1,279 @@
+# Data API
+
+Status: draft.
+
+The DRYML Data API provides reusable, repo-backed dataset objects and dataset transformations. Datasets are normal DRYML objects, so they can be saved, queried, composed, and used as part of larger object graphs.
+
+## Dataset Contract
+
+`Dataset` is an abstract iterable dataset type. Every concrete Dataset subclass
+must implement `__iter__`; `__len__` remains optional because cardinality can be
+unknown. The supported source, mapped, and structural dataset classes implement
+iteration and remain constructible.
+
+Important expectations:
+
+- A dataset should be re-iterable.
+- `iter(dataset)` should produce a fresh iterator.
+- `dataset.spec` describes one yielded element.
+- `len(dataset)` should return cardinality when known.
+- `peek()` returns one element without permanently consuming the dataset.
+
+`dryml.artifacts.CachedDataset` implements this same contract after completion.
+Its persisted output spec is the codec's actual NumPy-backed `SpecTree`, so
+`Map`, `Batch`, `Unbatch`, cursors, and other ordinary Dataset consumers do not
+branch on cache type or codec. A new or progress-only cache has no consumable
+spec; only a completed StateRef restores an iterable Dataset.
+
+### Cursors and Exact Bounds
+
+`dataset.iterator()` creates an independent closeable `DatasetCursor`. Its
+`position` counts consumed yields, `skip(n)` requires a nonnegative exact
+integer and either advances exactly `n` values or raises `DatasetExhaustedError`
+with requested and actual counts, and `close()` releases its owned iterator.
+Dataset objects do not retain a shared cursor. Array and NPY-file sources use
+equivalent private indexed advancement, so skipping does not read discarded rows
+or files.
+
+`Take(source, n)` requires a nonnegative exact integer and has finite
+cardinality `n`. It yields exactly `n` values or raises `DatasetExhaustedError`
+after its available prefix; `Take(source, 0)` does not open the source. The
+older `Skip(source, n)` remains forgiving when a source ends before its prefix.
+
+### Prepared Stream Graphs
+
+`dataset.method_graph()` returns an inert `MethodGraph` view for a Dataset
+pipeline. It does not open, peek, select from, or otherwise consume a source.
+Call `graph.learn(strategy="local")` before `graph.iterator()`; preparation
+records qualified local selections from declared specs and opens no sources.
+`graph.iterator()` then returns an independent closeable graph cursor. Optional
+positional specs supplied to `learn` are assertions of the graph's declared
+source specs, and `output_spec` is an assertion of its declared result spec.
+Mismatched assertions, unsupported strategies, unqualified operators, and
+Method-selection failures raise before source execution.
+
+The initial prepared subset is `Map`, `Batch`, `Unbatch`, `Zip`, and `Chain`.
+It preserves their ordinary order and cardinality rules: Map emits one result
+per input, Batch retains short final batches unless `drop_remainder=True`,
+Unbatch emits split items in order, Zip stops at the shortest source with its
+existing left-to-right positional over-pull, and Chain opens/advances sources in
+declaration order. Other Dataset operators keep their eager behavior but reject
+graph planning explicitly.
+
+One graph cursor owns all source and selected output iterator resources it
+acquires. It closes them once in reverse acquisition order on exhaustion,
+explicit close, acquisition/body failure, or a consumer body error. Reusing one
+Dataset occurrence in branches opens independent cursors and independent
+unknown-spec discovery buffers; it is not teeing, memoization, or deduplication.
+`skip()` has the normal exact cursor contract, and reopening a graph creates a
+fresh traversal rather than serializing an iterator or generator frame.
+
+Prepared Dataset boundaries may retain one dense NumPy/TensorFlow/Torch handoff
+edge when a downstream Method has no direct compatible implementation. The
+adapter is applied while advancing the Dataset cursor, before native model
+forward/loss/backward/tape or compiled work begins. Dataset preprocessing is
+therefore data-only: it is not an end-to-end autodiff, tracing, or `tf.function`
+contract. Batch and Unbatch select the existing declared-backend stack/split
+operation once when available; their generic Python fallback remains equivalent
+for order, short batches, cardinality, and cursor cleanup. Zip and Chain retain
+the Python fallback unless compatible source-native composition is explicitly
+provided by all inputs.
+
+## Source Datasets
+
+Common source dataset classes:
+
+- `GeneratorDataset`
+- `ArrayDataset`
+- `NpyFileDataset`
+- `TFDSAdapter`
+- `TorchDatasetAdapter`
+
+`TFDSAdapter` loads a selected TFDS split and delivers either native TensorFlow
+values or NumPy values. `data_dir` is an optional string local TFDS root; `None`
+uses TFDS's normal default. `download` is an exact boolean and defaults to
+`True` for compatibility, so ordinary use can cause TFDS download/network and
+filesystem preparation side effects. Set `download=False` with a prepared
+`data_dir` to require local-only loading: a missing split then fails through
+TFDS rather than downloading. `download_config` accepts a TFDS `DownloadConfig`
+object and is forwarded only when supplied, so callers can control TFDS
+preparation behavior. Adapter construction imports TFDS and propagates its
+import, split, local filesystem, and download failures; NumPy delivery avoids
+importing DRYML's TensorFlow spec backend.
+
+The historical modules `dryml.data.tf.dataset` and
+`dryml.data.torch.dataset` are unsupported legacy APIs. They are not current
+exports and are not compatible with this Dataset contract.
+
+Example:
+
+```python
+import numpy as np
+
+from dryml.core import TensorSpec
+from dryml.data import ArrayDataset
+
+dataset = ArrayDataset(
+    np.arange(12, dtype="float32").reshape(3, 4),
+    spec=TensorSpec("float32", shape=(4,)),
+)
+```
+
+## Transforming Data
+
+`Map` applies one Method or a pipeline of Methods to each source element. Method
+types and authoring helpers are owned by `dryml.methods`, not `dryml.code`.
+`Map` selects one local callable from a complete source spec before iteration;
+when only the backend is missing, it may inspect one first value to select it.
+That local selection does not change the Method's eager, learning, or cached
+state.
+
+When a selected Method explicitly declares `iteration_independent`, a Map cursor
+may delegate discarded values to its source cursor without invoking the Method.
+Otherwise it transforms the discarded prefix normally. The fast path may omit
+data-dependent errors in discarded transformed values, but preserves source
+counts, exhaustion, and validation for delivered values.
+
+```python
+from dryml.data import Map, Scale
+
+scaled = Map(dataset, Scale(0.5))
+```
+
+Common transformation methods:
+
+- `Pipe`: compose methods.
+- `Project`: project nested structures.
+- `Select`: select values by path.
+- `Cast`: change dtype.
+- `Flatten`: flatten tensor-like values.
+- `Scale`: multiply/shift values.
+- `ArgMax`: compute argmax along an axis.
+
+## Numerical Reduction Methods
+
+`Diff`, `Abs`, `Squared`, and `Equal` are reusable native numerical Methods.
+`Diff`, `Abs`, and `Squared` promote signed `int8`/`int16`/`int32`/`int64` and
+`float32`/`float64` inputs to float64 before arithmetic; they reject boolean
+arithmetic, broadcasting, mixed backends, non-finite inputs, unsigned/complex,
+object, sparse, and ragged values. `Equal` accepts supported numeric or boolean
+equal-shaped values and returns a native boolean tensor.
+
+`ArrayMean(axis=None)` and `ArrayQuantile(q, axis=None)` reduce one bounded
+native array. Their axis declarations accept `None`, one integer, or a unique
+tuple of integers. Mean accepts booleans and returns float64; quantile rejects
+booleans, preserves tuple request order and duplicates, and uses native linear
+interpolation. Empty selected populations, invalid axes, non-finite values, and
+unsupported dtypes raise rather than changing population semantics.
+
+`MeanInitial`, `MeanUpdate`, and `MeanFinalize` are the reusable declared
+sum/count program behind the named mean factory. `ReservoirInitial`,
+`ReservoirUpdate`, and `ReservoirQuantile` are the corresponding bounded
+Algorithm R program. They keep carry tensors in NumPy, Torch CPU, or TensorFlow
+CPU through initialization, transitions, and finalization. They do not collect
+the Dataset or use a global random generator. Mean carry is a finite float64
+sum with a nonnegative scalar int64 count; transitions reject changed carry
+shape/dtype, non-finite intermediate sums, and count wrap before returning a
+next carry. Reservoir carry is float64 storage plus scalar int64 population and
+draw counters and a two-limb int64 key. Fill consumes no draw; each attempted
+post-fill draw, including a rejection, advances the counter once. Invalid
+population/draw metadata and int64 wrap fail before arithmetic or sampling.
+
+The evaluation factories in `dryml.metrics` build their source projections from
+these Data Methods: `Project(prediction=Pipe(Select(x), model),
+target=Select(y))`, followed by `Diff` and either `Abs` or `Squared` for
+regression. Classification factories require caller-supplied label Methods;
+`ArgMax` remains an explicit conversion rather than an implicit classifier
+policy.
+
+`Fold` retains its Dataset through `Ref[AutoRef]`. The declaration, its CDef, and
+an exact completed Fold state retain the selected reference rather than an owned
+Dataset payload. The Dataset is materialized only by `Fold.compute()` through its
+selected managed Repo; a result-only `StateRef` remains readable after that input
+is unavailable, while a later fresh rerun fails normally. During compatible
+recovery Fold applies its saved processed-yield count to a new closeable cursor;
+it never persists or transfers the prior iterator. Exact skipping detects a source
+that now ends before the saved position. Positional continuation assumes a
+re-iterable source but does not claim that a stochastic suffix equals the suffix
+from the interrupted traversal. Saved EOF progress needs no new source cursor.
+CachedDataset applies the same positional meaning to retained cache progress: the
+completed prefix remains exact, while a resumed stochastic source may provide a
+fresh suffix after the saved yield count.
+
+## Structural Operations
+
+Structural dataset nodes change iteration structure rather than individual values.
+
+- `Batch`
+- `Unbatch`
+- `Take`
+- `Skip`
+- `Shuffle`
+- `Repeat`
+
+For bounded custom synchronous behavior, subclass `StreamDataset` and declare a
+class-level `dryml.methods.StreamNode`. The declaration names ordered
+`IteratorPort` inputs/output, pure element-spec and cardinality transforms,
+deterministic pull policy, and an exact maximum buffered-item count. Its
+implementation receives borrowed input iterators and returns an iterator; a list
+returned by an element `Map` Method remains one element and is not implicitly
+expanded into stream outputs. Custom declarations are process-local trusted code,
+not a generator serializer, async scheduler, key join, whole-stream collector,
+or JIT interface.
+
+Example:
+
+```python
+from dryml.data import Batch, Take
+
+small_batches = Take(Batch(dataset, batch_size=32), 10)
+```
+
+## Combining Datasets
+
+`Zip` combines datasets elementwise. `Chain` concatenates datasets sequentially.
+
+```python
+from dryml.data import Zip, Chain
+
+pairs = Zip(features, labels)
+combined = Chain(train_a, train_b)
+```
+
+## Working With `(x, y)` Data
+
+Utility functions help with common supervised-learning structures:
+
+- `iter_xy(dataset)`
+- `collect_xy(dataset)`
+- `collate_xy(dataset)`
+- `Collect`
+
+These utilities assume an element structure where `x` and `y` can be selected by path.
+
+## Specs And Data
+
+Dataset specs are important because models and methods use them to infer outputs and verify structure. A dataset yielding `(x, y)` pairs should usually expose a matching spec tree.
+
+```python
+from dryml.core import TensorSpec
+
+pair_spec = (
+    TensorSpec("float32", shape=(128,)),
+    TensorSpec("int64", shape=()),
+)
+```
+
+## Common Pitfalls
+
+- Dataset objects should be re-iterable unless clearly documented otherwise.
+- Keep specs aligned with actual yielded values.
+- Avoid embedding large data directly in definitions when a file-backed source is more appropriate.
+- Use `Batch` and `Unbatch` consistently with tensor specs.
+
+## Related Docs
+
+- [Methods](methods.md)
+- [Tensor Specs](tensor_specs.md)
+- [Models API](models.md)
+- [Repos and Stores](repos.md)

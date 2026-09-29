@@ -1,0 +1,158 @@
+# Release Notes
+
+## 0.3.0b1 (unreleased)
+
+`CachedDataset`, `CacheCodec`, and `CacheIntegrityError` are now concrete public
+Artifact APIs. Finite dense Dataset trees can be streamed into built-in NumPy,
+optional Parquet (`pyarrow>=25.0.1`), or optional NetCDF (`netCDF4>=1.7.4`) cache
+state and restored as ordinary NumPy-backed Datasets. Completed same-codec content
+can be republished without its source; codec changes recompute. Metadata is
+validated on restore and chunk integrity before delivery. Checked-in fixture-set
+v1 freezes finished format-v2 reader evidence for all three codecs and a
+deterministic NumPy/Parquet polynomial sample.
+
+CachedDataset progress uses managed checkpoints plus opaque Store-owned work
+tokens, fresh-cursor positional resume, and direct-DirStore retained files; final
+StateRefs are self-contained. Fold now checkpoints bounded carry and the same
+yield-position model. Dataset cursors are independent and closeable, Take is exact
+and reports requested/actual exhaustion, and explicit Method iteration
+independence allows eligible Map prefixes to skip transformations conservatively.
+These are same-host local-Store contracts, not stochastic replay, cache discovery,
+remote Store transport, a codec plugin API, or automatic cross-process
+synchronization.
+
+Managed declarations can opt into exact completed-StateRef returns and one
+definition-transported optional Store publication control. Authored bodies still
+declare `-> None`; unexpected body values warn and are discarded, and failures
+never return apparent completion. `ml_dtypes>=0.6.0` is a base dependency; the
+`parquet`, `netcdf`, and test extras carry the qualified optional readers.
+
+`dryml.dispatch` adds an explicit configuration-first facade for bounded static
+environment/world declaration discovery and one selected execution route. Process
+defaults and immutable views can select an Execute backend or `InProcess()`;
+there is no implicit route, backend fallback, resource growth, worker thread,
+environment creation, package installation, Ray deployment, retry, resume, or
+lost-response reconciliation. `submit` returns the existing core future only for
+an Execute route, while in-process `run` admits fresh held-generation evidence
+then directly calls the original synchronous callable once. Coroutine, generator,
+and async-generator roots reject before probing; lazy values returned from a
+synchronous root are data and are not driven by Dispatch.
+
+Discovery uses shared generic static dependency, environment, and world kernels
+for inline and isolated probes. Incomplete but valid static coverage issues a
+visible warning for `run`/`submit`; conflicts, malformed results, timeout/crash,
+cleanup failure, target drift, and hard admission failures stop work. Reports and
+probe envelopes are bounded, redacted, ephemeral observations rather than Store
+records or admission tickets. Existing `EnvironmentSpec` selection now flows
+through generic/core Execute and Dispatch as an exact point-in-time pin; an
+unavailable or mismatched selected environment never falls back. Historical
+source/loaded-code drift and post-admission external environment mutation remain
+accepted limitations, not hot-reload or environment-locking guarantees.
+
+`dryml.execute` now provides generic trusted-callable execution with explicit
+`Executor`/one-off backend configuration, common `ExecutionFuture` and bounded
+output APIs, local subprocess execution, and an optional existing same-host Ray
+2.56.0 backend. Calls use coordinator-owned bounded spools and pre-GO admission;
+they do not use `Repo`, `Store`, managed operations, runtime/session transport,
+or an implicit backend. Existing Conda/venv targets and Ray deployments are
+caller supplied. Ray is never provisioned or stopped by DRYML, borrowed drivers
+survive close, and logical Ray resources do not claim physical isolation or
+cross-coordinator accounting. The focused Linux Python 3.12 CI fixture prepares
+its own ephemeral test server and environments; remote CI evidence remains
+pending until the workflow passes on the pushed revision.
+
+`dryml.core.execute` now supplies the separate core-aware facade over generic
+Execute. It freezes call options and one shared `DirStore`/`RepoDefinition`
+snapshot at submission; current support requires existing directly shared
+`DirStore` authority and rejects archive, absent, ambiguous, and replacement
+storage. It transports whole callable/capture graphs through worker setup, runs
+one owner-specific function/Method/managed boundary, publishes returned live
+Object graphs through ordinary Repo saving, and returns exact references plus
+bounded Store-table-relative evidence. Inputs are not auto-saved. Opt-in argument
+refresh coalesces maximal roots, can reuse a returned descendant StateRef, and is
+not transactional: failed recovery neither rolls back completed publications nor
+replays work.
+
+Core futures adapt one generic byte future once, retain separate cleanup evidence,
+and close only their reconstructed recovery Repo with `flush=False`; they never
+close caller handles. The adapter uses version-local worker/coordinator codecs,
+not cross-version RPC. Worker runtime activation precedes Store and payload work;
+subprocess grants can be exact while Ray grants are logical only. Each Ray worker
+uses one attempt and one runtime boundary. This remains an execution boundary, not
+automatic Store/environment/cluster provisioning, distributed transfer, physical
+isolation, or a transaction/rollback guarantee.
+
+Stage 4 adds `dryml.requirements`, the dependency-light shared contract for
+explicit hard requirements. Its public API is `RequirementSource`,
+`RequirementDeclaration`, `RequirementIssue`, `RequirementReport`,
+`RequirementResult`, `RequirementError`, `RequirementCombinationError`,
+`RequirementBarrierError`, `RequirementCombiner`, `combine_requirements`,
+`AdmissionReport`, and `require_admission`. Combination has only empty success,
+valued success, and conflict failure outcomes; malformed input and invalid
+protocols fail before partial authority is exposed. Explicit admission uses the
+policy-independent `admission_ok`, not a domain report's policy-dependent `ok`,
+and does not run work or mutate session/runtime state.
+
+`dryml.environments.req(...)` and `dryml.worlds.req(...)` add passive hard
+declaration APIs for supported live targets, with `requirements_for(...)` and
+`requirements_for_method(...)` for independent domain resolution. The lazy root
+aliases `dryml.env` and `dryml.world` are the exact plural owner modules. World
+declaration omission is unconstrained, and `roles=` remains an exclusive
+complete-role grammar. Requirements are not defaults, candidate selection,
+runtime/session state, dispatch, inference, or automatic enforcement.
+`EnvironmentRequirement.check(...)` now exposes `CompatibilityReport.admission_ok`
+alongside its policy-dependent `ok`; `check_world_spec_satisfies_requirement(...)`
+and `check_allocation_satisfies_requirement(...)` return the independently owned
+`WorldCompatibilityReport.admission_ok` decision.
+
+This is a clean environment-fragment drop. `RequirementFragment`,
+`ENVIRONMENT_FRAGMENT_SCHEMA_VERSION`, `add_req`, `override_req`,
+`fragments_for_class`, `compose_fragments`, `requirements_for_class`, and the
+`dryml.environments.fragments` module are removed. There is no compatibility
+alias, decoder, migration, or legacy-record path. Fresh environment records omit
+only `payload.dryml.schema_versions["environment_fragment"]`; the reduced
+payload changes their semantic IDs and record IDs, while persistent environment
+and world value schemas otherwise remain unchanged.
+
+## 0.3.0.dev1 (unreleased)
+
+Stage 3 adds dependency-light generic code analysis through `dryml.code`. The published
+surface covers closed target normalization, immutable program graphs, per-request
+kernel DAGs and facts, local static `analyze()`/`probe()`, and bounded
+current-thread `trace()`. Results are ephemeral in-process artifacts: consumers
+own any persistence, domain facts, and interpretation.
+
+This is not a transformation, registry, serialized-probe, worker, or process
+transport API. `dryml.code` does not own cross-process isolation or invocation
+policy; future transport and execution isolation remain owned by `dryml.execute`
+and `dryml.dispatch`. Method-specific probing and transformations remain
+deferred.
+
+The root code-analysis namespace intentionally exports only the documented
+principal APIs. Legacy source extraction, compiler hints, analyzer registries,
+probe transport, domain fact, Method, Traits, and transformation compatibility
+surfaces are absent.
+
+## CDef V2 Completion
+
+CDef V2 is a clean break. Only fully bound V2 CDefs, graph-aware definitions, ObjectRefs, StateRefs, and current Store records are accepted. Pre-port CDefs, missing identity versions, old Store layouts, historical query metadata, and mutable-state generations fail closed. There is no migration, converter, dual reader, or old-release recovery workflow.
+
+Structural CDef identity is separate from graph topology and durable object lineage. `ObjectRef` preserves topology and ObjectIds; `StateRef` names immutable snapshots. Exact load uses `load_state_ref()` and an explicit reuse policy. Generic alias loading, revision selection, instance/build-missing/reuse-weak switches, and graph-save option objects are removed.
+
+Directory checkpoints are the supported local persistence scope. DRYML supplies a payload directory and hashes an exhaustive manifest after codec hooks complete. It does not automatically detect application mutation; callers save after relevant mutation. Local filesystem publication and cooperating-process locking are supported; distributed filesystems and reference transport across unsupported execution backends are not.
+
+Transfer, garbage collection, alternate representations, scalable incremental checkpointing, automatic mutation detection, and distributed Store coordination remain deferred.
+
+## Passive Annotation Kernel
+
+`dryml.annotations` is now a clean-break passive key/value carrier, direct
+live-target attachment API, and deterministic static collector. Entries are
+process-local, use identity semantics, and are neither serialized nor persisted.
+Consumers own keys, values, interpretation, and any separately derived durable
+state.
+
+The retained surface is `Annotation`, `ANNOTATION_ATTR`, attachment and direct
+lookup, class/method collection, and generic annotation errors. Requirement and
+default decorators, environment/world/runtime facades, merge and resolution
+APIs, source diagnostics, annotation envelopes and IDs, Definition helpers, and
+the corresponding retired annotation modules have no compatibility exports.

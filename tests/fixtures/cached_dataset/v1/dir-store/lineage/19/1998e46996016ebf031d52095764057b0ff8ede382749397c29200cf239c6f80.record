@@ -1,0 +1,1 @@
+{"contract_version":"1.1","id":"record-v1.1-cb67b56fe0df0993755e2a6346a9b3eb80794b6a63b941d3aa9144ac8d70271d","kind":"dryml.core.lineage_metadata","payload":{"data":{"created_at":1790337600,"creation_status":"known","object_ref_digest":"1998e46996016ebf031d52095764057b0ff8ede382749397c29200cf239c6f80"},"version":1},"schema":"dryml.record.v1.1"}

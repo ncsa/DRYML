@@ -1,0 +1,1375 @@
+"""Focused v1 portable Repo-definition coverage."""
+
+from copy import deepcopy
+from io import BytesIO
+import json
+import os
+import shutil
+import threading
+import subprocess
+import sys
+import textwrap
+
+import pytest
+
+from dryml.core import (
+    AnyValue, Choice, ConcreteDefinition, Definition, Exact, F, IntRange, Mat, Match, Missing, ObjectId,
+    ObjectRef, Present, Ref, Repo, RepoDefinition, RepoDefinitionError,
+    RepoReconstructionError, SelectorSpec,
+    Satisfies, Selector, SKIP_ARGS, StateRef, SubclassOf,
+)
+from dryml.core.object import Object, Serializable
+from dryml.core.params import AnyMatcher, ExactMatcher
+from dryml.core.store.dir import DirStore
+from dryml.core.store.zip import ZipStore
+from dryml.core.repo_plan import SaveRouting
+from dryml.core.symbol import ImportRef
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.links import DefLink
+import dryml.core.session as session
+from dryml.core.utils.graph.path import GraphPath, Parameter
+from dryml.core.utils.graph.value import iter_set_members
+from dryml.core.utils.stable_hash import stable_hash_function
+
+
+class DefinitionTarget:
+    def __init__(self, value=None):
+        self.value = value
+
+
+class SelectorParityBase:
+    pass
+
+
+class SelectorParityChild(SelectorParityBase):
+    pass
+
+
+class ReconstructionTarget(Object):
+    def __init__(self, value=""):
+        super().__init__()
+        self.value = value
+
+
+class SelectorDataTarget(Object):
+    def __init__(self, selector: Ref[SelectorSpec]):
+        super().__init__()
+        self.selector = selector
+
+
+class RefArgumentTarget(Object):
+    def __init__(self, child: Ref[ConcreteDefinition]):
+        super().__init__()
+        self.child = child
+
+
+class ReferenceLeaf(Serializable):
+    def __init__(self, value=1):
+        self.value = value
+
+
+class ReferenceWrapper(Object):
+    def __init__(self, child, child_alias=None):
+        self.child = child
+        self.child_alias = child_alias
+
+
+class SemanticChainNode(Object):
+    def __init__(self, child=None):
+        super().__init__()
+        self.child = child
+
+
+def _state_hash(char="a"):
+    return "pkl-" + char * 64
+
+
+def _route_data(tmp_path):
+    """Return one valid detached envelope with a non-empty selector graph."""
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(
+        store,
+        save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, "base")), store),)),
+    )
+    return repo.to_definition().to_data()
+
+
+def _archive_store(path):
+    store = ZipStore(path)
+    store._archive_dirty = True
+    store.commit()
+    return store
+
+
+def test_definition_round_trip_detaches_mixed_configuration(tmp_path):
+    """Export retains only ordered portable descriptors and detached routing."""
+    directory = DirStore(tmp_path / "dir", query_index="memory")
+    archive = _archive_store(tmp_path / "store.zip")
+    shared = Definition(DefinitionTarget, "shared")
+    selector = Selector(Definition(DefinitionTarget, shared, value=Exact("x")))
+    repo = Repo(
+        [directory, archive], config={"nested": {"value": [1]}},
+        save_routing=SaveRouting(((selector, archive), (selector, directory)), "all", "closure"),
+    )
+    repo.save_objs_on_deletion = True
+
+    definition = repo.to_definition()
+    data = definition.to_data()
+
+    assert data["stores"] == [
+        {"kind": "dir", "path": str(tmp_path / "dir"), "query_index": "memory"},
+        {"kind": "zip", "path": str(tmp_path / "store.zip")},
+    ]
+    assert data["routing"]["match_mode"] == "all"
+    assert data["routing"]["graph_mode"] == "closure"
+    assert data["routing"]["routes"][0]["store"] == 1
+    assert definition.to_json() == RepoDefinition.from_json(definition.to_json()).to_json()
+    data["settings"]["config"]["nested"]["value"].append(2)
+    assert definition.to_data()["settings"]["config"]["nested"]["value"] == [1]
+    repo.save_objs_on_deletion = False
+
+
+def test_definition_supports_omitted_args_shared_and_parameter_variants(tmp_path):
+    """The closed selector grammar retains partial spelling and supported Matches."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    shared = Definition(DefinitionTarget, "shared")
+    root = Definition(
+        DefinitionTarget,
+        [shared, shared],
+        present=Present("p"), any_value=AnyValue("a"), choices=Choice([1, 2]),
+        ranged=IntRange(1, 3), generated=Choice(["x", "y"]),
+    )
+    repo = Repo(store, save_routing=SaveRouting(((Selector(root, strict=True), store),)))
+
+    route = repo.to_definition().to_data()["routing"]["routes"][0]["selector"]
+
+    assert route["strict"] is True
+    assert len(route["nodes"]) == 2
+    assert {node["node_kind"] for node in route["nodes"]} == {"definition"}
+
+
+def test_definition_round_trips_partial_and_concrete_factory_selectors_without_resolution(tmp_path):
+    """Closed route data retains factory call shape and Match predicate leaves."""
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    partial = F(
+        "unresolved_factory_target",
+        Match(AnyMatcher()),
+        "fixed",
+        required=Match(AnyMatcher()),
+    )
+    concrete = F("unresolved_factory_target", 7, flag=True)
+    partial_selector = Selector(Definition(DefinitionTarget, partial), cls_policy="exact")
+    concrete_selector = Selector(Definition(DefinitionTarget, concrete), cls_policy="exact")
+    repo = Repo(
+        store,
+        save_routing=SaveRouting(((partial_selector, store), (concrete_selector, store))),
+    )
+
+    data = repo.to_definition().to_data()
+    assert '"kind":"factory"' in RepoDefinition.from_data(data).to_json()
+    assert '"kind":"match"' in RepoDefinition.from_data(data).to_json()
+    restored = Repo.from_definition(RepoDefinition.from_data(data))
+    restored_partial, restored_concrete = (
+        route[0] for route in restored.save_routing.routes
+    )
+
+    assert restored_partial.matches(Definition(DefinitionTarget, F(
+        "unresolved_factory_target", 64, "fixed", required=False, extra="allowed",
+    )))
+    assert not restored_partial.matches(Definition(DefinitionTarget, F(
+        "unresolved_factory_target", 64, "other", required=False,
+    )))
+    assert not restored_partial.matches(Definition(DefinitionTarget, F(
+        "unresolved_factory_target", 64, "fixed",
+    )))
+    assert not restored_partial.matches(Definition(DefinitionTarget, F(
+        "other_target", 64, "fixed", required=False,
+    )))
+    assert restored_concrete.matches(Definition(DefinitionTarget, F("unresolved_factory_target", 7, flag=True)))
+    assert not restored_concrete.matches(Definition(DefinitionTarget, F("unresolved_factory_target", 7, flag=True, extra=False)))
+
+
+def test_definition_distinguishes_disabled_empty_and_shorthand_routing(tmp_path):
+    """Disabled routing remains distinct from a normalized configured empty policy."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    disabled = Repo(store).to_definition().to_data()
+    configured = Repo(store, save_routing="closure").to_definition().to_data()
+
+    assert disabled["routing"] is None
+    assert configured["routing"] == {"graph_mode": "closure", "match_mode": "first", "routes": []}
+
+
+def test_definition_rejects_dirty_and_nonportable_runtime_configuration(tmp_path):
+    """Export refuses dirty archives, custom backends, and runtime factories."""
+    archive = _archive_store(tmp_path / "store.zip")
+    archive._archive_dirty = True
+    with pytest.raises(RepoDefinitionError, match="clean committed archive"):
+        Repo(archive).to_definition()
+    assert archive._archive_dirty is True
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    with pytest.raises(RepoDefinitionError, match="owner-token"):
+        Repo(store, owner_token_factory=lambda: "owner").to_definition()
+    from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+    custom_index = DirStore(tmp_path / "custom", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    with pytest.raises(RepoDefinitionError, match="query policy"):
+        Repo(custom_index).to_definition()
+    with pytest.raises(RepoDefinitionError) as error:
+        Repo(store, config={"secret": object()}).to_definition()
+    assert "object at" not in str(error.value)
+
+
+@pytest.mark.parametrize("case", ["missing", "zero", "file-like"], ids=str)
+def test_definition_rejects_unreconstructable_archive_without_mutating_it(tmp_path, case):
+    """Export never commits, repairs, or substitutes unavailable archive authority."""
+
+    if case == "file-like":
+        buffer = BytesIO()
+        archive = ZipStore(buffer)
+        before = buffer.getvalue()
+    else:
+        path = tmp_path / f"{case}.zip"
+        archive = _archive_store(path)
+        if case == "missing":
+            path.unlink()
+        else:
+            path.write_bytes(b"")
+        before = path.read_bytes() if path.exists() else None
+
+    with pytest.raises(RepoDefinitionError, match="clean committed archive"):
+        Repo(archive).to_definition()
+
+    if case == "file-like":
+        assert buffer.getvalue() == before
+    else:
+        assert (path.read_bytes() if path.exists() else None) == before
+    archive.close()
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda data: data.__setitem__("version", True),
+    lambda data: data.__setitem__("unknown", 1),
+    lambda data: data["stores"].append(deepcopy(data["stores"][0])),
+    lambda data: data["routing"]["routes"][0].__setitem__("store", 3),
+])
+def test_definition_rejects_malformed_data(tmp_path, mutate):
+    """Malformed envelope fields and indices cannot produce partial definitions."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(store, save_routing=SaveRouting(((Selector(Definition(DefinitionTarget)), store),)))
+    data = repo.to_definition().to_data()
+    mutate(data)
+    with pytest.raises(RepoDefinitionError):
+        RepoDefinition.from_data(data)
+
+
+def test_definition_decoding_is_inert(monkeypatch, tmp_path):
+    """Mapping and JSON decode never instantiate Stores or resolve symbols."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(store, save_routing=SaveRouting(((Selector(Definition(ImportRef("no.such.module", "Type"))), store),))).to_definition().to_data()
+
+    monkeypatch.setattr(DirStore, "__init__", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("opened store")))
+    monkeypatch.setattr(ImportRef, "resolve", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("resolved symbol")))
+
+    assert RepoDefinition.from_data(data).to_data() == data
+    assert RepoDefinition.from_json(RepoDefinition.from_data(data).to_json()).to_data() == data
+
+
+def test_definition_reconstruction_preserves_source_backed_live_class_matching(tmp_path):
+    """Source-backed local classes retain default, exact, and strict route matches."""
+
+    class LocalSourceTarget(Object):
+        pass
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    target = Definition(LocalSourceTarget).concretize()
+    for policy in ({}, {"cls_policy": "exact"}, {"strict": True}):
+        selector = Selector(Definition(LocalSourceTarget), **policy)
+        source = Repo(store, save_routing=SaveRouting(((selector, store),)))
+        rebuilt = Repo.from_definition(source.to_definition())
+        try:
+            assert selector.matches(target)
+            assert rebuilt.save_routing.routes[0][0].matches(target)
+        finally:
+            rebuilt.close(flush=False)
+
+
+def test_definition_round_trips_typed_canonical_map_keys(tmp_path):
+    """Portable selector maps preserve distinct integer and string keys."""
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    mapping = {1: "integer", "1": "string"}
+    selector = Selector(Definition(DefinitionTarget, value=Exact(mapping)))
+    definition = Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition()
+    rebuilt = Repo.from_definition(RepoDefinition.from_json(definition.to_json()))
+    try:
+        rebuilt_mapping = rebuilt.save_routing.routes[0][0].root.kwargs["value"].matcher.value
+        assert rebuilt_mapping == mapping
+        assert set(rebuilt_mapping) == {1, "1"}
+    finally:
+        rebuilt.close(flush=False)
+
+
+@pytest.mark.parametrize("alias", ["dot", "symlink"], ids=str)
+def test_definition_rejects_physical_store_aliases_before_opening(tmp_path, monkeypatch, alias):
+    """Live reconstruction rejects duplicate destinations before opening either handle."""
+
+    archive = _archive_store(tmp_path / "archive.zip")
+    data = Repo(archive).to_definition().to_data()
+    if alias == "dot":
+        duplicate = os.path.join(tmp_path, ".", "archive.zip")
+    else:
+        duplicate = tmp_path / "archive-alias.zip"
+        duplicate.symlink_to(archive.archive_path)
+    data["stores"].append({"kind": "zip", "path": str(duplicate)})
+    opened = []
+    monkeypatch.setattr(
+        ZipStore,
+        "open_existing",
+        classmethod(lambda cls, path: opened.append(path)),
+    )
+
+    definition = RepoDefinition.from_data(data)
+    with pytest.raises(RepoDefinitionError):
+        Repo.from_definition(definition)
+
+    assert opened == []
+    archive.close()
+
+
+@pytest.mark.parametrize("mutation", ["envelope", "segment", "unversioned"], ids=str)
+def test_definition_rejects_unknown_or_unversioned_nested_graph_paths(tmp_path, mutation):
+    """Reference path envelopes and segments use only the closed portable grammar."""
+
+    leaf = Definition(ReferenceLeaf).concretize()
+    root = Definition(ReferenceWrapper, leaf).concretize()
+    path = GraphPath((Parameter("child"),))
+    reference = ObjectRef(root, {path: ObjectId(("child",))})
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(
+        store,
+        save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, reference)), store),)),
+    ).to_definition().to_data()
+
+    def first_reference(value):
+        if isinstance(value, dict):
+            if value.get("kind") == "object-ref":
+                return value
+            for child in value.values():
+                found = first_reference(child)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = first_reference(child)
+                if found is not None:
+                    return found
+        return None
+
+    descriptor = first_reference(data["routing"]["routes"][0]["selector"])
+    encoded_path = descriptor["objects"][0]["path"]
+    if mutation == "envelope":
+        encoded_path["unknown"] = True
+    elif mutation == "segment":
+        encoded_path["segments"][0]["unknown"] = True
+    else:
+        descriptor["objects"][0]["path"] = encoded_path["segments"]
+
+    with pytest.raises(RepoDefinitionError, match="reference path"):
+        RepoDefinition.from_data(data)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("string", "x" * (1024 * 1024 + 1)),
+    ("integer", 1 << 4096),
+    ("entries", list(range(4097))),
+    ("nonfinite", float("inf")),
+], ids=("string", "integer", "entries", "nonfinite"))
+def test_definition_enforces_closed_json_value_bounds(tmp_path, field, value):
+    """Settings use the same bounded JSON validation as the complete envelope."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(store).to_definition().to_data()
+    data["settings"]["config"] = {field: value}
+
+    with pytest.raises(RepoDefinitionError):
+        RepoDefinition.from_data(data)
+
+
+def test_definition_rejects_duplicate_json_keys_and_cycles(tmp_path):
+    """Parser duplicate handling and recursive configuration fail without values."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(store).to_definition().to_data()
+    duplicated = '{"schema":"dryml-repo-definition","schema":"dryml-repo-definition"}'
+    with pytest.raises(RepoDefinitionError):
+        RepoDefinition.from_json(duplicated)
+
+    data["settings"]["config"] = {}
+    data["settings"]["config"]["cycle"] = data["settings"]["config"]
+    with pytest.raises(RepoDefinitionError) as error:
+        RepoDefinition.from_data(data)
+    assert "object at" not in str(error.value)
+
+
+def test_definition_encodes_complete_nested_reference_topology_inertly(tmp_path, monkeypatch):
+    """Exact reference leaves retain all paths, identities, states, and edge roles."""
+
+    leaf = Definition(ReferenceLeaf).concretize()
+    child_path = GraphPath((Parameter("child"),))
+    imported = ObjectRef(leaf, {GraphPath(): ObjectId(("imported",))})
+    imported_state = StateRef(imported, {GraphPath(): _state_hash("b")})
+    outer = Definition(
+        ReferenceWrapper,
+        DefLink.finalized(EdgeKind.MATERIALIZE, imported_state),
+        child_alias=DefLink.finalized(EdgeKind.REF, imported_state),
+    ).concretize()
+    outer_ref = ObjectRef(outer, {child_path: imported.object_id})
+    state = StateRef(outer_ref, {child_path: _state_hash("c")})
+    selector = Selector(
+        Definition(
+            DefinitionTarget,
+            DefLink.finalized(EdgeKind.MATERIALIZE, state),
+            ref=DefLink.finalized(EdgeKind.REF, state),
+            open_leaf={"x": state},
+        )
+    )
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition().to_data()
+
+    monkeypatch.setattr(
+        ObjectRef,
+        "from_data",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("materialized reference")),
+    )
+    monkeypatch.setattr(
+        StateRef,
+        "from_data",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("materialized state")),
+    )
+
+    assert RepoDefinition.from_data(data).to_data() == data
+
+    def first_descriptor(value, kind):
+        if isinstance(value, dict):
+            if value.get("kind") == kind:
+                return value
+            for item in value.values():
+                found = first_descriptor(item, kind)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = first_descriptor(item, kind)
+                if found is not None:
+                    return found
+        return None
+
+    state_descriptor = first_descriptor(data["routing"]["routes"][0]["selector"], "state-ref")
+    assert state_descriptor is not None
+    state_descriptor["states"] = []
+    with pytest.raises(RepoDefinitionError, match="state paths"):
+        RepoDefinition.from_data(data)
+
+    state_descriptor["object"]["objects"] = []
+    with pytest.raises(RepoDefinitionError, match="CDef topology"):
+        RepoDefinition.from_data(data)
+
+
+def test_definition_enforces_total_encoded_bound_and_sanitizes_unicode(tmp_path):
+    """Mapping, constructor, export, and JSON paths share encoded-byte limits."""
+
+    data = _route_data(tmp_path)
+    data["settings"]["config"] = {
+        f"key-{index}": "x" * 4096 for index in range(4096)
+    }
+    for constructor in (RepoDefinition, RepoDefinition.from_data):
+        with pytest.raises(RepoDefinitionError, match="encoded"):
+            constructor(data)
+
+    store = DirStore(tmp_path / "unicode", query_index="none")
+    with pytest.raises(RepoDefinitionError) as error:
+        Repo(store, config={"value": "\ud800"}).to_definition()
+    assert "\\ud800" not in str(error.value)
+
+
+def test_definition_validates_materializing_reference_paths_inside_sets(tmp_path):
+    """Set-member fingerprints retain and validate exact materializing paths."""
+
+    leaf = Definition(ReferenceLeaf).concretize()
+    segment = iter_set_members({leaf})[0][0]
+    root = Definition(ReferenceWrapper, {leaf}).concretize()
+    path = GraphPath((Parameter("child"), segment))
+    reference = ObjectRef(root, {path: ObjectId(("setchild",))})
+    state = StateRef(reference, {path: _state_hash("d")})
+    store = DirStore(tmp_path / "store", query_index="none")
+    selector = Selector(Definition(DefinitionTarget, state))
+    data = Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition().to_data()
+
+    assert RepoDefinition.from_data(data).to_data() == data
+
+    def set_descriptor(value):
+        if isinstance(value, dict):
+            if value.get("kind") == "set":
+                return value
+            for item in value.values():
+                found = set_descriptor(item)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = set_descriptor(item)
+                if found is not None:
+                    return found
+        return None
+
+    encoded_set = set_descriptor(data["routing"]["routes"][0]["selector"])
+    assert encoded_set is not None
+    encoded_set["items"][0]["fingerprint"] = "0" * 64
+    with pytest.raises(RepoDefinitionError, match="set fingerprint"):
+        RepoDefinition.from_data(data)
+
+
+def test_definition_rejects_forged_set_fingerprints_with_matching_reference_paths(tmp_path):
+    """Inert decode derives set identity instead of trusting matching path data."""
+
+    leaf = Definition(ReferenceLeaf).concretize()
+    segment = iter_set_members({leaf})[0][0]
+    root = Definition(ReferenceWrapper, {leaf}).concretize()
+    path = GraphPath((Parameter("child"), segment))
+    reference = ObjectRef(root, {path: ObjectId(("setchild",))})
+    state = StateRef(reference, {path: _state_hash("d")})
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(
+        store,
+        save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, state)), store),)),
+    ).to_definition().to_data()
+
+    def first_set(value):
+        if isinstance(value, dict):
+            if value.get("kind") == "set":
+                return value
+            for child in value.values():
+                found = first_set(child)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = first_set(child)
+                if found is not None:
+                    return found
+        return None
+
+    encoded_set = first_set(data["routing"]["routes"][0]["selector"])
+    assert encoded_set is not None
+    original = encoded_set["items"][0]["fingerprint"]
+    forged = "0" * 64 if original != "0" * 64 else "1" * 64
+
+    def replace_fingerprint(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "fingerprint" and child == original:
+                    value[key] = forged
+                else:
+                    replace_fingerprint(child)
+        elif isinstance(value, list):
+            for child in value:
+                replace_fingerprint(child)
+
+    replace_fingerprint(data)
+    for decode in (RepoDefinition.from_data, lambda value: RepoDefinition.from_json(json.dumps(value))):
+        with pytest.raises(RepoDefinitionError, match="set fingerprint"):
+            decode(deepcopy(data))
+
+
+def test_definition_accepts_set_members_with_exact_reference_semantics(tmp_path):
+    """Descriptor fingerprints preserve ObjectRef and StateRef set members inertly."""
+
+    leaf = Definition(ReferenceLeaf).concretize()
+    reference = ObjectRef(leaf, {GraphPath(): ObjectId(("setref",))})
+    state = StateRef(reference, {GraphPath(): _state_hash("f")})
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(
+        store,
+        save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, values={reference, state})), store),)),
+    ).to_definition().to_data()
+
+    assert RepoDefinition.from_data(data).to_data() == data
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda selector: selector.__setitem__("cls_policy", "unsupported"),
+        lambda selector: selector["nodes"][0]["args"].__setitem__(0, {"kind": "atom", "value": []}),
+        lambda selector: selector["nodes"][0]["args"].__setitem__(0, {"kind": "atom", "value": {}}),
+        lambda selector: selector.__setitem__("root", {"kind": "atom", "value": None}),
+        lambda selector: selector["nodes"][0].__setitem__("node_kind", "cdef"),
+        lambda selector: selector["nodes"][0]["cls"]["symbol"].__setitem__("qualname", ""),
+    ],
+)
+def test_definition_rejects_closed_selector_grammar_violations(tmp_path, mutate):
+    """Every selector tag, operand kind, policy, and source field is closed."""
+
+    data = _route_data(tmp_path)
+    selector = data["routing"]["routes"][0]["selector"]
+    mutate(selector)
+    with pytest.raises(RepoDefinitionError):
+        RepoDefinition.from_data(data)
+
+
+def test_definition_rejects_bad_reference_descriptor_kinds_and_duplicate_sets(tmp_path):
+    """Reference descriptors require exact topology kinds and canonical set members."""
+
+    data = _route_data(tmp_path)
+    selector = data["routing"]["routes"][0]["selector"]
+    root = selector["root"]
+    selector["nodes"][0]["args"] = [{"kind": "object-ref", "definition": root, "objects": []}]
+    with pytest.raises(RepoDefinitionError):
+        RepoDefinition.from_data(data)
+
+    data = _route_data(tmp_path)
+    selector = data["routing"]["routes"][0]["selector"]
+    selector["nodes"][0]["args"] = [{"kind": "state-ref", "object": selector["root"], "states": []}]
+    with pytest.raises(RepoDefinitionError):
+        RepoDefinition.from_data(data)
+
+    data = _route_data(tmp_path)
+    selector = data["routing"]["routes"][0]["selector"]
+    selector["nodes"][0]["args"] = [
+        {
+            "kind": "set",
+            "items": [
+                {"fingerprint": stable_hash_function(1), "value": {"kind": "atom", "value": 1}},
+                {"fingerprint": stable_hash_function(1), "value": {"kind": "atom", "value": 1}},
+            ],
+        }
+    ]
+    with pytest.raises(RepoDefinitionError, match="duplicate canonical values"):
+        RepoDefinition.from_data(data)
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        lambda secret: Selector(Definition(DefinitionTarget, value={secret: "\ud800"})),
+        lambda secret: Selector(Definition(DefinitionTarget, **{secret: "\ud800"})),
+    ],
+    ids=("map-key", "definition-field"),
+)
+def test_definition_encoder_errors_do_not_render_user_keys(tmp_path, selector):
+    """Encoder diagnostics use schema paths rather than caller-controlled names."""
+
+    secret = "SECRET-KEY\nMUST-NOT-RENDER"
+    store = DirStore(tmp_path / "store", query_index="none")
+
+    with pytest.raises(RepoDefinitionError) as raised:
+        Repo(store, save_routing=SaveRouting(((selector(secret), store),))).to_definition()
+
+    assert secret not in str(raised.value)
+    assert "\n" not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+@pytest.mark.parametrize("case", ("missing", "malformed", "wrong-type"))
+def test_reconstruction_preflights_bad_store_before_resolving_selector_symbols(
+        tmp_path, monkeypatch, case):
+    """Persistent Store admission precedes every selector symbol resolution."""
+
+    source = DirStore(tmp_path / "source", query_index="none")
+    data = _route_data(tmp_path)
+    target = tmp_path / case
+    data["stores"][0]["path"] = str(target)
+    if case == "malformed":
+        target.mkdir()
+        (target / "store-format.record").write_bytes(b"malformed")
+    elif case == "wrong-type":
+        target.write_text("not a Store")
+
+    resolved = []
+    monkeypatch.setattr(ImportRef, "resolve", lambda self: resolved.append(self))
+
+    with pytest.raises(RepoDefinitionError):
+        Repo.from_definition(RepoDefinition.from_data(data))
+
+    assert resolved == []
+    assert source.read_main_ref() is None
+
+
+def _compact_binary_cdef_dag_data(tmp_path, depth):
+    """Return a compact descriptor whose reference topology branches twice per level."""
+
+    data = _route_data(tmp_path)
+    selector = data["routing"]["routes"][0]["selector"]
+    root = selector["nodes"][0]
+    root["args"] = [{
+        "kind": "object-ref",
+        "definition": {"kind": "definition-ref", "label": "n1"},
+        "objects": [],
+    }]
+    for index in range(1, depth + 1):
+        parameters = [] if index == depth else [
+            ["left", {"kind": "definition-ref", "label": f"n{index + 1}"}],
+            ["right", {"kind": "definition-ref", "label": f"n{index + 1}"}],
+        ]
+        selector["nodes"].append({
+            "label": f"n{index}",
+            "node_kind": "cdef",
+            "cls": deepcopy(root["cls"]),
+            "parameters": parameters,
+            "stateful_role": False,
+        })
+    return data
+
+
+def test_definition_rejects_compact_semantic_dag_above_visit_budget(tmp_path):
+    """Compact shared CDef DAGs cannot expand topology work exponentially."""
+
+    data = _compact_binary_cdef_dag_data(tmp_path, 17)
+    assert len(json.dumps(data)) < 100_000
+
+    with pytest.raises(RepoDefinitionError, match="semantic"):
+        RepoDefinition.from_data(data)
+
+
+def test_definition_export_rejects_deep_semantic_chain_before_recursion(tmp_path):
+    """Deep live selector graphs fail at the semantic depth bound, not recursion."""
+
+    child = Definition(SemanticChainNode).concretize()
+    for _ in range(33):
+        child = Definition(SemanticChainNode, child).concretize()
+    store = DirStore(tmp_path / "store", query_index="none")
+
+    with pytest.raises(RepoDefinitionError, match="semantic") as raised:
+        Repo(store, save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, child)), store),))).to_definition()
+
+    assert raised.value.__cause__ is None
+
+
+class _CustomExact(ExactMatcher):
+    def __repr__(self):
+        return "CUSTOM-REPR-MUST-NOT-LEAK"
+
+    def stable_key(self):
+        raise AssertionError("unsupported matcher must not call stable_key")
+
+
+def test_definition_rejects_custom_matcher_subclasses_without_repr(tmp_path):
+    """Only exact supported Match matcher classes have portable semantics."""
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    selector = Selector(Definition(DefinitionTarget, Match(_CustomExact(1), "custom")))
+    with pytest.raises(RepoDefinitionError) as error:
+        Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition()
+    assert "CUSTOM-REPR-MUST-NOT-LEAK" not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+def test_definition_rejects_satisfies_without_invoking_predicate(tmp_path):
+    """Predicate closure matchers are excluded from the portable selector grammar."""
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    selector = Selector(Definition(DefinitionTarget, Satisfies(lambda _: True, name="always")))
+    with pytest.raises(RepoDefinitionError):
+        Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition()
+
+
+def test_definition_set_topology_is_deterministic_across_processes(tmp_path):
+    """Set traversal assigns stable labels without merging shared CDef identities."""
+
+    script = textwrap.dedent(
+        """
+        from dryml.core import Definition, Repo, Selector
+        from dryml.core.repo_plan import SaveRouting
+        from dryml.core.store.dir import DirStore
+        from dryml.core.symbol import ImportRef
+        import sys
+
+        store = DirStore(sys.argv[1], query_index="none")
+        shared = Definition(ImportRef("builtins", "dict"), value="shared")
+        left = Definition(ImportRef("builtins", "dict"), value=shared)
+        right = Definition(ImportRef("builtins", "dict"), value=shared)
+        root = Definition(ImportRef("builtins", "dict"), values={left, right})
+        repo = Repo(store, save_routing=SaveRouting(((Selector(root), store),)))
+        print(repo.to_definition().to_json())
+        """
+    )
+    outputs = []
+    for seed in ("1", "2"):
+        environment = {**os.environ, "PYTHONHASHSEED": seed}
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path / "store")],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        outputs.append(result.stdout)
+    assert outputs[0] == outputs[1]
+
+    store = DirStore(tmp_path / "local", query_index="none")
+    shared = Definition(ReferenceLeaf, 1).concretize()
+    independent = Definition(ReferenceLeaf, 2).concretize()
+    selector = Selector(Definition(DefinitionTarget, values=[shared, shared, independent]))
+    nodes = Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition().to_data()["routing"]["routes"][0]["selector"]["nodes"]
+    assert len(nodes) == 3
+
+
+def test_definition_export_releases_config_lock_before_archive_fence(tmp_path, monkeypatch):
+    """Configuration updates cannot deadlock behind an archive export fence."""
+
+    archive = _archive_store(tmp_path / "store.zip")
+    repo = Repo(archive)
+    entered = threading.Event()
+    release = threading.Event()
+    original_fence = archive.transaction_fence
+
+    def fenced():
+        context = original_fence()
+
+        class Fence:
+            def __enter__(self):
+                entered.set()
+                assert release.wait(2)
+                return context.__enter__()
+
+            def __exit__(self, *args):
+                return context.__exit__(*args)
+
+        return Fence()
+
+    monkeypatch.setattr(archive, "transaction_fence", fenced)
+    export = threading.Thread(target=repo.to_definition)
+    export.start()
+    assert entered.wait(2)
+    update = threading.Thread(target=repo.set_config, args=("concurrent", True))
+    update.start()
+    update.join(1)
+    release.set()
+    export.join(2)
+    update.join(2)
+
+    assert not export.is_alive()
+    assert not update.is_alive()
+
+
+def test_from_definition_reopens_existing_stores_and_preserves_route_behavior(tmp_path):
+    """Explicit reconstruction creates fresh handles with equivalent selection."""
+
+    directory = DirStore(tmp_path / "dir", query_index="none")
+    archive = _archive_store(tmp_path / "store.zip")
+    selector = Selector(Definition(ReconstructionTarget, value=Exact("selected")), strict=True)
+    source = Repo(
+        [directory, archive],
+        config={"mode": "portable"},
+        save_routing=SaveRouting(((selector, archive),), "first", "closure"),
+    )
+
+    rebuilt = Repo.from_definition(source.to_definition())
+    try:
+        assert rebuilt is not source
+        assert [type(store) for store in rebuilt.stores] == [DirStore, ZipStore]
+        assert all(left is not right for left, right in zip(source.stores, rebuilt.stores))
+        assert rebuilt.config == {"mode": "portable"}
+        assert rebuilt.save_routing.graph_mode == "closure"
+        target = Definition(ReconstructionTarget, value="selected").concretize()
+        unmatched = Definition(ReconstructionTarget, value="other").concretize()
+        with source._retain_save_context() as source_context:
+            with rebuilt._retain_save_context() as rebuilt_context:
+                assert source.save_routing.routes[0][0].matches(target)
+                assert rebuilt.save_routing.routes[0][0].matches(target)
+                assert source._select_save_destinations(source_context, target)[0] is archive
+                assert type(rebuilt._select_save_destinations(rebuilt_context, target)[0]) is ZipStore
+                assert source._select_save_destinations(source_context, unmatched)[0] is directory
+                assert type(rebuilt._select_save_destinations(rebuilt_context, unmatched)[0]) is DirStore
+    finally:
+        rebuilt.close(flush=False)
+        archive.close()
+
+
+@pytest.mark.parametrize("case", ["missing", "empty", "wrong-type", "malformed"], ids=str)
+def test_from_definition_never_initializes_invalid_directory_authority(tmp_path, case):
+    """Existing-only reconstruction rejects every invalid directory without repair."""
+
+    store = DirStore(tmp_path / "source", query_index="none")
+    data = Repo(store).to_definition().to_data()
+    target = tmp_path / case
+    data["stores"][0]["path"] = str(target)
+    if case == "empty":
+        target.mkdir()
+    elif case == "wrong-type":
+        target.write_text("not a directory")
+    elif case == "malformed":
+        target.mkdir()
+        (target / "store-format.record").write_bytes(b"not a store format")
+
+    with pytest.raises(RepoDefinitionError):
+        Repo.from_definition(RepoDefinition.from_data(data))
+
+    assert not target.exists() if case == "missing" else True
+    if case in {"empty", "malformed"}:
+        assert not (target / "definitions").exists()
+
+
+@pytest.mark.parametrize("kind", ["dir-missing", "dir-incompatible", "zip-missing", "zip-incompatible"])
+def test_from_definition_invalid_resources_never_initialize_or_activate_session(
+        tmp_path, monkeypatch, kind):
+    """Invalid DirStore and ZipStore descriptors fail before session or storage creation."""
+
+    source = DirStore(tmp_path / "source", query_index="none")
+    data = Repo(source).to_definition().to_data()
+    target = tmp_path / kind
+    if kind.startswith("dir"):
+        data["stores"][0] = {"kind": "dir", "path": str(target), "query_index": "none"}
+        if kind.endswith("incompatible"):
+            target.mkdir()
+            (target / "store-format.record").write_bytes(b"incompatible")
+    else:
+        data["stores"][0] = {"kind": "zip", "path": str(target)}
+        if kind.endswith("incompatible"):
+            target.write_bytes(b"not an archive")
+    before = target.read_bytes() if target.is_file() else None
+    monkeypatch.setattr(
+        session, "configure",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("activated session")),
+    )
+
+    with pytest.raises(RepoDefinitionError):
+        Repo.from_definition(RepoDefinition.from_data(data))
+
+    assert not target.exists() if kind.endswith("missing") else (
+        target.read_bytes() == before if target.is_file() else not (target / "definitions").exists()
+    )
+
+
+def test_from_definition_removed_after_preflight_never_creates_replacement(tmp_path, monkeypatch):
+    """A normal authority removal after descriptor preflight still fails closed."""
+
+    source = DirStore(tmp_path / "source", query_index="none")
+    definition = Repo(source).to_definition()
+    original_open = DirStore.open_existing
+
+    def remove_then_open(cls, path, *, query_index):
+        shutil.rmtree(path)
+        return original_open(path, query_index=query_index)
+
+    monkeypatch.setattr(DirStore, "open_existing", classmethod(remove_then_open))
+    with pytest.raises(RepoDefinitionError):
+        Repo.from_definition(definition)
+
+    assert not (tmp_path / "source").exists()
+
+
+def test_reconstruction_failure_closes_only_freshly_opened_resources(tmp_path, monkeypatch):
+    """A later failed Store open unwinds fresh handles without touching the source."""
+
+    source_store = DirStore(tmp_path / "source", query_index="none")
+    source = Repo(source_store)
+    data = source.to_definition().to_data()
+    archive = _archive_store(tmp_path / "archive.zip")
+    data["stores"].append({"kind": "zip", "path": str(tmp_path / "archive.zip")})
+    data["default_store"] = 0
+    opened = []
+    original_close = DirStore.close
+
+    def observe_close(self):
+        opened.append(self)
+        return original_close(self)
+
+    monkeypatch.setattr(DirStore, "close", observe_close)
+    monkeypatch.setattr(
+        ZipStore,
+        "open_existing",
+        classmethod(lambda cls, path: (_ for _ in ()).throw(OSError("later open failed"))),
+    )
+    with pytest.raises(RepoDefinitionError):
+        Repo.from_definition(RepoDefinition.from_data(data))
+
+    assert source_store not in opened
+    assert opened
+    assert source_store.read_main_ref() is None
+    archive.close()
+
+
+def test_reconstruction_failure_retains_only_failed_new_handle_for_retry(tmp_path, monkeypatch):
+    """A close error after a later open failure remains actionable without touching source handles."""
+
+    source_store = DirStore(tmp_path / "source", query_index="none")
+    source = Repo(source_store)
+    data = source.to_definition().to_data()
+    archive = _archive_store(tmp_path / "archive.zip")
+    data["stores"].append({"kind": "zip", "path": str(archive.archive_path)})
+    opened = []
+    closes = []
+    original_open = DirStore.open_existing
+    original_close = DirStore.close
+
+    def open_existing(cls, path, *, query_index):
+        result = original_open(path, query_index=query_index)
+        opened.append(result)
+        return result
+
+    def fail_then_close(self):
+        closes.append(self)
+        if self is opened[0] and closes.count(self) == 1:
+            raise OSError("close failed")
+        return original_close(self)
+
+    monkeypatch.setattr(DirStore, "open_existing", classmethod(open_existing))
+    monkeypatch.setattr(DirStore, "close", fail_then_close)
+    monkeypatch.setattr(
+        ZipStore,
+        "open_existing",
+        classmethod(lambda cls, path: (_ for _ in ()).throw(OSError("later open failed"))),
+    )
+
+    with pytest.raises(RepoReconstructionError) as raised:
+        Repo.from_definition(RepoDefinition.from_data(data))
+
+    error = raised.value
+    assert isinstance(error.__cause__, OSError)
+    assert not hasattr(error, "cleanup_stores")
+    assert len(error.cleanup_issues) == 1
+    assert error.cleanup() is None
+    assert closes == [opened[0], opened[0]]
+    assert error.cleanup() is None
+    assert closes == [opened[0], opened[0]]
+    assert source_store not in closes
+    archive.close()
+
+
+def test_reconstruction_interrupt_retains_failed_close_without_deletion_save(tmp_path, monkeypatch):
+    """Control-flow interruption retains failed fresh cleanup without destructor publication."""
+
+    source_store = DirStore(tmp_path / "source", query_index="none")
+    source = Repo(source_store)
+    data = source.to_definition().to_data()
+    archive = _archive_store(tmp_path / "archive.zip")
+    data["stores"].append({"kind": "zip", "path": str(archive.archive_path)})
+    opened = []
+    saved = []
+    original_open = DirStore.open_existing
+    original_close = DirStore.close
+
+    def open_existing(cls, path, *, query_index):
+        result = original_open(path, query_index=query_index)
+        opened.append(result)
+        return result
+
+    def fail_then_close(self):
+        if self is opened[0] and not getattr(self, "_test_close_failed", False):
+            self._test_close_failed = True
+            raise OSError("close failed")
+        return original_close(self)
+
+    def interrupt_adoption(self, stores):
+        self.save_objs_on_deletion = True
+        self.cache_strong(Serializable(repo=self))
+        self.save = lambda obj: saved.append(obj)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(DirStore, "open_existing", classmethod(open_existing))
+    monkeypatch.setattr(DirStore, "close", fail_then_close)
+    monkeypatch.setattr(Repo, "_adopt_owned_stores", interrupt_adoption)
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        Repo.from_definition(RepoDefinition.from_data(data))
+
+    cleanup = raised.value.repo_cleanup_error
+    assert isinstance(cleanup, RepoReconstructionError)
+    assert cleanup.cleanup() is None
+    assert saved == []
+    archive.close()
+
+
+def test_reconstruction_cleanup_serializes_concurrent_callers():
+    """Concurrent cleanup callers never close the same retained Store twice."""
+
+    class BlockingStore:
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def close(self):
+            with self.lock:
+                self.calls += 1
+                self.started.set()
+            assert self.release.wait(timeout=5)
+
+    store = BlockingStore()
+    error = RepoReconstructionError("cleanup required", _retained_stores=(store,))
+    first = threading.Thread(target=error.cleanup)
+    second = threading.Thread(target=error.cleanup)
+    first.start()
+    assert store.started.wait(timeout=5)
+    second.start()
+    store.release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert store.calls == 1
+
+
+def test_reconstruction_cleanup_reraises_owner_when_close_still_fails():
+    """A failed cleanup retry updates and re-raises its original owner error."""
+
+    class FailingStore:
+        def __init__(self):
+            self.calls = 0
+
+        def close(self):
+            self.calls += 1
+            if self.calls < 2:
+                raise OSError("close failed")
+
+    store = FailingStore()
+    error = RepoReconstructionError("cleanup required", _retained_stores=(store,))
+
+    with pytest.raises(RepoReconstructionError) as raised:
+        error.cleanup()
+
+    assert raised.value is error
+    assert len(error.cleanup_issues) == 1
+    assert error.cleanup() is None
+    assert store.calls == 2
+
+
+def test_reconstruction_cleanup_preserves_interrupt_ownership():
+    """An interrupted cleanup keeps ownership attached for a later retry."""
+
+    class InterruptedStore:
+        def __init__(self):
+            self.interrupted = True
+            self.calls = 0
+
+        def close(self):
+            self.calls += 1
+            if self.interrupted:
+                raise KeyboardInterrupt
+
+    store = InterruptedStore()
+    error = RepoReconstructionError("cleanup required", _retained_stores=(store,))
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        error.cleanup()
+
+    assert raised.value.repo_cleanup_error is error
+    store.interrupted = False
+    assert error.cleanup() is None
+    assert store.calls == 2
+
+
+def test_reconstruction_retains_exact_selector_data_and_subclass_semantics(tmp_path):
+    """Nested exact CDefs retain selector data, links, and live subclasses."""
+
+    nested = Selector(Definition(ReconstructionTarget, SKIP_ARGS, value=Exact("nested")))
+    selector_cdef = Definition(SelectorDataTarget, nested).concretize()
+    ref_cdef = Definition(
+        RefArgumentTarget, Definition(ReconstructionTarget, "").concretize()
+    ).concretize()
+    selector = Selector(
+        Definition(
+            ReconstructionTarget,
+            value=Choice([selector_cdef, ref_cdef]),
+            type_value=SubclassOf(ReconstructionTarget),
+        )
+    )
+    store = DirStore(tmp_path / "store", query_index="none")
+    source = Repo(store, save_routing=SaveRouting(((selector, store),)))
+
+    rebuilt = Repo.from_definition(source.to_definition())
+    try:
+        rebuilt_selector = rebuilt.save_routing.routes[0][0]
+        original_value = selector.root.kwargs["value"].matcher.values[0]
+        rebuilt_value = rebuilt_selector.root.kwargs["value"].matcher.values[0]
+        assert original_value._stateful_role is rebuilt_value._stateful_role
+        assert type(rebuilt_value.parameters["selector"]).__name__ == "SelectorSpec"
+        assert rebuilt_value.parameters["selector"].selector.root.args is None
+        rebuilt_ref = rebuilt_selector.root.kwargs["value"].matcher.values[1]
+        assert rebuilt_ref.parameters["child"].kind.value == "ref"
+    finally:
+        rebuilt.close(flush=False)
+
+
+def test_definition_reconstructs_in_subprocess_from_a_different_directory(tmp_path):
+    """JSON transport recreates fresh routing without inheriting source handles."""
+
+    directory = DirStore(tmp_path / "dir", query_index="none")
+    archive = _archive_store(tmp_path / "store.zip")
+    source = Repo(
+        [directory, archive],
+        save_routing=SaveRouting(((Selector(Definition(Object)), archive),)),
+    )
+    later = tmp_path / "later"
+    later.mkdir()
+    script = textwrap.dedent(
+        """
+        import sys
+        from dryml.core import Definition, Object, Repo, RepoDefinition
+
+        repo = Repo.from_definition(RepoDefinition.from_json(sys.argv[1]))
+        try:
+            target = Definition(Object).concretize()
+            with repo._retain_save_context() as context:
+                selected = repo._select_save_destinations(context, target)[0]
+                print(type(selected).__name__, selected.archive_path)
+        finally:
+            repo.close(flush=False)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, source.to_definition().to_json()],
+        cwd=later,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    archive.close()
+
+    assert result.stdout.strip() == f"ZipStore {tmp_path / 'store.zip'}"
+
+
+@pytest.mark.parametrize(
+    ("selector", "matching", "unmatched"),
+    (
+        (
+            Selector(Definition(ReconstructionTarget, "selected")),
+            Definition(ReconstructionTarget, "selected").concretize(),
+            Definition(ReconstructionTarget, "other").concretize(),
+        ),
+        (
+            Selector(Definition(ReconstructionTarget, SKIP_ARGS, value=Exact("selected"))),
+            Definition(ReconstructionTarget, "selected").concretize(),
+            Definition(ReconstructionTarget, "other").concretize(),
+        ),
+        (
+            Selector(Definition(ReconstructionTarget, value=Present())),
+            Definition(ReconstructionTarget, "selected").concretize(),
+            Definition(ReconstructionTarget).concretize(),
+        ),
+        (
+            Selector(Definition(ReconstructionTarget, value=Missing())),
+            Definition(ReconstructionTarget).concretize(),
+            Definition(ReconstructionTarget, "selected").concretize(),
+        ),
+        (
+            Selector(Definition(ReconstructionTarget, value=AnyValue())),
+            Definition(ReconstructionTarget, "selected").concretize(),
+            Definition(ReconstructionTarget).concretize(),
+        ),
+        (
+            Selector(Definition(ReconstructionTarget, value=Choice(["one", "two"]))),
+            Definition(ReconstructionTarget, "one").concretize(),
+            Definition(ReconstructionTarget, "other").concretize(),
+        ),
+        (
+            Selector(Definition(ReconstructionTarget, value=IntRange(1, 2))),
+            Definition(ReconstructionTarget, 1).concretize(),
+            Definition(ReconstructionTarget, 3).concretize(),
+        ),
+        (
+            Selector(Definition(ReconstructionTarget, value=SubclassOf(SelectorParityBase))),
+            Definition(ReconstructionTarget, SelectorParityChild).concretize(),
+            Definition(ReconstructionTarget, ReconstructionTarget).concretize(),
+        ),
+        (
+            Selector(Definition(Object, SKIP_ARGS)),
+            Definition(Object).concretize(),
+            Definition(ReconstructionTarget).concretize(),
+        ),
+        (
+            Selector(Definition(Object, SKIP_ARGS), cls_policy="exact"),
+            Definition(Object).concretize(),
+            Definition(ReconstructionTarget).concretize(),
+        ),
+        (
+            Selector(Definition(Object, SKIP_ARGS), strict=True),
+            Definition(Object).concretize(),
+            Definition(ReconstructionTarget).concretize(),
+        ),
+        (
+            Selector(Definition(ImportRef("dryml.core.object", "Object"), SKIP_ARGS)),
+            Definition(Object).concretize(),
+            Definition(ReconstructionTarget).concretize(),
+        ),
+    ),
+    ids=(
+        "positional", "skip-args", "present", "missing", "any", "choice",
+        "int-range", "subclass",
+        "selector-class", "exact-class", "strict", "symbolic-class",
+    ),
+)
+def test_definition_reconstruction_preserves_selector_matches_and_routes(
+        tmp_path, selector, matching, unmatched):
+    """Live reconstruction preserves each portable selector's route decisions."""
+
+    first = DirStore(tmp_path / "first", query_index="none")
+    second = DirStore(tmp_path / "second", query_index="none")
+    source = Repo(
+        [first, second], save_routing=SaveRouting(((selector, second),)),
+    )
+    rebuilt = Repo.from_definition(source.to_definition())
+    try:
+        rebuilt_selector = rebuilt.save_routing.routes[0][0]
+        for target in (matching, unmatched):
+            assert rebuilt_selector.matches(target) is selector.matches(target)
+            with source._retain_save_context() as source_context:
+                source_destination = source._select_save_destinations(source_context, target)[0]
+            with rebuilt._retain_save_context() as rebuilt_context:
+                rebuilt_destination = rebuilt._select_save_destinations(rebuilt_context, target)[0]
+            assert source.stores.index(source_destination) == rebuilt.stores.index(rebuilt_destination)
+    finally:
+        rebuilt.close(flush=False)
+
+
+def test_definition_reconstruction_preserves_roles_and_exact_reference_identity(tmp_path):
+    """Quoted roles and exact shared/independent references keep match semantics."""
+
+    shared = Definition(ReferenceLeaf, 1).concretize()
+    independent = Definition(ReferenceLeaf, 1).concretize()
+    object_ref = ObjectRef(shared, {GraphPath(): ObjectId(("selector",))})
+    state_ref = StateRef(object_ref, {GraphPath(): _state_hash("e")})
+    nested = Selector(Definition(ReconstructionTarget, SKIP_ARGS, value=Exact("nested")))
+    role_value = Definition(SelectorDataTarget, nested).concretize()
+    ref_value = Definition(
+        RefArgumentTarget, Definition(ReconstructionTarget, "").concretize()
+    ).concretize()
+    selector = Selector(Definition(
+        ReconstructionTarget,
+        value=Exact([shared, shared, independent, object_ref, state_ref, role_value, ref_value]),
+    ))
+    matching = Definition(
+        ReconstructionTarget,
+        [shared, shared, independent, object_ref, state_ref, role_value, ref_value],
+    ).concretize()
+    unmatched = Definition(
+        ReconstructionTarget,
+        [shared, independent, independent, object_ref, state_ref, role_value, ref_value],
+    ).concretize()
+    store = DirStore(tmp_path / "store", query_index="none")
+    source = Repo(store, save_routing=SaveRouting(((selector, store),)))
+    rebuilt = Repo.from_definition(source.to_definition())
+    try:
+        rebuilt_selector = rebuilt.save_routing.routes[0][0]
+        assert selector.matches(matching)
+        assert rebuilt_selector.matches(matching) is selector.matches(matching)
+        assert rebuilt_selector.matches(unmatched) is selector.matches(unmatched)
+    finally:
+        rebuilt.close(flush=False)
+
+
+def test_definition_rejects_classless_positional_selector_descriptor(tmp_path):
+    """Classless partial Definitions cannot silently discard encoded positional args."""
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(store, save_routing=SaveRouting(((Selector(Definition()), store),)))
+    data = repo.to_definition().to_data()
+    data["routing"]["routes"][0]["selector"]["nodes"][0]["args"] = [
+        {"kind": "atom", "value": "discarded"},
+    ]
+
+    with pytest.raises(RepoDefinitionError, match="classless"):
+        RepoDefinition.from_data(data)
