@@ -1,6 +1,6 @@
-"""Generate the small, trusted Stage 5+7 v1 reader fixtures.
+"""Generate the small, trusted qualification v1 reader fixtures.
 
-Run with ``PYTHONPATH=src python tests/fixtures/stage5_7_v1/generate.py --output
+Run with ``PYTHONPATH=src python tests/fixtures/qualification_reader_v1/generate.py --output
 <empty-directory>`` from the repository root after intentionally changing the
 documented payload contract. Omitting ``--output`` deliberately regenerates the
 source-controlled fixture directory.
@@ -189,7 +189,7 @@ def main(destination: Path | str | None = None) -> None:
     _write_json(
         output / "manifest.json",
         {
-            "schema": "dryml-stage5_7-fixtures",
+            "schema": "dryml-qualification-reader-fixtures",
             "version": 1,
             "generator": "generate.py",
             "provenance": "Closed code-free reader vectors; TrainState is a named __setstate__ compatibility vector, not a portable pickle codec claim.",

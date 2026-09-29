@@ -144,7 +144,7 @@ a file with a curated `representative_functions` entry is omitted until that
 file's function allowlist is deliberately updated. This intentional selection
 gap is why the exhaustive mode remains available on explicit user request.
 
-The Stage 5+7 representative set retains dependency-light coverage for Method
+The ML workflow qualification representative set retains dependency-light coverage for Method
 preparation/stream handoffs, recursive Experiment identity projection,
 TemplateBundle and history v1 fixtures, TrainState observation persistence,
 Artifact/history association, and closed qualification request construction.
@@ -153,7 +153,7 @@ training, or GPU execution. Those are explicit opt-in qualification gates, not
 routine profile evidence.
 
 The real TFDS NumPy adapter test is `exhaustive_only`. It requires a caller-selected
-`DRYML_STAGE5_7_TFDS_DATA_DIR` and uses `download=False`; routine selection keeps
+`DRYML_ML_QUALIFICATION_TFDS_DATA_DIR` and uses `download=False`; routine selection keeps
 the mocked offline adapter tests while excluding that real reader.
 
 The routine suite has an approximate five-minute feedback goal, not a runtime

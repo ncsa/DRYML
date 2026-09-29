@@ -338,7 +338,7 @@ def test_sdist_contains_port_modules_without_retired_core(
     assert not any(name.startswith("tutorials/") for name in names)
 
 
-def test_wheel_metadata_declares_stage5_7_dependencies(
+def test_wheel_metadata_declares_ml_workflow_dependencies(
     release_artifacts: tuple[Path, Path],
 ) -> None:
     """Require base history support and closed optional qualification extras."""

@@ -1,4 +1,4 @@
-# Stage 5+7 Verification
+# ML Workflow Qualification Verification
 
 Status: persistent-fixture, local, worker-routing, cross-framework, and GPU
 qualification harnesses are implemented.
@@ -7,14 +7,14 @@ and recovery-schema tests pass; all numerical qualification gates, including the
 24-cell CPU matrix, TFDS TensorFlow-to-Torch delivery, step-64 Torch/W3
 recovery, TensorFlow/W1 GPU, and Torch/W3 GPU gates remain unrun.
 
-The Stage 5+7 release matrix is not part of routine test collection. Real W1-W3
+The ML workflow qualification matrix is not part of routine test collection. Real W1-W3
 training, TFDS access, subprocess/Ray execution, and GPU evidence require an
 explicit caller-prepared fixture manifest and explicit pytest opt-in. A skipped
 or unavailable case is `unrun`, never numerical qualification evidence.
 
 ## Persistent Fixtures
 
-`tests/qualification/stage5_7_baseline.json` is the checked-in fixed baseline.
+`tests/qualification/ml_workflow_baseline.json` is the checked-in fixed baseline.
 Generated TFDS directories and Store snapshots are deliberately not tracked.
 The caller selects a persistent manifest path, fixture Store, and TFDS data root.
 The local manifest binds the configuration digest, version evidence, exact W3
@@ -28,11 +28,11 @@ to prove sample codec equivalence before the matrix.
 Prepare through the explicit callable:
 
 ```python
-from tests.qualification.stage5_7_fixtures import prepare_manifest
+from tests.qualification.ml_workflow_fixtures import prepare_manifest
 
 manifest = prepare_manifest(
-    "/persistent/stage5_7/manifest.json",
-    fixture_store="/persistent/stage5_7/store",
+    "/persistent/ml-qualification/manifest.json",
+    fixture_store="/persistent/ml-qualification/store",
     tfds_data_dir="/persistent/tfds",
     build=prepare_my_tfds_and_w3_caches,
     environment={
@@ -96,7 +96,7 @@ reference. `supplemental_tfds_torch_case(manifest)` is a separately counted W1
 TensorFlow-mode TFDS-to-Torch interoperability gate; it is not a twenty-fifth
 matrix cell and does not change primary Torch delivery.
 
-`test_stage5_7_accelerated.py` owns exactly three opt-in real gates: the
+`test_ml_workflow_accelerated.py` owns exactly three opt-in real gates: the
 TensorFlow-mode TFDS-to-Torch W1 interoperability gate plus TensorFlow/W1 and
 Torch/W3 GPU gates. `accelerated_cases(manifest)` emits the latter two separately
 identified subprocess requests, each with one caller-selected GPU visibility
@@ -108,7 +108,7 @@ until the `TrainingPreparation`-retained `tf_to_torch` training boundary; caller
 do not add NumPy, DLPack, or conversion-lambda glue. Its saved accuracy Artifact
 uses the same W1 `>= 0.80` contract as the primary cases.
 
-`tests/qualification/stage5_7_workers.py` builds one selected primary case into a closed
+`tests/qualification/ml_workflow_workers.py` builds one selected primary case into a closed
 JSON worker request. The request carries only case/manifest identities, exact W3
 references encoded by the case, selected authority paths, execution backend,
 session-allocation facts, and optional fixed recovery control. It never carries a live
@@ -169,7 +169,7 @@ for this change.
 The two GPU gates retain the same W1/W3 numerical gates, 300-second deadline,
 8 GiB peak-RSS budget, and 4 GiB case-Store budget. Before a worker case path or
 submission exists, a disposable process applies the caller-selected
-`DRYML_STAGE5_7_GPU_DEVICE` visibility control and verifies exactly one usable
+`DRYML_ML_QUALIFICATION_GPU_DEVICE` visibility control and verifies exactly one usable
 framework GPU. Missing hardware is `QualificationUnrun`; after launch, CPU,
 mixed, unknown, or contradictory placement is a failure. Accepted accelerated
 evidence records the selected visibility entry plus normalized `gpu:0` claim,
@@ -186,19 +186,19 @@ gradients.
 
 ## Opt-In Runs
 
-Use targeted test paths and add `--stage5-7-qualification` only after preparing
+Use targeted test paths and add `--ml-workflow-qualification` only after preparing
 the persistent fixtures. The local W1/W2/W3 entry point requires both paths and
 does not create authority itself:
 
 ```bash
-DRYML_STAGE5_7_MANIFEST=/persistent/stage5_7/manifest.json \
-DRYML_STAGE5_7_FIXTURE_STORE=/persistent/stage5_7/store \
-DRYML_STAGE5_7_TFDS_DATA_DIR=/persistent/tfds \
-DRYML_STAGE5_7_OUTPUT_STORE=/persistent/stage5_7/case-output \
-DRYML_STAGE5_7_WORK_DIR=/persistent/stage5_7/case-work \
-DRYML_STAGE5_7_EVIDENCE_DIR=/persistent/stage5_7/case-evidence \
-./tests.sh tests/qualification/test_stage5_7_local.py \
-  --stage5-7-qualification --no-cov -x
+DRYML_ML_QUALIFICATION_MANIFEST=/persistent/ml-qualification/manifest.json \
+DRYML_ML_QUALIFICATION_FIXTURE_STORE=/persistent/ml-qualification/store \
+DRYML_ML_QUALIFICATION_TFDS_DATA_DIR=/persistent/tfds \
+DRYML_ML_QUALIFICATION_OUTPUT_STORE=/persistent/ml-qualification/case-output \
+DRYML_ML_QUALIFICATION_WORK_DIR=/persistent/ml-qualification/case-work \
+DRYML_ML_QUALIFICATION_EVIDENCE_DIR=/persistent/ml-qualification/case-evidence \
+./tests.sh tests/qualification/test_ml_workflow_local.py \
+  --ml-workflow-qualification --no-cov -x
 ```
 
 Without the switch collection labels real work `UNRUN`. With the switch but
@@ -208,13 +208,13 @@ or substitute synthetic data for release evidence. This harness is not numerical
 qualification evidence and does not complete U10's real gates.
 
 The worker matrix additionally requires an existing
-`DRYML_STAGE5_7_CONTROL_STORE`. Its six Ray cells require an existing
-same-host `DRYML_STAGE5_7_RAY_ADDRESS`; no address leaves those cells unrun while
+`DRYML_ML_QUALIFICATION_CONTROL_STORE`. Its six Ray cells require an existing
+same-host `DRYML_ML_QUALIFICATION_RAY_ADDRESS`; no address leaves those cells unrun while
 the 18 non-Ray cells remain eligible.
 
 The accelerated gates additionally require a caller-selected decimal
-`DRYML_STAGE5_7_GPU_DEVICE`; the harness neither provisions a GPU nor falls back
-to CPU. Run only their explicit path with `--stage5-7-qualification`. Collection
+`DRYML_ML_QUALIFICATION_GPU_DEVICE`; the harness neither provisions a GPU nor falls back
+to CPU. Run only their explicit path with `--ml-workflow-qualification`. Collection
 without that option, or collection-only with it, does not inspect hardware or
 initialize TensorFlow, Torch, or TFDS. No accelerated qualification evidence has
 been recorded by this change.
@@ -250,7 +250,7 @@ validates exact Method and Models public manifests, confirms the retired
 ```bash
 ./tests.sh tests/package/test_public_imports.py \
   tests/package/test_release_artifacts.py \
-  tests/models/test_stage5_7_persistence_fixtures.py \
+  tests/models/test_qualification_persistence_fixtures.py \
   tests/models/test_qualification_contract.py \
   tests/artifacts/test_value.py tests/core/test_template_bundle.py \
   tests/test_timing_plugin.py tests/docs/test_cdef_v2_documentation.py --no-cov -x

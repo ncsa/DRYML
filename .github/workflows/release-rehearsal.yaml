@@ -1,0 +1,92 @@
+name: Release rehearsal
+
+on:
+  push:
+    tags:
+      - "test-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-rehearsal-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate rehearsal tag
+        run: |
+          version="$(python - <<'PY'
+          import configparser
+
+          config = configparser.ConfigParser()
+          config.read("setup.cfg", encoding="utf-8")
+          print(config["metadata"]["version"])
+          PY
+          )"
+          if [[ "$GITHUB_REF_NAME" != "test-v$version" ]]; then
+            printf 'Tag %s does not match package version %s (expected test-v%s).\n' \
+              "$GITHUB_REF_NAME" "$version" "$version" >&2
+            exit 1
+          fi
+
+      - name: Build and check wheel
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build --wheel --outdir dist
+          python -m twine check dist/*.whl
+          python - <<'PY'
+          from pathlib import Path
+
+          wheels = tuple(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one pure-Python wheel, found {len(wheels)}")
+          PY
+
+      - name: Store wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/dryml
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@v5
+        with:
+          name: release-wheel
+          path: dist
+
+      - name: Publish wheel
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/

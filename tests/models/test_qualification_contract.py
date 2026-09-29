@@ -1,4 +1,4 @@
-"""Lightweight import and evidence contracts for Stage 5+7 qualification."""
+"""Lightweight import and evidence contracts for ML workflow qualification."""
 
 from __future__ import annotations
 
@@ -14,14 +14,14 @@ from dryml.core import Repo
 from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset
 
-from tests.qualification.stage5_7_fixtures import (
+from tests.qualification.ml_workflow_fixtures import (
     FixtureManifest, FixtureReferences, REQUIRED_ENVIRONMENT_KEYS, TFDSAuthority,
     installed_environment, load_baseline,
 )
-from tests.qualification.stage5_7_workloads import (
+from tests.qualification.ml_workflow_workloads import (
     QualificationCase, accelerated_cases, case_from_manifest, cpu_matrix, supplemental_tfds_torch_case,
 )
-from tests.qualification.stage5_7_workers import QualificationWorkerRequest, inspect_worker_transport
+from tests.qualification.ml_workflow_workers import QualificationWorkerRequest, inspect_worker_transport
 
 
 def _manifest(tmp_path):
@@ -68,9 +68,9 @@ def test_qualification_case_round_trip_retains_exact_w3_reference_without_live_h
 
     code = """
 import json
-from tests.qualification.stage5_7_fixtures import load_manifest
-from tests.qualification.stage5_7_workloads import case_from_manifest
-m = load_manifest(__import__('sys').argv[1], fixture_store=__import__('sys').argv[2], tfds_data_dir=__import__('sys').argv[3], environment={key: 'test' for key in __import__('tests.qualification.stage5_7_fixtures', fromlist=['REQUIRED_ENVIRONMENT_KEYS']).REQUIRED_ENVIRONMENT_KEYS})
+from tests.qualification.ml_workflow_fixtures import load_manifest
+from tests.qualification.ml_workflow_workloads import case_from_manifest
+m = load_manifest(__import__('sys').argv[1], fixture_store=__import__('sys').argv[2], tfds_data_dir=__import__('sys').argv[3], environment={key: 'test' for key in __import__('tests.qualification.ml_workflow_fixtures', fromlist=['REQUIRED_ENVIRONMENT_KEYS']).REQUIRED_ENVIRONMENT_KEYS})
 c = case_from_manifest(m, workload='W3', framework='tf', execution='managed-local')
 print(json.dumps({'digest': c.w3_test_ref.digest(), 'loaded': sorted(n for n in __import__('sys').modules if n in {'tensorflow', 'torch', 'pandas', 'tensorflow_datasets'})}))
 """
@@ -124,7 +124,7 @@ def test_qualification_preflight_records_tfds_version_without_importing_tfds(mon
         "torch": "2.8.0",
     }
     monkeypatch.setattr(
-        "tests.qualification.stage5_7_fixtures.importlib.metadata.version",
+        "tests.qualification.ml_workflow_fixtures.importlib.metadata.version",
         versions.__getitem__,
     )
 

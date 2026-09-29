@@ -1,4 +1,4 @@
-# Stage 5+7 Local Workflow Harness
+# ML Workflow Qualification Harness
 
 The qualification harness keeps reusable preprocessing in Dataset/Method graphs
 and separates fixture preparation from execution. Build MNIST data from a
@@ -6,7 +6,7 @@ caller-supplied `TFDSAdapter` only after the persistent fixture manifest has bee
 validated:
 
 ```python
-from tests.qualification.stage5_7_workloads import mnist_pipeline, w1_label_methods
+from tests.qualification.ml_workflow_workloads import mnist_pipeline, w1_label_methods
 
 prepared = mnist_pipeline(raw_mnist_dataset)
 graph = prepared.method_graph()
@@ -27,12 +27,12 @@ normalized, flattened image Method supplies both `x` and `y`. For W3, construct
 the case only from the loaded manifest:
 
 ```python
-from tests.qualification.stage5_7_fixtures import load_manifest
-from tests.qualification.stage5_7_workloads import case_from_manifest
+from tests.qualification.ml_workflow_fixtures import load_manifest
+from tests.qualification.ml_workflow_workloads import case_from_manifest
 
 manifest = load_manifest(
-    "/persistent/stage5_7/manifest.json",
-    fixture_store="/persistent/stage5_7/store",
+    "/persistent/ml-qualification/manifest.json",
+    fixture_store="/persistent/ml-qualification/store",
     tfds_data_dir="/persistent/tfds",
 )
 case = case_from_manifest(manifest, workload="W3", framework="torch", execution="local")
@@ -42,7 +42,8 @@ assert case.w3_test_ref == manifest.references.numpy
 This does not open the Store, TFDS, or regenerate a seed-derived dataset. The real
 runner supplies that exact reference as `Experiment.test_data`, then verifies the
 same reference survives checkpoint binding and every repeat. See
-[Stage 5+7 Verification](stage5_7_verification.md) for fixture preparation,
+[ML Workflow Qualification Verification](ml_workflow_qualification_verification.md)
+for fixture preparation,
 fixed gates, and evidence requirements.
 
 An opted-in local runner uses

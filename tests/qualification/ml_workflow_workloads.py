@@ -23,7 +23,7 @@ from dryml.core import StateRef
 from dryml.data import ArgMax, ArrayDataset, Cast, Flatten, Map, Pipe, Project, Select
 from dryml.data.image import ImageNormalize
 
-from .stage5_7_fixtures import (
+from .ml_workflow_fixtures import (
     FixtureManifest, FixtureManifestError, QualificationUnrun, REQUIRED_ENVIRONMENT_KEYS, _reference_from_json,
     _reference_to_json, config_digest, preflight_manifest,
 )
@@ -103,7 +103,7 @@ def selected_gpu_device(value: str | None = None) -> str:
 
     Args:
         value: Optional caller-selected CUDA device index. When omitted, reads
-            ``DRYML_STAGE5_7_GPU_DEVICE``.
+            ``DRYML_ML_QUALIFICATION_GPU_DEVICE``.
 
     Returns:
         The nonnegative decimal device index selected by the caller.
@@ -113,10 +113,10 @@ def selected_gpu_device(value: str | None = None) -> str:
             framework initialization.
     """
 
-    selected = os.environ.get("DRYML_STAGE5_7_GPU_DEVICE") if value is None else value
+    selected = os.environ.get("DRYML_ML_QUALIFICATION_GPU_DEVICE") if value is None else value
     if type(selected) is not str or not selected.isdecimal():
         raise QualificationUnrun(
-            "GPU qualification requires one caller-selected DRYML_STAGE5_7_GPU_DEVICE."
+            "GPU qualification requires one caller-selected DRYML_ML_QUALIFICATION_GPU_DEVICE."
         )
     return selected
 
@@ -522,7 +522,7 @@ class QualificationCase:
 
         required = {"workload", "framework", "execution", "fixture_store", "manifest_digest", "config_digest", "environment", "seed", "w3_test_ref", "case_kind", "tensorflow_mode", "accelerator"}
         if not isinstance(value, Mapping) or set(value) != required:
-            raise FixtureManifestError("Stage 5+7 case record is malformed.")
+            raise FixtureManifestError("ML workflow qualification case record is malformed.")
         reference = None if value["w3_test_ref"] is None else _ref_from_json(value["w3_test_ref"])
         try:
             return cls(
@@ -531,7 +531,7 @@ class QualificationCase:
                 dict(value["seed"]), reference, value["case_kind"], value["tensorflow_mode"], value["accelerator"],
             )
         except (TypeError, ValueError) as error:
-            raise FixtureManifestError("Stage 5+7 case record is malformed.") from error
+            raise FixtureManifestError("ML workflow qualification case record is malformed.") from error
 
 
 def case_from_manifest(manifest: FixtureManifest, *, workload: str, framework: str, execution: str) -> QualificationCase:
@@ -586,18 +586,18 @@ def cpu_matrix(manifest: FixtureManifest) -> tuple[QualificationCase, ...]:
         for workload in WORKLOADS for framework in FRAMEWORKS for execution in EXECUTION_MODES
     )
     if len(cases) != 24:
-        raise AssertionError("Stage 5+7 CPU matrix must contain exactly 24 cases.")
+        raise AssertionError("ML workflow CPU matrix must contain exactly 24 cases.")
     identities = {(case.workload, case.framework, case.execution) for case in cases}
     if len(identities) != len(cases) or identities != {
             (workload, framework, execution)
             for workload in WORKLOADS for framework in FRAMEWORKS
             for execution in EXECUTION_MODES
     }:
-        raise AssertionError("Stage 5+7 CPU matrix must enumerate every cell exactly once.")
+        raise AssertionError("ML workflow CPU matrix must enumerate every cell exactly once.")
     if len({case.case_id for case in cases}) != len(cases):
-        raise AssertionError("Stage 5+7 CPU matrix case IDs must be unique.")
+        raise AssertionError("ML workflow CPU matrix case IDs must be unique.")
     if any(case.tensorflow_mode or case.case_kind != "matrix" for case in cases):
-        raise AssertionError("Stage 5+7 CPU matrix must contain only NumPy-delivery matrix cases.")
+        raise AssertionError("ML workflow CPU matrix must contain only NumPy-delivery matrix cases.")
     return cases
 
 
@@ -717,7 +717,7 @@ def build_w3_fixtures(store, baseline: Mapping[str, object]):
     from dryml.core import Repo
     from dryml.core.store.dir import DirStore
     from dryml.managed import ManagedConfig
-    from .stage5_7_fixtures import FixtureReferences
+    from .ml_workflow_fixtures import FixtureReferences
 
     w3 = baseline["w3"]
     repo = Repo(DirStore(store))
@@ -1151,9 +1151,9 @@ def require_real_qualification(opted_in: bool, *, prerequisites: Sequence[str] =
     """Report disabled or unavailable real work as truthful unrun status."""
 
     if not opted_in:
-        raise QualificationUnrun("Real Stage 5+7 qualification requires explicit opt-in.")
+        raise QualificationUnrun("Real ML workflow qualification requires explicit opt-in.")
     if prerequisites:
-        raise QualificationUnrun("Stage 5+7 qualification prerequisites are unavailable: " + ", ".join(prerequisites))
+        raise QualificationUnrun("ML workflow qualification prerequisites are unavailable: " + ", ".join(prerequisites))
 
 
 def run_local_case(manifest: FixtureManifest, case: QualificationCase, *, opted_in: bool, runner: Callable[[QualificationCase], QualificationEvidence], prerequisites: Sequence[str] = (), output_store=None) -> QualificationEvidence:

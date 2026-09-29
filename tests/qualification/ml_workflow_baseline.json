@@ -1,5 +1,5 @@
 {
-  "format": "dryml-stage5-7-baseline",
+  "format": "dryml-ml-workflow-baseline",
   "version": 1,
   "mnist": {
     "train_split": "train[:4096]",

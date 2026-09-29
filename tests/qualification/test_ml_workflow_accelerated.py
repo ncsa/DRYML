@@ -19,15 +19,15 @@ from dryml.core.cardinality import Cardinality
 from dryml.core import TensorSpec
 from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset, GeneratorDataset
-from tests.qualification.stage5_7_fixtures import (
+from tests.qualification.ml_workflow_fixtures import (
     FixtureManifest, FixtureManifestError, FixtureReferences, QualificationUnrun,
     REQUIRED_ENVIRONMENT_KEYS, TFDSAuthority, load_baseline,
 )
-from tests.qualification.stage5_7_workloads import (
+from tests.qualification.ml_workflow_workloads import (
     QualificationEvidence, accelerated_cases, cpu_matrix, mnist_pipeline,
     native_device_observations, preflight_gpu_framework, qualification_case_paths, selected_gpu_device,
 )
-from tests.qualification.stage5_7_workers import (
+from tests.qualification.ml_workflow_workers import (
     QualificationWorkerRequest, inspect_worker_transport, worker_request,
 )
 
@@ -123,7 +123,7 @@ def test_gpu_request_is_closed_requires_one_selected_device_and_keeps_frameworks
 
     manifest, manifest_path, roots = _authority(tmp_path)
     case = accelerated_cases(manifest)[0]
-    monkeypatch.delenv("DRYML_STAGE5_7_GPU_DEVICE", raising=False)
+    monkeypatch.delenv("DRYML_ML_QUALIFICATION_GPU_DEVICE", raising=False)
     with pytest.raises(QualificationUnrun, match="GPU_DEVICE"):
         worker_request(
             manifest, case, manifest_path=manifest_path, tfds_data_dir=manifest.tfds.data_dir,
@@ -138,7 +138,7 @@ def test_gpu_request_is_closed_requires_one_selected_device_and_keeps_frameworks
     assert request.resource_mode == "worker-process-one-gpu"
     assert request.gate_id == "gpu-tf-w1"
     assert QualificationWorkerRequest.from_data(inspect_worker_transport(request)) == request
-    monkeypatch.setenv("DRYML_STAGE5_7_GPU_DEVICE", "3")
+    monkeypatch.setenv("DRYML_ML_QUALIFICATION_GPU_DEVICE", "3")
     assert selected_gpu_device() == "3"
 
 
@@ -146,7 +146,7 @@ def test_missing_gpu_prerequisite_is_unrun_before_worker_launch(monkeypatch):
     """A failed disposable availability probe is truthful unrun, not CPU fallback."""
 
     monkeypatch.setattr(
-        "tests.qualification.stage5_7_workloads.subprocess.run",
+        "tests.qualification.ml_workflow_workloads.subprocess.run",
         lambda *args, **kwargs: type("Result", (), {"returncode": 3})(),
     )
     with pytest.raises(QualificationUnrun, match="no single usable"):
@@ -173,7 +173,7 @@ def test_accelerated_evidence_rejects_missing_mixed_or_contradictory_native_devi
 
 def test_accelerated_request_evidence_rejects_selector_identity_pid_and_allocation_substitution(tmp_path):
     """Publication binds GPU facts to the exact selected request and Core worker."""
-    from tests.qualification.stage5_7_workers import validate_request_evidence
+    from tests.qualification.ml_workflow_workers import validate_request_evidence
 
     manifest, manifest_path, roots = _authority(tmp_path)
     case = accelerated_cases(manifest)[0]
@@ -241,7 +241,7 @@ def test_native_device_observations_require_one_actual_parameter_training_and_ex
 
 def test_torch_exact_loaded_formula_model_uses_public_gpu_preparation_before_inference(tmp_path, monkeypatch):
     """GPU formula validation prepares the exact-loaded wrapper without a GPU host."""
-    from tests.qualification.stage5_7_workloads import prepare_exact_model_for_formula
+    from tests.qualification.ml_workflow_workloads import prepare_exact_model_for_formula
 
     manifest, _, roots = _authority(tmp_path)
     case = accelerated_cases(manifest)[1]
@@ -251,7 +251,7 @@ def test_torch_exact_loaded_formula_model_uses_public_gpu_preparation_before_inf
         def to_device(self, device):
             prepared.append(str(device))
 
-    monkeypatch.setenv("DRYML_STAGE5_7_GPU_DEVICE", "7")
+    monkeypatch.setenv("DRYML_ML_QUALIFICATION_GPU_DEVICE", "7")
     prepare_exact_model_for_formula(ExactLoadedModel(), case)
 
     assert prepared == ["cuda:0"]
@@ -281,24 +281,24 @@ def test_tensorflow_to_torch_handoff_runs_through_training_preparation_and_is_gr
     assert all(parameter.grad is not None for parameter in model.obj.parameters())
 
 
-@pytest.mark.stage5_7_qualification
+@pytest.mark.ml_workflow_qualification
 @pytest.mark.parametrize("gate", ("interoperability", "tensorflow-w1-gpu", "torch-w3-gpu"))
-def test_stage5_7_real_accelerated_gates(gate):
+def test_ml_workflow_real_accelerated_gates(gate):
     """Run the one TFDS handoff and two caller-selected GPU gates, or report unrun."""
 
-    from tests.qualification.test_stage5_7_local import _real_manifest_or_unrun, _real_runner_in_child
-    from tests.qualification.stage5_7_workers import execute_real_worker_request
+    from tests.qualification.test_ml_workflow_local import _real_manifest_or_unrun, _real_runner_in_child
+    from tests.qualification.ml_workflow_workers import execute_real_worker_request
 
     manifest = _real_manifest_or_unrun()
     roots = {name: os.environ.get(variable) for name, variable in {
-        "output": "DRYML_STAGE5_7_OUTPUT_STORE", "work": "DRYML_STAGE5_7_WORK_DIR",
-        "evidence": "DRYML_STAGE5_7_EVIDENCE_DIR", "control": "DRYML_STAGE5_7_CONTROL_STORE",
+        "output": "DRYML_ML_QUALIFICATION_OUTPUT_STORE", "work": "DRYML_ML_QUALIFICATION_WORK_DIR",
+        "evidence": "DRYML_ML_QUALIFICATION_EVIDENCE_DIR", "control": "DRYML_ML_QUALIFICATION_CONTROL_STORE",
     }.items()}
     if not all(roots.values()):
         pytest.skip("QualificationUnrun: prepared authority and output/control roots are required")
     try:
         if gate == "interoperability":
-            from tests.qualification.stage5_7_workloads import run_local_case, supplemental_tfds_torch_case
+            from tests.qualification.ml_workflow_workloads import run_local_case, supplemental_tfds_torch_case
 
             case = supplemental_tfds_torch_case(manifest)
             run_local_case(
@@ -307,13 +307,13 @@ def test_stage5_7_real_accelerated_gates(gate):
                 output_store=roots["output"],
             )
             return
-        gpu_device = os.environ.get("DRYML_STAGE5_7_GPU_DEVICE")
+        gpu_device = os.environ.get("DRYML_ML_QUALIFICATION_GPU_DEVICE")
         if gpu_device is None:
-            raise QualificationUnrun("set one caller-selected DRYML_STAGE5_7_GPU_DEVICE")
+            raise QualificationUnrun("set one caller-selected DRYML_ML_QUALIFICATION_GPU_DEVICE")
         case = accelerated_cases(manifest)[0 if gate == "tensorflow-w1-gpu" else 1]
         request = worker_request(
-            manifest, case, manifest_path=os.environ["DRYML_STAGE5_7_MANIFEST"],
-            tfds_data_dir=os.environ["DRYML_STAGE5_7_TFDS_DATA_DIR"], output_store=roots["output"],
+            manifest, case, manifest_path=os.environ["DRYML_ML_QUALIFICATION_MANIFEST"],
+            tfds_data_dir=os.environ["DRYML_ML_QUALIFICATION_TFDS_DATA_DIR"], output_store=roots["output"],
             work_dir=roots["work"], evidence_dir=roots["evidence"], control_store=roots["control"],
             gpu_device=gpu_device,
         )

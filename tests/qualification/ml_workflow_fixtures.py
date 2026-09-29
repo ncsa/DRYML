@@ -1,4 +1,4 @@
-"""Persistent authority and validation for Stage 5+7 qualification fixtures.
+"""Persistent authority and validation for ML workflow qualification fixtures.
 
 This module is intentionally import-safe: preparation is the only path that
 opens a Store, and optional ML packages are never imported here.
@@ -22,9 +22,9 @@ from dryml.core import StateRef
 from dryml.locking import LockError, interprocess_lock
 
 
-MANIFEST_FORMAT = "dryml-stage5-7-fixtures"
+MANIFEST_FORMAT = "dryml-ml-workflow-fixtures"
 MANIFEST_VERSION = 1
-BASELINE_PATH = Path(__file__).with_name("stage5_7_baseline.json")
+BASELINE_PATH = Path(__file__).with_name("ml_workflow_baseline.json")
 REQUIRED_ENVIRONMENT_KEYS = (
     "python", "dryml", "pandas", "pyarrow", "tensorflow", "tensorflow_datasets", "torch",
 )
@@ -102,17 +102,17 @@ def load_baseline(path: str | Path = BASELINE_PATH) -> dict[str, object]:
     try:
         value = json.loads(Path(path).read_text(encoding="ascii"))
     except (OSError, json.JSONDecodeError) as error:
-        raise FixtureManifestError("Stage 5+7 baseline is unavailable or malformed.") from error
-    value = _closed_mapping(value, name="Stage 5+7 baseline")
+        raise FixtureManifestError("ML workflow baseline is unavailable or malformed.") from error
+    value = _closed_mapping(value, name="ML workflow baseline")
     required = {
         "format", "version", "mnist", "w1", "w2", "w3", "initialization",
         "batch_size", "checkpoint_every_steps", "cpu_budget_seconds",
         "cpu_peak_rss_bytes", "case_store_budget_bytes",
     }
-    if set(value) != required or value.get("format") != "dryml-stage5-7-baseline" or value.get("version") != 1:
-        raise FixtureManifestError("Stage 5+7 baseline format is unsupported.")
+    if set(value) != required or value.get("format") != "dryml-ml-workflow-baseline" or value.get("version") != 1:
+        raise FixtureManifestError("ML workflow baseline format is unsupported.")
     if not all(isinstance(value[key], dict) for key in ("mnist", "w1", "w2", "w3", "initialization")):
-        raise FixtureManifestError("Stage 5+7 baseline nested schema is malformed.")
+        raise FixtureManifestError("ML workflow baseline nested schema is malformed.")
     return value
 
 
@@ -120,9 +120,9 @@ def _fixed_baseline(value: Mapping[str, object] | None) -> dict[str, object]:
     """Reject caller-selected hyperparameters instead of treating them as a baseline."""
 
     fixed = load_baseline()
-    candidate = fixed if value is None else _closed_mapping(dict(value), name="Stage 5+7 baseline")
+    candidate = fixed if value is None else _closed_mapping(dict(value), name="ML workflow baseline")
     if candidate != fixed:
-        raise FixtureManifestError("Stage 5+7 qualification rejects baseline/config drift.")
+        raise FixtureManifestError("ML workflow qualification rejects baseline/config drift.")
     return fixed
 
 
@@ -302,7 +302,7 @@ class TFDSAuthority:
         if not isinstance(value, dict) or set(value) != {"data_dir", "builder", "config", "version", "content_digest"}:
             raise FixtureManifestError("TFDS authority record is malformed.")
         if type(value["data_dir"]) is not str or _absolute(value["data_dir"]) != _absolute(data_dir):
-            raise FixtureManifestError("Stage 5+7 fixture manifest does not authorize this TFDS root.")
+            raise FixtureManifestError("ML workflow fixture manifest does not authorize this TFDS root.")
         return cls(_absolute(data_dir), **{key: value[key] for key in ("builder", "config", "version", "content_digest")})
 
 
@@ -337,7 +337,7 @@ def _tfds_content_digest(builder) -> str:
     if not entries:
         raise QualificationUnrun("Prepared MNIST data has no content files in the selected TFDS root.")
     digest = hashlib.sha256()
-    digest.update(b"dryml-stage5-7-tfds-content-v1\0")
+    digest.update(b"dryml-ml-workflow-tfds-content-v1\0")
     for relative, path, size in entries:
         encoded = relative.encode("utf-8")
         digest.update(b"path\0" + len(encoded).to_bytes(8, "big") + encoded)
@@ -408,7 +408,7 @@ def validate_tfds_content_authority(authority: TFDSAuthority) -> None:
 
 @dataclass(frozen=True, slots=True)
 class FixtureManifest:
-    """Closed persistent authority for one fixed Stage 5+7 fixture set.
+    """Closed persistent authority for one fixed ML workflow fixture set.
 
     Args:
         fixture_store: Caller-selected absolute Store containing retained caches.
@@ -460,19 +460,19 @@ class FixtureManifest:
 
         required = {"format", "version", "fixture_store", "baseline", "config_digest", "references", "environment", "tfds"}
         if not isinstance(value, dict) or set(value) != required:
-            raise FixtureManifestError("Stage 5+7 fixture manifest fields are invalid.")
+            raise FixtureManifestError("ML workflow fixture manifest fields are invalid.")
         if value["format"] != MANIFEST_FORMAT or value["version"] != MANIFEST_VERSION:
-            raise FixtureManifestError("Stage 5+7 fixture manifest version is unsupported.")
+            raise FixtureManifestError("ML workflow fixture manifest version is unsupported.")
         if not isinstance(value["baseline"], dict):
-            raise FixtureManifestError("Stage 5+7 fixture baseline is malformed.")
+            raise FixtureManifestError("ML workflow fixture baseline is malformed.")
         baseline = _fixed_baseline(value["baseline"])
         if type(value["config_digest"]) is not str or value["config_digest"] != config_digest(baseline):
-            raise FixtureManifestError("Stage 5+7 fixture configuration digest is invalid.")
+            raise FixtureManifestError("ML workflow fixture configuration digest is invalid.")
         if type(value["fixture_store"]) is not str or _absolute(value["fixture_store"]) != _absolute(fixture_store):
-            raise FixtureManifestError("Stage 5+7 fixture manifest does not authorize this Store.")
+            raise FixtureManifestError("ML workflow fixture manifest does not authorize this Store.")
         recorded = _environment(value["environment"])
         if recorded != _environment(environment):
-            raise FixtureManifestError("Stage 5+7 fixture environment evidence is incompatible.")
+            raise FixtureManifestError("ML workflow fixture environment evidence is incompatible.")
         return cls(_absolute(fixture_store), baseline, FixtureReferences.from_data(value["references"]), recorded, TFDSAuthority.from_data(value["tfds"], data_dir=tfds_data_dir))
 
 
@@ -488,9 +488,9 @@ def load_manifest(manifest_path: str | Path, *, fixture_store: str | Path, tfds_
     try:
         value = json.loads(Path(manifest_path).read_text(encoding="ascii"))
     except FileNotFoundError as error:
-        raise FixtureManifestError("Stage 5+7 fixture manifest is missing.") from error
+        raise FixtureManifestError("ML workflow fixture manifest is missing.") from error
     except (OSError, json.JSONDecodeError) as error:
-        raise FixtureManifestError("Stage 5+7 fixture manifest is malformed.") from error
+        raise FixtureManifestError("ML workflow fixture manifest is malformed.") from error
     return FixtureManifest.from_data(value, fixture_store=fixture_store, tfds_data_dir=tfds_data_dir, environment=expected_environment)
 
 
@@ -505,8 +505,8 @@ def _lock_paths(manifest_path: Path, store: Path) -> tuple[Path, Path]:
     manifest_identity = hashlib.sha256(str(manifest_path).encode("utf-8")).hexdigest()
     store_identity = hashlib.sha256(str(store).encode("utf-8")).hexdigest()
     paths = (
-        manifest_path.parent / f".stage5_7_manifest_{manifest_identity}.lock",
-        store.parent / f".stage5_7_store_{store_identity}.lock",
+        manifest_path.parent / f".ml_workflow_manifest_{manifest_identity}.lock",
+        store.parent / f".ml_workflow_store_{store_identity}.lock",
     )
     return tuple(sorted(paths, key=os.fspath))
 

@@ -126,7 +126,7 @@ def test_tfds_adapter_real_mnist_numpy_mode():
     """Read caller-prepared MNIST authority without downloading or caching it."""
 
     pytest.importorskip("tensorflow_datasets")
-    data_dir = os.environ.get("DRYML_STAGE5_7_TFDS_DATA_DIR")
+    data_dir = os.environ.get("DRYML_ML_QUALIFICATION_TFDS_DATA_DIR")
     if not data_dir or not Path(data_dir).is_dir():
         pytest.skip("QualificationUnrun: a caller-selected prepared TFDS root is required")
 

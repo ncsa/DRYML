@@ -1,4 +1,4 @@
-"""Closed worker routing and recovery controls for Stage 5+7 qualification.
+"""Closed worker routing and recovery controls for ML workflow qualification.
 
 This module is deliberately framework-free.  Coordinators construct JSON-only
 requests, preflight selected shared authority, and submit those requests through
@@ -21,11 +21,11 @@ import struct
 import sys
 from types import MappingProxyType
 
-from .stage5_7_fixtures import (
+from .ml_workflow_fixtures import (
     FixtureManifestError, QualificationUnrun, installed_environment, load_manifest,
     preflight_manifest, validate_fixture_reference_metadata,
 )
-from .stage5_7_workloads import QualificationCase, accelerated_cases, cpu_matrix, selected_gpu_device
+from .ml_workflow_workloads import QualificationCase, accelerated_cases, cpu_matrix, selected_gpu_device
 
 
 _ROUTES = {
@@ -290,7 +290,7 @@ class QualificationWorkerRequest:
             raise FixtureManifestError("Only accelerated qualification requests may carry a GPU device.")
         if self.case.execution == "ray":
             if type(self.ray_address) is not str or not self.ray_address:
-                raise QualificationUnrun("Same-host Ray qualification requires DRYML_STAGE5_7_RAY_ADDRESS.")
+                raise QualificationUnrun("Same-host Ray qualification requires DRYML_ML_QUALIFICATION_RAY_ADDRESS.")
         elif self.ray_address is not None:
             raise FixtureManifestError("Only Ray matrix requests may carry a Ray address.")
         if self.recovery is not None:
@@ -444,20 +444,20 @@ def _preflight_coordinator_request(request: QualificationWorkerRequest) -> None:
             # Probe in a disposable process before this coordinator creates a
             # case child or submits the actual worker. Missing hardware is unrun,
             # while post-launch placement contradictions remain hard failures.
-            from .stage5_7_workloads import preflight_gpu_framework
+            from .ml_workflow_workloads import preflight_gpu_framework
             preflight_gpu_framework(request.case.framework, visible_device=request.gpu_device)
         # The orchestrator validates manifest-bound bytes and Store receipts but
         # deliberately does not import TFDS.  The worker reconstructs TFDS before
         # opening payloads through preflight_manifest().
         from dryml.core.store.dir import DirStore
-        from .stage5_7_fixtures import validate_tfds_content_authority
+        from .ml_workflow_fixtures import validate_tfds_content_authority
         validate_tfds_content_authority(manifest.tfds)
         fixture_store = DirStore.open_existing(manifest.fixture_store)
         try:
             validate_fixture_reference_metadata(manifest.references, store=fixture_store)
         finally:
             fixture_store.close()
-        from .stage5_7_workloads import _paths_overlap, _safe_qualification_root
+        from .ml_workflow_workloads import _paths_overlap, _safe_qualification_root
         roots = tuple(_safe_qualification_root(value, name) for value, name in (
             (request.output_store, "output Store"), (request.work_dir, "work"),
             (request.evidence_dir, "evidence"), (request.control_store, "control Store"),
@@ -521,15 +521,15 @@ def run_real_worker_request(data: Mapping[str, object]) -> Mapping[str, object]:
 
     request = QualificationWorkerRequest.from_data(data)
     preflight_worker_request(request)
-    from .stage5_7_fixtures import installed_environment, load_manifest, preflight_manifest
-    from .stage5_7_workloads import QualificationEvidence, validate_evidence
-    from tests.qualification.test_stage5_7_local import _real_runner
+    from .ml_workflow_fixtures import installed_environment, load_manifest, preflight_manifest
+    from .ml_workflow_workloads import QualificationEvidence, validate_evidence
+    from tests.qualification.test_ml_workflow_local import _real_runner
 
     previous = {
         name: os.environ.get(name)
         for name in (
-            "DRYML_STAGE5_7_CASE_OUTPUT_STORE", "DRYML_STAGE5_7_CASE_WORK_DIR",
-            "DRYML_STAGE5_7_CASE_CONTROL_STORE", "DRYML_STAGE5_7_GPU_DEVICE",
+            "DRYML_ML_QUALIFICATION_CASE_OUTPUT_STORE", "DRYML_ML_QUALIFICATION_CASE_WORK_DIR",
+            "DRYML_ML_QUALIFICATION_CASE_CONTROL_STORE", "DRYML_ML_QUALIFICATION_GPU_DEVICE",
             "CUDA_VISIBLE_DEVICES",
         )
     }
@@ -538,7 +538,7 @@ def run_real_worker_request(data: Mapping[str, object]) -> Mapping[str, object]:
             # TFDS may import TensorFlow while validating its prepared builder.
             # Install the selected visibility before every worker-side preflight,
             # not only immediately before model construction.
-            os.environ["DRYML_STAGE5_7_GPU_DEVICE"] = request.gpu_device
+            os.environ["DRYML_ML_QUALIFICATION_GPU_DEVICE"] = request.gpu_device
             os.environ["CUDA_VISIBLE_DEVICES"] = request.gpu_device
         try:
             manifest = load_manifest(
@@ -550,9 +550,9 @@ def run_real_worker_request(data: Mapping[str, object]) -> Mapping[str, object]:
             raise FixtureManifestError(
                 f"Qualification worker prerequisite drifted after coordinator preflight: {error}"
             ) from error
-        os.environ["DRYML_STAGE5_7_CASE_OUTPUT_STORE"] = request.output_store
-        os.environ["DRYML_STAGE5_7_CASE_WORK_DIR"] = request.work_dir
-        os.environ["DRYML_STAGE5_7_CASE_CONTROL_STORE"] = request.control_store
+        os.environ["DRYML_ML_QUALIFICATION_CASE_OUTPUT_STORE"] = request.output_store
+        os.environ["DRYML_ML_QUALIFICATION_CASE_WORK_DIR"] = request.work_dir
+        os.environ["DRYML_ML_QUALIFICATION_CASE_CONTROL_STORE"] = request.control_store
         evidence = _real_runner(
             manifest, request.case, recovery=request.recovery,
             worker_request_id=request.request_id,
@@ -582,7 +582,7 @@ def execute_real_worker_request(request: QualificationWorkerRequest):
     from dryml.core.store.dir import DirStore
     from dryml.execute.ray import RayBackendConfig
     from dryml.execute.subprocess import SubProcessConfig
-    from .stage5_7_workloads import QualificationEvidence, qualification_case_paths
+    from .ml_workflow_workloads import QualificationEvidence, qualification_case_paths
 
     with _coordinator_scope():
         preflight_coordinator_request(request)
@@ -665,16 +665,16 @@ def _request_environment(request: QualificationWorkerRequest):
     """Install only case-local worker paths while preserving the caller environment."""
 
     names = {
-        "DRYML_STAGE5_7_CASE_OUTPUT_STORE": request.output_store,
-        "DRYML_STAGE5_7_CASE_WORK_DIR": request.work_dir,
-        "DRYML_STAGE5_7_CASE_CONTROL_STORE": request.control_store,
-        "DRYML_STAGE5_7_CASE_RESOURCE_MODE": request.resource_mode,
+        "DRYML_ML_QUALIFICATION_CASE_OUTPUT_STORE": request.output_store,
+        "DRYML_ML_QUALIFICATION_CASE_WORK_DIR": request.work_dir,
+        "DRYML_ML_QUALIFICATION_CASE_CONTROL_STORE": request.control_store,
+        "DRYML_ML_QUALIFICATION_CASE_RESOURCE_MODE": request.resource_mode,
     }
     if request.gpu_device is not None:
         # This runs in the isolated worker before the real runner imports a
         # framework, so a requested GPU can never silently fall back to CPU.
         names.update({
-            "DRYML_STAGE5_7_GPU_DEVICE": request.gpu_device,
+            "DRYML_ML_QUALIFICATION_GPU_DEVICE": request.gpu_device,
             "CUDA_VISIBLE_DEVICES": request.gpu_device,
         })
     previous = {name: os.environ.get(name) for name in names}
@@ -699,7 +699,7 @@ def _run_in_process_request(request: QualificationWorkerRequest):
 
     code = (
         "import json, sys\n"
-        "from tests.qualification.stage5_7_workers import _run_local_child_request\n"
+        "from tests.qualification.ml_workflow_workers import _run_local_child_request\n"
         "print(json.dumps(_run_local_child_request(json.loads(sys.argv[1])), sort_keys=True))\n"
     )
     environment = {
@@ -727,7 +727,7 @@ def _run_in_process_request(request: QualificationWorkerRequest):
         raise FixtureManifestError("Isolated local qualification child returned malformed provisional evidence.") from error
     if not isinstance(result, Mapping) or set(result) != {"evidence", "observation"}:
         raise FixtureManifestError("Isolated local qualification child omitted its execution observation.")
-    from .stage5_7_workloads import QualificationEvidence
+    from .ml_workflow_workloads import QualificationEvidence
 
     try:
         evidence = QualificationEvidence.from_data(result["evidence"])
@@ -1025,8 +1025,8 @@ def _finalize_coordinator_evidence(*, manifest, evidence, request: Qualification
     """Validate and non-replacing-publish final coordinator-owned evidence."""
 
     from dataclasses import replace as data_replace
-    from .stage5_7_workloads import QualificationEvidence, validate_evidence
-    from .stage5_7_fixtures import load_manifest
+    from .ml_workflow_workloads import QualificationEvidence, validate_evidence
+    from .ml_workflow_fixtures import load_manifest
 
     if manifest is None:
         manifest = load_manifest(

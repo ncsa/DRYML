@@ -31,13 +31,13 @@
             "test_fixture_manifest_portable_tfds_identity_excludes_local_root"
           ]
         },
-        "tests/models/test_stage5_7_persistence_fixtures.py": {
+        "tests/models/test_qualification_persistence_fixtures.py": {
           "rationale": "Retain source-controlled v1 history/reference and TrainState observation compatibility without pandas analysis or live payloads.",
             "functions": [
                 "test_experiment_data_v1_fixture_round_trips_actual_reader_input_without_payloads",
                 "test_value_receipt_fixture_round_trips_actual_value_reader_input",
                 "test_train_state_named_state_vector_restores_observation_and_historical_defaults",
-                "test_stage5_7_fixture_generator_reproduces_the_committed_bytes"
+                "test_qualification_fixture_generator_reproduces_the_committed_bytes"
             ]
         },
         "tests/models/test_experiment_data_codec.py": {
@@ -85,21 +85,21 @@
             "test_known_spec_handoff_records_one_immutable_graph_edge_without_body_execution"
           ]
         },
-        "tests/qualification/test_stage5_7_local.py": {
+        "tests/qualification/test_ml_workflow_local.py": {
           "rationale": "Retain explicit no-download fixture preparation and fixed-case construction only; real TFDS/training remains opt-in.",
           "functions": [
             "test_preparation_requires_opt_in_and_never_overwrites_authority",
             "test_case_is_closed_and_carries_manifest_environment_seed_and_fixture_identity"
           ]
         },
-        "tests/qualification/test_stage5_7_cpu.py": {
+        "tests/qualification/test_ml_workflow_cpu.py": {
           "rationale": "Retain deterministic 24-cell request enumeration and closed fake worker transport, not the real CPU/recovery gates.",
           "functions": [
             "test_worker_matrix_enumerates_all_24_primary_cells_once_and_excludes_supplement",
             "test_fake_execute_routes_all_24_requests_without_live_transport_or_framework_import"
           ]
         },
-        "tests/qualification/test_stage5_7_accelerated.py": {
+        "tests/qualification/test_ml_workflow_accelerated.py": {
           "rationale": "Retain GPU request/evidence gating without TFDS, GPU probing, or real interoperability execution.",
           "functions": [
             "test_gpu_request_is_closed_requires_one_selected_device_and_keeps_frameworks_unloaded",

@@ -1,4 +1,4 @@
-"""Integrity helpers for the closed Stage 5+7 reader fixture set."""
+"""Integrity helpers for the closed qualification reader fixture set."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pickletools
 from typing import Any
 
 
-_MANIFEST_SCHEMA = "dryml-stage5_7-fixtures"
+_MANIFEST_SCHEMA = "dryml-qualification-reader-fixtures"
 _MANIFEST_VERSION = 1
 _FIXTURE_FIELDS = {
     "artifact_value/value.pkl": {"format", "version", "sha256"},
@@ -23,7 +23,7 @@ _UNSAFE_PICKLE_OPCODES = frozenset({
 })
 
 
-def verify_stage5_7_fixture_manifest(root: Path) -> dict[str, Any]:
+def verify_qualification_fixture_manifest(root: Path) -> dict[str, Any]:
     """Validate the closed manifest and file hashes before a fixture is decoded.
 
     Args:

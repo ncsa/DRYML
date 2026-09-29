@@ -24,6 +24,6 @@
   },
   "generator": "generate.py",
   "provenance": "Closed code-free reader vectors; TrainState is a named __setstate__ compatibility vector, not a portable pickle codec claim.",
-  "schema": "dryml-stage5_7-fixtures",
+  "schema": "dryml-qualification-reader-fixtures",
   "version": 1
 }

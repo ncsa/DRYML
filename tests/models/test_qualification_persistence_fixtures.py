@@ -1,4 +1,4 @@
-"""Read source-controlled Stage 5+7 persistence inputs without live payloads."""
+"""Read source-controlled qualification inputs without live payloads."""
 
 from __future__ import annotations
 
@@ -11,13 +11,13 @@ import sys
 from dryml.artifacts import Value
 from dryml.managed import managed_operation
 from dryml.models import ExperimentData, TrainState, TrainingObservation
-from tests.stage5_7_fixture_support import (
+from tests.qualification_fixture_support import (
     assert_value_fixture_has_no_executable_pickle_opcodes,
-    verify_stage5_7_fixture_manifest,
+    verify_qualification_fixture_manifest,
 )
 
 
-FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "stage5_7_v1"
+FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "qualification_reader_v1"
 
 
 def _generated_fixture_bytes(root: Path) -> dict[str, bytes]:
@@ -49,7 +49,7 @@ class FixtureValue(Value):
 def test_experiment_data_v1_fixture_round_trips_actual_reader_input_without_payloads(tmp_path):
     """Decode, canonically re-encode, and re-decode one closed v1 history row."""
 
-    verify_stage5_7_fixture_manifest(FIXTURE_ROOT)
+    verify_qualification_fixture_manifest(FIXTURE_ROOT)
     payload_path = FIXTURE_ROOT / "experiment_data.json"
     payload = json.loads(payload_path.read_text(encoding="ascii"))
     encoded_state = payload["rows"][0]["facts"]["state_ref"]
@@ -76,7 +76,7 @@ def test_value_receipt_fixture_round_trips_actual_value_reader_input(tmp_path):
     """Restore and re-save the committed ``value.pkl`` receipt through Value APIs."""
 
     receipt = FIXTURE_ROOT / "artifact_value" / "value.pkl"
-    verify_stage5_7_fixture_manifest(FIXTURE_ROOT)
+    verify_qualification_fixture_manifest(FIXTURE_ROOT)
     assert_value_fixture_has_no_executable_pickle_opcodes(receipt)
     value = FixtureValue()
     value.restore_state_from_dir_imp(FIXTURE_ROOT / "artifact_value", codec="pkl")
@@ -89,7 +89,7 @@ def test_value_receipt_fixture_round_trips_actual_value_reader_input(tmp_path):
 def test_train_state_named_state_vector_restores_observation_and_historical_defaults():
     """Restore the documented named-state compatibility vector without pickle claims."""
 
-    verify_stage5_7_fixture_manifest(FIXTURE_ROOT)
+    verify_qualification_fixture_manifest(FIXTURE_ROOT)
     fixture = json.loads((FIXTURE_ROOT / "train_state.json").read_text(encoding="ascii"))
     state_data = dict(fixture["state"])
     state_data["pending_observation"] = TrainingObservation(
@@ -107,7 +107,7 @@ def test_train_state_named_state_vector_restores_observation_and_historical_defa
     assert historical.examples_seen == historical.loss_denominator == 0
 
 
-def test_stage5_7_fixture_generator_reproduces_the_committed_bytes(tmp_path):
+def test_qualification_fixture_generator_reproduces_the_committed_bytes(tmp_path):
     """Regenerate into a clean directory without changing committed reader inputs."""
 
     repository = FIXTURE_ROOT.parents[2]
@@ -126,6 +126,6 @@ def test_stage5_7_fixture_generator_reproduces_the_committed_bytes(tmp_path):
         env={**os.environ, "PYTHONPATH": str(repository / "src")},
     )
 
-    verify_stage5_7_fixture_manifest(output)
+    verify_qualification_fixture_manifest(output)
     assert _generated_fixture_bytes(FIXTURE_ROOT) == committed
     assert _generated_fixture_bytes(output) == committed

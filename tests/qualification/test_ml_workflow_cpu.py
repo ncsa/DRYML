@@ -17,16 +17,16 @@ import pytest
 from dryml.core import Repo
 from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset
-from tests.qualification.stage5_7_fixtures import (
+from tests.qualification.ml_workflow_fixtures import (
     FixtureManifest, FixtureManifestError, FixtureReferences, QualificationUnrun, REQUIRED_ENVIRONMENT_KEYS,
     TFDSAuthority, load_baseline,
 )
-from tests.qualification.stage5_7_workers import (
+from tests.qualification.ml_workflow_workers import (
     QualificationWorkerRequest, inspect_worker_transport,
     execute_real_worker_request, preflight_coordinator_request, recovery_request, run_worker_request, submit_worker_request, validate_recovery_report,
     worker_request, worker_requests, _publish_final_evidence,
 )
-from tests.qualification.stage5_7_workloads import cpu_matrix, supplemental_tfds_torch_case
+from tests.qualification.ml_workflow_workloads import cpu_matrix, supplemental_tfds_torch_case
 
 
 _TEST_ENVIRONMENT = {key: "test" for key in REQUIRED_ENVIRONMENT_KEYS}
@@ -166,8 +166,8 @@ def test_coordinator_preflight_completes_before_case_children_or_spool(tmp_path,
     request = next(item for item in requests if item.case.execution == "subprocess")
     control = DirStore(roots["control"])
     control.close()
-    import tests.qualification.stage5_7_fixtures as fixtures
-    import tests.qualification.stage5_7_workers as workers
+    import tests.qualification.ml_workflow_fixtures as fixtures
+    import tests.qualification.ml_workflow_workers as workers
 
     monkeypatch.setattr(workers, "installed_environment", lambda: _TEST_ENVIRONMENT)
     monkeypatch.setattr(workers, "load_manifest", lambda *args, **kwargs: manifest)
@@ -187,7 +187,7 @@ def test_worker_transport_and_fresh_process_reconstruct_only_closed_request_data
     assert "Repo" not in json.dumps(payload) and "DirStore" not in json.dumps(payload)
     code = """
 import json, sys
-from tests.qualification.stage5_7_workers import run_worker_request
+from tests.qualification.ml_workflow_workers import run_worker_request
 print(json.dumps(dict(run_worker_request(json.loads(sys.argv[1]))), sort_keys=True))
 """
     environment = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(Path.cwd() / "src"), str(Path.cwd()), os.environ.get("PYTHONPATH")]))}
@@ -213,7 +213,7 @@ def test_fresh_local_isolation_preserves_semantic_session_mode(tmp_path, executi
     )
     code = """
 import json, sys
-from tests.qualification.stage5_7_workers import run_local_isolation_probe
+from tests.qualification.ml_workflow_workers import run_local_isolation_probe
 print(json.dumps(run_local_isolation_probe(json.loads(sys.argv[1]))))
 """
     environment = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(Path.cwd() / "src"), str(Path.cwd()), os.environ.get("PYTHONPATH")]))}
@@ -234,7 +234,7 @@ def test_final_evidence_file_is_non_replacing_and_reopens_exact_bytes(tmp_path):
         def to_data(self):
             return {"accepted": True, "refs": ["one", "two"]}
 
-    import tests.qualification.stage5_7_workers as workers
+    import tests.qualification.ml_workflow_workers as workers
 
     path = tmp_path / "qualification-evidence.json"
     synchronized = []
@@ -260,7 +260,7 @@ def test_coordinator_classifies_absent_prerequisite_but_rejects_corrupt_authorit
         preflight_coordinator_request(request)
     roots["control"].mkdir()
     manifest_path.write_text("{", encoding="ascii")
-    monkeypatch.setattr("tests.qualification.stage5_7_workers.installed_environment", lambda: _TEST_ENVIRONMENT)
+    monkeypatch.setattr("tests.qualification.ml_workflow_workers.installed_environment", lambda: _TEST_ENVIRONMENT)
     with pytest.raises(FixtureManifestError, match="malformed"):
         preflight_coordinator_request(request)
 
@@ -328,7 +328,7 @@ def test_coordinator_scope_keeps_import_and_materialization_restrictions_after_s
     from dryml.artifacts import Value
     from dryml.data import Dataset
     from dryml.models import ExperimentData, Model
-    from tests.qualification.stage5_7_workers import _coordinator_result_scope, _coordinator_scope, _load_selected_coordinator_results
+    from tests.qualification.ml_workflow_workers import _coordinator_result_scope, _coordinator_scope, _load_selected_coordinator_results
 
     requests, *_ = _requests(tmp_path)
     request = next(item for item in requests if item.case.execution == "subprocess")
@@ -380,7 +380,7 @@ def test_coordinator_scope_keeps_import_and_materialization_restrictions_after_s
 def test_local_child_observation_rejects_request_or_allocation_mismatch(tmp_path):
     """Coordinator accepts only the child-observed local session/allocation facts."""
 
-    from tests.qualification.stage5_7_workers import _validate_local_observation
+    from tests.qualification.ml_workflow_workers import _validate_local_observation
 
     requests, *_ = _requests(tmp_path)
     request = next(item for item in requests if item.case.execution == "managed-local")
@@ -399,21 +399,21 @@ def test_local_child_observation_rejects_request_or_allocation_mismatch(tmp_path
 def test_worker_environment_threads_only_the_selected_control_store(tmp_path):
     """Local workers receive the request control authority independently of output state."""
 
-    from tests.qualification.stage5_7_workers import _request_environment
+    from tests.qualification.ml_workflow_workers import _request_environment
 
     requests, *_ = _requests(tmp_path)
     request = next(item for item in requests if item.case.execution == "local")
-    original = os.environ.get("DRYML_STAGE5_7_CASE_CONTROL_STORE")
+    original = os.environ.get("DRYML_ML_QUALIFICATION_CASE_CONTROL_STORE")
     with _request_environment(request):
-        assert os.environ["DRYML_STAGE5_7_CASE_CONTROL_STORE"] == request.control_store
-        assert os.environ["DRYML_STAGE5_7_CASE_CONTROL_STORE"] != request.output_store
-    assert os.environ.get("DRYML_STAGE5_7_CASE_CONTROL_STORE") == original
+        assert os.environ["DRYML_ML_QUALIFICATION_CASE_CONTROL_STORE"] == request.control_store
+        assert os.environ["DRYML_ML_QUALIFICATION_CASE_CONTROL_STORE"] != request.output_store
+    assert os.environ.get("DRYML_ML_QUALIFICATION_CASE_CONTROL_STORE") == original
 
 
 def test_core_snapshot_without_allocation_reports_worker_process_truthfully(tmp_path):
     """Core worker evidence does not relabel a missing session allocation as managed."""
 
-    from tests.qualification.stage5_7_workers import _observed_core_evidence
+    from tests.qualification.ml_workflow_workers import _observed_core_evidence
 
     @dataclass(frozen=True)
     class Reference:
@@ -450,7 +450,7 @@ def test_core_snapshot_without_allocation_reports_worker_process_truthfully(tmp_
 def test_canonical_state_digest_is_stable_bounded_and_device_independent_for_arrays_and_scalars():
     """Recovery state digests retain typed values, not pickle or array layout accidents."""
 
-    from tests.qualification.stage5_7_workers import _canonical_state_digest
+    from tests.qualification.ml_workflow_workers import _canonical_state_digest
 
     first = {"tensor": np.asarray([[1.0, 2.0]], dtype=np.float32), "state": [None, True, 3, -0.0, "ok"]}
     second = {"state": [None, True, 3, -0.0, "ok"], "tensor": np.asfortranarray(first["tensor"])}
@@ -474,7 +474,7 @@ def test_canonical_state_digest_matches_tiny_torch_state_dict_and_changes_with_s
     """A fresh tiny Torch model/optimizer state has deterministic recovery digests."""
 
     torch = pytest.importorskip("torch")
-    from tests.qualification.stage5_7_workers import _canonical_state_digest, _state_placement
+    from tests.qualification.ml_workflow_workers import _canonical_state_digest, _state_placement
 
     model = torch.nn.Linear(2, 1)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
@@ -497,26 +497,26 @@ def test_canonical_state_digest_matches_tiny_torch_state_dict_and_changes_with_s
     assert _state_placement(model_state) == _state_placement(optimizer_state) == ("cpu",)
 
 
-@pytest.mark.stage5_7_qualification
+@pytest.mark.ml_workflow_qualification
 @pytest.mark.parametrize("case_index", range(24), ids=lambda index: f"cpu-{index:02d}")
-def test_stage5_7_real_cpu_worker_matrix(case_index):
+def test_ml_workflow_real_cpu_worker_matrix(case_index):
     """Explicit real worker matrix gate; collection remains unrun without opt-in authority.
 
     The executed runner is intentionally supplied by release automation after it
     selects persistent fixture/output/control roots and, for Ray, an existing
-    ``DRYML_STAGE5_7_RAY_ADDRESS``.  This test never creates a Ray target.
+    ``DRYML_ML_QUALIFICATION_RAY_ADDRESS``.  This test never creates a Ray target.
     """
 
-    manifest_path = os.environ.get("DRYML_STAGE5_7_MANIFEST")
-    fixture_store = os.environ.get("DRYML_STAGE5_7_FIXTURE_STORE")
-    tfds_root = os.environ.get("DRYML_STAGE5_7_TFDS_DATA_DIR")
+    manifest_path = os.environ.get("DRYML_ML_QUALIFICATION_MANIFEST")
+    fixture_store = os.environ.get("DRYML_ML_QUALIFICATION_FIXTURE_STORE")
+    tfds_root = os.environ.get("DRYML_ML_QUALIFICATION_TFDS_DATA_DIR")
     roots = {name: os.environ.get(variable) for name, variable in {
-        "output": "DRYML_STAGE5_7_OUTPUT_STORE", "work": "DRYML_STAGE5_7_WORK_DIR",
-        "evidence": "DRYML_STAGE5_7_EVIDENCE_DIR", "control": "DRYML_STAGE5_7_CONTROL_STORE",
+        "output": "DRYML_ML_QUALIFICATION_OUTPUT_STORE", "work": "DRYML_ML_QUALIFICATION_WORK_DIR",
+        "evidence": "DRYML_ML_QUALIFICATION_EVIDENCE_DIR", "control": "DRYML_ML_QUALIFICATION_CONTROL_STORE",
     }.items()}
     if not manifest_path or not fixture_store or not tfds_root or not all(roots.values()):
         pytest.skip("QualificationUnrun: prepared U10 authority and output/control roots are required")
-    from tests.qualification.stage5_7_fixtures import installed_environment, load_manifest
+    from tests.qualification.ml_workflow_fixtures import installed_environment, load_manifest
     try:
         manifest = load_manifest(manifest_path, fixture_store=fixture_store, tfds_data_dir=tfds_root, environment=installed_environment())
         case = cpu_matrix(manifest)[case_index]
@@ -524,27 +524,27 @@ def test_stage5_7_real_cpu_worker_matrix(case_index):
             manifest, case, manifest_path=manifest_path, tfds_data_dir=tfds_root,
             output_store=roots["output"], work_dir=roots["work"],
             evidence_dir=roots["evidence"], control_store=roots["control"],
-            ray_address=os.environ.get("DRYML_STAGE5_7_RAY_ADDRESS"),
+            ray_address=os.environ.get("DRYML_ML_QUALIFICATION_RAY_ADDRESS"),
         )
         assert execute_real_worker_request(request).case == request.case
     except QualificationUnrun as error:
         pytest.skip(f"QualificationUnrun: {error}")
 
 
-@pytest.mark.stage5_7_qualification
-def test_stage5_7_real_torch_w3_subprocess_recovery():
+@pytest.mark.ml_workflow_qualification
+def test_ml_workflow_real_torch_w3_subprocess_recovery():
     """Explicit step-64 recovery gate; it is never represented by fake evidence."""
 
-    manifest_path = os.environ.get("DRYML_STAGE5_7_MANIFEST")
-    fixture_store = os.environ.get("DRYML_STAGE5_7_FIXTURE_STORE")
-    tfds_root = os.environ.get("DRYML_STAGE5_7_TFDS_DATA_DIR")
+    manifest_path = os.environ.get("DRYML_ML_QUALIFICATION_MANIFEST")
+    fixture_store = os.environ.get("DRYML_ML_QUALIFICATION_FIXTURE_STORE")
+    tfds_root = os.environ.get("DRYML_ML_QUALIFICATION_TFDS_DATA_DIR")
     roots = {name: os.environ.get(variable) for name, variable in {
-        "output": "DRYML_STAGE5_7_OUTPUT_STORE", "work": "DRYML_STAGE5_7_WORK_DIR",
-        "evidence": "DRYML_STAGE5_7_EVIDENCE_DIR", "control": "DRYML_STAGE5_7_CONTROL_STORE",
+        "output": "DRYML_ML_QUALIFICATION_OUTPUT_STORE", "work": "DRYML_ML_QUALIFICATION_WORK_DIR",
+        "evidence": "DRYML_ML_QUALIFICATION_EVIDENCE_DIR", "control": "DRYML_ML_QUALIFICATION_CONTROL_STORE",
     }.items()}
     if not manifest_path or not fixture_store or not tfds_root or not all(roots.values()):
         pytest.skip("QualificationUnrun: real recovery requires prepared U10 authority and output/control roots")
-    from tests.qualification.stage5_7_fixtures import installed_environment, load_manifest
+    from tests.qualification.ml_workflow_fixtures import installed_environment, load_manifest
     try:
         manifest = load_manifest(manifest_path, fixture_store=fixture_store, tfds_data_dir=tfds_root, environment=installed_environment())
         request = recovery_request(

@@ -1,4 +1,4 @@
-"""Routine contract tests plus explicitly marked real Stage 5+7 local gates."""
+"""Routine contract tests plus explicitly marked real ML workflow gates."""
 
 from __future__ import annotations
 
@@ -20,12 +20,12 @@ from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset, Map
 from dryml.artifacts import CachedDataset
 from dryml.managed import ManagedConfig
-from tests.qualification.stage5_7_fixtures import (
+from tests.qualification.ml_workflow_fixtures import (
     FixtureManifest, FixtureManifestError, FixtureReferences, QualificationUnrun,
     REQUIRED_ENVIRONMENT_KEYS, TFDSAuthority, _tfds_content_digest, config_digest, load_baseline, load_manifest,
     prepare_manifest, verify_codec_equivalence,
 )
-from tests.qualification.stage5_7_workloads import (
+from tests.qualification.ml_workflow_workloads import (
     QualificationCase, QualificationEvidence, accuracy_formula, build_workload, case_from_manifest, cpu_matrix,
     mnist_pipeline, mse_formula, native_device_evidence, qualification_case_paths, require_real_qualification,
     run_local_case, supplemental_tfds_torch_case, w1_label_methods,
@@ -112,7 +112,7 @@ def test_preparation_requires_opt_in_and_never_overwrites_authority(tmp_path, mo
         prepare_manifest(tmp_path / "manifest.json", fixture_store=tmp_path / "store", build=build, environment=_TEST_ENVIRONMENT, tfds_data_dir=tmp_path / "tfds")
     assert calls == []
     monkeypatch.setattr(
-        "tests.qualification.stage5_7_fixtures.require_supported_pyarrow",
+        "tests.qualification.ml_workflow_fixtures.require_supported_pyarrow",
         lambda: "25.0.1",
     )
     existing = tmp_path / "existing.json"
@@ -132,7 +132,7 @@ def test_unsupported_pyarrow_fails_before_manifest_or_store_mutation(tmp_path, m
 
     calls = []
     monkeypatch.setattr(
-        "tests.qualification.stage5_7_fixtures.require_supported_pyarrow",
+        "tests.qualification.ml_workflow_fixtures.require_supported_pyarrow",
         lambda: (_ for _ in ()).throw(QualificationUnrun("pyarrow unsupported")),
     )
 
@@ -337,15 +337,15 @@ def test_qualification_child_timeout_preserves_diagnostic_evidence_and_never_acc
     roots = tuple(tmp_path / name for name in ("output", "work", "evidence"))
     for root in roots:
         root.mkdir()
-    monkeypatch.setenv("DRYML_STAGE5_7_OUTPUT_STORE", os.fspath(roots[0]))
-    monkeypatch.setenv("DRYML_STAGE5_7_WORK_DIR", os.fspath(roots[1]))
-    monkeypatch.setenv("DRYML_STAGE5_7_EVIDENCE_DIR", os.fspath(roots[2]))
+    monkeypatch.setenv("DRYML_ML_QUALIFICATION_OUTPUT_STORE", os.fspath(roots[0]))
+    monkeypatch.setenv("DRYML_ML_QUALIFICATION_WORK_DIR", os.fspath(roots[1]))
+    monkeypatch.setenv("DRYML_ML_QUALIFICATION_EVIDENCE_DIR", os.fspath(roots[2]))
     case = case_from_manifest(manifest, workload="W3", framework="torch", execution="local")
     child_code = """
 import os
 import time
 from pathlib import Path
-Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'worker-provisional.json').write_text('{}', encoding='ascii')
+Path(os.environ['DRYML_ML_QUALIFICATION_CASE_EVIDENCE_DIR'], 'worker-provisional.json').write_text('{}', encoding='ascii')
 time.sleep(10)
 """
     started = time.monotonic()
@@ -478,7 +478,7 @@ def test_evidence_record_is_closed_round_trippable_and_rejects_nonfinite_or_extr
     roots = {name: tmp_path / name for name in ("output", "work", "evidence", "control")}
     for root in roots.values():
         root.mkdir()
-    from tests.qualification.stage5_7_workers import validate_request_evidence, worker_request
+    from tests.qualification.ml_workflow_workers import validate_request_evidence, worker_request
     request = worker_request(
         manifest, case, manifest_path=manifest_path, tfds_data_dir=tmp_path / "tfds",
         output_store=roots["output"], work_dir=roots["work"], evidence_dir=roots["evidence"],
@@ -530,15 +530,15 @@ def test_evidence_record_is_closed_round_trippable_and_rejects_nonfinite_or_extr
 def _real_manifest_or_unrun():
     """Load explicitly selected persistent authority for a marked numerical gate."""
 
-    manifest_path = os.environ.get("DRYML_STAGE5_7_MANIFEST")
-    fixture_store = os.environ.get("DRYML_STAGE5_7_FIXTURE_STORE")
+    manifest_path = os.environ.get("DRYML_ML_QUALIFICATION_MANIFEST")
+    fixture_store = os.environ.get("DRYML_ML_QUALIFICATION_FIXTURE_STORE")
     if not manifest_path or not fixture_store:
-        pytest.skip("QualificationUnrun: set DRYML_STAGE5_7_MANIFEST and DRYML_STAGE5_7_FIXTURE_STORE")
-    from tests.qualification.stage5_7_fixtures import installed_environment
+        pytest.skip("QualificationUnrun: set DRYML_ML_QUALIFICATION_MANIFEST and DRYML_ML_QUALIFICATION_FIXTURE_STORE")
+    from tests.qualification.ml_workflow_fixtures import installed_environment
     try:
-        tfds_data_dir = os.environ.get("DRYML_STAGE5_7_TFDS_DATA_DIR")
+        tfds_data_dir = os.environ.get("DRYML_ML_QUALIFICATION_TFDS_DATA_DIR")
         if not tfds_data_dir:
-            raise QualificationUnrun("set DRYML_STAGE5_7_TFDS_DATA_DIR")
+            raise QualificationUnrun("set DRYML_ML_QUALIFICATION_TFDS_DATA_DIR")
         return load_manifest(manifest_path, fixture_store=fixture_store, tfds_data_dir=tfds_data_dir, environment=installed_environment())
     except QualificationUnrun as error:
         pytest.skip(f"QualificationUnrun: {error}")
@@ -552,7 +552,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     from dryml.data import Map
     from dryml.managed import ManagedConfig
     from dryml.models import ExperimentData
-    from tests.qualification.stage5_7_workloads import (
+    from tests.qualification.ml_workflow_workloads import (
         QualificationEvidence, _FORMULAS, _METRIC_NAMES, native_device_evidence,
         prepare_exact_model_for_formula,
     )
@@ -563,8 +563,8 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
             data_dir=os.fspath(manifest.tfds.data_dir), download=False,
         )
 
-    output_store = os.environ.get("DRYML_STAGE5_7_CASE_OUTPUT_STORE")
-    work_dir = os.environ.get("DRYML_STAGE5_7_CASE_WORK_DIR")
+    output_store = os.environ.get("DRYML_ML_QUALIFICATION_CASE_OUTPUT_STORE")
+    work_dir = os.environ.get("DRYML_ML_QUALIFICATION_CASE_WORK_DIR")
     if not output_store or not work_dir:
         raise QualificationUnrun("qualification child lacks isolated output Store/work paths")
     output_path = Path(output_store).expanduser().resolve(strict=False)
@@ -574,7 +574,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     if not work_path.is_dir():
         raise QualificationUnrun("Selected real-case work directory is unavailable.")
     control_path = Path(
-        control_store or os.environ.get("DRYML_STAGE5_7_CASE_CONTROL_STORE") or output_path
+        control_store or os.environ.get("DRYML_ML_QUALIFICATION_CASE_CONTROL_STORE") or output_path
     ).expanduser().resolve(strict=False)
     if control_path == manifest.fixture_store or not control_path.is_dir():
         raise FixtureManifestError("Real case control Store must be an existing non-fixture authority.")
@@ -635,7 +635,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
         else:
             import dryml.models.experiment as experiment_module
             from dryml.artifacts import Artifact
-            from tests.qualification.stage5_7_workers import _canonical_state_digest, _state_placement
+            from tests.qualification.ml_workflow_workers import _canonical_state_digest, _state_placement
 
             original_boundary = experiment_module._experiment_boundary
             triggered = []
@@ -699,7 +699,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
                     if len(encoded.encode("utf-8")) > 1024 * 1024:
                         raise FixtureManifestError("Recovery diagnostic probe exceeds its bounded size.")
                     probe.write_text(encoded, encoding="utf-8")
-                    raise RuntimeError("stage5_7 deterministic recovery interruption")
+                    raise RuntimeError("ML workflow deterministic recovery interruption")
                 original_boundary(boundary)
 
             experiment_module._experiment_boundary = interrupt_after_retained_step
@@ -800,7 +800,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     observed_device = native_device_evidence(model, training_tensors=tuple(training_tensors))
     device_evidence = None
     if case.accelerator == "gpu":
-        from tests.qualification.stage5_7_workloads import native_device_observations, selected_gpu_device
+        from tests.qualification.ml_workflow_workloads import native_device_observations, selected_gpu_device
 
         observations = native_device_observations(
             model, training_tensors=tuple(training_tensors), execution_tensors=tuple(execution_tensors),
@@ -854,9 +854,9 @@ def _real_runner_in_child(manifest, case, *, timeout_seconds=None, child_code=No
 
     paths = qualification_case_paths(
         case,
-        output_store_root=os.environ["DRYML_STAGE5_7_OUTPUT_STORE"],
-        work_root=os.environ["DRYML_STAGE5_7_WORK_DIR"],
-        evidence_root=os.environ["DRYML_STAGE5_7_EVIDENCE_DIR"],
+        output_store_root=os.environ["DRYML_ML_QUALIFICATION_OUTPUT_STORE"],
+        work_root=os.environ["DRYML_ML_QUALIFICATION_WORK_DIR"],
+        evidence_root=os.environ["DRYML_ML_QUALIFICATION_EVIDENCE_DIR"],
         tfds_root=manifest.tfds.data_dir,
         gate_id="local-qualification",
         create=True,
@@ -869,21 +869,21 @@ import json
 import os
 import sys
 from pathlib import Path
-from tests.qualification.test_stage5_7_local import _real_manifest_or_unrun, _real_runner
-from tests.qualification.stage5_7_workloads import QualificationCase
+from tests.qualification.test_ml_workflow_local import _real_manifest_or_unrun, _real_runner
+from tests.qualification.ml_workflow_workloads import QualificationCase
 manifest = _real_manifest_or_unrun()
 case = QualificationCase.from_data(json.loads(sys.argv[1]))
 evidence = _real_runner(manifest, case)
-Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'worker-provisional.json').write_text(json.dumps(evidence.to_data()), encoding='ascii')
+Path(os.environ['DRYML_ML_QUALIFICATION_CASE_EVIDENCE_DIR'], 'worker-provisional.json').write_text(json.dumps(evidence.to_data()), encoding='ascii')
 """ if child_code is None else child_code
     timeout = _QUALIFICATION_CASE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     if type(timeout) not in (int, float) or timeout <= 0:
         raise ValueError("Qualification child timeout must be a positive number of seconds.")
     environment = {
         **os.environ,
-        "DRYML_STAGE5_7_CASE_OUTPUT_STORE": os.fspath(paths.output_store),
-        "DRYML_STAGE5_7_CASE_WORK_DIR": os.fspath(paths.work_dir),
-        "DRYML_STAGE5_7_CASE_EVIDENCE_DIR": os.fspath(paths.evidence_dir),
+        "DRYML_ML_QUALIFICATION_CASE_OUTPUT_STORE": os.fspath(paths.output_store),
+        "DRYML_ML_QUALIFICATION_CASE_WORK_DIR": os.fspath(paths.work_dir),
+        "DRYML_ML_QUALIFICATION_CASE_EVIDENCE_DIR": os.fspath(paths.evidence_dir),
         "PYTHONPATH": os.pathsep.join(filter(None, [
             str(Path.cwd() / "src"), str(Path.cwd()), os.environ.get("PYTHONPATH"),
         ])),
@@ -903,8 +903,8 @@ Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'worker-provisional.json').
         provisional = QualificationEvidence.from_data(json.loads(provisional_path.read_text(encoding="ascii")))
     except (OSError, json.JSONDecodeError, FixtureManifestError) as error:
         raise FixtureManifestError("Isolated qualification child returned malformed provisional evidence.") from error
-    from tests.qualification.stage5_7_workers import _publish_final_evidence
-    from tests.qualification.stage5_7_workloads import validate_evidence
+    from tests.qualification.ml_workflow_workers import _publish_final_evidence
+    from tests.qualification.ml_workflow_workloads import validate_evidence
 
     worker = dict(provisional.worker)
     worker.update({
@@ -934,16 +934,16 @@ Path(os.environ['DRYML_STAGE5_7_CASE_EVIDENCE_DIR'], 'worker-provisional.json').
     return accepted
 
 
-@pytest.mark.stage5_7_qualification
+@pytest.mark.ml_workflow_qualification
 @pytest.mark.parametrize("workload", ("W1", "W2", "W3"))
-def test_stage5_7_real_local_workloads(workload):
+def test_ml_workflow_real_local_workloads(workload):
     """Explicit W1/W2/W3 gate; missing prerequisites are unrun, never a pass."""
 
     manifest = _real_manifest_or_unrun()
     case = case_from_manifest(manifest, workload=workload, framework="torch", execution="local")
     try:
-        output_store = os.environ.get("DRYML_STAGE5_7_OUTPUT_STORE")
-        if not output_store or not os.environ.get("DRYML_STAGE5_7_WORK_DIR") or not os.environ.get("DRYML_STAGE5_7_EVIDENCE_DIR"):
+        output_store = os.environ.get("DRYML_ML_QUALIFICATION_OUTPUT_STORE")
+        if not output_store or not os.environ.get("DRYML_ML_QUALIFICATION_WORK_DIR") or not os.environ.get("DRYML_ML_QUALIFICATION_EVIDENCE_DIR"):
             raise QualificationUnrun("set qualification output Store, work, and evidence roots")
         run_local_case(manifest, case, opted_in=True, runner=lambda request: _real_runner_in_child(manifest, request), output_store=output_store)
     except QualificationUnrun as error:
