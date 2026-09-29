@@ -44,6 +44,34 @@ class ZeroLeafDataset(Dataset):
         return self.count
 
 
+class FrameworkArrayDataset(Dataset):
+    """Yield one framework tensor while retaining only portable CDef inputs."""
+
+    def __init__(self, value, spec):
+        self.value = value
+        super().__init__(spec)
+
+    def __iter__(self):
+        return iter((_framework_value(self.value, str(self.spec.backend)),))
+
+    def __len__(self):
+        return Cardinality.finite(1)
+
+
+def _framework_value(value, backend):
+    """Convert a portable NumPy fixture to one installed framework value."""
+
+    if backend == "numpy":
+        return value
+    if backend == "torch":
+        return pytest.importorskip("torch").as_tensor(value)
+    if backend == "tf":
+        return pytest.importorskip("tensorflow").convert_to_tensor(value)
+    if backend == "jax":
+        return pytest.importorskip("jax.numpy").asarray(value)
+    raise AssertionError(f"unknown test backend {backend!r}")
+
+
 def test_cache_is_not_ready_before_compute_and_validates_codec_keyword(tmp_path):
     """Construction is inert and exposes no completed Dataset contract."""
 
@@ -254,28 +282,22 @@ def test_numpy_cache_exhaustive_framework_conversion_matrix(tmp_path, backend, d
         value = np.zeros(shape, dtype=ml_dtypes.bfloat16)
     else:
         value = np.zeros(shape, dtype=np.dtype(dtype))
-    if backend == "torch":
-        if dtype == "string":
-            pytest.skip("Torch has no Unicode tensor dtype.")
-        torch = pytest.importorskip("torch")
-        value = torch.as_tensor(value)
-    elif backend == "tf":
-        tensorflow = pytest.importorskip("tensorflow")
-        try:
-            value = tensorflow.convert_to_tensor(value)
-        except (TypeError, ValueError):
-            pytest.skip("TensorFlow does not support this dtype conversion.")
-    elif backend == "jax":
-        if dtype in {"string", "bfloat16"}:
-            pytest.skip("JAX does not provide this portable dtype conversion.")
-        jax_numpy = pytest.importorskip("jax.numpy")
-        try:
-            value = jax_numpy.asarray(value)
-        except (TypeError, ValueError):
-            pytest.skip("JAX does not support this dtype conversion.")
-    cache = CachedDataset(ArrayDataset([value], TensorSpec(dtype, shape=shape, backend=backend)))
+    if backend == "torch" and dtype == "string":
+        pytest.skip("Torch has no Unicode tensor dtype.")
+    if backend == "jax" and dtype in {"string", "bfloat16"}:
+        pytest.skip("JAX does not provide this portable dtype conversion.")
+    try:
+        converted = _framework_value(value, backend)
+    except (TypeError, ValueError, RuntimeError):
+        pytest.skip(f"{backend} does not support this dtype conversion.")
+    converted_array = np.asarray(converted.numpy()) if backend == "tf" else np.asarray(converted)
+    if converted_array.dtype != value.dtype:
+        pytest.skip(f"{backend} does not preserve this dtype conversion.")
+    cache = CachedDataset(FrameworkArrayDataset(
+        value, TensorSpec(dtype, shape=shape, backend=backend),
+    ))
     cache.compute(codec="numpy", managed=ManagedConfig(state_repo=Repo(DirStore(tmp_path / "store"))))
-    np.testing.assert_equal(next(iter(cache)), np.asarray(value))
+    np.testing.assert_equal(next(iter(cache)), value)
 
 
 def test_oversized_logical_yield_uses_bounded_physical_segments(tmp_path):

@@ -37,7 +37,7 @@ def test_sklearn_basic_mnist_classifier_with_tfds_adapter():
 
     assert categorical_accuracy(model, val_ds, batch_size=64) > 0.1
     assert Map(val_ds, Select(0), model).spec == TensorSpec("float64", shape=(10,), backend="numpy")
-    assert exp.state.phase is None
+    assert exp.state.phase == "trained"
 
 
 def test_tf_basic_mnist_classifier_with_tfds_adapter():

@@ -115,6 +115,8 @@ def test_worker_request_transport_is_closed_and_does_not_capture_core_authority(
 def test_qualification_preflight_records_tfds_version_without_importing_tfds(monkeypatch):
     """Distribution preflight records TFDS evidence without authorizing data access."""
 
+    missing = object()
+    tfds_before = sys.modules.get("tensorflow_datasets", missing)
     versions = {
         "dryml": "0.3.0.dev2",
         "pandas": "3.0.0",
@@ -131,4 +133,4 @@ def test_qualification_preflight_records_tfds_version_without_importing_tfds(mon
     observed = installed_environment()
 
     assert observed["tensorflow_datasets"] == "4.9.9"
-    assert "tensorflow_datasets" not in sys.modules
+    assert sys.modules.get("tensorflow_datasets", missing) is tfds_before

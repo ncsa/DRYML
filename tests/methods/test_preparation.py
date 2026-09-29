@@ -169,7 +169,7 @@ def test_valid_selection_failure_leaves_learning_without_a_partial_cache():
     method.learn()
 
     with pytest.raises(ImplementationSelectionError) as error:
-        method(np.ones((2,), dtype=np.float32))
+        method(np.asarray(["not convertible to Torch"]))
     assert error.value.reason == "no_candidate"
     assert method.call_mode == "learning"
     assert method.cached_signature is None

@@ -139,7 +139,7 @@ def test_resume_discards_only_contiguous_unassociated_chunk_tail(tmp_path):
     (chunks / "chunk-00000001.npz").write_bytes(b"unassociated")
     (chunks / "unrelated.bin").write_bytes(b"preserve")
 
-    _discard_unassociated_tail(workdir, [{"file": "chunk-00000000.npz"}])
+    _discard_unassociated_tail(workdir, [{"file": "chunk-00000000.npz"}], "numpy")
 
     assert (chunks / "chunk-00000000.npz").exists()
     assert not (chunks / "chunk-00000001.npz").exists()

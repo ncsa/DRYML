@@ -66,8 +66,11 @@ partition_process_state_tests() {
         [[ "$path" == ./tests/dispatch/* ]] && process_state_selected+=("$path")
     done
     for path in "${paths[@]}"; do
+        [[ "$path" == ./tests/qualification/test_ml_workflow_cpu.py ]] && process_state_selected+=("$path")
+    done
+    for path in "${paths[@]}"; do
         case "$path" in
-            ./tests/session/*|./tests/runtime/*|./tests/core/test_orchestrator_*|./tests/core/test_execute_worker_context.py|./tests/dispatch/*) ;;
+            ./tests/session/*|./tests/runtime/*|./tests/core/test_orchestrator_*|./tests/core/test_execute_worker_context.py|./tests/dispatch/*|./tests/qualification/test_ml_workflow_cpu.py) ;;
             *) ordinary_selected+=("$path") ;;
         esac
     done
@@ -105,7 +108,13 @@ run_tier() {
         exit 2
     fi
     if [ "$tier_name" == "heavy" ]; then
-        run_phase env DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers "$tier_filter" "${selected[@]}" "${stripped_args[@]}"
+        partition_process_state_tests "${selected[@]}"
+        if [ "${#process_state_selected[@]}" -gt 0 ]; then
+            run_phase pytest --no-cov --dryml-runner-tiers "$tier_filter" "${process_state_selected[@]}" "${stripped_args[@]}"
+        fi
+        if [ "${#ordinary_selected[@]}" -gt 0 ]; then
+            run_phase env DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers "$tier_filter" "${ordinary_selected[@]}" "${stripped_args[@]}"
+        fi
     else
         partition_process_state_tests "${selected[@]}"
         if [ "${#process_state_selected[@]}" -gt 0 ]; then
@@ -140,7 +149,13 @@ run_maintained() {
     partition_process_state_tests "${medium_selected[@]}"
     run_phase pytest --no-cov --dryml-runner-tiers smoke,medium "${process_state_selected[@]}" "${stripped_args[@]}"
     run_phase pytest --no-cov --dryml-runner-tiers smoke,medium "${ordinary_selected[@]}" "${stripped_args[@]}"
-    run_phase env DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers heavy "${heavy_selected[@]}" "${stripped_args[@]}"
+    partition_process_state_tests "${heavy_selected[@]}"
+    if [ "${#process_state_selected[@]}" -gt 0 ]; then
+        run_phase pytest --no-cov --dryml-runner-tiers heavy "${process_state_selected[@]}" "${stripped_args[@]}"
+    fi
+    if [ "${#ordinary_selected[@]}" -gt 0 ]; then
+        run_phase env DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers heavy "${ordinary_selected[@]}" "${stripped_args[@]}"
+    fi
     finish_phases
 }
 
@@ -169,7 +184,9 @@ run_coverage() {
     partition_process_state_tests "${medium_selected[@]}"
     run_coverage_phase smoke,medium "${process_state_selected[@]}"
     run_coverage_phase smoke,medium "${ordinary_selected[@]}"
-    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 run_coverage_phase heavy "${heavy_selected[@]}"
+    partition_process_state_tests "${heavy_selected[@]}"
+    run_coverage_phase heavy "${process_state_selected[@]}"
+    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 run_coverage_phase heavy "${ordinary_selected[@]}"
     finish_phases
 }
 
@@ -214,6 +231,7 @@ run_profile() {
     mkdir -p "$output_dir"
     local medium_output="$output_dir/test-timings-medium.json"
     local process_state_output="$output_dir/test-timings-process-state.json"
+    local heavy_process_state_output="$output_dir/test-timings-heavy-process-state.json"
     local heavy_output="$output_dir/test-timings-heavy.json"
     local unknown_args=()
     if [ "$unknown_only" -eq 1 ]; then
@@ -224,9 +242,11 @@ run_profile() {
     partition_process_state_tests "${medium_selected[@]}"
     run_phase pytest --no-cov --dryml-runner-tiers smoke,medium "${process_state_selected[@]}" --dryml-timing-output "$process_state_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
     run_phase pytest --no-cov --dryml-runner-tiers smoke,medium "${ordinary_selected[@]}" --dryml-timing-output "$medium_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
-    run_phase env DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers heavy "${heavy_selected[@]}" --dryml-timing-output "$heavy_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    partition_process_state_tests "${heavy_selected[@]}"
+    run_phase pytest --no-cov --dryml-runner-tiers heavy "${process_state_selected[@]}" --dryml-timing-output "$heavy_process_state_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    run_phase env DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov --dryml-runner-tiers heavy "${ordinary_selected[@]}" --dryml-timing-output "$heavy_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
     finish_phases
-    python ./tests/tools/test_buckets.py update "$process_state_output" "$medium_output" "$heavy_output"
+    python ./tests/tools/test_buckets.py update "$process_state_output" "$medium_output" "$heavy_process_state_output" "$heavy_output"
     python ./tests/tools/test_buckets.py summary --all-files
 }
 

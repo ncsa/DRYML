@@ -40,7 +40,8 @@ def _run_tests_sh(
         "open(os.environ[\"DRYML_BUCKET_LOG\"], \"a\").write("
         "sys.argv[1] + \"\\n\")' \"$2\"\n"
         "      if [[ \" $* \" == *\" heavy \"* ]]; then\n"
-        "        printf '%s\\n' ./tests/tf/test_one.py\n"
+        "        printf '%s\\n' ./tests/qualification/test_ml_workflow_cpu.py "
+        "./tests/tf/test_one.py\n"
         "      else\n"
         "        printf '%s\\n' ./tests/session/test_one.py "
         "./tests/core/test_one.py\n"
@@ -198,7 +199,7 @@ def test_exhaustive_runner_preserves_options_and_intersects_user_filters(
     )
 
     assert result.returncode == 0, result.stderr
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert bucket_calls == ["select", "select"]
     for call in calls:
         assert ["--ignore", "tests/old"] == call[
@@ -219,11 +220,13 @@ def test_exhaustive_runner_preserves_options_and_intersects_user_filters(
     assert phase_paths == [
         {"./tests/session/test_one.py"},
         {"./tests/core/test_one.py"},
+        {"./tests/qualification/test_ml_workflow_cpu.py"},
         {"./tests/tf/test_one.py"},
     ]
     assert set().union(*phase_paths) == {
         "./tests/session/test_one.py",
         "./tests/core/test_one.py",
+        "./tests/qualification/test_ml_workflow_cpu.py",
         "./tests/tf/test_one.py",
     }
     assert all(
@@ -252,7 +255,7 @@ def test_coverage_is_the_only_mode_that_implicitly_combines_coverage(tmp_path):
     result, calls, bucket_calls = _run_tests_sh(tmp_path, "coverage")
 
     assert result.returncode == 0, result.stderr
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert bucket_calls == ["select", "select"]
     assert all("--cov=dryml" in call for call in calls)
     assert "--cov-append" not in calls[0]
@@ -322,7 +325,7 @@ def test_profile_remains_exhaustive_no_cov_and_writes_timings_under_tmp(tmp_path
     result, calls, bucket_calls = _run_tests_sh(tmp_path, "profile")
 
     assert result.returncode == 0, result.stderr
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert bucket_calls == ["select", "select", "update", "summary"]
     assert all("--no-cov" in call for call in calls)
     assert all("--dryml-test-profile" not in call for call in calls)
