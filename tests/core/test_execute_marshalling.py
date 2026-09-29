@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import dill
+from dataclasses import dataclass
 from pathlib import Path
+
+import dill
 import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
@@ -42,8 +44,41 @@ class SavedBlob(Serializable):
         self.payload = (Path(src_dir) / "payload").read_text(encoding="ascii")
 
 
+@dataclass(frozen=True, slots=True)
+class FrozenValue:
+    """Ordinary immutable value transported without invoking its constructor."""
+
+    value: int
+
+
+class StateProtocolValue:
+    """Ordinary value whose declared pickle state differs from raw fields."""
+
+    def __init__(self, value):
+        self.value = value
+        self.transient = "original"
+
+    def __getstate__(self):
+        return {"value": self.value}
+
+    def __setstate__(self, state):
+        self.value = state["value"]
+        self.transient = "restored"
+
+
+class OrdinaryEnvelope:
+    """Ordinary dill leaf used to verify hidden core authority rejection."""
+
+    def __init__(self, value):
+        self.value = value
+
+
 def _read_value(value):
     return value.value
+
+
+def _identity(value):
+    return value
 
 
 def _same(left, right):
@@ -217,6 +252,44 @@ def test_path_arguments_use_public_value_transport_instead_of_private_slots(tmp_
     outcome = decode_outcome(invoke_invocation(invocation, repo=repo), repo=repo)
     assert outcome["success"]
     assert outcome["result"] == (str(path), path.name)
+
+
+def test_ordinary_leaves_use_dill_state_and_preserve_aliases(tmp_path):
+    """Non-DRYML leaves retain normal dill state, immutability, and identity."""
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    frozen = FrozenValue(7)
+
+    invocation = encode_invocation(_identity, (StateProtocolValue(7),), {}, repo=repo)
+    outcome = decode_outcome(invoke_invocation(invocation, repo=repo), repo=repo)
+    alias_invocation = encode_invocation(_same, (frozen, frozen), {}, repo=repo)
+    alias_outcome = decode_outcome(
+        invoke_invocation(alias_invocation, repo=repo), repo=repo
+    )
+
+    assert outcome["success"]
+    assert isinstance(outcome["result"], StateProtocolValue)
+    assert outcome["result"].value == 7
+    assert outcome["result"].transient == "restored"
+    assert alias_outcome["success"]
+    assert alias_outcome["result"] is True
+
+
+def test_ordinary_dill_leaf_cannot_hide_core_resources(tmp_path):
+    """Opaque ordinary state cannot bypass DRYML authority handling."""
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    value = SavedValue(3, repo=repo)
+    repo.save_object(value, deep_capture=True)
+
+    with pytest.raises(CoreCallCodecError, match="live core resource"):
+        encode_invocation(
+            _read_value, (OrdinaryEnvelope(repo),), {}, repo=repo
+        )
+    with pytest.raises(CoreCallCodecError, match="DRYML semantic value"):
+        encode_invocation(
+            _read_value, (OrdinaryEnvelope(value),), {}, repo=repo
+        )
 
 
 def test_user_helper_globals_and_defaults_are_structural_snapshots(tmp_path, monkeypatch):

@@ -181,6 +181,10 @@ The core adapter supports ordinary functions, lambdas, nested functions and
 closures, bound methods, callable instances, `@function` callables, `Method`, and
 managed-operation callables. It sends one whole callable/argument/capture graph,
 including globals, defaults, annotations, instance fields, and `__slots__`.
+Without an explicit signature role, built-in containers are traversed and known
+DRYML semantic leaves use their authority-aware representation. Other trusted
+Python leaves use bounded dill serialization with ordinary pickle state behavior;
+they cannot hide a nested DRYML authority value or live Repo/Store resource.
 Stable captured API function dependencies owned by `dryml.*`, such as process-local
 context getters, use their import reference. Caller-owned helper functions,
 including importable module-level helpers, and closure values remain structurally

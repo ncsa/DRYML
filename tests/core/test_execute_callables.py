@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import functools
 import os
 from pathlib import Path
@@ -54,6 +55,13 @@ class SlotCallableInstance:
 
     def __call__(self, other):
         return self.value.value + other.value, self.value is other
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenOrdinaryValue:
+    """Immutable non-DRYML leaf for real subprocess transport coverage."""
+
+    value: int
 
 
 class CapturedValue(Serializable):
@@ -188,6 +196,12 @@ def _worker_pid(value):
     return value, os.getpid()
 
 
+def _identity(value):
+    """Return one ordinary leaf through invocation and result transport."""
+
+    return value
+
+
 def _reference_only(value: Ref[ObjectRef]):
     """Prove a Ref input remains authority data in the worker."""
     return value.digest()
@@ -228,6 +242,20 @@ def test_fresh_subprocess_transports_every_callable_owner_and_shared_capture_gra
     assert _subprocess_invoke(SlotCallableInstance(older), (older,), repo, spool) == (14, True)
     assert _subprocess_invoke(_reference_only, (older.object,), repo, spool) == older.object.digest()
     assert calls == []
+
+
+def test_fresh_subprocess_uses_dill_for_ordinary_leaves(tmp_path):
+    """Ordinary immutable values retain normal serialization across a worker."""
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    spool = tmp_path / "spool"
+    spool.mkdir()
+
+    result = _subprocess_invoke(
+        _identity, (FrozenOrdinaryValue(7),), repo, spool
+    )
+
+    assert result == FrozenOrdinaryValue(7)
 
 
 def test_copied_function_wrapper_metadata_rebuilds_its_established_owner(

@@ -78,6 +78,76 @@ def _dill_result(value: Any, path: str) -> bytes:
         raise CoreCallCodecError(f"core execution transport rejected ordinary result at {path}") from error
 
 
+class _DillLeafError(Exception):
+    """Classify a DRYML semantic value hidden inside one ordinary dill leaf."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _DillLeafPickler(dill.Pickler):
+    """Serialize trusted ordinary leaves without hiding DRYML authority."""
+
+    def persistent_id(self, value: object) -> object | None:
+        """Reject values that require the structural core transport."""
+
+        from dryml.managed.config import ManagedConfig
+        from .template import TemplateBundle
+
+        if isinstance(value, (Repo, Store)):
+            raise _DillLeafError("live core resource")
+        if isinstance(
+            value,
+            (
+                ConcreteDefinition,
+                DefLink,
+                ManagedConfig,
+                Object,
+                ObjectRef,
+                StateRef,
+                TemplateBundle,
+            ),
+        ):
+            raise _DillLeafError("DRYML semantic value inside ordinary value")
+        return None
+
+
+def _dill_leaf(value: Any, path: str, *, limit_bytes: int) -> bytes:
+    """Encode one trusted non-DRYML leaf with ordinary dill semantics."""
+
+    import io
+
+    output = io.BytesIO()
+    try:
+        _DillLeafPickler(
+            output, protocol=5, byref=False, recurse=True
+        ).dump(value)
+    except _DillLeafError as error:
+        _fail(error.reason, path)
+    except Exception as error:
+        raise CoreCallCodecError(
+            f"core execution transport rejected ordinary value at {path}"
+        ) from error
+    payload = output.getvalue()
+    if len(payload) > limit_bytes:
+        _fail("oversized ordinary value", path)
+    return payload
+
+
+def _load_dill_leaf(value: Any, path: str, *, limit_bytes: int) -> Any:
+    """Decode one bounded trusted ordinary leaf with normal dill behavior."""
+
+    if not isinstance(value, bytes) or len(value) > limit_bytes:
+        _fail("malformed ordinary value", path)
+    try:
+        return dill.loads(value)
+    except Exception as error:
+        raise CoreCallCodecError(
+            f"core execution transport rejected ordinary value at {path}"
+        ) from error
+
+
 def _result_graph(value: Any, *, limit_bytes: int,
                   automatic_references: set[int]) -> bytes:
     """Encode an already-published result graph with the call graph grammar."""
@@ -441,7 +511,11 @@ class _Encoder:
                 and not isinstance(item, types.MemberDescriptorType)
             }
             return {"tag": "class", "name": value.__name__, "bases": [self.value(base, f"{path}.base[{index}]", depth + 1) for index, base in enumerate(value.__bases__)], "namespace": namespace}
-        if not isinstance(value, type) and (_instance_fields(value) is not None):
+        if (
+            not isinstance(value, type)
+            and callable(value)
+            and (_instance_fields(value) is not None)
+        ):
             ref = _import_ref(type(value))
             type_node = (
                 {"module": ref.module, "qualname": ref.qualname}
@@ -452,7 +526,10 @@ class _Encoder:
             return {"tag": "instance", "type": type_node, "fields": {name: self.value(item, f"{path}.field[{index}]", depth + 1) for index, (name, item) in enumerate(fields.items())}}
         if value is None or type(value) in {bool, int, float, str, bytes}:
             return {"tag": "atom", "value": value}
-        _fail("unsupported ordinary value", path)
+        return {
+            "tag": "dill",
+            "value": _dill_leaf(value, path, limit_bytes=self.limit_bytes),
+        }
 
     def _managed_config_resource(self, value: Any, path: str, *, allow_repo: bool) -> dict[str, Any] | None:
         """Detach one supported ManagedConfig authority without retaining its handle."""
@@ -532,6 +609,7 @@ class _Decoder:
             raise CoreCallCodecError("core execution transport rejected malformed call graph")
         self.graph = graph
         self.nodes = graph["nodes"]
+        self.limit_bytes = limit_bytes
         if len(self.nodes) > _MAX_NODES:
             raise CoreCallCodecError("core execution transport rejected oversized call graph")
         self.allow_managed_config = allow_managed_config
@@ -554,6 +632,7 @@ class _Decoder:
             "tuple": {"tag", "items"}, "list": {"tag", "items"}, "set": {"tag", "items"},
             "frozenset": {"tag", "items"}, "dict": {"tag", "items"},
             "path": {"tag", "kind", "value"},
+            "dill": {"tag", "value"},
             "bound_method": {"tag", "function", "receiver"},
             "function_owner": {"tag", "target"},
             "function": {"tag", "code", "name", "defaults", "kwdefaults", "annotations", "captures", "freevars"},
@@ -569,6 +648,11 @@ class _Decoder:
             if not isinstance(node, Mapping) or node.get("tag") not in allowed or set(node) != allowed[node["tag"]]:
                 _fail("malformed graph node", f"$.node[{index}]")
             tag = node["tag"]
+            if tag == "dill" and (
+                not isinstance(node["value"], bytes)
+                or len(node["value"]) > self.limit_bytes
+            ):
+                _fail("malformed ordinary value", f"$.node[{index}]")
             if tag in {"tuple", "list", "set", "frozenset"} and not isinstance(node["items"], list):
                 _fail("malformed container", f"$.node[{index}]")
             if tag == "path" and (
@@ -771,6 +855,10 @@ class _Decoder:
                 raise CoreCallCodecError(
                     f"core execution transport rejected incompatible path at {path}"
                 ) from error
+        if tag == "dill":
+            return _load_dill_leaf(
+                node.get("value"), path, limit_bytes=self.limit_bytes
+            )
         if tag == "import":
             module, qualname = node.get("module"), node.get("qualname")
             if not isinstance(module, str) or (qualname is not None and not isinstance(qualname, str)):
@@ -834,7 +922,11 @@ class _Decoder:
             for position, (name, index) in enumerate(fields.items()):
                 if not isinstance(name, str):
                     _fail("malformed instance field", path)
-                setattr(instance, name, self.value(index, f"{path}.field[{position}]"))
+                object.__setattr__(
+                    instance,
+                    name,
+                    self.value(index, f"{path}.field[{position}]"),
+                )
             return instance
         if tag == "managed_declaration":
             from dryml.managed.descriptor import ManagedOperation
