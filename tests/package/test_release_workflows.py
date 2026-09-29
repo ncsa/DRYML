@@ -53,5 +53,7 @@ def test_official_release_publishes_before_creating_github_release() -> None:
     release = workflow["jobs"]["github-release"]
     assert release["needs"] == "publish-pypi"
     assert release["permissions"] == {"contents": "write"}
-    command = release["steps"][-1]["run"]
+    release_step = release["steps"][-1]
+    assert release_step["env"]["GH_REPO"] == "${{ github.repository }}"
+    command = release_step["run"]
     assert 'gh release create "$GITHUB_REF_NAME" dist/*.whl' in command
