@@ -1,6 +1,6 @@
 # Release Notes
 
-## 0.3.0.dev2 (unreleased)
+## 0.3.0b1 (unreleased)
 
 `CachedDataset`, `CacheCodec`, and `CacheIntegrityError` are now concrete public
 Artifact APIs. Finite dense Dataset trees can be streamed into built-in NumPy,

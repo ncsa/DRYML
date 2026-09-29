@@ -118,7 +118,7 @@ def test_qualification_preflight_records_tfds_version_without_importing_tfds(mon
     missing = object()
     tfds_before = sys.modules.get("tensorflow_datasets", missing)
     versions = {
-        "dryml": "0.3.0.dev2",
+        "dryml": "0.3.0b1",
         "pandas": "3.0.0",
         "pyarrow": "25.0.1",
         "tensorflow": "2.19.0",

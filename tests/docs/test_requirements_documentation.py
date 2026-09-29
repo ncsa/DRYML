@@ -108,7 +108,7 @@ def test_cross_guide_boundaries_and_release_notes_match_stage_four() -> None:
     for phrase in ("dryml.env", "dryml.world", "lazy", "not importable"):
         assert phrase in annotations, phrase
     for phrase in (
-        "0.3.0.dev2",
+        "0.3.0b1",
         "dryml.requirements",
         "dryml.env",
         "dryml.world",

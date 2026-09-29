@@ -633,7 +633,7 @@ print(json.dumps({
     assert data["root_filesystem"]
     assert data["root_paths"]
     assert data["aliases"] == {"env": True, "world": True, "requirements": "dryml.requirements"}
-    assert data["version"] == data["metadata_version"] == "0.3.0.dev2"
+    assert data["version"] == data["metadata_version"] == "0.3.0b1"
     assert "site-packages" in data["module"].replace("\\", "/")
 
 
