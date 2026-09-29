@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import resource
 import subprocess
 import sys
 import time
 from contextlib import nullcontext
 from dataclasses import replace
+
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - exercised by Windows CI collection.
+    _resource = None
 
 import numpy as np
 import pytest
@@ -39,7 +43,11 @@ _QUALIFICATION_CASE_TIMEOUT_SECONDS = 300
 def _peak_rss_bytes() -> int:
     """Return this fresh process's absolute maximum RSS in normalized bytes."""
 
-    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if _resource is None:
+        raise QualificationUnrun(
+            "Peak RSS measurement requires the platform resource module."
+        )
+    value = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
     return int(value if sys.platform == "darwin" else value * 1024)
 
 
@@ -417,11 +425,18 @@ def test_peak_rss_is_absolute_and_cannot_be_reduced_by_a_preloaded_baseline(monk
     """Each fresh child reports its lifetime peak, never a delta from setup RSS."""
 
     usage = type("Usage", (), {"ru_maxrss": 4096})()
-    monkeypatch.setattr(resource, "getrusage", lambda _: usage)
+    resource = type("Resource", (), {})()
+    resource.RUSAGE_SELF = object()
+    resource.getrusage = lambda _: usage
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_resource", resource)
     monkeypatch.setattr(sys, "platform", "linux")
     preloaded_baseline = 8192 * 1024
     assert preloaded_baseline > _peak_rss_bytes()
     assert _peak_rss_bytes() == 4096 * 1024
+    monkeypatch.setattr(module, "_resource", None)
+    with pytest.raises(QualificationUnrun, match="resource module"):
+        _peak_rss_bytes()
 
 
 def test_native_device_evidence_traverses_tiny_torch_autoencoder_on_cpu():
