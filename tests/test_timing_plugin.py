@@ -425,6 +425,27 @@ def test_exhaustive_only_cannot_silently_remove_a_mandatory_profile_node():
         )
 
 
+def test_good_enough_excludes_real_tfds_adapter_but_keeps_mocked_adapter_tests():
+    """Routine selection cannot invoke the network-capable TFDS qualification case."""
+
+    mocked = FakeItem(
+        "tests/data/test_source_adapters.py::test_tfds_adapter_numpy_mode_infers_spec_and_iterates"
+    )
+    qualification = FakeItem(
+        "tests/data/test_source_adapters.py::test_tfds_adapter_real_mnist_numpy_mode",
+        markers=("exhaustive_only",),
+    )
+
+    selected, deselected, summary = timing_plugin.select_representatives(
+        [mocked, qualification],
+        timing_plugin._load_baseline(timing_plugin.DEFAULT_PROFILES)["profiles"]["good-enough"],
+    )
+
+    assert selected == [mocked]
+    assert deselected == [qualification]
+    assert summary["reasons"]["explicit exhaustive-only cases"] == 1
+
+
 def test_representative_stale_checks_are_scoped_to_collected_files():
     profile = {
         "representative_functions": {
@@ -510,6 +531,16 @@ def test_good_enough_policy_retains_required_boundary_proofs():
         "tests/models/test_qualification_contract.py": {
             "test_qualification_case_round_trip_retains_exact_w3_reference_without_live_handles",
         },
+        "tests/models/test_stage5_7_persistence_fixtures.py": {
+            "test_experiment_data_v1_fixture_round_trips_actual_reader_input_without_payloads",
+            "test_value_receipt_fixture_round_trips_actual_value_reader_input",
+        },
+        "tests/qualification/test_stage5_7_cpu.py": {
+            "test_fake_execute_routes_all_24_requests_without_live_transport_or_framework_import",
+        },
+        "tests/qualification/test_stage5_7_accelerated.py": {
+            "test_missing_gpu_prerequisite_is_unrun_before_worker_launch",
+        },
     }
     for path, functions in required.items():
         assert functions <= set(representatives[path]["functions"])
@@ -518,6 +549,9 @@ def test_good_enough_policy_retains_required_boundary_proofs():
         test_buckets.load_baseline(test_buckets.DEFAULT_BASELINE), {"smoke", "medium"}, profile,
     )
     assert "./tests/models/test_qualification_contract.py" in selected
+    assert "./tests/models/test_stage5_7_persistence_fixtures.py" in selected
+    assert "./tests/qualification/test_stage5_7_cpu.py" in selected
+    assert "./tests/qualification/test_stage5_7_accelerated.py" in selected
 
     assert (
         "tests/core/test_execute_managed_integration.py::"

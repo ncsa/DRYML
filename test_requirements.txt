@@ -3,5 +3,7 @@ pytest
 pytest-cov
 pytest-timeout
 build
+setuptools>=42
+wheel
 GPUtil
 PyYAML

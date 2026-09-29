@@ -31,6 +31,81 @@
             "test_fixture_manifest_portable_tfds_identity_excludes_local_root"
           ]
         },
+        "tests/models/test_stage5_7_persistence_fixtures.py": {
+          "rationale": "Retain source-controlled v1 history/reference and TrainState observation compatibility without pandas analysis or live payloads.",
+            "functions": [
+                "test_experiment_data_v1_fixture_round_trips_actual_reader_input_without_payloads",
+                "test_value_receipt_fixture_round_trips_actual_value_reader_input",
+                "test_train_state_named_state_vector_restores_observation_and_historical_defaults",
+                "test_stage5_7_fixture_generator_reproduces_the_committed_bytes"
+            ]
+        },
+        "tests/models/test_experiment_data_codec.py": {
+          "rationale": "Retain the closed v1 history decode and no-partial-install boundary without a framework workload.",
+          "functions": [
+            "test_codec_round_trip_and_rejected_decode_leave_rows_unchanged"
+          ]
+        },
+        "tests/models/test_experiment_artifacts.py": {
+          "rationale": "Retain exact checkpoint Artifact binding and history readability without selecting a backend training matrix.",
+          "functions": [
+            "test_terminal_checkpoint_binds_artifact_to_exact_experiment_state",
+            "test_history_remains_readable_when_its_checkpoint_payload_is_unavailable"
+          ]
+        },
+        "tests/core/test_object_projection.py": {
+          "rationale": "Retain recursive projection identity, Ref opacity, and import-free purity for ExperimentData association.",
+          "functions": [
+            "test_recursive_object_projection_preserves_ids_roles_sharing_and_codec_meaning",
+            "test_projection_never_allocates_object_ids_or_resolves_symbols"
+          ]
+        },
+        "tests/core/test_template_bundle.py": {
+          "rationale": "Retain inert quoted recipe persistence and its committed v1 bundle fixture.",
+          "functions": [
+            "test_bundle_ref_admission_codec_and_store_restore_remain_inert",
+            "test_bundle_v1_fixture_round_trips_without_resolving_its_recipe"
+          ]
+        },
+        "tests/methods/test_preparation.py": {
+          "rationale": "Retain one known-spec preparation and retained-call validation path without optional backends.",
+          "functions": [
+            "test_known_spec_learning_selects_without_a_body_and_validates_dynamic_batches"
+          ]
+        },
+        "tests/methods/test_stream_ir.py": {
+          "rationale": "Retain bounded custom stream declaration validation without source iteration.",
+          "functions": [
+            "test_custom_two_input_variable_output_node_declares_bounded_pull_contract"
+          ]
+        },
+        "tests/methods/test_conversion_planning.py": {
+          "rationale": "Retain local handoff planning without executing an optional backend or transfer.",
+          "functions": [
+            "test_known_spec_handoff_records_one_immutable_graph_edge_without_body_execution"
+          ]
+        },
+        "tests/qualification/test_stage5_7_local.py": {
+          "rationale": "Retain explicit no-download fixture preparation and fixed-case construction only; real TFDS/training remains opt-in.",
+          "functions": [
+            "test_preparation_requires_opt_in_and_never_overwrites_authority",
+            "test_case_is_closed_and_carries_manifest_environment_seed_and_fixture_identity"
+          ]
+        },
+        "tests/qualification/test_stage5_7_cpu.py": {
+          "rationale": "Retain deterministic 24-cell request enumeration and closed fake worker transport, not the real CPU/recovery gates.",
+          "functions": [
+            "test_worker_matrix_enumerates_all_24_primary_cells_once_and_excludes_supplement",
+            "test_fake_execute_routes_all_24_requests_without_live_transport_or_framework_import"
+          ]
+        },
+        "tests/qualification/test_stage5_7_accelerated.py": {
+          "rationale": "Retain GPU request/evidence gating without TFDS, GPU probing, or real interoperability execution.",
+          "functions": [
+            "test_gpu_request_is_closed_requires_one_selected_device_and_keeps_frameworks_unloaded",
+            "test_missing_gpu_prerequisite_is_unrun_before_worker_launch"
+          ]
+        },
         "tests/core/test_live_reuse.py": {
           "rationale": "Retain matching, never-reuse, unique greedy restore, ambiguous fallback, and failed-restore eviction; exhaustive mode covers equivalent stale/equal-node combinations.",
           "functions": [

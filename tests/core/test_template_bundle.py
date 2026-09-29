@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +12,10 @@ from dryml.core import Definition, Object, Par, Ref, Repo, Template, TemplateBun
 from dryml.core.cdef_codec import decode_cdef_graph, encode_cdef_graph
 from dryml.core.errors import TemplateError, TemplateLimitError
 from dryml.core.store.dir import DirStore
+from tests.stage5_7_fixture_support import verify_stage5_7_fixture_manifest
+
+
+FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "stage5_7_v1"
 
 
 class BundleLeaf(Object):
@@ -93,6 +99,17 @@ def test_bundle_payload_rejects_wrong_kind_duplicate_name_and_noncanonical_data(
         TemplateBundle({"": _recipe(1)})
     with pytest.raises(TypeError):
         TemplateBundle([_recipe(1), object()])
+
+
+def test_bundle_v1_fixture_round_trips_without_resolving_its_recipe():
+    """Keep the committed aggregate recipe fixture independent of Artifact payloads."""
+
+    verify_stage5_7_fixture_manifest(FIXTURE_ROOT)
+    payload = json.loads((FIXTURE_ROOT / "template_bundle.json").read_text(encoding="ascii"))
+    restored = TemplateBundle.from_data(payload)
+
+    assert restored.to_data() == payload
+    assert restored.names == ("score",)
 
 
 def test_bundle_ref_is_opaque_by_default_and_opt_in_traversal_enters_each_recipe():

@@ -103,7 +103,14 @@ def test_fake_execute_routes_all_24_requests_without_live_transport_or_framework
     for request, (_, payload) in zip(requests, executor.calls):
         assert QualificationWorkerRequest.from_data(payload) == request
         assert json.loads(json.dumps(payload, ensure_ascii=True)) == payload
-        assert run_worker_request(payload)["optional_modules"] == ()
+        optional_before = {
+            name for name in ("pandas", "tensorflow", "tensorflow_datasets", "torch")
+            if name in sys.modules
+        }
+        result = run_worker_request(payload)
+        # Routing must not add optional imports, even when an earlier routine
+        # history test has already loaded pandas in this shared pytest process.
+        assert set(result["optional_modules"]) <= optional_before
         if request.case.execution in {"subprocess", "ray"}:
             assert request.resource_mode == "worker-process-no-session-allocation"
 

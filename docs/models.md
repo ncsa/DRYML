@@ -16,6 +16,10 @@ Important public types:
 - `TrainState`
 - `Experiment`
 - `ExperimentData`
+- `ExperimentDataError`
+- `TrainingObservation`
+- `model_parameter_counts`
+- `parameter_counts_from_parameters`
 
 Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBoost, and other frameworks.
 
@@ -92,6 +96,19 @@ available directly from `dryml.tf.measurements.parameter_counts(native_model)`
 and `dryml.torch.measurements.parameter_counts(native_model)`, without a DRYML
 runtime or wrapper. `Model.parameter_counts()` uses the existing DRYML graph
 traversal for composites and applies the same native identity deduplication.
+
+`model_parameter_counts(model, *, repo=None)` measures a DRYML model or
+single-backend composite through its declared native parameter objects. It returns
+`ParameterCounts` and raises `MeasurementUnavailableError` for unbuilt/lazy or
+unknown-shape parameters, and `TypeError` for unsupported or mixed backends. It
+does not call, build, compile, save, or otherwise mutate a model; an optional
+`Repo` is used only to traverse a composite graph.
+
+`parameter_counts_from_parameters(parameters, trainable_parameters)` returns
+identity-deduplicated `ParameterCounts` from native parameter iterables. It raises
+`MeasurementUnavailableError` when a shape cannot be read without execution and
+does not initialize a backend or mutate its inputs. A parameter present only on a
+trainable path is included in both totals.
 
 `MeasurementUnavailableError` means a native model is unbuilt, lazy, or has an
 unknown parameter shape. It is not equivalent to a valid built zero-parameter
@@ -266,6 +283,14 @@ or pandas JSON inference.
 Use `ExperimentData.scalar_column(artifact, field=None)` when turning a configured
 Artifact name and optional top-level scalar field into a history column. It escapes
 backslashes and dots in components and rejects built-in history-field collisions.
+
+`ExperimentDataError` is raised before local mutation when an association,
+reference, row fact, scalar, status transition, or closed v1 codec payload violates
+the history contract. It has no Store side effect. `TrainingObservation` is the
+immutable typed safe-point value retained inside `TrainState`; its
+`training_loss` property returns the window's weighted mean or `None` when no
+successful update contributed. Constructing either type does not invoke a trainer,
+load a checkpoint, or import an optional ML backend.
 
 ## Backend Wrappers
 

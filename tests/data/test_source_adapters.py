@@ -1,5 +1,7 @@
 import builtins
 import inspect
+import os
+from pathlib import Path
 import sys
 import types
 
@@ -119,10 +121,19 @@ def test_tfds_adapter_rejects_non_bool_download_before_optional_import():
         TFDSAdapter("mnist", download=0)
 
 
+@pytest.mark.exhaustive_only
 def test_tfds_adapter_real_mnist_numpy_mode():
-    pytest.importorskip("tensorflow_datasets")
+    """Read caller-prepared MNIST authority without downloading or caching it."""
 
-    ds = TFDSAdapter("mnist", split="train[:2]", as_supervised=True, as_numpy=True)
+    pytest.importorskip("tensorflow_datasets")
+    data_dir = os.environ.get("DRYML_STAGE5_7_TFDS_DATA_DIR")
+    if not data_dir or not Path(data_dir).is_dir():
+        pytest.skip("QualificationUnrun: a caller-selected prepared TFDS root is required")
+
+    ds = TFDSAdapter(
+        "mnist", split="train[:2]", as_supervised=True, as_numpy=True,
+        data_dir=data_dir, download=False,
+    )
 
     assert ds.spec[0] == TensorSpec("uint8", shape=(28, 28, 1), backend="numpy")
     assert ds.spec[1] == TensorSpec("int64", shape=(), backend="numpy")

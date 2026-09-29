@@ -14,6 +14,21 @@ import venv
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+_OFFLINE_PIP_ENV = {
+    "PIP_NO_INDEX": "1",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+}
+
+
+def _run_package_subprocess(args: list[str], *, cwd: Path) -> None:
+    """Run one package build or installation command with network access disabled."""
+
+    subprocess.run(
+        args,
+        cwd=cwd,
+        check=True,
+        env={**os.environ, **_OFFLINE_PIP_ENV, "PYTHONPATH": ""},
+    )
 
 
 @pytest.fixture(scope="session")
@@ -22,11 +37,9 @@ def release_artifacts() -> tuple[Path, Path]:
 
     output = Path("/tmp/dryml/package-tests") / uuid.uuid4().hex
     output.mkdir(parents=True)
-    subprocess.run(
-        [sys.executable, "-m", "build", "--outdir", str(output)],
+    _run_package_subprocess(
+        [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(output)],
         cwd=ROOT,
-        check=True,
-        env={**os.environ, "PYTHONPATH": ""},
     )
     sdists = tuple(
         path for path in output.iterdir() if path.is_file() and tarfile.is_tarfile(path)
@@ -53,14 +66,12 @@ def installed_python(release_artifacts: tuple[Path, Path]) -> Path:
     project = next(source.iterdir())
     wheel_dir = root / "wheel"
     wheel_dir.mkdir()
-    subprocess.run(
-        [str(python), "-m", "build", "--wheel", "--outdir", str(wheel_dir)],
+    _run_package_subprocess(
+        [str(python), "-m", "build", "--no-isolation", "--wheel", "--outdir", str(wheel_dir)],
         cwd=project,
-        check=True,
-        env={**os.environ, "PYTHONPATH": ""},
     )
     (wheel,) = wheel_dir.glob("*.whl")
-    subprocess.run(
+    _run_package_subprocess(
         [
             str(python),
             "-m",
@@ -71,7 +82,6 @@ def installed_python(release_artifacts: tuple[Path, Path]) -> Path:
             str(wheel),
         ],
         cwd=root,
-        check=True,
     )
     yield python
     shutil.rmtree(root, ignore_errors=True)

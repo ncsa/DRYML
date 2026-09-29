@@ -15,7 +15,8 @@ from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset
 
 from tests.qualification.stage5_7_fixtures import (
-    FixtureManifest, FixtureReferences, REQUIRED_ENVIRONMENT_KEYS, TFDSAuthority, load_baseline,
+    FixtureManifest, FixtureReferences, REQUIRED_ENVIRONMENT_KEYS, TFDSAuthority,
+    installed_environment, load_baseline,
 )
 from tests.qualification.stage5_7_workloads import (
     QualificationCase, accelerated_cases, case_from_manifest, cpu_matrix, supplemental_tfds_torch_case,
@@ -109,3 +110,25 @@ def test_worker_request_transport_is_closed_and_does_not_capture_core_authority(
     # Framework version keys and serialized reference class names are evidence,
     # not live handles; JSON round-trip is the transport boundary.
     assert "object at 0x" not in encoded
+
+
+def test_qualification_preflight_records_tfds_version_without_importing_tfds(monkeypatch):
+    """Distribution preflight records TFDS evidence without authorizing data access."""
+
+    versions = {
+        "dryml": "0.3.0.dev2",
+        "pandas": "3.0.0",
+        "pyarrow": "25.0.1",
+        "tensorflow": "2.19.0",
+        "tensorflow-datasets": "4.9.9",
+        "torch": "2.8.0",
+    }
+    monkeypatch.setattr(
+        "tests.qualification.stage5_7_fixtures.importlib.metadata.version",
+        versions.__getitem__,
+    )
+
+    observed = installed_environment()
+
+    assert observed["tensorflow_datasets"] == "4.9.9"
+    assert "tensorflow_datasets" not in sys.modules

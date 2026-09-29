@@ -1,0 +1,31 @@
+{
+  "fixture": "dryml-train-state-named-state-vector",
+  "fixture_version": 1,
+  "state": {
+    "epoch": 2,
+    "examples_seen": 81,
+    "loss_denominator": 0,
+    "loss_numerator": 0.0,
+    "next_batch": 4,
+    "pending_epoch_metrics": null,
+    "pending_epoch_postlude": null,
+    "pending_epoch_postlude_phase": null,
+    "pending_observation": {
+      "epoch": 2,
+      "examples_seen": 81,
+      "loss_denominator": 81,
+      "loss_numerator": 162.0,
+      "next_batch": 4,
+      "sequence": 1
+    },
+    "pending_observation_attempt_id": "fixture-attempt",
+    "pending_observation_prev_row_key": null,
+    "pending_observation_prev_state_ref": null,
+    "pending_observation_terminal": false,
+    "pending_observation_time": 0,
+    "phase": "training",
+    "safe_point_sequence": 1,
+    "step": 3,
+    "target_epoch": 3
+  }
+}

@@ -236,3 +236,52 @@ timeout, uses the fixture Store only as read authority, and measures bytes from
 only that case's child Store, never shared fixtures or prior cases. Process-local
 CPU controls and framework seeds are set before model materialization; a
 preinitialized incompatible framework is reported unrun.
+
+## U13 Focused Package Evidence
+
+The following focused package/docs/contract command passed in `big_env` on
+2026-09-29 with **87 passed**. It builds source and installed wheel/sdist test
+artifacts offline without isolation, with `PIP_NO_INDEX=1` and
+`PIP_DISABLE_PIP_VERSION_CHECK=1` on every build and install subprocess. It
+validates exact Method and Models public manifests, confirms the retired
+`dryml.code.method` and `dryml.code.traits` modules are absent, and proves lazy
+`ExperimentData` discovery does not import pandas, TensorFlow, TFDS, or Torch.
+
+```bash
+./tests.sh tests/package/test_public_imports.py \
+  tests/package/test_release_artifacts.py \
+  tests/models/test_stage5_7_persistence_fixtures.py \
+  tests/models/test_qualification_contract.py \
+  tests/artifacts/test_value.py tests/core/test_template_bundle.py \
+  tests/test_timing_plugin.py tests/docs/test_cdef_v2_documentation.py --no-cov -x
+```
+
+The tested wheel metadata requires `pandas>=2.3.3` in the base distribution and
+declares both TensorFlow and tensorflow-datasets only in the `tf` extra with
+`python_version < "3.14"`. It declares no TFDS lower bound. Installed versions
+were pandas 3.0.5, TensorFlow 2.19.0, and tensorflow-datasets 4.9.10; 4.9.10 is
+recorded as tested current metadata/import evidence only, not real TFDS
+qualification or evidence that 4.9.9 executed.
+
+The focused persistence tests validate the closed manifest schema and SHA-256 of
+every fixture payload before reading it, then read a nonempty ExperimentData v1
+row through its actual reader and canonical re-encoder, a real `Value`
+`value.pkl` receipt, the actual TemplateBundle codec, and a code-free named
+`TrainState.__setstate__` compatibility vector. The committed Value pickle has a
+static no-executable-opcode check before unpickling. A clean explicit generator
+destination reproduces every committed fixture byte with no missing or extra
+generated file. The TrainState vector is not a portable pickle codec claim.
+
+The final implementation-closeout command also passed in `big_env` on
+2026-09-29:
+
+```bash
+./tests.sh good-enough --ignore tests/old --ignore tests/dev -x tests
+```
+
+Its policy-selected phase passed **264 tests** with 64 deselected. Its maintained
+phase passed **3371 tests** with 30 skipped and 966 deselected. Real TFDS
+preparation, the 24-cell CPU matrix, step-64 recovery, TensorFlow-to-Torch
+delivery, Ray, training, and GPU qualification are all `UNRUN`; neither the
+package and deterministic evidence above nor this representative suite is
+release qualification evidence.

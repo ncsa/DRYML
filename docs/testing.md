@@ -144,6 +144,18 @@ a file with a curated `representative_functions` entry is omitted until that
 file's function allowlist is deliberately updated. This intentional selection
 gap is why the exhaustive mode remains available on explicit user request.
 
+The Stage 5+7 representative set retains dependency-light coverage for Method
+preparation/stream handoffs, recursive Experiment identity projection,
+TemplateBundle and history v1 fixtures, TrainState observation persistence,
+Artifact/history association, and closed qualification request construction.
+It does not run TFDS preparation, a real 24-cell CPU/recovery matrix, Ray,
+training, or GPU execution. Those are explicit opt-in qualification gates, not
+routine profile evidence.
+
+The real TFDS NumPy adapter test is `exhaustive_only`. It requires a caller-selected
+`DRYML_STAGE5_7_TFDS_DATA_DIR` and uses `download=False`; routine selection keeps
+the mocked offline adapter tests while excluding that real reader.
+
 The routine suite has an approximate five-minute feedback goal, not a runtime
 cutoff. A reference selection measured **445.03 seconds (7m25s) wall time** on
 Linux with Python 3.12.13 in `big_env`, with **3,167 passed and 22 skipped**:
@@ -329,6 +341,13 @@ Ubuntu and Windows for Python 3.10 through 3.14. Ordinary pushes and pull
 requests run `good-enough`. Only manually requested `exhaustive`
 or `coverage` suites run `medium` there so every smoke/medium parameter
 combination is exercised. Python 3.14 is explicitly framework-reduced.
+
+The `tf` extra declares TensorFlow and tensorflow-datasets only for
+`python_version < '3.14'`, matching that framework-reduced boundary. TFDS has no
+declared minimum version: its deterministic local adapter contract is metadata
+support, while installed tensorflow-datasets 4.9.10 is recorded only as the tested
+current environment when its focused package checks pass. It is not evidence that
+4.9.9 executed.
 
 Lightweight CI jobs print individual test names and use `pytest-timeout`'s
 thread watchdog with a 180-second per-test limit (including fixture work).

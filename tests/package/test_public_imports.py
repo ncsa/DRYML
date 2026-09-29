@@ -467,24 +467,48 @@ _RETIRED_ENVIRONMENT_SURFACE = {
     "requirements_for_class",
 }
 
-_EXPECTED_METHOD_EXPORTS = {
+_EXPECTED_METHOD_EXPORTS = (
+    "Traits",
+    "traits",
+    "MethodImplementation",
+    "ConversionEdge",
+    "MethodGraph",
+    "MethodGraphNode",
+    "MethodGraphNodeKind",
+    "MethodPort",
+    "MethodPortKind",
+    "IteratorPort",
+    "StreamGraphCursor",
+    "StreamNode",
+    "MethodCallMode",
+    "MethodCallNodeKind",
+    "MethodCallNode",
+    "MethodCallSignature",
+    "Method",
     "Accumulator",
     "AccumulatorGroup",
+    "MethodError",
     "ImplementationDeclarationError",
     "ImplementationSelectionError",
-    "Method",
-    "MethodCallMode",
-    "MethodCallNode",
-    "MethodCallNodeKind",
-    "MethodCallSignature",
-    "MethodError",
-    "MethodImplementation",
     "PreparedCallMismatchError",
     "SelectionFailureReason",
     "SelectionTraitName",
-    "Traits",
-    "traits",
-}
+)
+
+_EXPECTED_MODELS_EXPORTS = (
+    "AutoEncoder",
+    "Experiment",
+    "ExperimentData",
+    "ExperimentDataError",
+    "Model",
+    "MeasurementUnavailableError",
+    "model_parameter_counts",
+    "ParameterCounts",
+    "parameter_counts_from_parameters",
+    "TrainFunction",
+    "TrainState",
+    "TrainingObservation",
+)
 
 _EXPECTED_ANNOTATION_EXPORTS = {
     "ANNOTATION_ATTR",
@@ -888,42 +912,45 @@ def test_installed_methods_manifest_and_retired_imports(
         installed_python,
         """
 import importlib
+import importlib.util
 import json
 
 import dryml.code
 import dryml.methods
 
-assert set(dryml.methods.__all__) == {
-    'Accumulator', 'AccumulatorGroup',
-    'ImplementationDeclarationError', 'ImplementationSelectionError', 'Method',
-    'MethodCallMode', 'MethodCallNode', 'MethodCallNodeKind',
-    'MethodCallSignature', 'MethodError', 'MethodImplementation',
-    'PreparedCallMismatchError', 'SelectionFailureReason', 'SelectionTraitName',
-    'Traits', 'traits',
-}
-assert not {'Method', 'Traits', 'traits'} & set(dryml.code.__all__)
-for statement in (
-    'from dryml.code import Method',
-    'from dryml.code import Traits',
-    'from dryml.code import traits',
-):
+retired_imports = []
+for name in ('Method', 'Traits', 'traits'):
     try:
-        exec(statement, {})
-    except ImportError:
+        getattr(dryml.code, name)
+    except AttributeError:
         pass
     else:
-        raise AssertionError(f'retired import succeeded: {statement}')
-for module in ('dryml.code.method', 'dryml.code.traits'):
-    try:
-        importlib.import_module(module)
-    except ModuleNotFoundError as error:
-        assert error.name == module
-    else:
-        raise AssertionError(f'retired module remains importable: {module}')
-print(json.dumps(sorted(dryml.methods.__all__)))
+        retired_imports.append(name)
+print(json.dumps({
+    'exports': list(dryml.methods.__all__),
+    'code_exports': sorted(set(dryml.code.__all__) & {'Method', 'Traits', 'traits'}),
+    'retired_imports': retired_imports,
+    'retired_modules': [
+        module for module in ('dryml.code.method', 'dryml.code.traits')
+        if importlib.util.find_spec(module) is not None
+    ],
+}))
 """,
     )
-    assert set(json.loads(result.stdout)) == _EXPECTED_METHOD_EXPORTS
+    assert json.loads(result.stdout) == {
+        "exports": list(_EXPECTED_METHOD_EXPORTS),
+        "code_exports": [],
+        "retired_imports": [],
+        "retired_modules": [],
+    }
+
+
+def test_source_methods_manifest_matches_installed_contract() -> None:
+    """Keep the source Method manifest aligned with the installed wheel contract."""
+
+    import dryml.methods
+
+    assert tuple(dryml.methods.__all__) == _EXPECTED_METHOD_EXPORTS
 
 
 def test_installed_code_analysis_contract_and_removed_apis(
@@ -1106,7 +1133,7 @@ print(json.dumps({
 
 
 def test_source_models_history_export_is_pandas_and_backend_lazy() -> None:
-    """Expose ExperimentData without importing its pandas analysis dependency."""
+    """Expose ExperimentData without importing analysis or optional backends."""
 
     root = Path(__file__).parents[2]
     env = dict(os.environ)
@@ -1123,7 +1150,7 @@ import dryml.models
 from dryml.models import ExperimentData
 print(json.dumps({
     'exported': 'ExperimentData' in dryml.models.__all__,
-    'heavy': sorted(name for name in ('pandas', 'tensorflow', 'torch') if name in sys.modules),
+    'heavy': sorted(name for name in ('pandas', 'tensorflow', 'tensorflow_datasets', 'torch') if name in sys.modules),
     'name': ExperimentData.__name__,
 }))
 """,
@@ -1137,6 +1164,52 @@ print(json.dumps({
     assert json.loads(result.stdout) == {
         "exported": True, "heavy": [], "name": "ExperimentData",
     }
+
+
+def test_installed_models_history_surface_is_pandas_and_backend_lazy(
+    installed_python: Path,
+) -> None:
+    """Keep installed history discovery independent of pandas and ML backends."""
+
+    result = _installed_probe(
+        installed_python,
+        """
+import json
+import sys
+
+import dryml.models
+from dryml.models import (
+    ExperimentData, ExperimentDataError, TrainingObservation,
+    model_parameter_counts, parameter_counts_from_parameters,
+)
+
+print(json.dumps({
+    'exports': list(dryml.models.__all__),
+    'types': [ExperimentData.__name__, ExperimentDataError.__name__, TrainingObservation.__name__],
+    'functions': [model_parameter_counts.__name__, parameter_counts_from_parameters.__name__],
+    'name': ExperimentData.__name__,
+    'heavy': sorted(
+        name for name in ('pandas', 'tensorflow', 'tensorflow_datasets', 'torch')
+        if name in sys.modules
+    ),
+}))
+""",
+    )
+    assert json.loads(result.stdout) == {
+        "exports": list(_EXPECTED_MODELS_EXPORTS),
+        "types": ["ExperimentData", "ExperimentDataError", "TrainingObservation"],
+        "functions": ["model_parameter_counts", "parameter_counts_from_parameters"],
+        "name": "ExperimentData",
+        "heavy": [],
+    }
+
+
+def test_source_models_manifest_matches_installed_contract() -> None:
+    """Keep model exports and lazy measurement conveniences explicit."""
+
+    import dryml.models
+
+    assert tuple(dryml.models.__all__) == _EXPECTED_MODELS_EXPORTS
 
 
 def test_installed_stage_four_dataset_exports_are_optional_backend_safe(

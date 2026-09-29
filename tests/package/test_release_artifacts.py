@@ -14,6 +14,35 @@ from packaging.requirements import Requirement
 
 from tests.tools.native_lock_audit import native_advisory_lock_offenders
 
+
+def test_package_build_tooling_and_subprocesses_are_offline(monkeypatch) -> None:
+    """Require local build prerequisites and offline package command environments."""
+
+    from tests.package import conftest as package_conftest
+
+    captured: list[dict[str, object]] = []
+
+    def record_run(args, **kwargs):
+        captured.append({"args": args, **kwargs})
+
+    monkeypatch.setattr(package_conftest.subprocess, "run", record_run)
+    package_conftest._run_package_subprocess(["package-command"], cwd=package_conftest.ROOT)
+
+    requirements = {
+        line.strip() for line in (package_conftest.ROOT / "test_requirements.txt").read_text(
+            encoding="ascii"
+        ).splitlines() if line.strip() and not line.startswith("#")
+    }
+    pyproject = (package_conftest.ROOT / "pyproject.toml").read_text(encoding="ascii")
+    environment = captured[0]["env"]
+
+    assert {"build", "setuptools>=42", "wheel"} <= requirements
+    assert '"setuptools >= 42"' in pyproject
+    assert '"wheel"' in pyproject
+    assert environment["PIP_NO_INDEX"] == "1"
+    assert environment["PIP_DISABLE_PIP_VERSION_CHECK"] == "1"
+    assert environment["PYTHONPATH"] == ""
+
 _REQUIRED_MODULES = {
     "dryml/filesystem/__init__.py",
     "dryml/filesystem/_posix.py",
@@ -59,10 +88,13 @@ _REQUIRED_MODULES = {
     "dryml/jax/runtime.py",
     "dryml/ray/__init__.py",
     "dryml/methods/__init__.py",
+    "dryml/methods/conversion.py",
     "dryml/methods/errors.py",
     "dryml/methods/implementation.py",
+    "dryml/methods/ir.py",
     "dryml/methods/method.py",
     "dryml/methods/signature.py",
+    "dryml/methods/stream.py",
     "dryml/methods/traits.py",
     "dryml/code/__init__.py",
     "dryml/code/analysis.py",
@@ -116,6 +148,11 @@ _REQUIRED_MODULES = {
     "dryml/dispatch/api.py",
     "dryml/dispatch/errors.py",
     "dryml/dispatch/models.py",
+    "dryml/models/__init__.py",
+    "dryml/models/experiment.py",
+    "dryml/models/experiment_data.py",
+    "dryml/models/measurements.py",
+    "dryml/models/train_spec.py",
 }
 
 _RETIRED_CODE_MODULES = {
@@ -301,10 +338,10 @@ def test_sdist_contains_port_modules_without_retired_core(
     assert not any(name.startswith("tutorials/") for name in names)
 
 
-def test_wheel_metadata_declares_cached_dataset_dependencies(
+def test_wheel_metadata_declares_stage5_7_dependencies(
     release_artifacts: tuple[Path, Path],
 ) -> None:
-    """Require base dtype support and closed optional codec/test extras."""
+    """Require base history support and closed optional qualification extras."""
 
     _, wheel = release_artifacts
     with zipfile.ZipFile(wheel) as archive:
@@ -325,7 +362,11 @@ def test_wheel_metadata_declares_cached_dataset_dependencies(
     }
 
     assert ("ml_dtypes", ">=0.6.0", None) in observed
+    assert ("pandas", ">=2.3.3", None) in observed
     assert ("pyarrow", ">=25.0.1", 'extra == "parquet"') in observed
     assert ("netcdf4", ">=1.7.4", 'extra == "netcdf"') in observed
     assert ("pyarrow", ">=25.0.1", 'extra == "test"') in observed
     assert ("netcdf4", ">=1.7.4", 'extra == "test"') in observed
+    tf_marker = 'python_version < "3.14" and extra == "tf"'
+    assert ("tensorflow", "", tf_marker) in observed
+    assert ("tensorflow_datasets", "", tf_marker) in observed

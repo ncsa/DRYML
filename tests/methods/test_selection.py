@@ -184,10 +184,11 @@ def test_known_spec_preparation_rejects_strategy_and_selection_errors_before_bod
             return value
 
     numpy = TensorSpec("float32", shape=(2,), backend="numpy")
+    jax = TensorSpec("float32", shape=(2,), backend="jax")
     with pytest.raises(ValueError, match="local"):
         TorchOnly().learn(numpy, strategy="remote")
     with pytest.raises(ImplementationSelectionError) as missing:
-        TorchOnly().learn(numpy)
+        TorchOnly().learn(jax)
     assert missing.value.reason == "no_candidate"
     with pytest.raises(ImplementationSelectionError) as tied:
         Tied().learn(numpy)
