@@ -10,7 +10,7 @@ import pytest
 
 from dryml.core import ConcreteDefinition, Definition, F, Object, ObjectRef, Ref, Repo, StateRef, Template
 from dryml.core.cdef_codec import CDefGraphCodecError, decode_cdef_graph, encode_cdef_graph
-from dryml.core.errors import TemplateError
+from dryml.core.errors import ParameterizationError
 from dryml.core.links import DefLink
 from dryml.core.repo_definition import RepoDefinition
 from dryml.core.store.dir import DirStore
@@ -150,7 +150,7 @@ def test_declared_ref_template_owner_restores_through_a_store(tmp_path):
 def test_unresolved_template_requires_exact_ref_template_admission(owner):
     """Raw and non-Template roles cannot bypass concrete-owner admission."""
 
-    with pytest.raises((TypeError, TemplateError)):
+    with pytest.raises((TypeError, ParameterizationError)):
         Definition(owner, _recipe()).concretize()
 
 
@@ -172,9 +172,9 @@ def test_template_codec_rejects_unknown_tags_and_duplicate_labels():
     duplicate = deepcopy(data)
     duplicate["nodes"].append(deepcopy(duplicate["nodes"][0]))
 
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         Template.from_data(unknown)
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         Template.from_data(duplicate)
 
 
@@ -195,9 +195,9 @@ def test_template_codec_rejects_invalid_binary_operands_and_factory_targets():
     )
     factory_node["target"] = {"tag": "int", "value": "1"}
 
-    with pytest.raises(TemplateError, match="binary operands"):
+    with pytest.raises(ParameterizationError, match="binary operands"):
         Template.from_data(binary)
-    with pytest.raises(TemplateError, match="factory target"):
+    with pytest.raises(ParameterizationError, match="factory target"):
         Template.from_data(factory)
 
 
@@ -206,7 +206,7 @@ def test_template_codec_normalizes_float_overflow_and_preserves_definition_alias
 
     overflow = Template.from_value(1.0).to_data()
     overflow["root"]["value"] = "0x1p+999999999999999999999"
-    with pytest.raises(TemplateError, match="float is invalid"):
+    with pytest.raises(ParameterizationError, match="float is invalid"):
         Template.from_data(overflow)
 
     definition = Definition(PortableLeaf, 1)
@@ -251,7 +251,7 @@ def test_selector_codec_rejects_noncanonical_node_order():
     payload = selector.to_data()
     payload["nodes"].reverse()
 
-    with pytest.raises(TemplateError, match="canonical"):
+    with pytest.raises(ParameterizationError, match="canonical"):
         TemplateSelector.from_data(payload)
 
 
@@ -261,7 +261,7 @@ def test_template_codec_rejects_actual_private_cycles_before_back_references():
     root = []
     root.append(root)
 
-    with pytest.raises(TemplateError, match="cycle"):
+    with pytest.raises(ParameterizationError, match="cycle"):
         Template._from_root(root).to_data()
 
 
@@ -270,19 +270,19 @@ def test_template_name_limits_and_set_member_boundary():
 
     component = "a" * 64
     assert Par(component).name == component
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         Par("a" * 65)
     assert Par("/".join(["a"] * 16)).name.count("/") == 15
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         Par("/".join(["a"] * 17))
     assert Par("/".join(("a" * 64, "b" * 64, "c" * 64, "d" * 61))).name
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         Par("/".join(("a" * 64, "b" * 64, "c" * 64, "d" * 62)))
     qualified = "/".join(("a",) * 15 + ("width",))
     assert Template(PortableLeaf, Par(qualified)).sub(namespace=("a",) * 15, width=1).is_resolved
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         Template(PortableLeaf, Par(qualified)).sub(namespace=("a",) * 16, width=1)
-    with pytest.raises(TemplateError, match="set members"):
+    with pytest.raises(ParameterizationError, match="set members"):
         Template.from_value({Par("width")})
 
 
@@ -297,7 +297,7 @@ def test_template_codec_rejects_expression_set_members():
         "value": {"tag": "par", "name": "width", "path": {"schema_version": 3, "segments": []}},
     })
 
-    with pytest.raises(TemplateError, match="set members"):
+    with pytest.raises(ParameterizationError, match="set members"):
         Template.from_data(payload)
 
 

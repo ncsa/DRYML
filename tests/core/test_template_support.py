@@ -6,7 +6,7 @@ import pytest
 
 from dryml.core import Definition, Object
 from dryml.core.domains import UniformFromSet, UniformIntRange
-from dryml.core.errors import TemplateError, TemplateLimitError, UnsupportedTemplateVerificationError
+from dryml.core.errors import ParameterizationError, ParameterizationLimitError, UnsupportedGeneratorVerificationError
 from dryml.core.template import Par, Shared, Template, repeat
 from dryml.core.template_selector import TemplateGenerator
 
@@ -134,7 +134,7 @@ def test_hidden_wide_support_exceeding_budget_is_not_approximated():
     template = Template(SupportModel, product=Par("width") * 2)
     selector = TemplateGenerator(template, width=UniformIntRange(1, 1_000_000)).support_selector(max_assignments=8)
 
-    with pytest.raises(TemplateLimitError):
+    with pytest.raises(ParameterizationLimitError):
         selector.matches(Definition(SupportModel, product=8))
 
 
@@ -143,10 +143,10 @@ def test_support_never_hides_invalid_branches_or_unavailable_exact_proofs():
     invalid = Template(SupportModel, product=10 / Par("divisor"))
     selector = TemplateGenerator(invalid, divisor=InvalidBranchDomain()).support_selector()
 
-    with pytest.raises(TemplateError, match="division"):
+    with pytest.raises(ParameterizationError, match="division"):
         selector.matches(Definition(SupportModel, product=10))
 
     unindexed = Template(SupportModel, product=Par("width") * 2)
     unsupported = TemplateGenerator(unindexed, width=UnindexedDomain()).support_selector()
-    with pytest.raises(UnsupportedTemplateVerificationError):
+    with pytest.raises(UnsupportedGeneratorVerificationError):
         unsupported.matches(Definition(SupportModel, product=2))

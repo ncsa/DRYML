@@ -21,7 +21,7 @@ from .utils.types import is_nonclass_callable
 from .utils.general import get_class_str
 from .utils.graph import GraphCtx, GraphMatcher
 from .freeze import FrozenDict, FrozenTuple
-from .errors import PathAccessError
+from .errors import ParameterizationError, PathAccessError
 from .policies import CachePolicy
 from .canonical import (
     to_canonical,
@@ -225,6 +225,7 @@ class Definition(DefInterface, Mapping):
                     object.__setattr__(self, "_cls", None)
                     object.__setattr__(self, "_args", None)
                     object.__setattr__(self, "_kwargs", self._freeze_kwargs(kwargs))
+                    _validate_symbolic_sets(self)
                     return
                 else:
                     raise ValueError("First positional argument must be a class, callable, or symbol reference.")
@@ -244,6 +245,7 @@ class Definition(DefInterface, Mapping):
             object.__setattr__(self, "_cls", None)
             object.__setattr__(self, "_args", FrozenTuple())
             object.__setattr__(self, "_kwargs", self._freeze_kwargs(kwargs))
+        _validate_symbolic_sets(self)
 
     @classmethod
     def _from_prepared_parameters(cls, selector_cls, parameters) -> "Definition":
@@ -261,6 +263,9 @@ class Definition(DefInterface, Mapping):
         occurrences after their correspondence was recorded.
         """
 
+        from .template import _validate_distribution_free
+
+        _validate_distribution_free({"parameters": parameters})
         result = object.__new__(cls)
         object.__setattr__(result, "_stable_hash_cache", None)
         object.__setattr__(result, "_cls", selector_cls)
@@ -269,28 +274,28 @@ class Definition(DefInterface, Mapping):
         return result
 
     @classmethod
-    def _from_template_parts(cls, definition_cls, args, kwargs) -> "Definition":
+    def _from_symbolic_parts(cls, definition_cls, args, kwargs) -> "Definition":
         """Rebuild an already-frozen soft call without rebinding its spelling.
 
-        Template rewriting owns the supplied immutable values and uses this
+        Symbolic rewriting owns the supplied immutable values and uses this
         narrow constructor to preserve positional, keyword, and skipped-args
         call shape without resolving the target or applying defaults.
         """
 
+        from .template import _validate_distribution_free
+
+        _validate_distribution_free({"args": args, "kwargs": kwargs})
         result = object.__new__(cls)
         object.__setattr__(result, "_stable_hash_cache", None)
         object.__setattr__(result, "_cls", definition_cls)
         object.__setattr__(result, "_args", args)
         object.__setattr__(result, "_kwargs", kwargs)
+        _validate_symbolic_sets(result)
         return result
 
     @staticmethod
     def _freeze_value(value):
         from .canonical import freeze_def_value
-        from .template import Template, TemplateBundle
-
-        if isinstance(value, (Template, TemplateBundle)):
-            return value
         return freeze_def_value(value)
 
     @classmethod
@@ -565,22 +570,185 @@ class Definition(DefInterface, Mapping):
         from .selector import Selector
         return Selector(self, **policy)
 
-    def as_template(self) -> "Template":
-        """Convert this Definition into an inert reusable template.
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Return active parameter roots in first-occurrence traversal order.
 
         Returns:
-            A Template retaining this Definition's frozen recipe exactly.
-
-        Raises:
-            TemplateError: If this Definition contains an unsupported template
-                value.
+            Each active root exactly once, without resolving Definition targets or
+            interpreting receiving constructor roles.
 
         Side Effects:
-            None. The source is neither resolved nor constructed.
+            None. Direct :class:`QuotedDef` values and Ref edges remain opaque.
         """
-        from .template import Template
 
-        return Template.from_value(self)
+        from .template import _active_parameters
+
+        return tuple(parameter.name for parameter in _active_parameters(self))
+
+    @property
+    def is_resolved(self) -> bool:
+        """Return whether no active symbolic expression remains in this Definition.
+
+        This structural inspection is not a constructor-completeness check and
+        does not resolve targets or interpret receiving roles.
+        """
+
+        from .template import _contains_expression
+
+        return not _contains_expression(self)
+
+    def sub(
+            self,
+            *,
+            sub_dict: Mapping[str, object] | None = None,
+            namespace: object = (),
+            traverse_refs: bool = False,
+            **bindings: object) -> "Definition":
+        """Immutably bind static roots and evaluate fully bound expressions once.
+
+        Args:
+            sub_dict: Fully-qualified root-to-static-value bindings.
+            namespace: Optional namespace prepended to keyword binding names.
+            traverse_refs: Whether to enter Ref-carried Definition quotation data.
+            **bindings: Unqualified static root bindings.
+
+        Returns:
+            A new ``Definition`` retaining partial symbolic structure when roots
+            remain and evaluating supported closed arithmetic and repetition.
+
+        Raises:
+            ParameterizationError: If bindings are invalid, unknown, or contain a
+                Distribution, or expression evaluation is invalid.
+
+        Side Effects:
+            Never resolves or invokes targets, applies defaults, samples a
+            provider, materializes values, or mutates this Definition.
+        """
+
+        from .template import (
+            _evaluate_template_value,
+            _normalize_bindings,
+            _project_binding,
+            _rewrite_template_value,
+            _snapshot_parameters,
+            _validate_distribution_free,
+        )
+
+        if type(traverse_refs) is not bool:
+            raise ParameterizationError("traverse_refs must be a bool")
+        occurrences = _snapshot_parameters(self, traverse_refs=traverse_refs)
+        roots = {parameter.name for parameter in occurrences}
+        supplied = _normalize_bindings(sub_dict, namespace, bindings)
+        _validate_distribution_free(supplied)
+        unknown = sorted(set(supplied) - roots)
+        if unknown:
+            raise ParameterizationError(f"unknown parameter binding roots: {unknown!r}")
+        projected: dict[tuple[str, object], object] = {}
+        replacements: dict[int, object] = {}
+        for parameter in occurrences:
+            if parameter.name not in supplied:
+                continue
+            key = parameter.name, parameter.path
+            if key not in projected:
+                projected[key] = _project_binding(
+                    supplied[parameter.name], parameter.path, parameter.name,
+                )
+            replacements[id(parameter)] = projected[key]
+        result = _evaluate_template_value(
+            _rewrite_template_value(
+                self,
+                replacements=replacements,
+                remap=None,
+                traverse_refs=traverse_refs,
+            ),
+            traverse_refs=traverse_refs,
+        )
+        if not isinstance(result, Definition):
+            raise AssertionError("Definition substitution must retain its Definition root")
+        return result
+
+    def remap(
+            self,
+            mapping: Mapping[str, str] | None = None,
+            *,
+            prefix: object = (),
+            strip: object = (),
+            traverse_refs: bool = False) -> "Definition":
+        """Simultaneously rename active roots without resolving this Definition.
+
+        Args:
+            mapping: Fully-qualified old-to-new root names.
+            prefix: Namespace prepended after explicit remapping.
+            strip: Namespace removed from remapped roots before prefixing.
+            traverse_refs: Whether to enter Ref-carried Definition quotation data.
+
+        Returns:
+            A new Definition with unchanged root-relative parameter paths.
+
+        Raises:
+            ParameterizationError: If roots, namespaces, mappings, or traversal
+                controls are malformed.
+        """
+
+        from .template import (
+            _has_prefix,
+            _normalize_namespace,
+            _normalize_remap,
+            _remap_root,
+            _root_parts,
+            _rewrite_template_value,
+            _snapshot_parameters,
+        )
+
+        if type(traverse_refs) is not bool:
+            raise ParameterizationError("traverse_refs must be a bool")
+        occurrences = _snapshot_parameters(self, traverse_refs=traverse_refs)
+        roots = {parameter.name for parameter in occurrences}
+        renames = _normalize_remap(mapping, roots)
+        prefix_parts = _normalize_namespace(prefix, "prefix")
+        strip_parts = _normalize_namespace(strip, "strip")
+        mapped_roots = {root: renames.get(root, root) for root in roots}
+        if strip_parts and not any(
+                _has_prefix(_root_parts(root), strip_parts)
+                for root in mapped_roots.values()):
+            raise ParameterizationError("strip namespace does not match any active parameter root")
+        result_names = {
+            root: _remap_root(name, prefix_parts, strip_parts)
+            for root, name in mapped_roots.items()
+        }
+        result = _rewrite_template_value(
+            self,
+            replacements=None,
+            remap=result_names,
+            traverse_refs=traverse_refs,
+        )
+        if not isinstance(result, Definition):
+            raise AssertionError("Definition remapping must retain its Definition root")
+        return result
+
+    def loose_selector(self, *, strict: bool = False):
+        """Project known symbolic structure into a deliberately loose Selector.
+
+        Args:
+            strict: Whether retained known structure uses strict Selector matching.
+
+        Returns:
+            A selector that replaces unknown symbolic relationships with local
+            wildcards while preserving known Definition structure.
+
+        Raises:
+            ParameterizationError: If the Definition cannot be projected.
+        """
+
+        from .template_selector import _loose_selector
+
+        selector = _loose_selector(self)
+        if strict:
+            from .selector import Selector
+
+            return Selector(selector.root, strict=True, cls_policy="exact")
+        return selector
 
 
 # Python 3.10's frozen-slots dataclass transform replaces custom pickle methods.
@@ -598,6 +766,46 @@ class DefinitionLens:
         from .utils.graph.value import replace_subtree
 
         return replace_subtree(self.definition, self.path, freeze_def_value(value))
+
+
+def _validate_symbolic_sets(value: object) -> None:
+    """Reject unordered Definition values only when symbolic traversal needs order.
+
+    Plain and resolved structural sets retain their existing support. Direct
+    quotation and Ref boundaries remain opaque because their contents are not
+    Definition-owned symbolic traversal by default.
+    """
+
+    from .cdef_graph import EdgeKind
+    from .links import DefLink
+    from .quoted import QuotedDef
+    from .template import _contains_expression, _template_children
+
+    seen: set[int] = set()
+
+    def visit(current: object) -> None:
+        if isinstance(current, QuotedDef):
+            return
+        if isinstance(current, DefLink):
+            if current.kind is EdgeKind.MATERIALIZE:
+                visit(current.target)
+            return
+        if isinstance(current, (set, frozenset)) and any(
+                _contains_expression(member) for member in current):
+            raise ParameterizationError(
+                "Definition sets cannot contain active symbolic expressions."
+            )
+        children = _template_children(current)
+        if not children:
+            return
+        marker = id(current)
+        if marker in seen:
+            return
+        seen.add(marker)
+        for child in children:
+            visit(child)
+
+    visit(value)
 
 
 @dataclass(frozen=True, slots=True, init=False)

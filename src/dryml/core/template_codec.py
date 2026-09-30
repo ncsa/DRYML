@@ -13,7 +13,7 @@ import json
 import math
 from typing import Any, Mapping
 
-from .errors import TemplateError, TemplateLimitError
+from .errors import ParameterizationError, ParameterizationLimitError
 
 TEMPLATE_CODEC_SCHEMA = "dryml-template"
 TEMPLATE_CODEC_VERSION = 1
@@ -24,10 +24,10 @@ _MAX_ENTRIES = 4_096
 _MAX_INT_BITS = 1_024
 
 
-class TemplateCodecError(TemplateError):
+class TemplateCodecError(ParameterizationError):
     """Raised when a portable template payload is malformed or unsupported.
 
-    The error is a :class:`TemplateError` so public callers retain one bounded
+    The error is a :class:`ParameterizationError` so public callers retain one bounded
     failure family for authoring and persistence errors.
     """
 
@@ -89,7 +89,7 @@ def template_bundle_to_data(bundle: Any) -> dict[str, object]:
 
     Raises:
         TypeError: If ``bundle`` is not a TemplateBundle.
-        TemplateError: If any recipe is nonportable or the aggregate exceeds a
+        ParameterizationError: If any recipe is nonportable or the aggregate exceeds a
             codec limit.
 
     Side Effects:
@@ -113,7 +113,7 @@ def template_bundle_from_data(data: Mapping[str, object]) -> Any:
         The decoded immutable TemplateBundle.
 
     Raises:
-        TemplateError: If data is malformed, unsupported, noncanonical, or
+        ParameterizationError: If data is malformed, unsupported, noncanonical, or
             exceeds an aggregate codec limit.
 
     Side Effects:
@@ -130,7 +130,7 @@ def template_bundle_from_data(data: Mapping[str, object]) -> Any:
         raise TemplateCodecError("template bundle recipes are invalid")
     try:
         return TemplateBundle._from_recipes(root)
-    except (TypeError, TemplateError) as error:
+    except (TypeError, ParameterizationError) as error:
         raise TemplateCodecError("template bundle recipes are invalid") from error
 
 
@@ -214,7 +214,7 @@ def selector_from_data(data: Mapping[str, object]) -> Any:
             traverse_refs=extra["traverse_refs"],
         )
         selector = TemplateSelector(generator, max_assignments=extra["max_assignments"])
-    except TemplateError:
+    except ParameterizationError:
         raise
     except Exception as error:
         raise TemplateCodecError("template selector payload is invalid") from error
@@ -242,7 +242,7 @@ class _Encoder:
 
         self.entries += count
         if self.entries > _MAX_ENTRIES:
-            raise TemplateLimitError("template aggregate entry limit exceeded")
+            raise ParameterizationLimitError("template aggregate entry limit exceeded")
 
     def finish(self, kind: str, root: object, *, extra: dict[str, object] | None = None) -> dict[str, object]:
         result: dict[str, object] = {"schema": TEMPLATE_CODEC_SCHEMA, "version": TEMPLATE_CODEC_VERSION,
@@ -254,14 +254,14 @@ class _Encoder:
 
     def value(self, value: object, depth: int = 0) -> dict[str, object]:
         if depth > _MAX_DEPTH:
-            raise TemplateLimitError("template codec depth limit exceeded")
+            raise ParameterizationLimitError("template codec depth limit exceeded")
         if value is None:
             return {"tag": "none"}
         if type(value) is bool:
             return {"tag": "bool", "value": value}
         if type(value) is int:
             if value.bit_length() > _MAX_INT_BITS:
-                raise TemplateLimitError("template integer bit-length limit exceeded")
+                raise ParameterizationLimitError("template integer bit-length limit exceeded")
             return {"tag": "int", "value": str(value)}
         if type(value) is float:
             if not math.isfinite(value):
@@ -291,7 +291,7 @@ class _Encoder:
         if marker in self.labels:
             return {"tag": "ref", "label": self.labels[marker]}
         if len(self.nodes) >= _MAX_NODES:
-            raise TemplateLimitError("template codec node limit exceeded")
+            raise ParameterizationLimitError("template codec node limit exceeded")
         # Allocate before recursively encoding children so labels stay unique
         # for a depth-first graph with aliases.
         label = f"n{len(self.labels)}"
@@ -357,12 +357,12 @@ class _Encoder:
             return {"tag": "map", "items": [[self.value(key, depth), self.value(item, depth)] for key, item in value.items()]}
         if isinstance(value, (FrozenList, list, FrozenTuple, tuple)):
             if len(value) > _MAX_ENTRIES:
-                raise TemplateLimitError("template container entry limit exceeded")
+                raise ParameterizationLimitError("template container entry limit exceeded")
             self.consume_entries(len(value))
             return {"tag": "list" if isinstance(value, (FrozenList, list)) else "tuple", "items": [self.value(item, depth) for item in value]}
         if isinstance(value, (FrozenSet, set, frozenset)):
             if len(value) > _MAX_ENTRIES:
-                raise TemplateLimitError("template container entry limit exceeded")
+                raise ParameterizationLimitError("template container entry limit exceeded")
             self.consume_entries(len(value))
             if any(not _portable_set_member(item) for item in value):
                 raise TemplateCodecError("template set members must be literal portable values")
@@ -403,7 +403,7 @@ class _DecodeState:
 
         self.entries += count
         if self.entries > _MAX_ENTRIES:
-            raise TemplateLimitError("template aggregate entry limit exceeded")
+            raise ParameterizationLimitError("template aggregate entry limit exceeded")
 
 
 def _decode(data: Mapping[str, object], *, extra: set[str] | None = None):
@@ -513,7 +513,7 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
         if not isinstance(recipes, FrozenDict) or any(type(name) is not str or not isinstance(recipe, Template) for name, recipe in recipes.items()):
             raise TemplateCodecError("template bundle recipes are invalid")
         try: return TemplateBundle._from_recipes(recipes)
-        except (TypeError, TemplateError): raise TemplateCodecError("template bundle recipes are invalid") from None
+        except (TypeError, ParameterizationError): raise TemplateCodecError("template bundle recipes are invalid") from None
     if tag == "par" and set(data) == {"tag", "name", "path"}:
         path = data["path"]
         if not isinstance(path, Mapping) or not isinstance(path.get("segments"), list):
@@ -545,21 +545,21 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
         if args is not None:
             args = value(args)
             if not isinstance(args, FrozenTuple): raise TemplateCodecError("template Definition args are invalid")
-        return Definition._from_template_parts(cls, args, kwargs)
+        return Definition._from_symbolic_parts(cls, args, kwargs)
     if tag == "factory" and set(data) == {"tag", "target", "args", "kwargs"}:
         target, args, kwargs = value(data["target"]), value(data["args"]), value(data["kwargs"])
         if not isinstance(args, FrozenTuple) or not isinstance(kwargs, FrozenDict): raise TemplateCodecError("template factory is invalid")
         try: target = _validated_factory_target(target)
         except TypeError: raise TemplateCodecError("template factory target is invalid") from None
-        return FactorySpec._from_template_parts(target, tuple(args), kwargs)
+        return FactorySpec._from_symbolic_parts(target, tuple(args), kwargs)
     if tag == "map" and set(data) == {"tag", "items"} and isinstance(data["items"], list):
-        if len(data["items"]) > _MAX_ENTRIES: raise TemplateLimitError("template container entry limit exceeded")
+        if len(data["items"]) > _MAX_ENTRIES: raise ParameterizationLimitError("template container entry limit exceeded")
         state.consume_entries(len(data["items"]))
         items = [(value(pair[0]), value(pair[1])) for pair in data["items"] if isinstance(pair, list) and len(pair) == 2]
         if len(items) != len(data["items"]) or any(type(key) not in {str, int} for key, _ in items) or len({key for key, _ in items}) != len(items): raise TemplateCodecError("template map is invalid")
         return FrozenDict(items)
     if tag in {"list", "tuple", "set"} and set(data) == {"tag", "items"} and isinstance(data["items"], list):
-        if len(data["items"]) > _MAX_ENTRIES: raise TemplateLimitError("template container entry limit exceeded")
+        if len(data["items"]) > _MAX_ENTRIES: raise ParameterizationLimitError("template container entry limit exceeded")
         state.consume_entries(len(data["items"]))
         items = [value(item) for item in data["items"]]
         if tag == "set" and any(not _portable_set_member(item) for item in items):
@@ -611,4 +611,4 @@ def _portable_set_member(value: object) -> bool:
 
 def _check_bytes(value: object) -> None:
     if len(_canonical_bytes(value)) > _MAX_BYTES:
-        raise TemplateLimitError("template encoded payload size limit exceeded")
+        raise ParameterizationLimitError("template encoded payload size limit exceeded")

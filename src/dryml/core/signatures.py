@@ -1188,14 +1188,21 @@ def _authority_types() -> tuple[Any, Any, Any, Any]:
 
 
 def _select_automatic(value: Any, name: str) -> Any:
-    """Select graph-aware Ref authority from supplied local information only."""
+    """Select graph-aware Ref authority from supplied local information only.
+
+    A soft Definition remains structural until canonicalization recursively
+    validates and lowers it. This admits class-rooted symbolic construction
+    graphs without resolving targets during symbolic rewriting.
+    """
 
     from .cdef_graph import has_stateful_materialization
-    from .definition import ConcreteDefinition
+    from .definition import ConcreteDefinition, Definition
     from .object import Object
     from .reference_values import ObjectRef, StateRef
 
     if isinstance(value, (ConcreteDefinition, ObjectRef, StateRef)):
+        return value
+    if isinstance(value, Definition):
         return value
     if not isinstance(value, Object):
         raise _SelectionUnavailable()

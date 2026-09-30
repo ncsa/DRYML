@@ -346,7 +346,7 @@ def object_projection_cdef(
                     new is old for new, old in zip(args, current.args)
                 ))
             ) and all(kwargs[name] is value for name, value in current.kwargs.items()) else (
-                Definition._from_template_parts(current.cls, args, kwargs)
+                Definition._from_symbolic_parts(current.cls, args, kwargs)
             )
             memo[marker] = result
             return result
@@ -361,7 +361,7 @@ def object_projection_cdef(
             result = current if all(
                 new is old for new, old in zip(args, current.args)
             ) and all(kwargs[name] is value for name, value in current.kwargs.items()) else (
-                FactorySpec._from_template_parts(current.target, args, kwargs)
+                FactorySpec._from_symbolic_parts(current.target, args, kwargs)
             )
             memo[marker] = result
             return result

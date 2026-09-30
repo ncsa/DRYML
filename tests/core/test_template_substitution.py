@@ -8,7 +8,7 @@ from dryml.core import ConcreteDefinition, Definition, F, Mat, Object, ObjectId,
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.domains import UniformFromSet
-from dryml.core.errors import TemplateError, UnresolvedTemplateError
+from dryml.core.errors import ParameterizationError, UnresolvedDefinitionError
 from dryml.core.links import DefLink
 from dryml.core.symbol import ImportRef
 from dryml.core.template import Par, Template
@@ -103,14 +103,14 @@ def test_substitution_rejects_duplicate_unknown_and_nested_distributions_before_
     template = Template.from_value({"value": Par("width")})
     provider = UniformFromSet((1, 2))
 
-    with pytest.raises(TemplateError, match="duplicate"):
+    with pytest.raises(ParameterizationError, match="duplicate"):
         template.sub(sub_dict={"width": 1}, width=2)
-    with pytest.raises(TemplateError, match="unknown"):
+    with pytest.raises(ParameterizationError, match="unknown"):
         template.sub(height=1)
-    with pytest.raises(TemplateError, match="Distribution"):
+    with pytest.raises(ParameterizationError, match="Distribution"):
         template.sub(width={"provider": provider})
     ProbeDistribution.sampled = 0
-    with pytest.raises(TemplateError, match="Distribution"):
+    with pytest.raises(ParameterizationError, match="Distribution"):
         template.sub(width=ProbeDistribution())
     assert ProbeDistribution.sampled == 0
     assert template.root["value"] == Par("width")
@@ -229,10 +229,10 @@ def test_checkpoint_binding_keeps_model_and_ref_test_data_at_the_exact_state():
 
 
 def test_substitution_paths_fail_without_mutating_the_source_template():
-    """Unsupported root paths are deterministic TemplateError failures."""
+    """Unsupported root paths are deterministic ParameterizationError failures."""
     template = Template.from_value({"value": Par("root.missing")})
 
-    with pytest.raises(TemplateError, match="path"):
+    with pytest.raises(ParameterizationError, match="path"):
         template.sub(root={"present": 1})
     assert template.root["value"] == Par("root.missing")
 
@@ -257,11 +257,11 @@ def test_resolve_and_to_definition_preserve_import_free_root_contracts(monkeypat
     cdef_template = Template.from_value(cdef)
     monkeypatch.setattr(ImportRef, "resolve", lambda self: pytest.fail("must not resolve"))
     assert cdef_template.resolve() is cdef
-    with pytest.raises(TemplateError, match="Definition root"):
+    with pytest.raises(ParameterizationError, match="Definition root"):
         cdef_template.to_definition()
-    with pytest.raises(TemplateError, match="Definition root"):
+    with pytest.raises(ParameterizationError, match="Definition root"):
         Template.from_value({"value": 1}).to_definition()
-    with pytest.raises(UnresolvedTemplateError):
+    with pytest.raises(UnresolvedDefinitionError):
         Template.from_value(Par("missing")).resolve()
 
 
@@ -270,7 +270,7 @@ def test_remap_strip_restores_roots_and_rejects_unmatched_prefixes():
     template = Template.from_value({"value": Par("encoder/width.child")})
 
     assert template.remap(strip="encoder").root["value"] == Par("width.child")
-    with pytest.raises(TemplateError, match="does not match"):
+    with pytest.raises(ParameterizationError, match="does not match"):
         template.remap(strip="decoder")
 
 

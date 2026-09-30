@@ -10,7 +10,7 @@ import pytest
 
 from dryml.core import Definition, Object, Par, Ref, Repo, Template, TemplateBundle
 from dryml.core.cdef_codec import decode_cdef_graph, encode_cdef_graph
-from dryml.core.errors import TemplateError, TemplateLimitError
+from dryml.core.errors import ParameterizationError, ParameterizationLimitError
 from dryml.core.store.dir import DirStore
 from tests.qualification_fixture_support import verify_qualification_fixture_manifest
 
@@ -77,7 +77,7 @@ def test_bundle_ref_admission_codec_and_store_restore_remain_inert(tmp_path):
     assert restored_bundle.to_data() == bundle.to_data()
     assert restored.artifacts.names == bundle.names
     assert BundleLeaf.constructed == 0
-    with pytest.raises((TypeError, TemplateError)):
+    with pytest.raises((TypeError, ParameterizationError)):
         Definition(RawBundleOwner, bundle).concretize()
 
 
@@ -91,11 +91,11 @@ def test_bundle_payload_rejects_wrong_kind_duplicate_name_and_noncanonical_data(
     noncanonical = deepcopy(payload)
     noncanonical["nodes"].reverse()
 
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         TemplateBundle.from_data(wrong_kind)
-    with pytest.raises(TemplateError, match="canonical"):
+    with pytest.raises(ParameterizationError, match="canonical"):
         TemplateBundle.from_data(noncanonical)
-    with pytest.raises((TypeError, TemplateError)):
+    with pytest.raises((TypeError, ParameterizationError)):
         TemplateBundle({"": _recipe(1)})
     with pytest.raises(TypeError):
         TemplateBundle([_recipe(1), object()])
@@ -121,7 +121,7 @@ def test_bundle_ref_is_opaque_by_default_and_opt_in_traversal_enters_each_recipe
     })
     outer = Template.from_value({"artifacts": Ref(bundle)})
 
-    with pytest.raises(TemplateError, match="unknown"):
+    with pytest.raises(ParameterizationError, match="unknown"):
         outer.sub(width=4)
 
     bound = outer.sub(sub_dict={"width": 4, "height": 8}, traverse_refs=True)
@@ -144,13 +144,13 @@ def test_bundle_codec_applies_one_aggregate_entry_budget(monkeypatch):
         "first": Template.from_value([0] * 2_100),
         "second": Template.from_value([1] * 2_100),
     })
-    with pytest.raises(TemplateLimitError, match="aggregate entry"):
+    with pytest.raises(ParameterizationLimitError, match="aggregate entry"):
         bundle.to_data()
 
     monkeypatch.setattr(template_codec, "_MAX_ENTRIES", 5_000)
     payload = bundle.to_data()
     monkeypatch.setattr(template_codec, "_MAX_ENTRIES", 4_096)
-    with pytest.raises(TemplateLimitError, match="aggregate entry"):
+    with pytest.raises(ParameterizationLimitError, match="aggregate entry"):
         TemplateBundle.from_data(payload)
 
 
@@ -167,11 +167,11 @@ def test_bundle_codec_counts_inline_source_import_entries(monkeypatch):
         "first": Template.from_value(SourceSpec("function", "lambda: None", imports=imports("a"))),
         "second": Template.from_value(SourceSpec("function", "lambda: None", imports=imports("b"))),
     })
-    with pytest.raises(TemplateLimitError, match="aggregate entry"):
+    with pytest.raises(ParameterizationLimitError, match="aggregate entry"):
         bundle.to_data()
 
     monkeypatch.setattr(template_codec, "_MAX_ENTRIES", 5_000)
     payload = bundle.to_data()
     monkeypatch.setattr(template_codec, "_MAX_ENTRIES", 4_096)
-    with pytest.raises(TemplateLimitError, match="aggregate entry"):
+    with pytest.raises(ParameterizationLimitError, match="aggregate entry"):
         TemplateBundle.from_data(payload)
