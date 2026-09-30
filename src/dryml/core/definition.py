@@ -381,7 +381,7 @@ class Definition(DefInterface, Mapping):
 
         try:
             return self.parameters[name]
-        except KeyError as error:
+        except (KeyError, TypeError) as error:
             raise AttributeError(
                 f"{type(self).__name__!s} object has no attribute {name!r}"
             ) from error
