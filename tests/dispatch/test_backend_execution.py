@@ -11,7 +11,10 @@ import pytest
 
 import dryml.dispatch as dispatch
 import dryml.core.execute as core_execute
-from dryml.core import AutoRef, ObjectRef, Ref, Repo, Serializable, StateRef, function
+from dryml.core import (
+    AutoRef, Definition, Object, ObjectRef, Ref, Repo, Serializable, StateRef,
+    function,
+)
 from dryml.core.execute import CoreExecutionFuture, CoreOptions
 from dryml.core.store.dir import DirStore
 from dryml.environments import CurrentEnvironmentSpec
@@ -26,6 +29,20 @@ def _add(value: int, *, env: str) -> tuple[int, str]:
     """Return ordinary workload data, including a control-named keyword."""
 
     return value + 1, env
+
+
+class _DefinitionInput(Object):
+    """Stateless Object constructed from a Definition inside a worker."""
+
+    def __init__(self, value: int = 0) -> None:
+        super().__init__()
+        self.value = value
+
+
+def _read_definition_input(value: Object) -> int:
+    """Read a materialized Definition input through its Object API."""
+
+    return value.value
 
 
 class _StatefulResult(Serializable):
@@ -193,6 +210,23 @@ def test_dispatch_submit_and_run_use_the_existing_core_one_off_owner(
         8,
         "still-workload-data",
     )
+
+
+def test_dispatch_materializes_a_symbolic_definition_in_a_real_worker(
+        tmp_path) -> None:
+    """Preserve Definition identity instead of its public Mapping view."""
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    dispatch.set_execute_backend_default(
+        SubProcessConfig(spool_directory=spool),
+        core=CoreOptions(repo=repo, return_objects=False),
+    )
+
+    assert dispatch.run(
+        _read_definition_input, Definition(_DefinitionInput, 7)
+    ) == 7
 
 
 def test_dispatch_preserves_core_reference_and_alias_recovery(

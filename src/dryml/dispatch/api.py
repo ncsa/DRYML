@@ -47,10 +47,17 @@ def _warn_coverage(prepared: _Preflight) -> None:
     """Emit only coverage categories selected by the probe policy."""
 
     if "dispatch.coverage_incomplete" in prepared.report.warnings:
+        diagnostics = prepared.report.diagnostics
+        detail = ", ".join(diagnostics[:8]) or "unspecified"
+        if len(diagnostics) > 8:
+            detail += f", ... (+{len(diagnostics) - 8} more)"
         warnings.warn(
-            "Dispatch static requirement coverage is incomplete",
+            "Dispatch static requirement coverage is incomplete "
+            f"(diagnostics: {detail}); undiscovered calls may hide worker "
+            "requirements. Call dispatch.explain(...) for the full preflight "
+            "report.",
             DispatchCoverageWarning,
-            stacklevel=3,
+            stacklevel=4,
         )
 
 

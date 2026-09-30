@@ -30,6 +30,12 @@ Symbolic errors are `ParameterizationError`, `UnresolvedDefinitionError`,
 `CannotConcretizeParameterizedDefinition` remains the TypeError for attempting
 to concretize an active expression.
 
+Core Execute now preserves symbolic `Definition` values through worker transport
+instead of degrading their public Mapping view to an ordinary dictionary. This
+allows Mat arguments to materialize in workers and keeps `Ref[Definition]` data
+symbolic. Dispatch's incomplete-coverage warning now names its bounded diagnostic
+categories and directs callers to `dispatch.explain(...)` for the full report.
+
 `CachedDataset`, `CacheCodec`, and `CacheIntegrityError` are now concrete public
 Artifact APIs. Finite dense Dataset trees can be streamed into built-in NumPy,
 optional Parquet (`pyarrow>=25.0.1`), or optional NetCDF (`netCDF4>=1.7.4`) cache
