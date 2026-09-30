@@ -217,6 +217,10 @@ not opened until that code requests it. Core values otherwise lower to exact CDe
 index in the frozen Store table, never a path. The worker reconstructs one local
 owner boundary: function, Method, and managed owners each deliver/invoke/normalize
 once rather than gaining a second generic signature boundary.
+Transient `Ref(value)` and `Mat(value)` assertions are invocation-only graph
+nodes. They cross intact to that worker-owned boundary and must be consumed by
+signature activation there; unconsumed assertions remain forbidden in result
+graphs and persistent formats.
 
 Core Execute does not inject a root `ManagedConfig` into a managed target. Direct
 managed targets and managed calls nested inside ordinary transported callables use
@@ -327,7 +331,9 @@ earlier restores nor replays the workload.
 Store-table-relative publication status only; it never carries a live Repo,
 Store, `StoreReport`, argument, or result. A delivered worker failure preserves
 known publication evidence but does not imply rollback, retry, or successful
-caller refresh.
+caller refresh. Coordinator recovery reports this bounded category as
+`core execution worker failed: <reason>` without including submitted values or
+remote exception payloads.
 
 `PreparedCoreCall` contains only invocation bytes, frozen storage setup, and
 opaque update descriptors. It never retains caller Objects or refresh progress.

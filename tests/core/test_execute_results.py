@@ -163,7 +163,10 @@ def test_result_cycles_fail_without_claiming_a_successful_outcome(tmp_path):
     prepared = strategy.prepare(_cycle, (), {}, repo=repo, control_store=None, update_args=False)
 
     output = strategy.invoke(prepared.invocation, repo=repo, update_args=False)
-    with pytest.raises(CoreExecutionError, match="CoreCallCodecError|cyclic"):
+    with pytest.raises(
+        CoreExecutionError,
+        match=r"^core execution worker failed: CoreCallCodecError$",
+    ):
         strategy.recover(
             output, prepared, repo=repo, args=(), kwargs={},
             return_objects=False, update_args=False,
