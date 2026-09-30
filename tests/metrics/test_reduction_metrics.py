@@ -466,6 +466,20 @@ def test_symbolic_metric_factories_validate_known_controls_immediately(monkeypat
     deferred = regressor_mae(Par("data"), Par("model"), mode=Par("mode"))
     assert isinstance(deferred, Definition)
 
+    from dryml.data.reduction_methods import MeanInitial
+    from dryml.metrics import ConfusionInitial, F1FromConfusion
+
+    with pytest.raises(ValueError, match="mode"):
+        MeanInitial.defn(mode=Par("mode")).sub(mode="invalid").concretize()
+    with pytest.raises(ValueError, match="duplicates"):
+        ConfusionInitial.defn(Par("classes")).sub(
+            classes=(0, 0)
+        ).concretize()
+    with pytest.raises(ValueError, match="positive_index"):
+        F1FromConfusion.defn(
+            average=Par("average"), positive_index=Par("positive")
+        ).sub(average="macro", positive=1).concretize()
+
 
 def test_symbolic_metric_factory_concretizes_to_the_direct_fold_definition(tmp_path):
     """Complete binding produces the same Fold CDef as the direct helper call."""

@@ -491,6 +491,17 @@ class MeanInitial(Method):
     def __init__(self, *, mode: ReductionMode) -> None:
         self.mode = _normalize_mode(mode)
 
+    @staticmethod
+    def __dryml_normalize_definition_arguments__(args, kwargs):
+        """Validate a bound symbolic mode when Definition concretization closes."""
+
+        from dryml.core.template import Expr
+
+        mode = kwargs.get("mode")
+        if not isinstance(mode, Expr):
+            _normalize_mode(mode)
+        return args, kwargs
+
     @traits(batch_mode="element")
     def element(self, observation: object):
         """Allocate state for one unbatched observation."""
@@ -518,6 +529,17 @@ class MeanUpdate(Accumulator):
 
     def __init__(self, *, mode: ReductionMode) -> None:
         self.mode = _normalize_mode(mode)
+
+    @staticmethod
+    def __dryml_normalize_definition_arguments__(args, kwargs):
+        """Validate a bound symbolic mode when Definition concretization closes."""
+
+        from dryml.core.template import Expr
+
+        mode = kwargs.get("mode")
+        if not isinstance(mode, Expr):
+            _normalize_mode(mode)
+        return args, kwargs
 
     @traits(batch_mode="element")
     def element(self, observation: object, state: tuple[object, object]):

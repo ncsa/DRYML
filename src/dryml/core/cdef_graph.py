@@ -18,6 +18,7 @@ from .links import DefLink
 from .params import Match
 from .quoted import QuotedDef, SelectorSpec
 from .object import Object
+from .template import Expr
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 
@@ -129,8 +130,6 @@ def _iter_direct_edges_from_value(
         return
     if isinstance(value, (QuotedDef, SelectorSpec)):
         return
-    from .template import Expr
-
     if isinstance(value, (Match, Expr)):
         raise ConcreteDefinitionGraphError(
             f"Unresolved template expression found inside ConcreteDefinition graph at {path!s}."

@@ -292,18 +292,15 @@ class Definition(DefInterface, Mapping):
 
         Symbolic rewriting owns the supplied immutable values and uses this
         narrow constructor to preserve positional, keyword, and skipped-args
-        call shape without resolving the target or applying defaults.
+        call shape without resolving the target or applying defaults. Public
+        entry points validate replacements before rewriting, so this trusted
+        constructor deliberately does not rescan each rebuilt subtree.
         """
-
-        from .template import _validate_distribution_free
-
-        _validate_distribution_free({"args": args, "kwargs": kwargs})
         result = object.__new__(cls)
         object.__setattr__(result, "_stable_hash_cache", None)
         object.__setattr__(result, "_cls", definition_cls)
         object.__setattr__(result, "_args", args)
         object.__setattr__(result, "_kwargs", kwargs)
-        _validate_symbolic_sets(result)
         return result
 
     @staticmethod
@@ -710,6 +707,7 @@ class Definition(DefInterface, Mapping):
         )
         if not isinstance(result, Definition):
             raise AssertionError("Definition substitution must retain its Definition root")
+        _validate_symbolic_sets(result, traverse_refs=traverse_refs)
         return result
 
     def remap(
@@ -812,7 +810,8 @@ class DefinitionLens:
         return replace_subtree(self.definition, self.path, freeze_def_value(value))
 
 
-def _validate_symbolic_sets(value: object) -> None:
+def _validate_symbolic_sets(
+        value: object, *, traverse_refs: bool = False) -> None:
     """Reject unordered Definition values only when symbolic traversal needs order.
 
     Plain and resolved structural sets retain their existing support. Direct
@@ -831,11 +830,13 @@ def _validate_symbolic_sets(value: object) -> None:
         if isinstance(current, QuotedDef):
             return
         if isinstance(current, DefLink):
-            if current.kind is EdgeKind.MATERIALIZE:
+            if current.kind is EdgeKind.MATERIALIZE or (
+                    traverse_refs and current.kind is EdgeKind.REF):
                 visit(current.target)
             return
         if isinstance(current, (set, frozenset)) and any(
-                _contains_expression(member) for member in current):
+                _contains_expression(member, traverse_refs=traverse_refs)
+                for member in current):
             raise ParameterizationError(
                 "Definition sets cannot contain active symbolic expressions."
             )

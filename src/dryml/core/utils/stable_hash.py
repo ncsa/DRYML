@@ -143,13 +143,19 @@ class StableHashGraphHasher(GraphHasher):
 
         kind = node_kind(obj)
         if kind is NodeKind.QUOTED_DEF:
+            cached_leaf = ctx.state.get("_stable_leaf_bytes", {}).get(id(obj))
+            if cached_leaf is not None and cached_leaf[0] is obj:
+                return True
             # Expression-codec data gives portable quote identity. Existing
             # non-expression quotation data (for example Match selectors) keeps
             # its established structural hashing path.
             try:
-                obj.__stable_leaf_bytes__()
+                encoded = obj.__stable_leaf_bytes__()
             except Exception:
                 return False
+            ctx.state.setdefault("_stable_leaf_bytes", {})[id(obj)] = (
+                obj, encoded
+            )
             return True
         return kind in {
             NodeKind.POD,
@@ -168,6 +174,9 @@ class StableHashGraphHasher(GraphHasher):
         cached_cdef_hash = self._validated_cdef_hash(obj)
         if cached_cdef_hash is not None:
             return cached_cdef_hash
+        cached_leaf = ctx.state.get("_stable_leaf_bytes", {}).get(id(obj))
+        if cached_leaf is not None and cached_leaf[0] is obj:
+            return hashlib.sha256(cached_leaf[1]).hexdigest()
         return stable_hash_value(obj)
 
     def should_track_cycle(self, obj, ctx: GraphCtx) -> bool:

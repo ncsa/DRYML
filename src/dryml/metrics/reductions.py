@@ -11,6 +11,8 @@ import numpy as np
 
 from dryml.artifacts import Fold, mean
 from dryml.core import AutoRef, ConcreteDefinition, Definition, Par, Ref, function
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.links import DefLink
 from dryml.core.tensor_spec import SpecTree, TensorSpec
 from dryml.data import Abs, Diff, Map, Pipe, Project, Select, Squared
 from dryml.data.reduction_methods import (
@@ -148,7 +150,7 @@ def _symbolic_metric_definition(name: str, arguments: Mapping[str, object]) -> D
         )
         mode = arguments["mode"]
         return Fold.defn(
-            Ref(source),
+            DefLink.finalized(EdgeKind.REF, source),
             initial_state=MeanInitial.defn(mode=mode),
             accumulator=MeanUpdate.defn(mode=mode),
             finalize=MeanFinalize.defn(),
@@ -402,6 +404,14 @@ class ConfusionInitial(Method):
         self.classes = _classes(classes)
         self.prediction, self.target = prediction, target
 
+    @staticmethod
+    def __dryml_normalize_definition_arguments__(args, kwargs):
+        """Validate a fully bound class domain during Definition concretization."""
+
+        classes = args[0] if args else kwargs.get("classes")
+        _validate_known_classes(classes)
+        return args, kwargs
+
     def _runtime_selection_facts(self, args, kwargs):
         """Keep direct NumPy string-label calls outside TensorSpec's numeric adapter."""
 
@@ -444,6 +454,14 @@ class ConfusionCounts(Accumulator):
     def __init__(self, classes: tuple[Label, ...], *, prediction: Path = "prediction", target: Path = "target") -> None:
         self.classes = _classes(classes)
         self.prediction, self.target = prediction, target
+
+    @staticmethod
+    def __dryml_normalize_definition_arguments__(args, kwargs):
+        """Validate a fully bound class domain during Definition concretization."""
+
+        classes = args[0] if args else kwargs.get("classes")
+        _validate_known_classes(classes)
+        return args, kwargs
 
     def _runtime_selection_facts(self, args, kwargs):
         """Keep direct NumPy string-label calls outside TensorSpec's numeric adapter."""
@@ -547,6 +565,15 @@ class F1FromConfusion(Method):
         elif positive_index is not None:
             raise ValueError("positive_index is valid only for binary F1.")
         self.average, self.positive_index = average, positive_index
+
+    @staticmethod
+    def __dryml_normalize_definition_arguments__(args, kwargs):
+        """Validate fully bound F1 controls during Definition concretization."""
+
+        _validate_known_f1_controls(
+            kwargs.get("average"), kwargs.get("positive_index")
+        )
+        return args, kwargs
 
     def __call__(self, matrix: object):
         """Return native F1 values using zero for unsupported per-class terms."""

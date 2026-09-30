@@ -22,6 +22,7 @@ from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 
 CDEF_GRAPH_CODEC_VERSION = 2
+_MAX_QUOTED_DEFINITION_BYTES = 16 * 1024 * 1024
 
 
 class CDefGraphCodecError(ValueError):
@@ -49,6 +50,7 @@ def encode_cdef_graph(root: ConcreteDefinition) -> dict[str, Any]:
             f"Expected ConcreteDefinition, got {type(root).__name__}."
         )
     graph, labels = _graph_and_labels(root)
+    quotation_budget = _QuotationBudget()
     nodes = []
     for node in graph.nodes():
         cdef = node.definition
@@ -56,7 +58,9 @@ def encode_cdef_graph(root: ConcreteDefinition) -> dict[str, Any]:
             {
                 "label": labels[cdef_node_key(cdef)],
                 "cls": cdef.cls,
-                "parameters": _encode_value(cdef.parameters, labels),
+                "parameters": _encode_value(
+                    cdef.parameters, labels, quotation_budget
+                ),
                 "stateful_role": cdef._stateful_role,
             }
         )
@@ -123,6 +127,7 @@ def decode_cdef_graph(data: Any) -> ConcreteDefinition:
         )
     built: dict[str, ConcreteDefinition] = {}
     active: set[str] = set()
+    quotation_budget = _QuotationBudget()
 
     def build(label: str) -> ConcreteDefinition:
         if label in built:
@@ -134,7 +139,9 @@ def decode_cdef_graph(data: Any) -> ConcreteDefinition:
         active.add(label)
         try:
             node = payloads[label]
-            parameters = _decode_value(node["parameters"], build, payloads)
+            parameters = _decode_value(
+                node["parameters"], build, payloads, quotation_budget
+            )
             if not isinstance(parameters, FrozenDict):
                 raise CDefGraphCodecError(
                     f"CDef graph parameters for {label!r} must be a frozen mapping payload."
@@ -217,6 +224,7 @@ def object_projection_cdef(
     if type(traverse_refs) is not bool:
         raise TypeError("traverse_refs must be a bool.")
 
+    from .cdef_graph import EdgeKind
     from .definition import Definition
     from .factory import FactorySpec
     from .template import _BinaryExpr, _RepeatExpr
@@ -252,7 +260,19 @@ def object_projection_cdef(
             marker = id(current)
             if marker in memo:
                 return memo[marker]
-            target = rewrite(current.target)
+            if (
+                traverse_refs
+                and current.kind is EdgeKind.REF
+                and isinstance(current.target, QuotedDef)
+            ):
+                value = rewrite(current.target.value)
+                target = (
+                    current.target
+                    if value is current.target.value
+                    else QuotedDef(value)
+                )
+            else:
+                target = rewrite(current.target)
             result = current if target is current.target else (
                 DefLink.finalized(current.kind, target)
                 if current.is_finalized
@@ -540,7 +560,38 @@ def _graph_and_labels(root: ConcreteDefinition):
     return graph, labels
 
 
-def _encode_value(value: Any, labels: dict[object, str]) -> dict[str, Any]:
+class _QuotationBudget:
+    """Bound cumulative quoted-expression bytes retained by one CDef record."""
+
+    def __init__(self) -> None:
+        self.bytes = 0
+
+    def consume(self, payload: Any) -> None:
+        try:
+            size = len(
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("ascii")
+            )
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise CDefGraphCodecError(
+                "CDef quoted Definition payload is invalid."
+            ) from error
+        self.bytes += size
+        if self.bytes > _MAX_QUOTED_DEFINITION_BYTES:
+            raise CDefGraphCodecError(
+                "CDef aggregate quoted Definition payload limit exceeded."
+            )
+
+
+def _encode_value(
+    value: Any,
+    labels: dict[object, str],
+    quotation_budget: _QuotationBudget,
+) -> dict[str, Any]:
     if isinstance(value, ObjectRef):
         return {"kind": "object_ref", "value": value.to_data()}
     if isinstance(value, StateRef):
@@ -550,38 +601,54 @@ def _encode_value(value: Any, labels: dict[object, str]) -> dict[str, Any]:
     if isinstance(value, QuotedDef):
         from .definition_expression_codec import to_data
 
-        return {"kind": "quoted-definition", "value": to_data(value.value)}
+        payload = to_data(value.value)
+        quotation_budget.consume(payload)
+        return {"kind": "quoted-definition", "value": payload}
     if isinstance(value, DefLink):
         if not value.is_finalized:
             raise CDefGraphCodecError("Unresolved DefLink assertions cannot be encoded.")
+        if isinstance(value.target, QuotedDef):
+            from .definition import Definition
+
+            if not isinstance(value.target.value, Definition):
+                raise CDefGraphCodecError(
+                    "CDef quoted Definition link must contain a Definition."
+                )
         return {
             "kind": "link",
             "edge_kind": value.kind.value,
-            "target": _encode_value(value.target, labels),
+            "target": _encode_value(value.target, labels, quotation_budget),
         }
     if isinstance(value, FrozenDict):
         return {
             "kind": "dict",
             "items": [
-                [edge.segment.key, _encode_value(edge.value, labels)]
+                [
+                    edge.segment.key,
+                    _encode_value(edge.value, labels, quotation_budget),
+                ]
                 for edge in iter_value_edges(value)
             ],
         }
     if isinstance(value, FrozenList):
         return {
             "kind": "list",
-            "items": [_encode_value(item, labels) for item in value],
+            "items": [
+                _encode_value(item, labels, quotation_budget) for item in value
+            ],
         }
     if isinstance(value, FrozenTuple):
         return {
             "kind": "tuple",
-            "items": [_encode_value(item, labels) for item in value],
+            "items": [
+                _encode_value(item, labels, quotation_budget) for item in value
+            ],
         }
     if isinstance(value, FrozenSet):
         return {
             "kind": "set",
             "items": [
-                _encode_value(edge.value, labels)
+                _encode_value(edge.value, labels, quotation_budget)
                 for edge in iter_value_edges(value)
             ],
         }
@@ -589,7 +656,10 @@ def _encode_value(value: Any, labels: dict[object, str]) -> dict[str, Any]:
 
 
 def _decode_value(
-    data: Any, build, payloads: dict[str, dict[str, Any]]
+    data: Any,
+    build,
+    payloads: dict[str, dict[str, Any]],
+    quotation_budget: _QuotationBudget,
 ) -> Any:
     if not isinstance(data, dict) or "kind" not in data:
         raise CDefGraphCodecError(
@@ -615,7 +685,10 @@ def _decode_value(
         from .definition_expression_codec import from_data
 
         try:
+            quotation_budget.consume(data["value"])
             return QuotedDef(from_data(data["value"]))
+        except CDefGraphCodecError:
+            raise
         except Exception as error:
             raise CDefGraphCodecError("CDef quoted Definition payload is invalid.") from error
     if kind == "link":
@@ -628,7 +701,9 @@ def _decode_value(
             raise CDefGraphCodecError(
                 f"Invalid CDef link kind {data['edge_kind']!r}."
             ) from error
-        target = _decode_value(data["target"], build, payloads)
+        target = _decode_value(
+            data["target"], build, payloads, quotation_budget
+        )
         if not isinstance(target, (
             ConcreteDefinition, ObjectRef, StateRef, QuotedDef, SelectorSpec,
         )):
@@ -640,6 +715,13 @@ def _decode_value(
             raise CDefGraphCodecError(
                 "CDef constructor-data quotation links must use a Ref edge."
             )
+        if isinstance(target, QuotedDef):
+            from .definition import Definition
+
+            if not isinstance(target.value, Definition):
+                raise CDefGraphCodecError(
+                    "CDef quoted Definition link must contain a Definition."
+                )
         return DefLink.finalized(edge_kind, target)
     if kind == "dict":
         _require_exact_keys(data, {"kind", "items"}, "CDef dict")
@@ -663,7 +745,14 @@ def _decode_value(
                     f"Duplicate CDef graph mapping key {item[0]!r}."
                 )
             seen_keys.add(item[0])
-            items.append((item[0], _decode_value(item[1], build, payloads)))
+            items.append(
+                (
+                    item[0],
+                    _decode_value(
+                        item[1], build, payloads, quotation_budget
+                    ),
+                )
+            )
         try:
             return FrozenDict(dict(items))
         except Exception as error:
@@ -673,7 +762,8 @@ def _decode_value(
         if not isinstance(data["items"], list):
             raise CDefGraphCodecError(f"CDef {kind} items must be a list.")
         items = [
-            _decode_value(item, build, payloads) for item in data["items"]
+            _decode_value(item, build, payloads, quotation_budget)
+            for item in data["items"]
         ]
         if kind == "list":
             return FrozenList(items)

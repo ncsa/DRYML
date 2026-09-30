@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
+import json
 
 import pytest
 
 from dryml.core import Definition, Object, Par, Ref, Repo, Template
+import dryml.core.cdef_codec as cdef_codec
 from dryml.core.cdef_codec import CDefGraphCodecError, decode_cdef_graph, encode_cdef_graph
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.definition_expression_codec import from_data as expression_from_data
 from dryml.core.definition_expression_codec import to_data as expression_to_data
 from dryml.core.links import DefLink
+from dryml.core.errors import (
+    ParameterizationError,
+    ParameterizationLimitError,
+    UnresolvedDefinitionError,
+)
 from dryml.core.quoted import QuotedDef
 from dryml.core.repo_definition import _SelectorEncoder, _selector_from_data, _validate_selector
 from dryml.core.selector import Selector
 from dryml.core.signatures import Mat, SignatureError, compile_signature
 from dryml.core.template import repeat
 from dryml.core.utils.graph.path import canonical_key_bytes
+from dryml.core.utils.stable_hash import StableHashGraphHasher
 
 
 class RoleLeaf(Object):
@@ -113,7 +122,7 @@ def test_ref_template_and_mat_roles_admit_symbolic_definitions_distinctly():
     assert delivered is symbolic
     with pytest.raises(SignatureError, match="conflicts"):
         _plan(Template).prepare_args((Mat(symbolic),), {})
-    with pytest.raises(Exception, match="active symbolic expression"):
+    with pytest.raises(UnresolvedDefinitionError, match="active symbolic expression"):
         _plan(Mat[Definition]).prepare_args((symbolic,), {}, repo=Repo()).deliver_args()
     assert RoleLeaf.constructions == 0
 
@@ -180,8 +189,48 @@ def test_template_values_persist_as_quoted_definitions_and_replay_without_signat
     with pytest.raises(CDefGraphCodecError, match="quoted Definition"):
         decode_cdef_graph(malformed)
 
+    malformed = encode_cdef_graph(cdef)
+    malformed["nodes"][0]["parameters"]["items"][0][1]["target"]["value"] = (
+        expression_to_data(1)
+    )
+    with pytest.raises(CDefGraphCodecError, match="must contain a Definition"):
+        decode_cdef_graph(malformed)
 
-def test_definition_expression_codec_preserves_aliases_and_rejects_bad_budgets():
+
+def test_cdef_codec_bounds_aggregate_quoted_definition_bytes(monkeypatch):
+    """A CDef graph shares one byte budget across all quoted recipes."""
+
+    cdef = Definition(
+        MappingHolder,
+        {"first": Definition(RoleLeaf, 1), "second": Definition(RoleLeaf, 2)},
+    ).concretize()
+    encoded = encode_cdef_graph(cdef)
+    recipes = encoded["nodes"][0]["parameters"]["items"][0][1]["items"]
+    payload_sizes = [
+        len(
+            json.dumps(
+                item[1]["target"]["value"],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("ascii")
+        )
+        for item in recipes
+    ]
+    monkeypatch.setattr(
+        cdef_codec,
+        "_MAX_QUOTED_DEFINITION_BYTES",
+        max(payload_sizes),
+    )
+
+    with pytest.raises(CDefGraphCodecError, match="aggregate quoted"):
+        encode_cdef_graph(cdef)
+    with pytest.raises(CDefGraphCodecError, match="aggregate quoted"):
+        decode_cdef_graph(encoded)
+
+
+def test_definition_expression_codec_preserves_aliases_and_rejects_bad_budgets(
+        monkeypatch):
     """Quoted Definition expression data round-trips arithmetic, repetition, and aliases data-only."""
 
     shared = Definition(RoleLeaf, Par("width"))
@@ -196,6 +245,43 @@ def test_definition_expression_codec_preserves_aliases_and_rejects_bad_budgets()
     with pytest.raises(Exception, match="schema or version"):
         expression_from_data(malformed)
 
+    cyclic = []
+    cyclic.append(cyclic)
+    with pytest.raises(ParameterizationError, match="cycle"):
+        expression_to_data(cyclic)
+    with pytest.raises(ParameterizationError, match="set members"):
+        expression_to_data({Par("unordered")})
+
+    duplicate = deepcopy(expression_to_data(Definition(RoleLeaf, 1)))
+    duplicate["nodes"].append(deepcopy(duplicate["nodes"][0]))
+    with pytest.raises(ParameterizationError, match="duplicated"):
+        expression_from_data(duplicate)
+
+    bounded = expression_to_data([1, 2])
+    monkeypatch.setattr("dryml.core.template_codec._MAX_ENTRIES", 1)
+    with pytest.raises(ParameterizationLimitError, match="entry limit"):
+        expression_to_data([1, 2])
+    with pytest.raises(ParameterizationLimitError, match="entry limit"):
+        expression_from_data(bounded)
+
+
+def test_quoted_definition_hash_reuses_atomicity_encoding(monkeypatch):
+    """One graph-hash invocation encodes portable quotation data once."""
+
+    quoted = QuotedDef(Definition(RoleLeaf, Par("width")))
+    calls = 0
+    original = QuotedDef.__stable_leaf_bytes__
+
+    def counted(self):
+        nonlocal calls
+        calls += 1
+        return original(self)
+
+    monkeypatch.setattr(QuotedDef, "__stable_leaf_bytes__", counted)
+
+    assert len(StableHashGraphHasher().hash([quoted, quoted])) == 64
+    assert calls == 1
+
 
 def test_repo_definition_selector_data_round_trips_symbolic_quoted_definitions():
     """Repo-definition selectors retain symbolic QuotedDef payloads as data-only records."""
@@ -207,6 +293,21 @@ def test_repo_definition_selector_data_round_trips_symbolic_quoted_definitions()
     _validate_selector(data, "$.selector")
     restored = _selector_from_data(data)
     restored_quote = restored.root.kwargs["recipe"]
+    assert isinstance(restored_quote, QuotedDef)
+    assert restored_quote.value.names == ("width",)
+
+
+def test_repo_definition_selector_set_round_trips_quoted_definitions():
+    """Quoted Definition set members retain their portable fingerprints."""
+
+    quoted = Definition(RoleLeaf, Par("width") * 2).quote()
+    selector = Selector(Definition(PlainHolder, recipe={quoted}))
+    data = _SelectorEncoder().selector(selector, "$.selector")
+
+    _validate_selector(data, "$.selector")
+    restored = _selector_from_data(data)
+
+    restored_quote = next(iter(restored.root.kwargs["recipe"]))
     assert isinstance(restored_quote, QuotedDef)
     assert restored_quote.value.names == ("width",)
 
@@ -246,3 +347,36 @@ def test_direct_failure_precedes_live_cache_seeding_and_owner_construction(monke
 
     assert cache_calls == []
     assert NoEffectHolder.constructions == 0
+
+
+def test_repo_failure_precedes_all_root_canonicalization_and_cache_effects(
+        monkeypatch):
+    """Repo checks every symbolic root before canonicalizing an earlier valid one."""
+
+    repo = Repo()
+    cache_calls = []
+    monkeypatch.setattr(repo, "cache_weak", lambda value: cache_calls.append(value))
+    monkeypatch.setattr(
+        "dryml.core.canonical.to_canonical",
+        lambda *args, **kwargs: pytest.fail(
+            "Repo canonicalized a root before symbolic preflight completed"
+        ),
+    )
+
+    with pytest.raises(Exception, match="active symbolic expression"):
+        repo.materialize_boundary((
+            Definition(RoleLeaf, 1),
+            Definition(RoleLeaf, Par("width")),
+        ))
+
+    assert cache_calls == []
+
+
+def test_classless_resolved_definition_is_not_reported_as_symbolically_unresolved():
+    """Missing constructor authority remains distinct from active expressions."""
+
+    definition = Definition(value=1)
+
+    assert definition.is_resolved
+    with pytest.raises(ValueError, match="no class authority"):
+        Repo().materialize_boundary((definition,))

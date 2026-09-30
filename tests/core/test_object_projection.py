@@ -80,7 +80,12 @@ def test_recursive_object_projection_preserves_ids_roles_sharing_and_codec_meani
     assert projected.object_projection() == projected
     assert ObjectRef.from_data(projected.to_data()) == projected
 
-    assert state.object_projection(traverse_refs=True) == projected
+    traversed = state.object_projection(traverse_refs=True)
+    traversed_recipe = traversed.definition.parameters["recipe"].target.value
+    assert traversed != projected
+    projected_exact = traversed_recipe.args[0]["exact"]
+    assert isinstance(projected_exact, ObjectRef)
+    assert not isinstance(projected_exact, StateRef)
 
 
 def test_projection_never_allocates_object_ids_or_resolves_symbols(monkeypatch):

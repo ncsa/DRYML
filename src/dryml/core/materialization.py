@@ -34,6 +34,7 @@ def preflight_symbolic_materialization(*roots: Any, repo: Any = None) -> None:
     Raises:
         UnresolvedDefinitionError: If active expressions remain in materializing
             structure after owning Template slots establish quotation barriers.
+        ValueError: If a resolved Definition has no class authority.
         SignatureError: If an activated role rejects its selected authority.
 
     Side Effects:
@@ -59,7 +60,7 @@ def preflight_symbolic_materialization(*roots: Any, repo: Any = None) -> None:
             return
         seen.add(marker)
         if definition.cls is None:
-            raise UnresolvedDefinitionError("materializing Definition has no class authority")
+            raise ValueError("materializing Definition has no class authority")
         cls = resolve_symbol(definition.cls)
         if not isinstance(cls, type):
             raise TypeError("materializing Definition class authority must resolve to a type")

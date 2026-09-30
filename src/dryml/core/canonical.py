@@ -749,12 +749,16 @@ class _ToCanonicalTransformer(GraphTransformer):
                     f"got {type(live_cls).__name__}."
                 )
             from .bound_args import BoundArguments
+            from .object import _normalize_definition_arguments
             from .signatures import compile_signature
 
+            normalized_args, normalized_kwargs = _normalize_definition_arguments(
+                live_cls, tuple(obj.args), dict(obj.kwargs)
+            )
             # New definitions have one owner for preparation, binding, and role
             # assertions. Persisted CDefs bypass this branch entirely.
             boundary = compile_signature(live_cls, constructor=True).prepare_constructor_args(
-                tuple(obj.args), dict(obj.kwargs), repo=repo,
+                normalized_args, normalized_kwargs, repo=repo,
             )
             bound_args = boundary.canonical
             canonical_bound_args = BoundArguments(
