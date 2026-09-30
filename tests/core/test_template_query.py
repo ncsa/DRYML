@@ -511,6 +511,22 @@ def test_traversed_recipe_ref_has_direct_and_query_support_parity():
     assert tuple(repo.query(selector).cached().defs()) == (owner.definition,)
 
 
+def test_bare_template_recipe_has_direct_and_query_support_parity():
+    """Receiving-role projection quotes natural Template authoring for support."""
+
+    recipe = Definition(QueryTemplateLeaf, Par("width"))
+    selector = Generator(
+        Definition(RecipeQueryOwner, recipe),
+        {"width": UniformFromSet((64,))},
+    ).support_selector()
+    repo = Repo()
+    owner = RecipeQueryOwner(recipe.sub(width=64), repo=repo)
+    repo.add_objects(owner)
+
+    assert selector.matches(owner.definition)
+    assert tuple(repo.query(selector).cached().defs()) == (owner.definition,)
+
+
 @pytest.mark.parametrize("shared_first", [False, True])
 def test_template_selector_preserves_graph_witnesses_across_stores(tmp_path, shared_first):
     """Store partition and insertion order cannot choose the wrong topology witness."""

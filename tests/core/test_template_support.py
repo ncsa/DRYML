@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core import Definition, Generator, Object
+from dryml.core import Definition, Generator, Mat, Object
 from dryml.core.domains import UniformFromSet, UniformIntRange
 from dryml.core.errors import ParameterizationError, ParameterizationLimitError, UnsupportedGeneratorVerificationError
 from dryml.core.template import Par, Shared, repeat
@@ -31,6 +31,14 @@ class SupportParent(Object):
 
     def __init__(self, children):
         self.children = children
+
+
+class MatSupportParent(Object):
+    """Root with explicit materializing roles for topology normalization."""
+
+    def __init__(self, first: Mat[Definition], second: Mat[Definition]):
+        self.first = first
+        self.second = second
 
 
 class UnindexedDomain:
@@ -116,6 +124,28 @@ def test_support_selector_enforces_shared_and_independent_graph_topology():
     assert not shared_selector.matches(independent)
     assert independent_selector.matches(independent)
     assert not independent_selector.matches(shared)
+
+
+def test_support_selector_normalizes_materializing_assertions_for_topology():
+    """Transient Mat wrappers preserve sharing across direct and CDef matches."""
+
+    block = Definition(SupportLeaf, Par("width"))
+    selector = Generator(
+        Definition(MatSupportParent, Mat(block), Mat(block)),
+        {"width": UniformFromSet((64,))},
+    ).support_selector()
+    shared_leaf = Definition(SupportLeaf, 64)
+    shared = Definition(MatSupportParent, Mat(shared_leaf), Mat(shared_leaf))
+    independent = Definition(
+        MatSupportParent,
+        Mat(Definition(SupportLeaf, 64)),
+        Mat(Definition(SupportLeaf, 64)),
+    )
+
+    assert selector.matches(shared)
+    assert selector.matches(shared.concretize())
+    assert not selector.matches(independent)
+    assert not selector.matches(independent.concretize())
 
 
 def test_direct_wide_range_membership_does_not_require_enumeration():

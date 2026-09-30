@@ -122,6 +122,54 @@ def test_definition_rejects_distributions_at_all_public_value_boundaries():
         definition.sub(width={"provider": provider})
 
 
+def test_definition_substitution_validates_bindings_once_not_each_parent(monkeypatch):
+    """Trusted symbolic rebuilding does not recursively rescan every ancestor."""
+
+    import dryml.core.template as template_module
+
+    definition = Definition(SymbolicLeaf, Par("width"))
+    for _ in range(64):
+        definition = Definition(SymbolicEnvelope, child=definition)
+    calls = 0
+    original = template_module._validate_distribution_free
+
+    def counted(value):
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(template_module, "_validate_distribution_free", counted)
+
+    assert definition.sub(width=1).is_resolved
+    assert calls == 1
+
+
+def test_definition_substitution_rejects_active_expressions_inside_sets():
+    """One final validation rejects order-sensitive symbolic binding output."""
+
+    definition = Definition(SymbolicLeaf, Par("width"))
+
+    with pytest.raises(ParameterizationError, match="sets cannot contain"):
+        definition.sub(width={Par("nested")})
+
+    hidden = Definition(
+        SymbolicEnvelope,
+        child=Ref(Definition(SymbolicLeaf, Par("width"))),
+    )
+    with pytest.raises(ParameterizationError, match="sets cannot contain"):
+        hidden.sub(
+            width={Par("nested")},
+            traverse_refs=True,
+        )
+
+    inverse = Definition(SymbolicLeaf, Par("width"))
+    with pytest.raises(ParameterizationError, match="sets cannot contain"):
+        inverse.sub(
+            width={Ref(Definition(SymbolicLeaf, Par("nested")))},
+            traverse_refs=True,
+        )
+
+
 def test_parameterization_error_hierarchy_replaces_template_errors_without_aliases():
     """The public error surface uses only the Definition parameterization names."""
 

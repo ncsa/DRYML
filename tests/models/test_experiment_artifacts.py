@@ -209,6 +209,48 @@ def test_terminal_checkpoint_binds_artifact_to_exact_experiment_state(tmp_path):
     assert SavedModelValue.calls[-1] == final.at(GraphPath((Parameter("model"),)))
 
 
+def test_symbolic_metric_recipe_binds_through_ref_during_evaluation(
+        tmp_path, monkeypatch):
+    """Preflight and runtime bind metric roots hidden by Fold's source Ref."""
+
+    from dryml.metrics import regressor_mae
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    test_data = repo.save_object(CounterModel())
+    recipe = regressor_mae(
+        Par("this.test_data"), Par("this.model"), mode="global"
+    )
+    exp = Experiment(
+        CounterModel(), TerminalOnly(), test_data=test_data,
+        artifacts={"score": recipe}, repo=repo,
+    )
+
+    assert recipe.names == ()
+    exp._preflight_artifacts()
+
+    observed = []
+
+    def inspect_bound(definition, *, repo=None):
+        from dryml.core.template import _snapshot_parameters
+
+        del repo
+        observed.append(tuple(_snapshot_parameters(definition, traverse_refs=True)))
+        raise RuntimeError("stop after runtime binding")
+
+    monkeypatch.setattr(Definition, "concretize", inspect_bound)
+    checkpoint = StateRef(
+        exp.object_ref,
+        {path: "dryml-" + "0" * 64 for path in exp.object_ref.objects},
+    )
+    with pytest.raises(RuntimeError, match="stop after runtime binding"):
+        exp._evaluate_artifact(
+            "score", recipe, checkpoint, None, None,
+            type("Context", (), {"state_repo": repo})(),
+        )
+
+    assert observed == [()]
+
+
 class FiveUpdates(TrainFunction):
     """Trainer exposing five post-update safe points for cadence tests."""
 

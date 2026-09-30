@@ -364,13 +364,23 @@ class Template:
             raise TypeError("Template supports only the exact Definition target.")
         return Annotated[Definition, _Role("template")]
 
-def _contains_expression(value: object) -> bool:
+def _contains_expression(
+        value: object, *, traverse_refs: bool = False) -> bool:
+    from .cdef_graph import EdgeKind
+    from .links import DefLink
+
     seen: set[int] = set()
 
     def visit(current: object) -> bool:
         if isinstance(current, Expr):
             return True
-        children = _template_children(current)
+        children = (
+            (current.target,)
+            if traverse_refs
+            and isinstance(current, DefLink)
+            and current.kind is EdgeKind.REF
+            else _template_children(current)
+        )
         if not children:
             return False
         marker = id(current)

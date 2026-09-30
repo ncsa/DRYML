@@ -73,7 +73,8 @@ class Experiment(Serializable):
         capabilities: Additional trainer-owned configuration.
 
     ``train`` publishes and associates each Experiment checkpoint, writes its
-    pending history row, evaluates Artifacts in declaration order, and then marks
+    pending history row, evaluates Artifacts in canonical artifact-key order, and
+    then marks
     the row terminal. History rows retain exact checkpoint references while their
     projected subject remains non-materializing.
     """
@@ -307,7 +308,7 @@ class Experiment(Serializable):
             {path: "dryml-" + "0" * 64 for path in self.object_ref.objects},
         )
         for name, recipe in recipes.items():
-            roots = set(recipe.names)
+            roots = self._artifact_recipe_roots(recipe)
             unknown = roots.difference({"this"})
             if unknown:
                 raise TypeError(
@@ -315,7 +316,7 @@ class Experiment(Serializable):
                     f"{sorted(unknown)!r}."
                 )
             try:
-                bound = recipe.sub(this=proof) if "this" in roots else recipe
+                _, bound = self._bind_artifact_recipe(recipe, proof)
                 definition = bound.concretize()
             except Exception as error:
                 raise TypeError(
@@ -331,6 +332,28 @@ class Experiment(Serializable):
             if inspect.isabstract(artifact_cls):
                 raise TypeError(f"Artifact recipe {name!r} resolves to an abstract Artifact class.")
             self._validate_artifact_compute(name, artifact_cls)
+
+    @staticmethod
+    def _artifact_recipe_roots(recipe):
+        """Return active roots, including Ref-held artifact recipe structure."""
+        from dryml.core.template import _snapshot_parameters
+
+        return {
+            parameter.name
+            for parameter in _snapshot_parameters(recipe, traverse_refs=True)
+        }
+
+    @classmethod
+    def _bind_artifact_recipe(cls, recipe, checkpoint):
+        """Bind checkpoint roots through Ref-held artifact recipe structure."""
+
+        roots = cls._artifact_recipe_roots(recipe)
+        bound = (
+            recipe.sub(this=checkpoint, traverse_refs=True)
+            if "this" in roots
+            else recipe
+        )
+        return roots, bound
 
     @staticmethod
     def _validate_artifact_compute(name: str, artifact_cls: type[Artifact]) -> None:
@@ -382,7 +405,7 @@ class Experiment(Serializable):
         can enter history.
         """
 
-        bound = recipe.sub(this=checkpoint) if "this" in recipe.names else recipe
+        _, bound = self._bind_artifact_recipe(recipe, checkpoint)
         definition = bound.concretize(repo=context.state_repo)
         if self.state.pending_observation_terminal:
             completed = Artifact.load_completed(

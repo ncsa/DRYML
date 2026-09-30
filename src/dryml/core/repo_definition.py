@@ -470,7 +470,18 @@ def _descriptor_set_fingerprint(
         if kind == "link":
             return _stable_mapping_hash("dryml.core.links.DefLink", [("kind", _stable_leaf_hash(current["edge"])), ("target", item(current["target"], depth + 1))])
         if kind == "quoted-definition":
-            return _stable_mapping_hash("dryml.core.quoted.QuotedDef", [("value", item(current["value"], depth + 1))])
+            from .definition_expression_codec import from_data
+            from .quoted import QuotedDef
+            from .utils.stable_hash import stable_hash_function
+
+            try:
+                return stable_hash_function(
+                    QuotedDef(from_data(current["payload"]))
+                )
+            except (RecursionError, TypeError, ValueError, OverflowError):
+                raise _error(
+                    path, "quoted Definition set member is invalid"
+                ) from None
         if kind == "match":
             return match(current, depth + 1)
         if kind == "object-ref":

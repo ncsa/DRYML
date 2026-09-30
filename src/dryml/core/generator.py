@@ -273,7 +273,7 @@ class GeneratorSelector:
         self._generator = generator
         self._max_assignments = _validate_limit(max_assignments, label="max_assignments", maximum=_MAX_ASSIGNMENTS)
         self._prefilter = _loose_selector(
-            _quote_ref_definitions(generator.definition),
+            _project_selector_definition_roles(generator.definition, loose=True),
             traverse_refs=generator._traverse_refs,
         )
 
@@ -355,6 +355,8 @@ class GeneratorSelector:
             target = target.definition
         if not isinstance(target, (Definition, ConcreteDefinition)):
             return False
+        if isinstance(target, Definition):
+            target = _project_selector_definition_roles(target)
         inferred = self._infer_visible_roots(target)
         for name, value in inferred.items():
             if value is _INCONSISTENT or self._membership(name, value, budget) is False:
@@ -377,7 +379,9 @@ class GeneratorSelector:
         for choice in product(*values):
             assignments = dict(inferred)
             assignments.update(zip(unknown, choice))
-            generated = _quote_ref_definitions(self._generator._definition_for(assignments))
+            generated = _project_selector_definition_roles(
+                self._generator._definition_for(assignments)
+            )
             if generated.match(target, strict=True, cls_policy="exact") and _topology_matches(generated, target):
                 matched = True
         return matched
@@ -482,23 +486,46 @@ class _AssignmentBudget:
         self.remaining -= count
 
 
-def _quote_ref_definitions(value: Definition) -> Definition:
-    """Lower Ref-carried Definitions to their persisted quotation representation.
+def _project_selector_definition_roles(
+    value: Definition, *, loose: bool = False
+) -> Definition:
+    """Project Definition roles to their persisted selector representation.
 
-    Exact support compares generated Definitions with CDefs already admitted by a
-    Template role.  That role persists a carried Definition as ``QuotedDef``;
-    this selector-only projection preserves that delivery representation without
-    changing Generator samples or inspecting constructor signatures.
+    Exact support compares authored Definitions with admitted CDefs. Ref-held
+    Definitions and values received by Template slots persist as quotations, so
+    this effect-free projection applies those barriers before matching without
+    changing Generator samples or materializing Objects.
     """
 
     from .cdef_graph import EdgeKind
     from .factory import FactorySpec
     from .links import DefLink
     from .quoted import QuotedDef
+    from .signatures import compile_signature
 
     memo: dict[int, object] = {}
 
+    def quote_definition(current: object) -> object:
+        if isinstance(current, DefLink):
+            if (
+                current.kind is EdgeKind.REF
+                and isinstance(current.target, Definition)
+            ):
+                if loose and not current.target.is_resolved:
+                    return _UNKNOWN
+                return DefLink.finalized(
+                    EdgeKind.REF, QuotedDef(current.target)
+                )
+            return current
+        if isinstance(current, Definition):
+            if loose and not current.is_resolved:
+                return _UNKNOWN
+            return DefLink.finalized(EdgeKind.REF, QuotedDef(current))
+        return current
+
     def project(current: object) -> object:
+        if current is _UNKNOWN:
+            return current
         if isinstance(current, (Expr, QuotedDef)):
             return current
         marker = id(current)
@@ -516,18 +543,38 @@ def _quote_ref_definitions(value: Definition) -> Definition:
                 DefLink.finalized(current.kind, target) if current.is_finalized else DefLink.assertion(current.kind, target)
             )
         elif isinstance(current, Definition):
-            args = None
-            args_changed = False
-            if current.args is not None:
-                projected_args = tuple(project(item) for item in current.args)
-                args_changed = any(new is not old for new, old in zip(projected_args, current.args))
-                args = FrozenTuple(projected_args) if args_changed else current.args
-            projected_kwargs = tuple((name, project(item)) for name, item in current.kwargs.items())
-            kwargs_changed = any(
-                item is not current.kwargs[name] for name, item in projected_kwargs
+            try:
+                values = current.parameters
+                slots = (
+                    compile_signature(current.cls, constructor=True).slots
+                    if isinstance(current.cls, type)
+                    else {}
+                )
+            except (TypeError, ValueError):
+                values, slots = current.kwargs, {}
+            projected = []
+            for name, item in values.items():
+                slot = slots.get(name)
+                if slot is not None and slot.role == "template":
+                    if slot.mode == "mapping" and isinstance(item, Mapping):
+                        normalized = FrozenDict(
+                            (key, quote_definition(member))
+                            for key, member in item.items()
+                        )
+                    else:
+                        normalized = quote_definition(item)
+                else:
+                    normalized = project(item)
+                projected.append((name, normalized))
+            kwargs = FrozenDict(projected)
+            unchanged = (
+                current.args is None
+                and all(kwargs[name] is item for name, item in current.kwargs.items())
+                and len(kwargs) == len(current.kwargs)
             )
-            kwargs = FrozenDict(projected_kwargs) if kwargs_changed else current.kwargs
-            result = current if not args_changed and not kwargs_changed else Definition._from_symbolic_parts(current.cls, args, kwargs)
+            result = current if unchanged else Definition._from_symbolic_parts(
+                current.cls, None, kwargs
+            )
         elif isinstance(current, FactorySpec):
             projected_args = tuple(project(item) for item in current.args)
             projected_kwargs = tuple((name, project(item)) for name, item in current.kwargs.items())
@@ -592,6 +639,10 @@ def _topology_matches(generated: Definition, target: Definition | ConcreteDefini
             ) from error
 
     def visit(left: object, right: object) -> bool:
+        while isinstance(left, DefLink) and left.kind.value == "materialize":
+            left = left.target
+        while isinstance(right, DefLink) and right.kind.value == "materialize":
+            right = right.target
         left_key, right_key = node_key(left), node_key(right)
         if left_key is not None or right_key is not None:
             if left_key is None or right_key is None:
@@ -658,6 +709,8 @@ def _loose_selector(value: Definition, *, traverse_refs: bool = False):
         raise ParameterizationError("loose_selector requires a Definition root")
 
     def project(current: object) -> object:
+        if current is _UNKNOWN:
+            return _UNKNOWN
         if isinstance(current, Expr):
             return _UNKNOWN
         if isinstance(current, DefLink):
