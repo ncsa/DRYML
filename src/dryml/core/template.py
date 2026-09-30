@@ -1,4 +1,4 @@
-"""Inert definition-template authoring and symbolic expression syntax."""
+"""Symbolic Definition expression syntax and the Template annotation marker."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def _stable_operand(value: object) -> object:
 
 
 class Expr:
-    """Base class for immutable unresolved template arithmetic and repetition.
+    """Base class for immutable unresolved Definition arithmetic and repetition.
 
     Symbolic expressions record supported operations but never implement index
     conversion or call user constructors. Unsupported operands return
@@ -134,7 +134,7 @@ class Expr:
 
 @dataclass(frozen=True, slots=True, init=False)
 class Par(Expr):
-    """Identify one named template binding root and optional semantic path.
+    """Identify one named Definition binding root and optional semantic path.
 
     Args:
         name: ASCII qualified root, optionally followed by dot-separated
@@ -193,10 +193,10 @@ class _BinaryExpr(Expr):
 
 @dataclass(frozen=True, slots=True)
 class Shared:
-    """Request graph-sharing semantics for a repeated template group.
+    """Request graph-sharing semantics for a repeated symbolic Definition group.
 
     Args:
-        count: Exact nonnegative integer or unresolved template expression.
+        count: Exact nonnegative integer or unresolved symbolic expression.
 
     Raises:
         ParameterizationError: If ``count`` is not a permitted repetition count.
@@ -339,6 +339,22 @@ class Template:
 
     @classmethod
     def __class_getitem__(cls, target):
+        """Return the fixed symbolic Definition role annotation.
+
+        Args:
+            target: The exact ``Definition`` class.
+
+        Returns:
+            The same passive annotation role as bare ``Template``.
+
+        Raises:
+            TypeError: If ``target`` is not exactly ``Definition``.
+
+        Side Effects:
+            None. Subscription creates annotation metadata only and does not
+            construct a recipe or resolve a target.
+        """
+
         from typing import Annotated
 
         from .definition import Definition

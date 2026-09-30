@@ -1,11 +1,12 @@
 # Symbolic Definitions And Generation
 
-`Definition` is DRYML's immutable construction-description value. It can contain
-`Par` and supported arithmetic or repetition expressions without resolving a
-target, applying defaults, calling a factory, materializing an Object, or saving
-anything. `Definition.names` reports active roots in authored first-occurrence
-order. `Definition.is_resolved` means only that no active expression remains; it
-does not prove that a constructor call is complete or valid.
+`Definition` is DRYML's one immutable construction-description value, for both
+resolved and symbolic authoring. It can contain `Par` and supported arithmetic or
+repetition expressions without resolving a target, applying defaults, calling a
+factory, materializing an Object, or saving anything. `Definition.names` reports
+active roots in authored first-occurrence order. `Definition.is_resolved` means
+only that no active expression remains; it does not prove that a constructor call
+is complete or valid.
 
 Use `Definition.sub(...)` for static values. Substitution is immutable and one
 pass: it evaluates expressions made closed by the supplied values, but never
@@ -45,31 +46,39 @@ resolved Definitions and are all-or-error at their provider boundary.
 ## Receiving Roles
 
 `Mat[Definition]`, `Ref[Definition]`, and bare `Template` are receiving roles,
-not alternate construction-value types. `Mat[Definition]` admits resolved
-materializing structure and delivers an Object. `Ref[Definition]` requires a
-symbolically resolved Definition and delivers a Definition without
-materialization. Bare `Template` is shorthand for `Template[Definition]`; it
-accepts a symbolic or resolved Definition as inert quotation data and delivers
-a Definition. `Template` cannot be instantiated and has no other subscription
-target.
+not alternate construction-value types.
 
-Role admission is delayed until the annotated boundary is activated. This is
-why an authored Definition may remain structurally unresolved when an active
-expression is safely carried by a nested Template slot, while a `Ref[Definition]`
-boundary rejects the same authored active expression.
+| Receiving annotation | Accepts | Delivers | Active-expression rule |
+| --- | --- | --- | --- |
+| `Mat[Definition]` | materializing Definition structure | materialized Object | After activated roles establish quotation barriers, materializing structure must be resolved before CDef, Repo, target, cache, or Store effects. |
+| `Ref[Definition]` | selected Definition | Definition | The selected authored Definition must be resolved; constructor completeness is not tested. |
+| `Template` or `Template[Definition]` | symbolic or resolved Definition, including compatible `Ref(definition)` | Definition | Symbolic content is inert quotation data. |
 
-`Ref(definition)` records a non-materializing assertion and does not bypass the
-destination role's admission rule. Use `Definition.quote()` or `QuotedDef` when
-a Definition must be explicit local expression data rather than a graph edge.
-Direct `QuotedDef` values remain symbolic traversal barriers by default.
+Bare `Template` is exactly shorthand for `Template[Definition]`. It cannot be
+instantiated, has no other subscription target, and is not a runtime recipe
+value. Role admission is delayed until the annotated boundary is activated. An
+authored outer Definition can therefore remain structurally unresolved because a
+nested Template slot carries an active expression, while materialization of that
+outer Definition succeeds because the nested recipe is quotation data. The same
+outer Definition supplied to `Ref[Definition]` is rejected without inspecting the
+outer constructor roles.
 
-`Experiment.artifacts` uses the narrow `Mapping[str, Template] | None` form.
-Each nonempty string key names one Definition recipe; singleton recipes,
-sequences, nested mappings, and runtime Template values are invalid. At the
-activated Experiment boundary entries are independently quoted and ordered by
-`canonical_key_bytes`; that order controls evaluation and checkpoint recovery.
-Definition and selector authoring retain the mapping inertly until that boundary
-is concretized, so recipe targets are not resolved during authoring.
+`Ref(definition)` records a lossless non-materializing assertion and does not
+bypass the destination role's admission rule. `Definition.quote()` and
+`QuotedDef` instead make a Definition explicit local expression data, not an
+Object graph edge. Direct QuotedDef values are traversal barriers by default;
+they are delivered as `QuotedDef` only through an explicit `Ref[QuotedDef]` role.
+
+## Experiment Artifact Mappings
+
+`Experiment.artifacts` accepts only `Mapping[str, Template] | None`, with
+`Mapping[str, Template[Definition]]` as the equivalent long spelling. Each value
+is admitted separately as a Template-role Definition. Keys must be nonempty
+strings; lists, tuples, singleton recipes, nested mappings, non-Definition
+values, and non-string keys fail before training effects. At the activated
+Experiment boundary, entries are ordered by `canonical_key_bytes`; that canonical
+order controls evaluation and checkpoint recovery. Definition and selector
+authoring retain an artifact mapping inertly until later concretization.
 
 ## Exact Support And Persistence
 
@@ -87,5 +96,16 @@ it decodes directly to Definition-based state. A Generator and arbitrary runtime
 providers are intentionally nonportable. GeneratorSelector works with Repo
 queries and save routing while retaining exact witness verification.
 
-Templates and providers operate on trusted DRYML code and values. They are not a
-sandbox or safe-deserialization boundary.
+Symbolic Definitions and providers operate on trusted DRYML code and values.
+They are not a sandbox or safe-deserialization boundary.
+
+## Beta Removals
+
+There is no runtime `Template` carrier and no `TemplateBundle`,
+`TemplateGenerator`, or `TemplateSelector` API. There are no aliases, source or
+pickle compatibility shims, or persisted-value migration for those beta values,
+including previously persisted symbolic `Ref[Definition]` values. Re-author a
+recipe as a Definition, bind fixed values with `Definition.sub(...)`, and use
+`Generator` only for an explicit Distribution mapping. Compatible
+`GeneratorSelector` payloads are the sole retained beta-format compatibility
+commitment.

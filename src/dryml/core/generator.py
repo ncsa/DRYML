@@ -254,7 +254,17 @@ class GeneratorSelector:
 
     Visible roots are inferred directly. Remaining roots are enumerated only when
     finite support proves exact verification possible; bounds never substitute
-    for proof.
+    for proof. A selector is portable only when every provider is a supported
+    immutable built-in Distribution; a Generator itself is runtime-only.
+
+    Raises:
+        ParameterizationError: If the Generator or proof limit is invalid.
+        ParameterizationLimitError: If the requested proof limit exceeds the
+            fixed hard limit.
+
+    Side Effects:
+        Construction creates an inert prefilter only. It does not sample
+        providers, resolve recipe targets, materialize Objects, or persist data.
     """
 
     def __init__(self, generator: Generator, /, *, max_assignments: int = _MAX_ASSIGNMENTS) -> None:
@@ -269,7 +279,15 @@ class GeneratorSelector:
 
     @property
     def prefilter(self):
-        """Return the conservative ordinary Selector used before exact proof."""
+        """Return the conservative ordinary Selector used before exact proof.
+
+        Returns:
+            A Selector that may reject candidates cheaply but cannot establish
+            Generator support by itself.
+
+        Side Effects:
+            None. Access does not inspect a candidate or invoke a provider.
+        """
 
         return self._prefilter
 
@@ -307,10 +325,23 @@ class GeneratorSelector:
     def matches(self, target: Definition | ConcreteDefinition | object, /) -> bool:
         """Return whether a candidate has one exact captured assignment.
 
+        Args:
+            target: Definition, ConcreteDefinition, or Object candidate. Other
+                values return ``False`` without provider interaction.
+
+        Returns:
+            ``True`` only when the candidate has one exact Distribution
+            assignment and matching symbolic graph topology.
+
         Raises:
             UnsupportedGeneratorVerificationError: If exact proof is unavailable.
             ParameterizationLimitError: If finite proof work exceeds its budget.
             ParameterizationError: If a provider or generated assignment is invalid.
+
+        Side Effects:
+            May invoke provider membership, cardinality, and indexed-value
+            methods. It never samples, resolves recipe targets, materializes
+            Objects, or persists data.
         """
 
         return self._matches(target, _AssignmentBudget(self._max_assignments))

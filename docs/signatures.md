@@ -78,16 +78,11 @@ normalization validates string keys, orders entries by `canonical_key_bytes`, an
 admits every value independently. Lists, tuples, nested mappings, non-string
 keys, and nested Ref/Mat forms are rejected.
 
-`Ref[TemplateBundle]` is the corresponding exact declaration for a named ordered
-collection of Template recipes. It is quotation data, not a container-role
-extension: raw bundles and materializing roles fail, and persistence or worker
-transport never resolves a recipe or its parameters.
-
 `StateRef.reference_value_at(path)` is the narrow graph-inspection accessor for a
 terminal `Ref` field containing an exact `ObjectRef` or `StateRef`. It may pass
 through preceding materializing graph edges but never crosses a Ref boundary,
 loads state, or accesses Python attributes. `StateRef.at(path)` remains limited to
-materializing subtrees and rejects Ref-only paths. Template bindings use this
+materializing subtrees and rejects Ref-only paths. Symbolic artifact bindings use this
 accessor for paths such as `Par("this.test_data")`, preserving the supplied exact
 StateRef instead of selecting a live or floating reference.
 
@@ -284,3 +279,11 @@ contents are not rewritten or migrated.
 binding, discovery, context ownership, wrapper conflicts, and unavailable or
 ambiguous authority. Repo and lifecycle errors retain their own types and cleanup
 semantics during Mat realization.
+
+Symbolic Definition failures use `ParameterizationError(ValueError)`. Its
+specializations are `UnresolvedDefinitionError` for required resolution,
+`ParameterizationLimitError` for bounded traversal or generation work, and
+`UnsupportedGeneratorVerificationError` when exact support cannot be proved.
+These distinguish active expressions and generator/provider failures from a
+constructor-incomplete but symbolically resolved Definition. Concretization of a
+remaining expression uses `CannotConcretizeParameterizedDefinition(TypeError)`.

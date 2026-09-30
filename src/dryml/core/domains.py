@@ -1,4 +1,4 @@
-"""Immutable indexed domain capabilities for template generation."""
+"""Immutable indexed Distribution capabilities for Definition generation."""
 
 from __future__ import annotations
 
@@ -13,10 +13,11 @@ from .freeze import FrozenTuple
 
 @runtime_checkable
 class Distribution(Protocol):
-    """Provide sampling and optional finite indexed support for a binding.
+    """Provide sampling and optional finite indexed support for a Generator binding.
 
     Implementations are trusted runtime providers. They are not template values
-    and are not implicitly discovered from arbitrary objects.
+    or Definition-owned structure, and are not implicitly discovered from
+    arbitrary objects.
     """
 
     def sample(self, rng: random.Random, /) -> object:
@@ -29,7 +30,7 @@ class Distribution(Protocol):
             One value from this distribution's support.
 
         Raises:
-            Exception: Provider failures propagate to the template operation,
+            Exception: Provider failures propagate to the Generator operation,
                 which normalizes them to ``ParameterizationError``.
         """
 
@@ -38,7 +39,7 @@ class Distribution(Protocol):
 
         Raises:
             Exception: Provider failures propagate and are normalized by the
-                calling template operation.
+                calling Generator operation.
 
         This query must not sample values or mutate provider state.
         """
@@ -70,7 +71,7 @@ class Distribution(Protocol):
 
         Raises:
             Exception: Provider failures propagate and are normalized by the
-                calling template operation.
+                calling Generator operation.
 
         This query must not sample values or mutate provider state.
         """
@@ -86,7 +87,7 @@ class Distribution(Protocol):
 
         Raises:
             Exception: Provider failures propagate and are normalized by the
-                calling template operation.
+                calling Generator operation.
 
         This query must not sample values or mutate provider state.
         """
@@ -154,7 +155,7 @@ class UniformFromSet:
     """Uniform immutable distribution over a detached ordered choice support.
 
     Args:
-        values: Nonempty iterable of supported template input values.
+        values: Nonempty iterable of supported generated Definition values.
 
     Raises:
         ParameterizationError: If the support is empty or contains a type-aware
