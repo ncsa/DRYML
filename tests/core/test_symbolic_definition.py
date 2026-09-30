@@ -13,6 +13,7 @@ from dryml.core.errors import (
     UnresolvedDefinitionError,
     UnsupportedGeneratorVerificationError,
 )
+from dryml.core.symbol import ImportRef
 
 
 class SymbolicLeaf:
@@ -168,6 +169,16 @@ def test_definition_substitution_rejects_active_expressions_inside_sets():
             width={Ref(Definition(SymbolicLeaf, Par("nested")))},
             traverse_refs=True,
         )
+
+
+def test_unresolved_positional_definition_hasattr_obeys_attribute_protocol():
+    """Protocol probes do not leak semantic-name errors through ``hasattr``."""
+
+    definition = Definition(ImportRef("builtins", "dict"), 1)
+
+    with pytest.raises(TypeError, match="positional names are unknown"):
+        _ = definition.parameters
+    assert not hasattr(definition, "sample")
 
 
 def test_parameterization_error_hierarchy_replaces_template_errors_without_aliases():
