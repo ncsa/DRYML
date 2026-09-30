@@ -98,7 +98,6 @@ def iter_direct_cdef_edges(
 def _iter_direct_edges_from_value(
     value: Any, path: GraphPath
 ) -> Iterator[tuple[GraphPath, ConcreteDefinition, EdgeKind]]:
-    from .template import Template, TemplateBundle
 
     if isinstance(value, Object):
         raise ConcreteDefinitionGraphError(
@@ -108,16 +107,11 @@ def _iter_direct_edges_from_value(
         raise ConcreteDefinitionGraphError(
             f"Plain Definition found inside ConcreteDefinition graph at {path!s}."
         )
-    if isinstance(value, (Template, TemplateBundle)):
-        raise ConcreteDefinitionGraphError(
-            f"Template quotation found outside a Ref boundary at {path!s}."
-        )
     if isinstance(value, ConcreteDefinition):
         yield path, value, EdgeKind.MATERIALIZE
         return
     if isinstance(value, DefLink):
         from .reference_values import ObjectRef, StateRef
-        from .template import Template, TemplateBundle
 
         if isinstance(value.target, (ObjectRef, StateRef)):
             return
@@ -125,12 +119,6 @@ def _iter_direct_edges_from_value(
             if value.kind is not EdgeKind.REF:
                 raise ConcreteDefinitionGraphError(
                     f"Quotation DefLink at {path!s} must be a Ref boundary."
-                )
-            return
-        if isinstance(value.target, (Template, TemplateBundle)):
-            if value.kind is not EdgeKind.REF:
-                raise ConcreteDefinitionGraphError(
-                    f"Template quotation DefLink at {path!s} must be a Ref boundary."
                 )
             return
         if not isinstance(value.target, ConcreteDefinition):

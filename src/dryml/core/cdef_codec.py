@@ -197,7 +197,7 @@ def object_projection_cdef(
 
     Args:
         root: Exact CDef graph to rewrite without resolving its class authority.
-        traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
+        traverse_refs: Whether to enter Ref-held quoted Definition data. Ordinary
             Ref-held exact references are always rewritten.
 
     Returns:
@@ -220,7 +220,7 @@ def object_projection_cdef(
     from .definition import Definition
     from .cdef_graph import EdgeKind
     from .factory import FactorySpec
-    from .template import Template, TemplateBundle, _BinaryExpr, _RepeatExpr
+    from .template import _BinaryExpr, _RepeatExpr
 
     memo: dict[int, Any] = {}
     active: set[int] = set()
@@ -239,38 +239,6 @@ def object_projection_cdef(
         finally:
             active.remove(marker)
 
-    def rewrite_template(template: Template) -> Template:
-        marker = id(template)
-        if marker in memo:
-            return memo[marker]
-        if marker in active:
-            raise ValueError("Object projection does not support cyclic Template graphs.")
-        active.add(marker)
-        try:
-            root_value = rewrite(template.root)
-            result = template if root_value is template.root else Template._from_root(root_value)
-            memo[marker] = result
-            return result
-        finally:
-            active.remove(marker)
-
-    def rewrite_bundle(bundle: TemplateBundle) -> TemplateBundle:
-        """Rewrite quoted recipes only after the caller crosses their Ref barrier."""
-
-        marker = id(bundle)
-        if marker in memo:
-            return memo[marker]
-        if marker in active:
-            raise ValueError("Object projection does not support cyclic TemplateBundle graphs.")
-        active.add(marker)
-        try:
-            recipes = FrozenDict((name, rewrite_template(recipe)) for name, recipe in bundle.recipes.items())
-            result = bundle if all(recipes[name] is recipe for name, recipe in bundle.recipes.items()) else TemplateBundle._from_recipes(recipes)
-            memo[marker] = result
-            return result
-        finally:
-            active.remove(marker)
-
     def rewrite(current: Any) -> Any:
         if isinstance(current, StateRef):
             marker = id(current)
@@ -281,23 +249,11 @@ def object_projection_cdef(
             return result
         if isinstance(current, ObjectRef):
             return rewrite_reference(current)
-        if isinstance(current, Template):
-            return current
-        if isinstance(current, TemplateBundle):
-            return current
         if isinstance(current, DefLink):
             marker = id(current)
             if marker in memo:
                 return memo[marker]
-            if (
-                current.kind is EdgeKind.REF
-                and isinstance(current.target, (Template, TemplateBundle))
-            ):
-                if not traverse_refs:
-                    return current
-                target = rewrite_template(current.target) if isinstance(current.target, Template) else rewrite_bundle(current.target)
-            else:
-                target = rewrite(current.target)
+            target = rewrite(current.target)
             result = current if target is current.target else (
                 DefLink.finalized(current.kind, target)
                 if current.is_finalized

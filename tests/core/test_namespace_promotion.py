@@ -53,7 +53,7 @@ def test_promoted_package_keeps_the_destination_export_manifest():
         "Compute", "Definition", "categorical_definition", "ConcreteDefinition", "DefLink", "Ref", "Mat", "AutoRef",
         "normalize_args", "normalize_return", "signature_context", "function", "SignatureError",
         "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace", "freeze",
-        "QuotedDef", "SelectorSpec", "Selector", "selector", "Par", "Expr", "Shared", "Template", "TemplateBundle", "TemplateGenerator", "TemplateSelector", "repeat", "Match", "Distribution", "ParameterizationError", "UnresolvedDefinitionError", "ParameterizationLimitError", "UnsupportedGeneratorVerificationError", "Present",
+        "QuotedDef", "SelectorSpec", "Selector", "selector", "Par", "Expr", "Shared", "Template", "Generator", "GeneratorSelector", "repeat", "Match", "Distribution", "ParameterizationError", "UnresolvedDefinitionError", "ParameterizationLimitError", "UnsupportedGeneratorVerificationError", "Present",
         "Missing", "AnyValue", "Exact", "Choice", "IntRange", "SubclassOf", "Satisfies",
         "UniformIntRange", "UniformFromSet", "SKIP_ARGS", "Repo", "MetadataConflictError", "RepoDefinition", "RepoDefinitionError", "RepoReconstructionError", "configure",
         "reset_config", "status", "definition_mode", "selector_mode", "dtype",

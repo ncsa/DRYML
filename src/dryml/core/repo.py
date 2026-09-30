@@ -4989,7 +4989,7 @@ class Repo:
 
         Args:
             selector: A Definition, ConcreteDefinition, Selector,
-                TemplateSelector, Object, or ``None``. Template selectors retain
+                GeneratorSelector, Object, or ``None``. Generator selectors retain
                 an exact support residual and verify graph-distinct witnesses at
                 terminal execution.
 

@@ -15,7 +15,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 
-from dryml.core import StateRef, Template, TemplateBundle
+from dryml.core import StateRef
 from dryml.core.cardinality import Cardinality
 from dryml.core.utils.general import pickle_save
 from dryml.models import ExperimentData, ParameterCounts
@@ -159,10 +159,6 @@ def main(destination: Path | str | None = None) -> None:
         "state": train_state,
     }, pretty=True)
 
-    template_path = output / "template_bundle.json"
-    bundle = TemplateBundle({"score": Template.from_value(1)})
-    _write_json(template_path, bundle.to_data())
-
     entries = {
         "artifact_value/value.pkl": {
             "format": "dryml.artifacts.value",
@@ -172,12 +168,6 @@ def main(destination: Path | str | None = None) -> None:
         "experiment_data.json": {
             "format": "dryml-experiment-data",
             "sha256": sha256(history_path.read_bytes()).hexdigest(),
-            "version": 1,
-        },
-        "template_bundle.json": {
-            "format": "dryml-template",
-            "kind": "template-bundle",
-            "sha256": sha256(template_path.read_bytes()).hexdigest(),
             "version": 1,
         },
         "train_state.json": {

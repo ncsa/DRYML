@@ -52,19 +52,19 @@ class _QueryGenerationChanged(Exception):
 
 
 _MAX_NESTED_QUERY_RETRIES = 3
-_DEFAULT_TEMPLATE_WITNESS_LIMIT = 65_536
+_DEFAULT_GENERATOR_WITNESS_LIMIT = 65_536
 _DEFAULT_MAX_WITNESSES = object()
 
 
 @dataclass(slots=True)
-class _TemplateWitnessBudget:
+class _GeneratorWitnessBudget:
     limit: int | None
     visited: int = 0
 
     def consume(self) -> None:
         self.visited += 1
         if self.limit is not None and self.visited > self.limit:
-            raise ParameterizationLimitError("template query witness limit exceeded")
+            raise ParameterizationLimitError("generator query witness limit exceeded")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +83,7 @@ class DefinitionQuery:
         max_witness_limit: Exact-template authoritative-visit cap. The internal
             default is 65,536; visits consume it before safe prefilter rejection
             or duplicate suppression, and ``None`` permits an unbounded scan.
-        template_selector: Optional exact TemplateSelector residual applied
+        generator_selector: Optional exact GeneratorSelector residual applied
             after structural prefiltering. Residual queries reject rewrites
             that cannot preserve exact support semantics.
     """
@@ -101,7 +101,7 @@ class DefinitionQuery:
     scan_policy_mode: str = "allow"
     max_verify_limit: int | None = None
     max_witness_limit: int | None | object = _DEFAULT_MAX_WITNESSES
-    template_selector: Any | None = None
+    generator_selector: Any | None = None
     _original_values: tuple[tuple[DefinitionPath, Any], ...] = ()
 
     @classmethod
@@ -116,8 +116,8 @@ class DefinitionQuery:
 
         Args:
             repo: Managing Repo required to resolve StateSelectorRef leaves.
-            source: Optional Definition, CDef, Selector, TemplateSelector, or
-                Object source. TemplateSelector support retains an exact
+            source: Optional Definition, CDef, Selector, GeneratorSelector, or
+                Object source. GeneratorSelector support retains an exact
                 residual beside its ordinary structural prefilter.
             domain: Optional initial query domain.
             universe: Optional fixed result universe for refinement.
@@ -132,9 +132,9 @@ class DefinitionQuery:
             ValueError: If a selector resolves outside its ObjectRef scope.
             RepoLoadError: If connected Stores provide conflicting alias authority.
         """
-        from ..template_selector import TemplateSelector
+        from ..generator import GeneratorSelector
 
-        if isinstance(source, TemplateSelector):
+        if isinstance(source, GeneratorSelector):
             prefilter = _resolve_query_state_selectors(source.prefilter.root, repo)
             return cls(
                 repo=repo,
@@ -143,7 +143,7 @@ class DefinitionQuery:
                 domain=domain,
                 universe=universe,
                 class_match_policy="exact",
-                template_selector=source,
+                generator_selector=source,
             )
         if isinstance(source, Selector):
             root = _resolve_query_state_selectors(source.root, repo)
@@ -167,12 +167,12 @@ class DefinitionQuery:
             CDefs without materializing Objects or loading state payloads.
 
         Raises:
-            QueryDomainError: If an exact TemplateSelector residual is attached;
+            QueryDomainError: If an exact GeneratorSelector residual is attached;
                 ReferenceQuery cannot retain topology witness semantics.
         """
 
-        if self.template_selector is not None:
-            raise QueryDomainError("TemplateSelector queries cannot be converted to ReferenceQuery.")
+        if self.generator_selector is not None:
+            raise QueryDomainError("GeneratorSelector queries cannot be converted to ReferenceQuery.")
         from .reference import ReferenceQuery
 
         return ReferenceQuery(self.repo, definition=self.selector)
@@ -343,7 +343,7 @@ class DefinitionQuery:
         if policy not in {"selector", "exact"}:
             raise ValueError("class_match policy must be 'selector' or 'exact'.")
         # Exact support comparisons intentionally do not resolve inheritance.
-        return replace(self, class_match_policy="exact" if self.template_selector is not None else policy)
+        return replace(self, class_match_policy="exact" if self.generator_selector is not None else policy)
 
     def strict(self, enabled: bool = True) -> "DefinitionQuery":
         return replace(self, strict_policy=bool(enabled))
@@ -433,8 +433,8 @@ class DefinitionQuery:
     def _reject_residual_rewrite(self, operation: str) -> None:
         """Reject selector rewrites that cannot preserve an exact residual."""
 
-        if self.template_selector is not None:
-            raise QueryDomainError(f"TemplateSelector queries cannot apply {operation}().")
+        if self.generator_selector is not None:
+            raise QueryDomainError(f"GeneratorSelector queries cannot apply {operation}().")
 
     @property
     def lowering_scan_policy(self) -> ScanPolicy:
@@ -442,8 +442,8 @@ class DefinitionQuery:
 
     def execute(self):
         self._require_domain()
-        if self.template_selector is not None:
-            return self._execute_template_selector()
+        if self.generator_selector is not None:
+            return self._execute_generator_selector()
         if self.domain == "nested":
             if self.universe is None and self.projection == "definitions":
                 cdefs, stats = self._execute_nested_definitions()
@@ -526,7 +526,7 @@ class DefinitionQuery:
         return self._execute_count()
 
     def exists(self) -> bool:
-        if self.template_selector is not None:
+        if self.generator_selector is not None:
             return self._execute_count() > 0
         if self.universe is None and self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
             count, _ = self.repo._query_index.count_definition_domain(self, stop_after=1)
@@ -556,8 +556,8 @@ class DefinitionQuery:
 
     def _execute_count(self) -> int:
         self._require_domain()
-        if self.template_selector is not None:
-            return len(self._execute_template_selector())
+        if self.generator_selector is not None:
+            return len(self._execute_generator_selector())
         if self.universe is None and self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
             count, _ = self.repo._query_index.count_definition_domain(self)
             return count
@@ -587,8 +587,8 @@ class DefinitionQuery:
 
     def _execute_explanation(self, *, analyze: bool = False, sql: bool = False) -> QueryExplanation:
         self._require_domain()
-        if self.template_selector is not None:
-            result = self._execute_template_selector()
+        if self.generator_selector is not None:
+            result = self._execute_generator_selector()
             return result.explanation or QueryStats(result_count=len(result)).explanation(
                 domain=self._domain_label(), refresh=self.refresh_policy,
             )
@@ -675,7 +675,7 @@ class DefinitionQuery:
         replicas = {cdef: replicas.get(cdef, ()) for cdef in matches}
         return matches, stats, replicas
 
-    def _execute_template_selector(self):
+    def _execute_generator_selector(self):
         """Verify exact support against complete graph-distinct domain witnesses.
 
         Query indexes intentionally collapse structural CDefs, so they cannot be
@@ -685,15 +685,15 @@ class DefinitionQuery:
         """
 
         if self.scan_policy_mode == "forbid" and self.universe is None:
-            raise QueryDomainError("TemplateSelector queries require complete witness scanning.")
+            raise QueryDomainError("GeneratorSelector queries require complete witness scanning.")
         if self.domain == "nested" and not (
                 self.universe is not None and self.universe.kind == "definitions"):
-            return self._execute_template_selector_nested()
+            return self._execute_generator_selector_nested()
 
-        stats = QueryStats(refresh_action="template-witness-scan")
-        witness_budget = self._template_witness_budget()
-        witnesses = self._template_definition_witnesses(stats, witness_budget)
-        matches, replicas, verified_witnesses = self._verify_template_witnesses(witnesses, stats)
+        stats = QueryStats(refresh_action="generator-witness-scan")
+        witness_budget = self._generator_witness_budget()
+        witnesses = self._generator_definition_witnesses(stats, witness_budget)
+        matches, replicas, verified_witnesses = self._verify_generator_witnesses(witnesses, stats)
         stats.result_count = len(matches)
         explanation = stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
         materializable = self.universe.materializable if self.universe is not None else True
@@ -709,25 +709,25 @@ class DefinitionQuery:
             witness_complete=True,
         )
 
-    def _template_witness_budget(self) -> _TemplateWitnessBudget:
+    def _generator_witness_budget(self) -> _GeneratorWitnessBudget:
         limit = (
-            _DEFAULT_TEMPLATE_WITNESS_LIMIT
+            _DEFAULT_GENERATOR_WITNESS_LIMIT
             if self.max_witness_limit is _DEFAULT_MAX_WITNESSES
             else self.max_witness_limit
         )
-        return _TemplateWitnessBudget(limit)
+        return _GeneratorWitnessBudget(limit)
 
-    def _template_definition_witnesses(
+    def _generator_definition_witnesses(
             self,
             stats: QueryStats,
-            witness_budget: _TemplateWitnessBudget):
+            witness_budget: _GeneratorWitnessBudget):
         """Stream complete roots after a conservative structural index prefilter."""
 
         if self.universe is not None:
             if self.universe.kind != "definitions":
                 raise QueryDomainError("A definition terminal cannot execute over an occurrence universe.")
             if not self.universe.witness_complete:
-                raise QueryDomainError("TemplateSelector refinement requires complete immutable witness evidence.")
+                raise QueryDomainError("GeneratorSelector refinement requires complete immutable witness evidence.")
             replicas = self.universe.replicas or {}
 
             def universe_witnesses():
@@ -745,7 +745,7 @@ class DefinitionQuery:
             prefilter_query = replace(
                 self,
                 domain="stored",
-                template_selector=None,
+                generator_selector=None,
                 max_witness_limit=_DEFAULT_MAX_WITNESSES,
             )
             candidates, index_stats, _ = self.repo._query_index.execute_definition_domain(
@@ -769,9 +769,9 @@ class DefinitionQuery:
                     iterate = getattr(store, "iter_authoritative_root_definitions", None)
                     if not callable(iterate):
                         raise QueryDomainError(
-                            "TemplateSelector stored queries require authoritative root enumeration."
+                            "GeneratorSelector stored queries require authoritative root enumeration."
                         )
-                    for cdef in self._iter_template_store_roots(store, iterate):
+                    for cdef in self._iter_generator_store_roots(store, iterate):
                         witness_budget.consume()
                         if indexed_candidates is None or cdef in indexed_candidates:
                             yield cdef, (store,)
@@ -787,33 +787,33 @@ class DefinitionQuery:
                         yield obj.definition, ()
 
         if self.domain not in {"stored", "cached", "known"}:
-            raise QueryDomainError(f"Unsupported TemplateSelector definition domain {self.domain!r}.")
+            raise QueryDomainError(f"Unsupported GeneratorSelector definition domain {self.domain!r}.")
         return roots()
 
     @staticmethod
-    def _iter_template_store_roots(store, iterate):
+    def _iter_generator_store_roots(store, iterate):
         """Validate one Store's streamed exact-template witness authority."""
 
         try:
             for cdef in iterate():
                 if not isinstance(cdef, ConcreteDefinition):
                     raise QueryDomainError(
-                        "TemplateSelector Store enumeration yielded a non-CDef root."
+                        "GeneratorSelector Store enumeration yielded a non-CDef root."
                     )
                 yield cdef
         except QueryDomainError:
             raise
         except Exception as error:
             raise QueryDomainError(
-                f"TemplateSelector Store enumeration failed for {store!r}."
+                f"GeneratorSelector Store enumeration failed for {store!r}."
             ) from error
 
-    def _verify_template_witnesses(self, witnesses, stats: QueryStats):
+    def _verify_generator_witnesses(self, witnesses, stats: QueryStats):
         """Verify each witness before structural result representative selection."""
 
-        from ..template_selector import _AssignmentBudget
+        from ..generator import _AssignmentBudget
 
-        assignment_budget = _AssignmentBudget(self.template_selector._max_assignments)
+        assignment_budget = _AssignmentBudget(self.generator_selector._max_assignments)
         merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
         replicas: dict[ConcreteDefinition, list[Any]] = {}
         verified_witnesses = []
@@ -831,16 +831,16 @@ class DefinitionQuery:
         ordered = tuple(sorted(merged.values(), key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
         return ordered, {cdef: tuple(dict.fromkeys(replicas.get(cdef, ()))) for cdef in ordered}, tuple(verified_witnesses)
 
-    def _execute_template_selector_nested(self):
+    def _execute_generator_selector_nested(self):
         """Apply exact support to graph-distinct nested occurrences and owners."""
 
         from ..cdef_graph import ConcreteDefinitionGraph
 
-        stats = QueryStats(refresh_action="template-witness-scan")
-        witness_budget = self._template_witness_budget()
+        stats = QueryStats(refresh_action="generator-witness-scan")
+        witness_budget = self._generator_witness_budget()
         if self.universe is not None:
             if self.universe.kind != "occurrences" or not self.universe.witness_complete:
-                raise QueryDomainError("TemplateSelector refinement requires complete immutable witness evidence.")
+                raise QueryDomainError("GeneratorSelector refinement requires complete immutable witness evidence.")
             replicas = self.universe.replicas or {}
             candidates = (
                 (item.owner, tuple(replicas.get(item.owner, ())), item.path, item.definition)
@@ -852,17 +852,17 @@ class DefinitionQuery:
                     iterate = getattr(store, "iter_authoritative_root_definitions", None)
                     if not callable(iterate):
                         raise QueryDomainError(
-                            "TemplateSelector nested queries require authoritative root enumeration."
+                            "GeneratorSelector nested queries require authoritative root enumeration."
                         )
-                    for root in self._iter_template_store_roots(store, iterate):
+                    for root in self._iter_generator_store_roots(store, iterate):
                         for occurrence in ConcreteDefinitionGraph.from_root(root).iter_occurrences():
                             yield root, (store,), occurrence.path, occurrence.definition
 
             candidates = authoritative_occurrences()
         occurrences = []
         owner_replicas: dict[ConcreteDefinition, list[Any]] = {}
-        from ..template_selector import _AssignmentBudget
-        assignment_budget = _AssignmentBudget(self.template_selector._max_assignments)
+        from ..generator import _AssignmentBudget
+        assignment_budget = _AssignmentBudget(self.generator_selector._max_assignments)
         for root, stores, path, candidate in candidates:
             witness_budget.consume()
             stats.candidate_count += 1
@@ -947,8 +947,8 @@ class DefinitionQuery:
 
     def _execute_terminal_items(self, *, stop_after: int):
         self._require_domain()
-        if self.template_selector is not None:
-            return tuple(item for _, item in zip(range(stop_after), self._execute_template_selector()))
+        if self.generator_selector is not None:
+            return tuple(item for _, item in zip(range(stop_after), self._execute_generator_selector()))
         if self.domain == "nested":
             if self.universe is None and self.projection == "definitions" and self.repo._query_index.can_execute_query_domain("nested"):
                 return self.repo._query_index.execute_nested_definitions(self, stop_after=stop_after)[0]
@@ -1126,11 +1126,11 @@ class DefinitionQuery:
                     strict=self.strict_policy,
                     class_match=self.class_match_policy):
                 continue
-            if self.template_selector is not None:
+            if self.generator_selector is not None:
                 if template_budget is None:
-                    matched = self.template_selector.matches(cdef)
+                    matched = self.generator_selector.matches(cdef)
                 else:
-                    matched = self.template_selector._matches(cdef, template_budget)
+                    matched = self.generator_selector._matches(cdef, template_budget)
                 if not matched:
                     continue
             out.append(cdef)
@@ -1146,8 +1146,8 @@ def _snapshot_source(source):
         return source
     if isinstance(source, Selector):
         return source.root
-    from ..template_selector import TemplateSelector
-    if isinstance(source, TemplateSelector):
+    from ..generator import GeneratorSelector
+    if isinstance(source, GeneratorSelector):
         return source.prefilter.root
     if isinstance(source, Definition):
         return deepcopy(source)

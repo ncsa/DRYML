@@ -2,12 +2,12 @@
 
 import pytest
 
-from dryml.core import Definition, ObjectId, ObjectRef, Ref, StateRef
+from dryml.core import Definition, ObjectId, ObjectRef, Ref, StateRef, Template
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
 from dryml.core.object import Serializable
 from dryml.core.symbol import ImportRef
-from dryml.core.template import Par, Template
+from dryml.core.template import Par
 from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
@@ -21,7 +21,7 @@ class ProjectionLeaf(Serializable):
 class ProjectionRoot(Serializable):
     """Stateful container with materializing, reference, and recipe fields."""
 
-    def __init__(self, materialized, referenced: Ref[StateRef], recipe: Ref[Template]):
+    def __init__(self, materialized, referenced: Ref[StateRef], recipe: Template):
         self.materialized = materialized
         self.referenced = referenced
         self.recipe = recipe
@@ -48,12 +48,12 @@ def test_recursive_object_projection_preserves_ids_roles_sharing_and_codec_meani
     """Projection weakens nested state references without changing graph association data."""
 
     imported = _state_ref("child", "imported", _state_hash("a"))
-    recipe = Template.from_value({"exact": imported, "width": Par("width")})
+    recipe = Definition(ProjectionLeaf, {"exact": imported, "width": Par("width")})
     root = Definition(
         ProjectionRoot,
         DefLink.finalized(EdgeKind.MATERIALIZE, imported),
         referenced=DefLink.finalized(EdgeKind.REF, imported),
-        recipe=DefLink.finalized(EdgeKind.REF, recipe),
+        recipe=recipe,
     ).concretize()
     root_path = GraphPath()
     child_path = GraphPath((Parameter("materialized"),))
@@ -76,15 +76,11 @@ def test_recursive_object_projection_preserves_ids_roles_sharing_and_codec_meani
     assert referenced.kind is EdgeKind.REF
     assert materialized is referenced.target
     assert isinstance(materialized, ObjectRef)
-    assert opaque_recipe.target is recipe
-    assert opaque_recipe.target.root["exact"] is imported
+    assert opaque_recipe.target.value == recipe
     assert projected.object_projection() == projected
     assert ObjectRef.from_data(projected.to_data()) == projected
 
-    traversed = state.object_projection(traverse_refs=True)
-    traversed_recipe = traversed.definition.parameters["recipe"].target
-    assert traversed_recipe.root["width"] == Par("width")
-    assert traversed_recipe.root["exact"] == imported.object
+    assert state.object_projection(traverse_refs=True) == projected
 
 
 def test_projection_never_allocates_object_ids_or_resolves_symbols(monkeypatch):
@@ -108,7 +104,7 @@ def test_reference_value_at_accepts_only_terminal_ref_data():
     """Exact Ref data is available only at the terminal declared graph boundary."""
 
     imported = _state_ref("child", "imported", _state_hash("a"))
-    recipe = Template.from_value({"exact": imported})
+    recipe = Definition(ProjectionLeaf, {"exact": imported})
     carrier_definition = Definition(
         ProjectionCarrier, reference=DefLink.finalized(EdgeKind.REF, imported)
     ).concretize()
@@ -120,7 +116,7 @@ def test_reference_value_at_accepts_only_terminal_ref_data():
         ProjectionRoot,
         DefLink.finalized(EdgeKind.MATERIALIZE, carrier),
         referenced=DefLink.finalized(EdgeKind.REF, imported),
-        recipe=DefLink.finalized(EdgeKind.REF, recipe),
+        recipe=recipe,
     ).concretize()
     root_path = GraphPath()
     child_path = GraphPath((Parameter("materialized"),))

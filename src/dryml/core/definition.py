@@ -741,7 +741,7 @@ class Definition(DefInterface, Mapping):
             ParameterizationError: If the Definition cannot be projected.
         """
 
-        from .template_selector import _loose_selector
+        from .generator import _loose_selector
 
         selector = _loose_selector(self)
         if strict:

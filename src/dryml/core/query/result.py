@@ -59,7 +59,7 @@ class DefinitionResultSet:
         replicas: Explicit definition-to-Store authority. Materializable results
             require an entry for every definition; use an empty mapping for
             nonmaterializable results.
-        witnesses: Graph-distinct CDefs retained for exact TemplateSelector
+        witnesses: Graph-distinct CDefs retained for exact GeneratorSelector
             refinement before structural result deduplication.
         witness_complete: Whether ``witnesses`` is complete immutable evidence
             for this result universe.
@@ -342,7 +342,7 @@ class OccurrenceResultSet:
         occurrence_factory: Replayable lazy occurrence producer.
         explanation: Optional terminal execution diagnostics.
         owner_replicas: Owner-to-Store authority used by :meth:`owners`.
-        witnesses: Graph-distinct occurrences retained for exact TemplateSelector
+        witnesses: Graph-distinct occurrences retained for exact GeneratorSelector
             refinement and projection.
         witness_complete: Whether ``witnesses`` is complete immutable evidence
             for this occurrence universe.

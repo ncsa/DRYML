@@ -14,7 +14,6 @@ _MANIFEST_VERSION = 1
 _FIXTURE_FIELDS = {
     "artifact_value/value.pkl": {"format", "version", "sha256"},
     "experiment_data.json": {"format", "version", "sha256"},
-    "template_bundle.json": {"format", "kind", "version", "sha256"},
     "train_state.json": {"fixture", "fixture_version", "sha256"},
 }
 _UNSAFE_PICKLE_OPCODES = frozenset({

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from dryml.artifacts import Value
-from dryml.core import Par, Ref, Repo, StateRef, Template, TemplateBundle
+from dryml.core import Definition, Par, Ref, Repo, StateRef
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedConfig, ManagedRerunRequiredError, managed_operation
@@ -182,10 +182,10 @@ def test_failed_second_artifact_reuses_the_same_pending_history_occurrence(tmp_p
     OrderedValue.failures = {"second"}
     exp = Experiment(
         RecoveryModel(), CheckpointTrainer(),
-        artifacts=TemplateBundle({
-            name: Template(OrderedValue, name, Par("this.model"))
+        artifacts={
+            name: Definition(OrderedValue, name, Par("this.model"))
             for name in ("first", "second", "third")
-        }),
+        },
         repo=repo,
     )
 
@@ -195,9 +195,9 @@ def test_failed_second_artifact_reuses_the_same_pending_history_occurrence(tmp_p
     history = ExperimentData.find(checkpoint.object_projection(), repo=repo)
     failed = history.data.iloc[0]
 
-    assert OrderedValue.events == ["first", "second"]
+    assert OrderedValue.events == ["first", "third", "second"]
     assert failed.evaluation_status == "failed"
-    assert tuple(failed.eval_artifacts) == ("first",)
+    assert tuple(failed.eval_artifacts) == ("first", "third")
 
     final = exp.train(managed=ManagedConfig(state_repo=repo))
     repaired = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
@@ -205,10 +205,10 @@ def test_failed_second_artifact_reuses_the_same_pending_history_occurrence(tmp_p
     assert repaired.row_key == failed.row_key
     assert repaired.state_ref == checkpoint
     assert repaired.evaluation_status == "completed"
-    assert tuple(repaired.eval_artifacts) == ("first", "second", "third")
+    assert tuple(repaired.eval_artifacts) == ("first", "third", "second")
     # The default cadence is terminal-only; retry repairs its retained row without
     # scheduling a second intermediate/final pair for the one completed update.
-    assert OrderedValue.events == ["first", "second", "second", "third"]
+    assert OrderedValue.events == ["first", "third", "second", "second"]
 
 
 def test_completed_admission_race_adopts_receipt_without_rerunning_artifact(
@@ -222,7 +222,7 @@ def test_completed_admission_race_adopts_receipt_without_rerunning_artifact(
     OrderedValue.failures = set()
     exp = Experiment(
         RecoveryModel(), TerminalTrainer(),
-        artifacts=Template(OrderedValue, "race", Par("this.model")),
+        artifacts={"race": Definition(OrderedValue, "race", Par("this.model"))},
         repo=repo,
     )
     original_invoke = managed_runtime.invoke
@@ -246,7 +246,7 @@ def test_completed_admission_race_adopts_receipt_without_rerunning_artifact(
 
     assert OrderedValue.events == ["race"]
     assert row.evaluation_status == "completed"
-    assert row.eval_artifacts["artifact_0"] == completed[0]
+    assert row.eval_artifacts["race"] == completed[0]
 
 
 def test_terminal_artifact_retry_replays_one_occurrence_without_retraining(tmp_path):
@@ -256,7 +256,7 @@ def test_terminal_artifact_retry_replays_one_occurrence_without_retraining(tmp_p
     TerminalTrainer.calls = 0
     FailOnceValue.calls = 0
     exp = Experiment(
-        RecoveryModel(), TerminalTrainer(), artifacts=Template(FailOnceValue), repo=repo,
+        RecoveryModel(), TerminalTrainer(), artifacts={"fail-once": Definition(FailOnceValue)}, repo=repo,
     )
 
     with pytest.raises(RuntimeError, match="terminal artifact failed"):
@@ -281,7 +281,7 @@ def test_cadenced_checkpoint_retry_restores_step_and_finishes_without_duplicate_
     repo = Repo(DirStore(tmp_path / "store"))
     FailOnceValue.calls = 0
     exp = Experiment(
-        RecoveryModel(), CadencedRecoveryTrainer(), artifacts=Template(FailOnceValue),
+        RecoveryModel(), CadencedRecoveryTrainer(), artifacts={"fail-once": Definition(FailOnceValue)},
         checkpoint_every_steps=2, repo=repo,
     )
 
@@ -312,9 +312,7 @@ def test_terminal_recovery_reuses_one_occurrence_after_each_experiment_boundary(
     OrderedValue.failures = set()
     exp = Experiment(
         RecoveryModel(), TerminalTrainer(),
-        artifacts=TemplateBundle({
-            "only": Template(OrderedValue, "only", Par("this.model")),
-        }),
+        artifacts={"only": Definition(OrderedValue, "only", Par("this.model"))},
         repo=repo,
     )
     original = experiment_module._experiment_boundary
@@ -382,7 +380,7 @@ def test_failed_status_publication_boundary_recovers_without_retraining(tmp_path
     OrderedValue.failures = {"only"}
     exp = Experiment(
         RecoveryModel(), TerminalTrainer(),
-        artifacts=TemplateBundle({"only": Template(OrderedValue, "only", Par("this.model"))}),
+        artifacts={"only": Definition(OrderedValue, "only", Par("this.model"))},
         repo=repo,
     )
     original = experiment_module._experiment_boundary
@@ -419,10 +417,10 @@ def test_failed_status_publish_error_preserves_completed_results_for_retry(tmp_p
     OrderedValue.failures = {"second"}
     exp = Experiment(
         RecoveryModel(), TerminalTrainer(),
-        artifacts=TemplateBundle({
-            name: Template(OrderedValue, name, Par("this.model"))
+        artifacts={
+            name: Definition(OrderedValue, name, Par("this.model"))
             for name in ("first", "second")
-        }),
+        },
         repo=repo,
     )
     original = ExperimentData.publish
@@ -469,7 +467,7 @@ def test_completed_status_publish_error_reuses_completed_artifact_without_retrai
     OrderedValue.failures = set()
     exp = Experiment(
         RecoveryModel(), TerminalTrainer(),
-        artifacts=TemplateBundle({"only": Template(OrderedValue, "only", Par("this.model"))}),
+        artifacts={"only": Definition(OrderedValue, "only", Par("this.model"))},
         repo=repo,
     )
     original = ExperimentData.publish

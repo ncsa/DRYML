@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core import F, Par, Shared, Template, TemplateGenerator, UniformFromSet
+from dryml.core import Definition, F, Generator, Par, Shared, UniformFromSet
 
 
 def _resolved_groups(sequential, factories):
     """Generate one resolved Sequential Definition without loading data."""
 
-    template = Template(
+    definition = Definition(
         sequential,
         layer_defs=factories * Par("depth"),
     )
-    return TemplateGenerator(
-        template,
-        depth=UniformFromSet((2,)),
-        width=4,
+    return Generator(
+        definition.sub(width=4), {"depth": UniformFromSet((2,))}
     ).sample()
 
 
@@ -60,13 +58,11 @@ def test_shared_factory_repetition_does_not_tie_backend_instances():
     torch = pytest.importorskip("torch")
     from dryml.models.torch import Sequential
 
-    template = Template(
+    definition = Definition(
         Sequential,
         layer_defs=[F("Linear", 3, 4)] * Shared(Par("depth")),
     )
-    definition = TemplateGenerator(
-        template, depth=UniformFromSet((2,))
-    ).sample()
+    definition = Generator(definition, {"depth": UniformFromSet((2,))}).sample()
     model = definition.cls(*definition.args, **definition.kwargs)
 
     assert len(model.obj) == 2
