@@ -31,10 +31,9 @@ def to_data(value: Any) -> dict[str, object]:
             the shared expression limits.
     """
 
-    from .template_codec import _Encoder
+    from .template_codec import _encode
 
-    encoder = _Encoder()
-    data = encoder.finish(_KIND, encoder.value(value))
+    data = _encode(_KIND, value)
     data["schema"] = SCHEMA
     return data
 

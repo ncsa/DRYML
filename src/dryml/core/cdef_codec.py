@@ -218,7 +218,6 @@ def object_projection_cdef(
         raise TypeError("traverse_refs must be a bool.")
 
     from .definition import Definition
-    from .cdef_graph import EdgeKind
     from .factory import FactorySpec
     from .template import _BinaryExpr, _RepeatExpr
 

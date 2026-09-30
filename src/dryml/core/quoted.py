@@ -43,14 +43,10 @@ class QuotedDef:
             None. Encoding never resolves symbols or constructs Objects.
         """
 
-        import json
-
         from .definition_expression_codec import to_data
+        from .template_codec import _canonical_bytes
 
-        return b"dryml-quoted-definition-v1\x00" + json.dumps(
-            to_data(self.value), sort_keys=True, separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("ascii")
+        return b"dryml-quoted-definition-v1\x00" + _canonical_bytes(to_data(self.value))
 
 
 @dataclass(frozen=True, slots=True)

@@ -43,11 +43,8 @@ def preflight_symbolic_materialization(*roots: Any, repo: Any = None) -> None:
     """
 
     from .bound_args import BoundArguments
-    from .cdef_graph import EdgeKind
-    from .definition import ConcreteDefinition, Definition
     from .errors import UnresolvedDefinitionError
     from .links import DefLink
-    from .object import Object
     from .params import Match
     from .quoted import QuotedDef, SelectorSpec
     from .signatures import compile_signature
@@ -63,7 +60,7 @@ def preflight_symbolic_materialization(*roots: Any, repo: Any = None) -> None:
         seen.add(marker)
         if definition.cls is None:
             raise UnresolvedDefinitionError("materializing Definition has no class authority")
-        cls = _resolve_materialization_class(definition) if isinstance(definition, ConcreteDefinition) else resolve_symbol(definition.cls)
+        cls = resolve_symbol(definition.cls)
         if not isinstance(cls, type):
             raise TypeError("materializing Definition class authority must resolve to a type")
         plan = compile_signature(cls, constructor=True)

@@ -594,11 +594,14 @@ class F1FromConfusion(Method):
 def _concrete_evaluation_source(test_ds: object, model: object, *, x: Path, y: Path, prediction_labels: object | None = None, target_labels: object | None = None) -> ConcreteDefinition:
     """Declare and inertly concretize one complete model-evaluation Map graph."""
 
-    prediction = Pipe.defn(Select.defn(x), model)
-    if prediction_labels is not None:
-        prediction = Pipe.defn(prediction, prediction_labels)
-    target = Select.defn(y) if target_labels is None else Pipe.defn(Select.defn(y), target_labels)
-    return Map.defn(test_ds, Project.defn(prediction=prediction, target=target)).concretize()
+    return _symbolic_evaluation_source(
+        test_ds,
+        model,
+        x=x,
+        y=y,
+        prediction_labels=prediction_labels,
+        target_labels=target_labels,
+    ).concretize()
 
 
 def _error_source(test_ds: object, model: object, *, x: Path, y: Path, error: type[Method]) -> ConcreteDefinition:
