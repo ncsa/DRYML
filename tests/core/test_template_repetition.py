@@ -7,7 +7,7 @@ import pytest
 from dryml.core import Definition, F, Mat, Object
 from dryml.core.cdef_identity import cdef_node_key
 from dryml.core.cdef_graph import EdgeKind
-from dryml.core.errors import TemplateError, TemplateLimitError
+from dryml.core.errors import ParameterizationError, ParameterizationLimitError
 from dryml.core.links import DefLink
 from dryml.core.template import Par, Shared, Template, repeat
 
@@ -59,9 +59,9 @@ def test_substitution_evaluates_arithmetic_post_order_without_coercion():
     assert resolved.root == {"product": 130, "division": 32.5, "floor": -3}
     assert type(resolved.root["division"]) is float
 
-    with pytest.raises(TemplateError, match="division"):
+    with pytest.raises(ParameterizationError, match="division"):
         template.sub(width=1, scale=0)
-    with pytest.raises(TemplateError, match="numbers"):
+    with pytest.raises(ParameterizationError, match="numbers"):
         template.sub(width=True, scale=1)
     assert template.root["product"] == Par("width") * Par("scale")
 
@@ -72,9 +72,9 @@ def test_arithmetic_enforces_the_integer_bit_length_limit():
     at_limit = 1 << 1023
     assert Template.from_value(Par("value") * 1).sub(value=at_limit).root == at_limit
 
-    with pytest.raises(TemplateLimitError, match="bit-length"):
+    with pytest.raises(ParameterizationLimitError, match="bit-length"):
         Template.from_value(Par("value") * 1).sub(value=1 << 1024)
-    with pytest.raises(TemplateLimitError, match="bit-length"):
+    with pytest.raises(ParameterizationLimitError, match="bit-length"):
         Template.from_value(Par("value") * 2).sub(value=at_limit)
 
 
@@ -174,7 +174,7 @@ def test_repetition_limits_are_cumulative_and_leave_sources_unchanged():
     assert all(len(group) == 255 for group in exact.root)
 
     over = Template.from_value(repeat([repeat(["value"], 256)], 256))
-    with pytest.raises(TemplateLimitError, match="expansion"):
+    with pytest.raises(ParameterizationLimitError, match="expansion"):
         over.sub()
     assert isinstance(over.root, type(repeat(["value"], 1)))
 
@@ -188,11 +188,11 @@ def test_repetition_limits_are_cumulative_and_leave_sources_unchanged():
 
     depth_over = depth_exact
     depth_over = repeat([depth_over], 1)
-    with pytest.raises(TemplateLimitError, match="depth"):
+    with pytest.raises(ParameterizationLimitError, match="depth"):
         Template.from_value(depth_over).sub()
 
-    with pytest.raises(TemplateLimitError, match="count"):
+    with pytest.raises(ParameterizationLimitError, match="count"):
         Template.from_value(repeat(["value"], 1025)).sub()
     for count in (True, 1.0, -1):
-        with pytest.raises(TemplateError):
+        with pytest.raises(ParameterizationError):
             repeat(["value"], count)

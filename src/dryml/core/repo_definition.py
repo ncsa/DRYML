@@ -1475,7 +1475,7 @@ def _selector_from_data(value: Mapping[str, Any]):
                 matcher = SubclassMatcher(_symbol_from_data(matcher_data["cls"], require_live=True))
             return Match(matcher, current["name"])
         if kind == "factory":
-            return FactorySpec._from_template_parts(
+            return FactorySpec._from_symbolic_parts(
                 item(current["target"]),
                 tuple(item(child) for child in current["args"]),
                 FrozenDict((name, item(child)) for name, child in current["kwargs"]),

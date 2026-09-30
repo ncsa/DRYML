@@ -7,7 +7,7 @@ import math
 import random
 from typing import Any, Iterable, Protocol, runtime_checkable
 
-from .errors import TemplateError
+from .errors import ParameterizationError
 from .freeze import FrozenTuple
 
 
@@ -30,7 +30,7 @@ class Distribution(Protocol):
 
         Raises:
             Exception: Provider failures propagate to the template operation,
-                which normalizes them to ``TemplateError``.
+                which normalizes them to ``ParameterizationError``.
         """
 
     def cardinality(self) -> int | None:
@@ -94,7 +94,7 @@ class Distribution(Protocol):
 
 def _index(index: int, cardinality: int) -> int:
     if type(index) is not int or index < 0 or index >= cardinality:
-        raise TemplateError("distribution index is outside finite support")
+        raise ParameterizationError("distribution index is outside finite support")
     return index
 
 
@@ -111,7 +111,7 @@ class UniformIntRange:
         hi: Inclusive upper integer bound, excluding ``bool``.
 
     Raises:
-        TemplateError: If bounds are not exact integers or ``hi`` precedes
+        ParameterizationError: If bounds are not exact integers or ``hi`` precedes
             ``lo``.
     """
 
@@ -120,9 +120,9 @@ class UniformIntRange:
 
     def __post_init__(self) -> None:
         if type(self.lo) is not int or type(self.hi) is not int:
-            raise TemplateError("integer range bounds must be exact int values, not bool or coercible numerics")
+            raise ParameterizationError("integer range bounds must be exact int values, not bool or coercible numerics")
         if self.hi < self.lo:
-            raise TemplateError("integer range upper bound must not precede lower bound")
+            raise ParameterizationError("integer range upper bound must not precede lower bound")
 
     def sample(self, rng: random.Random, /) -> int:
         """Draw an inclusive integer using the supplied random generator."""
@@ -136,7 +136,7 @@ class UniformIntRange:
         """Return an indexed support value.
 
         Raises:
-            TemplateError: If ``index`` is outside the inclusive range.
+            ParameterizationError: If ``index`` is outside the inclusive range.
         """
         return self.lo + _index(index, self.cardinality())
 
@@ -157,7 +157,7 @@ class UniformFromSet:
         values: Nonempty iterable of supported template input values.
 
     Raises:
-        TemplateError: If the support is empty or contains a type-aware
+        ParameterizationError: If the support is empty or contains a type-aware
             duplicate.
     """
 
@@ -168,10 +168,10 @@ class UniformFromSet:
 
         frozen = FrozenTuple(freeze_def_value(value) for value in values)
         if not frozen:
-            raise TemplateError("choice distribution requires at least one value")
+            raise ParameterizationError("choice distribution requires at least one value")
         for index, value in enumerate(frozen):
             if any(_same_choice(value, prior) for prior in frozen[:index]):
-                raise TemplateError("choice distribution values must be type-aware duplicate-free")
+                raise ParameterizationError("choice distribution values must be type-aware duplicate-free")
         object.__setattr__(self, "values", frozen)
 
     def sample(self, rng: random.Random, /) -> object:
@@ -186,7 +186,7 @@ class UniformFromSet:
         """Return an indexed choice.
 
         Raises:
-            TemplateError: If ``index`` is outside finite support.
+            ParameterizationError: If ``index`` is outside finite support.
         """
         return self.values[_index(index, self.cardinality())]
 

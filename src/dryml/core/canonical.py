@@ -1175,6 +1175,7 @@ def freeze_def_value(value: Any) -> Any:
 
 
 def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
+    from .domains import Distribution
     from .definition import ConcreteDefinition, Definition
     from .links import DefLink
     from .object import Object
@@ -1183,6 +1184,13 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
     from .selector import Selector
     from .template import Expr, TemplateBundle
 
+    if isinstance(value, Distribution):
+        from .errors import ParameterizationError
+
+        raise ParameterizationError(
+            "Definition-owned structure cannot contain a Distribution; bind static "
+            "values with Definition.sub() and reserve distributions for Generator."
+        )
     if isinstance(value, Object):
         return value.definition
     if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, Match, Expr, TemplateBundle, ObjectRef, StateRef, StateSelectorRef)):

@@ -13,7 +13,7 @@ from ..params import Match
 from ..quoted import QuotedDef, SelectorSpec
 from ..selector import Selector
 from ..symbol import maybe_symbol_ref, resolve_symbol
-from ..errors import TemplateLimitError
+from ..errors import ParameterizationLimitError
 from ..utils.types import is_nonclass_callable
 from .graph_plan import graph_candidate_ids
 from .lowering import ScanPolicy
@@ -64,7 +64,7 @@ class _TemplateWitnessBudget:
     def consume(self) -> None:
         self.visited += 1
         if self.limit is not None and self.visited > self.limit:
-            raise TemplateLimitError("template query witness limit exceeded")
+            raise ParameterizationLimitError("template query witness limit exceeded")
 
 
 @dataclass(frozen=True, slots=True)

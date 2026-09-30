@@ -15,10 +15,10 @@ import random
 from .definition import ConcreteDefinition, Definition, _structural_value_equal
 from .domains import Distribution, UniformFromSet
 from .errors import (
-    TemplateError,
-    TemplateLimitError,
-    UnresolvedTemplateError,
-    UnsupportedTemplateVerificationError,
+    ParameterizationError,
+    ParameterizationLimitError,
+    UnresolvedDefinitionError,
+    UnsupportedGeneratorVerificationError,
 )
 from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .template import (
@@ -38,9 +38,9 @@ def _validate_limit(value: object, *, label: str, maximum: int) -> int:
     """Validate one positive caller-lowered operation bound."""
 
     if type(value) is not int or value <= 0:
-        raise TemplateError(f"{label} must be a positive exact int")
+        raise ParameterizationError(f"{label} must be a positive exact int")
     if value > maximum:
-        raise TemplateLimitError(f"{label} exceeds the template hard limit")
+        raise ParameterizationLimitError(f"{label} exceeds the template hard limit")
     return value
 
 
@@ -50,9 +50,9 @@ def _provider_cardinality(provider: Distribution, root: str) -> int:
     try:
         cardinality = provider.cardinality()
     except Exception as error:
-        raise TemplateError("distribution cardinality failed", root=root) from error
+        raise ParameterizationError("distribution cardinality failed", root=root) from error
     if type(cardinality) is not int or cardinality <= 0:
-        raise TemplateError("distribution must declare a positive finite cardinality", root=root)
+        raise ParameterizationError("distribution must declare a positive finite cardinality", root=root)
     return cardinality
 
 
@@ -62,13 +62,13 @@ def _support_cardinality(provider: Distribution, root: str) -> int:
     try:
         cardinality = provider.cardinality()
     except Exception as error:
-        raise TemplateError("distribution cardinality failed", root=root) from error
+        raise ParameterizationError("distribution cardinality failed", root=root) from error
     if cardinality is None:
-        raise UnsupportedTemplateVerificationError(
+        raise UnsupportedGeneratorVerificationError(
             "exact template support needs finite indexed domain support", root=root
         )
     if type(cardinality) is not int or cardinality <= 0:
-        raise TemplateError("distribution must declare a positive finite cardinality", root=root)
+        raise ParameterizationError("distribution must declare a positive finite cardinality", root=root)
     return cardinality
 
 
@@ -77,10 +77,10 @@ def _provider_value(provider: Distribution, root: str, index: int) -> object:
 
     try:
         return provider.value_at(index)
-    except TemplateError:
+    except ParameterizationError:
         raise
     except Exception as error:
-        raise TemplateError("distribution indexed support lookup failed", root=root) from error
+        raise ParameterizationError("distribution indexed support lookup failed", root=root) from error
 
 
 class TemplateGenerator:
@@ -96,7 +96,7 @@ class TemplateGenerator:
         **bindings: Unqualified bindings under ``namespace``.
 
     Raises:
-        TemplateError: If the root or binding coverage is invalid, static capture
+        ParameterizationError: If the root or binding coverage is invalid, static capture
             cannot be represented, or a known choice introduces an uncovered root.
 
     Construction does not sample providers, resolve targets, or materialize
@@ -114,13 +114,13 @@ class TemplateGenerator:
         **bindings: object,
     ) -> None:
         if not isinstance(template, Template):
-            raise TemplateError("TemplateGenerator requires a Template")
+            raise ParameterizationError("TemplateGenerator requires a Template")
         if type(traverse_refs) is not bool:
-            raise TemplateError("traverse_refs must be a bool")
+            raise ParameterizationError("traverse_refs must be a bool")
         if not isinstance(template.root, Definition):
-            raise TemplateError("TemplateGenerator requires a soft Definition root")
+            raise ParameterizationError("TemplateGenerator requires a soft Definition root")
         if template.root.cls is None or template.root.args is None:
-            raise TemplateError("TemplateGenerator requires a classed non-skip-args Definition root")
+            raise ParameterizationError("TemplateGenerator requires a classed non-skip-args Definition root")
 
         occurrences = _snapshot_parameters(template.root, traverse_refs=traverse_refs)
         roots = {parameter.name for parameter in occurrences}
@@ -128,9 +128,9 @@ class TemplateGenerator:
         missing = sorted(roots - set(supplied))
         unknown = sorted(set(supplied) - roots)
         if missing:
-            raise TemplateError(f"missing template generator bindings: {missing!r}")
+            raise ParameterizationError(f"missing template generator bindings: {missing!r}")
         if unknown:
-            raise TemplateError(f"unknown template generator bindings: {unknown!r}")
+            raise ParameterizationError(f"unknown template generator bindings: {unknown!r}")
 
         statics = {name: value for name, value in supplied.items() if not isinstance(value, Distribution)}
         domains = {name: value for name, value in supplied.items() if isinstance(value, Distribution)}
@@ -141,7 +141,7 @@ class TemplateGenerator:
         }))
         remaining_roots = set(remaining)
         if remaining_roots != set(domains):
-            raise TemplateError("static capture does not leave exactly the declared distribution roots")
+            raise ParameterizationError("static capture does not leave exactly the declared distribution roots")
 
         self._template = prepared
         self._domains = MappingProxyType({name: domains[name] for name in remaining})
@@ -170,8 +170,8 @@ class TemplateGenerator:
             A fully bound soft Definition.
 
         Raises:
-            TemplateError: If a provider fails or supplies an invalid value.
-            UnresolvedTemplateError: If a provider introduces active roots.
+            ParameterizationError: If a provider fails or supplies an invalid value.
+            UnresolvedDefinitionError: If a provider introduces active roots.
 
         A supplied RNG is not rolled back when a provider or completion fails.
         """
@@ -179,15 +179,15 @@ class TemplateGenerator:
         if rng is None:
             rng = random.Random()
         if not isinstance(rng, random.Random):
-            raise TemplateError("sample rng must be random.Random or None")
+            raise ParameterizationError("sample rng must be random.Random or None")
         assignments = {}
         for name, provider in self._domains.items():
             try:
                 assignments[name] = provider.sample(rng)
-            except TemplateError:
+            except ParameterizationError:
                 raise
             except Exception as error:
-                raise TemplateError("distribution sampling failed", root=name) from error
+                raise ParameterizationError("distribution sampling failed", root=name) from error
         return self._definition_for(assignments)
 
     def grid(self, *, max_results: int = _MAX_GRID_RESULTS) -> tuple[Definition, ...]:
@@ -200,8 +200,8 @@ class TemplateGenerator:
             Every fully bound Definition in mixed-radix root order.
 
         Raises:
-            TemplateLimitError: If the finite product exceeds ``max_results``.
-            TemplateError: If a provider violates its indexed-support contract.
+            ParameterizationLimitError: If the finite product exceeds ``max_results``.
+            ParameterizationError: If a provider violates its indexed-support contract.
 
         The return is all-or-error: no partial tuple is exposed on failure.
         """
@@ -215,7 +215,7 @@ class TemplateGenerator:
         for cardinality in cardinalities:
             total *= cardinality
             if total > maximum:
-                raise TemplateLimitError("template grid result limit exceeded")
+                raise ParameterizationLimitError("template grid result limit exceeded")
         names = tuple(self._domains)
         values = [
             tuple(_provider_value(self._domains[name], name, index) for index in range(cardinality))
@@ -234,8 +234,8 @@ class TemplateGenerator:
             A TemplateSelector that reuses this immutable capture.
 
         Raises:
-            TemplateError: If ``max_assignments`` is malformed.
-            TemplateLimitError: If it exceeds the fixed hard limit.
+            ParameterizationError: If ``max_assignments`` is malformed.
+            ParameterizationLimitError: If it exceeds the fixed hard limit.
         """
 
         return TemplateSelector(self, max_assignments=max_assignments)
@@ -255,7 +255,7 @@ class TemplateGenerator:
                     for parameter in _snapshot_parameters(result.root, traverse_refs=self._traverse_refs)
                 }
                 if active != expected:
-                    raise TemplateError("known distribution value introduces uncovered active roots", root=name)
+                    raise ParameterizationError("known distribution value introduces uncovered active roots", root=name)
 
     def _definition_for(self, assignments: Mapping[str, object]) -> Definition:
         """Apply one complete assignment and enforce the generator boundary."""
@@ -263,7 +263,7 @@ class TemplateGenerator:
         bound = self._template.sub(sub_dict=assignments, traverse_refs=self._traverse_refs)
         active = _snapshot_parameters(bound.root, traverse_refs=self._traverse_refs)
         if active:
-            raise UnresolvedTemplateError("generator assignment left active template roots")
+            raise UnresolvedDefinitionError("generator assignment left active template roots")
         return bound.to_definition()
 
 
@@ -281,7 +281,7 @@ class TemplateSelector:
 
     def __init__(self, generator: TemplateGenerator, /, *, max_assignments: int = _MAX_ASSIGNMENTS) -> None:
         if not isinstance(generator, TemplateGenerator):
-            raise TemplateError("TemplateSelector requires a TemplateGenerator")
+            raise ParameterizationError("TemplateSelector requires a TemplateGenerator")
         self._generator = generator
         self._max_assignments = _validate_limit(
             max_assignments, label="max_assignments", maximum=_MAX_ASSIGNMENTS
@@ -304,7 +304,7 @@ class TemplateSelector:
             Closed ``dryml-template`` v1 selector data.
 
         Raises:
-            TemplateError: If a runtime custom provider is present.
+            ParameterizationError: If a runtime custom provider is present.
         """
         from .template_codec import selector_to_data
 
@@ -321,7 +321,7 @@ class TemplateSelector:
             A rebuilt exact TemplateSelector.
 
         Raises:
-            TemplateError: If the payload or captured domains are invalid.
+            ParameterizationError: If the payload or captured domains are invalid.
         """
         from .template_codec import selector_from_data
 
@@ -337,10 +337,10 @@ class TemplateSelector:
             ``True`` only when an assignment satisfies all generated structure.
 
         Raises:
-            UnsupportedTemplateVerificationError: If a surviving unknown root
+            UnsupportedGeneratorVerificationError: If a surviving unknown root
                 cannot be exactly verified.
-            TemplateLimitError: If finite exact proof work exceeds its budget.
-            TemplateError: If a provider or a generated assignment is invalid.
+            ParameterizationLimitError: If finite exact proof work exceeds its budget.
+            ParameterizationError: If a provider or a generated assignment is invalid.
         """
 
         return self._matches(target, _AssignmentBudget(self._max_assignments))
@@ -375,7 +375,7 @@ class TemplateSelector:
             cardinalities.append(cardinality)
             total *= cardinality
             if total > self._max_assignments:
-                raise TemplateLimitError("template support verification assignment limit exceeded")
+                raise ParameterizationLimitError("template support verification assignment limit exceeded")
         budget.charge(total)
 
         values = [
@@ -406,14 +406,14 @@ class TemplateSelector:
         try:
             contains = provider.contains(value)
         except Exception as error:
-            raise TemplateError("distribution membership check failed", root=name) from error
+            raise ParameterizationError("distribution membership check failed", root=name) from error
         if type(contains) is bool:
             return contains
         if contains is not None:
-            raise TemplateError("distribution membership must return bool or None", root=name)
+            raise ParameterizationError("distribution membership must return bool or None", root=name)
         cardinality = _support_cardinality(provider, name)
         if cardinality > self._max_assignments:
-            raise TemplateLimitError("template support membership scan limit exceeded")
+            raise ParameterizationLimitError("template support membership scan limit exceeded")
         budget.charge(cardinality)
         return any(_structural_value_equal(value, _provider_value(provider, name, index)) for index in range(cardinality))
 
@@ -502,7 +502,7 @@ class _AssignmentBudget:
         """Consume ``count`` assignments or fail before partial verification."""
 
         if count > self.remaining:
-            raise TemplateLimitError("template support verification assignment limit exceeded")
+            raise ParameterizationLimitError("template support verification assignment limit exceeded")
         self.remaining -= count
 
 
@@ -529,7 +529,7 @@ def _topology_matches(generated: Definition, target: Definition | ConcreteDefini
         try:
             return value.parameters
         except TypeError as error:
-            raise UnsupportedTemplateVerificationError(
+            raise UnsupportedGeneratorVerificationError(
                 "exact topology verification needs available supplied parameter names"
             ) from error
 
@@ -577,14 +577,14 @@ def _provider_bounds(provider: Distribution, root: str) -> tuple[int | float, in
     try:
         bounds = provider.bounds()
     except Exception as error:
-        raise TemplateError("distribution bounds check failed", root=root) from error
+        raise ParameterizationError("distribution bounds check failed", root=root) from error
     if bounds is None:
         return None
     if not isinstance(bounds, tuple) or len(bounds) != 2:
-        raise TemplateError("distribution bounds must be a pair", root=root)
+        raise ParameterizationError("distribution bounds must be a pair", root=root)
     lo, hi = bounds
     if type(lo) not in {int, float} or type(hi) not in {int, float} or lo != lo or hi != hi or lo > hi:
-        raise TemplateError("distribution bounds are invalid", root=root)
+        raise ParameterizationError("distribution bounds are invalid", root=root)
     return lo, hi
 
 
@@ -594,8 +594,8 @@ def _outside_bounds(value: object, bounds: tuple[int | float, int | float]) -> b
     return type(value) in {int, float} and (value < bounds[0] or value > bounds[1])
 
 
-def _loose_selector(template: Template, *, traverse_refs: bool = False):
-    """Project a soft template into an ordinary structural Selector."""
+def _loose_selector(value: Definition | Template, *, traverse_refs: bool = False):
+    """Project a soft symbolic Definition into an ordinary structural Selector."""
 
     from .factory import FactorySpec
     from .cdef_graph import EdgeKind
@@ -603,8 +603,9 @@ def _loose_selector(template: Template, *, traverse_refs: bool = False):
     from .params import AnyValue
     from .selector import Selector
 
-    if not isinstance(template.root, Definition):
-        raise TemplateError("Template.as_selector requires a soft Definition root")
+    root = value if isinstance(value, Definition) else value.root
+    if not isinstance(root, Definition):
+        raise ParameterizationError("loose_selector requires a soft Definition root")
 
     def project(value: object) -> object:
         if isinstance(value, Expr):
@@ -631,7 +632,7 @@ def _loose_selector(template: Template, *, traverse_refs: bool = False):
                 (name, AnyValue() if (item := project(arg)) is _UNKNOWN else item)
                 for name, arg in value.kwargs.items()
             )
-            return FactorySpec._from_template_parts(value.target, args, kwargs)
+            return FactorySpec._from_symbolic_parts(value.target, args, kwargs)
         if isinstance(value, Definition):
             args = None if value.args is None else FrozenTuple(
                 AnyValue() if (item := project(arg)) is _UNKNOWN else item
@@ -642,7 +643,7 @@ def _loose_selector(template: Template, *, traverse_refs: bool = False):
                 for name, arg in value.kwargs.items()
                 if (item := project(arg)) is not _UNKNOWN
             )
-            return Definition._from_template_parts(value.cls, args, kwargs)
+            return Definition._from_symbolic_parts(value.cls, args, kwargs)
         if isinstance(value, Mapping):
             return FrozenDict(
                 (name, item)
@@ -658,9 +659,9 @@ def _loose_selector(template: Template, *, traverse_refs: bool = False):
             return _UNKNOWN if any(item is _UNKNOWN for item in items) else FrozenSet(items)
         return value
 
-    projected = project(template.root)
+    projected = project(root)
     if projected is _UNKNOWN or not isinstance(projected, Definition):
-        raise TemplateError("Template.as_selector requires a projectable soft Definition root")
+        raise ParameterizationError("loose_selector requires a projectable soft Definition root")
     return Selector(projected, cls_policy="exact")
 
 

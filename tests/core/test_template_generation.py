@@ -8,7 +8,7 @@ import pytest
 
 from dryml.core import Definition, Object
 from dryml.core.domains import UniformFromSet
-from dryml.core.errors import TemplateError, UnresolvedTemplateError
+from dryml.core.errors import ParameterizationError, UnresolvedDefinitionError
 from dryml.core.template import Par, Template
 from dryml.core.template_selector import TemplateGenerator
 
@@ -162,18 +162,18 @@ def test_generator_rejects_incomplete_or_invalid_root_contracts_before_sampling(
     """Capture rejects missing roots and unsupported generation roots eagerly."""
     template = Template(GeneratedModel, Par("width"), scale=1, product=Par("width"))
 
-    with pytest.raises(TemplateError, match="missing"):
+    with pytest.raises(ParameterizationError, match="missing"):
         TemplateGenerator(template)
-    with pytest.raises(TemplateError, match="unknown"):
+    with pytest.raises(ParameterizationError, match="unknown"):
         TemplateGenerator(template, width=1, extra=2)
-    with pytest.raises(TemplateError, match="Definition root"):
+    with pytest.raises(ParameterizationError, match="Definition root"):
         TemplateGenerator(Template.from_value([Par("width")]), width=1)
 
     introduced = Template(GeneratedModel, Par("width"), scale=1, product=1)
-    with pytest.raises(TemplateError, match="uncovered"):
+    with pytest.raises(ParameterizationError, match="uncovered"):
         TemplateGenerator(introduced, width=UniformFromSet((Par("later"),)))
     generator = TemplateGenerator(introduced, width=DynamicRootDistribution())
-    with pytest.raises(UnresolvedTemplateError):
+    with pytest.raises(UnresolvedDefinitionError):
         generator.sample(random.Random(0))
 
 
@@ -182,6 +182,6 @@ def test_grid_checks_cardinality_before_provider_indexing():
     OversizeDomain.lookups = 0
     template = Template(GeneratedModel, Par("width"), scale=1, product=1)
 
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         TemplateGenerator(template, width=OversizeDomain()).grid()
     assert OversizeDomain.lookups == 0

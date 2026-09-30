@@ -8,7 +8,7 @@ import pytest
 
 from dryml.core import Definition, Object, Ref, Repo
 from dryml.core.domains import UniformFromSet
-from dryml.core.errors import TemplateLimitError
+from dryml.core.errors import ParameterizationLimitError
 from dryml.core.query.model import QueryDomainError, QueryIndexError
 from dryml.core.template import Par, Template
 from dryml.core.template_selector import TemplateGenerator
@@ -112,7 +112,7 @@ def test_template_selector_query_witness_budget_never_returns_partial_results():
         QueryTemplateParent([QueryTemplateLeaf(64, repo=repo)] * 2, repo=repo),
     )
 
-    with pytest.raises(TemplateLimitError):
+    with pytest.raises(ParameterizationLimitError):
         repo.query(_selector(shared=True)).cached().max_witnesses(1).defs()
 
     assert len(repo.query(_selector(shared=True)).cached().max_witnesses(None).defs()) == 1
@@ -142,7 +142,7 @@ def test_template_selector_witness_budget_counts_prefilter_rejections_and_duplic
     monkeypatch.setattr(store, "iter_authoritative_root_definitions", authority)
 
     query = repo.query(_selector(shared=True)).stored()
-    with pytest.raises(TemplateLimitError, match="witness limit"):
+    with pytest.raises(ParameterizationLimitError, match="witness limit"):
         query.defs()
 
     assert tuple(query.max_witnesses(3).defs()) == (matching.definition,)
@@ -169,7 +169,7 @@ def test_nested_template_witness_budget_stops_authority_streaming(tmp_path, monk
 
     monkeypatch.setattr(store, "iter_authoritative_root_definitions", authority)
 
-    with pytest.raises(TemplateLimitError, match="witness limit"):
+    with pytest.raises(ParameterizationLimitError, match="witness limit"):
         repo.query(_selector(shared=True)).nested().definitions().max_witnesses(1).defs()
 
     assert visited == [first.definition]
@@ -361,7 +361,7 @@ def test_template_query_enforces_one_cumulative_assignment_budget():
         width=UniformFromSet((64,)),
     ).support_selector(max_assignments=1)
 
-    with pytest.raises(TemplateLimitError, match="assignment limit"):
+    with pytest.raises(ParameterizationLimitError, match="assignment limit"):
         repo.query(selector).cached().defs()
 
 
