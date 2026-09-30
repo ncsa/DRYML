@@ -142,6 +142,15 @@ class StableHashGraphHasher(GraphHasher):
         from ..canonical import node_kind, NodeKind
 
         kind = node_kind(obj)
+        if kind is NodeKind.QUOTED_DEF:
+            # Expression-codec data gives portable quote identity. Existing
+            # non-expression quotation data (for example Match selectors) keeps
+            # its established structural hashing path.
+            try:
+                obj.__stable_leaf_bytes__()
+            except Exception:
+                return False
+            return True
         return kind in {
             NodeKind.POD,
             NodeKind.TYPE,

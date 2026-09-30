@@ -321,7 +321,7 @@ def _active_parameters(value: object) -> tuple[Par, ...]:
 
 
 @dataclass(frozen=True, slots=True, init=False, eq=False)
-class Template:
+class _LegacyTemplate:
     """Capture an immutable definition recipe without resolving its target.
 
     Args:
@@ -628,6 +628,37 @@ class Template:
         from .template_codec import template_from_data
 
         return template_from_data(data)
+
+
+class Template:
+    """Annotation-only shorthand for a symbolic :class:`Definition` slot.
+
+    ``Template`` is equivalent to ``Template[Definition]`` at an activated
+    signature boundary. It accepts a symbolic or resolved Definition through Ref
+    authority, persists it as ``QuotedDef`` data, and delivers a Definition
+    without materializing it.
+
+    Raises:
+        TypeError: If called as a runtime value or subscribed with anything other
+            than exactly ``Definition``.
+
+    Side Effects:
+        None. This marker creates no recipe value and never resolves a target.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        raise TypeError("Template is an annotation-only Definition role and cannot be instantiated.")
+
+    @classmethod
+    def __class_getitem__(cls, target):
+        from typing import Annotated
+
+        from .definition import Definition
+        from .signatures import _Role
+
+        if target is not Definition:
+            raise TypeError("Template supports only the exact Definition target.")
+        return Annotated[Definition, _Role("template")]
 
 
 @dataclass(frozen=True, slots=True, init=False, eq=False)

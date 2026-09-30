@@ -481,7 +481,12 @@ def test_symbolic_metric_factory_concretizes_to_the_direct_fold_definition(tmp_p
     direct = regressor_mae(source_ref, model_ref, mode="global")
     recipe = regressor_mae(Par("data"), Par("model"), mode=Par("mode"))
 
-    bound = recipe.sub(data=source_ref, model=model_ref, mode="global")
+    bound = recipe.sub(
+        data=source_ref,
+        model=model_ref,
+        mode="global",
+        traverse_refs=True,
+    )
 
     assert isinstance(bound, Definition)
     assert bound.concretize(repo=repo) == direct.definition

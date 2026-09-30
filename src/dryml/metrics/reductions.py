@@ -148,7 +148,7 @@ def _symbolic_metric_definition(name: str, arguments: Mapping[str, object]) -> D
         )
         mode = arguments["mode"]
         return Fold.defn(
-            source,
+            Ref(source),
             initial_state=MeanInitial.defn(mode=mode),
             accumulator=MeanUpdate.defn(mode=mode),
             finalize=MeanFinalize.defn(),
