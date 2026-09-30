@@ -133,8 +133,11 @@ def test_auto_ref_requires_explicit_intent_for_soft_definitions():
     from dryml.core import AutoRef
 
     resolved = Definition(RoleLeaf, 1)
-    with pytest.raises(SignatureError, match="requested authority is unavailable"):
+    with pytest.raises(SignatureError) as error:
         _plan(Ref[AutoRef]).prepare_args((resolved,), {})
+    assert error.value.reason == (
+        "Definition requires explicit Ref(...) for automatic reference selection"
+    )
 
     delivered = _plan(Ref[AutoRef]).prepare_args((Ref(resolved),), {}).deliver_args()[0][0]
     assert delivered is resolved

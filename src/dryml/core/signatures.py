@@ -1145,16 +1145,24 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
             value, asserted = value.target, True
     if value is None and slot.targets and not slot.nullable:
         raise SignatureError("None does not satisfy this role target", name)
-    if asserted and slot.mode == "automatic":
+    if slot.mode == "automatic":
         from .definition import Definition
 
-        selected = value if isinstance(value, Definition) else _select_authority(
-            value,
-            slot,
-            name,
-            controls,
-            selection_key=name if selection_key is None else selection_key,
-        )
+        if isinstance(value, Definition):
+            if not asserted:
+                raise SignatureError(
+                    "Definition requires explicit Ref(...) for automatic reference selection",
+                    name,
+                )
+            selected = value
+        else:
+            selected = _select_authority(
+                value,
+                slot,
+                name,
+                controls,
+                selection_key=name if selection_key is None else selection_key,
+            )
     else:
         selected = _select_authority(
             value,

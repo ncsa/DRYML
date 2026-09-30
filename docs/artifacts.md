@@ -27,7 +27,9 @@ invalidation handles failed in-place restores.
 `CachedDataset[T]` is a concrete resumable Artifact and ordinary re-iterable
 `Dataset[T]`. Its constructor retains one `Ref[AutoRef]` source without loading,
 traversing, or implicitly saving it. Before successful computation, `ready` is
-false and spec, length, and iteration raise `ArtifactNotReadyError`. Completed
+false and spec, length, and iteration raise `ArtifactNotReadyError`. Supply a
+soft source `Definition` as `Ref(definition)`; a bare Definition is rejected
+rather than assigned implicit reference intent. Completed
 state publishes the codec's actual NumPy-backed output spec with exact container
 kinds, mapping keys/order, tensor values, shapes, yield boundaries, and supported
 dtypes. Ragged, sparse, Python-object, and nullable-object leaves are rejected.

@@ -267,6 +267,9 @@ def test_dispatch_carries_explicit_reference_assertion_to_worker(tmp_path) -> No
     state = repo.save(value, deep_capture=True)
 
     assert dispatch.run(_reference_kind, Ref(state)) == "StateRef"
+    assert dispatch.run(
+        _reference_kind, Ref(Definition(_DefinitionInput, 8))
+    ) == "Definition"
 
 
 def test_dispatch_forwards_one_frozen_exact_selector_without_reresolution(

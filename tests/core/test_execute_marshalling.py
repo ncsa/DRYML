@@ -15,7 +15,7 @@ from dryml.core import (
 )
 from dryml.core.execute import CoreOptions, SharedDirStoreStrategy, prepare_shared_storage
 from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation
-from dryml.core.signatures import Mat, Ref, ReferenceSelection
+from dryml.core.signatures import AutoRef, Mat, Ref, ReferenceSelection
 from dryml.core.store.dir import DirStore
 from dryml.core.symbol import ImportRef
 
@@ -121,6 +121,12 @@ def _definition_identity(value: Ref[Definition]) -> Ref[Definition]:
     return value
 
 
+def _automatic_definition_identity(value: Ref[AutoRef]) -> Ref[Definition]:
+    """Consume explicit soft-Definition intent at the worker boundary."""
+
+    return value
+
+
 def _path_identity(value):
     """Return public path data after transport reconstructs the concrete path."""
     return str(value), value.name
@@ -173,6 +179,9 @@ def test_symbolic_definition_transport_preserves_ref_data_and_mat_delivery(
     _, restored = _invoke(
         strategy, _definition_identity, (definition,), repo=repo
     )
+    _, restored_asserted = _invoke(
+        strategy, _automatic_definition_identity, (Ref(definition),), repo=repo
+    )
     _, restored_skipped = _invoke(
         strategy, _definition_identity, (skipped,), repo=repo
     )
@@ -180,6 +189,7 @@ def test_symbolic_definition_transport_preserves_ref_data_and_mat_delivery(
     assert value == 7
     assert isinstance(restored, Definition)
     assert restored.stable_hash() == definition.stable_hash()
+    assert restored_asserted.stable_hash() == definition.stable_hash()
     assert repr(restored.kwargs["labels"]).startswith("F[")
     assert restored_skipped.args is None
     assert restored_skipped.stable_hash() == skipped.stable_hash()
