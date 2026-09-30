@@ -8,7 +8,6 @@ invokes a factory/provider.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import math
 from typing import Any, Mapping
@@ -32,113 +31,11 @@ class TemplateCodecError(ParameterizationError):
     """
 
 
-def template_to_data(template: Any) -> dict[str, object]:
-    """Encode one Template into the closed v1 graph payload.
-
-    Args:
-        template: The immutable :class:`Template` to encode.
-
-    Returns:
-        A canonical, JSON-compatible ``dryml-template`` v1 mapping.
-
-    Raises:
-        TemplateCodecError: If a value is nonportable, cyclic, or exceeds a
-            codec limit.
-    """
-
-    from .template import Template
-
-    if not isinstance(template, Template):
-        raise TypeError("template_to_data requires a Template")
-    return _encode("template", template.root)
-
-
-def template_from_data(data: Mapping[str, object]) -> Any:
-    """Decode one closed v1 Template payload without resolving its symbols.
-
-    Args:
-        data: Canonical mapping produced by :func:`template_to_data`.
-
-    Returns:
-        A frozen Template with recreated graph aliases.
-
-    Raises:
-        TemplateCodecError: If the payload is unknown, malformed, cyclic,
-            noncanonical, or exceeds a hard limit.
-    """
-
-    from .template import Template
-
-    kind, root = _decode(data)
-    if kind != "template":
-        raise TemplateCodecError("template payload kind is invalid")
-    return Template._from_root(root)
-
-
-def template_bundle_to_data(bundle: Any) -> dict[str, object]:
-    """Encode one TemplateBundle as a single aggregate closed v1 graph payload.
-
-    The shared encoder applies its byte, depth, node, and entry limits across all
-    recipes rather than resetting the budget for each individual recipe.
-
-    Args:
-        bundle: Immutable TemplateBundle to encode.
-
-    Returns:
-        Canonical ``dryml-template`` v1 aggregate data.
-
-    Raises:
-        TypeError: If ``bundle`` is not a TemplateBundle.
-        ParameterizationError: If any recipe is nonportable or the aggregate exceeds a
-            codec limit.
-
-    Side Effects:
-        None. Encoding never resolves a target.
-    """
-
-    from .template import TemplateBundle
-
-    if not isinstance(bundle, TemplateBundle):
-        raise TypeError("template_bundle_to_data requires a TemplateBundle")
-    return _encode("template-bundle", bundle.recipes)
-
-
-def template_bundle_from_data(data: Mapping[str, object]) -> Any:
-    """Decode one canonical aggregate TemplateBundle without target resolution.
-
-    Args:
-        data: Canonical ``dryml-template`` v1 aggregate data.
-
-    Returns:
-        The decoded immutable TemplateBundle.
-
-    Raises:
-        ParameterizationError: If data is malformed, unsupported, noncanonical, or
-            exceeds an aggregate codec limit.
-
-    Side Effects:
-        None. Decoding does not import or invoke recipe targets.
-    """
-
-    from .freeze import FrozenDict
-    from .template import Template, TemplateBundle
-
-    kind, root = _decode(data)
-    if kind != "template-bundle" or not isinstance(root, FrozenDict):
-        raise TemplateCodecError("template bundle payload kind is invalid")
-    if any(type(name) is not str or not isinstance(recipe, Template) for name, recipe in root.items()):
-        raise TemplateCodecError("template bundle recipes are invalid")
-    try:
-        return TemplateBundle._from_recipes(root)
-    except (TypeError, ParameterizationError) as error:
-        raise TemplateCodecError("template bundle recipes are invalid") from error
-
-
 def selector_to_data(selector: Any) -> dict[str, object]:
-    """Encode an exact TemplateSelector with built-in immutable domains only.
+    """Encode an exact GeneratorSelector with built-in immutable domains only.
 
     Args:
-        selector: Exact selector produced by ``TemplateGenerator``.
+        selector: Exact selector produced by ``Generator``.
 
     Returns:
         A canonical v1 data mapping.
@@ -148,21 +45,21 @@ def selector_to_data(selector: Any) -> dict[str, object]:
     """
 
     from .domains import UniformFromSet, UniformIntRange
-    from .template_selector import TemplateSelector
+    from .generator import GeneratorSelector
 
-    if not isinstance(selector, TemplateSelector):
-        raise TypeError("selector_to_data requires a TemplateSelector")
+    if not isinstance(selector, GeneratorSelector):
+        raise TypeError("selector_to_data requires a GeneratorSelector")
     generator = selector._generator
     domains = []
     encoder = _Encoder()
-    for name, domain in generator.domains.items():
+    for name, domain in generator.distributions.items():
         if isinstance(domain, UniformIntRange):
             domains.append({"name": name, "kind": "int-range", "lo": domain.lo, "hi": domain.hi})
         elif isinstance(domain, UniformFromSet):
             domains.append({"name": name, "kind": "set", "values": [encoder.value(value) for value in domain.values]})
         else:
             raise TemplateCodecError("template selector has a nonportable domain")
-    root = encoder.value(generator.template.root)
+    root = encoder.value(generator.definition)
     return encoder.finish(
         "template-selector",
         root,
@@ -172,21 +69,21 @@ def selector_to_data(selector: Any) -> dict[str, object]:
 
 
 def selector_from_data(data: Mapping[str, object]) -> Any:
-    """Decode a built-in-domain TemplateSelector without runtime providers.
+    """Decode a built-in-domain GeneratorSelector without runtime providers.
 
     Args:
         data: Canonical mapping produced by :func:`selector_to_data`.
 
     Returns:
-        A TemplateSelector reconstructed from inert template and domain data.
+        A GeneratorSelector reconstructed from inert Definition and domain data.
 
     Raises:
         TemplateCodecError: If policies, domains, or graph data are invalid.
     """
 
     from .domains import UniformFromSet, UniformIntRange
-    from .template import Template
-    from .template_selector import TemplateGenerator, TemplateSelector
+    from .definition import Definition
+    from .generator import Generator, GeneratorSelector
 
     kind, root, extra, state = _decode(data, extra={"domains", "traverse_refs", "max_assignments"})
     if kind != "template-selector":
@@ -209,11 +106,10 @@ def selector_from_data(data: Mapping[str, object]) -> Any:
         else:
             raise TemplateCodecError("template selector domain entry is invalid")
     try:
-        generator = TemplateGenerator(
-            Template._from_root(root), sub_dict=domains,
-            traverse_refs=extra["traverse_refs"],
-        )
-        selector = TemplateSelector(generator, max_assignments=extra["max_assignments"])
+        if not isinstance(root, Definition):
+            raise TemplateCodecError("template selector root must be a Definition")
+        generator = Generator(root, domains, traverse_refs=extra["traverse_refs"])
+        selector = GeneratorSelector(generator, max_assignments=extra["max_assignments"])
     except ParameterizationError:
         raise
     except Exception as error:
@@ -221,13 +117,6 @@ def selector_from_data(data: Mapping[str, object]) -> Any:
     if selector_to_data(selector) != dict(data):
         raise TemplateCodecError("template selector payload is not canonical")
     return selector
-
-
-def stable_hash(template: Any) -> str:
-    """Return the topology-sensitive stable digest of one portable Template."""
-
-    encoded = _canonical_bytes(template_to_data(template))
-    return hashlib.sha256(b"dryml-template-v1\x00" + encoded).hexdigest()
 
 
 class _Encoder:
@@ -312,12 +201,7 @@ class _Encoder:
         from .quoted import QuotedDef, SelectorSpec
         from .reference_values import ObjectRef, StateRef
         from .selector import Selector
-        from .template import Expr, Par, Template, TemplateBundle, _BinaryExpr, _RepeatExpr, _validate_number
-
-        if isinstance(value, Template):
-            return {"tag": "template", "root": self.value(value.root, depth)}
-        if isinstance(value, TemplateBundle):
-            return {"tag": "template-bundle", "recipes": self.value(value.recipes, depth)}
+        from .template import Expr, Par, _BinaryExpr, _RepeatExpr, _validate_number
         if isinstance(value, Par):
             path = value.path.to_data()
             self.consume_entries(len(path["segments"]))
@@ -501,19 +385,12 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectId, ObjectRef, StateRef
     from .selector import Selector
-    from .template import Expr, Par, Template, TemplateBundle, _BinaryExpr, _RepeatExpr, _validate_number
+    from .template import Expr, Par, _BinaryExpr, _RepeatExpr, _validate_number
     from .utils.graph.path import GraphPath
 
     if not isinstance(data, Mapping) or not isinstance(data.get("tag"), str): raise TemplateCodecError("template node is invalid")
     tag = data["tag"]
     value = lambda item: _decode_value(item, state, depth + 1)
-    if tag == "template" and set(data) == {"tag", "root"}: return Template._from_root(value(data["root"]))
-    if tag == "template-bundle" and set(data) == {"tag", "recipes"}:
-        recipes = value(data["recipes"])
-        if not isinstance(recipes, FrozenDict) or any(type(name) is not str or not isinstance(recipe, Template) for name, recipe in recipes.items()):
-            raise TemplateCodecError("template bundle recipes are invalid")
-        try: return TemplateBundle._from_recipes(recipes)
-        except (TypeError, ParameterizationError): raise TemplateCodecError("template bundle recipes are invalid") from None
     if tag == "par" and set(data) == {"tag", "name", "path"}:
         path = data["path"]
         if not isinstance(path, Mapping) or not isinstance(path.get("segments"), list):

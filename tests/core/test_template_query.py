@@ -7,14 +7,13 @@ import warnings
 
 import pytest
 
-from dryml.core import Definition, Object, Ref, Repo
+from dryml.core import Definition, Generator, Object, Ref, Repo, Template
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.domains import UniformFromSet
 from dryml.core.errors import ParameterizationLimitError
 from dryml.core.links import DefLink
 from dryml.core.query.model import QueryDomainError, QueryIndexError
-from dryml.core.template import Par, Template
-from dryml.core.template_selector import TemplateGenerator
+from dryml.core.template import Par
 from dryml.core.params import AnyValue
 from dryml.core.factory import FactorySpec
 
@@ -43,16 +42,16 @@ class FactoryQueryOwner(Object):
 class RecipeQueryOwner(Object):
     """Owner carrying an inert recipe through an explicit Ref boundary."""
 
-    def __init__(self, recipe: Ref[Template]):
+    def __init__(self, recipe: Template):
         self.recipe = recipe
 
 
 def _selector(*, shared: bool):
     child = Definition(QueryTemplateLeaf, Par("width"))
     children = [child, child] if shared else [child, Definition(QueryTemplateLeaf, Par("width"))]
-    return TemplateGenerator(
-        Template(QueryTemplateParent, children),
-        width=UniformFromSet((64,)),
+    return Generator(
+        Definition(QueryTemplateParent, children),
+        {"width": UniformFromSet((64,))},
     ).support_selector()
 
 
@@ -145,9 +144,9 @@ def test_nested_template_selector_honors_reference_aware_path_policies(tmp_path)
     repo.save_object(reference)
     repo.save_object(mixed)
 
-    selector = TemplateGenerator(
-        Template(QueryTemplateLeaf, Par("width")),
-        width=UniformFromSet((64,)),
+    selector = Generator(
+        Definition(QueryTemplateLeaf, Par("width")),
+        {"width": UniformFromSet((64,))},
     ).support_selector()
 
     assert len(tuple(repo.query(selector).nested().execute())) == 1
@@ -192,9 +191,9 @@ def test_nested_template_selector_drains_before_occurrence_cap(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     leaf = QueryTemplateLeaf(64, repo=repo)
     repo.save_object(QueryTemplateParent([leaf, leaf], repo=repo))
-    selector = TemplateGenerator(
-        Template(QueryTemplateLeaf, Par("width")),
-        width=UniformFromSet((64,)),
+    selector = Generator(
+        Definition(QueryTemplateLeaf, Par("width")),
+        {"width": UniformFromSet((64,))},
     ).support_selector(max_assignments=1)
     query = repo.query(selector).nested().max_occurrences(1)
 
@@ -214,9 +213,9 @@ def test_capped_nested_template_result_cannot_regrow_fixed_witnesses(tmp_path):
     second = QueryTemplateParent(QueryTemplateLeaf(128, repo=repo), repo=repo)
     repo.save_object(first)
     repo.save_object(second)
-    selector = TemplateGenerator(
-        Template(QueryTemplateLeaf, Par("width")),
-        width=UniformFromSet((64, 128)),
+    selector = Generator(
+        Definition(QueryTemplateLeaf, Par("width")),
+        {"width": UniformFromSet((64, 128))},
     ).support_selector()
 
     raw = repo.query(selector).nested().max_occurrences(1).execute()
@@ -238,9 +237,9 @@ def test_fixed_complete_cdef_containment_supports_generator_refinement(tmp_path)
     repo.save_object(QueryTemplateParent(first, repo=repo))
     repo.save_object(QueryTemplateParent(second, repo=repo))
     direct_selector = Definition(QueryTemplateLeaf, AnyValue())
-    generator = TemplateGenerator(
-        Template(QueryTemplateLeaf, Par("width")),
-        width=UniformFromSet((64,)),
+    generator = Generator(
+        Definition(QueryTemplateLeaf, Par("width")),
+        {"width": UniformFromSet((64,))},
     ).support_selector()
 
     complete = repo.query(direct_selector).nested(edges="all").definitions().defs()
@@ -277,13 +276,13 @@ def test_fixed_complete_containment_shares_template_budgets(
     repo.save_object(first)
     repo.save_object(second)
     direct_selector = Definition(QueryTemplateLeaf, AnyValue())
-    generator = TemplateGenerator(
-        Template(
+    generator = Generator(
+        Definition(
             QueryTemplateLeaf if carrier != "owner" else QueryTemplateParent,
             Par("width") * 1 if carrier != "owner"
             else Definition(QueryTemplateLeaf, Par("width") * 1),
         ),
-        width=UniformFromSet((64, 128)),
+        {"width": UniformFromSet((64, 128))},
     ).support_selector(max_assignments=2)
 
     if carrier == "direct":
@@ -384,8 +383,8 @@ def test_template_selector_witness_budget_counts_prefilter_rejections_and_duplic
     import dryml.core.query.query as query_module
     from dryml.core.store.dir import DirStore
 
-    assert query_module._DEFAULT_TEMPLATE_WITNESS_LIMIT == 65_536
-    monkeypatch.setattr(query_module, "_DEFAULT_TEMPLATE_WITNESS_LIMIT", 2)
+    assert query_module._DEFAULT_GENERATOR_WITNESS_LIMIT == 65_536
+    monkeypatch.setattr(query_module, "_DEFAULT_GENERATOR_WITNESS_LIMIT", 2)
 
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
@@ -457,9 +456,9 @@ def test_template_selector_query_scans_stored_authority_and_controls_refinement(
     with pytest.raises(QueryDomainError):
         repo.query().stored().defs().refine(_selector(shared=True))
 
-    leaf_selector = TemplateGenerator(
-        Template(QueryTemplateLeaf, Par("width")),
-        width=UniformFromSet((64,)),
+    leaf_selector = Generator(
+        Definition(QueryTemplateLeaf, Par("width")),
+        {"width": UniformFromSet((64,))},
     ).support_selector()
     nested = repo.query(leaf_selector).nested().definitions().defs()
     assert len(nested) == 1
@@ -498,10 +497,10 @@ def test_template_selector_uses_index_prefilter_without_hydrate_index(tmp_path, 
 def test_traversed_recipe_ref_has_direct_and_query_support_parity():
     """Loose index projection cannot reject a recipe accepted by exact support."""
 
-    recipe = Template(QueryTemplateLeaf, Par("width"))
-    selector = TemplateGenerator(
-        Template(RecipeQueryOwner, Ref(recipe)),
-        width=UniformFromSet((64,)),
+    recipe = Definition(QueryTemplateLeaf, Par("width"))
+    selector = Generator(
+        Definition(RecipeQueryOwner, Ref(recipe)),
+        {"width": UniformFromSet((64,))},
         traverse_refs=True,
     ).support_selector()
     repo = Repo()
@@ -558,9 +557,9 @@ def test_occurrence_refinement_preserves_owner_replica_authority(tmp_path):
     first_repo.save_object(first)
     second_repo.save_object(second)
 
-    selector = TemplateGenerator(
-        Template(QueryTemplateLeaf, Par("width")),
-        width=UniformFromSet((64, 128)),
+    selector = Generator(
+        Definition(QueryTemplateLeaf, Par("width")),
+        {"width": UniformFromSet((64, 128))},
     ).support_selector()
     repo = Repo(stores=(first_store, second_store))
     occurrences = repo.query(selector).nested().execute().refine(selector)
@@ -585,13 +584,13 @@ def test_occurrence_projections_retain_exact_witnesses_for_refinement(tmp_path):
     leaf = QueryTemplateLeaf(64, repo=repo)
     owner = QueryTemplateParent([leaf], repo=repo)
     repo.save_object(owner)
-    leaf_selector = TemplateGenerator(
-        Template(QueryTemplateLeaf, Par("width")),
-        width=UniformFromSet((64,)),
+    leaf_selector = Generator(
+        Definition(QueryTemplateLeaf, Par("width")),
+        {"width": UniformFromSet((64,))},
     ).support_selector()
-    owner_selector = TemplateGenerator(
-        Template(QueryTemplateParent, [Definition(QueryTemplateLeaf, Par("width"))]),
-        width=UniformFromSet((64,)),
+    owner_selector = Generator(
+        Definition(QueryTemplateParent, [Definition(QueryTemplateLeaf, Par("width"))]),
+        {"width": UniformFromSet((64,))},
     ).support_selector()
 
     occurrences = repo.query(leaf_selector).nested().execute()
@@ -615,9 +614,9 @@ def test_template_query_enforces_one_cumulative_assignment_budget():
         ),
     )
     child = Definition(QueryTemplateLeaf, Par("width") * 1)
-    selector = TemplateGenerator(
-        Template(QueryTemplateParent, [child, Definition(QueryTemplateLeaf, Par("width") * 1)]),
-        width=UniformFromSet((64,)),
+    selector = Generator(
+        Definition(QueryTemplateParent, [child, Definition(QueryTemplateLeaf, Par("width") * 1)]),
+        {"width": UniformFromSet((64,))},
     ).support_selector(max_assignments=1)
 
     with pytest.raises(ParameterizationLimitError, match="assignment limit"):

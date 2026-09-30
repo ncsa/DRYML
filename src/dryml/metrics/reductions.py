@@ -10,7 +10,7 @@ from typing import Any, Literal, TypeAlias
 import numpy as np
 
 from dryml.artifacts import Fold, mean
-from dryml.core import AutoRef, ConcreteDefinition, Definition, Par, Ref, Template, function
+from dryml.core import AutoRef, ConcreteDefinition, Definition, Par, Ref, function
 from dryml.core.tensor_spec import SpecTree, TensorSpec
 from dryml.data import Abs, Diff, Map, Pipe, Project, Select, Squared
 from dryml.data.reduction_methods import (
@@ -28,7 +28,7 @@ F1Average: TypeAlias = Literal["binary", "micro", "macro", "weighted", "none"]
 def _contains_template_value(value: object) -> bool:
     """Return whether supported metric input structure contains symbolic values."""
 
-    if isinstance(value, (Definition, Template, Par)):
+    if isinstance(value, (Definition, Par)):
         return True
     if isinstance(value, Mapping):
         return any(
@@ -67,7 +67,7 @@ def _metric_factory(target):
 def _validate_known_metric_arguments(name: str, arguments: Mapping[str, object]) -> None:
     """Validate literal metric controls while retaining symbolic dependencies."""
 
-    if "mode" in arguments and not isinstance(arguments["mode"], (Template, Par)):
+    if "mode" in arguments and not isinstance(arguments["mode"], Par):
         mode = arguments["mode"]
         if mode not in ("global", "coordinate"):
             raise ValueError("mode must be 'global' or 'coordinate'.")
@@ -82,7 +82,7 @@ def _validate_known_metric_arguments(name: str, arguments: Mapping[str, object])
 def _validate_known_classes(classes: object) -> None:
     """Reject fixed class-domain errors while allowing symbolic tuple members."""
 
-    if isinstance(classes, (Template, Par)):
+    if isinstance(classes, Par):
         return
     if not isinstance(classes, tuple) or not classes:
         _classes(classes)
@@ -100,8 +100,8 @@ def _validate_known_classes(classes: object) -> None:
 def _validate_known_f1_controls(average: object, positive_index: object) -> None:
     """Validate F1 facts that do not depend on unresolved direct controls."""
 
-    average_symbolic = isinstance(average, (Template, Par))
-    positive_symbolic = isinstance(positive_index, (Template, Par))
+    average_symbolic = isinstance(average, Par)
+    positive_symbolic = isinstance(positive_index, Par)
     if not average_symbolic and average not in ("binary", "micro", "macro", "weighted", "none"):
         raise ValueError("average must be binary, micro, macro, weighted, or none.")
     if not positive_symbolic and positive_index is not None and (

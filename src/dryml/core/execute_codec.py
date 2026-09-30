@@ -94,7 +94,6 @@ class _DillLeafPickler(dill.Pickler):
         """Reject values that require the structural core transport."""
 
         from dryml.managed.config import ManagedConfig
-        from .template import TemplateBundle
 
         if isinstance(value, (asyncio.Future, asyncio.AbstractEventLoop)):
             raise _DillLeafError("live asyncio resource")
@@ -109,7 +108,6 @@ class _DillLeafPickler(dill.Pickler):
                 Object,
                 ObjectRef,
                 StateRef,
-                TemplateBundle,
             ),
         ):
             raise _DillLeafError("DRYML semantic value inside ordinary value")
@@ -446,9 +444,6 @@ class _Encoder:
                 "qualname": imported_capture.qualname,
             }
         automatic = id(value) in self.automatic_references
-        from .template import TemplateBundle
-        if isinstance(value, TemplateBundle):
-            return {"tag": "template-bundle", "value": value.to_data()}
         if isinstance(value, ConcreteDefinition):
             return {"tag": "auto_cdef" if automatic else "cdef", "value": encode_cdef_graph(value)}
         if isinstance(value, Object):
@@ -893,14 +888,6 @@ class _Decoder:
             if not isinstance(module, str) or (qualname is not None and not isinstance(qualname, str)):
                 _fail("malformed import reference", path)
             return ImportRef(module, qualname).resolve()
-        if tag == "template-bundle":
-            from .template import TemplateBundle
-            try:
-                return TemplateBundle.from_data(node.get("value"))
-            except (TypeError, ValueError) as error:
-                raise CoreCallCodecError(
-                    f"core execution transport rejected malformed template bundle at {path}"
-                ) from error
         if tag in {"link", "assertion"}:
             from .cdef_graph import EdgeKind
             try:

@@ -4985,14 +4985,14 @@ class Repo:
             return result.one()
 
     def query(self, selector=None):
-        """Create an immutable structural or exact-template definition query.
+        """Create an immutable structural or exact GeneratorSelector definition query.
 
         Args:
             selector: A Definition, ConcreteDefinition, ObjectRef, StateRef,
-                Selector, TemplateSelector, Object, or ``None``. ObjectRef and
+                Selector, GeneratorSelector, Object, or ``None``. ObjectRef and
                 StateRef values are exact lazy containment targets and require
                 ``nested()``; they do not alter ordinary reference authority.
-                Template selectors retain an exact support residual and verify
+                Generator selectors retain an exact support residual and verify
                 graph-distinct witnesses at terminal execution.
 
         Returns:

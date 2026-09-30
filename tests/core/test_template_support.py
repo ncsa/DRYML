@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core import Definition, Object
+from dryml.core import Definition, Generator, Object
 from dryml.core.domains import UniformFromSet, UniformIntRange
 from dryml.core.errors import ParameterizationError, ParameterizationLimitError, UnsupportedGeneratorVerificationError
-from dryml.core.template import Par, Shared, Template, repeat
-from dryml.core.template_selector import TemplateGenerator
+from dryml.core.template import Par, Shared, repeat
 
 
 class SupportModel:
@@ -74,22 +73,21 @@ class InvalidBranchDomain:
 
 def test_support_selector_enforces_correlated_and_hidden_finite_products():
     """Exact support retains joint assignments rather than projected value sets."""
-    visible = Template(
+    visible = Definition(
         SupportModel,
         Par("width"),
         scale=2,
         product=Par("width") * 2,
     )
-    selector = TemplateGenerator(visible, width=UniformFromSet((32, 64))).support_selector()
+    selector = Generator(visible, {"width": UniformFromSet((32, 64))}).support_selector()
 
     assert selector.matches(Definition(SupportModel, 64, scale=2, product=128))
     assert not selector.matches(Definition(SupportModel, 32, scale=2, product=128))
 
-    hidden = Template(SupportModel, product=Par("width") * Par("scale"))
-    hidden_selector = TemplateGenerator(
+    hidden = Definition(SupportModel, product=Par("width") * Par("scale"))
+    hidden_selector = Generator(
         hidden,
-        width=UniformFromSet((32, 64)),
-        scale=UniformFromSet((1, 2)),
+        {"width": UniformFromSet((32, 64)), "scale": UniformFromSet((1, 2))},
     ).support_selector()
     assert hidden_selector.matches(Definition(SupportModel, product=64))
     assert not hidden_selector.matches(Definition(SupportModel, product=96))
@@ -99,13 +97,13 @@ def test_support_selector_enforces_shared_and_independent_graph_topology():
     """Exact support uses a two-way node mapping rather than structural equality."""
 
     block = Definition(SupportLeaf, Par("width"))
-    shared_selector = TemplateGenerator(
-        Template(SupportParent, repeat([block], Shared(2))),
-        width=UniformFromSet((64,)),
+    shared_selector = Generator(
+        Definition(SupportParent, repeat([block], Shared(2))),
+        {"width": UniformFromSet((64,))},
     ).support_selector()
-    independent_selector = TemplateGenerator(
-        Template(SupportParent, repeat([block], 2)),
-        width=UniformFromSet((64,)),
+    independent_selector = Generator(
+        Definition(SupportParent, repeat([block], 2)),
+        {"width": UniformFromSet((64,))},
     ).support_selector()
     shared_leaf = Definition(SupportLeaf, 64)
     shared = Definition(SupportParent, [shared_leaf, shared_leaf])
@@ -122,8 +120,8 @@ def test_support_selector_enforces_shared_and_independent_graph_topology():
 
 def test_direct_wide_range_membership_does_not_require_enumeration():
     """A visible range root uses exact membership before finite expansion."""
-    template = Template(SupportModel, Par("width"), product=Par("width") * 2)
-    selector = TemplateGenerator(template, width=UniformIntRange(1, 1_000_000)).support_selector()
+    definition = Definition(SupportModel, Par("width"), product=Par("width") * 2)
+    selector = Generator(definition, {"width": UniformIntRange(1, 1_000_000)}).support_selector()
 
     assert selector.matches(Definition(SupportModel, 999_999, product=1_999_998))
     assert not selector.matches(Definition(SupportModel, 999_999, product=1_999_999))
@@ -131,8 +129,8 @@ def test_direct_wide_range_membership_does_not_require_enumeration():
 
 def test_hidden_wide_support_exceeding_budget_is_not_approximated():
     """Unknown finite roots exceed proof budget rather than accepting bounds."""
-    template = Template(SupportModel, product=Par("width") * 2)
-    selector = TemplateGenerator(template, width=UniformIntRange(1, 1_000_000)).support_selector(max_assignments=8)
+    definition = Definition(SupportModel, product=Par("width") * 2)
+    selector = Generator(definition, {"width": UniformIntRange(1, 1_000_000)}).support_selector(max_assignments=8)
 
     with pytest.raises(ParameterizationLimitError):
         selector.matches(Definition(SupportModel, product=8))
@@ -140,13 +138,13 @@ def test_hidden_wide_support_exceeding_budget_is_not_approximated():
 
 def test_support_never_hides_invalid_branches_or_unavailable_exact_proofs():
     """A later invalid branch and unindexed hidden root are explicit failures."""
-    invalid = Template(SupportModel, product=10 / Par("divisor"))
-    selector = TemplateGenerator(invalid, divisor=InvalidBranchDomain()).support_selector()
+    invalid = Definition(SupportModel, product=10 / Par("divisor"))
+    selector = Generator(invalid, {"divisor": InvalidBranchDomain()}).support_selector()
 
     with pytest.raises(ParameterizationError, match="division"):
         selector.matches(Definition(SupportModel, product=10))
 
-    unindexed = Template(SupportModel, product=Par("width") * 2)
-    unsupported = TemplateGenerator(unindexed, width=UnindexedDomain()).support_selector()
+    unindexed = Definition(SupportModel, product=Par("width") * 2)
+    unsupported = Generator(unindexed, {"width": UnindexedDomain()}).support_selector()
     with pytest.raises(UnsupportedGeneratorVerificationError):
         unsupported.matches(Definition(SupportModel, product=2))

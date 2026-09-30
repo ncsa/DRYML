@@ -348,11 +348,11 @@ def _validate_target(target: Any, role: str, slot: str) -> None:
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectRef, StateRef
     from .selector import Selector
-    from .template import Template, TemplateBundle
+    from .template import Template
 
     supported = (
         Definition, ConcreteDefinition, ObjectRef, StateRef, Object, AutoRef,
-        QuotedDef, Selector, SelectorSpec, Template, TemplateBundle,
+        QuotedDef, Selector, SelectorSpec, Template,
     )
     if target not in supported:
         _reject_object_subclass(target, slot)
@@ -365,8 +365,6 @@ def _validate_target(target: Any, role: str, slot: str) -> None:
         raise SignatureError("quotation targets are only reference data", slot)
     if target is Template:
         raise SignatureError("Template is annotation vocabulary, not a Ref target", slot)
-    if target is TemplateBundle and role != "ref":
-        raise SignatureError("Template quotations are only reference targets", slot)
 
 
 def _parse_slot(annotation: Any, slot: str) -> _Slot:
@@ -1052,8 +1050,12 @@ def _normalize_parameter_value(value: Any, parameter: inspect.Parameter,
             return None, None
         if not isinstance(value, Mapping):
             raise SignatureError("Template mapping value must be a mapping", name)
+        if len(value) > 4_096:
+            raise SignatureError("Template mapping exceeds the 4096-entry limit", name)
         if any(type(key) is not str for key in value):
             raise SignatureError("Template mapping keys must be strings", name)
+        if any(not key for key in value):
+            raise SignatureError("Template mapping keys must be nonempty", name)
         from .utils.graph.path import canonical_key_bytes
 
         authority, canonical = {}, {}
@@ -1125,15 +1127,9 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
             # Decoded and structural links already carry their edge authority.
             # Bound replay and unannotated constructor structure stay inert;
             # fresh explicit constructor roles still enforce their exact edge.
-            from .template import Template, TemplateBundle
-
             if preserve_finalized_links:
                 return value, value
             if persist_role and not slot.explicit:
-                if isinstance(value.target, Template):
-                    raise SignatureError("Template requires an explicit Ref[Template] declaration", name)
-                if isinstance(value.target, TemplateBundle):
-                    raise SignatureError("TemplateBundle requires an explicit Ref[TemplateBundle] declaration", name)
                 return value, value
             expected = EdgeKind.REF if slot.role in {"ref", "template"} else EdgeKind.MATERIALIZE
             if value.kind is not expected:
@@ -1293,7 +1289,6 @@ def _select_exact(value: Any, target: Any, name: str,
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectRef, StateRef
     from .selector import Selector
-    from .template import Template, TemplateBundle
 
     if target is QuotedDef:
         return value if isinstance(value, QuotedDef) else QuotedDef(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dryml.core import Definition, F
-from dryml.core.template import Par, Template
+from dryml.core.template import Par
 
 
 class ProjectionModel:
@@ -17,13 +17,13 @@ class ProjectionModel:
 
 def test_loose_projection_preserves_known_values_and_sequence_positions():
     """Unknown values become local wildcards while fixed facts still constrain."""
-    template = Template(
+    definition = Definition(
         ProjectionModel,
         (Par("width"), "fixed", Par("depth")),
         activation="relu",
         flag=False,
     )
-    selector = template.as_selector()
+    selector = definition.loose_selector()
 
     assert selector.matches(Definition(ProjectionModel, (999, "fixed", 0), activation="relu", flag=False))
     assert not selector.matches(Definition(ProjectionModel, (999, "wrong", 0), activation="relu", flag=False))
@@ -32,12 +32,12 @@ def test_loose_projection_preserves_known_values_and_sequence_positions():
 
 def test_loose_projection_keeps_partial_factory_call_shape_without_building():
     """Projected factories retain target, arity, known values, and keyword presence."""
-    template = Template(
+    definition = Definition(
         ProjectionModel,
         (F("builtins:tuple", Par("width"), "fixed", flag=Par("flag")),),
         activation="relu",
     )
-    selector = template.as_selector()
+    selector = definition.loose_selector()
 
     assert selector.matches(Definition(
         ProjectionModel,

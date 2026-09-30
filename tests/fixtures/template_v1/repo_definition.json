@@ -1,8 +1,0 @@
-{
-  "default_store": null,
-  "routing": null,
-  "schema": "dryml-repo-definition",
-  "settings": {"config": {}, "lease_duration": 30.0, "save_objs_on_deletion": false},
-  "stores": [],
-  "version": 1
-}
