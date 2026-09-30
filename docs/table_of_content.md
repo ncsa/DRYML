@@ -10,7 +10,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 2. [Objects and Definitions](objects_and_defs.md)
 3. [Immutable Definition Graph](immutable_definition_graph.md)
 4. [Graph Querying](graph_querying.md)
-5. [Definition Templates](templates.md)
+5. [Symbolic Definitions And Generation](templates.md)
 6. [Annotations](annotations.md)
 7. [Hard Requirements](requirements.md)
 8. [Code Analysis](code_analysis.md)

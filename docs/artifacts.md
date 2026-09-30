@@ -168,12 +168,12 @@ likewise accept non-materializing Dataset/model references and require explicit
 prediction and target label Methods. They never decode logits, probabilities,
 or one-hot values implicitly. A caller can use `ArgMax` or another declared
 Method in the supplied conversion graph when that conversion is intended.
-All five supplied metric helpers return an inert `Template` when any supported
-argument contains `Template` or `Par`; concrete-only calls continue to return an
-uncomputed Fold. Invalid known literal controls fail while authoring the symbolic
-call, while checks that depend on unresolved values run when the bound factory is
-built. Symbolic lifting itself constructs no helper Method and performs no input
-work.
+All five supplied metric helpers return an inert class-rooted `Definition` when
+any supported argument contains a symbolic Definition value or `Par`; concrete-only
+calls continue to return an uncomputed Fold. Invalid known literal controls fail
+while authoring the symbolic call, while checks that depend on unresolved values
+run when the bound Definition is concretized. Symbolic lifting itself constructs
+no helper Method and performs no input work.
 Incoming `StateRef` inputs remain exact nested references in that declared graph:
 a later model save does not replace the selected snapshot. Factory construction
 never saves an unpersisted source or model. A completed metric Fold can restore

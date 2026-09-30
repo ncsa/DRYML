@@ -145,8 +145,8 @@ file's function allowlist is deliberately updated. This intentional selection
 gap is why the exhaustive mode remains available on explicit user request.
 
 The ML workflow qualification representative set retains dependency-light coverage for Method
-preparation/stream handoffs, recursive Experiment identity projection,
-TemplateBundle and history v1 fixtures, TrainState observation persistence,
+preparation/stream handoffs, recursive Experiment identity projection, symbolic
+Definition quotation and history v1 fixtures, TrainState observation persistence,
 Artifact/history association, and closed qualification request construction.
 It does not run TFDS preparation, a real 24-cell CPU/recovery matrix, Ray,
 training, or GPU execution. Those are explicit opt-in qualification gates, not

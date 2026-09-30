@@ -6,16 +6,18 @@ Graph traversal records typed V2 `Parameter` and container paths. Materializing 
 
 Store indexes are acceleration only. Rebuild scans authoritative definition and reference records, announces visible progress, and can safely replace a missing or stale derived index. A query may fail closed when current metadata is incompatible; it never treats an incompatible index as empty or current authority.
 
-## Template Selectors
+## Symbolic Definition Selectors
 
-`Template.as_selector()` creates a loose ordinary Selector that preserves known
-concrete structure but intentionally drops unknown parameter, arithmetic, and
-topology relationships. Use `TemplateGenerator.support_selector()` when a query
-must verify captured domain support, linked names, derived values, ordering, and
-shared-node topology exactly. Template support verification is residual to index
-prefiltering and never constructs candidate Objects or factory targets. A provider
-without exact verification raises an explicit unsupported-verification error; a
-numeric bound alone is never accepted as a match.
+`Definition.as_selector()` retains its ordinary selector behavior. Use
+`Definition.loose_selector()` to project known symbolic structure into a loose
+ordinary Selector; it intentionally drops unknown parameter, arithmetic, and
+topology relationships. Use `Generator.support_selector()` when a query must
+verify captured distribution support, linked names, derived values, ordering, and
+shared-node topology exactly. Exact Generator support verification is residual to
+index prefiltering and never constructs candidate Objects or factory targets. A
+provider without an exact proof raises
+`UnsupportedGeneratorVerificationError`; a numeric bound alone is never accepted
+as a match.
 
 Exact support remains residual because graph-distinct authoritative witnesses
 cannot be collapsed into structural index rows. Stored queries use the loose
@@ -24,8 +26,7 @@ roots before residual verification. The default terminal limit is 65,536
 authoritative visits; prefilter rejections and duplicate source visits consume
 the budget before suppression. Lower it with `max_witnesses(n)` or explicitly
 disable it with `max_witnesses(None)`. Finite-support assignment work is also
-bounded cumulatively for the terminal and can raise `TemplateLimitError` before
-any partial result is returned.
+bounded cumulatively for the terminal and can raise `ParameterizationLimitError`
 
 `require_indexed()` and `scan_policy("forbid")` reject exact support because the
 residual always needs complete witness verification. Exact selectors use exact

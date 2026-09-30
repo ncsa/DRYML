@@ -1,7 +1,7 @@
 """Explicit synchronous normalization for supported DRYML signatures.
 
-This module owns the Ref/Mat vocabulary, flat annotation grammar, lossless
-assertions, local activation, and read-only Repo-backed authority selection.
+This module owns the Ref/Mat/Template vocabulary, flat annotation grammar,
+lossless assertions, local activation, and read-only Repo-backed authority selection.
 Materialization stays with Repo and its later whole-boundary admission seam.
 """
 

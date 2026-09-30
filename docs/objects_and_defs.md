@@ -103,14 +103,23 @@ an unchanged factory declaration. `FactorySpec.build(namespace=...)` resolves an
 invokes the target at that explicit consumer boundary; resolution can import
 trusted target code.
 
-## Templates
+## Symbolic Definitions
 
-`Definition.as_template()` explicitly converts a soft definition into an inert
-`Template`; direct authoring uses `Template(Target, ...)`. Templates substitute
-only static values and defer generation to `TemplateGenerator`, whose completed
-sample/grid results are ordinary Definitions. This does not construct the target
-or factory. See [Definition Templates](templates.md) for namespaces, repetition,
-exact support selectors, and the intentional SearchSpace migration.
+`Definition` is also the sole runtime value for symbolic construction. It may
+contain `Par` roots and supported arithmetic or repetition expressions while
+remaining immutable. `names` reports active roots in authored first-occurrence
+order and `is_resolved` means only that no active expression remains. Neither
+operation resolves a target, interprets a receiving constructor role, applies
+defaults, or proves a constructor call is complete or valid.
+
+Use `Definition.sub(...)` for static binding and `Definition.remap(...)` for
+simultaneous root renaming; both return new Definitions and do not construct,
+save, import, or sample. `Distribution` is not construction data and is rejected
+anywhere in Definition-owned structure. To vary every remaining active root, pass
+the partially bound Definition and one exact root-to-Distribution mapping to a
+`Generator`. Its samples and grid members are resolved Definitions. See
+[Symbolic Definitions And Generation](templates.md) for expression traversal,
+role admission, and exact support selection.
 
 ## Categorical Selectors
 

@@ -186,6 +186,11 @@ class Definition(DefInterface, Mapping):
     represent partial selector or search-space intent as well as a construction
     recipe. ``concretize()`` produces a fully bound exact V2
     ``ConcreteDefinition`` when its class and values are materializable.
+    Definitions may contain :class:`Par` and supported symbolic expressions.
+    ``names``, ``is_resolved``, ``sub(...)``, and ``remap(...)`` inspect or
+    rewrite authored structure without resolving targets or interpreting
+    receiving roles. A Distribution is generation policy, not Definition data,
+    and is rejected recursively.
 
     Args:
         *args: Optional class or symbol reference followed by positional
@@ -195,8 +200,14 @@ class Definition(DefInterface, Mapping):
         **kwargs: Supplied constructor values, retained as immutable fields.
 
     Raises:
-            ValueError: If the leading value is not a supported class, callable,
-                or symbol reference, or ``SKIP_ARGS`` is used incorrectly.
+        ValueError: If the leading value is not a supported class, callable, or
+            symbol reference, or ``SKIP_ARGS`` is used incorrectly.
+        ParameterizationError: If a supplied value contains a Distribution or an
+            unsupported order-sensitive symbolic set.
+
+    Side Effects:
+        Freezes supplied values. Construction does not resolve a target, apply
+        defaults, sample a provider, materialize an Object, or persist data.
     """
 
     _cls: Callable[..., Any] | type | ImportRef | SourceSpec | None
@@ -213,6 +224,8 @@ class Definition(DefInterface, Mapping):
 
         Raises:
             ValueError: If the class or ``SKIP_ARGS`` form is invalid.
+            ParameterizationError: If values contain a Distribution or an
+                unsupported order-sensitive symbolic set.
 
         Side Effects:
             Deeply freezes supplied definition values; caller-owned containers
@@ -563,10 +576,41 @@ class Definition(DefInterface, Mapping):
         return Mat(self)
 
     def quote(self):
+        """Return this Definition as explicit local expression data.
+
+        Returns:
+            A ``QuotedDef`` wrapper. It is not a materializing graph edge and
+            remains opaque to ordinary symbolic traversal.
+
+        Raises:
+            TypeError: If this Definition cannot be frozen as quotation data.
+
+        Side Effects:
+            Freezes the quotation value without resolving a target, applying
+            constructor roles, materializing an Object, or saving data.
+        """
+
         from .quoted import QuotedDef
         return QuotedDef(self)
 
     def as_selector(self, **policy):
+        """Create an ordinary Selector using the supplied selector policy.
+
+        Args:
+            **policy: Selector constructor policy, such as class-matching or
+                strictness controls supported by :class:`Selector`.
+
+        Returns:
+            A Selector rooted at this Definition.
+
+        Raises:
+            TypeError: If selector policy is invalid.
+
+        Side Effects:
+            Creates a selector only. It does not rewrite this Definition,
+            resolve a target, materialize an Object, or query a Repo.
+        """
+
         from .selector import Selector
         return Selector(self, **policy)
 

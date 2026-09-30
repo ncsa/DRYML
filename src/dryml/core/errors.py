@@ -25,15 +25,27 @@ class ParameterizationError(ValueError):
 
 
 class UnresolvedDefinitionError(ParameterizationError):
-    """Report an operation that requires a Definition with no active expressions."""
+    """Report an operation requiring a Definition with no active expressions.
+
+    This error identifies symbolic-resolution failure only. A resolved Definition
+    can still be constructor-incomplete or invalid at a later receiving boundary.
+    """
 
 
 class ParameterizationLimitError(ParameterizationError):
-    """Report a symbolic Definition operation that exceeds a declared resource limit."""
+    """Report symbolic Definition or Generator work exceeding a fixed limit.
+
+    Limit failures return no partial rewritten Definition, grid, or exact-support
+    verification result.
+    """
 
 
 class UnsupportedGeneratorVerificationError(ParameterizationError):
-    """Report an unsupported exact verification operation for a Generator."""
+    """Report that a Generator cannot establish exact support verification.
+
+    A conservative provider bound may reject a value, but cannot replace the
+    finite or exact proof required for successful verification.
+    """
 
 # -----------------------------
 # Errors
