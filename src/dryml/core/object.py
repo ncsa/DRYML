@@ -256,18 +256,24 @@ class Dryml(ABCMeta):
         with materialization_admission(operation="direct_object_construction"):
             if __cdef__ is None and object_mode == "load_or_build":
                 from .repo import manage_repo
+                from .materialization import preflight_symbolic_materialization
 
                 with manage_repo(repo=active_repo) as sub_repo:
+                    definition = Definition(dryml_cls, *args, **kwargs)
+                    preflight_symbolic_materialization(definition, repo=sub_repo)
                     _cache_runtime_object_args(sub_repo, args, kwargs)
-                    cdef = Definition(dryml_cls, *args, **kwargs).concretize(repo=sub_repo)
+                    cdef = definition.concretize(repo=sub_repo)
                     return sub_repo.load_or_build(cdef, cache=session_config.cache)
 
             from .repo import default_repo, manage_repo
             with realization_scope(), _construction_config(), manage_repo(repo=active_repo) as sub_repo:
                 if __cdef__ is None:
                     # First-time construction from a soft Definition
-                    _cache_runtime_object_args(sub_repo, args, kwargs)
+                    from .materialization import preflight_symbolic_materialization
+
                     defn = Definition(dryml_cls, *args, **kwargs)
+                    preflight_symbolic_materialization(defn, repo=sub_repo)
+                    _cache_runtime_object_args(sub_repo, args, kwargs)
                     cdef = defn.concretize(repo=sub_repo)
 
                     from .materialization import project_cdef_call

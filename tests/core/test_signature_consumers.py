@@ -296,7 +296,9 @@ def test_all_constructor_entry_points_delegate_to_signature_normalization(monkey
     ConcreteDefinition(PlainConsumer, (2,), {})
     PlainConsumer(3)
 
-    assert calls == ["value", "value", "value"]
+    # Direct construction performs an effect-free role admission before it seeds
+    # live-object caches and repeats normal canonicalization.
+    assert calls == ["value", "value", "value", "value"]
 
 
 def test_public_signature_surface_has_one_owner_and_no_role_facades() -> None:

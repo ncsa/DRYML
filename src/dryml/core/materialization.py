@@ -23,6 +23,94 @@ MaterializationActionKind = Literal["reuse", "construct"]
 MaterializationReuseSource = Literal["memo", "cache", None]
 
 
+def preflight_symbolic_materialization(*roots: Any, repo: Any = None) -> None:
+    """Admit symbolic materializing structure before any Repo or target effect.
+
+    Args:
+        *roots: Raw Definition or container values selected for materialization.
+        repo: Optional existing Repo used only for ordinary Ref authority
+            selection while inspecting constructor signatures.
+
+    Raises:
+        UnresolvedDefinitionError: If active expressions remain in materializing
+            structure after owning Template slots establish quotation barriers.
+        SignatureError: If an activated role rejects its selected authority.
+
+    Side Effects:
+        Resolves materializing class symbols solely to inspect their signatures.
+        It never invokes constructors, factories, providers, CDef construction,
+        cache mutation, claims, or Store writes.
+    """
+
+    from .bound_args import BoundArguments
+    from .cdef_graph import EdgeKind
+    from .definition import ConcreteDefinition, Definition
+    from .errors import UnresolvedDefinitionError
+    from .links import DefLink
+    from .object import Object
+    from .params import Match
+    from .quoted import QuotedDef, SelectorSpec
+    from .signatures import compile_signature
+    from .template import Expr
+    from .utils.graph.value import iter_value_edges
+
+    seen: set[int] = set()
+
+    def visit_definition(definition: Definition) -> None:
+        marker = id(definition)
+        if marker in seen:
+            return
+        seen.add(marker)
+        if definition.cls is None:
+            raise UnresolvedDefinitionError("materializing Definition has no class authority")
+        cls = _resolve_materialization_class(definition) if isinstance(definition, ConcreteDefinition) else resolve_symbol(definition.cls)
+        if not isinstance(cls, type):
+            raise TypeError("materializing Definition class authority must resolve to a type")
+        plan = compile_signature(cls, constructor=True)
+        boundary = plan.prepare_bound(
+            BoundArguments(definition.parameters.items()), partial=True, repo=repo,
+        )
+        for name, value in boundary.authority.items():
+            role = plan.slots[name].role
+            if role in {"template", "ref"}:
+                continue
+            visit(value)
+
+    def visit(value: Any) -> None:
+        if isinstance(value, (QuotedDef, SelectorSpec, Object, Match)):
+            return
+        if isinstance(value, Expr):
+            raise UnresolvedDefinitionError(
+                "materializing Definition contains an active symbolic expression"
+            )
+        if isinstance(value, ConcreteDefinition):
+            # Persisted CDefs were already role-normalized; their direct Ref
+            # quotations are terminal, while materializing descendants remain live.
+            marker = id(value)
+            if marker in seen:
+                return
+            seen.add(marker)
+            for edge in iter_value_edges(value):
+                visit(edge.value)
+            return
+        if isinstance(value, Definition):
+            visit_definition(value)
+            return
+        if isinstance(value, DefLink):
+            if value.kind is EdgeKind.MATERIALIZE:
+                visit(value.target)
+            return
+        marker = id(value)
+        if marker in seen:
+            return
+        seen.add(marker)
+        for edge in iter_value_edges(value):
+            visit(edge.value)
+
+    for root in roots:
+        visit(root)
+
+
 def _resolve_materialization_class(cdef: ConcreteDefinition) -> type:
     """Resolve one CDef class while explaining retired mixin authority."""
 

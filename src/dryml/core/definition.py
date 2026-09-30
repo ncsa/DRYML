@@ -1308,6 +1308,7 @@ def _structural_value_equal(left: Any, right: Any) -> bool:
     from .links import DefLink
     from .quoted import QuotedDef, SelectorSpec
     from .selector import Selector
+    from .symbol import ImportRef
 
     if left is right:
         return True
@@ -1315,6 +1316,10 @@ def _structural_value_equal(left: Any, right: Any) -> bool:
         if not isinstance(left, np.ndarray) or not isinstance(right, np.ndarray):
             return False
         return left.shape == right.shape and left.dtype == right.dtype and bool(np.array_equal(left, right))
+    if isinstance(left, ImportRef) and isinstance(right, type):
+        return left.module == right.__module__ and left.qualname == right.__qualname__
+    if isinstance(right, ImportRef) and isinstance(left, type):
+        return right.module == left.__module__ and right.qualname == left.__qualname__
     if type(left) is not type(right):
         return False
     if isinstance(left, (Definition, ConcreteDefinition)):

@@ -618,7 +618,9 @@ class _SelectorEncoder:
         if isinstance(value, (Definition, ConcreteDefinition)):
             return self.definition(value, path, depth + 1)
         if isinstance(value, QuotedDef):
-            return {"kind": "quoted-definition", "value": self.value(value.value, path + ".value", depth + 1)}
+            from .definition_expression_codec import to_data
+
+            return {"kind": "quoted-definition", "payload": to_data(value.value)}
         if isinstance(value, SelectorSpec):
             return {
                 "kind": "selector-spec",
@@ -1043,8 +1045,13 @@ def _validate_selector(value: Any, path: str) -> None:
             definition_ref(current, item_path, depth + 1)
             return
         if kind == "quoted-definition":
-            _exact_keys(current, {"kind", "value"}, item_path)
-            item(current["value"], item_path + ".value", depth + 1)
+            _exact_keys(current, {"kind", "payload"}, item_path)
+            from .definition_expression_codec import from_data
+
+            try:
+                from_data(current["payload"])
+            except (TypeError, ValueError):
+                raise _error(item_path, "quoted Definition payload is invalid") from None
             return
         if kind == "selector-spec":
             _exact_keys(current, {"kind", "selector"}, item_path)
@@ -1437,7 +1444,9 @@ def _selector_from_data(value: Mapping[str, Any]):
         if kind == "definition-ref":
             return definition(current["label"])
         if kind == "quoted-definition":
-            return QuotedDef(item(current["value"]))
+            from .definition_expression_codec import from_data
+
+            return QuotedDef(from_data(current["payload"]))
         if kind == "selector-spec":
             return SelectorSpec(_selector_from_data(current["selector"]))
         if kind == "template":

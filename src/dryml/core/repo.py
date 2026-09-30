@@ -4069,6 +4069,12 @@ class Repo:
             if not any(store is connected for connected in self.stores):
                 raise RepoLoadError("Selected declaration Store is not connected to this Repo.")
 
+        # Role-aware symbolic admission must complete before canonicalization can
+        # seed live-object caches or this method can acquire claims.
+        from .materialization import preflight_symbolic_materialization
+
+        preflight_symbolic_materialization(*roots, repo=self)
+
         canonical_memo = {}
 
         def concretize_definitions(value, memo):
