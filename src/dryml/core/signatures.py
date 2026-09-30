@@ -373,18 +373,18 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
     from .definition import Definition
     from .template import Template
 
+    template_annotation = Template[Definition]
+    template_role = get_args(template_annotation)[1]
+
     def template_branch(branch: Any) -> Any:
         if branch is Template:
-            return Annotated[Definition, _Role("template")]
+            return template_annotation
         if get_origin(branch) is Mapping:
             mapping_args = get_args(branch)
             if len(mapping_args) == 2 and mapping_args[0] is str:
                 value = mapping_args[1]
-                value_args = get_args(value)
-                if value is Template or (
-                        get_origin(value) is Annotated and len(value_args) == 2
-                        and value_args[0] is Definition and value_args[1] == _Role("template")):
-                    return Annotated[branch, _Role("template")]
+                if value is Template or value == template_annotation:
+                    return Annotated[branch, template_role]
         return branch
 
     if annotation is inspect.Signature.empty:
@@ -417,12 +417,9 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
         if metadata[0].name == "template" and get_origin(target) is Mapping:
             mapping_args = get_args(target)
             value_annotation = template_branch(mapping_args[1]) if len(mapping_args) == 2 else None
-            value_args = get_args(value_annotation)
             if (
                     len(mapping_args) != 2 or mapping_args[0] is not str
-                    or get_origin(value_annotation) is not Annotated
-                    or len(value_args) != 2 or value_args[0] is not Definition
-                    or value_args[1] != _Role("template")):
+                    or value_annotation != template_annotation):
                 raise SignatureError("Template mapping must be Mapping[str, Template]", slot)
             template_mapping = True
             continue
@@ -1122,6 +1119,7 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
     from .links import DefLink
 
     asserted = False
+    edge_kind = EdgeKind.REF if slot.role in {"ref", "template"} else EdgeKind.MATERIALIZE
     if isinstance(value, DefLink):
         if value.is_finalized:
             # Decoded and structural links already carry their edge authority.
@@ -1131,13 +1129,11 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
                 return value, value
             if persist_role and not slot.explicit:
                 return value, value
-            expected = EdgeKind.REF if slot.role in {"ref", "template"} else EdgeKind.MATERIALIZE
-            if value.kind is not expected:
+            if value.kind is not edge_kind:
                 raise SignatureError("value assertion conflicts with the declared role", name)
             value, asserted = value.target, True
         else:
-            expected = EdgeKind.REF if slot.role in {"ref", "template"} else EdgeKind.MATERIALIZE
-            if value.kind is not expected:
+            if value.kind is not edge_kind:
                 raise SignatureError("value assertion conflicts with the declared role", name)
             if value.target is None:
                 reason = (
@@ -1186,10 +1182,7 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
         if selected is None or isinstance(selected, (QuotedDef, SelectorSpec)):
             return selected, selected
     if asserted or (persist_role and slot.role in {"ref", "template"} and selected is not None):
-        return selected, DefLink.finalized(
-            EdgeKind.REF if slot.role in {"ref", "template"} else EdgeKind.MATERIALIZE,
-            selected,
-        )
+        return selected, DefLink.finalized(edge_kind, selected)
     return selected, selected
 
 

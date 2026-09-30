@@ -516,21 +516,45 @@ def _quote_ref_definitions(value: Definition) -> Definition:
                 DefLink.finalized(current.kind, target) if current.is_finalized else DefLink.assertion(current.kind, target)
             )
         elif isinstance(current, Definition):
-            args = None if current.args is None else FrozenTuple(project(item) for item in current.args)
-            kwargs = FrozenDict((name, project(item)) for name, item in current.kwargs.items())
-            result = current if args is current.args and kwargs == current.kwargs else Definition._from_symbolic_parts(current.cls, args, kwargs)
+            args = None
+            args_changed = False
+            if current.args is not None:
+                projected_args = tuple(project(item) for item in current.args)
+                args_changed = any(new is not old for new, old in zip(projected_args, current.args))
+                args = FrozenTuple(projected_args) if args_changed else current.args
+            projected_kwargs = tuple((name, project(item)) for name, item in current.kwargs.items())
+            kwargs_changed = any(
+                item is not current.kwargs[name] for name, item in projected_kwargs
+            )
+            kwargs = FrozenDict(projected_kwargs) if kwargs_changed else current.kwargs
+            result = current if not args_changed and not kwargs_changed else Definition._from_symbolic_parts(current.cls, args, kwargs)
         elif isinstance(current, FactorySpec):
-            args = FrozenTuple(project(item) for item in current.args)
-            kwargs = FrozenDict((name, project(item)) for name, item in current.kwargs.items())
-            result = current if args == current.args and kwargs == current.kwargs else FactorySpec._from_symbolic_parts(current.target, args, kwargs)
+            projected_args = tuple(project(item) for item in current.args)
+            projected_kwargs = tuple((name, project(item)) for name, item in current.kwargs.items())
+            changed = any(new is not old for new, old in zip(projected_args, current.args)) or any(
+                item is not current.kwargs[name] for name, item in projected_kwargs
+            )
+            result = current if not changed else FactorySpec._from_symbolic_parts(
+                current.target,
+                FrozenTuple(projected_args),
+                FrozenDict(projected_kwargs),
+            )
         elif isinstance(current, Mapping):
-            result = FrozenDict((name, project(item)) for name, item in current.items())
+            items = tuple((name, project(item)) for name, item in current.items())
+            unchanged = all(item is current[name] for name, item in items)
+            result = current if unchanged and isinstance(current, FrozenDict) else FrozenDict(items)
         elif isinstance(current, (list, FrozenList)):
-            result = FrozenList(project(item) for item in current)
+            items = tuple(project(item) for item in current)
+            unchanged = all(new is old for new, old in zip(items, current))
+            result = current if unchanged and isinstance(current, FrozenList) else FrozenList(items)
         elif isinstance(current, (tuple, FrozenTuple)):
-            result = FrozenTuple(project(item) for item in current)
+            items = tuple(project(item) for item in current)
+            unchanged = all(new is old for new, old in zip(items, current))
+            result = current if unchanged and isinstance(current, FrozenTuple) else FrozenTuple(items)
         elif isinstance(current, (set, frozenset, FrozenSet)):
-            result = FrozenSet(project(item) for item in current)
+            items = tuple(project(item) for item in current)
+            unchanged = all(new is old for new, old in zip(items, current))
+            result = current if unchanged and isinstance(current, FrozenSet) else FrozenSet(items)
         else:
             return current
         memo[marker] = result
@@ -578,7 +602,12 @@ def _topology_matches(generated: Definition, target: Definition | ConcreteDefini
                 return False
             generated_to_target[left_key] = right_key
             target_to_generated[right_key] = left_key
-            return all(name in definition_values(right) and visit(value, definition_values(right)[name]) for name, value in definition_values(left).items())
+            left_values = definition_values(left)
+            right_values = definition_values(right)
+            return all(
+                name in right_values and visit(value, right_values[name])
+                for name, value in left_values.items()
+            )
         if isinstance(left, DefLink):
             return True
         if isinstance(left, FactorySpec) and isinstance(right, FactorySpec):
