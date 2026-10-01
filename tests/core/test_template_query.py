@@ -7,8 +7,10 @@ from itertools import chain, repeat
 import pytest
 
 from dryml.core import Definition, Object, Ref, Repo
+from dryml.core.cdef_graph import EdgeKind
 from dryml.core.domains import UniformFromSet
 from dryml.core.errors import TemplateLimitError
+from dryml.core.links import DefLink
 from dryml.core.query.model import QueryDomainError, QueryIndexError
 from dryml.core.template import Par, Template
 from dryml.core.template_selector import TemplateGenerator
@@ -116,6 +118,123 @@ def test_template_selector_query_witness_budget_never_returns_partial_results():
         repo.query(_selector(shared=True)).cached().max_witnesses(1).defs()
 
     assert len(repo.query(_selector(shared=True)).cached().max_witnesses(None).defs()) == 1
+
+
+def test_nested_template_selector_honors_reference_aware_path_policies(tmp_path):
+    """Exact nested support uses each literal retained containment edge policy."""
+
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    material_leaf = QueryTemplateLeaf(64, repo=repo)
+    referenced_leaf = QueryTemplateLeaf(64, repo=repo)
+    mixed_leaf = QueryTemplateLeaf(64, repo=repo)
+    material = QueryTemplateParent(material_leaf, repo=repo)
+    reference = QueryTemplateParent(
+        DefLink.finalized(EdgeKind.REF, referenced_leaf.definition), repo=repo,
+    )
+    mixed = QueryTemplateParent(
+        DefLink.finalized(
+            EdgeKind.REF,
+            QueryTemplateParent(mixed_leaf, repo=repo).definition,
+        ),
+        repo=repo,
+    )
+    repo.save_object(material)
+    repo.save_object(reference)
+    repo.save_object(mixed)
+
+    selector = TemplateGenerator(
+        Template(QueryTemplateLeaf, Par("width")),
+        width=UniformFromSet((64,)),
+    ).support_selector()
+
+    assert len(tuple(repo.query(selector).nested().execute())) == 1
+    assert len(tuple(repo.query(selector).nested(edges="ref").execute())) == 1
+    assert len(tuple(repo.query(selector).nested(edges="all").execute())) == 3
+    assert len(
+        tuple(repo.query(selector).nested(edges="all", contains_ref=True).execute())
+    ) == 2
+    assert len(
+        repo.query(selector).nested(edges="all").max_occurrences(1).definitions().defs()
+    ) == 1
+    assert len(
+        tuple(repo.query(selector).nested(edges="all").max_occurrences(1).execute())
+    ) == 1
+
+
+def test_nested_template_selector_preserves_shared_topology_witnesses(tmp_path):
+    """Exact nested support distinguishes a shared child graph from equal nodes."""
+
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    shared_leaf = QueryTemplateLeaf(64, repo=repo)
+    shared = QueryTemplateParent([shared_leaf, shared_leaf], repo=repo)
+    independent = QueryTemplateParent(
+        [QueryTemplateLeaf(64, repo=repo), QueryTemplateLeaf(64, repo=repo)],
+        repo=repo,
+    )
+    root = QueryTemplateParent([shared.definition, independent.definition], repo=repo)
+    repo.save_object(root)
+
+    results = repo.query(_selector(shared=True)).nested().definitions().defs()
+
+    assert tuple(results) == (shared.definition,)
+
+
+def test_nested_template_selector_drains_before_occurrence_cap(tmp_path):
+    """Raw caps cannot suppress exact-support assignment or witness failures."""
+
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    leaf = QueryTemplateLeaf(64, repo=repo)
+    repo.save_object(QueryTemplateParent([leaf, leaf], repo=repo))
+    selector = TemplateGenerator(
+        Template(QueryTemplateLeaf, Par("width")),
+        width=UniformFromSet((64,)),
+    ).support_selector(max_assignments=1)
+    query = repo.query(selector).nested().max_occurrences(1)
+
+    with pytest.raises(TemplateLimitError, match="assignment limit"):
+        query.execute()
+    with pytest.raises(TemplateLimitError, match="witness limit"):
+        query.max_witnesses(1).execute()
+
+
+def test_nested_template_selector_rejects_forbidden_shared_residual_scan(tmp_path, monkeypatch):
+    """Reference-aware exact support fails before entering authority traversal."""
+
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    repo.save_object(QueryTemplateParent(QueryTemplateLeaf(64, repo=repo), repo=repo))
+
+    monkeypatch.setattr(
+        store,
+        "iter_authoritative_root_definitions",
+        lambda: pytest.fail("non-analyzing explanation scanned authority"),
+    )
+    explanation = repo.query(_selector(shared=True)).nested(edges="all").require_indexed().explain()
+
+    assert explanation.scan_required
+
+    with pytest.raises(QueryDomainError, match="complete witness scanning"):
+        repo.query(_selector(shared=True)).nested(edges="all").require_indexed().execute()
+
+
+def test_nested_template_selector_rejects_incomplete_fixed_witnesses():
+    """Fixed raw results cannot claim exact support without complete evidence."""
+
+    from dryml.core.query.result import OccurrenceResultSet
+
+    repo = Repo()
+    incomplete = OccurrenceResultSet(repo, (), witness_complete=False)
+
+    with pytest.raises(QueryDomainError, match="complete immutable witness evidence"):
+        incomplete.refine(_selector(shared=True))
 
 
 def test_template_selector_witness_budget_counts_prefilter_rejections_and_duplicates(

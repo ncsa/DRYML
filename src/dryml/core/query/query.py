@@ -25,7 +25,6 @@ from .model import (
     ContainmentContext,
     ContainmentEdgePolicy,
     DefinitionId,
-    DefinitionOccurrence,
     QueryDomain,
     QueryDomainError,
     QueryExplanation,
@@ -38,6 +37,7 @@ from .model import (
     QueryWouldScanError,
     RefreshPolicy,
     ResultUniverse,
+    containment_witness_key,
     is_exact_reference_target,
     validate_containment_policy,
     validate_containment_target,
@@ -867,6 +867,15 @@ class DefinitionQuery:
     def _execute_explanation(self, *, analyze: bool = False, sql: bool = False) -> QueryExplanation:
         self._require_domain()
         if self.template_selector is not None:
+            if not analyze:
+                stats = QueryStats(
+                    scan_required=self.universe is None,
+                    scan_reason=(
+                        "TemplateSelector queries require complete witness scanning."
+                        if self.universe is None else None
+                    ),
+                )
+                return self._explanation(stats)
             result = self._execute_template_selector()
             return result.explanation or QueryStats(result_count=len(result)).explanation(
                 domain=self._domain_label(), refresh=self.refresh_policy,
@@ -1139,63 +1148,131 @@ class DefinitionQuery:
         return ordered, {cdef: tuple(dict.fromkeys(replicas.get(cdef, ()))) for cdef in ordered}, tuple(verified_witnesses)
 
     def _execute_template_selector_nested(self):
-        """Apply exact support to graph-distinct nested occurrences and owners."""
+        """Apply exact support over shared root-local containment witnesses.
 
-        from ..cdef_graph import ConcreteDefinitionGraph
+        Template support must inspect every selected candidate occurrence before a
+        raw-result cap is applied: each visit participates in the existing
+        witness and assignment budgets.  The containment walker supplies the
+        literal edge policy and complete hops without collapsing private graph
+        topology into the materialization-only graph helper.
+        """
 
         stats = QueryStats(refresh_action="template-witness-scan")
         witness_budget = self._template_witness_budget()
-        if self.universe is not None:
-            if self.universe.kind != "occurrences" or not self.universe.witness_complete:
-                raise QueryDomainError("TemplateSelector refinement requires complete immutable witness evidence.")
-            replicas = self.universe.replicas or {}
-            candidates = (
-                (item.owner, tuple(replicas.get(item.owner, ())), item.path, item.definition)
-                for item in self.universe.witnesses
-            )
-        else:
-            def authoritative_occurrences():
-                for store in self.repo.stores:
-                    iterate = getattr(store, "iter_authoritative_root_definitions", None)
-                    if not callable(iterate):
-                        raise QueryDomainError(
-                            "TemplateSelector nested queries require authoritative root enumeration."
-                        )
-                    for root in self._iter_template_store_roots(store, iterate):
-                        for occurrence in ConcreteDefinitionGraph.from_root(root).iter_occurrences():
-                            yield root, (store,), occurrence.path, occurrence.definition
-
-            candidates = authoritative_occurrences()
-        occurrences = []
-        owner_replicas: dict[ConcreteDefinition, list[Any]] = {}
         from ..template_selector import _AssignmentBudget
+
         assignment_budget = _AssignmentBudget(self.template_selector._max_assignments)
-        for root, stores, path, candidate in candidates:
+
+        def matches(value) -> bool:
+            # Exact selectors only accept CDefs. Exact references remain terminal
+            # containment values and never become template-selector candidates.
+            if not isinstance(value, ConcreteDefinition):
+                return False
             witness_budget.consume()
             stats.candidate_count += 1
-            if self._verify_cdefs(
-                    (candidate,), stats=stats, template_budget=assignment_budget):
-                occurrences.append(DefinitionOccurrence(root, path, candidate))
-                owner_replicas.setdefault(root, []).extend(stores)
-        owner_replicas = {owner: tuple(dict.fromkeys(stores)) for owner, stores in owner_replicas.items()}
-        explanation = stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
+            return bool(self._verify_cdefs(
+                (value,), stats=stats, template_budget=assignment_budget,
+            ))
+
+        if self.universe is not None:
+            context = self.universe.containment
+            complete = self.universe.witness_complete or (
+                context is not None and context.complete
+            )
+            if self.universe.kind != "occurrences" or not complete:
+                raise QueryDomainError("TemplateSelector refinement requires complete immutable witness evidence.")
+            replicas = self.universe.replicas or {}
+            evidence = (
+                self.universe.containment_witnesses
+                if context is not None else self.universe.witnesses
+            )
+
+            def candidates():
+                if self.projection == "owners":
+                    for owner in self.universe.witnesses:
+                        if matches(owner):
+                            for occurrence in evidence:
+                                if occurrence.owner is owner:
+                                    yield occurrence, tuple(replicas.get(owner, ()))
+                    return
+                for occurrence in evidence:
+                    if matches(occurrence.definition):
+                        yield occurrence, tuple(replicas.get(occurrence.owner, ()))
+        else:
+            reason = "TemplateSelector queries require complete witness scanning."
+            stats.scan_required = True
+            stats.scan_reason = reason
+            if self.scan_policy_mode == "warn":
+                warnings.warn(
+                    f"DRYML query requires scan fallback: {reason}",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+            stores = self._containment_stores()
+
+            def candidates():
+                with self.repo._authority_read_fences(stores):
+                    for store in stores:
+                        iterate = getattr(store, "iter_authoritative_root_definitions", None)
+                        if not callable(iterate):
+                            raise QueryDomainError(
+                                "TemplateSelector nested queries require authoritative root enumeration."
+                            )
+                        stats.store_scan_count += 1
+                        for root in self._iter_template_store_roots(store, iterate):
+                            yield from (
+                                (occurrence, (store,))
+                                for occurrence in iter_containment_occurrences_matching(
+                                    (root,), matches,
+                                    edges=self.containment_edges,
+                                    contains_ref=self.contains_ref,
+                                )
+                            )
+
+            context = ContainmentContext(
+                target_kind="definition",
+                edges=self.containment_edges,
+                contains_ref=self.contains_ref,
+                source_scope=self._containment_source_scope(),
+                complete=True,
+                bounded=self.occurrence_limit is not None,
+            )
+
+        merged: dict[tuple[Any, ...], Any] = {}
+        owner_replicas: dict[ConcreteDefinition, list[Any]] = {}
+        for occurrence, stores in candidates():
+            owner_replicas.setdefault(occurrence.owner, []).extend(stores)
+            merged.setdefault(containment_witness_key(occurrence), occurrence)
+        occurrences = tuple(merged[key] for key in sorted(merged))
+        owner_replicas = {
+            owner: tuple(dict.fromkeys(stores))
+            for owner, stores in owner_replicas.items()
+        }
         if self.projection == "definitions":
             definitions = tuple(occ.definition for occ in occurrences)
+            stats.result_count = len(dict.fromkeys(definitions))
             return DefinitionResultSet(
                 self.repo, definitions, materializable=False, domain="nested-definitions",
-                explanation=explanation, replicas={}, witnesses=definitions, witness_complete=True,
+                explanation=self._explanation(stats), replicas={}, witnesses=definitions, witness_complete=True,
+                containment=context, containment_witnesses=occurrences,
             )
         if self.projection == "owners":
             owners = tuple(occ.owner for occ in occurrences)
+            stats.result_count = len(dict.fromkeys(owners))
             return DefinitionResultSet(
-                self.repo, owners, materializable=True, domain="owners", explanation=explanation,
+                self.repo, owners, materializable=True, domain="owners", explanation=self._explanation(stats),
                 replicas=owner_replicas, witnesses=owners, witness_complete=True,
+                containment=context, containment_witnesses=occurrences,
+                containment_carrier="owner",
             )
+        visible = occurrences
         if self.projection not in {"object_refs", "state_refs"} and self.occurrence_limit is not None:
-            occurrences = occurrences[:self.occurrence_limit]
+            visible = visible[:self.occurrence_limit]
+        stats.result_count = len(visible)
         return OccurrenceResultSet(
-            self.repo, occurrences, explanation=explanation, owner_replicas=owner_replicas,
+            self.repo, visible, explanation=self._explanation(stats), owner_replicas=owner_replicas,
             witnesses=occurrences, witness_complete=True,
+            containment=context, containment_witnesses=occurrences,
         )
 
     def _execute_federated_known_domain(self, *, stop_after: int | None = None):

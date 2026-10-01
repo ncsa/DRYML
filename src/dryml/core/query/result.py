@@ -196,15 +196,22 @@ class DefinitionResultSet:
                 materializable=self.materializable,
                 domain="nested",
                 replicas=dict(self._replicas),
+                witnesses=self._witnesses,
+                witness_complete=self._witness_complete,
                 containment=self._containment,
                 containment_witnesses=self._containment_witnesses,
             )
-            return DefinitionQuery.from_source(
+            query = DefinitionQuery.from_source(
                 self.repo,
                 selector,
                 domain="nested",
                 universe=universe,
             )
+            query = query.nested(
+                edges=self._containment.edges,
+                contains_ref=self._containment.contains_ref,
+            )
+            return query.definitions() if self._containment_carrier == "target" else query.owners()
         universe = ResultUniverse(
             kind="definitions",
             definitions=self._definitions,
@@ -657,12 +664,18 @@ class OccurrenceResultSet:
             containment=self._containment,
             containment_witnesses=self._containment_witnesses,
         )
-        return DefinitionQuery.from_source(
+        query = DefinitionQuery.from_source(
             self.repo,
             selector,
             domain="nested",
             universe=universe,
         )
+        if self._containment is not None:
+            return query.nested(
+                edges=self._containment.edges,
+                contains_ref=self._containment.contains_ref,
+            )
+        return query
 
     def union(self, other: "OccurrenceResultSet") -> "OccurrenceResultSet":
         self._check_compatible(other)
