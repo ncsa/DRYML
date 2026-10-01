@@ -7,7 +7,7 @@ import pytest
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from dryml.artifacts import CachedDataset
-from dryml.core import Object, QueryDomainError, Repo, Serializable, StateRef
+from dryml.core import Definition, Object, Par, QueryDomainError, Repo, Serializable, StateRef, Template
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
@@ -20,6 +20,7 @@ from dryml.core.query.containment import (
     visit_containment_occurrences,
 )
 from dryml.core.query.model import ContainmentHop, DefinitionOccurrence, containment_witness_key
+from dryml.core.quoted import QuotedDef
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord
 from dryml.core.utils.graph.path import GraphPath
@@ -59,6 +60,26 @@ class QueryDataset(Dataset):
 
     def __iter__(self):
         return iter(())
+
+
+class QueryRecipeOwner(Object):
+    """Stored owner whose symbolic recipe is inert Template-role quotation data."""
+
+    def __init__(self, recipe: Template):
+        self.recipe = recipe
+
+
+def test_symbolic_template_recipe_is_not_a_reference_containment_edge(tmp_path):
+    """Quoted symbolic Definitions do not invent a traversable concrete target."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    owner = QueryRecipeOwner(Definition(QueryLeaf, Par("name")), repo=repo)
+    target = Definition(QueryLeaf, "child").concretize()
+    repo.save_object(owner)
+
+    assert isinstance(owner.definition.parameters["recipe"].target, QuotedDef)
+    assert repo.query(target).nested(edges="all").owners().count() == 0
+    assert repo.references().containing(target, edges="ref").count() == 0
 
 
 def test_cached_dataset_definition_only_reference_containment(tmp_path):

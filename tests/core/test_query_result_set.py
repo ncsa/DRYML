@@ -1,11 +1,10 @@
 import pytest
 
-from dryml.core import Definition, Object, ObjectId, ObjectRef, Repo, Serializable, SKIP_ARGS, StateRef
+from dryml.core import Definition, Generator, Object, ObjectId, ObjectRef, Repo, Serializable, SKIP_ARGS, StateRef
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
 from dryml.core.domains import UniformFromSet
-from dryml.core.template import Par, Template
-from dryml.core.template_selector import TemplateGenerator
+from dryml.core.template import Par
 from dryml.core.query import QueryCardinalityError, QueryDomainError
 from dryml.core.query.model import (
     ContainmentContext,
@@ -42,9 +41,9 @@ class ResultReferenceLeaf(Serializable):
 def _result_exact_selector():
     """Return a minimal exact selector used to reject reference-value refinement."""
 
-    return TemplateGenerator(
-        Template(ResultLeaf, Par("name")),
-        name=UniformFromSet(("target",)),
+    return Generator(
+        Definition(ResultLeaf, Par("name")),
+        {"name": UniformFromSet(("target",))},
     ).support_selector()
 
 

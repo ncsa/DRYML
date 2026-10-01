@@ -328,9 +328,10 @@
           ]
         },
         "tests/core/test_repo_query_nested.py": {
-          "rationale": "Retain the inert CachedDataset reference-containment example; exhaustive mode owns traversal-policy combinations.",
+          "rationale": "Retain the inert CachedDataset reference-containment example and the symbolic Template quotation boundary; exhaustive mode owns traversal-policy combinations.",
           "functions": [
-            "test_cached_dataset_definition_only_reference_containment"
+            "test_cached_dataset_definition_only_reference_containment",
+            "test_symbolic_template_recipe_is_not_a_reference_containment_edge"
           ]
         },
         "tests/core/test_reference_query.py": {
