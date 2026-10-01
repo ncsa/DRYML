@@ -1,12 +1,27 @@
 """DefinitionRecord closure coverage for graphs with ephemeral nodes."""
 
+import sys
+
 import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Object, QueryDomainError, Repo, Serializable
+from dryml.core import Object, QueryDomainError, Repo, Serializable, StateRef
+from dryml.core.bound_args import BoundArguments
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict
+from dryml.core.links import DefLink
+from dryml.core.query.containment import (
+    iter_containment_occurrences,
+    iter_containment_owners,
+    visit_containment_occurrences,
+)
+from dryml.core.query.model import ContainmentHop, DefinitionOccurrence
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord
+from dryml.core.utils.graph.path import GraphPath
 
 
 class QueryLeaf(Object):
@@ -25,6 +40,16 @@ class QueryParent(Serializable):
 
     def save_state_to_dir_imp(self, dest_dir, *, codec):
         """Publish no payload files for this structural test value."""
+
+
+class QueryReferenceLeaf(Serializable):
+    """Stateful reference target whose complete identities remain inspectable."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        """Publish no payload files for this exact-reference test value."""
 
 
 def test_save_records_definition_closure_for_ephemeral_child(tmp_path):
@@ -73,3 +98,197 @@ def test_nested_source_restriction_does_not_claim_unimplemented_execution(tmp_pa
 
     with pytest.raises(QueryDomainError, match="containment execution"):
         repo.query(child.definition).nested().in_store(store).count()
+
+
+@pytest.mark.parametrize(
+    ("path_kinds", "edges", "contains_ref", "matches"),
+    (
+        ((EdgeKind.MATERIALIZE,), "materialize", False, True),
+        ((EdgeKind.MATERIALIZE,), "materialize", True, False),
+        ((EdgeKind.MATERIALIZE,), "ref", False, False),
+        ((EdgeKind.MATERIALIZE,), "all", False, True),
+        ((EdgeKind.MATERIALIZE,), "all", True, False),
+        ((EdgeKind.MATERIALIZE, EdgeKind.MATERIALIZE), "materialize", False, True),
+        ((EdgeKind.MATERIALIZE, EdgeKind.MATERIALIZE), "ref", False, False),
+        ((EdgeKind.MATERIALIZE, EdgeKind.MATERIALIZE), "all", False, True),
+        ((EdgeKind.MATERIALIZE, EdgeKind.MATERIALIZE), "all", True, False),
+        ((EdgeKind.REF,), "ref", False, True),
+        ((EdgeKind.REF,), "ref", True, True),
+        ((EdgeKind.REF,), "materialize", False, False),
+        ((EdgeKind.REF,), "all", False, True),
+        ((EdgeKind.REF,), "all", True, True),
+        ((EdgeKind.REF, EdgeKind.REF), "ref", False, True),
+        ((EdgeKind.REF, EdgeKind.REF), "materialize", False, False),
+        ((EdgeKind.REF, EdgeKind.REF), "all", False, True),
+        ((EdgeKind.REF, EdgeKind.REF), "all", True, True),
+        ((EdgeKind.MATERIALIZE, EdgeKind.REF), "all", False, True),
+        ((EdgeKind.MATERIALIZE, EdgeKind.REF), "materialize", False, False),
+        ((EdgeKind.REF, EdgeKind.MATERIALIZE), "all", False, True),
+        ((EdgeKind.REF, EdgeKind.MATERIALIZE), "materialize", False, False),
+        ((EdgeKind.REF, EdgeKind.MATERIALIZE, EdgeKind.REF), "all", True, True),
+        ((EdgeKind.MATERIALIZE, EdgeKind.REF), "ref", False, False),
+        ((EdgeKind.MATERIALIZE, EdgeKind.REF), "all", True, True),
+        ((EdgeKind.REF, EdgeKind.MATERIALIZE), "ref", False, False),
+        ((EdgeKind.REF, EdgeKind.MATERIALIZE), "all", True, True),
+        ((EdgeKind.REF, EdgeKind.MATERIALIZE, EdgeKind.REF), "materialize", False, False),
+        ((EdgeKind.REF, EdgeKind.MATERIALIZE, EdgeKind.REF), "ref", False, False),
+        ((EdgeKind.REF, EdgeKind.MATERIALIZE, EdgeKind.REF), "all", False, True),
+    ),
+)
+def test_containment_walker_honors_every_hop_policy(
+    path_kinds, edges, contains_ref, matches,
+):
+    target = QueryLeaf("target").definition
+    current = target
+    for kind in reversed(path_kinds):
+        value = current if kind is EdgeKind.MATERIALIZE else DefLink.finalized(kind, current)
+        current = QueryParent(value).definition
+
+    occurrences = tuple(
+        iter_containment_occurrences(
+            (current,), target, edges=edges, contains_ref=contains_ref,
+        )
+    )
+
+    assert bool(occurrences) is matches
+    if matches:
+        assert tuple(hop.kind for hop in occurrences[0].hops) == path_kinds
+        assert occurrences[0].target == target
+
+
+def test_containment_walker_excludes_the_empty_root_path():
+    root = QueryLeaf("root").definition
+
+    assert tuple(iter_containment_occurrences((root,), root, edges="all")) == ()
+
+
+def test_containment_reference_filter_is_path_local_and_preserves_dag_paths():
+    target = QueryLeaf("target").definition
+    unrelated = QueryLeaf("unrelated").definition
+    material_branch = QueryParent(target).definition
+    root = QueryParent(
+        {
+            "material": material_branch,
+            "unrelated": DefLink.finalized(EdgeKind.REF, unrelated),
+            "reference": DefLink.finalized(EdgeKind.REF, material_branch),
+        }
+    ).definition
+
+    occurrences = tuple(
+        iter_containment_occurrences(
+            (root,), target, edges="all", contains_ref=True,
+        )
+    )
+
+    assert len(occurrences) == 1
+    assert tuple(hop.kind for hop in occurrences[0].hops) == (
+        EdgeKind.REF, EdgeKind.MATERIALIZE,
+    )
+
+
+def test_containment_walker_keeps_shared_and_equal_private_node_paths_distinct():
+    target = QueryLeaf("target").definition
+    shared = QueryParent(target).definition
+    equal_first = QueryLeaf("equal").definition
+    equal_second = QueryLeaf("equal").definition
+    root = QueryParent([shared, shared, equal_first, equal_second]).definition
+
+    shared_occurrences = tuple(
+        iter_containment_occurrences((root,), target, edges="materialize")
+    )
+    equal_occurrences = tuple(
+        iter_containment_occurrences(
+            (root,), equal_first, edges="materialize",
+        )
+    )
+
+    assert len(shared_occurrences) == 2
+    assert len({item.path for item in shared_occurrences}) == 2
+    assert len(equal_occurrences) == 2
+    assert len({item.path for item in equal_occurrences}) == 2
+
+
+def test_containment_owner_projection_is_existential_and_callback_reuses_witnesses(
+    monkeypatch,
+):
+    target = QueryLeaf("target").definition
+    shared = QueryParent(target).definition
+    root = QueryParent([shared, shared]).definition
+    captured = []
+
+    def fail_path_enumeration(*args, **kwargs):
+        raise AssertionError("owner projection enumerated raw occurrences")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "dryml.core.query.containment._iter_root_occurrences",
+            fail_path_enumeration,
+        )
+        assert tuple(iter_containment_owners((root,), target)) == (root,)
+
+    visit_containment_occurrences(
+        (root,), target, captured.append, edges="materialize",
+    )
+    assert len(captured) == 2
+
+
+def test_containment_hop_evidence_preserves_legacy_definition_occurrence_identity():
+    definition = QueryLeaf("target").definition
+    original = DefinitionOccurrence(definition, GraphPath(), definition)
+    enriched = DefinitionOccurrence(
+        definition,
+        GraphPath(),
+        definition,
+        (ContainmentHop(GraphPath(), EdgeKind.REF),),
+    )
+
+    assert enriched == original
+    assert hash(enriched) == hash(original)
+    assert enriched.target == definition
+
+
+def test_containment_walker_matches_terminal_exact_references_without_imports(
+    tmp_path, monkeypatch,
+):
+    repo = Repo(DirStore(tmp_path / "store"))
+    state = repo.save_object(QueryReferenceLeaf("target", repo=repo))
+    other_state = StateRef(
+        state.object,
+        {path: "pkl-" + "0" * 64 for path in state.states},
+    )
+    root = ConcreteDefinition._from_persisted_record(
+        QueryParent,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments(((
+            "child",
+            FrozenDict({
+                "bare": state.object,
+                "ref": DefLink.finalized(EdgeKind.REF, state),
+            }),
+        ),)),
+    )
+    def fail_resolution(*args, **kwargs):
+        raise AssertionError("containment traversal resolved a retained reference")
+
+    monkeypatch.setattr(repo, "build_object_ref", fail_resolution)
+    monkeypatch.setattr(repo, "load_state_ref", fail_resolution)
+    before = set(sys.modules)
+
+    object_occurrences = tuple(
+        iter_containment_occurrences((root,), state.object, edges="materialize")
+    )
+    state_occurrences = tuple(
+        iter_containment_occurrences((root,), state, edges="ref", contains_ref=True)
+    )
+    mismatched_states = tuple(
+        iter_containment_occurrences((root,), other_state, edges="ref")
+    )
+
+    assert len(object_occurrences) == 1
+    assert object_occurrences[0].target == state.object
+    assert tuple(hop.kind for hop in object_occurrences[0].hops) == (EdgeKind.MATERIALIZE,)
+    assert len(state_occurrences) == 1
+    assert state_occurrences[0].target == state
+    assert tuple(hop.kind for hop in state_occurrences[0].hops) == (EdgeKind.REF,)
+    assert mismatched_states == ()
+    assert set(sys.modules) == before

@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from contextlib import ExitStack
-from dataclasses import dataclass
 from typing import Any, Iterator
 
 from ..definition import ConcreteDefinition, Definition
@@ -18,6 +17,7 @@ from ..links import DefLink
 from ..reference_values import ObjectId, ObjectRef, StateRef
 from ..utils.graph.path import GraphPath, graph_path_sort_key, normalize_path
 from ..utils.graph.value import iter_value_edges
+from .model import ReferenceOccurrence
 from .query import _query_match
 
 
@@ -33,22 +33,6 @@ def _owner_key(value: Any) -> tuple[str, str]:
     if isinstance(value, ConcreteDefinition):
         return ("definition", value.graph_hash())
     return (type(value).__qualname__, repr(value))
-
-
-@dataclass(frozen=True, slots=True)
-class ReferenceOccurrence:
-    """One exact lightweight reference occurrence in immutable authority.
-
-    Attributes:
-        owner: Complete aggregate reference or Definition record containing the
-            value.  Complete reference owners retain durable aggregate identity.
-        path: Typed GraphPath from ``owner`` to ``value``.
-        value: Exact ObjectRef or StateRef found at the path.
-    """
-
-    owner: Any
-    path: GraphPath
-    value: ObjectRef | StateRef
 
 
 def _occurrence_key(item: ReferenceOccurrence) -> tuple[Any, ...]:

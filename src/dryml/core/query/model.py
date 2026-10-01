@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from ..cdef_graph import EdgeKind
@@ -279,10 +279,77 @@ class StoredRootMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class ContainmentHop:
+    """One direct edge in a root-local containment witness.
+
+    Attributes:
+        path: Typed path from the preceding CDef node to this direct target.
+        kind: Literal retained edge role at this hop.
+
+    The path is deliberately local to one CDef boundary.  Joining ordered hops
+    recovers the occurrence's full owner-to-target path without losing the
+    edge kind associated with each boundary.
+    """
+
+    path: DefinitionPath
+    kind: EdgeKind
+
+
+@dataclass(frozen=True, slots=True)
 class DefinitionOccurrence:
+    """One CDef occurrence, optionally with root-local containment evidence.
+
+    Attributes:
+        owner: Enclosing stored or query-owner CDef.
+        path: Typed path from ``owner`` to ``definition``.
+        definition: Matched CDef value.
+        hops: Ordered direct-edge evidence when supplied by containment.
+
+    ``hops`` is intentionally excluded from equality and hashing so existing
+    indexed occurrence construction and set behavior remain unchanged.
+    """
+
     owner: Any
     path: DefinitionPath
     definition: Any
+    hops: tuple[ContainmentHop, ...] = field(
+        default=(), compare=False, hash=False, repr=False,
+    )
+
+    @property
+    def target(self) -> Any:
+        """Return the matched terminal value without changing legacy fields."""
+
+        return self.definition
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceOccurrence:
+    """One exact lightweight reference occurrence in immutable authority.
+
+    Attributes:
+        owner: Complete aggregate reference or Definition record containing the
+            value.
+        path: Typed GraphPath from ``owner`` to ``value``.
+        value: Exact ObjectRef or StateRef found at the path.
+        hops: Ordered direct-edge evidence when supplied by containment.
+
+    ``hops`` is intentionally excluded from equality and hashing to preserve
+    ordinary reference-query occurrence identity and construction.
+    """
+
+    owner: Any
+    path: DefinitionPath
+    value: Any
+    hops: tuple[ContainmentHop, ...] = field(
+        default=(), compare=False, hash=False, repr=False,
+    )
+
+    @property
+    def target(self) -> Any:
+        """Return the matched terminal value without changing legacy fields."""
+
+        return self.value
 
 
 @dataclass(frozen=True, slots=True)
