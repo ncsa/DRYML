@@ -245,6 +245,45 @@ def iter_containment_targets_matching(
                     stack.append((edge.target, next_has_ref))
 
 
+def iter_containment_projection_occurrences_matching(
+    roots: Iterable[ConcreteDefinition],
+    matches: ContainmentMatcher,
+    *,
+    edges: str = "materialize",
+    contains_ref: bool = False,
+) -> Iterator[ContainmentOccurrence]:
+    """Yield one qualified witness per terminal from each supplied root.
+
+    Args:
+        roots: Detached authoritative CDef roots selected by the caller.
+        matches: Predicate applied to reachable retained terminals.
+        edges: Edge kinds permitted at every containment traversal hop.
+        contains_ref: Whether a matching terminal needs a ``REF`` hop.
+
+    Yields:
+        One deterministic root-to-terminal occurrence for every matching terminal
+        identity reachable from each root.
+
+    Raises:
+        TypeError: If ``matches`` is not callable or a root is unsupported.
+        ValueError: If ``edges`` is unsupported.
+
+    Side Effects:
+        None. This existential traversal avoids raw-path enumeration while
+        retaining sufficient owner/terminal evidence for fixed result requery.
+    """
+
+    if not callable(matches):
+        raise TypeError("matches must be callable.")
+    edges, contains_ref = validate_containment_policy(edges, contains_ref)
+    for root in roots:
+        if not isinstance(root, ConcreteDefinition):
+            raise TypeError(
+                f"Containment roots must be ConcreteDefinition values, got {type(root).__name__}."
+            )
+        yield from _iter_root_projection_occurrences(root, matches, edges, contains_ref)
+
+
 def visit_containment_occurrences(
     roots: Iterable[ConcreteDefinition],
     target: ContainmentTarget,
@@ -363,6 +402,54 @@ def _root_contains_target(
         return False
 
     return visit(root, False, frozenset((cdef_node_key(root),)))
+
+
+def _iter_root_projection_occurrences(
+    root: ConcreteDefinition,
+    matches: ContainmentMatcher,
+    edges: str,
+    contains_ref: bool,
+) -> Iterator[ContainmentOccurrence]:
+    """Return a minimal target ledger without enumerating every DAG path."""
+
+    seen_nodes: set[tuple[object, bool]] = set()
+    seen_targets: set[tuple[Any, ...]] = set()
+    stack = [(root, GraphPath(), (), False)]
+    while stack:
+        node, path, hops, has_ref = stack.pop()
+        node_state = (cdef_node_key(node), has_ref)
+        if node_state in seen_nodes:
+            continue
+        seen_nodes.add(node_state)
+        direct_edges = sorted(
+            _iter_direct_containment_edges(node),
+            key=lambda item: graph_path_sort_key(item.path),
+            reverse=True,
+        )
+        for edge in direct_edges:
+            if not _permits(edges, edge.kind):
+                continue
+            next_has_ref = has_ref or edge.kind is EdgeKind.REF
+            next_path = path.join(edge.path)
+            next_hops = hops + (ContainmentHop(edge.path, edge.kind),)
+            if matches(edge.target) and (not contains_ref or next_has_ref):
+                target_key = _projection_target_key(edge.target)
+                if target_key not in seen_targets:
+                    seen_targets.add(target_key)
+                    if isinstance(edge.target, ConcreteDefinition):
+                        yield DefinitionOccurrence(root, next_path, edge.target, next_hops)
+                    else:
+                        yield ReferenceOccurrence(root, next_path, edge.target, next_hops)
+            if isinstance(edge.target, ConcreteDefinition):
+                stack.append((edge.target, next_path, next_hops, next_has_ref))
+
+
+def _projection_target_key(target: ContainmentTarget) -> tuple[Any, ...]:
+    """Return an equality-preserving terminal key for one projection ledger."""
+
+    if isinstance(target, ConcreteDefinition):
+        return ("definition", target.stable_hash(), repr(target))
+    return (type(target).__name__, target.digest())
 
 
 def _iter_direct_containment_edges(

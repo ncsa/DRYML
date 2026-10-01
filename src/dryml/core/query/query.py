@@ -45,6 +45,7 @@ from .model import (
 from .containment import (
     iter_containment_occurrences_matching,
     iter_containment_owners_matching,
+    iter_containment_projection_occurrences_matching,
     iter_containment_targets_matching,
 )
 from .path import DefinitionPath, DefinitionPathLike, Kwarg, Parameter, QueryPathError, get_subtree, iter_value_edges, normalize_path, replace_subtree
@@ -470,9 +471,17 @@ class DefinitionQuery:
                 raise QueryDomainError(
                     "Cannot change traversal policy for a fixed containment result universe."
                 )
-            if context.target_kind != "definition" and not (
+            if context.target_kind != "definition" and self.template_selector is not None:
+                raise QueryDomainError(
+                    "Exact selector refinement is unavailable for fixed reference containment results."
+                )
+            if (
+                    context.target_kind != "definition"
+                    and self.universe.containment_carrier != "owner"
+                    and not (
                     self.containment_target is None
-                    or is_exact_reference_target(self.containment_target)):
+                    or is_exact_reference_target(self.containment_target))
+            ):
                 raise QueryDomainError(
                     "Exact-reference containment results require exact reference refinement."
                 )
@@ -537,6 +546,7 @@ class DefinitionQuery:
 
         if self.domain != "nested":
             return self
+        self._require_fixed_containment_carrier("target")
         self._require_cdef_target_projection("definitions")
         return replace(self, projection="definitions")
 
@@ -555,6 +565,7 @@ class DefinitionQuery:
 
         if self.domain != "nested":
             raise QueryDomainError("owners() is only valid for nested queries.")
+        self._require_fixed_containment_carrier("owner")
         return replace(self, projection="owners")
 
     def object_refs(self):
@@ -667,6 +678,19 @@ class DefinitionQuery:
                 f"{projection}() is unavailable for exact {type(self.containment_target).__name__} containment targets."
             )
 
+    def _require_fixed_containment_carrier(self, carrier: str) -> None:
+        """Reject projection changes that would widen a fixed containment result."""
+
+        if (
+                self.universe is not None
+                and self.universe.containment is not None
+                and self.universe.kind == "definitions"
+                and self.universe.containment_carrier != carrier
+        ):
+            raise QueryDomainError(
+                "Cannot change the projection of a fixed containment result universe."
+            )
+
     def _require_reference_target_projection(self, projection: str, expected: str) -> None:
         """Validate an exact-reference value terminal before unsupported execution."""
 
@@ -688,7 +712,18 @@ class DefinitionQuery:
         if self.template_selector is not None:
             return self._execute_template_selector()
         if self.domain == "nested":
+            if self.universe is not None and self.universe.kind == "definitions":
+                return self._execute_fixed_containment_definition_result()
             if self.universe is None and self.projection == "definitions":
+                if self._uses_authoritative_containment_residual():
+                    cdefs, stats, _, evidence = self._execute_authoritative_containment_projection_evidence("target")
+                    return DefinitionResultSet(
+                        self.repo, cdefs, materializable=False, domain="nested-definitions",
+                        explanation=self._explanation(stats), replicas={},
+                        containment=self._fresh_containment_context(complete=True),
+                        containment_witnesses=evidence,
+                        containment_carrier="target",
+                    )
                 cdefs, stats = self._execute_nested_definitions()
                 explanation = self._explanation(stats)
                 return DefinitionResultSet(
@@ -698,8 +733,19 @@ class DefinitionQuery:
                     domain="nested-definitions",
                     explanation=explanation,
                     replicas={},
+                    containment=self._fresh_containment_context(complete=False),
+                    containment_carrier="target",
                 )
             if self.universe is None and self.projection == "owners":
+                if self._uses_authoritative_containment_residual():
+                    cdefs, stats, replicas, evidence = self._execute_authoritative_containment_projection_evidence("owner")
+                    return DefinitionResultSet(
+                        self.repo, cdefs, materializable=True, domain="owners",
+                        explanation=self._explanation(stats), replicas=replicas,
+                        containment=self._fresh_containment_context(complete=True),
+                        containment_witnesses=evidence,
+                        containment_carrier="owner",
+                    )
                 cdefs, stats, replicas = self._execute_nested_owners()
                 explanation = self._explanation(stats)
                 return DefinitionResultSet(
@@ -709,11 +755,13 @@ class DefinitionQuery:
                     domain="owners",
                     explanation=explanation,
                     replicas=replicas,
+                    containment=self._fresh_containment_context(complete=False),
+                    containment_carrier="owner",
                 )
             occs, stats, owner_replicas = self._execute_nested_occurrences()
             explanation = self._explanation(stats)
             containment = None if self.universe is None else self.universe.containment
-            containment_witnesses = () if self.universe is None else self.universe.containment_witnesses
+            containment_witnesses = None if self.universe is None else self.universe.containment_witnesses
             if containment is None and self.universe is None:
                 from .model import containment_target_kind
 
@@ -850,6 +898,8 @@ class DefinitionQuery:
             cdefs, _, _ = self._execute_federated_known_domain()
             return len(cdefs)
         if self.domain == "nested":
+            if self.universe is not None and self.universe.kind == "definitions":
+                return len(self._execute_fixed_containment_definition_result())
             if self.projection in {"object_refs", "state_refs"}:
                 return len(self.execute())
             if self.universe is None and self.projection == "definitions":
@@ -875,6 +925,10 @@ class DefinitionQuery:
     def _execute_explanation(self, *, analyze: bool = False, sql: bool = False) -> QueryExplanation:
         self._require_domain()
         if self.template_selector is not None:
+            if self._is_deterministic_empty_containment():
+                return self._explanation(QueryStats(
+                    fast_path="deterministic-empty-containment", result_count=0,
+                ))
             if not analyze:
                 stats = QueryStats(
                     scan_required=self.universe is None,
@@ -895,6 +949,9 @@ class DefinitionQuery:
                 return QueryStats(result_count=len(result)).explanation(domain=self._domain_label(), refresh=self.refresh_policy)
             return explanation
         if self.domain == "nested":
+            if self.universe is not None and self.universe.kind == "definitions":
+                result = self._execute_fixed_containment_definition_result()
+                return result.explanation or self._explanation(QueryStats(result_count=len(result)))
             if self._uses_authoritative_containment_residual() and not analyze:
                 stats = QueryStats(
                     scan_required=True,
@@ -936,15 +993,23 @@ class DefinitionQuery:
         from .model import containment_target_kind
 
         target_kind = (
-            containment_target_kind(self.containment_target)
-            if self.containment_target is not None else "definition"
+            self.universe.containment.target_kind
+            if self.universe is not None and self.universe.containment is not None
+            else (
+                containment_target_kind(self.containment_target)
+                if self.containment_target is not None else "definition"
+            )
         )
         return replace(
             explanation,
             containment_target_kind=target_kind,
             containment_edges=self.containment_edges,
             containment_contains_ref=self.contains_ref,
-            containment_source_scope=self._containment_source_scope(),
+            containment_source_scope=(
+                self.universe.containment.source_scope
+                if self.universe is not None and self.universe.containment is not None
+                else self._containment_source_scope()
+            ),
         )
 
     def _execute_definition_domain(self):
@@ -1008,8 +1073,19 @@ class DefinitionQuery:
         before restoring the public structural-deduplication result semantics.
         """
 
-        if self.scan_policy_mode == "forbid" and self.universe is None:
+        if (
+                self.scan_policy_mode == "forbid"
+                and self.universe is None
+                and not self._is_deterministic_empty_containment()
+        ):
             raise QueryDomainError("TemplateSelector queries require complete witness scanning.")
+        if (
+                self.domain == "nested"
+                and self.universe is not None
+                and self.universe.kind == "definitions"
+                and self.universe.containment is not None
+        ):
+            return self._execute_fixed_containment_definition_result()
         if self.domain == "nested" and not (
                 self.universe is not None and self.universe.kind == "definitions"):
             return self._execute_template_selector_nested()
@@ -1182,7 +1258,17 @@ class DefinitionQuery:
                 (value,), stats=stats, template_budget=assignment_budget,
             ))
 
-        if self.universe is not None:
+        if self._is_deterministic_empty_containment():
+            candidates = lambda: ()
+            context = ContainmentContext(
+                target_kind="definition",
+                edges=self.containment_edges,
+                contains_ref=self.contains_ref,
+                source_scope=self._containment_source_scope(),
+                complete=True,
+                bounded=self.occurrence_limit is not None,
+            )
+        elif self.universe is not None:
             context = self.universe.containment
             complete = self.universe.witness_complete or (
                 context is not None and context.complete
@@ -1279,8 +1365,8 @@ class DefinitionQuery:
         stats.result_count = len(visible)
         return OccurrenceResultSet(
             self.repo, visible, explanation=self._explanation(stats), owner_replicas=owner_replicas,
-            witnesses=occurrences, witness_complete=True,
-            containment=context, containment_witnesses=occurrences,
+            witnesses=visible, witness_complete=True,
+            containment=context, containment_witnesses=visible,
         )
 
     def _execute_federated_known_domain(self, *, stop_after: int | None = None):
@@ -1468,6 +1554,79 @@ class DefinitionQuery:
 
         return occurrence_factory, stats, traversal.owner_replicas
 
+    def _execute_fixed_containment_definition_result(self) -> DefinitionResultSet:
+        """Refine one projected fixed universe without reacquiring Store authority.
+
+        CDef selectors refine the result's projected carrier.  Exact reference
+        targets instead filter the retained owner/terminal ledger, because an
+        owner result must retain its target evidence for later exact requery.
+        """
+
+        universe = self.universe
+        if universe is None or universe.kind != "definitions" or universe.containment is None:
+            raise QueryDomainError("A nested definition result requires containment universe metadata.")
+        context = universe.containment
+        carrier = universe.containment_carrier
+        if carrier not in {"target", "owner"}:
+            raise QueryDomainError("Fixed containment result has an unsupported carrier.")
+        stats = QueryStats(universe_size=len(universe.definitions))
+        evidence = universe.containment_witnesses
+        if self.template_selector is not None and not context.complete:
+            raise QueryDomainError(
+                "TemplateSelector refinement requires complete retained witness evidence."
+            )
+        if is_exact_reference_target(self.containment_target):
+            if not context.complete:
+                raise QueryDomainError(
+                    "Exact containment refinement requires complete retained witness evidence."
+                )
+            evidence = tuple(
+                item for item in evidence if item.target == self.containment_target
+            )
+            if carrier != "owner":
+                raise QueryDomainError(
+                    "Exact-reference containment cannot refine a definition-target result."
+                )
+            retained = tuple(dict.fromkeys(item.owner for item in evidence))
+        else:
+            if self.template_selector is None:
+                retained = self._verify_cdefs(tuple(universe.definitions), stats=stats)
+            else:
+                from ..template_selector import _AssignmentBudget
+
+                witness_budget = self._template_witness_budget()
+                assignment_budget = _AssignmentBudget(self.template_selector._max_assignments)
+                retained_items = []
+                for candidate in universe.definitions:
+                    witness_budget.consume()
+                    retained_items.extend(self._verify_cdefs(
+                        (candidate,), stats=stats, template_budget=assignment_budget,
+                    ))
+                retained = tuple(sorted(
+                    retained_items, key=lambda cdef: (cdef.stable_hash(), repr(cdef)),
+                ))
+            retained_set = set(retained)
+            if evidence:
+                evidence = tuple(
+                    item for item in evidence
+                    if (item.target if carrier == "target" else item.owner) in retained_set
+                )
+        replicas = {}
+        if universe.replicas is not None:
+            replicas = {cdef: universe.replicas.get(cdef, ()) for cdef in retained}
+        stats.result_count = len(retained)
+        return DefinitionResultSet(
+            self.repo,
+            retained,
+            materializable=universe.materializable,
+            domain=("nested-definitions" if carrier == "target" else "owners"),
+            explanation=self._explanation(stats),
+            replicas=replicas,
+            containment=context,
+            containment_witnesses=evidence,
+            containment_carrier=carrier,
+        )
+
     def _execute_nested_definitions(self) -> tuple[tuple[ConcreteDefinition, ...], QueryStats]:
         if self._is_deterministic_empty_containment():
             stats = QueryStats(fast_path="deterministic-empty-containment", result_count=0)
@@ -1544,6 +1703,23 @@ class DefinitionQuery:
         """Return canonical source keys selected for fresh containment evidence."""
 
         return tuple(sorted(self._containment_source_key(store) for store in self._containment_stores()))
+
+    def _fresh_containment_context(self, *, complete: bool) -> ContainmentContext:
+        """Build fixed-result policy metadata for one fresh containment terminal."""
+
+        from .model import containment_target_kind
+
+        return ContainmentContext(
+            target_kind=(
+                containment_target_kind(self.containment_target)
+                if self.containment_target is not None else "definition"
+            ),
+            edges=self.containment_edges,
+            contains_ref=self.contains_ref,
+            source_scope=self._containment_source_scope(),
+            complete=complete,
+            bounded=False,
+        )
 
     def _containment_stores(self) -> tuple[Any, ...]:
         """Return selected physical sources once, in Repo priority order."""
@@ -1718,6 +1894,55 @@ class DefinitionQuery:
         return out, stats, {
             owner: tuple(dict.fromkeys(replicas.get(owner, ()))) for owner in out
         }
+
+    def _execute_authoritative_containment_projection_evidence(self, carrier: str):
+        """Capture minimal complete owner/terminal ledgers for a direct projection.
+
+        The projection walker contributes one actual path per matching terminal
+        per root.  This supports fixed carrier and exact-target refinement while
+        avoiding raw enumeration of every path through a shared DAG.
+        """
+
+        if carrier not in {"target", "owner"}:
+            raise ValueError("Containment projection carrier must be target or owner.")
+        stats = QueryStats()
+        entries = self._capture_authoritative_containment_roots(stats)
+        matches = self._containment_matcher(stats)
+        selected: dict[ConcreteDefinition, ConcreteDefinition] = {}
+        replicas: dict[ConcreteDefinition, list[Any]] = {}
+        witness_map = {}
+        for root, store in entries:
+            for occurrence in iter_containment_projection_occurrences_matching(
+                    (root,), matches, edges=self.containment_edges,
+                    contains_ref=self.contains_ref,
+            ):
+                if carrier == "target":
+                    if not isinstance(occurrence.target, ConcreteDefinition):
+                        continue
+                    selected.setdefault(occurrence.target, occurrence.target)
+                    owner_target = (occurrence.owner, occurrence.target)
+                    existing = witness_map.get(owner_target)
+                    if (
+                            existing is None
+                            or containment_witness_key(occurrence)
+                            < containment_witness_key(existing)
+                    ):
+                        witness_map[owner_target] = occurrence
+                    continue
+                owner = selected.setdefault(occurrence.owner, occurrence.owner)
+                replicas.setdefault(owner, []).append(store)
+                witness_map.setdefault(containment_witness_key(occurrence), occurrence)
+        out = tuple(sorted(selected.values(), key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
+        evidence = tuple(
+            witness_map[key] for key in sorted(
+                witness_map,
+                key=(lambda key: containment_witness_key(witness_map[key]))
+            )
+        )
+        stats.result_count = len(out)
+        return out, stats, {
+            cdef: tuple(dict.fromkeys(replicas.get(cdef, ()))) for cdef in out
+        }, evidence
 
     def _execute_authoritative_containment_occurrences(self):
         """Collect canonically ordered root-local witnesses under one global cap."""

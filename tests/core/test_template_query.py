@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from itertools import chain, repeat
+import warnings
 
 import pytest
 
@@ -203,6 +204,111 @@ def test_nested_template_selector_drains_before_occurrence_cap(tmp_path):
         query.max_witnesses(1).execute()
 
 
+def test_capped_nested_template_result_cannot_regrow_fixed_witnesses(tmp_path):
+    """Fixed requery and projections retain only a capped raw result's paths."""
+
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    first = QueryTemplateParent(QueryTemplateLeaf(64, repo=repo), repo=repo)
+    second = QueryTemplateParent(QueryTemplateLeaf(128, repo=repo), repo=repo)
+    repo.save_object(first)
+    repo.save_object(second)
+    selector = TemplateGenerator(
+        Template(QueryTemplateLeaf, Par("width")),
+        width=UniformFromSet((64, 128)),
+    ).support_selector()
+
+    raw = repo.query(selector).nested().max_occurrences(1).execute()
+    visible = raw.one()
+
+    assert raw._containment.bounded
+    assert tuple(raw.query().nested().execute()) == (visible,)
+    assert tuple(raw.owners().query().nested().owners().defs()) == (visible.owner,)
+
+
+def test_fixed_complete_cdef_containment_supports_generator_refinement(tmp_path):
+    """Complete direct CDef evidence retains context across exact refinements."""
+
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    first = QueryTemplateLeaf(64, repo=repo)
+    second = QueryTemplateLeaf(128, repo=repo)
+    repo.save_object(QueryTemplateParent(first, repo=repo))
+    repo.save_object(QueryTemplateParent(second, repo=repo))
+    direct_selector = Definition(QueryTemplateLeaf, AnyValue())
+    generator = TemplateGenerator(
+        Template(QueryTemplateLeaf, Par("width")),
+        width=UniformFromSet((64,)),
+    ).support_selector()
+
+    complete = repo.query(direct_selector).nested(edges="all").definitions().defs()
+    refined = complete.refine(generator)
+
+    assert complete._containment.complete
+    assert tuple(refined) == (first.definition,)
+    assert refined._containment == complete._containment
+    assert refined._containment_carrier == "target"
+    assert tuple(item.target for item in refined._containment_witnesses) == (first.definition,)
+    assert tuple(refined.refine(generator)) == (first.definition,)
+
+    indexed = repo.query(direct_selector).nested().definitions().defs()
+    assert not indexed._containment.complete
+    with pytest.raises(QueryDomainError, match="complete retained witness evidence"):
+        indexed.refine(generator)
+
+
+@pytest.mark.parametrize("carrier", ["direct", "raw", "owner"])
+@pytest.mark.parametrize(
+    ("budget", "message"),
+    [("assignment", "assignment limit"), ("witness", "witness limit")],
+)
+def test_fixed_complete_containment_shares_template_budgets(
+        tmp_path, monkeypatch, carrier, budget, message):
+    """Fixed containment candidates share exact selector assignment and visit caps."""
+
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    first = QueryTemplateParent(QueryTemplateLeaf(64, repo=repo), repo=repo)
+    second = QueryTemplateParent(QueryTemplateLeaf(128, repo=repo), repo=repo)
+    repo.save_object(first)
+    repo.save_object(second)
+    direct_selector = Definition(QueryTemplateLeaf, AnyValue())
+    generator = TemplateGenerator(
+        Template(
+            QueryTemplateLeaf if carrier != "owner" else QueryTemplateParent,
+            Par("width") * 1 if carrier != "owner"
+            else Definition(QueryTemplateLeaf, Par("width") * 1),
+        ),
+        width=UniformFromSet((64, 128)),
+    ).support_selector(max_assignments=2)
+
+    if carrier == "direct":
+        fixed = repo.query(direct_selector).nested(edges="all").definitions().defs()
+    elif carrier == "raw":
+        fixed = repo.query(direct_selector).nested(edges="all").execute().definitions()
+    else:
+        fixed = repo.query(direct_selector).nested(edges="all").owners().defs()
+
+    assert fixed._containment.complete
+    assert len(fixed) == 2
+    assert all(generator.matches(candidate) for candidate in fixed)
+    monkeypatch.setattr(
+        store,
+        "iter_authoritative_root_definitions",
+        lambda: pytest.fail("fixed containment refinement scanned Store authority"),
+    )
+
+    query = fixed.query(generator)
+    if budget == "witness":
+        query = query.max_witnesses(1)
+    with pytest.raises(TemplateLimitError, match=message):
+        query.defs()
+
+
 def test_nested_template_selector_rejects_forbidden_shared_residual_scan(tmp_path, monkeypatch):
     """Reference-aware exact support fails before entering authority traversal."""
 
@@ -223,6 +329,40 @@ def test_nested_template_selector_rejects_forbidden_shared_residual_scan(tmp_pat
 
     with pytest.raises(QueryDomainError, match="complete witness scanning"):
         repo.query(_selector(shared=True)).nested(edges="all").require_indexed().execute()
+
+
+@pytest.mark.parametrize("policy", ["allow", "warn", "require_indexed", "forbid"])
+@pytest.mark.parametrize("terminal", ["count", "exists", "execute", "explain"])
+def test_nested_template_selector_materialize_ref_filter_is_empty_without_authority(
+        tmp_path, monkeypatch, policy, terminal):
+    """Impossible exact containment does not require Store enumeration or a scan."""
+
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+
+    def fail_authority_access(*args, **kwargs):
+        pytest.fail("deterministic empty exact containment accessed Store authority")
+
+    monkeypatch.setattr(store, "iter_authoritative_root_definitions", None)
+    monkeypatch.setattr(store, "authoritative_root_definitions", fail_authority_access)
+    query = repo.query(_selector(shared=True)).nested(contains_ref=True)
+    query = query.require_indexed() if policy == "require_indexed" else query.scan_policy(policy)
+
+    with warnings.catch_warnings(record=True) as caught:
+        result = getattr(query, terminal)()
+
+    assert not caught
+    if terminal == "count":
+        assert result == 0
+    elif terminal == "exists":
+        assert result is False
+    elif terminal == "execute":
+        assert tuple(result) == ()
+    else:
+        assert result.scan_required is False
+        assert result.result_count == 0
 
 
 def test_nested_template_selector_rejects_incomplete_fixed_witnesses():

@@ -191,8 +191,8 @@ class DefinitionResultSet:
 
         if self._containment is not None:
             universe = ResultUniverse(
-                kind="occurrences",
-                occurrences=self._containment_witnesses,
+                kind="definitions",
+                definitions=self._definitions,
                 materializable=self.materializable,
                 domain="nested",
                 replicas=dict(self._replicas),
@@ -200,6 +200,7 @@ class DefinitionResultSet:
                 witness_complete=self._witness_complete,
                 containment=self._containment,
                 containment_witnesses=self._containment_witnesses,
+                containment_carrier=self._containment_carrier,
             )
             query = DefinitionQuery.from_source(
                 self.repo,
@@ -469,6 +470,7 @@ class OccurrenceResultSet:
     _witness_complete: bool = False
     _containment: ContainmentContext | None = None
     _containment_witnesses: tuple[ContainmentOccurrence, ...] = ()
+    _containment_witnesses_implicit: bool = False
 
     def __init__(
             self,
@@ -505,7 +507,8 @@ class OccurrenceResultSet:
                 bounded=True,
             )
         object.__setattr__(self, "_containment", containment)
-        if containment_witnesses is None:
+        implicit_containment_witnesses = containment_witnesses is None
+        if implicit_containment_witnesses:
             containment_witnesses = () if eager_occurrences is None else eager_occurrences
         containment_witnesses = tuple(containment_witnesses)
         if containment is not None:
@@ -521,6 +524,7 @@ class OccurrenceResultSet:
             if invalid is not None:
                 raise ValueError("Containment occurrence evidence does not match its target kind.")
         object.__setattr__(self, "_containment_witnesses", _unique_witnesses(containment_witnesses))
+        object.__setattr__(self, "_containment_witnesses_implicit", implicit_containment_witnesses)
 
     def __iter__(self) -> Iterator[ContainmentOccurrence]:
         if self._occurrences is not None:
@@ -741,6 +745,9 @@ class OccurrenceResultSet:
         if self._occurrences is None:
             object.__setattr__(self, "_occurrences", _sort_occurrences(self._occurrence_factory()))
             object.__setattr__(self, "_occurrence_factory", None)
+        if self._containment_witnesses_implicit:
+            object.__setattr__(self, "_containment_witnesses", _unique_witnesses(self._occurrences))
+            object.__setattr__(self, "_containment_witnesses_implicit", False)
         return self._occurrences
 
 

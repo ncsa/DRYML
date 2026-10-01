@@ -705,6 +705,7 @@ class ResultUniverse:
     witness_complete: bool = False
     containment: ContainmentContext | None = None
     containment_witnesses: tuple[DefinitionOccurrence | ReferenceOccurrence, ...] = ()
+    containment_carrier: ContainmentCarrier = "target"
 
 
 @dataclass(slots=True)
