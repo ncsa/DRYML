@@ -18,7 +18,7 @@ from dryml.core.query.containment import (
     iter_containment_owners,
     visit_containment_occurrences,
 )
-from dryml.core.query.model import ContainmentHop, DefinitionOccurrence
+from dryml.core.query.model import ContainmentHop, DefinitionOccurrence, containment_witness_key
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord
 from dryml.core.utils.graph.path import GraphPath
@@ -245,6 +245,7 @@ def test_containment_hop_evidence_preserves_legacy_definition_occurrence_identit
     assert enriched == original
     assert hash(enriched) == hash(original)
     assert enriched.target == definition
+    assert containment_witness_key(enriched) != containment_witness_key(original)
 
 
 def test_containment_walker_matches_terminal_exact_references_without_imports(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from ..cdef_graph import EdgeKind
@@ -10,8 +10,10 @@ from .path import DefinitionPath
 RefreshPolicy = Literal[False, "auto", True]
 ClassMatchPolicy = Literal["selector", "exact"]
 QueryDomain = Literal["stored", "cached", "known", "nested"]
-QueryProjection = Literal["definitions", "owners"]
+QueryProjection = Literal["definitions", "owners", "object_refs", "state_refs"]
 ContainmentEdgePolicy = Literal["materialize", "ref", "all"]
+ContainmentTargetKind = Literal["definition", "object_ref", "state_ref"]
+ContainmentCarrier = Literal["target", "owner", "occurrence"]
 
 
 def validate_containment_policy(
@@ -352,6 +354,127 @@ class ReferenceOccurrence:
         return self.value
 
 
+def containment_target_kind(value: Any) -> ContainmentTargetKind:
+    """Return the non-coercing containment kind for one terminal value.
+
+    Args:
+        value: A retained CDef, ObjectRef, or StateRef terminal.
+
+    Returns:
+        The terminal's exact containment kind.
+
+    Raises:
+        TypeError: If ``value`` is not a supported containment terminal.
+
+    Side Effects:
+        None. This classification neither resolves nor projects references.
+    """
+
+    from ..definition import ConcreteDefinition
+    from ..reference_values import ObjectRef, StateRef
+
+    if isinstance(value, ConcreteDefinition):
+        return "definition"
+    if isinstance(value, ObjectRef):
+        return "object_ref"
+    if isinstance(value, StateRef):
+        return "state_ref"
+    raise TypeError(f"Unsupported containment terminal {type(value).__name__}.")
+
+
+def containment_witness_key(item: DefinitionOccurrence | ReferenceOccurrence) -> tuple[Any, ...]:
+    """Return the complete deduplication key for a containment witness.
+
+    Args:
+        item: A CDef or exact-reference occurrence with optional ordered hops.
+
+    Returns:
+        A canonical owner/path/hops/terminal key that preserves exact references.
+
+    Side Effects:
+        None. The key only reads immutable occurrence evidence.
+    """
+
+    from ..definition import ConcreteDefinition
+    from ..utils.graph.path import graph_path_sort_key
+
+    def cdef_key(value: ConcreteDefinition) -> tuple[str, str, str]:
+        return ("definition", value.stable_hash(), repr(value))
+
+    def value_key(value: Any) -> tuple[Any, ...]:
+        kind = containment_target_kind(value)
+        if kind == "definition":
+            return cdef_key(value)
+        return (kind, value.digest())
+
+    return (
+        value_key(item.owner),
+        graph_path_sort_key(item.path),
+        tuple((graph_path_sort_key(hop.path), hop.kind.value) for hop in item.hops),
+        value_key(item.target),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ContainmentContext:
+    """Immutable fixed-universe semantics for one containment result.
+
+    Args:
+        target_kind: Exact terminal type selected by the containment query.
+        edges: Literal traversal policy retained by every result transformation.
+        contains_ref: Whether qualified paths require a reference hop.
+        source_scope: Canonical selected source identifiers.
+        complete: Whether retained witness evidence covers the selected universe.
+        bounded: Whether raw occurrence truncation may have omitted witnesses.
+
+    ``complete`` and ``bounded`` describe evidence rather than query identity, so
+    compatible set operations combine them conservatively.
+    """
+
+    target_kind: ContainmentTargetKind
+    edges: ContainmentEdgePolicy = "materialize"
+    contains_ref: bool = False
+    source_scope: tuple[str, ...] = ()
+    complete: bool = True
+    bounded: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate detached policy metadata without touching Store authority."""
+
+        if self.target_kind not in {"definition", "object_ref", "state_ref"}:
+            raise ValueError("Containment target_kind must be definition, object_ref, or state_ref.")
+        validate_containment_policy(self.edges, self.contains_ref)
+        if not isinstance(self.source_scope, tuple) or not all(isinstance(key, str) for key in self.source_scope):
+            raise TypeError("Containment source_scope must be a tuple of canonical source keys.")
+        if type(self.complete) is not bool or type(self.bounded) is not bool:
+            raise TypeError("Containment completeness and boundedness must be exact bools.")
+
+    def compatible_with(self, other: "ContainmentContext") -> bool:
+        """Return whether two contexts may combine without widening authority."""
+
+        return (
+            self.target_kind == other.target_kind
+            and self.edges == other.edges
+            and self.contains_ref == other.contains_ref
+            and self.source_scope == other.source_scope
+        )
+
+    def combined_with(self, other: "ContainmentContext") -> "ContainmentContext":
+        """Conservatively merge evidence state from compatible result contexts.
+
+        Raises:
+            ValueError: If policy, target kind, or source scope differs.
+        """
+
+        if not self.compatible_with(other):
+            raise ValueError("Cannot combine results with incompatible containment contexts.")
+        return replace(
+            self,
+            complete=self.complete and other.complete,
+            bounded=self.bounded or other.bounded,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class OwnerProjection:
     owner_ids: frozenset[DefinitionId]
@@ -553,12 +676,14 @@ class QueryExplanation:
 class ResultUniverse:
     kind: Literal["definitions", "occurrences"]
     definitions: tuple[Any, ...] = ()
-    occurrences: tuple[DefinitionOccurrence, ...] = ()
+    occurrences: tuple[DefinitionOccurrence | ReferenceOccurrence, ...] = ()
     materializable: bool = False
     domain: str = "stored"
     replicas: dict[Any, tuple[Any, ...]] | None = None
     witnesses: tuple[Any, ...] = ()
     witness_complete: bool = False
+    containment: ContainmentContext | None = None
+    containment_witnesses: tuple[DefinitionOccurrence | ReferenceOccurrence, ...] = ()
 
 
 @dataclass(slots=True)

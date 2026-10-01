@@ -1,9 +1,16 @@
 import pytest
 
-from dryml.core import Definition, Object, Repo, Serializable, SKIP_ARGS
+from dryml.core import Definition, Object, ObjectId, ObjectRef, Repo, Serializable, SKIP_ARGS, StateRef
+from dryml.core.cdef_graph import EdgeKind
 from dryml.core.query import QueryCardinalityError, QueryDomainError
-from dryml.core.query.result import QueryBackedDefinitionResultSet
+from dryml.core.query.model import (
+    ContainmentContext,
+    ContainmentHop,
+    ReferenceOccurrence,
+)
+from dryml.core.query.result import OccurrenceResultSet, QueryBackedDefinitionResultSet
 from dryml.core.store.dir import DirStore
+from dryml.core.utils.graph.path import GraphPath, Key
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
@@ -18,6 +25,14 @@ class ResultParent(Serializable):
     def __init__(self, child):
         super().__init__()
         self.child = child
+
+
+class ResultReferenceLeaf(Serializable):
+    def __init__(self, name):
+        self.name = name
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        pass
 
 
 def test_result_set_cardinality_helpers(tmp_path):
@@ -184,3 +199,130 @@ def test_fixed_resultset_universe_rejects_domain_switch(tmp_path):
 
     with pytest.raises(QueryDomainError, match="Cannot switch"):
         nested_defs.query(Definition(ResultLeaf, SKIP_ARGS)).stored().defs()
+
+
+def test_containment_reference_projections_keep_complete_typed_identities(tmp_path):
+    repo = Repo(DirStore(tmp_path / "store"))
+    first = repo.save_object(ResultReferenceLeaf("same", repo=repo))
+    second = ObjectRef(
+        first.definition,
+        {path: ObjectId() for path in first.object.objects},
+    )
+    first_state = StateRef(first.object, first.states)
+    other_first_state = StateRef(
+        first.object,
+        {path: "pkl-" + "0" * 64 for path in first.states},
+    )
+    owner = ResultParent("owner", repo=repo).definition
+    object_occurrences = OccurrenceResultSet(
+        repo,
+        (
+            ReferenceOccurrence(
+                owner, GraphPath((Key("first"),)), first.object,
+                (ContainmentHop(GraphPath((Key("first"),)), EdgeKind.MATERIALIZE),),
+            ),
+            ReferenceOccurrence(
+                owner, GraphPath((Key("second"),)), second,
+                (ContainmentHop(GraphPath((Key("second"),)), EdgeKind.REF),),
+            ),
+        ),
+        owner_replicas={owner: ()},
+        containment=ContainmentContext(target_kind="object_ref", edges="all"),
+    )
+    state_occurrences = OccurrenceResultSet(
+        repo,
+        (
+            ReferenceOccurrence(owner, GraphPath((Key("state"),)), first_state),
+            ReferenceOccurrence(owner, GraphPath((Key("other-state"),)), other_first_state),
+        ),
+        owner_replicas={owner: ()},
+        containment=ContainmentContext(target_kind="state_ref", edges="all"),
+    )
+
+    object_results = object_occurrences.object_refs()
+    state_results = state_occurrences.state_refs()
+
+    assert set(object_results) == {first.object, second}
+    assert set(state_results) == {first_state, other_first_state}
+    assert object_results.count() == 2
+    assert state_results.count() == 2
+    with pytest.raises(QueryCardinalityError):
+        object_results.one()
+    with pytest.raises(QueryCardinalityError):
+        state_results.one_or_none()
+    with pytest.raises(QueryDomainError, match="StateRef"):
+        state_occurrences.object_refs()
+
+
+def test_containment_result_unions_keep_owner_witness_ledgers_and_fixed_refinement(tmp_path, monkeypatch):
+    repo = Repo(DirStore(tmp_path / "store"))
+    first = repo.save_object(ResultLeaf("first", repo=repo))
+    second = repo.save_object(ResultLeaf("second", repo=repo))
+    owner = ResultParent("owner", repo=repo).definition
+    context = ContainmentContext(target_kind="object_ref", edges="all", source_scope=("source",))
+    first_replica = object()
+    second_replica = object()
+
+    def result_for(value, name, replica):
+        occurrence = ReferenceOccurrence(
+            owner,
+            GraphPath((Key(name),)),
+            value,
+            (ContainmentHop(GraphPath((Key(name),)), EdgeKind.REF),),
+        )
+        return OccurrenceResultSet(
+            repo,
+            (occurrence,),
+            owner_replicas={owner: (replica,)},
+            containment=context,
+        ).owners()
+
+    first_owner = result_for(first.object, "first", first_replica)
+    second_owner = result_for(second.object, "second", second_replica)
+    combined = first_owner.union(second_owner)
+    intersected = first_owner.intersection(second_owner)
+    monkeypatch.setattr(
+        repo._query_catalog,
+        "refresh",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fixed universe scanned Store")),
+    )
+    refined = combined.query(first.object).nested(edges="all").owners().defs()
+
+    assert list(combined) == [owner]
+    assert set(combined.replicas(owner)) == {first_replica, second_replica}
+    assert list(refined) == [owner]
+    assert refined._containment_witnesses[0].target == first.object
+    assert {item.target for item in intersected._containment_witnesses} == {
+        first.object, second.object,
+    }
+
+
+def test_containment_result_context_rejects_incompatible_union_and_keeps_bounded_projection(tmp_path):
+    repo = Repo(DirStore(tmp_path / "store"))
+    target = repo.save_object(ResultLeaf("target", repo=repo)).object
+    owner = ResultParent("owner", repo=repo).definition
+    occurrence = ReferenceOccurrence(owner, GraphPath((Key("target"),)), target)
+    all_edges = OccurrenceResultSet(
+        repo,
+        (occurrence,),
+        owner_replicas={owner: ()},
+        containment=ContainmentContext(target_kind="object_ref", edges="all"),
+    )
+    ref_edges = OccurrenceResultSet(
+        repo,
+        (occurrence,),
+        owner_replicas={owner: ()},
+        containment=ContainmentContext(target_kind="object_ref", edges="ref"),
+    )
+
+    projected = all_edges.object_refs()
+    empty = all_edges.query(target).nested(edges="all").max_occurrences(0).object_refs()
+
+    assert not projected._containment.bounded
+    assert empty._containment.bounded
+    assert empty.count() == 0
+    assert empty.one_or_none() is None
+    with pytest.raises(QueryCardinalityError):
+        empty.one()
+    with pytest.raises(ValueError, match="containment contexts"):
+        all_edges.union(ref_edges)

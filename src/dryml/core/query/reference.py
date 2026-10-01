@@ -17,7 +17,12 @@ from ..links import DefLink
 from ..reference_values import ObjectId, ObjectRef, StateRef
 from ..utils.graph.path import GraphPath, graph_path_sort_key, normalize_path
 from ..utils.graph.value import iter_value_edges
-from .model import ReferenceOccurrence
+from .model import (
+    ContainmentContext,
+    QueryDomainError,
+    ReferenceOccurrence,
+    containment_witness_key,
+)
 from .query import _query_match
 
 
@@ -125,11 +130,38 @@ class _ReferenceValueResultSet:
     typed paths that produced each projection.
     """
 
-    def __init__(self, repo, values: Iterable[ObjectRef | StateRef], occurrences: Iterable[ReferenceOccurrence] = ()):
+    def __init__(
+            self,
+            repo,
+            values: Iterable[ObjectRef | StateRef],
+            occurrences: Iterable[ReferenceOccurrence] = (),
+            *,
+            containment: ContainmentContext | None = None,
+            containment_witnesses: Iterable[ReferenceOccurrence] = (),
+            owner_replicas=None):
+        """Snapshot complete reference values and optional containment evidence.
+
+        Containment callers retain the raw owner/path/hop ledger so a later
+        fixed-universe refinement can filter evidence without a Store scan.
+        Ordinary authority result behavior remains unchanged when ``containment``
+        is omitted.
+        """
+
         self.repo = repo
         unique = {_reference_key(value): value for value in values}
         self._values = tuple(unique[key] for key in sorted(unique))
         self._occurrences = tuple(occurrences)
+        self._containment = containment
+        self._containment_witnesses = tuple(
+            {containment_witness_key(item): item for item in containment_witnesses}.values()
+        )
+        self._owner_replicas = {} if owner_replicas is None else dict(owner_replicas)
+        if containment is not None:
+            expected = "object_ref" if isinstance(self, ObjectRefResultSet) else "state_ref"
+            if containment.target_kind != expected:
+                raise QueryDomainError(
+                    f"{type(self).__name__} cannot project {containment.target_kind} containment evidence."
+                )
 
     def __iter__(self):
         """Iterate complete references in canonical identity order."""
@@ -171,23 +203,103 @@ class _ReferenceValueResultSet:
         """Project retained owner/path/value occurrences without collapsing owners."""
 
         values = set(self._values)
+        if self._containment is not None:
+            from .result import OccurrenceResultSet
+
+            return OccurrenceResultSet(
+                self.repo,
+                (item for item in self._occurrences if item.value in values),
+                owner_replicas=self._owner_replicas,
+                containment=self._containment,
+                containment_witnesses=self._containment_witnesses,
+            )
         return ReferenceResultSet(self.repo, (item for item in self._occurrences if item.value in values))
+
+    def query(self, selector=None):
+        """Refine complete containment evidence without reacquiring Store authority.
+
+        Raises:
+            QueryDomainError: If this ordinary authority projection has no fixed
+                containment evidence.
+        """
+
+        if self._containment is None:
+            raise QueryDomainError("Only containment reference results support fixed-universe refinement.")
+        return self.occurrences().query(selector)
+
+    def union(self, other):
+        """Union compatible complete reference results and retain both ledgers."""
+
+        containment = self._combined_containment(other)
+        values = (*self._values, *other._values)
+        witnesses = self._containment_witnesses + other._containment_witnesses
+        return type(self)(
+            self.repo,
+            values,
+            (*self._occurrences, *other._occurrences),
+            containment=containment,
+            containment_witnesses=witnesses,
+            owner_replicas=_merge_containment_replicas(
+                self._owner_replicas, other._owner_replicas,
+            ),
+        )
+
+    def intersection(self, other):
+        """Intersect compatible complete reference values by exact identity."""
+
+        containment = self._combined_containment(other)
+        values = tuple(value for value in self._values if value in other._values)
+        value_set = set(values)
+        witnesses = tuple(
+            item for item in (*self._containment_witnesses, *other._containment_witnesses)
+            if item.target in value_set
+        )
+        return type(self)(
+            self.repo,
+            values,
+            tuple(item for item in (*self._occurrences, *other._occurrences) if item.value in value_set),
+            containment=containment,
+            containment_witnesses=witnesses,
+            owner_replicas=_merge_containment_replicas(
+                self._owner_replicas, other._owner_replicas,
+            ),
+        )
+
+    def _combined_containment(self, other) -> ContainmentContext:
+        """Validate and merge fixed containment context for one set operation."""
+
+        if type(self) is not type(other) or self.repo is not other.repo:
+            raise ValueError("Cannot combine incompatible reference result sets.")
+        if self._containment is None or other._containment is None:
+            raise ValueError("Only containment reference results support set operations.")
+        return self._containment.combined_with(other._containment)
+
+
+def _merge_containment_replicas(left, right):
+    """Merge owner replica evidence without importing result classes eagerly."""
+
+    from .result import _merge_replica_maps
+
+    return _merge_replica_maps(left, right)
 
 
 class ObjectRefResultSet(_ReferenceValueResultSet):
-    """Deterministic projection of complete ObjectRefs from Store authority.
+    """Deterministic projection of complete ObjectRefs from query evidence.
 
     The terminal returns lightweight immutable identities, never live Objects
     or local-state payloads. Equal replicas deduplicate by complete ObjectRef
     identity, while :meth:`occurrences` retains distinct owners and paths.
+    Fixed containment results also retain their qualified path ledger for
+    scan-free requery and compatible set operations.
     """
 
 class StateRefResultSet(_ReferenceValueResultSet):
-    """Deterministic projection of complete StateRefs from Store authority.
+    """Deterministic projection of complete StateRefs from query evidence.
 
     The terminal returns exact immutable state identities without restoration.
     Equal replicas deduplicate by complete StateRef identity, while
-    :meth:`occurrences` retains distinct owners and paths.
+    :meth:`occurrences` retains distinct owners and paths. Fixed containment
+    results retain their qualified path ledger for scan-free requery.
     """
 
 class ReferenceQuery:

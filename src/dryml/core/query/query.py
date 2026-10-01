@@ -450,6 +450,18 @@ class DefinitionQuery:
 
         edges, contains_ref = validate_containment_policy(edges, contains_ref)
         self._check_universe_domain_switch("nested")
+        if self.universe is not None and self.universe.containment is not None:
+            context = self.universe.containment
+            if context.edges != edges or context.contains_ref != contains_ref:
+                raise QueryDomainError(
+                    "Cannot change traversal policy for a fixed containment result universe."
+                )
+            if context.target_kind != "definition" and not (
+                    self.containment_target is None
+                    or is_exact_reference_target(self.containment_target)):
+                raise QueryDomainError(
+                    "Exact-reference containment results require exact reference refinement."
+                )
         q = replace(
             self,
             domain="nested",
@@ -479,6 +491,10 @@ class DefinitionQuery:
 
         if self.domain != "nested":
             raise QueryDomainError("in_store() is only valid for nested containment queries.")
+        if self.universe is not None and self.universe.containment is not None:
+            raise QueryDomainError(
+                "Cannot change source scope for a fixed containment result universe."
+            )
         if not any(candidate is store for candidate in self.repo.stores):
             raise ValueError("in_store() requires a connected Store handle.")
         return replace(self, source_store=store)
@@ -530,44 +546,46 @@ class DefinitionQuery:
     def object_refs(self):
         """Return exact ObjectRef containment values when execution supports them.
 
-        This U1 entry validates the selected containment projection but does not
-        execute reference containment before its traversal/result implementation
-        is available.
+        Fixed containment universes project their retained complete ObjectRef
+        evidence without rescanning Stores. Backend-owned fresh containment
+        execution remains unavailable until an authority traversal is selected.
 
         Raises:
             QueryDomainError: If the target is not an ObjectRef, nested domain is
-                not selected, or exact-reference containment execution is absent.
+                not selected, or fresh exact-reference containment execution is
+                unavailable.
 
         Returns:
-            Never returns in U1; later containment execution owns this terminal.
+            An ObjectRefResultSet for fixed containment evidence.
 
         Side Effects:
-            None. The failure occurs before a Store scan.
+            Fixed-universe projection has no Store side effects.
         """
 
         self._require_reference_target_projection("object_refs", "ObjectRef")
-        raise QueryDomainError("Exact-reference containment execution is not available yet.")
+        return replace(self, projection="object_refs").execute()
 
     def state_refs(self):
         """Return exact StateRef containment values when execution supports them.
 
-        This U1 entry validates the selected containment projection but does not
-        execute reference containment before its traversal/result implementation
-        is available.
+        Fixed containment universes project their retained complete StateRef
+        evidence without rescanning Stores. Backend-owned fresh containment
+        execution remains unavailable until an authority traversal is selected.
 
         Raises:
             QueryDomainError: If the target is not a StateRef, nested domain is
-                not selected, or exact-reference containment execution is absent.
+                not selected, or fresh exact-reference containment execution is
+                unavailable.
 
         Returns:
-            Never returns in U1; later containment execution owns this terminal.
+            A StateRefResultSet for fixed containment evidence.
 
         Side Effects:
-            None. The failure occurs before a Store scan.
+            Fixed-universe projection has no Store side effects.
         """
 
         self._require_reference_target_projection("state_refs", "StateRef")
-        raise QueryDomainError("Exact-reference containment execution is not available yet.")
+        return replace(self, projection="state_refs").execute()
 
     def max_occurrences(self, limit: int | None) -> "DefinitionQuery":
         if limit is not None and limit < 0:
@@ -680,19 +698,36 @@ class DefinitionQuery:
                 )
             occs, stats, owner_replicas = self._execute_nested_occurrences()
             explanation = stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
+            containment = None if self.universe is None else self.universe.containment
+            containment_witnesses = () if self.universe is None else self.universe.containment_witnesses
+            if containment is not None and self.occurrence_limit is not None:
+                containment = replace(containment, bounded=True)
             if callable(occs):
                 raw = OccurrenceResultSet(
                     self.repo,
                     occurrence_factory=occs,
                     explanation=explanation,
                     owner_replicas=owner_replicas,
+                    containment=containment,
+                    containment_witnesses=containment_witnesses,
                 )
             else:
-                raw = OccurrenceResultSet(self.repo, occs, explanation=explanation, owner_replicas=owner_replicas)
+                raw = OccurrenceResultSet(
+                    self.repo,
+                    occs,
+                    explanation=explanation,
+                    owner_replicas=owner_replicas,
+                    containment=containment,
+                    containment_witnesses=containment_witnesses,
+                )
             if self.projection == "definitions":
                 return raw.definitions()
             if self.projection == "owners":
                 return raw.owners()
+            if self.projection == "object_refs":
+                return raw.object_refs()
+            if self.projection == "state_refs":
+                return raw.state_refs()
             return raw
 
         if self.universe is None and self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
@@ -776,6 +811,8 @@ class DefinitionQuery:
             cdefs, _, _ = self._execute_federated_known_domain()
             return len(cdefs)
         if self.domain == "nested":
+            if self.projection in {"object_refs", "state_refs"}:
+                return len(self.execute())
             if self.universe is None and self.projection == "definitions":
                 if self.repo._query_index.can_execute_query_domain("nested"):
                     cdefs, _ = self.repo._query_index.execute_nested_definitions(self)
@@ -830,10 +867,13 @@ class DefinitionQuery:
             raise QueryDomainError("Select a query domain with stored(), cached(), known(), or nested() before executing.")
         if self.domain == "nested" and self.source_store is not None:
             raise QueryDomainError("Source-restricted containment execution is not available yet.")
-        if self.domain == "nested" and is_exact_reference_target(self.containment_target):
+        if (
+                self.domain == "nested"
+                and is_exact_reference_target(self.containment_target)
+                and self.universe is None):
             raise QueryDomainError("Exact-reference containment execution is not available yet.")
         if self.domain == "nested" and (
-                self.containment_edges != "materialize" or self.contains_ref):
+                self.containment_edges != "materialize" or self.contains_ref) and self.universe is None:
             raise QueryDomainError("Reference-aware containment execution is not available yet.")
 
     def _domain_label(self) -> str:
@@ -1202,7 +1242,48 @@ class DefinitionQuery:
             stats = QueryStats()
             if self.universe.kind != "occurrences":
                 raise QueryDomainError("A nested query cannot execute over a definition universe.")
-            stats.universe_size = len(self.universe.occurrences)
+            evidence = self.universe.containment_witnesses or self.universe.occurrences
+            stats.universe_size = len(evidence)
+            if self.universe.containment is not None:
+                context = self.universe.containment
+                target = self.containment_target
+                if target is not None:
+                    from .model import containment_target_kind
+
+                    if containment_target_kind(target) != context.target_kind:
+                        raise QueryDomainError(
+                            "Fixed containment refinement cannot change the exact target kind."
+                        )
+                    if is_exact_reference_target(target):
+                        out = tuple(item for item in evidence if item.target == target)
+                    else:
+                        out = tuple(
+                            item for item in evidence
+                            if isinstance(item.target, ConcreteDefinition)
+                            and _query_match(
+                                self.selector,
+                                item.target,
+                                strict=self.strict_policy,
+                                class_match=self.class_match_policy,
+                            )
+                        )
+                elif context.target_kind == "definition" and self.selector is not None:
+                    out = tuple(
+                        item for item in evidence
+                        if isinstance(item.target, ConcreteDefinition)
+                        and _query_match(
+                            self.selector,
+                            item.target,
+                            strict=self.strict_policy,
+                            class_match=self.class_match_policy,
+                        )
+                    )
+                else:
+                    out = tuple(evidence)
+                if self.occurrence_limit is not None:
+                    out = out[:self.occurrence_limit]
+                stats.result_count = len(out)
+                return out, stats, self.universe.replicas
             verified_nested = self._verify_cdefs(
                 tuple({occ.definition for occ in self.universe.occurrences}),
                 stats=stats,
