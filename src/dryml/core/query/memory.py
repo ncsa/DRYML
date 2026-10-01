@@ -130,15 +130,18 @@ class MemoryStoreReadView:
     def nested_ids(self) -> set:
         nested = set()
         stack = list(self.all_stored_ids())
-        seen = set(stack)
+        seen = set()
         while stack:
             parent_id = stack.pop()
+            if parent_id in seen:
+                continue
+            seen.add(parent_id)
             children = self._view.children({parent_id}, _ROOT_PATH, unordered=True, edge_kind=EdgeKind.MATERIALIZE)
             for child_id in children:
+                # A stored child remains nested when another stored root reaches it.
+                nested.add(child_id)
                 if child_id in seen:
                     continue
-                seen.add(child_id)
-                nested.add(child_id)
                 stack.append(child_id)
         return nested
 

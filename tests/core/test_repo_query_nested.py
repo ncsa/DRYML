@@ -91,13 +91,12 @@ def test_nested_source_restriction_is_immutable_and_validated(tmp_path):
         unrestricted.in_store(other)
 
 
-def test_nested_source_restriction_does_not_claim_unimplemented_execution(tmp_path):
+def test_nested_source_restriction_executes_against_selected_authority(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     child = QueryLeaf("child", repo=repo)
 
-    with pytest.raises(QueryDomainError, match="containment execution"):
-        repo.query(child.definition).nested().in_store(store).count()
+    assert repo.query(child.definition).nested().in_store(store).count() == 0
 
 
 @pytest.mark.parametrize(

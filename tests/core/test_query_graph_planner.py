@@ -5,10 +5,15 @@ import pytest
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from dryml.core import Definition, Object, Repo, SKIP_ARGS, Satisfies
+from dryml.core.cdef_graph import EdgeKind
 from dryml.core.definition import ConcreteDefinition
+from dryml.core.links import DefLink
 from dryml.core.query.graph_plan import graph_candidate_ids
 from dryml.core.query.index import MemoryDefinitionGraphReadView
-from dryml.core.query.model import FeatureRequirement, FeatureToken, QueryStats
+from dryml.core.query.model import (
+    FeatureRequirement, FeatureToken, QueryStats, QueryVerifyBudgetExceeded,
+    QueryWouldScanError,
+)
 from dryml.core.query.path import DefinitionPath, Kwarg
 from dryml.core.query.query import _query_match
 from dryml.core.query.selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
@@ -524,6 +529,83 @@ def test_nested_filter_keeps_definition_that_is_also_stored_root(tmp_path):
     defs = repo.query(child.definition).nested(refresh=False).definitions().defs()
 
     assert list(defs) == [child.definition]
+
+
+def test_unconstrained_nested_keeps_definition_that_is_also_stored_root_memory(tmp_path):
+    """Nested membership depends on a non-empty owner path, not root exclusivity."""
+    store = DirStore(tmp_path / "store", query_index="memory")
+    repo = Repo(stores=store)
+    child = PlannerLeaf(name="child", repo=repo)
+    parent = PlannerParent(child=child, repo=repo)
+    repo.save_object(child)
+    repo.save_object(parent)
+
+    defs = repo.query(None).nested(refresh=True).definitions().defs()
+
+    assert list(defs) == [child.definition]
+
+
+@pytest.mark.parametrize(
+    ("query_index", "refresh"), (("memory", True), ("sqlite", False)),
+)
+def test_indexed_nested_occurrence_keeps_materialize_hop_evidence(
+    tmp_path, query_index, refresh,
+):
+    """Legacy indexed raw witnesses retain their direct materialize edge kind."""
+    repo = Repo(stores=DirStore(tmp_path / "store", query_index=query_index))
+    child = PlannerLeaf(name="child", repo=repo)
+    parent = PlannerParent(child=child, repo=repo)
+    repo.save_object(parent)
+
+    occurrence = repo.query(child.definition).nested(refresh=refresh).one()
+
+    assert occurrence.owner == parent.definition
+    assert occurrence.definition == child.definition
+    assert tuple(hop.kind.value for hop in occurrence.hops) == ("materialize",)
+
+
+@pytest.mark.parametrize("query_index", ["memory", "sqlite"])
+def test_reference_aware_nested_residual_preflights_policy_and_budget(
+    tmp_path, query_index,
+):
+    """Ref-aware containment scans authority only when policy permits it."""
+    repo = Repo(stores=DirStore(tmp_path / "store", query_index=query_index))
+    target = PlannerLeaf(name="target", repo=repo).definition
+    owner = PlannerParent(
+        child=DefLink.finalized(EdgeKind.REF, target), repo=repo,
+    )
+    repo.save_object(owner)
+    query = repo.query(target).nested(edges="ref", contains_ref=True, refresh=False)
+
+    with pytest.raises(QueryWouldScanError, match="authoritative root"):
+        query.require_indexed().definitions().defs()
+    with pytest.warns(RuntimeWarning, match="authoritative root"):
+        assert query.scan_policy("warn").owners().defs().one() == owner.definition
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        query.max_verify(0).definitions().defs()
+
+    explanation = query.explain()
+    assert explanation.scan_required
+    assert explanation.containment_target_kind == "definition"
+    assert explanation.containment_edges == "ref"
+    assert explanation.containment_contains_ref is True
+
+
+def test_materialize_reference_filter_is_empty_without_authority_scan(tmp_path, monkeypatch):
+    """The impossible materialize-plus-reference policy stays usable when strict."""
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(stores=store)
+    target = PlannerLeaf(name="target", repo=repo).definition
+    monkeypatch.setattr(
+        store, "authoritative_root_definitions",
+        lambda: pytest.fail("deterministic empty containment scanned authority"),
+    )
+
+    query = repo.query(target).nested(contains_ref=True).require_indexed()
+
+    assert query.definitions().count() == 0
+    assert query.owners().count() == 0
+    assert query.count() == 0
 
 
 def test_nested_owners_uses_reverse_edges_without_occurrence_expansion(tmp_path, monkeypatch):

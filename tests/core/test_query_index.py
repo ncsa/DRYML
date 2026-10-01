@@ -7,6 +7,8 @@ import pytest
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from dryml.core import Definition, Object, Repo, Serializable
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.links import DefLink
 from dryml.core.query import QueryIndexError
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord
@@ -139,3 +141,23 @@ def test_strict_index_guard_rejects_unindexed_broad_query(tmp_path):
 
     with pytest.raises(QueryIndexError):
         repo.query(None).stored(refresh=True).require_indexed().count()
+
+
+def test_reference_residual_keeps_authoritative_root_when_sqlite_sidecar_is_missing(
+    tmp_path,
+):
+    """Missing derived rows cannot exclude a retained reference-containing root."""
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    child = IndexLeaf("closure", repo=repo).definition
+    owner = IndexParent(DefLink.finalized(EdgeKind.REF, child), repo=repo)
+    repo.save_object(owner)
+    index = store.open_query_index()
+    assert index is not None
+    store.close()
+    index.path.unlink()
+
+    reopened = Repo(DirStore(store.base_dir, query_index="sqlite"))
+
+    assert reopened.query(child).stored(refresh=False).count() == 0
+    assert reopened.query(child).nested(edges="ref", refresh=False).owners().defs().one() == owner.definition

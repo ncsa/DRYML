@@ -174,13 +174,38 @@ def test_reference_containing_adapts_unfiltered_source_and_source_scope(tmp_path
         repo.references().exact(state.object).containing(state)
 
 
-def test_reference_containing_rejects_invalid_target_and_remains_nonexecuting(tmp_path):
+def test_reference_containing_rejects_invalid_target_without_scanning_at_build_time(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
 
     with pytest.raises(TypeError, match="containment target"):
         repo.references().containing(object())
-    with pytest.raises(QueryDomainError, match="[Ee]xact-reference containment"):
-        repo.query(state).nested().state_refs()
+    assert repo.query(state).nested().state_refs().count() == 0
 
     assert repo.references().exact(state.object).object_refs().one() == state.object
+
+
+@pytest.mark.parametrize("query_index", ["memory", "sqlite"])
+def test_exact_reference_containment_uses_authoritative_roots_and_ref_policy(
+    tmp_path, query_index,
+):
+    """Exact StateRef containment is evaluated from retained owner definitions."""
+    repo = Repo(DirStore(tmp_path / "store", query_index=query_index))
+    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
+    owner = repo.save_object(
+        ReferenceQueryRefParent(
+            DefLink.finalized(EdgeKind.REF, state), repo=repo,
+        )
+    )
+
+    query = repo.query(state).nested(edges="ref", contains_ref=True, refresh=False)
+
+    assert query.state_refs().one() == state
+    uncapped_values = query.max_occurrences(0).state_refs()
+    assert uncapped_values.one() == state
+    assert not uncapped_values._containment.bounded
+    assert query.owners().defs().one() == owner.definition
+    occurrence = query.one()
+    assert occurrence.owner == owner.definition
+    assert occurrence.value == state
+    assert tuple(hop.kind for hop in occurrence.hops) == (EdgeKind.REF,)

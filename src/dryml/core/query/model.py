@@ -536,9 +536,9 @@ class OccurrenceTraversalSnapshot:
         for target_id in sorted(self.targets):
             if target_id not in self.cdefs:
                 continue
-            stack = [(target_id, DefinitionPath())]
+            stack = [(target_id, DefinitionPath(), ())]
             while stack:
-                cur_id, suffix = stack.pop()
+                cur_id, suffix, suffix_hops = stack.pop()
                 edges = sorted(
                     self.incoming.get(cur_id, ()),
                     key=lambda edge: (edge.parent_id, str(edge.path)),
@@ -546,12 +546,16 @@ class OccurrenceTraversalSnapshot:
                 )
                 for edge in edges:
                     path = edge.path.join(suffix)
+                    hops = (ContainmentHop(edge.path, edge.edge_kind),) + suffix_hops
                     if edge.parent_id in self.stored_ids:
                         yielded += 1
-                        yield DefinitionOccurrence(self.cdefs[edge.parent_id], path, self.cdefs[target_id])
+                        yield DefinitionOccurrence(
+                            self.cdefs[edge.parent_id], path,
+                            self.cdefs[target_id], hops,
+                        )
                         if max_occurrences is not None and yielded >= max_occurrences:
                             return
-                    stack.append((edge.parent_id, path))
+                    stack.append((edge.parent_id, path, hops))
 
 
 class AllOccurrenceTraversalSnapshot:
@@ -574,17 +578,25 @@ class AllOccurrenceTraversalSnapshot:
             for edge in sorted(self.outgoing.get(owner_id, ()), key=lambda edge: str(edge.path), reverse=True):
                 if edge.edge_kind is not EdgeKind.MATERIALIZE:
                     continue
-                stack.append((edge.child_id, edge.path))
+                stack.append((
+                    edge.child_id, edge.path,
+                    (ContainmentHop(edge.path, edge.edge_kind),),
+                ))
             while stack:
-                did, path = stack.pop()
+                did, path, hops = stack.pop()
                 yielded += 1
-                yield DefinitionOccurrence(self.cdefs[owner_id], path, self.cdefs[did])
+                yield DefinitionOccurrence(
+                    self.cdefs[owner_id], path, self.cdefs[did], hops,
+                )
                 if max_occurrences is not None and yielded >= max_occurrences:
                     return
                 for edge in sorted(self.outgoing.get(did, ()), key=lambda edge: str(edge.path), reverse=True):
                     if edge.edge_kind is not EdgeKind.MATERIALIZE:
                         continue
-                    stack.append((edge.child_id, path.join(edge.path)))
+                    stack.append((
+                        edge.child_id, path.join(edge.path),
+                        hops + (ContainmentHop(edge.path, edge.edge_kind),),
+                    ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -618,6 +630,10 @@ class QueryExplanation:
     count_collision_buckets: int = 0
     terminal_stop_reason: str | None = None
     lowering_diagnostics: dict[str, Any] | None = None
+    containment_target_kind: ContainmentTargetKind | None = None
+    containment_edges: ContainmentEdgePolicy | None = None
+    containment_contains_ref: bool | None = None
+    containment_source_scope: tuple[str, ...] = ()
 
     def format(self) -> str:
         lines = [
@@ -648,6 +664,11 @@ class QueryExplanation:
             lines.append(f"lowering: {self.lowering_strategy}")
         if self.scan_required:
             lines.append(f"scan required: {self.scan_reason or 'unknown'}")
+        if self.containment_target_kind is not None:
+            lines.append(f"containment target: {self.containment_target_kind}")
+            lines.append(f"containment edges: {self.containment_edges}")
+            lines.append(f"containment contains ref: {self.containment_contains_ref}")
+            lines.append(f"containment sources: {self.containment_source_scope!r}")
         if self.candidate_rows_read or self.cdef_blobs_decoded or self.python_verifications:
             lines.append(f"candidate rows read: {self.candidate_rows_read}")
             lines.append(f"CDef blobs decoded: {self.cdef_blobs_decoded}")

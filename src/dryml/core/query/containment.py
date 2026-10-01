@@ -29,6 +29,7 @@ from .model import (
 
 ContainmentTarget = ConcreteDefinition | ObjectRef | StateRef
 ContainmentOccurrence = DefinitionOccurrence | ReferenceOccurrence
+ContainmentMatcher = Callable[[ContainmentTarget], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +79,49 @@ def iter_containment_occurrences(
             raise TypeError(
                 f"Containment roots must be ConcreteDefinition values, got {type(root).__name__}."
             )
-        yield from _iter_root_occurrences(root, target, edges, contains_ref)
+        yield from _iter_root_occurrences(
+            root, lambda value: _matches(target, value), edges, contains_ref,
+        )
+
+
+def iter_containment_occurrences_matching(
+    roots: Iterable[ConcreteDefinition],
+    matches: ContainmentMatcher,
+    *,
+    edges: str = "materialize",
+    contains_ref: bool = False,
+) -> Iterator[ContainmentOccurrence]:
+    """Yield qualified witnesses whose terminal satisfies ``matches``.
+
+    Args:
+        roots: Detached authoritative CDef roots selected by the caller.
+        matches: Predicate applied to each retained CDef, ObjectRef, or StateRef
+            terminal after its selected path has been established.
+        edges: Edge kinds permitted at every containment traversal hop.
+        contains_ref: Whether a witness must contain at least one ``REF`` hop.
+
+    Yields:
+        Root-local CDef or exact-reference occurrences with ordered hop evidence.
+
+    Raises:
+        TypeError: If ``matches`` is not callable, roots are unsupported, or the
+            policy filter is not an exact bool.
+        ValueError: If ``edges`` is unsupported.
+
+    Side Effects:
+        None. This matcher variant retains the same non-resolving traversal as
+        :func:`iter_containment_occurrences` for selector residuals.
+    """
+
+    if not callable(matches):
+        raise TypeError("matches must be callable.")
+    edges, contains_ref = validate_containment_policy(edges, contains_ref)
+    for root in roots:
+        if not isinstance(root, ConcreteDefinition):
+            raise TypeError(
+                f"Containment roots must be ConcreteDefinition values, got {type(root).__name__}."
+            )
+        yield from _iter_root_occurrences(root, matches, edges, contains_ref)
 
 
 def iter_containment_owners(
@@ -116,8 +159,90 @@ def iter_containment_owners(
             raise TypeError(
                 f"Containment roots must be ConcreteDefinition values, got {type(root).__name__}."
             )
-        if _root_contains_target(root, target, edges, contains_ref):
+        if _root_contains_target(
+                root, lambda value: _matches(target, value), edges, contains_ref,
+        ):
             yield root
+
+
+def iter_containment_owners_matching(
+    roots: Iterable[ConcreteDefinition],
+    matches: ContainmentMatcher,
+    *,
+    edges: str = "materialize",
+    contains_ref: bool = False,
+) -> Iterator[ConcreteDefinition]:
+    """Yield roots with a qualified terminal satisfying ``matches``.
+
+    This existential projection avoids raw occurrence enumeration while retaining
+    the same literal edge and reference-bearing policy as occurrence traversal.
+    """
+
+    if not callable(matches):
+        raise TypeError("matches must be callable.")
+    edges, contains_ref = validate_containment_policy(edges, contains_ref)
+    for root in roots:
+        if not isinstance(root, ConcreteDefinition):
+            raise TypeError(
+                f"Containment roots must be ConcreteDefinition values, got {type(root).__name__}."
+            )
+        if _root_contains_target(root, matches, edges, contains_ref):
+            yield root
+
+
+def iter_containment_targets_matching(
+    roots: Iterable[ConcreteDefinition],
+    matches: ContainmentMatcher,
+    *,
+    edges: str = "materialize",
+    contains_ref: bool = False,
+) -> Iterator[ContainmentTarget]:
+    """Yield matching terminals without enumerating every path to each one.
+
+    Args:
+        roots: Detached authoritative CDef roots selected by the caller.
+        matches: Predicate applied to reachable retained terminals.
+        edges: Edge kinds permitted at every containment traversal hop.
+        contains_ref: Whether a matching terminal needs a ``REF`` hop.
+
+    Yields:
+        Retained CDef, ObjectRef, or StateRef terminals reached by at least one
+        qualifying non-empty path. Equal terminals may be emitted by different
+        roots; callers own public result deduplication.
+
+    Raises:
+        TypeError: If ``matches`` is not callable or a root is unsupported.
+        ValueError: If ``edges`` is unsupported.
+
+    Side Effects:
+        None. Per-root ``(node, has_ref)`` visitation makes this an existential
+        projection rather than a raw occurrence traversal.
+    """
+
+    if not callable(matches):
+        raise TypeError("matches must be callable.")
+    edges, contains_ref = validate_containment_policy(edges, contains_ref)
+    for root in roots:
+        if not isinstance(root, ConcreteDefinition):
+            raise TypeError(
+                f"Containment roots must be ConcreteDefinition values, got {type(root).__name__}."
+            )
+        seen: set[tuple[object, bool]] = set()
+        stack = [(root, False)]
+        while stack:
+            node, has_ref = stack.pop()
+            state = (cdef_node_key(node), has_ref)
+            if state in seen:
+                continue
+            seen.add(state)
+            for edge in _iter_direct_containment_edges(node):
+                if not _permits(edges, edge.kind):
+                    continue
+                next_has_ref = has_ref or edge.kind is EdgeKind.REF
+                if matches(edge.target) and (not contains_ref or next_has_ref):
+                    yield edge.target
+                if isinstance(edge.target, ConcreteDefinition):
+                    stack.append((edge.target, next_has_ref))
 
 
 def visit_containment_occurrences(
@@ -157,7 +282,7 @@ def visit_containment_occurrences(
 
 def _iter_root_occurrences(
     root: ConcreteDefinition,
-    target: ContainmentTarget,
+    matches: ContainmentMatcher,
     edges: str,
     contains_ref: bool,
 ) -> Iterator[ContainmentOccurrence]:
@@ -175,7 +300,7 @@ def _iter_root_occurrences(
             next_path = path.join(edge.path)
             next_hops = hops + (ContainmentHop(edge.path, edge.kind),)
             if isinstance(edge.target, ConcreteDefinition):
-                if _matches(target, edge.target) and (
+                if matches(edge.target) and (
                     not contains_ref or next_has_ref
                 ):
                     yield DefinitionOccurrence(root, next_path, edge.target, next_hops)
@@ -188,7 +313,7 @@ def _iter_root_occurrences(
                         next_has_ref,
                         active_nodes | frozenset((child_key,)),
                     )
-            elif _matches(target, edge.target) and (
+            elif matches(edge.target) and (
                 not contains_ref or next_has_ref
             ):
                 yield ReferenceOccurrence(root, next_path, edge.target, next_hops)
@@ -199,7 +324,7 @@ def _iter_root_occurrences(
 
 def _root_contains_target(
     root: ConcreteDefinition,
-    target: ContainmentTarget,
+    matches: ContainmentMatcher,
     edges: str,
     contains_ref: bool,
 ) -> bool:
@@ -218,7 +343,7 @@ def _root_contains_target(
             if not _permits(edges, edge.kind):
                 continue
             next_has_ref = has_ref or edge.kind is EdgeKind.REF
-            if _matches(target, edge.target) and (
+            if matches(edge.target) and (
                 not contains_ref or next_has_ref
             ):
                 memo[memo_key] = True
