@@ -436,6 +436,48 @@ class ReferenceQuery:
             raise ValueError("in_store() requires a connected Store handle.")
         return self._replace(store=store)
 
+    def containing(
+            self,
+            target,
+            *,
+            edges="materialize",
+            contains_ref: bool = False,
+            refresh=None):
+        """Adapt an unfiltered reference builder to a nested containment query.
+
+        Args:
+            target: Exact ConcreteDefinition, ObjectRef, or StateRef to find
+                below authoritative stored CDef roots.
+            edges: Literal nested traversal policy.
+            contains_ref: Exact boolean reference-bearing path filter.
+            refresh: Optional nested derived-index refresh policy.
+
+        Returns:
+            A lazy DefinitionQuery carrying the same immutable containment intent
+            as ``repo.query(target).nested(...)``.
+
+        Raises:
+            TypeError: If ``target`` is not a supported exact containment value.
+            ValueError: If traversal policy is invalid.
+            QueryDomainError: If an authority predicate is already attached.
+
+        Side Effects:
+            None. The adapter neither scans Store authority nor changes ordinary
+            reference-query behavior.
+        """
+
+        self._require_unfiltered_containment_adapter()
+        from .model import validate_containment_target
+        from .query import DefinitionQuery
+
+        target = validate_containment_target(target)
+        query = DefinitionQuery.from_source(self.repo, target).nested(
+            edges=edges,
+            contains_ref=contains_ref,
+            refresh=refresh,
+        )
+        return query if self._store is None else query.in_store(self._store)
+
     def object_refs(self) -> ObjectRefResultSet:
         """Return matching complete aggregate ObjectRefs in canonical order.
 
@@ -495,6 +537,25 @@ class ReferenceQuery:
         }
         data.update(values)
         return ReferenceQuery(self.repo, **data)
+
+    def _require_unfiltered_containment_adapter(self) -> None:
+        """Reject authority predicates that cannot be reinterpreted as containment."""
+
+        if any(value is not None for value in (
+                self._definition,
+                self._object_id,
+                self._namespace,
+                self._object_ref,
+                self._contains,
+                self._alias,
+                self._path,
+                self._state_hash,
+                self._metadata,
+        )):
+            from .model import QueryDomainError
+            raise QueryDomainError(
+                "ReferenceQuery.containing() requires an unfiltered reference builder."
+            )
 
     def _scan(self):
         if self._metadata is None:

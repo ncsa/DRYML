@@ -2,7 +2,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Definition, Object, ObjectRef, Repo, Serializable
+from dryml.core import Definition, Object, ObjectRef, QueryDomainError, Repo, Serializable
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
 from dryml.core.repo import RepoLoadError
@@ -117,3 +117,70 @@ def test_derived_candidates_cannot_hide_conflicting_store_authority(
 
     with pytest.raises(RepoLoadError, match="incompatible closed-subtree authority"):
         query.object_refs()
+
+
+def test_exact_reference_containment_entry_is_lazy_and_preserves_intent(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
+
+    monkeypatch.setattr(
+        store,
+        "iter_definition_records",
+        lambda: (_ for _ in ()).throw(AssertionError("containment builder scanned Store")),
+    )
+
+    query = repo.query(state).nested(edges="all", contains_ref=True, refresh=False)
+
+    assert query.selector is None
+    assert query.containment_target == state
+    assert query.containment_edges == "all"
+    assert query.contains_ref is True
+    assert query.refresh_policy is False
+    object_query = repo.query(state.object).nested(edges="ref")
+    assert object_query.containment_target == state.object
+    assert object_query.containment_edges == "ref"
+
+
+def test_exact_reference_containment_rejects_wrong_domains_projections_and_conversions(tmp_path):
+    repo = Repo(DirStore(tmp_path / "store"))
+    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
+
+    for domain in ("stored", "cached", "known"):
+        with pytest.raises(QueryDomainError, match="[Ee]xact-reference"):
+            getattr(repo.query(state), domain)()
+    with pytest.raises(QueryDomainError, match="[Ee]xact-reference"):
+        repo.query(state).categorical()
+    with pytest.raises(QueryDomainError, match="reference authority"):
+        repo.query(state).references()
+    with pytest.raises(QueryDomainError, match="StateRef"):
+        repo.query(state).nested().definitions()
+    with pytest.raises(QueryDomainError, match="StateRef"):
+        repo.query(state).nested().object_refs()
+
+
+def test_reference_containing_adapts_unfiltered_source_and_source_scope(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
+
+    direct = repo.query(state).nested(edges="ref", contains_ref=True, refresh=False).in_store(store)
+    adapted = repo.references().in_store(store).containing(
+        state, edges="ref", contains_ref=True, refresh=False,
+    )
+
+    assert adapted == direct
+    with pytest.raises(QueryDomainError, match="unfiltered"):
+        repo.references().exact(state.object).containing(state)
+
+
+def test_reference_containing_rejects_invalid_target_and_remains_nonexecuting(tmp_path):
+    repo = Repo(DirStore(tmp_path / "store"))
+    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
+
+    with pytest.raises(TypeError, match="containment target"):
+        repo.references().containing(object())
+    with pytest.raises(QueryDomainError, match="[Ee]xact-reference containment"):
+        repo.query(state).nested().state_refs()
+
+    assert repo.references().exact(state.object).object_refs().one() == state.object

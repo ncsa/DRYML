@@ -2,7 +2,7 @@ import pytest
 
 from tests.core import core_objects as objects
 
-from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core import Definition, QueryDomainError, Repo, SKIP_ARGS
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
@@ -60,3 +60,68 @@ def test_find_defs_scope_nested_returns_distinct_nested_definitions(tmp_path):
     assert len(repo2.find_defs(selector, scope="stored")) == 0
     nested_defs = repo2.find_defs(selector, scope="nested")
     assert list(nested_defs) == [leaf.definition]
+
+
+@pytest.mark.parametrize(
+    ("edges", "contains_ref"),
+    [
+        ("materialize", False),
+        ("materialize", True),
+        ("ref", False),
+        ("ref", True),
+        ("all", False),
+        ("all", True),
+    ],
+)
+def test_nested_retains_immutable_containment_policy(edges, contains_ref):
+    repo = Repo()
+    target = objects.TestClass4(1, repo=repo).definition
+
+    query = repo.query(target)
+    nested = query.nested(edges=edges, contains_ref=contains_ref, refresh=False)
+
+    assert query.domain is None
+    assert query.containment_target == target
+    assert query.containment_edges == "materialize"
+    assert query.contains_ref is False
+    assert nested.domain == "nested"
+    assert nested.containment_target == target
+    assert nested.containment_edges == edges
+    assert nested.contains_ref is contains_ref
+    assert nested.refresh_policy is False
+
+
+@pytest.mark.parametrize("edges", [None, True, "reference", "Materialize"])
+def test_nested_rejects_invalid_containment_edge_policy(edges):
+    with pytest.raises(ValueError, match="edges"):
+        Repo().query().nested(edges=edges)
+
+
+@pytest.mark.parametrize("contains_ref", [None, 0, 1, "true"])
+def test_nested_requires_exact_boolean_reference_filter(contains_ref):
+    with pytest.raises(TypeError, match="contains_ref"):
+        Repo().query().nested(contains_ref=contains_ref)
+
+
+def test_nested_default_remains_materialize_only(tmp_path):
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = objects.TestNest2("child", repo=repo)
+    parent = objects.TestNest3(child=child, repo=repo)
+    repo.save_object(parent)
+
+    query = repo.query(child.definition).nested(refresh=False)
+
+    assert query.containment_edges == "materialize"
+    assert query.contains_ref is False
+    assert list(query.definitions().defs()) == [child.definition]
+
+
+def test_nested_cdef_containment_rejects_reference_authority_conversion():
+    repo = Repo()
+    target = objects.TestClass4(1, repo=repo).definition
+
+    with pytest.raises(QueryDomainError, match="containment"):
+        repo.query(target).nested().references()

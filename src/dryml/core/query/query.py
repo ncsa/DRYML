@@ -20,6 +20,7 @@ from .lowering import ScanPolicy
 from .domain import CachedDomain, KnownDomain, NestedDomain, StoredDomain
 from .model import (
     ClassMatchPolicy,
+    ContainmentEdgePolicy,
     DefinitionId,
     DefinitionOccurrence,
     QueryDomain,
@@ -33,6 +34,9 @@ from .model import (
     QueryStats,
     RefreshPolicy,
     ResultUniverse,
+    is_exact_reference_target,
+    validate_containment_policy,
+    validate_containment_target,
 )
 from .path import DefinitionPath, DefinitionPathLike, Kwarg, Parameter, QueryPathError, get_subtree, iter_value_edges, normalize_path, replace_subtree
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet
@@ -102,6 +106,10 @@ class DefinitionQuery:
     max_verify_limit: int | None = None
     max_witness_limit: int | None | object = _DEFAULT_MAX_WITNESSES
     template_selector: Any | None = None
+    containment_target: Any | None = None
+    containment_edges: ContainmentEdgePolicy = "materialize"
+    contains_ref: bool = False
+    source_store: Any | None = None
     _original_values: tuple[tuple[DefinitionPath, Any], ...] = ()
 
     @classmethod
@@ -116,9 +124,11 @@ class DefinitionQuery:
 
         Args:
             repo: Managing Repo required to resolve StateSelectorRef leaves.
-            source: Optional Definition, CDef, Selector, TemplateSelector, or
-                Object source. TemplateSelector support retains an exact
-                residual beside its ordinary structural prefilter.
+            source: Optional Definition, CDef, ObjectRef, StateRef, Selector,
+                TemplateSelector, or Object source. Exact references are lazy
+                containment targets and cannot select ordinary authority domains.
+                TemplateSelector support retains an exact residual beside its
+                ordinary structural prefilter.
             domain: Optional initial query domain.
             universe: Optional fixed result universe for refinement.
 
@@ -132,7 +142,18 @@ class DefinitionQuery:
             ValueError: If a selector resolves outside its ObjectRef scope.
             RepoLoadError: If connected Stores provide conflicting alias authority.
         """
+        from ..reference_values import ObjectRef, StateRef
         from ..template_selector import TemplateSelector
+
+        if isinstance(source, (ObjectRef, StateRef)):
+            return cls(
+                repo=repo,
+                original=None,
+                selector=None,
+                domain=domain,
+                universe=universe,
+                containment_target=validate_containment_target(source),
+            )
 
         if isinstance(source, TemplateSelector):
             prefilter = _resolve_query_state_selectors(source.prefilter.root, repo)
@@ -157,7 +178,15 @@ class DefinitionQuery:
                 class_match_policy=source.cls_policy,
             )
         original = _resolve_query_state_selectors(_snapshot_source(source), repo)
-        return cls(repo=repo, original=original, selector=original, domain=domain, universe=universe)
+        target = original if isinstance(original, ConcreteDefinition) else None
+        return cls(
+            repo=repo,
+            original=original,
+            selector=original,
+            domain=domain,
+            universe=universe,
+            containment_target=target,
+        )
 
     def references(self):
         """Start an authority-verified lightweight reference query.
@@ -168,11 +197,24 @@ class DefinitionQuery:
 
         Raises:
             QueryDomainError: If an exact TemplateSelector residual is attached;
-                ReferenceQuery cannot retain topology witness semantics.
+                ReferenceQuery cannot retain topology witness semantics, if this
+                query has an exact reference containment target, or if nested
+                containment has already been selected.
+
+        Side Effects:
+            None. This conversion does not query Store authority.
         """
 
         if self.template_selector is not None:
             raise QueryDomainError("TemplateSelector queries cannot be converted to ReferenceQuery.")
+        if is_exact_reference_target(self.containment_target):
+            raise QueryDomainError(
+                "Exact-reference containment queries cannot be converted to reference authority."
+            )
+        if self.domain == "nested":
+            raise QueryDomainError(
+                "Nested containment queries cannot be converted to reference authority."
+            )
         from .reference import ReferenceQuery
 
         return ReferenceQuery(self.repo, definition=self.selector)
@@ -234,6 +276,7 @@ class DefinitionQuery:
             reads stored names without resolving its class.
         """
 
+        self._reject_exact_reference_rewrite("categorical")
         self._reject_residual_rewrite("categorical")
         if self.selector is None:
             raise QueryPathError("Cannot apply semantic categorical projection to an unconstrained query.")
@@ -270,6 +313,7 @@ class DefinitionQuery:
         )
 
     def restore(self, *, path: DefinitionPathLike = "$") -> "DefinitionQuery":
+        self._reject_exact_reference_rewrite("restore")
         self._reject_residual_rewrite("restore")
         if self.original is None or self.selector is None:
             raise QueryPathError("Cannot restore() on an unconstrained query.")
@@ -283,6 +327,7 @@ class DefinitionQuery:
             definition: ConcreteDefinition | Object | None = None,
             *,
             path: DefinitionPathLike = "$") -> "DefinitionQuery":
+        self._reject_exact_reference_rewrite("exact")
         self._reject_residual_rewrite("exact")
         if self.selector is None:
             raise QueryPathError("Cannot apply exact() to an unconstrained query.")
@@ -340,12 +385,14 @@ class DefinitionQuery:
         return DefinitionPath(tuple(translated))
 
     def class_match(self, policy: ClassMatchPolicy) -> "DefinitionQuery":
+        self._reject_exact_reference_rewrite("class_match")
         if policy not in {"selector", "exact"}:
             raise ValueError("class_match policy must be 'selector' or 'exact'.")
         # Exact support comparisons intentionally do not resolve inheritance.
         return replace(self, class_match_policy="exact" if self.template_selector is not None else policy)
 
     def strict(self, enabled: bool = True) -> "DefinitionQuery":
+        self._reject_exact_reference_rewrite("strict")
         return replace(self, strict_policy=bool(enabled))
 
     def refresh(self, policy: RefreshPolicy = "auto") -> "DefinitionQuery":
@@ -357,24 +404,84 @@ class DefinitionQuery:
         return replace(self, reuse_weak_policy=bool(enabled))
 
     def stored(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
+        self._reject_exact_reference_domain("stored")
         self._check_universe_domain_switch("stored")
         q = replace(self, domain="stored", projection=None)
         return q if refresh is None else q.refresh(refresh)
 
     def cached(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
+        self._reject_exact_reference_domain("cached")
         self._check_universe_domain_switch("cached")
         q = replace(self, domain="cached", projection=None)
         return q if refresh is None else q.refresh(refresh)
 
     def known(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
+        self._reject_exact_reference_domain("known")
         self._check_universe_domain_switch("known")
         q = replace(self, domain="known", projection=None)
         return q if refresh is None else q.refresh(refresh)
 
-    def nested(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
+    def nested(
+            self,
+            *,
+            edges: ContainmentEdgePolicy = "materialize",
+            contains_ref: bool = False,
+            refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
+        """Select immutable stored-root containment with literal edge controls.
+
+        Args:
+            edges: ``"materialize"`` (the compatibility default), ``"ref"``,
+                or ``"all"``. The selected edge kind applies at every hop.
+            contains_ref: Exact boolean retaining only qualifying paths that
+                include at least one retained reference edge.
+            refresh: Optional existing derived-index refresh policy.
+
+        Returns:
+            An immutable nested query preserving its target and policy.
+
+        Raises:
+            ValueError: If ``edges`` or ``refresh`` is unsupported.
+            TypeError: If ``contains_ref`` is not an exact bool.
+
+        Side Effects:
+            None. This records containment intent without scanning Stores,
+            resolving references, or materializing Objects.
+        """
+
+        edges, contains_ref = validate_containment_policy(edges, contains_ref)
         self._check_universe_domain_switch("nested")
-        q = replace(self, domain="nested", projection=None)
+        q = replace(
+            self,
+            domain="nested",
+            projection=None,
+            containment_edges=edges,
+            contains_ref=contains_ref,
+        )
         return q if refresh is None else q.refresh(refresh)
+
+    def in_store(self, store) -> "DefinitionQuery":
+        """Restrict a nested containment query to one connected Store handle.
+
+        Args:
+            store: Exact Store instance already connected to this query's Repo.
+
+        Returns:
+            An immutable containment query scoped to ``store``.
+
+        Raises:
+            QueryDomainError: If this is not a nested query.
+            ValueError: If ``store`` is not currently connected to the Repo.
+
+        Side Effects:
+            None. Store authority is not captured until supported containment
+            execution is selected.
+        """
+
+        if self.domain != "nested":
+            raise QueryDomainError("in_store() is only valid for nested containment queries.")
+        if not any(candidate is store for candidate in self.repo.stores):
+            raise ValueError("in_store() requires a connected Store handle.")
+        return replace(self, source_store=store)
 
     def _check_universe_domain_switch(self, requested: str) -> None:
         if self.universe is None:
@@ -385,14 +492,82 @@ class DefinitionQuery:
             )
 
     def definitions(self) -> "DefinitionQuery":
+        """Project a nested CDef query onto matching contained definitions.
+
+        Returns:
+            An immutable query selecting the nested-definition projection.
+
+        Raises:
+            QueryDomainError: If an exact ObjectRef or StateRef target would be
+                coerced into a CDef projection.
+
+        Side Effects:
+            None. Projection selection does not execute the query.
+        """
+
         if self.domain != "nested":
             return self
+        self._require_cdef_target_projection("definitions")
         return replace(self, projection="definitions")
 
     def owners(self) -> "DefinitionQuery":
+        """Project a nested containment query onto enclosing stored CDefs.
+
+        Returns:
+            An immutable query selecting authoritative stored-root owners.
+
+        Raises:
+            QueryDomainError: If nested containment has not been selected.
+
+        Side Effects:
+            None. Projection selection does not execute the query.
+        """
+
         if self.domain != "nested":
             raise QueryDomainError("owners() is only valid for nested queries.")
         return replace(self, projection="owners")
+
+    def object_refs(self):
+        """Return exact ObjectRef containment values when execution supports them.
+
+        This U1 entry validates the selected containment projection but does not
+        execute reference containment before its traversal/result implementation
+        is available.
+
+        Raises:
+            QueryDomainError: If the target is not an ObjectRef, nested domain is
+                not selected, or exact-reference containment execution is absent.
+
+        Returns:
+            Never returns in U1; later containment execution owns this terminal.
+
+        Side Effects:
+            None. The failure occurs before a Store scan.
+        """
+
+        self._require_reference_target_projection("object_refs", "ObjectRef")
+        raise QueryDomainError("Exact-reference containment execution is not available yet.")
+
+    def state_refs(self):
+        """Return exact StateRef containment values when execution supports them.
+
+        This U1 entry validates the selected containment projection but does not
+        execute reference containment before its traversal/result implementation
+        is available.
+
+        Raises:
+            QueryDomainError: If the target is not a StateRef, nested domain is
+                not selected, or exact-reference containment execution is absent.
+
+        Returns:
+            Never returns in U1; later containment execution owns this terminal.
+
+        Side Effects:
+            None. The failure occurs before a Store scan.
+        """
+
+        self._require_reference_target_projection("state_refs", "StateRef")
+        raise QueryDomainError("Exact-reference containment execution is not available yet.")
 
     def max_occurrences(self, limit: int | None) -> "DefinitionQuery":
         if limit is not None and limit < 0:
@@ -435,6 +610,42 @@ class DefinitionQuery:
 
         if self.template_selector is not None:
             raise QueryDomainError(f"TemplateSelector queries cannot apply {operation}().")
+
+    def _reject_exact_reference_rewrite(self, operation: str) -> None:
+        """Reject structural rewrites for an exact reference containment target."""
+
+        if is_exact_reference_target(self.containment_target):
+            raise QueryDomainError(
+                f"Exact-reference containment queries cannot apply {operation}()."
+            )
+
+    def _reject_exact_reference_domain(self, domain: str) -> None:
+        """Reject ordinary definition authority domains for exact references."""
+
+        if is_exact_reference_target(self.containment_target):
+            raise QueryDomainError(
+                f"Exact-reference containment queries can only select nested(), not {domain}()."
+            )
+
+    def _require_cdef_target_projection(self, projection: str) -> None:
+        """Require a CDef-compatible target for a nested definition projection."""
+
+        if is_exact_reference_target(self.containment_target):
+            raise QueryDomainError(
+                f"{projection}() is unavailable for exact {type(self.containment_target).__name__} containment targets."
+            )
+
+    def _require_reference_target_projection(self, projection: str, expected: str) -> None:
+        """Validate an exact-reference value terminal before unsupported execution."""
+
+        if self.domain != "nested":
+            raise QueryDomainError(f"{projection}() is only valid for nested containment queries.")
+        if type(self.containment_target).__name__ != expected:
+            actual = (
+                type(self.containment_target).__name__
+                if self.containment_target is not None else "CDef selector"
+            )
+            raise QueryDomainError(f"{projection}() requires an exact {expected} containment target, got {actual}.")
 
     @property
     def lowering_scan_policy(self) -> ScanPolicy:
@@ -617,6 +828,13 @@ class DefinitionQuery:
     def _require_domain(self) -> None:
         if self.domain is None:
             raise QueryDomainError("Select a query domain with stored(), cached(), known(), or nested() before executing.")
+        if self.domain == "nested" and self.source_store is not None:
+            raise QueryDomainError("Source-restricted containment execution is not available yet.")
+        if self.domain == "nested" and is_exact_reference_target(self.containment_target):
+            raise QueryDomainError("Exact-reference containment execution is not available yet.")
+        if self.domain == "nested" and (
+                self.containment_edges != "materialize" or self.contains_ref):
+            raise QueryDomainError("Reference-aware containment execution is not available yet.")
 
     def _domain_label(self) -> str:
         if self.domain == "nested" and self.projection is not None:

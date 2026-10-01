@@ -11,6 +11,74 @@ RefreshPolicy = Literal[False, "auto", True]
 ClassMatchPolicy = Literal["selector", "exact"]
 QueryDomain = Literal["stored", "cached", "known", "nested"]
 QueryProjection = Literal["definitions", "owners"]
+ContainmentEdgePolicy = Literal["materialize", "ref", "all"]
+
+
+def validate_containment_policy(
+        edges: Any, contains_ref: Any) -> tuple[ContainmentEdgePolicy, bool]:
+    """Validate the immutable traversal controls for a nested containment query.
+
+    Args:
+        edges: Literal edge kinds permitted at every containment traversal hop.
+        contains_ref: Exact boolean requiring a qualifying path to include a
+            retained ``REF`` hop.
+
+    Returns:
+        The validated policy pair.
+
+    Raises:
+        ValueError: If ``edges`` is not ``"materialize"``, ``"ref"``, or
+            ``"all"``.
+        TypeError: If ``contains_ref`` is not an exact bool.
+
+    Side Effects:
+        None. Validation does not enumerate Store authority or traverse CDefs.
+    """
+
+    if not isinstance(edges, str) or edges not in {"materialize", "ref", "all"}:
+        raise ValueError("nested edges must be 'materialize', 'ref', or 'all'.")
+    if type(contains_ref) is not bool:
+        raise TypeError("nested contains_ref must be an exact bool.")
+    return edges, contains_ref
+
+
+def validate_containment_target(target: Any) -> Any:
+    """Require one exact value supported by containment query entry points.
+
+    Args:
+        target: Concrete CDef, ObjectRef, or StateRef retained as immutable
+            containment-query intent.
+
+    Returns:
+        The unchanged validated target.
+
+    Raises:
+        TypeError: If ``target`` is not an exact supported containment value.
+
+    Side Effects:
+        None. Exact reference targets remain data and are not resolved.
+    """
+
+    from ..definition import ConcreteDefinition
+    from ..reference_values import ObjectRef, StateRef
+
+    if not isinstance(target, (ConcreteDefinition, ObjectRef, StateRef)):
+        raise TypeError(
+            "containment target must be a ConcreteDefinition, ObjectRef, or StateRef."
+        )
+    return target
+
+
+def is_exact_reference_target(target: Any) -> bool:
+    """Return whether a containment target is an exact reference value.
+
+    Exact reference values select containment only; they do not select ordinary
+    reference-authority query domains.
+    """
+
+    from ..reference_values import ObjectRef, StateRef
+
+    return isinstance(target, (ObjectRef, StateRef))
 
 
 class QueryError(Exception):

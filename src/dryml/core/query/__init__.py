@@ -1,5 +1,6 @@
 from .path import Arg, DefinitionPath, GraphPath, GraphPathError, Index, Key, Kwarg, Parameter, QueryPathError, SetMember, normalize_path
 from .model import (
+    ContainmentEdgePolicy,
     QueryCardinalityError,
     QueryDomainError,
     QueryError,
@@ -19,6 +20,7 @@ from .reference import ObjectRefResultSet, ReferenceOccurrence, ReferenceQuery, 
 __all__ = [
     "Arg",
     "CandidateRelation",
+    "ContainmentEdgePolicy",
     "DefinitionPath",
     "DefinitionQuery",
     "DefinitionResultSet",
