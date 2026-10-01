@@ -735,7 +735,10 @@ class DefinitionQuery:
             if (
                     containment is not None
                     and self.occurrence_limit is not None
-                    and self.projection not in {"object_refs", "state_refs"}
+                    and (
+                        self.universe is not None
+                        or self.projection not in {"object_refs", "state_refs"}
+                    )
             ):
                 containment = replace(containment, bounded=True)
             if callable(occs):
