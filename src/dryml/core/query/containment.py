@@ -445,10 +445,15 @@ def _iter_root_projection_occurrences(
 
 
 def _projection_target_key(target: ContainmentTarget) -> tuple[Any, ...]:
-    """Return an equality-preserving terminal key for one projection ledger."""
+    """Return a private terminal key for one existential projection ledger.
+
+    Concrete definitions retain graph-node identity here so exact selector
+    refinement can distinguish equal targets with different sharing topology.
+    Public projections still apply their established structural deduplication.
+    """
 
     if isinstance(target, ConcreteDefinition):
-        return ("definition", target.stable_hash(), repr(target))
+        return ("definition", cdef_node_key(target))
     return (type(target).__name__, target.digest())
 
 

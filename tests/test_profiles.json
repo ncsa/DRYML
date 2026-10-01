@@ -353,9 +353,10 @@
           ]
         },
         "tests/core/test_query_federation.py": {
-          "rationale": "Retain replica provenance, source restriction, and global occurrence-cap behavior for reference-aware containment.",
+          "rationale": "Retain source restriction, replica provenance across distinct graph topologies, and global occurrence-cap behavior for reference-aware containment.",
           "functions": [
-            "test_reference_containment_keeps_replica_provenance_and_source_scope"
+            "test_reference_containment_keeps_replica_provenance_and_source_scope",
+            "test_reference_containment_cap_keeps_graph_distinct_owner_replicas"
           ]
         },
         "tests/core/test_repo_query_multistore.py": {

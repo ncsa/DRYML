@@ -1129,6 +1129,104 @@ def test_reference_containment_cap_does_not_enumerate_later_witnesses(tmp_path, 
     assert emitted == 1
 
 
+def test_reference_containment_cap_keeps_graph_distinct_owner_replicas(tmp_path, monkeypatch):
+    """A capped public witness retains every primed graph-distinct owner replica."""
+
+    shared_store = DirStore(
+        tmp_path / "shared", query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    independent_store = DirStore(
+        tmp_path / "independent", query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    shared_repo = Repo(shared_store)
+    shared_target = FederationLeaf(name="capped-replica-target", repo=shared_repo)
+    shared_unrelated = FederationLeaf(name="shared-unrelated", repo=shared_repo)
+    shared_owner = FederationPair(
+        DefLink.finalized(EdgeKind.REF, shared_target.definition),
+        FederationPair(
+            DefLink.finalized(EdgeKind.REF, shared_unrelated.definition),
+            DefLink.finalized(EdgeKind.REF, shared_unrelated.definition),
+            repo=shared_repo,
+        ).definition,
+        repo=shared_repo,
+    )
+    shared_repo.save_object(shared_owner)
+
+    independent_repo = Repo(independent_store)
+    independent_target = FederationLeaf(
+        name="capped-replica-target", repo=independent_repo,
+    )
+    independent_owner = FederationPair(
+        DefLink.finalized(EdgeKind.REF, independent_target.definition),
+        FederationPair(
+            DefLink.finalized(
+                EdgeKind.REF,
+                FederationLeaf(name="shared-unrelated", repo=independent_repo).definition,
+            ),
+            DefLink.finalized(
+                EdgeKind.REF,
+                FederationLeaf(name="shared-unrelated", repo=independent_repo).definition,
+            ),
+            repo=independent_repo,
+        ).definition,
+        repo=independent_repo,
+    )
+    independent_repo.save_object(independent_owner)
+
+    assert shared_owner.definition == independent_owner.definition
+    assert not shared_owner.definition.graph_equal(independent_owner.definition)
+    shared_witness = next(
+        query_module.iter_containment_occurrences_matching(
+            (shared_owner.definition,),
+            lambda value: value == shared_target.definition,
+            edges="ref",
+        )
+    )
+    independent_witness = next(
+        query_module.iter_containment_occurrences_matching(
+            (independent_owner.definition,),
+            lambda value: value == shared_target.definition,
+            edges="ref",
+        )
+    )
+    assert shared_witness.owner == independent_witness.owner
+    assert shared_witness.path == independent_witness.path
+    assert shared_witness.hops == independent_witness.hops
+    assert shared_witness.target == independent_witness.target
+    target_selector = Definition(
+        FederationLeaf, SKIP_ARGS, name="capped-replica-target",
+    )
+    original = query_module.iter_containment_occurrences_matching
+    primed = []
+
+    def observe_heads(*args, **kwargs):
+        for occurrence in original(*args, **kwargs):
+            primed.append(occurrence)
+            yield occurrence
+
+    monkeypatch.setattr(
+        query_module, "iter_containment_occurrences_matching", observe_heads,
+    )
+
+    for stores, expected_replicas in (
+        ((shared_store, independent_store), (shared_store, independent_store)),
+        ((independent_store, shared_store), (independent_store, shared_store)),
+    ):
+        repo = Repo(stores=stores)
+        raw = repo.query(target_selector).nested(edges="ref").max_occurrences(1).execute()
+
+        assert len(raw) == 1
+        assert raw.one().owner == shared_owner.definition
+        assert len(primed) == 2
+        assert primed[0].owner == primed[1].owner
+        assert primed[0].path == primed[1].path
+        assert primed[0].hops == primed[1].hops
+        assert primed[0].target == primed[1].target
+        assert len(raw._containment_private_witnesses) == 2
+        assert raw.owners().replicas(shared_owner.definition) == expected_replicas
+        primed.clear()
+
+
 def test_sqlite_nested_generation_retry_is_source_local(tmp_path, monkeypatch):
     store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
