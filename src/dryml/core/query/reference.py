@@ -541,6 +541,10 @@ class ReferenceQuery:
             refresh=None):
         """Adapt an unfiltered reference builder to a nested containment query.
 
+        This is equivalent to ``repo.query(target).nested(...)`` and preserves
+        an attached connected Store restriction. It does not alter ordinary
+        reference-authority lookup or imply target loadability.
+
         Args:
             target: Exact ConcreteDefinition, ObjectRef, or StateRef to find
                 below authoritative stored CDef roots.

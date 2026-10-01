@@ -6,6 +6,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
+from dryml.artifacts import CachedDataset
 from dryml.core import Object, QueryDomainError, Repo, Serializable, StateRef
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import EdgeKind
@@ -22,6 +23,7 @@ from dryml.core.query.model import ContainmentHop, DefinitionOccurrence, contain
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord
 from dryml.core.utils.graph.path import GraphPath
+from dryml.data import Dataset
 
 
 class QueryLeaf(Object):
@@ -50,6 +52,27 @@ class QueryReferenceLeaf(Serializable):
 
     def save_state_to_dir_imp(self, dest_dir, *, codec):
         """Publish no payload files for this exact-reference test value."""
+
+
+class QueryDataset(Dataset):
+    """Inert Dataset definition used to exercise CachedDataset reference retention."""
+
+    def __iter__(self):
+        return iter(())
+
+
+def test_cached_dataset_definition_only_reference_containment(tmp_path):
+    """A retained CachedDataset source is discoverable without source execution."""
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    source = QueryDataset(repo=repo)
+    cached = CachedDataset(source, repo=repo)
+
+    repo.save_object(cached)
+
+    assert source.definition not in tuple(repo.query().stored().defs())
+    assert repo.query(source.definition).nested(edges="ref").owners().defs().one() == cached.definition
 
 
 def test_save_records_definition_closure_for_ephemeral_child(tmp_path):

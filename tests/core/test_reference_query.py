@@ -174,6 +174,28 @@ def test_reference_containing_adapts_unfiltered_source_and_source_scope(tmp_path
         repo.references().exact(state.object).containing(state)
 
 
+def test_exact_state_ref_containment_entries_agree_several_levels_deep(tmp_path):
+    """Both entries retain exact checkpoint identity across mixed nested hops."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
+    owner = repo.save_object(ReferenceQueryWrapper(
+        ReferenceQueryRefParent(DefLink.finalized(EdgeKind.REF, state), repo=repo),
+        repo=repo,
+    ))
+
+    direct = repo.query(state).nested(edges="all", contains_ref=True)
+    adapted = repo.references().containing(state, edges="all", contains_ref=True)
+
+    assert tuple(direct.execute()) == tuple(adapted.execute())
+    assert direct.owners().defs().one() == adapted.owners().defs().one() == owner.definition
+    assert direct.state_refs().one() == adapted.state_refs().one() == state
+    assert tuple(hop.kind for hop in direct.one().hops) == (
+        EdgeKind.MATERIALIZE, EdgeKind.REF,
+    )
+    assert repo.references().exact(state.object).object_refs().one() == state.object
+
+
 def test_reference_containing_rejects_invalid_target_without_scanning_at_build_time(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))

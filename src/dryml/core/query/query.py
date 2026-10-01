@@ -438,6 +438,10 @@ class DefinitionQuery:
             refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
         """Select immutable stored-root containment with literal edge controls.
 
+        Concrete CDef targets match structurally; exact ObjectRef and StateRef
+        targets retain complete typed identity as terminal graph values. Selecting
+        containment neither resolves nor loads a reference target.
+
         Args:
             edges: ``"materialize"`` (the compatibility default), ``"ref"``,
                 or ``"all"``. The selected edge kind applies at every hop.
@@ -446,7 +450,8 @@ class DefinitionQuery:
             refresh: Optional existing derived-index refresh policy.
 
         Returns:
-            An immutable nested query preserving its target and policy.
+            An immutable nested query preserving its target, policy, and later
+            authoritative source scope.
 
         Raises:
             ValueError: If ``edges`` or ``refresh`` is unsupported.

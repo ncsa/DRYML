@@ -327,6 +327,12 @@
             "test_graph_query_matches_bruteforce_across_domains_and_replicas"
           ]
         },
+        "tests/core/test_repo_query_nested.py": {
+          "rationale": "Retain the inert CachedDataset reference-containment example; exhaustive mode owns traversal-policy combinations.",
+          "functions": [
+            "test_cached_dataset_definition_only_reference_containment"
+          ]
+        },
         "tests/core/test_reference_query.py": {
           "rationale": "Retain nonmaterializing scans, prepared-selector sidecars, aggregate identity, exact paths/aliases, nested state references, and conflicting-authority rejection as the complete reference-query boundary roster.",
           "functions": [
@@ -335,7 +341,20 @@
             "test_object_id_lookup_is_closed_but_reference_query_returns_aggregate",
             "test_reference_filters_keep_exact_paths_aliases_and_all_ephemeral_refs",
             "test_object_terminal_preserves_nested_ref_state_reference",
+            "test_exact_state_ref_containment_entries_agree_several_levels_deep",
             "test_derived_candidates_cannot_hide_conflicting_store_authority"
+          ]
+        },
+        "tests/core/test_reference_query_index.py": {
+          "rationale": "Retain reopened ready-sidecar compatibility for exact reference containment without the recovery-state matrix.",
+          "functions": [
+            "test_reopened_existing_sidecar_preserves_exact_reference_containment"
+          ]
+        },
+        "tests/core/test_query_federation.py": {
+          "rationale": "Retain replica provenance, source restriction, and global occurrence-cap behavior for reference-aware containment.",
+          "functions": [
+            "test_reference_containment_keeps_replica_provenance_and_source_scope"
           ]
         },
         "tests/core/test_repo_query_multistore.py": {

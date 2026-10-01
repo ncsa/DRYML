@@ -6,6 +6,85 @@ Graph traversal records typed V2 `Parameter` and container paths. Materializing 
 
 Store indexes are acceleration only. Rebuild scans authoritative definition and reference records, announces visible progress, and can safely replace a missing or stale derived index. A query may fail closed when current metadata is incompatible; it never treats an incompatible index as empty or current authority.
 
+## Reference-Aware Containment
+
+Nested containment finds authoritative stored CDef roots with a non-empty typed
+path to a target. The CDef entry is
+`repo.query(target).nested(...)`; `target` may be a concrete CDef, an exact
+`ObjectRef`, or an exact `StateRef`. The reference entry is
+`repo.references().containing(target, ...)`. It is an adapter for the same
+immutable nested query, so an unfiltered reference builder produces the same
+owners, occurrences, policies, source scope, and explanation as the CDef entry.
+It rejects already-filtered reference builders rather than reinterpreting an
+authority predicate as containment. Ordinary `Repo.references()` lookup,
+including `contains`, `exact`, aliases, and metadata predicates, is unchanged.
+
+`edges="materialize"` is the compatibility default and permits only owning
+materializing hops. `edges="ref"` permits only retained `Ref` hops, and
+`edges="all"` permits either kind at every hop. `contains_ref=False` is the
+default. Set `contains_ref=True` to retain only paths that contain at least one
+selected `Ref` hop; it narrows the selected edge policy and never widens it.
+Therefore `edges="materialize", contains_ref=True` is deterministically empty,
+while `edges="ref", contains_ref=True` has the same non-empty path membership
+as `edges="ref"`. An independently stored target does not match through its own
+empty root path; it qualifies only through another stored root's non-empty path.
+
+```python
+from dryml.artifacts import CachedDataset
+from dryml.core import Definition
+
+# This is definition-only: construction and the query do not open the Dataset
+# or compute the cache. `source` need not be an independently stored root.
+source = Definition(MyDataset, "training").concretize()
+cached = CachedDataset(source, repo=repo)
+repo.save_object(cached)
+
+owners = (
+    repo.query(source)
+    .nested(edges="ref")
+    .owners()
+    .defs()
+)
+assert list(owners) == [cached.definition]
+```
+
+For an exact reference target, `object_refs()` and `state_refs()` return only
+their respective complete target identities. A StateRef comparison includes its
+complete ObjectRef and state identity; an ObjectRef comparison includes its
+complete object identity. Neither terminal coerces an exact reference into its
+CDef, so a different checkpoint of the same object, or a different object with
+the same CDef, does not match. `owners().defs()` returns the enclosing stored
+CDefs for any target kind. Exact references are terminal values: containment
+does not load Objects, read payloads, resolve target authority, or infer that a
+target is independently stored, loadable, restorable, or eligible for cleanup.
+
+Raw nested execution returns one occurrence per qualifying owner-to-target
+path. Each occurrence retains the target plus `hops`, whose ordered entries pair
+the direct typed path segment with its literal `materialize` or `ref` kind. This
+distinguishes mixed paths such as `ref -> materialize -> ref` without treating a
+reference on an unrelated branch as evidence for a materializing path.
+
+Use `in_store(store)` after `nested()` or on the unfiltered reference builder
+before `containing()` to restrict roots to that exact connected Store handle.
+Source restriction happens before replica merging, counts, and occurrence
+limits. Owners and target projections are structurally or completely typed
+deduplicated as appropriate; identical replica witnesses merge their source
+evidence. Results use canonical owner/path/hop/terminal ordering. A raw
+`max_occurrences(n)` cap is one global, post-deduplication truncation, not a
+claim that the graph is complete. Direct owner and exact-target projections are
+existential and are not truncated by that raw-path cap; projections made from an
+already bounded occurrence result remain bounded.
+
+Reference-aware, reference-bearing, and exact-reference containment performs
+authoritative root verification. `scan_policy("allow")` permits it and
+`scan_policy("warn")` emits the existing warning before the scan;
+`scan_policy("forbid")` and `require_indexed()` reject it. `explain()` reports
+the target kind, edge policy, reference filter, source scope, scan reason, and
+derived index generation evidence without performing the required residual
+scan unless `analyze=True`. The legacy eligible materialize-only CDef paths keep
+their indexed behavior. Store indexes remain candidate-only derived state, never
+authority for root membership or a no-match conclusion.
+
 ## Template Selectors
 
 `Template.as_selector()` creates a loose ordinary Selector that preserves known

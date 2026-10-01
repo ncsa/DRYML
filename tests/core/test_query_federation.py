@@ -997,6 +997,8 @@ def test_reference_containment_keeps_replica_provenance_and_source_scope(tmp_pat
         store1.catalog_key(),
         store2.catalog_key(),
     )))
+    assert occurrences.explanation.containment_edges == "ref"
+    assert occurrences.explanation.containment_contains_ref is False
     assert query.in_store(repo_view.stores[1]).owners().one() == owner.definition
     assert query.max_occurrences(0).count() == 0
 

@@ -129,3 +129,28 @@ def test_reference_containment_refresh_false_uses_current_roots_not_old_sidecar_
     ))
 
     assert current.query(target.definition).nested(edges="ref", refresh=False).owners().one() == owner.definition
+
+
+def test_reopened_existing_sidecar_preserves_exact_reference_containment(tmp_path):
+    """A ready older sidecar remains compatible with exact StateRef containment."""
+
+    store = DirStore(
+        tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    repo = Repo(store)
+    target = repo.save_object(IndexedReferenceValue("checkpoint", repo=repo))
+    owner = repo.save_object(IndexedReferenceValue(
+        DefLink.finalized(EdgeKind.REF, target), repo=repo,
+    ))
+    assert store.query_index_status().state == "ready"
+
+    reopened_store = DirStore(
+        store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    reopened = Repo(reopened_store)
+    direct = reopened.query(target).nested(edges="ref", refresh=False)
+    adapted = reopened.references().containing(target, edges="ref", refresh=False)
+
+    assert direct.owners().defs().one() == adapted.owners().defs().one() == owner.definition
+    assert direct.state_refs().one() == adapted.state_refs().one() == target
+    assert reopened_store.query_index_status().state == "ready"
