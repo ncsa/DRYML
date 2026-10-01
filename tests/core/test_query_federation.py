@@ -1,12 +1,24 @@
-from pathlib import Path
+from dataclasses import replace
 import inspect
+from pathlib import Path
 
 import pytest
 
-from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from dryml.core import ConcreteDefinition, Definition, Object, Repo, SKIP_ARGS
-from dryml.core.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError, QueryIndexGenerationChanged, QueryVerifyBudgetExceeded, QueryWouldScanError
+from dryml.core.cdef_identity import cdef_node_key
+from dryml.core.links import DefLink
+from dryml.core.query.model import (
+    OccurrenceTraversalSnapshot,
+    QueryCardinalityError,
+    QueryIndexError,
+    QueryIndexGenerationChanged,
+    QueryVerifyBudgetExceeded,
+    QueryWouldScanError,
+    containment_witness_key,
+)
 import dryml.core.query.federation as federation_module
+import dryml.core.query.query as query_module
 from dryml.core.query.federation import CACHE_SOURCE_KEY, RepoGenerationVector, StoreIndexBinding
 from dryml.core.query.query import DefinitionQuery
 from dryml.core.query.result import DefinitionResultSet, QueryBackedDefinitionResultSet
@@ -954,6 +966,165 @@ def test_sqlite_multistore_occurrences_deduplicate_and_keep_replica_order(tmp_pa
     assert occurrence_items[0].definition == leaf.definition
     assert str(occurrence_items[0].path) == '$[@param("child")]'
     assert tuple(store.base_dir for store in owners.replicas(owner.definition)) == (store2.base_dir, store1.base_dir)
+
+
+def test_reference_containment_keeps_replica_provenance_and_source_scope(tmp_path):
+    """Reference-aware witnesses deduplicate only after retaining every source."""
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    leaf = FederationLeaf(name="replicated-reference", repo=repo)
+    owner = FederationParent(
+        DefLink.finalized(EdgeKind.REF, leaf.definition), name="reference-owner", repo=repo,
+    )
+    repo.save_object(owner, store=store1)
+    repo.save_object(owner, store=store2)
+
+    repo_view = Repo(stores=[
+        DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    query = repo_view.query(leaf.definition).nested(edges="ref")
+
+    occurrences = query.max_occurrences(1).execute()
+
+    assert len(occurrences) == 1
+    assert tuple(store.base_dir for store in occurrences.owners().replicas(owner.definition)) == (
+        store2.base_dir,
+        store1.base_dir,
+    )
+    assert occurrences.explanation.containment_source_scope == tuple(sorted((
+        store1.catalog_key(),
+        store2.catalog_key(),
+    )))
+    assert query.in_store(repo_view.stores[1]).owners().one() == owner.definition
+    assert query.max_occurrences(0).count() == 0
+
+
+def test_reference_containment_keeps_equal_topology_distinct_roots_source_local(
+        tmp_path, monkeypatch):
+    """Equal owners must be walked per retained graph before witness deduplication."""
+    shared_store = DirStore(
+        tmp_path / "shared", query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    independent_store = DirStore(
+        tmp_path / "independent", query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    shared_repo = Repo(shared_store)
+    shared_leaf = FederationLeaf(name="equal-topology-target", repo=shared_repo)
+    shared_owner = FederationPair(
+        DefLink.finalized(EdgeKind.REF, shared_leaf.definition),
+        DefLink.finalized(EdgeKind.REF, shared_leaf.definition),
+        repo=shared_repo,
+    )
+    shared_repo.save_object(shared_owner)
+
+    independent_repo = Repo(independent_store)
+    independent_owner = FederationPair(
+        DefLink.finalized(
+            EdgeKind.REF,
+            FederationLeaf(name="equal-topology-target", repo=independent_repo).definition,
+        ),
+        DefLink.finalized(
+            EdgeKind.REF,
+            FederationLeaf(name="equal-topology-target", repo=independent_repo).definition,
+        ),
+        repo=independent_repo,
+    )
+    independent_repo.save_object(independent_owner)
+
+    assert shared_owner.definition == independent_owner.definition
+    assert not shared_owner.definition.graph_equal(independent_owner.definition)
+
+    repo = Repo(stores=[
+        DirStore(shared_store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(independent_store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    original = query_module.iter_containment_occurrences_matching
+    walked_roots = []
+
+    def observe_roots(roots, *args, **kwargs):
+        roots = tuple(roots)
+        walked_roots.extend(cdef_node_key(root) for root in roots)
+        yield from original(roots, *args, **kwargs)
+
+    monkeypatch.setattr(query_module, "iter_containment_occurrences_matching", observe_roots)
+    query = repo.query(shared_leaf.definition).nested(edges="ref")
+    occurrences = query.execute()
+
+    assert len(walked_roots) == 2
+    assert walked_roots[0] is not walked_roots[1]
+    assert len(occurrences) == 4
+    witness_keys = tuple(map(containment_witness_key, occurrences))
+    assert witness_keys == tuple(sorted(witness_keys))
+    capped = query.max_occurrences(1).execute()
+    assert len(capped) == 1
+    assert containment_witness_key(capped.one()) == witness_keys[0]
+
+    reversed_repo = Repo(stores=[
+        DirStore(independent_store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(shared_store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    reversed_capped = reversed_repo.query(shared_leaf.definition).nested(edges="ref").max_occurrences(1).execute()
+
+    assert containment_witness_key(reversed_capped.one()) == witness_keys[0]
+    scoped_owners = query.in_store(repo.stores[1]).owners().defs()
+    assert scoped_owners.replicas(independent_owner.definition) == (
+        repo.stores[1],
+    )
+
+
+def test_reference_containment_rejects_repeated_derived_generation_mismatches(tmp_path, monkeypatch):
+    """A source capture cannot publish evidence across unstable index generations."""
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    leaf = FederationLeaf(name="generation-reference", repo=repo)
+    owner = FederationParent(
+        DefLink.finalized(EdgeKind.REF, leaf.definition), name="generation-owner", repo=repo,
+    )
+    repo.save_object(owner)
+    original = store.query_index_status
+    calls = 0
+
+    def changing_status():
+        nonlocal calls
+        calls += 1
+        return replace(original(), generation=calls)
+
+    monkeypatch.setattr(store, "query_index_status", changing_status)
+
+    with pytest.raises(QueryIndexError, match="Derived index generation changed repeatedly"):
+        repo.query(leaf.definition).nested(edges="ref", refresh=False).owners().defs()
+
+    assert calls == 6
+
+
+def test_reference_containment_cap_does_not_enumerate_later_witnesses(tmp_path, monkeypatch):
+    """The global cap stops an ordered source before it drains sibling paths."""
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    leaf = FederationLeaf(name="capped-reference", repo=repo)
+    owner = FederationPair(
+        DefLink.finalized(EdgeKind.REF, leaf.definition),
+        DefLink.finalized(EdgeKind.REF, leaf.definition),
+        repo=repo,
+    )
+    repo.save_object(owner)
+    original = query_module.iter_containment_occurrences_matching
+    emitted = 0
+
+    def fail_if_drained(*args, **kwargs):
+        nonlocal emitted
+        for occurrence in original(*args, **kwargs):
+            emitted += 1
+            if emitted > 1:
+                raise AssertionError("occurrence cap drained a later witness")
+            yield occurrence
+
+    monkeypatch.setattr(query_module, "iter_containment_occurrences_matching", fail_if_drained)
+
+    assert len(repo.query(leaf.definition).nested(edges="ref").max_occurrences(1).execute()) == 1
+    assert emitted == 1
 
 
 def test_sqlite_nested_generation_retry_is_source_local(tmp_path, monkeypatch):

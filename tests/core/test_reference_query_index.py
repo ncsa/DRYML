@@ -1,12 +1,16 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from dryml.core import Definition, Object, ObjectId, ObjectRef, Repo, Serializable
+from dryml.core.cdef_graph import EdgeKind
 from dryml.core.query.codecs import decode_reference, encode_reference
 from dryml.core.query.path import GraphPath
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core.links import DefLink
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import ObjectAliasRecord
 
@@ -67,3 +71,61 @@ def test_sqlite_reference_rows_rebuild_from_unchanged_authority(tmp_path):
     after = tuple(con.execute("SELECT reference_kind, reference_digest FROM reference_records ORDER BY 1, 2"))
     con.close()
     assert after == before
+
+
+@pytest.mark.parametrize("sidecar_state", ("missing", "dirty", "corrupt"))
+def test_reference_containment_uses_current_roots_before_sidecar_recovery(tmp_path, sidecar_state):
+    """Root-local containment never substitutes derived membership for authority."""
+    store = DirStore(
+        tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    repo = Repo(store)
+    target = ReferenceIndexValue("contained", repo=repo)
+    owner = ReferenceIndexValue(
+        DefLink.finalized(EdgeKind.REF, target.definition), repo=repo,
+    )
+    repo.save_object(owner)
+    sidecar = Path(store.query_index_path)
+    assert sidecar.exists()
+
+    if sidecar_state == "missing":
+        sidecar.unlink()
+    elif sidecar_state == "dirty":
+        store.mark_query_index_dirty()
+    else:
+        sidecar.write_bytes(b"not a sqlite database")
+
+    current = DirStore(
+        store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    current_repo = Repo(current)
+    query = current_repo.query(target.definition).nested(edges="ref", refresh=False).owners()
+
+    assert query.one() == owner.definition
+    assert current.query_index_status().state == sidecar_state
+
+    recovered = DirStore(
+        store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    assert Repo(recovered).query(target.definition).nested(edges="ref").owners().one() == owner.definition
+    assert recovered.query_index_status().state == "ready"
+
+
+def test_reference_containment_refresh_false_uses_current_roots_not_old_sidecar_membership(tmp_path):
+    """A ready but stale sidecar cannot hide an authoritative reference owner."""
+    store = DirStore(
+        tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    repo = Repo(store)
+    target = ReferenceIndexValue("current-root", repo=repo)
+    owner = ReferenceIndexValue(
+        DefLink.finalized(EdgeKind.REF, target.definition), repo=repo,
+    )
+    repo.save_object(owner)
+    store.open_query_index().remove_stored_roots((owner.definition,))
+
+    current = Repo(DirStore(
+        store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    ))
+
+    assert current.query(target.definition).nested(edges="ref", refresh=False).owners().one() == owner.definition

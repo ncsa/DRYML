@@ -16,7 +16,7 @@ from ..cdef_identity import cdef_node_key, same_cdef
 from ..definition import ConcreteDefinition
 from ..links import DefLink
 from ..reference_values import ObjectRef, StateRef
-from ..utils.graph.path import GraphPath
+from ..utils.graph.path import GraphPath, graph_path_sort_key
 from ..utils.graph.value import iter_value_edges
 from .model import (
     ContainmentHop,
@@ -293,7 +293,9 @@ def _iter_root_occurrences(
         has_ref: bool,
         active_nodes: frozenset[object],
     ) -> Iterator[ContainmentOccurrence]:
-        for edge in _iter_direct_containment_edges(node):
+        for edge in sorted(
+                _iter_direct_containment_edges(node), key=lambda item: graph_path_sort_key(item.path),
+        ):
             if not _permits(edges, edge.kind):
                 continue
             next_has_ref = has_ref or edge.kind is EdgeKind.REF

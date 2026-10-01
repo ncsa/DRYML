@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from heapq import merge
 from typing import Any
 import warnings
 
@@ -1256,9 +1257,19 @@ class DefinitionQuery:
         if self.template_selector is not None:
             return tuple(item for _, item in zip(range(stop_after), self._execute_template_selector()))
         if self.domain == "nested":
-            if self.universe is None and self.projection == "definitions" and self.repo._query_index.can_execute_query_domain("nested"):
+            if (
+                    self.universe is None
+                    and self.projection == "definitions"
+                    and not self._uses_authoritative_containment_residual()
+                    and self.repo._query_index.can_execute_query_domain("nested")
+            ):
                 return self.repo._query_index.execute_nested_definitions(self, stop_after=stop_after)[0]
-            if self.universe is None and self.projection == "owners" and self.repo._query_index.can_execute_query_domain("nested"):
+            if (
+                    self.universe is None
+                    and self.projection == "owners"
+                    and not self._uses_authoritative_containment_residual()
+                    and self.repo._query_index.can_execute_query_domain("nested")
+            ):
                 return self.repo._query_index.execute_nested_owners(self, stop_after=stop_after)[0]
             if self.universe is None and self.projection is None:
                 limit = stop_after if self.occurrence_limit is None else min(self.occurrence_limit, stop_after)
@@ -1447,12 +1458,38 @@ class DefinitionQuery:
     def _containment_source_scope(self) -> tuple[str, ...]:
         """Return canonical source keys selected for fresh containment evidence."""
 
-        stores = (self.source_store,) if self.source_store is not None else tuple(self.repo.stores)
-        return tuple(
-            store.catalog_key() if hasattr(store, "catalog_key")
-            else f"{type(store).__module__}.{type(store).__qualname__}:id:{id(store)}"
-            for store in stores
-        )
+        return tuple(sorted(self._containment_source_key(store) for store in self._containment_stores()))
+
+    def _containment_stores(self) -> tuple[Any, ...]:
+        """Return selected physical sources once, in Repo priority order."""
+
+        selected = (self.source_store,) if self.source_store is not None else tuple(self.repo.stores)
+        stores = []
+        seen = set()
+        for store in selected:
+            key = self._containment_source_key(store)
+            if key not in seen:
+                seen.add(key)
+                stores.append(store)
+        return tuple(stores)
+
+    @staticmethod
+    def _containment_source_key(store) -> str:
+        """Return the stable source identity used by containment evidence."""
+
+        if hasattr(store, "catalog_key"):
+            return store.catalog_key()
+        return f"{type(store).__module__}.{type(store).__qualname__}:id:{id(store)}"
+
+    def _refresh_authoritative_containment_sources(self, stores, stats: QueryStats) -> None:
+        """Perform allowed sidecar recovery before taking an authority cut."""
+
+        if self.refresh_policy is False:
+            return
+        for store in stores:
+            index = store.open_query_index()
+            if index is not None:
+                index.refresh(self.refresh_policy, stats=stats)
 
     def _capture_authoritative_containment_roots(self, stats: QueryStats):
         """Detach complete selected roots under existing Store authority fences.
@@ -1462,7 +1499,7 @@ class DefinitionQuery:
         open index view or Store fence after returning.
         """
 
-        stores = (self.source_store,) if self.source_store is not None else tuple(self.repo.stores)
+        stores = self._containment_stores()
         reason = "reference-aware containment requires authoritative root verification"
         stats.scan_required = True
         stats.scan_reason = reason
@@ -1475,31 +1512,60 @@ class DefinitionQuery:
                 stacklevel=3,
             )
 
-        entries = []
-        source_plans = []
-        generations = {}
-        with self.repo._authority_read_fences(stores):
-            for store in stores:
-                roots = tuple(store.authoritative_root_definitions())
-                stats.store_scan_count += 1
-                source_key = store.catalog_key() if hasattr(store, "catalog_key") else repr(store)
-                status = store.query_index_status()
-                generation = status.generation
-                if generation is not None:
-                    generations[source_key] = generation
-                source_plans.append(SourceQueryPlan(
-                    source_key=source_key,
-                    backend=status.backend,
-                    generation=generation,
-                    candidate_count=len(roots),
-                    refresh_action="authority-root-residual",
-                ))
-                entries.extend((root, store) for root in roots)
-        stats.refresh_action = "authority-root-residual"
-        stats.universe_size = len(entries)
-        stats.generation_vector = generations or None
-        stats.source_plans = tuple(source_plans)
-        return tuple(entries)
+        for _ in range(_MAX_NESTED_QUERY_RETRIES):
+            # Recovery has its own short fence; capture only after it releases it.
+            self._refresh_authoritative_containment_sources(stores, stats)
+            before = {
+                self._containment_source_key(store): store.query_index_status()
+                for store in stores
+            }
+            entries = []
+            source_plans = []
+            generations = {}
+            generation_changed = False
+            with self.repo._authority_read_fences(stores):
+                for store in stores:
+                    roots = tuple(store.authoritative_root_definitions())
+                    stats.store_scan_count += 1
+                    source_key = self._containment_source_key(store)
+                    status = store.query_index_status()
+                    previous = before[source_key]
+                    if (
+                            previous.state == "ready"
+                            and status.state == "ready"
+                            and (
+                                previous.backend != status.backend
+                                or previous.generation != status.generation
+                            )
+                    ):
+                        generation_changed = True
+                        break
+                    generation = status.generation
+                    if generation is not None:
+                        generations[source_key] = generation
+                    source_plans.append(SourceQueryPlan(
+                        source_key=source_key,
+                        backend=status.backend,
+                        generation=generation,
+                        candidate_count=len(roots),
+                        refresh_action="authority-root-residual",
+                    ))
+                    entries.extend((root, store) for root in roots)
+            if generation_changed:
+                continue
+            prior_action = stats.refresh_action
+            stats.refresh_action = (
+                "authority-root-residual"
+                if prior_action == "none"
+                else f"{prior_action}+authority-root-residual"
+            )
+            stats.universe_size = len(entries)
+            stats.generation_vector = generations or None
+            stats.source_plans = tuple(source_plans)
+            return tuple(entries)
+        raise QueryIndexError(
+            "Derived index generation changed repeatedly during authoritative containment capture."
+        )
 
     def _containment_matcher(self, stats: QueryStats):
         """Build a typed residual predicate while preserving verify budgets."""
@@ -1569,30 +1635,52 @@ class DefinitionQuery:
         }
 
     def _execute_authoritative_containment_occurrences(self):
-        """Collect and globally cap root-local witnesses from authoritative roots."""
+        """Collect canonically ordered root-local witnesses under one global cap."""
 
         from .model import containment_witness_key
 
         stats = QueryStats()
         entries = self._capture_authoritative_containment_roots(stats)
         matches = self._containment_matcher(stats)
+        limit = None if self.projection in {"object_refs", "state_refs"} else self.occurrence_limit
+        if limit == 0:
+            stats.result_count = 0
+            return (), stats, {}
         occurrences = []
         replicas: dict[ConcreteDefinition, list[Any]] = {}
         seen = set()
+        grouped_entries: dict[str, list[tuple[ConcreteDefinition, list[Any]]]] = {}
         for root, store in entries:
+            groups = grouped_entries.setdefault(root.graph_hash(), [])
+            for representative, stores in groups:
+                if representative.graph_equal(root):
+                    stores.append(store)
+                    break
+            else:
+                groups.append((root, [store]))
+        root_groups = (
+            group for groups in grouped_entries.values() for group in groups
+        )
+        def root_occurrences(root, stores):
             for occurrence in iter_containment_occurrences_matching(
                     (root,), matches, edges=self.containment_edges,
                     contains_ref=self.contains_ref,
             ):
-                key = containment_witness_key(occurrence)
-                if key in seen:
-                    continue
-                seen.add(key)
-                occurrences.append(occurrence)
-                replicas.setdefault(occurrence.owner, []).append(store)
-        occurrences.sort(key=containment_witness_key)
-        if self.projection not in {"object_refs", "state_refs"} and self.occurrence_limit is not None:
-            occurrences = occurrences[:self.occurrence_limit]
+                yield occurrence, stores
+
+        ordered = merge(
+            *(root_occurrences(root, stores) for root, stores in root_groups),
+            key=lambda item: containment_witness_key(item[0]),
+        )
+        for occurrence, stores in ordered:
+            key = containment_witness_key(occurrence)
+            replicas.setdefault(occurrence.owner, []).extend(stores)
+            if key in seen:
+                continue
+            seen.add(key)
+            occurrences.append(occurrence)
+            if limit is not None and len(occurrences) >= limit:
+                break
         stats.result_count = len(occurrences)
         return tuple(occurrences), stats, {
             owner: tuple(dict.fromkeys(stores)) for owner, stores in replicas.items()
