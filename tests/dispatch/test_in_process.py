@@ -390,23 +390,73 @@ def test_incompatible_publication_fails_while_direct_call_holds_lease(
     assert isinstance(result[0], PublicationBusyError)
 
 
-def test_incomplete_coverage_warns_but_known_conflict_is_ineligible() -> None:
-    """Preserve advisory incomplete coverage while stopping hard conflicts."""
+def test_unresolved_coverage_is_quiet_by_default_but_explicitly_warns_or_rejects() -> None:
+    """Keep notebook-style unresolved calls observable without warning by default."""
 
     def incomplete(callback):
         """Keep a parameter call unresolved while returning valid data."""
 
         return callback()
 
+    view = _local_view()
+    report = view.explain(incomplete)
+    assert report.eligible
+    assert report.coverage == "incomplete"
+    assert report.diagnostics == ("static.unresolved",)
+    assert report.warnings == ()
+
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
-        assert (
-            _local_view().run(incomplete, lambda: "complete enough")
-            == "complete enough"
-        )
-    assert any(
-        item.category is dispatch.DispatchCoverageWarning for item in captured
-    )
+        assert view.run(incomplete, lambda: "complete enough") == "complete enough"
+    assert not any(item.category is dispatch.DispatchCoverageWarning for item in captured)
+
+    warn = view.with_options(probe=dispatch.ProbeOptions(coverage_policy="warn"))
+    assert warn.explain(incomplete).warnings == ("dispatch.coverage_incomplete",)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        assert warn.run(incomplete, lambda: "warned") == "warned"
+    assert sum(item.category is dispatch.DispatchCoverageWarning for item in captured) == 1
+
+    strict = view.with_options(probe=dispatch.ProbeOptions(coverage_policy="strict"))
+    report = strict.explain(incomplete)
+    assert not report.eligible
+    assert report.coverage == "incomplete"
+    assert "static.unresolved" in report.diagnostics
+    assert "dispatch.coverage_incomplete" in report.diagnostics
+    with pytest.raises(dispatch.DispatchError) as raised:
+        strict.run(incomplete, lambda: pytest.fail("strict must reject"))
+    assert raised.value.report.diagnostics == report.diagnostics
+
+
+def test_bounded_static_traversal_warns_by_default() -> None:
+    """Exhausting the selected probe bound still alerts accepted callers."""
+
+    def helper():
+        return "ready"
+
+    def workload():
+        return helper()
+
+    view = _local_view().with_options(probe=dispatch.ProbeOptions(max_targets=1))
+    report = view.explain(workload)
+    assert report.eligible
+    assert "static.target_limit" in report.diagnostics
+    assert report.warnings == ("dispatch.coverage_incomplete",)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        assert view.run(workload) == "ready"
+    assert sum(item.category is dispatch.DispatchCoverageWarning for item in captured) == 1
+
+
+def test_probe_coverage_policy_rejects_invalid_values() -> None:
+    """Coverage handling uses a closed coordinator-local policy."""
+
+    with pytest.raises(ValueError, match="coverage_policy"):
+        dispatch.ProbeOptions(coverage_policy="unknown")
+
+
+def test_known_conflict_is_ineligible() -> None:
+    """Known incompatible requirements always stop execution."""
 
     @environment_req(python=">=4")
     @environment_req(python="<3")

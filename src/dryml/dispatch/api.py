@@ -44,9 +44,9 @@ def _checked_preflight(
 
 
 def _warn_coverage(prepared: _Preflight) -> None:
-    """Emit the valid-incomplete warning for accepted operations."""
+    """Emit only coverage categories selected by the probe policy."""
 
-    if prepared.report.coverage == "incomplete":
+    if "dispatch.coverage_incomplete" in prepared.report.warnings:
         warnings.warn(
             "Dispatch static requirement coverage is incomplete",
             DispatchCoverageWarning,
@@ -293,6 +293,14 @@ def _run(
     try:
         result = future.result()
     except BaseException as error:
+        if isinstance(error, KeyboardInterrupt) and not future.done():
+            try:
+                if not future.cancel():
+                    future.request_cancel()
+            except Exception:
+                pass
+            # Core's one-off completion callback owns cleanup after terminality.
+            raise
         try:
             future.cleanup()
         except CleanupError as cleanup_error:
@@ -319,10 +327,13 @@ def run(fn: Any, /, *args: Any, **kwargs: Any) -> Any:
             workload before acceptance.
         BaseException: Existing core/backend result and cleanup failures, with
             the primary execution failure retained when cleanup also fails.
+        KeyboardInterrupt: Propagates interruption; pending backend work is
+            first cancelled before GO or requested to stop if already running.
 
     Side Effects:
         Runs bounded preflight and one backend submission for Execute routes.
-        It neither retries work nor changes the selected route.
+        It neither retries work nor changes the selected route. A pending
+        interruption leaves terminal cleanup to the core one-off owner.
     """
 
     return _run(fn, args, kwargs, None)

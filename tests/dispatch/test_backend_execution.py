@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
+import warnings
 
 import pytest
 
@@ -435,3 +436,72 @@ def test_dispatch_run_keeps_execution_failure_primary_when_cleanup_fails(
 
     assert raised.value is primary
     assert raised.value.__cause__ is cleanup
+
+
+@pytest.mark.parametrize("prestart", (True, False))
+def test_interrupt_during_pending_dispatch_does_not_cleanup_live_future(
+    monkeypatch: pytest.MonkeyPatch,
+    prestart: bool,
+) -> None:
+    """Interrupt preserves the shell failure and leaves terminal cleanup to core."""
+
+    dispatch.set_execute_backend_default(SubProcessConfig())
+    interrupted = KeyboardInterrupt()
+    calls = []
+
+    class _Future:
+        def result(self):
+            raise interrupted
+
+        def done(self):
+            return False
+
+        def cancel(self):
+            calls.append("cancel-prestart")
+            return prestart
+
+        def request_cancel(self):
+            calls.append("cancel-running")
+            return True
+
+        def cleanup(self):
+            calls.append("cleanup")
+            raise RuntimeError("cannot clean pending future")
+
+    monkeypatch.setattr(dispatch.api, "_submit_backend", lambda *_args: _Future())
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        dispatch.run(lambda: None)
+
+    assert raised.value is interrupted
+    assert calls == (["cancel-prestart"] if prestart else ["cancel-prestart", "cancel-running"])
+
+
+def test_backend_submit_warning_policy_preserves_explain_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warn only when explicitly requested for an unresolved backend call."""
+
+    def notebook_style(callback):
+        return callback()
+
+    dispatch.set_execute_backend_default(SubProcessConfig())
+    future = object()
+    monkeypatch.setattr(dispatch.api, "_submit_backend", lambda *_args: future)
+    report = dispatch.explain(notebook_style)
+    assert report.eligible and report.diagnostics == ("static.unresolved",)
+    assert report.warnings == ()
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        assert dispatch.submit(notebook_style, lambda: None) is future
+    assert not any(item.category is dispatch.DispatchCoverageWarning for item in captured)
+
+    warn = dispatch.with_options(probe=dispatch.ProbeOptions(coverage_policy="warn"))
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        assert warn.submit(notebook_style, lambda: None) is future
+    assert sum(item.category is dispatch.DispatchCoverageWarning for item in captured) == 1
+
+    strict = dispatch.with_options(probe=dispatch.ProbeOptions(coverage_policy="strict"))
+    with pytest.raises(dispatch.DispatchError):
+        strict.submit(notebook_style, lambda: None)

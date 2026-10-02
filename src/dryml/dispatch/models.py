@@ -41,11 +41,12 @@ BackendChoice: TypeAlias = BackendConfig | InProcess | str
 
 
 class DispatchCoverageWarning(RuntimeWarning):
-    """Warn that valid static requirement collection was incomplete.
+    """Warn that accepted static requirement collection was incomplete.
 
     The warning carries no workload value, source, backend credentials, or
-    reservation. It is emitted by ``run`` and ``submit`` only; ``explain``
-    keeps the same fact in its immutable report.
+    reservation. ``run`` and ``submit`` emit it for bounded-analysis limits or
+    when the caller opts into all incomplete-coverage warnings. ``explain``
+    retains diagnostics without emitting warnings.
     """
 
 
@@ -263,6 +264,9 @@ class ProbeOptions:
             checked cooperatively at inline analysis boundaries.
         max_targets: Positive maximum static traversal targets, including root.
         max_depth: Positive maximum static traversal depth.
+        coverage_policy: ``"default"`` warns for bounded-analysis limits but
+            not unresolved-only calls; ``"warn"`` warns for all incomplete
+            coverage; ``"strict"`` rejects incomplete coverage before execution.
 
     Raises:
         TypeError: If a field has an unsupported type.
@@ -281,12 +285,15 @@ class ProbeOptions:
     execution_timeout: float = 30.0
     max_targets: int = 256
     max_depth: int = 32
+    coverage_policy: Literal["default", "warn", "strict"] = "default"
 
     def __post_init__(self) -> None:
         """Validate the inert policy without resolving external state."""
 
         if self.placement not in ("auto", "in_process", "execute"):
             raise ValueError("probe placement is invalid")
+        if self.coverage_policy not in ("default", "warn", "strict"):
+            raise ValueError("probe coverage_policy is invalid")
         if self.backend is not None and not isinstance(
             self.backend, (BackendConfig, str)
         ):

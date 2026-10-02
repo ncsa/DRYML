@@ -39,9 +39,14 @@ and async-generator roots reject before probing; lazy values returned from a
 synchronous root are data and are not driven by Dispatch.
 
 Discovery uses shared generic static dependency, environment, and world kernels
-for inline and isolated probes. Incomplete but valid static coverage issues a
-visible warning for `run`/`submit`; conflicts, malformed results, timeout/crash,
-cleanup failure, target drift, and hard admission failures stop work. Reports and
+for inline and isolated probes. Unresolved-only static coverage remains visible
+in `explain` without warning on routine accepted calls; traversal limits still
+warn, and explicit probe policy can warn for or reject all incomplete coverage.
+Notebook-owned asyncio tasks, futures, and loops reject at the transport boundary
+rather than crossing worker serialization, and interruption of pending blocking
+dispatch no longer attempts premature cleanup. Conflicts, malformed results,
+timeout/crash, cleanup failure, target drift, and hard admission failures stop
+work. Reports and
 probe envelopes are bounded, redacted, ephemeral observations rather than Store
 records or admission tickets. Existing `EnvironmentSpec` selection now flows
 through generic/core Execute and Dispatch as an exact point-in-time pin; an

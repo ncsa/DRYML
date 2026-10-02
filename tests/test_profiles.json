@@ -536,7 +536,9 @@
             "test_dispatch_forwards_one_frozen_exact_selector_without_reresolution",
             "test_target_drift_during_core_preparation_reclaims_owned_resources",
             "test_closed_borrowed_repo_rejects_final_acceptance_without_substitution",
-            "test_dispatch_run_keeps_execution_failure_primary_when_cleanup_fails"
+            "test_dispatch_run_keeps_execution_failure_primary_when_cleanup_fails",
+            "test_interrupt_during_pending_dispatch_does_not_cleanup_live_future",
+            "test_backend_submit_warning_policy_preserves_explain_diagnostics"
           ]
         },
         "tests/dispatch/test_in_process.py": {
@@ -548,7 +550,9 @@
             "test_in_process_final_target_guard_runs_under_held_lease",
             "test_in_process_releases_failed_admission_and_rejects_local_core_controls",
             "test_incompatible_publication_fails_while_direct_call_holds_lease",
-            "test_incomplete_coverage_warns_but_known_conflict_is_ineligible"
+            "test_unresolved_coverage_is_quiet_by_default_but_explicitly_warns_or_rejects",
+            "test_bounded_static_traversal_warns_by_default",
+            "test_known_conflict_is_ineligible"
           ]
         },
         "tests/dispatch/test_managed_execution.py": {

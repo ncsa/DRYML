@@ -364,6 +364,13 @@ already included in their routine jobs, avoiding duplicate runners. Package
 tests run only for manually requested exhaustive/coverage verification, through
 `medium` on Ubuntu/Windows and a package-only step on macOS.
 
+A separate Ubuntu Python 3.12 notebook job installs ipykernel 7.2.0 and
+jupyter-client 8.8.0 and runs the real-kernel Dispatch regression on every push
+and pull request. The general lightweight matrix does not install those optional
+dependencies, so its skipped notebook case is not the notebook verification gate.
+The test uses a job-owned kernel, temporary Store, and worker spool; it checks
+repeated publication/query, shell liveness, task ownership, and interrupt recovery.
+
 The heavy matrix runs on Ubuntu for Python 3.10 through 3.13 only when a user
 manually dispatches `exhaustive` or `coverage`. It
 installs and preflights TensorFlow, Torch, JAX/JAXlib, and pinned

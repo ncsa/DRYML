@@ -32,6 +32,7 @@ def test_dispatch_guide_documents_actual_defaults_and_boundaries() -> None:
         ),
         ("max_targets", f"max_targets={defaults.max_targets}"),
         ("max_depth", f"max_depth={defaults.max_depth}"),
+        ("coverage_policy", f'coverage_policy="{defaults.coverage_policy}"'),
     ):
         assert getattr(defaults, name) is not None
         assert rendered in guide
@@ -75,7 +76,7 @@ def test_dispatch_public_surface_and_dataclass_fields_are_closed() -> None:
     }
     assert [field.name for field in fields(ProbeOptions)] == [
         "placement", "backend", "environment", "world", "environment_spec",
-        "execution_timeout", "max_targets", "max_depth",
+        "execution_timeout", "max_targets", "max_depth", "coverage_policy",
     ]
     assert [field.name for field in fields(DispatchReport)] == [
         "workload_placement", "workload_backend", "supported_methods",

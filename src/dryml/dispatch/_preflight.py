@@ -116,7 +116,16 @@ def _report(
         if probe.placement == "in_process"
         else "selected Execute probe configuration"
     )
-    warnings = (_COVERAGE_WARNING,) if not probe.coverage.complete else ()
+    coverage_policy = options.probe.coverage_policy
+    warn = (
+        eligible
+        and not probe.coverage.complete
+        and (coverage_policy == "warn" or (
+            coverage_policy == "default"
+            and set(probe.coverage.diagnostics) != {"static.unresolved"}
+        ))
+    )
+    warnings = (_COVERAGE_WARNING,) if warn else ()
     return DispatchReport(
         workload_placement,
         workload_backend,
@@ -313,6 +322,10 @@ def preflight(
         if eligible
         else "configured and discovered requirements are incompatible"
     )
+    if eligible and options.probe.coverage_policy == "strict" and not result.coverage.complete:
+        eligible = False
+        reason = "static requirement coverage is incomplete under strict policy"
+        outcome_diagnostics = (*outcome_diagnostics, _COVERAGE_WARNING)
     report = _report(
         options,
         probe=result,

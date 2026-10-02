@@ -6,6 +6,7 @@ coordinator files and never launches a worker or imports DRYML core.
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import hashlib
 import hmac
@@ -233,7 +234,7 @@ def _reject_live_resource(value: object) -> None:
     value_type = type(value)
     if any(cls.__module__ == "dryml.core" or cls.__module__.startswith("dryml.core.") for cls in value_type.__mro__):
         raise _UnsupportedTransportResource("live resource: core semantic values are unsupported by Execute transport")
-    if isinstance(value, (io.IOBase, _LOCK_TYPES, GeneratorType, CoroutineType, socket.socket, threading.Thread, concurrent.futures.Executor, concurrent.futures.Future)):
+    if isinstance(value, (io.IOBase, _LOCK_TYPES, GeneratorType, CoroutineType, socket.socket, threading.Thread, concurrent.futures.Executor, concurrent.futures.Future, asyncio.Future, asyncio.AbstractEventLoop)):
         raise _UnsupportedTransportResource("live resource: streams, locks, sockets, threads, and futures are unsupported by Execute transport")
     if isinstance(value, _ConnectionBase):
         raise _UnsupportedTransportResource("live resource: Connection is unsupported by Execute transport")
