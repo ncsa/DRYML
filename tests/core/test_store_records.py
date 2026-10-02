@@ -5,7 +5,7 @@ import hashlib
 import dill
 import pytest
 
-from dryml.core import Object
+from dryml.core import Definition, Object
 from dryml.core.store.records import (
     DefinitionRecord, LocalStateManifest, StoreFormatRecord, StoreRecordError,
 )
@@ -13,6 +13,11 @@ from dryml.core.store.records import (
 
 class RecordObject(Object):
     pass
+
+
+class MappingRecordObject(Object):
+    def __init__(self, config):
+        self.config = config
 
 
 def test_definition_record_round_trips_and_recomputes_all_digest_fields():
@@ -26,6 +31,18 @@ def test_definition_record_round_trips_and_recomputes_all_digest_fields():
     data["graph_hash"] = "0" * 64
     with pytest.raises(StoreRecordError, match="hash fields"):
         DefinitionRecord.from_data(data)
+
+
+def test_definition_record_round_trip_preserves_mapping_identity():
+    definition = Definition(
+        MappingRecordObject,
+        config={"batch_size": 32, "seed": 7, "dtype": "float32"},
+    ).concretize()
+
+    decoded = DefinitionRecord.from_bytes(DefinitionRecord(definition).to_bytes())
+
+    assert decoded.definition == definition
+    assert decoded.definition.stable_hash() == definition.stable_hash()
 
 
 def test_record_codecs_reject_unknown_version_and_trailing_bytes():

@@ -8,7 +8,7 @@ from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition, Definition, stable_hash_function
-from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.freeze import FrozenDict, FrozenList, FrozenTuple
 from dryml.core.utils.stable_hash import StableHashGraphHasher
 
 
@@ -175,6 +175,42 @@ def test_definition_hash_7():
     def_hash2 = stable_hash_function(definition2)
 
     assert def_hash1 != def_hash2
+
+
+def test_mapping_insertion_order_is_not_part_of_definition_identity():
+    first = Definition(
+        objects.TestClass1,
+        10,
+        test={"outer": {"batch_size": 32, "seed": 7, "dtype": "float32"}},
+    ).concretize()
+    second = Definition(
+        objects.TestClass1,
+        10,
+        test={"outer": {"dtype": "float32", "seed": 7, "batch_size": 32}},
+    ).concretize()
+
+    assert first == second
+    assert first.stable_hash() == second.stable_hash()
+    assert hash(first) == hash(second)
+
+
+def test_frozen_dict_hash_matches_order_independent_mapping_equality():
+    first = FrozenDict((("items", FrozenList((1, 2))), ("label", "x")))
+    second = FrozenDict((("label", "x"), ("items", FrozenList((1, 2)))))
+
+    assert first == second
+    assert hash(first) == hash(second)
+    assert len({first, second}) == 1
+
+
+def test_definition_sequence_identity_remains_order_sensitive():
+    listed = Definition(objects.TestClass1, 10, test={"items": [1, 2]}).concretize()
+    reversed_list = Definition(objects.TestClass1, 10, test={"items": [2, 1]}).concretize()
+    tupled = Definition(objects.TestClass1, 10, test={"items": (1, 2)}).concretize()
+    reversed_tuple = Definition(objects.TestClass1, 10, test={"items": (2, 1)}).concretize()
+
+    assert listed != reversed_list
+    assert tupled != reversed_tuple
 
 
 def test_private_v2_records_preserve_independent_graph_nodes():
