@@ -74,6 +74,28 @@ jobs:
             ./tests.sh medium --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread
           fi
 
+  notebook-dispatch:
+    name: Notebook dispatch (Ubuntu, Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install notebook test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r test_requirements.txt "ipykernel==7.2.0" "jupyter-client==8.8.0"
+          python -m pip install .
+
+      - name: Run real-kernel Dispatch regression
+        run: |
+          ./tests.sh tests/dispatch/test_notebook.py --no-cov -x --timeout=180 --timeout-method=thread --basetemp="$RUNNER_TEMP/dryml-notebook-tests"
+
   local-filesystem-publication:
     name: Good-enough (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}

@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
 import functools
 import os
 from pathlib import Path
 
 from dryml.core import ObjectRef, Repo, Serializable, function
 from dryml.core.execute import ExecutionContext, SharedDirStoreStrategy, invoke_prepared_call, worker_context
+from dryml.core.execute_codec import CoreCallCodecError, encode_invocation
 from dryml.core.signatures import Ref
 from dryml.core.store.dir import DirStore
 from dryml.execute import Executor
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.managed import managed_operation
 from dryml.methods import Method
+import pytest
 
 
 def _invoke(fn, args, repo):
@@ -256,6 +259,29 @@ def test_fresh_subprocess_uses_dill_for_ordinary_leaves(tmp_path):
     )
 
     assert result == FrozenOrdinaryValue(7)
+
+
+def test_core_rejects_captured_kernel_task_before_dill_traversal():
+    """Never serialize an active task owned by the caller's event loop."""
+
+    async def exercise():
+        task = asyncio.create_task(asyncio.Event().wait())
+
+        def captured():
+            return task
+
+        try:
+            with pytest.raises(CoreCallCodecError, match="live asyncio resource"):
+                encode_invocation(captured, (), {}, repo=Repo())
+            with pytest.raises(CoreCallCodecError, match="live asyncio resource"):
+                encode_invocation(lambda value: value, (FrozenOrdinaryValue(task),), {}, repo=Repo())
+            assert not task.done()
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(exercise())
 
 
 def test_copied_function_wrapper_metadata_rebuilds_its_established_owner(

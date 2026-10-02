@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import asyncio
 import concurrent.futures
 import errno
 import os
@@ -192,6 +193,29 @@ def test_serializer_rejects_resource_subclasses_attrs_defaults_and_closures():
     finally:
         resources[1].close()
         resources[2].shutdown()
+
+
+def test_serializer_does_not_serialize_active_asyncio_task():
+    """Generic Execute rejects event-loop-owned state before Dill traverses it."""
+
+    async def exercise():
+        task = asyncio.create_task(asyncio.Event().wait())
+
+        def captured():
+            return task
+
+        try:
+            with pytest.raises(TypeError, match="live resource"):
+                serialize_call(captured, (), {}, limit_bytes=1_000_000)
+            with pytest.raises(TypeError, match="live resource"):
+                serialize_call(lambda value: value, (task,), {}, limit_bytes=1_000_000)
+            assert not task.done()
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(exercise())
 
 
 def test_cleanup_retry_preserves_unrelated_child_contents_and_payload_matching(tmp_path: Path, monkeypatch):

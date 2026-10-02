@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import builtins
 import ast
+import asyncio
 import dis
 import inspect
 import pathlib
@@ -95,6 +96,8 @@ class _DillLeafPickler(dill.Pickler):
         from dryml.managed.config import ManagedConfig
         from .template import TemplateBundle
 
+        if isinstance(value, (asyncio.Future, asyncio.AbstractEventLoop)):
+            raise _DillLeafError("live asyncio resource")
         if isinstance(value, (Repo, Store)):
             raise _DillLeafError("live core resource")
         if isinstance(
@@ -427,6 +430,8 @@ class _Encoder:
                 "receiver": self.value(value._instance, f"{path}.receiver", depth + 1),
                 "composite": self.value(value._composite, f"{path}.composite", depth + 1),
             }
+        if isinstance(value, (asyncio.Future, asyncio.AbstractEventLoop)):
+            _fail("live asyncio resource", path)
         if _is_resource(value):
             _fail("live core resource", path)
         imported_capture = self.imported_captures.get(id(value))

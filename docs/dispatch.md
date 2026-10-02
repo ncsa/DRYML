@@ -83,17 +83,18 @@ finalization retains its existing publication behavior.
 
 Reports contain only bounded diagnostic categories, redacted backend identifiers,
 coverage and requirement results. They never retain call data, handles,
-credentials, source, selectors, Stores, or reservations. Valid incomplete static
-coverage is reported; `run` and `submit` emit `DispatchCoverageWarning`, while
-`explain` does not warn.
+credentials, source, selectors, Stores, or reservations. Incomplete static
+coverage remains in `explain` diagnostics even when a normal unresolved call
+does not warn. `explain` never emits `DispatchCoverageWarning`.
 
 ## Probing And Static Coverage
 
 `ProbeOptions` is an immutable, inert policy with defaults
 `placement="auto"`, `execution_timeout=30.0`, `max_targets=256`, and
-`max_depth=32`. `placement="auto"` uses an explicit probe backend when supplied;
-otherwise it probes inline only with compatible current-process evidence and uses
-an owned local subprocess when isolation is required. `placement="execute"`
+`max_depth=32`, and `coverage_policy="default"`. `placement="auto"` uses an
+explicit probe backend when supplied; otherwise it probes inline only with
+compatible current-process evidence and uses an owned local subprocess when
+isolation is required. `placement="execute"`
 uses the supplied backend or that local subprocess default. `placement="in_process"`
 requires compatible current-process evidence and rejects a contradictory backend.
 Probe placement is independent of the selected workload route. It never falls
@@ -117,8 +118,14 @@ at 4 MiB. They retain at most 64 diagnostic entries with 512 characters per
 field. Capture separately limits individual source reads to 1 MiB, aggregate
 source reads to 8 MiB, candidate targets to 4,096, binding/call facts to 16,384,
 and raw annotation occurrences to 4,096. These ceilings do not make static
-analysis a full call-graph proof. A valid incomplete result warns and can proceed
-when known requirements pass; malformed projections/results, conflicts, crashes,
+analysis a full call-graph proof. By default, accepted incomplete coverage only
+warns when a traversal limit or other diagnostic accompanies `static.unresolved`;
+an unresolved-only call (common for notebook-defined functions and callbacks)
+proceeds quietly with `coverage="incomplete"` and its diagnostics retained in
+`explain`. `ProbeOptions(coverage_policy="warn")` restores warnings for every
+accepted incomplete probe. `ProbeOptions(coverage_policy="strict")` instead
+returns an ineligible report and rejects `run`/`submit` before workload acceptance
+for any incomplete probe. Malformed projections/results, conflicts, crashes,
 timeouts, or cleanup failures stop submission rather than becoming empty results.
 
 An `EnvironmentSpec` pin selects an existing interpreter, venv executable, or
@@ -140,7 +147,15 @@ result recovery, and cleanup retain the core Execute contracts.
 result, and reconciles its owned cleanup. If both the workload result and
 cleanup fail, the workload failure remains primary and the cleanup failure is
 its cause. Dispatch does not retry work, adapt results, or choose another
-backend after an unavailable or rejected selected backend.
+backend after an unavailable or rejected selected backend. A `KeyboardInterrupt`
+while the future is still pending first attempts confirmed pre-GO cancellation,
+then requests best-effort running cancellation if GO has won. It propagates the
+interrupt without prematurely cleaning up running work; core's one-off
+completion owns eventual cleanup. Blocking `run` occupies a notebook shell until
+it completes or is interrupted. In an async notebook cell, use `submit` and
+`await future` to avoid blocking the shell task; the caller remains responsible
+for observing and cleaning up the returned future. Captured live asyncio tasks,
+futures, and event loops cannot be transported into workers.
 
 The selected worker environment and world requirements are the combined
 configured and discovered requirements. A resolved worker Python selector is

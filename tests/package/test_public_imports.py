@@ -554,7 +554,7 @@ _EXPECTED_DISPATCH_EXPORTS = {
 _EXPECTED_DISPATCH_DATACLASS_FIELDS = {
     "ProbeOptions": [
         "placement", "backend", "environment", "world", "environment_spec",
-        "execution_timeout", "max_targets", "max_depth",
+        "execution_timeout", "max_targets", "max_depth", "coverage_policy",
     ],
     "DispatchReport": [
         "workload_placement", "workload_backend", "supported_methods",
