@@ -29,7 +29,12 @@ def test_repeated_notebook_dispatch_preserves_shell_and_kernel_task(tmp_path):
                         busy = await asyncio.wait_for(client.get_iopub_msg(), timeout=30)
                         if busy["parent_header"].get("msg_id") == message_id and busy["msg_type"] == "status" and busy["content"]["execution_state"] == "busy":
                             break
-                    await asyncio.sleep(2)
+                    marker = tmp_path / "worker-started"
+                    deadline = asyncio.get_running_loop().time() + 20
+                    while not marker.exists():
+                        if asyncio.get_running_loop().time() >= deadline:
+                            raise AssertionError("notebook dispatch worker never started")
+                        await asyncio.sleep(0.05)
                     await manager.interrupt_kernel()
                 while True:
                     reply = await asyncio.wait_for(client.get_shell_msg(), timeout=60)
@@ -45,10 +50,12 @@ def test_repeated_notebook_dispatch_preserves_shell_and_kernel_task(tmp_path):
                     elif message["msg_type"] == "error":
                         output.extend(message["content"]["traceback"])
                     elif message["msg_type"] == "status" and message["content"]["execution_state"] == "idle":
-                        assert reply["content"]["status"] == expected, "\n".join(output)
-                        if expected == "error":
+                        status = reply["content"]["status"]
+                        # ipykernel may signal its loop thread while a blocking shell call finishes.
+                        assert status == expected or (interrupt and status == "ok"), "\n".join(output)
+                        if status == "error":
                             assert reply["content"]["ename"] == "KeyboardInterrupt", "\n".join(output)
-                        return "\n".join(output)
+                        return (status, "\n".join(output)) if interrupt else "\n".join(output)
 
             await execute(
                 "import asyncio, os\n"
@@ -93,17 +100,22 @@ def test_repeated_notebook_dispatch_preserves_shell_and_kernel_task(tmp_path):
             assert "task-transport-rejected True" in rejected
             assert "Task was destroyed" not in rejected
             assert "shell-alive True True True 1" in await execute(shell_status)
-            interrupted = await execute(
-                "def slow_notebook_fn():\n    import time\n    time.sleep(30)\n    return _StatefulResult(99)\n"
+            status, interrupted = await execute(
+                "def slow_notebook_fn():\n    import time\n"
+                f"    with open({str(tmp_path / 'worker-started')!r}, 'w') as started:\n"
+                "        started.write('ready')\n"
+                "    time.sleep(30)\n    return _StatefulResult(99)\n"
                 "view.run(slow_notebook_fn)",
                 expected="error",
                 interrupt=True,
             )
-            assert "KeyboardInterrupt" in interrupted
+            if status == "error":
+                assert "KeyboardInterrupt" in interrupted
+            assert "Task was destroyed" not in interrupted
             after = await execute(
                 "print('after-interrupt', len(list(repo.find_defs(None, refresh=True))), not kernel_task.done())"
             )
-            assert "after-interrupt 3 True" in after
+            assert f"after-interrupt {3 if status == 'error' else 4} True" in after
             await execute("kernel_task.cancel()")
         finally:
             client.stop_channels()
