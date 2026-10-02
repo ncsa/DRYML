@@ -153,6 +153,7 @@ def test_coverage_warning_names_diagnostics_and_explanation_path() -> None:
     prepared = SimpleNamespace(report=SimpleNamespace(
         coverage="incomplete",
         diagnostics=("source.unavailable", "static.unresolved"),
+        warnings=("dispatch.coverage_incomplete",),
     ))
 
     with pytest.warns(dispatch.DispatchCoverageWarning) as captured:

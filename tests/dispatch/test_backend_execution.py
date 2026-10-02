@@ -283,7 +283,10 @@ def test_dispatch_forwards_one_frozen_exact_selector_without_reresolution(
     spool = tmp_path / "spool"
     spool.mkdir()
     dispatch.set_execute_backend_default(
-        SubProcessConfig(spool_directory=spool),
+        SubProcessConfig(
+            spool_directory=spool,
+            env_vars={"PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
+        ),
         core=CoreOptions(repo=repo, return_objects=False),
     )
     resolved = []
