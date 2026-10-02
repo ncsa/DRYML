@@ -1122,7 +1122,7 @@ def _structural_value_equal(left: Any, right: Any) -> bool:
     if isinstance(left, (FrozenList, FrozenTuple, tuple, list)):
         return len(left) == len(right) and all(_structural_value_equal(a, b) for a, b in zip(left, right))
     if isinstance(left, (FrozenDict, dict)):
-        if len(left) != len(right) or tuple(left.keys()) != tuple(right.keys()):
+        if len(left) != len(right) or left.keys() != right.keys():
             return False
         return all(_structural_value_equal(left[k], right[k]) for k in left.keys())
     if isinstance(left, (FrozenSet, frozenset, set)):

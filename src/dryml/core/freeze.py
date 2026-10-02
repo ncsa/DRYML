@@ -41,8 +41,14 @@ class FrozenSet(frozenset):
 
 
 class FrozenDict(ABCMapping):
-    """
-    Immutable mapping, not a dict subclass
+    """Immutable mapping whose equality and hash ignore insertion order.
+
+    Args:
+        items: A mapping or iterable of key/value pairs. Duplicate keys retain
+            the final value, matching ``dict`` construction.
+
+    Hashing requires hashable keys and values and raises ``TypeError`` when the
+    represented mapping cannot be hashed.
     """
     __slots__ = ("_items", "_dict")
 
@@ -75,7 +81,7 @@ class FrozenDict(ABCMapping):
         return f"F{self._dict!r}"
 
     def __hash__(self) -> int:
-        return hash(self._items)
+        return hash(frozenset(self._dict.items()))
 
 
 class FrozenNDArray(np.ndarray):
