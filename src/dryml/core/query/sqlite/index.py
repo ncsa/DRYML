@@ -862,13 +862,17 @@ class SQLiteStoreQueryIndex:
         result = self._run_write_transaction(operation)
         indexed_definitions = roots
         if self.store is not None and hasattr(self.store, "read_stored_root_record"):
-            # Closure-only graph nodes were indexed too, but another stored
-            # root's membership must not be acknowledged by graph hydration.
+            from ...store.records import DefinitionRecord as StoreDefinitionRecord
+
+            # Only direct definitions can have scoped closure-node tokens;
+            # fallback authority uses unscoped or metadata tokens instead.
             indexed_definitions = (*roots, *(
                 node.definition for node in graph_nodes
-                if self.store.read_stored_root_record(
-                    self._root_marker_key(node.definition),
-                ) is None
+                if (record := self.store.read_definition_record(
+                    StoreDefinitionRecord(node.definition).digest,
+                )) is not None
+                and record.definition.graph_equal(node.definition)
+                and self.store.read_stored_root_record(record.digest) is None
             ))
         self._clear_dirty(dirty_markers, roots=indexed_definitions)
         return result
