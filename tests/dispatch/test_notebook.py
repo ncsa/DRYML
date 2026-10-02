@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 
 import pytest
 
@@ -16,7 +17,11 @@ def test_repeated_notebook_dispatch_preserves_shell_and_kernel_task(tmp_path):
 
     async def exercise():
         manager = client_module.AsyncKernelManager(kernel_name="python3")
-        await manager.start_kernel(env={**os.environ, "DRYML_NOTEBOOK_TEST_ROOT": str(tmp_path)})
+        await manager.start_kernel(env={
+            **os.environ,
+            "DRYML_NOTEBOOK_TEST_ROOT": str(tmp_path),
+            "DRYML_NOTEBOOK_TEST_SOURCE": str(Path(__file__).resolve().parents[2] / "src"),
+        })
         client = manager.client()
         client.start_channels()
         try:
@@ -70,7 +75,7 @@ def test_repeated_notebook_dispatch_preserves_shell_and_kernel_task(tmp_path):
                 "root = Path(os.environ['DRYML_NOTEBOOK_TEST_ROOT'])\n"
                 "(root / 'spool').mkdir()\n"
                 "repo = Repo(DirStore(root / 'store'))\n"
-                "view = dispatch.with_options(backend=SubProcessConfig(spool_directory=root / 'spool'), core=CoreOptions(repo=repo, return_objects=False))\n"
+                "view = dispatch.with_options(backend=SubProcessConfig(spool_directory=root / 'spool', env_vars={'PYTHONPATH': os.environ['DRYML_NOTEBOOK_TEST_SOURCE']}), core=CoreOptions(repo=repo, return_objects=False))\n"
                 "def notebook_fn(value):\n    return _StatefulResult(value)\n"
                 "kernel_task = asyncio.create_task(asyncio.Event().wait())\n"
                 "initial_shell_task = asyncio.current_task()\n"

@@ -29,6 +29,25 @@ class QuotedDef:
 
         object.__setattr__(self, "value", freeze_selector_value(self.value))
 
+    def __stable_leaf_bytes__(self) -> bytes:
+        """Return the portable symbolic payload used for stable identity.
+
+        Returns:
+            Versioned canonical bytes for the quoted expression graph.
+
+        Raises:
+            ParameterizationError: If the quoted expression cannot be encoded
+                under the bounded Definition-expression grammar.
+
+        Side Effects:
+            None. Encoding never resolves symbols or constructs Objects.
+        """
+
+        from .definition_expression_codec import to_data
+        from .template_codec import _canonical_bytes
+
+        return b"dryml-quoted-definition-v1\x00" + _canonical_bytes(to_data(self.value))
+
 
 @dataclass(frozen=True, slots=True)
 class SelectorSpec:

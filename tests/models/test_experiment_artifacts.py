@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from dryml.artifacts import Artifact, ArtifactRecoveryError, Value
-from dryml.core import Par, Ref, Repo, StateRef, Template, TemplateBundle, definition_mode, selector_mode
+from dryml.core import Definition, Par, Ref, Repo, StateRef, definition_mode, selector_mode
 from dryml.core.object import Pickleable
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
@@ -192,7 +192,7 @@ def test_terminal_checkpoint_binds_artifact_to_exact_experiment_state(tmp_path):
     SavedModelValue.calls.clear()
     exp = Experiment(
         CounterModel(), OneUpdate(),
-        artifacts=TemplateBundle({"score": Template(SavedModelValue, Par("this.model"))}),
+        artifacts={"score": Definition(SavedModelValue, Par("this.model"))},
         repo=repo, checkpoint_every_steps=1,
     )
 
@@ -207,6 +207,48 @@ def test_terminal_checkpoint_binds_artifact_to_exact_experiment_state(tmp_path):
     assert SavedModelValue.calls == [final.at(GraphPath((Parameter("model"),)))]
     assert history.data.iloc[0].eval_artifacts == row.eval_artifacts
     assert SavedModelValue.calls[-1] == final.at(GraphPath((Parameter("model"),)))
+
+
+def test_symbolic_metric_recipe_binds_through_ref_during_evaluation(
+        tmp_path, monkeypatch):
+    """Preflight and runtime bind metric roots hidden by Fold's source Ref."""
+
+    from dryml.metrics import regressor_mae
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    test_data = repo.save_object(CounterModel())
+    recipe = regressor_mae(
+        Par("this.test_data"), Par("this.model"), mode="global"
+    )
+    exp = Experiment(
+        CounterModel(), TerminalOnly(), test_data=test_data,
+        artifacts={"score": recipe}, repo=repo,
+    )
+
+    assert recipe.names == ()
+    exp._preflight_artifacts()
+
+    observed = []
+
+    def inspect_bound(definition, *, repo=None):
+        from dryml.core.template import _snapshot_parameters
+
+        del repo
+        observed.append(tuple(_snapshot_parameters(definition, traverse_refs=True)))
+        raise RuntimeError("stop after runtime binding")
+
+    monkeypatch.setattr(Definition, "concretize", inspect_bound)
+    checkpoint = StateRef(
+        exp.object_ref,
+        {path: "dryml-" + "0" * 64 for path in exp.object_ref.objects},
+    )
+    with pytest.raises(RuntimeError, match="stop after runtime binding"):
+        exp._evaluate_artifact(
+            "score", recipe, checkpoint, None, None,
+            type("Context", (), {"state_repo": repo})(),
+        )
+
+    assert observed == [()]
 
 
 class FiveUpdates(TrainFunction):
@@ -269,17 +311,17 @@ def test_empty_artifacts_still_publish_one_terminal_facts_only_row(tmp_path):
 
 
 @pytest.mark.parametrize("artifacts", (
-    Template(SavedModelValue, Par("this.model")),
-    [Template(SavedModelValue, Par("this.model"))],
-    {"score": Template(SavedModelValue, Par("this.model"))},
+    Definition(SavedModelValue, Par("this.model")),
+    [Definition(SavedModelValue, Par("this.model"))],
+    {"score": {"nested": Definition(SavedModelValue, Par("this.model"))}},
 ))
-def test_experiment_normalizes_every_public_artifact_form(artifacts):
-    """Public singleton, sequence, and mapping forms remain inert at construction."""
+def test_experiment_rejects_retired_artifact_conveniences_before_training(artifacts):
+    """Only the direct flat named mapping reaches Experiment construction."""
 
-    exp = Experiment(CounterModel(), TerminalOnly(), artifacts=artifacts)
-
-    expected = ("score",) if isinstance(artifacts, dict) else ("artifact_0",)
-    assert exp.artifacts.names == expected
+    model = CounterModel()
+    with pytest.raises(Exception):
+        Experiment(model, TerminalOnly(), artifacts=artifacts)
+    assert model.value == 0
 
 
 def test_resolved_artifact_recipe_is_unchanged_and_receipt_is_terminal(tmp_path):
@@ -287,8 +329,8 @@ def test_resolved_artifact_recipe_is_unchanged_and_receipt_is_terminal(tmp_path)
 
     repo = Repo(DirStore(tmp_path / "store"))
     ConstantValue.calls = 0
-    recipe = Template(ConstantValue)
-    exp = Experiment(CounterModel(), TerminalOnly(), artifacts=recipe, repo=repo)
+    recipe = Definition(ConstantValue)
+    exp = Experiment(CounterModel(), TerminalOnly(), artifacts={"constant": recipe}, repo=repo)
 
     final = exp.train(managed=ManagedConfig(state_repo=repo))
     row = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
@@ -296,8 +338,8 @@ def test_resolved_artifact_recipe_is_unchanged_and_receipt_is_terminal(tmp_path)
     assert recipe.is_resolved
     assert ConstantValue.calls == 1
     assert row.state_ref == final
-    restored = repo.load_state_ref(row.eval_artifacts["artifact_0"], reuse_live="never", cache="none")
-    assert row.eval_artifacts["artifact_0"] == restored.compute.status(
+    restored = repo.load_state_ref(row.eval_artifacts["constant"], reuse_live="never", cache="none")
+    assert row.eval_artifacts["constant"] == restored.compute.status(
         state_repo=repo,
     ).final_state_ref
     assert restored.ready
@@ -310,16 +352,16 @@ def test_initially_ready_artifact_still_completes_its_retained_managed_receiver(
     repo = Repo(DirStore(tmp_path / "store"))
     InitiallyReadyArtifact.calls = 0
     exp = Experiment(
-        CounterModel(), TerminalOnly(), artifacts=Template(InitiallyReadyArtifact), repo=repo,
+        CounterModel(), TerminalOnly(), artifacts={"initial": Definition(InitiallyReadyArtifact)}, repo=repo,
     )
 
     final = exp.train(managed=ManagedConfig(state_repo=repo))
     row = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
-    initial = row.artifact_inputs["artifact_0"]
+    initial = row.artifact_inputs["initial"]
     recovered = Artifact.recover(initial, repo=repo, reuse_live="never")
 
     assert InitiallyReadyArtifact.calls == 1
-    assert row.eval_artifacts["artifact_0"] == recovered.last_state_ref
+    assert row.eval_artifacts["initial"] == recovered.last_state_ref
     assert recovered.compute.status(state_repo=repo).final_state_ref == recovered.last_state_ref
     assert row.evaluation_status == "completed"
 
@@ -330,14 +372,14 @@ def test_completed_but_not_ready_artifact_is_never_published_as_an_evaluation(tm
     repo = Repo(DirStore(tmp_path / "store"))
     NeverReadyArtifact.calls = 0
     exp = Experiment(
-        CounterModel(), TerminalOnly(), artifacts=Template(NeverReadyArtifact), repo=repo,
+        CounterModel(), TerminalOnly(), artifacts={"never": Definition(NeverReadyArtifact)}, repo=repo,
     )
 
     with pytest.raises(ArtifactRecoveryError, match="not ready"):
         exp.train(managed=ManagedConfig(state_repo=repo))
     checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
     row = ExperimentData.find(checkpoint.object_projection(), repo=repo).data.iloc[0]
-    initial = row.artifact_inputs["artifact_0"]
+    initial = row.artifact_inputs["never"]
     receiver = repo.load_state_ref(initial, reuse_live="never", cache="none")
 
     assert NeverReadyArtifact.calls == 1
@@ -375,7 +417,7 @@ def test_test_data_recipe_binds_the_exact_ref_held_dataset_state(tmp_path):
     SavedTestDataValue.calls.clear()
     exp = Experiment(
         CounterModel(), TerminalOnly(), test_data=test_data,
-        artifacts=Template(SavedTestDataValue, Par("this.test_data")), repo=repo,
+        artifacts={"test-data": Definition(SavedTestDataValue, Par("this.test_data"))}, repo=repo,
     )
 
     exp.train(managed=ManagedConfig(state_repo=repo))
@@ -390,7 +432,7 @@ def test_missing_test_data_recipe_fails_before_training_or_checkpoint_mutation(t
     model = CounterModel()
     exp = Experiment(
         model, TerminalOnly(), train_data=CounterModel(3), val_data=CounterModel(4),
-        artifacts=Template(SavedTestDataValue, Par("this.test_data")), repo=repo,
+        artifacts={"test-data": Definition(SavedTestDataValue, Par("this.test_data"))}, repo=repo,
     )
 
     with pytest.raises(TypeError, match="cannot bind"):
@@ -401,13 +443,10 @@ def test_missing_test_data_recipe_fails_before_training_or_checkpoint_mutation(t
     assert exp.train.status(state_repo=repo).state == "failed"
 
 
-@pytest.mark.parametrize("artifacts", (
-    Template(ConstantValue), [Template(ConstantValue)], {"constant": Template(ConstantValue)},
-    TemplateBundle({"constant": Template(ConstantValue)}),
-))
-def test_artifact_forms_are_canonical_at_every_experiment_definition_boundary(artifacts):
-    """Experiment normalizes recipes for direct, CDef, and object-mode entry points."""
+def test_artifact_mapping_is_inert_until_activated_concretization():
+    """Definition and selector authoring retain frozen mapping data until activation."""
 
+    artifacts = {"constant": Definition(ConstantValue)}
     kwargs = {"artifacts": artifacts}
     direct = Experiment(CounterModel(), TerminalOnly(), **kwargs)
     definition = Experiment.defn(CounterModel(), TerminalOnly(), **kwargs)
@@ -419,12 +458,12 @@ def test_artifact_forms_are_canonical_at_every_experiment_definition_boundary(ar
     with selector_mode():
         selector = Experiment(CounterModel(), TerminalOnly(), **kwargs)
 
-    assert isinstance(direct.artifacts, TemplateBundle)
-    assert isinstance(definition.parameters["artifacts"], TemplateBundle)
+    assert tuple(direct.artifacts) == ("constant",)
+    assert tuple(definition.parameters["artifacts"]) == ("constant",)
     assert definition.parameters["artifacts"] == alias.parameters["artifacts"]
     assert definition.parameters["artifacts"] == mode_definition.parameters["artifacts"]
-    assert isinstance(concrete.parameters["artifacts"].target, TemplateBundle)
-    assert isinstance(selector.root.parameters["artifacts"], TemplateBundle)
+    assert tuple(concrete.parameters["artifacts"]) == ("constant",)
+    assert tuple(selector.root.parameters["artifacts"]) == ("constant",)
 
 
 def test_artifact_scalars_store_normalized_native_values_without_backend_imports():
@@ -474,9 +513,9 @@ def test_artifact_scalars_accept_installed_native_zero_dimensional_values():
 
 
 @pytest.mark.parametrize("recipe, error", (
-    (Template(CounterModel), "Artifact definition"),
-    (Template(RequiredComputeValue), "ordinary arguments"),
-    (Template(NoReceiptValue), "resumable and return"),
+    ({"invalid": Definition(CounterModel)}, "Artifact definition"),
+    ({"required": Definition(RequiredComputeValue)}, "ordinary arguments"),
+    ({"no-receipt": Definition(NoReceiptValue)}, "resumable and return"),
 ))
 def test_artifact_preflight_rejects_invalid_contracts_before_trainer_mutation(
         tmp_path, recipe, error):

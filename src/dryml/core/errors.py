@@ -2,13 +2,13 @@ from typing import Any
 from dataclasses import dataclass
 
 
-class TemplateError(ValueError):
-    """Report an invalid template expression, binding, or domain operation.
+class ParameterizationError(ValueError):
+    """Report invalid symbolic Definition data, binding, or generation policy.
 
     Args:
         reason: Stable explanation of the rejected operation.
         path: Optional graph path at which the failure occurred.
-        root: Optional fully-qualified template binding root involved in the
+        root: Optional fully-qualified parameter root involved in the
             failure.
 
     Attributes:
@@ -24,16 +24,28 @@ class TemplateError(ValueError):
         super().__init__(reason)
 
 
-class UnresolvedTemplateError(TemplateError):
-    """Report an operation that requires a template with no active expressions."""
+class UnresolvedDefinitionError(ParameterizationError):
+    """Report an operation requiring a Definition with no active expressions.
+
+    This error identifies symbolic-resolution failure only. A resolved Definition
+    can still be constructor-incomplete or invalid at a later receiving boundary.
+    """
 
 
-class TemplateLimitError(TemplateError):
-    """Report a template operation that exceeds a declared resource limit."""
+class ParameterizationLimitError(ParameterizationError):
+    """Report symbolic Definition or Generator work exceeding a fixed limit.
+
+    Limit failures return no partial rewritten Definition, grid, or exact-support
+    verification result.
+    """
 
 
-class UnsupportedTemplateVerificationError(TemplateError):
-    """Report an unsupported exact verification operation for a template."""
+class UnsupportedGeneratorVerificationError(ParameterizationError):
+    """Report that a Generator cannot establish exact support verification.
+
+    A conservative provider bound may reject a value, but cannot replace the
+    finite or exact proof required for successful verification.
+    """
 
 # -----------------------------
 # Errors

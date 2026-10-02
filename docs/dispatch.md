@@ -85,7 +85,11 @@ Reports contain only bounded diagnostic categories, redacted backend identifiers
 coverage and requirement results. They never retain call data, handles,
 credentials, source, selectors, Stores, or reservations. Incomplete static
 coverage remains in `explain` diagnostics even when a normal unresolved call
-does not warn. `explain` never emits `DispatchCoverageWarning`.
+does not warn. When `run` or `submit` emits `DispatchCoverageWarning`, its
+message includes bounded diagnostic categories and directs callers to
+`dispatch.explain(...)` for the full report; `explain` itself does not warn.
+Incomplete coverage means undiscovered calls may hide worker requirements,
+not that the workload failed or that no declarations were found.
 
 ## Probing And Static Coverage
 

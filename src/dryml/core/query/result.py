@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, ItemsView, Iterable, Mapping, ValuesView
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterator
 
+from ..cdef_identity import cdef_node_key
 from ..definition import ConcreteDefinition
 from ..object import Object
 from ..policies import CachePolicy
@@ -28,14 +29,16 @@ ContainmentOccurrence = DefinitionOccurrence | ReferenceOccurrence
 
 
 def _sort_occurrences(
-        occurrences: Iterable[ContainmentOccurrence]) -> tuple[ContainmentOccurrence, ...]:
+    occurrences: Iterable[ContainmentOccurrence],
+) -> tuple[ContainmentOccurrence, ...]:
     """Return deterministic occurrences without projecting exact terminals."""
 
     return tuple(sorted(occurrences, key=containment_witness_key))
 
 
 def _unique_witnesses(
-        witnesses: Iterable[ContainmentOccurrence]) -> tuple[ContainmentOccurrence, ...]:
+    witnesses: Iterable[ContainmentOccurrence],
+) -> tuple[ContainmentOccurrence, ...]:
     """Deduplicate complete witnesses while retaining their canonical order."""
 
     unique = {containment_witness_key(item): item for item in witnesses}
@@ -45,7 +48,8 @@ def _unique_witnesses(
 def _witnesses_for_members(
         witnesses: Iterable[ContainmentOccurrence],
         carrier: ContainmentCarrier,
-        members: Iterable[Any]) -> tuple[ContainmentOccurrence, ...]:
+    members: Iterable[Any],
+) -> tuple[ContainmentOccurrence, ...]:
     """Restrict evidence to surviving result carriers after a set operation."""
 
     member_keys = (
@@ -54,7 +58,8 @@ def _witnesses_for_members(
         else set(members)
     )
     return _unique_witnesses(
-        item for item in witnesses
+        item
+        for item in witnesses
         if (
             containment_witness_key(item) in member_keys
             if carrier == "occurrence"
@@ -63,13 +68,58 @@ def _witnesses_for_members(
     )
 
 
+def _private_witnesses_for_members(
+    witnesses: Iterable[ContainmentOccurrence],
+    carrier: ContainmentCarrier,
+    members: Iterable[Any],
+) -> tuple[ContainmentOccurrence, ...]:
+    """Retain graph-distinct evidence whose public carrier survives an operation."""
+
+    member_keys = (
+        {containment_witness_key(item) for item in members}
+        if carrier == "occurrence"
+        else set(members)
+    )
+    return tuple(
+        item
+        for item in witnesses
+        if (
+            containment_witness_key(item) in member_keys
+            if carrier == "occurrence"
+            else (item.owner if carrier == "owner" else item.target) in member_keys
+        )
+    )
+
+
+def _private_witness_carriers(
+    witnesses: Iterable[ContainmentOccurrence], carrier: ContainmentCarrier
+) -> tuple[ConcreteDefinition, ...]:
+    """Return each private CDef carrier node once for exact budget charging."""
+
+    carriers = (
+        (
+            item.target
+            for item in witnesses
+            if isinstance(item.target, ConcreteDefinition)
+        )
+        if carrier == "target"
+        else (item.owner for item in witnesses)
+    )
+    unique = {}
+    for cdef in carriers:
+        unique.setdefault(cdef_node_key(cdef), cdef)
+    return tuple(unique.values())
+
+
 def _store_key(store) -> str:
     if hasattr(store, "catalog_key"):
         return store.catalog_key()
     return f"{type(store).__module__}.{type(store).__qualname__}:id:{id(store)}"
 
 
-def _merge_replica_maps(*maps: Mapping[ConcreteDefinition, tuple[Any, ...]]) -> dict[ConcreteDefinition, tuple[Any, ...]]:
+def _merge_replica_maps(
+    *maps: Mapping[ConcreteDefinition, tuple[Any, ...]]
+) -> dict[ConcreteDefinition, tuple[Any, ...]]:
     merged: dict[ConcreteDefinition, dict[str, Any]] = {}
     for replica_map in maps:
         for cdef, stores in replica_map.items():
@@ -80,6 +130,90 @@ def _merge_replica_maps(*maps: Mapping[ConcreteDefinition, tuple[Any, ...]]) -> 
         cdef: tuple(bucket[key] for key in sorted(bucket))
         for cdef, bucket in merged.items()
     }
+
+
+def _combine_private_witnesses(
+    left_witnesses: Iterable[ContainmentOccurrence],
+    left_replicas: Mapping[object, tuple[Any, ...]] | None,
+    right_witnesses: Iterable[ContainmentOccurrence],
+    right_replicas: Mapping[object, tuple[Any, ...]] | None,
+    carrier: ContainmentCarrier,
+    members: Iterable[Any],
+) -> tuple[
+    tuple[ContainmentOccurrence, ...], dict[object, tuple[Any, ...]] | None
+]:
+    """Combine private evidence without inventing graph-distinct candidates.
+
+    Same private roots are identical evidence.  Separate operands may instead
+    hold independently decoded copies of one Store graph; those merge only when
+    their rooted topology is graph-equal.  Distinct paths and non-equivalent
+    roots remain private evidence even when their public witness keys coincide.
+    """
+
+    left = _private_witnesses_for_members(left_witnesses, carrier, members)
+    right = _private_witnesses_for_members(right_witnesses, carrier, members)
+    left_owners = {cdef_node_key(item.owner): item.owner for item in left}
+    right_owners = {}
+
+    def left_owner(owner: ConcreteDefinition) -> ConcreteDefinition:
+        node_key = cdef_node_key(owner)
+        existing = left_owners.get(node_key)
+        if existing is not None:
+            return existing
+        left_owners[node_key] = owner
+        return owner
+
+    def right_owner(owner: ConcreteDefinition) -> ConcreteDefinition:
+        node_key = cdef_node_key(owner)
+        existing = left_owners.get(node_key)
+        if existing is None:
+            existing = right_owners.get(node_key)
+        if existing is not None:
+            return existing
+        for existing in left_owners.values():
+            if owner.graph_hash() == existing.graph_hash() and owner.graph_equal(existing):
+                return existing
+        right_owners[node_key] = owner
+        return owner
+
+    merged = []
+    seen = set()
+    source_keys: dict[object, object] = {}
+
+    def retain(item: ContainmentOccurrence, owner: ConcreteDefinition) -> None:
+        item = item if item.owner is owner else replace(item, owner=owner)
+        key = (cdef_node_key(owner), containment_witness_key(item))
+        if key not in seen:
+            seen.add(key)
+            merged.append(item)
+
+    for item in left:
+        owner = left_owner(item.owner)
+        source_keys[cdef_node_key(item.owner)] = cdef_node_key(owner)
+        retain(item, owner)
+    for item in right:
+        owner = right_owner(item.owner)
+        source_keys[cdef_node_key(item.owner)] = cdef_node_key(owner)
+        retain(item, owner)
+
+    if left_replicas is None or right_replicas is None:
+        return tuple(merged), None
+    replicas: dict[object, dict[str, Any]] = {}
+    for replica_map in (left_replicas, right_replicas):
+        for source_key, stores in replica_map.items():
+            owner_key = source_keys.get(source_key)
+            if owner_key is None:
+                continue
+            bucket = replicas.setdefault(owner_key, {})
+            for store in stores:
+                bucket.setdefault(_store_key(store), store)
+    return (
+        tuple(merged),
+        {
+            owner_key: tuple(stores[key] for key in sorted(stores))
+            for owner_key, stores in replicas.items()
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,10 +229,15 @@ class DefinitionResultSet:
         replicas: Explicit definition-to-Store authority. Materializable results
             require an entry for every definition; use an empty mapping for
             nonmaterializable results.
-        witnesses: Graph-distinct CDefs retained for exact TemplateSelector
+        witnesses: Graph-distinct CDefs retained for exact GeneratorSelector
             refinement before structural result deduplication.
         witness_complete: Whether ``witnesses`` is complete immutable evidence
             for this result universe.
+        containment_private_witnesses: Graph-distinct containment occurrences
+            used to retain only exact-selector-matching topology in later fixed
+            containment refinement. This evidence is never a public result.
+        containment_private_replicas: Source authority associated with private
+            owner witnesses. This evidence is never a public result.
 
     Raises:
         ValueError: If replica metadata is absent or incomplete.
@@ -118,6 +257,8 @@ class DefinitionResultSet:
     _witness_complete: bool = False
     _containment: ContainmentContext | None = None
     _containment_witnesses: tuple[ContainmentOccurrence, ...] = ()
+    _containment_private_witnesses: tuple[ContainmentOccurrence, ...] = ()
+    _containment_private_replicas: dict[object, tuple[Any, ...]] | None = None
     _containment_carrier: ContainmentCarrier = "target"
 
     def __init__(
@@ -133,9 +274,14 @@ class DefinitionResultSet:
             witness_complete: bool = False,
             containment: ContainmentContext | None = None,
             containment_witnesses: Iterable[ContainmentOccurrence] = (),
-            containment_carrier: ContainmentCarrier = "target"):
+        containment_private_witnesses: Iterable[ContainmentOccurrence] = (),
+        containment_private_replicas: Mapping[object, tuple[Any, ...]] | None = None,
+        containment_carrier: ContainmentCarrier = "target",
+    ):
         if replicas is None:
-            raise ValueError("DefinitionResultSet requires explicit replica metadata; use {} for nonmaterializable results.")
+            raise ValueError(
+                "DefinitionResultSet requires explicit replica metadata; use {} for nonmaterializable results."
+            )
         object.__setattr__(self, "repo", repo)
         definitions_t = _sort_cdefs(dict.fromkeys(definitions).keys())
         object.__setattr__(self, "_definitions", definitions_t)
@@ -145,14 +291,32 @@ class DefinitionResultSet:
         if materializable:
             missing = set(definitions_t) - set(replicas)
             if missing:
-                raise ValueError("Materializable DefinitionResultSet requires a replica entry for every definition.")
+                raise ValueError(
+                    "Materializable DefinitionResultSet requires a replica entry for every definition."
+                )
         object.__setattr__(self, "_replicas", dict(replicas))
         object.__setattr__(self, "_witnesses", tuple(witnesses))
         object.__setattr__(self, "_witness_complete", bool(witness_complete))
         if containment is not None and containment_carrier not in {"target", "owner"}:
-            raise ValueError("DefinitionResultSet containment carrier must be target or owner.")
+            raise ValueError(
+                "DefinitionResultSet containment carrier must be target or owner."
+            )
         object.__setattr__(self, "_containment", containment)
-        object.__setattr__(self, "_containment_witnesses", _unique_witnesses(containment_witnesses))
+        object.__setattr__(
+            self, "_containment_witnesses", _unique_witnesses(containment_witnesses)
+        )
+        object.__setattr__(
+            self, "_containment_private_witnesses", tuple(containment_private_witnesses)
+        )
+        object.__setattr__(
+            self,
+            "_containment_private_replicas",
+            (
+                None
+                if containment_private_replicas is None
+                else dict(containment_private_replicas)
+            ),
+        )
         object.__setattr__(self, "_containment_carrier", containment_carrier)
 
     def __iter__(self) -> Iterator[ConcreteDefinition]:
@@ -172,12 +336,16 @@ class DefinitionResultSet:
 
     def one(self) -> ConcreteDefinition:
         if len(self) != 1:
-            raise QueryCardinalityError(f"Expected exactly one result, found {len(self)}.")
+            raise QueryCardinalityError(
+                f"Expected exactly one result, found {len(self)}."
+            )
         return self._definitions[0]
 
     def one_or_none(self) -> ConcreteDefinition | None:
         if len(self) > 1:
-            raise QueryCardinalityError(f"Expected zero or one result, found {len(self)}.")
+            raise QueryCardinalityError(
+                f"Expected zero or one result, found {len(self)}."
+            )
         return self._definitions[0] if self._definitions else None
 
     def first(self) -> ConcreteDefinition | None:
@@ -200,6 +368,8 @@ class DefinitionResultSet:
                 witness_complete=self._witness_complete,
                 containment=self._containment,
                 containment_witnesses=self._containment_witnesses,
+                containment_private_witnesses=self._containment_private_witnesses,
+                containment_private_replicas=self._containment_private_replicas,
                 containment_carrier=self._containment_carrier,
             )
             query = DefinitionQuery.from_source(
@@ -212,7 +382,11 @@ class DefinitionResultSet:
                 edges=self._containment.edges,
                 contains_ref=self._containment.contains_ref,
             )
-            return query.definitions() if self._containment_carrier == "target" else query.owners()
+            return (
+                query.definitions()
+                if self._containment_carrier == "target"
+                else query.owners()
+            )
         universe = ResultUniverse(
             kind="definitions",
             definitions=self._definitions,
@@ -233,6 +407,24 @@ class DefinitionResultSet:
         self._check_compatible(other)
         containment = self._combined_containment(other)
         definitions = tuple(self._definitions) + tuple(other._definitions)
+        private_witnesses = ()
+        private_replicas = None
+        witness_complete = False
+        if containment is not None:
+            private_witnesses, private_replicas = _combine_private_witnesses(
+                self._containment_private_witnesses,
+                self._containment_private_replicas,
+                other._containment_private_witnesses,
+                other._containment_private_replicas,
+                self._containment_carrier,
+                definitions,
+            )
+            witness_complete = (
+                containment.complete
+                and self._witness_complete
+                and other._witness_complete
+                and not containment.bounded
+            )
         return DefinitionResultSet(
             self.repo,
             definitions,
@@ -240,11 +432,22 @@ class DefinitionResultSet:
             domain=self.domain,
             replicas=_merge_replica_maps(self._replicas, other._replicas),
             containment=containment,
-            containment_witnesses=_witnesses_for_members(
+            containment_witnesses=(
+                _witnesses_for_members(
                 (*self._containment_witnesses, *other._containment_witnesses),
                 self._containment_carrier,
                 definitions,
-            ) if containment is not None else (),
+                )
+                if containment is not None
+                else ()
+            ),
+            witnesses=_private_witness_carriers(
+                private_witnesses,
+                self._containment_carrier,
+            ),
+            witness_complete=witness_complete,
+            containment_private_witnesses=private_witnesses,
+            containment_private_replicas=private_replicas,
             containment_carrier=self._containment_carrier,
         )
 
@@ -253,6 +456,24 @@ class DefinitionResultSet:
         containment = self._combined_containment(other)
         kept = [cdef for cdef in self._definitions if cdef in other]
         merged_replicas = _merge_replica_maps(self._replicas, other._replicas)
+        private_witnesses = ()
+        private_replicas = None
+        witness_complete = False
+        if containment is not None:
+            private_witnesses, private_replicas = _combine_private_witnesses(
+                self._containment_private_witnesses,
+                self._containment_private_replicas,
+                other._containment_private_witnesses,
+                other._containment_private_replicas,
+                self._containment_carrier,
+                kept,
+            )
+            witness_complete = (
+                containment.complete
+                and self._witness_complete
+                and other._witness_complete
+                and not containment.bounded
+            )
         return DefinitionResultSet(
             self.repo,
             kept,
@@ -260,11 +481,22 @@ class DefinitionResultSet:
             domain=self.domain,
             replicas={cdef: merged_replicas.get(cdef, ()) for cdef in kept},
             containment=containment,
-            containment_witnesses=_witnesses_for_members(
+            containment_witnesses=(
+                _witnesses_for_members(
                 (*self._containment_witnesses, *other._containment_witnesses),
                 self._containment_carrier,
                 kept,
-            ) if containment is not None else (),
+                )
+                if containment is not None
+                else ()
+            ),
+            witnesses=_private_witness_carriers(
+                private_witnesses,
+                self._containment_carrier,
+            ),
+            witness_complete=witness_complete,
+            containment_private_witnesses=private_witnesses,
+            containment_private_replicas=private_replicas,
             containment_carrier=self._containment_carrier,
         )
 
@@ -286,14 +518,18 @@ class DefinitionResultSet:
 
         with materialization_admission(operation="definition_result_set_objects"):
             if not self.materializable:
-                raise QueryDomainError(f"Definitions from domain {self.domain!r} cannot be materialized directly.")
+                raise QueryDomainError(
+                    f"Definitions from domain {self.domain!r} cannot be materialized directly."
+                )
             objs = {}
             for cdef in self._definitions:
                 replicas = self._replicas.get(cdef, ())
                 if replicas:
                     self.repo.set_object_store(cdef, replicas[0])
                 objs[cdef] = self.repo.load_object(cdef, cache=cache)
-            return ObjectResultSet(self.repo, objs, domain=self.domain, explanation=self.explanation)
+            return ObjectResultSet(
+                self.repo, objs, domain=self.domain, explanation=self.explanation
+            )
 
     def replicas(self, cdef: ConcreteDefinition) -> tuple[Any, ...]:
         return self._replicas.get(cdef, ())
@@ -306,14 +542,22 @@ class DefinitionResultSet:
                 "Cannot combine DefinitionResultSets with different domains or materialization semantics."
             )
         if (self._containment is None) != (other._containment is None):
-            raise ValueError("Cannot combine containment and non-containment result sets.")
+            raise ValueError(
+                "Cannot combine containment and non-containment result sets."
+            )
         if self._containment is not None:
             if self._containment_carrier != other._containment_carrier:
-                raise ValueError("Cannot combine containment result sets with different projections.")
+                raise ValueError(
+                    "Cannot combine containment result sets with different projections."
+                )
             if not self._containment.compatible_with(other._containment):
-                raise ValueError("Cannot combine result sets with incompatible containment contexts.")
+                raise ValueError(
+                    "Cannot combine result sets with incompatible containment contexts."
+                )
 
-    def _combined_containment(self, other: "DefinitionResultSet") -> ContainmentContext | None:
+    def _combined_containment(
+        self, other: "DefinitionResultSet"
+    ) -> ContainmentContext | None:
         """Merge compatible containment evidence metadata for a set operation."""
 
         if self._containment is None:
@@ -330,16 +574,24 @@ class QueryBackedDefinitionResultSet(DefinitionResultSet):
     stable without re-querying.
     """
 
-    __slots__ = ("_page_factory", "_definition_cache", "_replica_cache", "_cache_complete")
+    __slots__ = (
+        "_page_factory",
+        "_definition_cache",
+        "_replica_cache",
+        "_cache_complete",
+    )
 
     def __init__(
             self,
             repo,
-            page_factory: Callable[[], Iterable[tuple[ConcreteDefinition, tuple[Any, ...]]]],
+        page_factory: Callable[
+            [], Iterable[tuple[ConcreteDefinition, tuple[Any, ...]]]
+        ],
             *,
             materializable: bool = True,
             domain: str = "stored",
-            explanation: QueryExplanation | None = None):
+        explanation: QueryExplanation | None = None,
+    ):
         object.__setattr__(self, "repo", repo)
         object.__setattr__(self, "_definitions", ())
         object.__setattr__(self, "materializable", materializable)
@@ -350,6 +602,8 @@ class QueryBackedDefinitionResultSet(DefinitionResultSet):
         object.__setattr__(self, "_witness_complete", False)
         object.__setattr__(self, "_containment", None)
         object.__setattr__(self, "_containment_witnesses", ())
+        object.__setattr__(self, "_containment_private_witnesses", ())
+        object.__setattr__(self, "_containment_private_replicas", None)
         object.__setattr__(self, "_containment_carrier", "target")
         object.__setattr__(self, "_page_factory", page_factory)
         object.__setattr__(self, "_definition_cache", [])
@@ -408,7 +662,9 @@ class QueryBackedDefinitionResultSet(DefinitionResultSet):
         for cdef, replicas in self._page_factory():
             if cdef in seen:
                 existing = self._replica_cache.get(cdef, ())
-                self._replica_cache[cdef] = _merge_store_tuple(existing, tuple(replicas))
+                self._replica_cache[cdef] = _merge_store_tuple(
+                    existing, tuple(replicas)
+                )
                 continue
             seen.add(cdef)
             self._definition_cache.append(cdef)
@@ -429,7 +685,9 @@ class QueryBackedDefinitionResultSet(DefinitionResultSet):
         object.__setattr__(self, "_cache_complete", True)
 
 
-def _merge_store_tuple(left: tuple[Any, ...], right: tuple[Any, ...]) -> tuple[Any, ...]:
+def _merge_store_tuple(
+    left: tuple[Any, ...], right: tuple[Any, ...]
+) -> tuple[Any, ...]:
     merged: dict[str, Any] = {}
     for store in (*left, *right):
         merged.setdefault(_store_key(store), store)
@@ -447,7 +705,7 @@ class OccurrenceResultSet:
         occurrence_factory: Replayable lazy occurrence producer.
         explanation: Optional terminal execution diagnostics.
         owner_replicas: Owner-to-Store authority used by :meth:`owners`.
-        witnesses: Graph-distinct occurrences retained for exact TemplateSelector
+        witnesses: Graph-distinct occurrences retained for exact GeneratorSelector
             refinement and projection.
         witness_complete: Whether ``witnesses`` is complete immutable evidence
             for this occurrence universe.
@@ -470,6 +728,8 @@ class OccurrenceResultSet:
     _witness_complete: bool = False
     _containment: ContainmentContext | None = None
     _containment_witnesses: tuple[ContainmentOccurrence, ...] = ()
+    _containment_private_witnesses: tuple[ContainmentOccurrence, ...] = ()
+    _containment_private_replicas: dict[object, tuple[Any, ...]] | None = None
     _containment_witnesses_implicit: bool = False
 
     def __init__(
@@ -484,17 +744,28 @@ class OccurrenceResultSet:
             witness_complete: bool = False,
             containment: ContainmentContext | None = None,
             containment_witnesses: Iterable[ContainmentOccurrence] | None = None,
-            bounded: bool = False):
+        containment_private_witnesses: Iterable[ContainmentOccurrence] = (),
+        containment_private_replicas: Mapping[object, tuple[Any, ...]] | None = None,
+        bounded: bool = False,
+    ):
         if occurrences is None and occurrence_factory is None:
             occurrences = ()
         if occurrences is not None and occurrence_factory is not None:
             raise ValueError("Provide occurrences or occurrence_factory, not both.")
         eager_occurrences = None if occurrences is None else tuple(occurrences)
         object.__setattr__(self, "repo", repo)
-        object.__setattr__(self, "_occurrences", None if eager_occurrences is None else _sort_occurrences(eager_occurrences))
+        object.__setattr__(
+            self,
+            "_occurrences",
+            None if eager_occurrences is None else _sort_occurrences(eager_occurrences),
+        )
         object.__setattr__(self, "_occurrence_factory", occurrence_factory)
         object.__setattr__(self, "explanation", explanation)
-        object.__setattr__(self, "_owner_replicas", None if owner_replicas is None else dict(owner_replicas))
+        object.__setattr__(
+            self,
+            "_owner_replicas",
+            None if owner_replicas is None else dict(owner_replicas),
+        )
         object.__setattr__(self, "_witnesses", tuple(witnesses))
         object.__setattr__(self, "_witness_complete", bool(witness_complete))
         if containment is not None and bounded:
@@ -509,22 +780,43 @@ class OccurrenceResultSet:
         object.__setattr__(self, "_containment", containment)
         implicit_containment_witnesses = containment_witnesses is None
         if implicit_containment_witnesses:
-            containment_witnesses = () if eager_occurrences is None else eager_occurrences
+            containment_witnesses = (
+                () if eager_occurrences is None else eager_occurrences
+            )
         containment_witnesses = tuple(containment_witnesses)
         if containment is not None:
             from .model import containment_target_kind
 
             invalid = next(
                 (
-                    item for item in containment_witnesses
+                    item
+                    for item in containment_witnesses
                     if containment_target_kind(item.target) != containment.target_kind
                 ),
                 None,
             )
             if invalid is not None:
-                raise ValueError("Containment occurrence evidence does not match its target kind.")
-        object.__setattr__(self, "_containment_witnesses", _unique_witnesses(containment_witnesses))
-        object.__setattr__(self, "_containment_witnesses_implicit", implicit_containment_witnesses)
+                raise ValueError(
+                    "Containment occurrence evidence does not match its target kind."
+                )
+        object.__setattr__(
+            self, "_containment_witnesses", _unique_witnesses(containment_witnesses)
+        )
+        object.__setattr__(
+            self, "_containment_private_witnesses", tuple(containment_private_witnesses)
+        )
+        object.__setattr__(
+            self,
+            "_containment_private_replicas",
+            (
+                None
+                if containment_private_replicas is None
+                else dict(containment_private_replicas)
+            ),
+        )
+        object.__setattr__(
+            self, "_containment_witnesses_implicit", implicit_containment_witnesses
+        )
 
     def __iter__(self) -> Iterator[ContainmentOccurrence]:
         if self._occurrences is not None:
@@ -545,20 +837,27 @@ class OccurrenceResultSet:
     def one(self) -> ContainmentOccurrence:
         occurrences = self._materialize()
         if len(occurrences) != 1:
-            raise QueryCardinalityError(f"Expected exactly one occurrence, found {len(occurrences)}.")
+            raise QueryCardinalityError(
+                f"Expected exactly one occurrence, found {len(occurrences)}."
+            )
         return occurrences[0]
 
     def one_or_none(self) -> ContainmentOccurrence | None:
         occurrences = self._materialize()
         if len(occurrences) > 1:
-            raise QueryCardinalityError(f"Expected zero or one occurrence, found {len(occurrences)}.")
+            raise QueryCardinalityError(
+                f"Expected zero or one occurrence, found {len(occurrences)}."
+            )
         return occurrences[0] if occurrences else None
 
     def first(self) -> ContainmentOccurrence | None:
         return next(iter(self), None)
 
     def definitions(self) -> DefinitionResultSet:
-        if self._containment is not None and self._containment.target_kind != "definition":
+        if (
+            self._containment is not None
+            and self._containment.target_kind != "definition"
+        ):
             raise QueryDomainError(
                 "definitions() is unavailable for exact reference containment targets."
             )
@@ -574,6 +873,8 @@ class OccurrenceResultSet:
             witness_complete=self._witness_complete,
             containment=self._containment,
             containment_witnesses=self._containment_witnesses,
+            containment_private_witnesses=self._containment_private_witnesses,
+            containment_private_replicas=self._containment_private_replicas,
             containment_carrier="target",
         )
 
@@ -590,6 +891,8 @@ class OccurrenceResultSet:
             witness_complete=self._witness_complete,
             containment=self._containment,
             containment_witnesses=self._containment_witnesses,
+            containment_private_witnesses=self._containment_private_witnesses,
+            containment_private_replicas=self._containment_private_replicas,
             containment_carrier="owner",
         )
 
@@ -602,8 +905,11 @@ class OccurrenceResultSet:
 
         if self._containment is None or self._containment.target_kind != "object_ref":
             actual = (
-                "non-containment occurrences" if self._containment is None
-                else self._containment.target_kind.replace("_", " ").title().replace(" ", "")
+                "non-containment occurrences"
+                if self._containment is None
+                else self._containment.target_kind.replace("_", " ")
+                .title()
+                .replace(" ", "")
             )
             raise QueryDomainError(
                 f"object_refs() requires exact ObjectRef containment evidence, got {actual}."
@@ -629,8 +935,11 @@ class OccurrenceResultSet:
 
         if self._containment is None or self._containment.target_kind != "state_ref":
             actual = (
-                "non-containment occurrences" if self._containment is None
-                else self._containment.target_kind.replace("_", " ").title().replace(" ", "")
+                "non-containment occurrences"
+                if self._containment is None
+                else self._containment.target_kind.replace("_", " ")
+                .title()
+                .replace(" ", "")
             )
             raise QueryDomainError(
                 f"state_refs() requires exact StateRef containment evidence, got {actual}."
@@ -648,7 +957,9 @@ class OccurrenceResultSet:
         )
 
     def objects(self, **kwargs):
-        raise QueryDomainError("Raw nested occurrences cannot be materialized directly; use .owners().objects().")
+        raise QueryDomainError(
+            "Raw nested occurrences cannot be materialized directly; use .owners().objects()."
+        )
 
     def refine(self, selector) -> "OccurrenceResultSet":
         return self.query(selector).execute()
@@ -667,6 +978,8 @@ class OccurrenceResultSet:
             witness_complete=self._witness_complete,
             containment=self._containment,
             containment_witnesses=self._containment_witnesses,
+            containment_private_witnesses=self._containment_private_witnesses,
+            containment_private_replicas=self._containment_private_replicas,
         )
         query = DefinitionQuery.from_source(
             self.repo,
@@ -685,15 +998,43 @@ class OccurrenceResultSet:
         self._check_compatible(other)
         containment = self._combined_containment(other)
         out = _unique_witnesses(self._materialize() + other._materialize())
+        private_witnesses = ()
+        private_replicas = None
+        witness_complete = False
+        if containment is not None:
+            private_witnesses, private_replicas = _combine_private_witnesses(
+                self._containment_private_witnesses,
+                self._containment_private_replicas,
+                other._containment_private_witnesses,
+                other._containment_private_replicas,
+                "occurrence",
+                out,
+            )
+            witness_complete = (
+                containment.complete
+                and self._witness_complete
+                and other._witness_complete
+                and not containment.bounded
+            )
         return OccurrenceResultSet(
             self.repo,
             out,
             explanation=self.explanation,
-            owner_replicas=_merge_replica_maps(self._owner_replicas or {}, other._owner_replicas or {}),
+            owner_replicas=_merge_replica_maps(
+                self._owner_replicas or {}, other._owner_replicas or {}
+            ),
             containment=containment,
-            containment_witnesses=_unique_witnesses(
+            containment_witnesses=(
+                _unique_witnesses(
                 (*self._containment_witnesses, *other._containment_witnesses),
-            ) if containment is not None else (),
+                )
+                if containment is not None
+                else ()
+            ),
+            witnesses=private_witnesses,
+            witness_complete=witness_complete,
+            containment_private_witnesses=private_witnesses,
+            containment_private_replicas=private_replicas,
         )
 
     def intersection(self, other: "OccurrenceResultSet") -> "OccurrenceResultSet":
@@ -701,31 +1042,68 @@ class OccurrenceResultSet:
         containment = self._combined_containment(other)
         other_keys = {containment_witness_key(occ) for occ in other._materialize()}
         kept = tuple(
-            occ for occ in self._materialize()
+            occ
+            for occ in self._materialize()
             if containment_witness_key(occ) in other_keys
         )
+        private_witnesses = ()
+        private_replicas = None
+        witness_complete = False
+        if containment is not None:
+            private_witnesses, private_replicas = _combine_private_witnesses(
+                self._containment_private_witnesses,
+                self._containment_private_replicas,
+                other._containment_private_witnesses,
+                other._containment_private_replicas,
+                "occurrence",
+                kept,
+            )
+            witness_complete = (
+                containment.complete
+                and self._witness_complete
+                and other._witness_complete
+                and not containment.bounded
+            )
         return OccurrenceResultSet(
             self.repo,
             kept,
             explanation=self.explanation,
-            owner_replicas=_merge_replica_maps(self._owner_replicas or {}, other._owner_replicas or {}),
+            owner_replicas=_merge_replica_maps(
+                self._owner_replicas or {}, other._owner_replicas or {}
+            ),
             containment=containment,
-            containment_witnesses=_witnesses_for_members(
+            containment_witnesses=(
+                _witnesses_for_members(
                 (*self._containment_witnesses, *other._containment_witnesses),
                 "occurrence",
                 kept,
-            ) if containment is not None else (),
+                )
+                if containment is not None
+                else ()
+            ),
+            witnesses=private_witnesses,
+            witness_complete=witness_complete,
+            containment_private_witnesses=private_witnesses,
+            containment_private_replicas=private_replicas,
         )
 
     def _check_compatible(self, other: "OccurrenceResultSet") -> None:
         if self.repo is not other.repo:
             raise ValueError("Cannot combine result sets from different repos.")
         if (self._containment is None) != (other._containment is None):
-            raise ValueError("Cannot combine containment and non-containment result sets.")
-        if self._containment is not None and not self._containment.compatible_with(other._containment):
-            raise ValueError("Cannot combine result sets with incompatible containment contexts.")
+            raise ValueError(
+                "Cannot combine containment and non-containment result sets."
+            )
+        if self._containment is not None and not self._containment.compatible_with(
+            other._containment
+        ):
+            raise ValueError(
+                "Cannot combine result sets with incompatible containment contexts."
+            )
 
-    def _combined_containment(self, other: "OccurrenceResultSet") -> ContainmentContext | None:
+    def _combined_containment(
+        self, other: "OccurrenceResultSet"
+    ) -> ContainmentContext | None:
         """Merge compatible containment evidence metadata for a set operation."""
 
         if self._containment is None:
@@ -734,19 +1112,27 @@ class OccurrenceResultSet:
 
     def _require_owner_replicas(self) -> dict[ConcreteDefinition, tuple[Any, ...]]:
         if self._owner_replicas is None:
-            raise QueryDomainError("Owner replica metadata was not captured for this occurrence result.")
+            raise QueryDomainError(
+                "Owner replica metadata was not captured for this occurrence result."
+            )
         occurrences = self._materialize()
         missing = {occ.owner for occ in occurrences} - set(self._owner_replicas)
         if missing:
-            raise QueryDomainError("Owner replica metadata is incomplete for this occurrence result.")
+            raise QueryDomainError(
+                "Owner replica metadata is incomplete for this occurrence result."
+            )
         return dict(self._owner_replicas)
 
     def _materialize(self) -> tuple[ContainmentOccurrence, ...]:
         if self._occurrences is None:
-            object.__setattr__(self, "_occurrences", _sort_occurrences(self._occurrence_factory()))
+            object.__setattr__(
+                self, "_occurrences", _sort_occurrences(self._occurrence_factory())
+            )
             object.__setattr__(self, "_occurrence_factory", None)
         if self._containment_witnesses_implicit:
-            object.__setattr__(self, "_containment_witnesses", _unique_witnesses(self._occurrences))
+            object.__setattr__(
+                self, "_containment_witnesses", _unique_witnesses(self._occurrences)
+            )
             object.__setattr__(self, "_containment_witnesses_implicit", False)
         return self._occurrences
 
@@ -764,7 +1150,8 @@ class ObjectResultSet(Mapping):
             objects: Mapping[ConcreteDefinition, Object],
             *,
             domain: str = "stored",
-            explanation: QueryExplanation | None = None):
+        explanation: QueryExplanation | None = None,
+    ):
         object.__setattr__(self, "repo", repo)
         ordered = {cdef: objects[cdef] for cdef in _sort_cdefs(objects.keys())}
         object.__setattr__(self, "_objects", ordered)
@@ -794,7 +1181,9 @@ class ObjectResultSet(Mapping):
 
         with materialization_admission(operation="object_result_set_one"):
             if len(self) != 1:
-                raise QueryCardinalityError(f"Expected exactly one object, found {len(self)}.")
+                raise QueryCardinalityError(
+                    f"Expected exactly one object, found {len(self)}."
+                )
             return next(iter(self._objects.values()))
 
     def one_or_none(self) -> Object | None:
@@ -802,7 +1191,9 @@ class ObjectResultSet(Mapping):
 
         with materialization_admission(operation="object_result_set_one_or_none"):
             if len(self) > 1:
-                raise QueryCardinalityError(f"Expected zero or one object, found {len(self)}.")
+                raise QueryCardinalityError(
+                    f"Expected zero or one object, found {len(self)}."
+                )
             return next(iter(self._objects.values())) if self._objects else None
 
     def first(self) -> Object | None:

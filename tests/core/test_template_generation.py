@@ -6,11 +6,10 @@ import random
 
 import pytest
 
-from dryml.core import Definition, Object
+from dryml.core import Definition, Generator, Object
 from dryml.core.domains import UniformFromSet
-from dryml.core.errors import TemplateError, UnresolvedTemplateError
-from dryml.core.template import Par, Template
-from dryml.core.template_selector import TemplateGenerator
+from dryml.core.errors import ParameterizationError, UnresolvedDefinitionError
+from dryml.core.template import Par
 
 
 class GeneratedModel:
@@ -40,6 +39,25 @@ class DynamicRootDistribution:
 
     def value_at(self, index):
         return Par("later")
+
+    def contains(self, value):
+        return None
+
+    def bounds(self):
+        return None
+
+
+class DistributionResult:
+    """Runtime provider whose result attempts to leak generation policy."""
+
+    def sample(self, rng):
+        return UniformFromSet((1,))
+
+    def cardinality(self):
+        return 1
+
+    def value_at(self, index):
+        return UniformFromSet((1,))
 
     def contains(self, value):
         return None
@@ -95,16 +113,16 @@ class OrderedDomain:
         return 1, 1
 
 
-def test_generator_captures_complete_bindings_and_samples_once_per_root():
+def test_generator_captures_complete_distributions_and_samples_once_per_root():
     """Sampling uses caller RNG once per lexical root and returns a Definition."""
-    template = Template(
+    definition = Definition(
         GeneratedModel,
         Par("encoder/width"),
         scale=Par("scale"),
         product=Par("encoder/width") * Par("scale"),
     )
     widths = UniformFromSet((32, 64))
-    generator = TemplateGenerator(template, sub_dict={"encoder/width": widths, "scale": 2})
+    generator = Generator(definition.sub(scale=2), {"encoder/width": widths})
 
     first = generator.sample(random.Random(7))
     second = generator.sample(random.Random(7))
@@ -112,76 +130,81 @@ def test_generator_captures_complete_bindings_and_samples_once_per_root():
     assert isinstance(first, Definition)
     assert first == second
     assert first.parameters["product"] == first.parameters["width"] * 2
-    assert generator.template.names == ("encoder/width",)
-    assert generator.domains["encoder/width"] is widths
+    assert generator.definition.names == ("encoder/width",)
+    assert generator.distributions["encoder/width"] is widths
 
 
 def test_generator_samples_qualified_roots_in_lexical_order():
     """Equivalent template layout does not change provider draw ordering."""
 
     OrderedDomain.calls = []
-    generator = TemplateGenerator(
-        Template(GeneratedModel, Par("zeta"), scale=Par("alpha"), product=1),
-        zeta=OrderedDomain("zeta"),
-        alpha=OrderedDomain("alpha"),
+    generator = Generator(
+        Definition(GeneratedModel, Par("zeta"), scale=Par("alpha"), product=1),
+        {"zeta": OrderedDomain("zeta"), "alpha": OrderedDomain("alpha")},
     )
 
     generator.sample(random.Random(0))
 
-    assert tuple(generator.domains) == ("alpha", "zeta")
+    assert tuple(generator.distributions) == ("alpha", "zeta")
     assert OrderedDomain.calls == ["alpha", "zeta"]
 
 
-def test_generator_grid_is_complete_and_static_capture_detaches_live_objects():
-    """Grid returns every root assignment only after all results are complete."""
-    template = Template(
+def test_generator_grid_is_complete_after_static_substitution():
+    """Grid returns every root assignment after callers bind static values."""
+    definition = Definition(
         GeneratedModel,
         Par("width"),
         scale=Par("scale"),
         product=Par("width") * Par("scale"),
     )
-    captured = StaticObject()
-    generator = TemplateGenerator(
-        template,
-        width=UniformFromSet((32, 64)),
-        scale=UniformFromSet((1, 2)),
+    generator = Generator(
+        definition,
+        {"width": UniformFromSet((32, 64)), "scale": UniformFromSet((1, 2))},
     )
 
     values = generator.grid()
 
     assert len(values) == 4
     assert {item.parameters["product"] for item in values} == {32, 64, 128}
-    static = TemplateGenerator(
-        Template(GeneratedModel, Par("width"), scale=1, product=1),
-        width=captured,
-    )
-    assert static.template.root.args[0] == captured.object_ref
-
-
 def test_generator_rejects_incomplete_or_invalid_root_contracts_before_sampling():
-    """Capture rejects missing roots and unsupported generation roots eagerly."""
-    template = Template(GeneratedModel, Par("width"), scale=1, product=Par("width"))
+    """Construction rejects non-exact and non-provider mappings before sampling."""
+    definition = Definition(GeneratedModel, Par("width"), scale=1, product=Par("width"))
 
-    with pytest.raises(TemplateError, match="missing"):
-        TemplateGenerator(template)
-    with pytest.raises(TemplateError, match="unknown"):
-        TemplateGenerator(template, width=1, extra=2)
-    with pytest.raises(TemplateError, match="Definition root"):
-        TemplateGenerator(Template.from_value([Par("width")]), width=1)
+    with pytest.raises(ParameterizationError, match="missing"):
+        Generator(definition, {})
+    with pytest.raises(ParameterizationError, match="unknown"):
+        Generator(definition, {"width": UniformFromSet((1,)), "extra": UniformFromSet((2,))})
+    with pytest.raises(ParameterizationError, match="bind static"):
+        Generator(definition, {"width": 64})
+    with pytest.raises(ParameterizationError, match="requires a Definition"):
+        Generator(object(), {})
 
-    introduced = Template(GeneratedModel, Par("width"), scale=1, product=1)
-    with pytest.raises(TemplateError, match="uncovered"):
-        TemplateGenerator(introduced, width=UniformFromSet((Par("later"),)))
-    generator = TemplateGenerator(introduced, width=DynamicRootDistribution())
-    with pytest.raises(UnresolvedTemplateError):
+    introduced = Definition(GeneratedModel, Par("width"), scale=1, product=1)
+    with pytest.raises(ParameterizationError, match="uncovered"):
+        Generator(introduced, {"width": UniformFromSet((Par("later"),))})
+    generator = Generator(introduced, {"width": DynamicRootDistribution()})
+    with pytest.raises(UnresolvedDefinitionError):
         generator.sample(random.Random(0))
+    with pytest.raises(UnresolvedDefinitionError):
+        generator.grid()
+    with pytest.raises(ParameterizationError, match="Distribution"):
+        Generator(introduced, {"width": DistributionResult()}).sample(random.Random(0))
 
 
 def test_grid_checks_cardinality_before_provider_indexing():
     """A product over the cap fails without allocating or indexing support."""
     OversizeDomain.lookups = 0
-    template = Template(GeneratedModel, Par("width"), scale=1, product=1)
+    definition = Definition(GeneratedModel, Par("width"), scale=1, product=1)
 
-    with pytest.raises(TemplateError):
-        TemplateGenerator(template, width=OversizeDomain()).grid()
+    with pytest.raises(ParameterizationError):
+        Generator(definition, {"width": OversizeDomain()}).grid()
     assert OversizeDomain.lookups == 0
+
+
+def test_definition_rejects_distribution_values_at_public_boundaries():
+    """Generation policy cannot be embedded directly in Definition structure."""
+
+    with pytest.raises(ParameterizationError, match="Distribution"):
+        Definition(GeneratedModel, UniformFromSet((32, 64)), scale=1, product=1)
+    with pytest.raises(ParameterizationError, match="Distribution"):
+        Definition(GeneratedModel, {"width": [UniformFromSet((32, 64))]}, scale=1, product=1)

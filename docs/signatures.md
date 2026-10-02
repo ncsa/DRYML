@@ -1,7 +1,7 @@
 # Signatures
 
 DRYML has one explicit signature-normalization boundary. Import `Ref`, `Mat`,
-`AutoRef`, `normalize_args`, `normalize_return`, `signature_context`, `function`,
+`Template`, `AutoRef`, `normalize_args`, `normalize_return`, `signature_context`, `function`,
 and `SignatureError` from `dryml` or `dryml.core`. Advanced
 `SignaturePlan`, `BoundaryPlan`, and `compile_signature` are available only from
 `dryml.core.signatures` for integrations that own a call boundary.
@@ -13,20 +13,25 @@ operation to activate them.
 ## Conversion
 
 `Ref[T]` selects and delivers reference or quotation data. `Mat[T]` selects the
-same authority but asks the caller-provided Repo to realize it. `Ref(value)` and
+same authority but asks the caller-provided Repo to realize it. `Template` is a
+third fixed role, shorthand for `Template[Definition]`: it accepts symbolic or
+resolved Definitions as inert quotation data and delivers a plain Definition.
+`Ref(value)` and
 `Mat(value)` are assertions, not conversion requests: an opposing assertion fails
 before selection. An unannotated slot is `Mat` by default. Scalars and a directly
 supplied live `Object` continue to pass through naturally, while an unannotated
 `Definition`, `ConcreteDefinition`, `ObjectRef`, or `StateRef` is materialized.
 
-Supported exact targets are `Definition`, `ConcreteDefinition`, `Template`, `ObjectRef`,
+Supported exact targets are `Definition`, `ConcreteDefinition`, `ObjectRef`,
 `StateRef`, `Object`, `QuotedDef`, `Selector`, and `SelectorSpec` where applicable.
 Exact requests deliver that exact authority: a `StateRef` supplied to
 `Ref[ObjectRef]` delivers its `ObjectRef`, for example. `Ref[AutoRef]` retains an
 incoming reference kind; for a live Object it selects CDef for an entirely
 stateless materializing graph, its known last `StateRef` for a stateful graph, or
 its `ObjectRef` otherwise. Automatic selection never saves or searches for a new
-receipt. `AutoRef` is an annotation-only marker class; use `Ref[AutoRef]`, not
+receipt. A bare soft `Definition` is ambiguous and fails with guidance to wrap it
+in `Ref(...)`; that explicit assertion retains the Definition as reference data.
+`AutoRef` is an annotation-only marker class; use `Ref[AutoRef]`, not
 `Ref[AutoRef()]`, on every supported Python version.
 
 Artifact Folds use `Ref[AutoRef]` for their source/model-facing inputs. This keeps
@@ -55,22 +60,31 @@ runtime. Persisted reconstruction does not rerun preparation, binding, or signat
 interpretation. Query indexing and matching treat these constructor markers as their
 quotation payloads rather than as graph boundaries.
 
-`Ref[Template]` is the exact declaration for carrying an unresolved definition
-recipe. It keeps the recipe as inert reference data while the receiving Object is
-constructed, saved, or restored; it does not resolve template parameters or
-materialize the recipe target. An unannotated or materializing slot rejects that
-unresolved value, and `Ref(value)` cannot bypass the declared role.
+`Template` is annotation vocabulary, not a runtime recipe value: `Template(...)`,
+`Ref[Template]`, and subscriptions other than `Template[Definition]` are invalid.
+The three Definition boundaries are deliberately distinct: `Ref[Definition]`
+delivers only a symbolically resolved Definition without testing constructor
+completeness; `Mat[Definition]` admits role-normalized materializing structure
+before CDef, Repo, target, cache, or Store effects; and `Template` leaves symbolic
+content inert. A compatible `Ref(definition)` assertion records caller intent but
+cannot bypass the receiving role's expression rule.
 
-`Ref[TemplateBundle]` is the corresponding exact declaration for a named ordered
-collection of Template recipes. It is quotation data, not a container-role
-extension: raw bundles and materializing roles fail, and persistence or worker
-transport never resolves a recipe or its parameters.
+Fresh `Ref[Definition]` and `Template` constructor values persist as a Ref link
+to `QuotedDef`. This preserves expression data, including bounded parameter and
+arithmetic expressions, without making it a CDef graph edge. Direct `QuotedDef`
+and `Ref[QuotedDef]` remain the explicit wrapper-preserving local-data APIs.
+
+The only nested Template grammar is `Mapping[str, Template]` (or the equivalent
+`Mapping[str, Template[Definition]]`), optionally unioned with `None`. Activated
+normalization validates string keys, orders entries by `canonical_key_bytes`, and
+admits every value independently. Lists, tuples, nested mappings, non-string
+keys, and nested Ref/Mat forms are rejected.
 
 `StateRef.reference_value_at(path)` is the narrow graph-inspection accessor for a
 terminal `Ref` field containing an exact `ObjectRef` or `StateRef`. It may pass
 through preceding materializing graph edges but never crosses a Ref boundary,
 loads state, or accesses Python attributes. `StateRef.at(path)` remains limited to
-materializing subtrees and rejects Ref-only paths. Template bindings use this
+materializing subtrees and rejects Ref-only paths. Symbolic artifact bindings use this
 accessor for paths such as `Par("this.test_data")`, preserving the supplied exact
 StateRef instead of selecting a live or floating reference.
 
@@ -267,3 +281,11 @@ contents are not rewritten or migrated.
 binding, discovery, context ownership, wrapper conflicts, and unavailable or
 ambiguous authority. Repo and lifecycle errors retain their own types and cleanup
 semantics during Mat realization.
+
+Symbolic Definition failures use `ParameterizationError(ValueError)`. Its
+specializations are `UnresolvedDefinitionError` for required resolution,
+`ParameterizationLimitError` for bounded traversal or generation work, and
+`UnsupportedGeneratorVerificationError` when exact support cannot be proved.
+These distinguish active expressions and generator/provider failures from a
+constructor-incomplete but symbolically resolved Definition. Concretization of a
+remaining expression uses `CannotConcretizeParameterizedDefinition(TypeError)`.

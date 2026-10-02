@@ -394,10 +394,11 @@ def test_regression_factories_are_inert_cdef_evaluations_and_weight_uneven_batch
     assert mse.value() == pytest.approx(5.0)
 
 
-def test_supplied_metric_factories_lift_symbolic_inputs_without_invocation():
-    """Only supplied helpers retain Template/Par calls as inert factory recipes."""
+def test_supplied_metric_factories_author_symbolic_fold_definitions_without_invocation():
+    """Only supplied helpers retain symbolic class-rooted Fold Definitions."""
 
-    from dryml.core import Par, Template
+    from dryml.artifacts import Fold
+    from dryml.core import Definition, Par
     from dryml.metrics import (
         classifier_accuracy, classifier_confusion_matrix, classifier_f1,
         regressor_mae, regressor_mse,
@@ -422,13 +423,14 @@ def test_supplied_metric_factories_lift_symbolic_inputs_without_invocation():
 
     lifted = tuple(factory() for factory in factories)
 
-    assert all(isinstance(recipe, Template) and not recipe.is_resolved for recipe in lifted)
+    assert all(isinstance(recipe, Definition) and not recipe.is_resolved for recipe in lifted)
+    assert all(recipe.cls is Fold for recipe in lifted)
 
 
 def test_symbolic_metric_factories_validate_known_controls_immediately(monkeypatch):
     """Literal errors fail at authoring while symbolic controls remain deferred."""
 
-    from dryml.core import Par, Template
+    from dryml.core import Definition, Par
     from dryml.metrics import classifier_accuracy, classifier_f1, regressor_mae
     from dryml.metrics import reductions
 
@@ -454,37 +456,54 @@ def test_symbolic_metric_factories_validate_known_controls_immediately(monkeypat
     with pytest.raises(ValueError, match="mode"):
         regressor_mae(Par("data"), Par("model"), mode=[Par("mode")])
 
-    monkeypatch.setattr(
-        reductions, "F1FromConfusion",
-        lambda *_args, **_kwargs: pytest.fail("symbolic lifting constructed a helper Method"),
-    )
     inert_f1 = classifier_f1(
         Par("data"), Par("model"), classes=(0, 1),
         prediction_labels=Par("prediction"), target_labels=Par("target"),
         average="binary", positive_index=1,
     )
-    assert isinstance(inert_f1, Template)
+    assert isinstance(inert_f1, Definition)
 
     deferred = regressor_mae(Par("data"), Par("model"), mode=Par("mode"))
-    assert isinstance(deferred, Template)
+    assert isinstance(deferred, Definition)
+
+    from dryml.data.reduction_methods import MeanInitial
+    from dryml.metrics import ConfusionInitial, F1FromConfusion
+
+    with pytest.raises(ValueError, match="mode"):
+        MeanInitial.defn(mode=Par("mode")).sub(mode="invalid").concretize()
+    with pytest.raises(ValueError, match="duplicates"):
+        ConfusionInitial.defn(Par("classes")).sub(
+            classes=(0, 0)
+        ).concretize()
+    with pytest.raises(ValueError, match="positive_index"):
+        F1FromConfusion.defn(
+            average=Par("average"), positive_index=Par("positive")
+        ).sub(average="macro", positive=1).concretize()
 
 
-def test_symbolic_metric_factory_validates_after_binding(tmp_path):
-    """A bound symbolic control re-enters concrete validation before Fold creation."""
+def test_symbolic_metric_factory_concretizes_to_the_direct_fold_definition(tmp_path):
+    """Complete binding produces the same Fold CDef as the direct helper call."""
 
     from dryml.artifacts import Fold
-    from dryml.core import Par, Repo
+    from dryml.core import Definition, Par, Repo
     from dryml.metrics import regressor_mae
 
     repo = Repo(DirStore(tmp_path / "store"))
     source = EvaluationDataset(({"x": [1.0], "y": [1.0]},))
     source_ref = repo.save_object(source)
     model_ref = repo.save_object(IdentityModel())
-    recipe = regressor_mae(source_ref, model_ref, mode=Par("mode"))
+    direct = regressor_mae(source_ref, model_ref, mode="global")
+    recipe = regressor_mae(Par("data"), Par("model"), mode=Par("mode"))
 
-    with pytest.raises(ValueError, match="mode"):
-        recipe.sub(mode="invalid").resolve().build()
-    assert isinstance(recipe.sub(mode="global").resolve().build(), Fold)
+    bound = recipe.sub(
+        data=source_ref,
+        model=model_ref,
+        mode="global",
+        traverse_refs=True,
+    )
+
+    assert isinstance(bound, Definition)
+    assert bound.concretize(repo=repo) == direct.definition
 
 
 def test_classification_factories_use_explicit_labels_and_one_traversal_each(tmp_path):

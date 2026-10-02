@@ -7,10 +7,10 @@ import importlib
 
 import pytest
 
-from dryml import Expr, Match, Par, Shared, Template, TemplateGenerator, repeat
+from dryml import Expr, Generator, Match, Par, Shared, Template, repeat
 from dryml.core import Definition, F, Object, Ref
 from dryml.core.domains import UniformFromSet, UniformIntRange
-from dryml.core.errors import TemplateError, UnresolvedTemplateError
+from dryml.core.errors import ParameterizationError, UnresolvedDefinitionError
 from dryml.core.params import PresentMatcher
 from dryml.core.utils.graph.path import GraphPath, Parameter
 
@@ -47,39 +47,36 @@ class DocumentedModel:
 class DocumentedRecipeConsumer(Object):
     """Template guide consumer proving Ref recipe admission stays inert."""
 
-    def __init__(self, recipe: Ref[Template]):
+    def __init__(self, recipe: Template):
         self.recipe = recipe
 
 
-def test_template_direct_authoring_and_definition_conversion_are_inert():
-    """Class-first templates retain the same frozen Definition recipe."""
+def test_template_is_annotation_only_and_definition_owns_symbolic_authoring():
+    """The marker creates no carrier while Definition retains symbolic structure."""
     TemplateModel.calls = 0
     expression = Par("width") * 2
 
-    template = Template(TemplateModel, expression, label="template")
-    converted = Definition(TemplateModel, expression, label="template").as_template()
+    definition = Definition(TemplateModel, expression, label="template")
 
-    assert template.root == converted.root
-    assert template.root.args == (expression,)
-    assert template.root.kwargs["label"] == "template"
-    assert not template.is_resolved
-    assert template.names == ("width",)
-    assert template.stable_hash() == converted.stable_hash()
+    assert definition.args == (expression,)
+    assert definition.kwargs["label"] == "template"
+    assert not definition.is_resolved
+    assert definition.names == ("width",)
+    assert not hasattr(definition, "as_template")
     assert TemplateModel.calls == 0
 
-    with pytest.raises(TypeError, match="class, ImportRef, or SourceSpec"):
+    with pytest.raises(TypeError, match="annotation-only"):
         Template(Definition(TemplateModel, 1))
     assert TemplateModel.calls == 0
 
 
-def test_template_from_value_handles_generic_roots_without_constructor_execution():
-    """Generic template roots remain inert and definitions round-trip directly."""
+def test_definition_authoring_does_not_construct_the_target():
+    """Definitions remain the sole inert class-rooted construction value."""
     TemplateModel.calls = 0
 
-    template = Template.from_value({"recipe": F(TemplateModel, Par("width"))})
+    definition = Definition(TemplateModel, F("builtins:tuple", Par("width")))
 
-    assert template.root["recipe"].args == (Par("width"),)
-    assert template.names == ("width",)
+    assert definition.names == ("width",)
     assert TemplateModel.calls == 0
 
 
@@ -95,9 +92,9 @@ def test_par_normalizes_qualified_names_and_rejects_ambiguous_spelling():
     )
 
     for name in ("", "/width", "width/", "width//depth", "width..child", "width/1bad"):
-        with pytest.raises(TemplateError):
+        with pytest.raises(ParameterizationError):
             Par(name)
-    with pytest.raises(TemplateError, match="dotted"):
+    with pytest.raises(ParameterizationError, match="dotted"):
         Par("width.child", path=GraphPath())
 
 
@@ -130,7 +127,7 @@ def test_factory_rejects_unresolved_expressions_before_target_invocation():
     FactoryTarget.calls = []
     unresolved = F(FactoryTarget, Par("width") * 2)
 
-    with pytest.raises(UnresolvedTemplateError):
+    with pytest.raises(UnresolvedDefinitionError):
         unresolved.build()
     assert FactoryTarget.calls == []
     assert F(FactoryTarget, 6).build().value == 6
@@ -151,13 +148,13 @@ def test_domains_are_immutable_indexed_capabilities_with_bounded_validation():
     assert huge.cardinality() == 10**100 + 1
     assert huge.value_at(10**100) == 10**100
 
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         UniformFromSet(())
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         UniformFromSet((1, 1))
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         UniformIntRange(True, 2)
-    with pytest.raises(TemplateError):
+    with pytest.raises(ParameterizationError):
         UniformIntRange(1, False)
 
 
@@ -175,22 +172,20 @@ def test_documented_authoring_example_captures_complete_definitions():
     """The Templates guide's authoring flow remains executable and inert."""
 
     group = [F("builtins:tuple", Par("width")), F("builtins:tuple")]
-    model = Template(DocumentedModel, group * Par("depth"), width=Par("width"))
+    model = Definition(DocumentedModel, group * Par("depth"), width=Par("width"))
     bound = model.sub(width=64, depth=2)
-    generator = TemplateGenerator(
+    generator = Generator(
         model,
-        width=UniformFromSet((32, 64)),
-        depth=UniformFromSet((1, 2)),
+        {"width": UniformFromSet((32, 64)), "depth": UniformFromSet((1, 2))},
     )
 
-    assert isinstance(bound.to_definition(), Definition)
+    assert isinstance(bound, Definition)
     assert len(generator.grid()) == 4
     sample = generator.sample(random.Random(7))
     assert generator.support_selector().matches(sample)
-    assert model.as_selector().matches(sample)
+    assert model.loose_selector().matches(sample)
     assert model.sub(sub_dict={"width": 64}, depth=2).is_resolved
-    consumer = Definition(DocumentedRecipeConsumer, recipe=model).concretize()
-    assert consumer.parameters["recipe"].target == model
+    assert Definition(DocumentedRecipeConsumer, recipe=model).parameters["recipe"] is model
 
 
 def test_retired_search_space_and_predicate_parameter_apis_are_absent():

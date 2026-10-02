@@ -251,8 +251,8 @@ validates exact Method and Models public manifests, confirms the retired
 ./tests.sh tests/package/test_public_imports.py \
   tests/package/test_release_artifacts.py \
   tests/models/test_qualification_persistence_fixtures.py \
-  tests/models/test_qualification_contract.py \
-  tests/artifacts/test_value.py tests/core/test_template_bundle.py \
+   tests/models/test_qualification_contract.py \
+   tests/artifacts/test_value.py tests/core/test_generator_persistence.py \
   tests/test_timing_plugin.py tests/docs/test_cdef_v2_documentation.py --no-cov -x
 ```
 
@@ -266,7 +266,7 @@ qualification or evidence that 4.9.9 executed.
 The focused persistence tests validate the closed manifest schema and SHA-256 of
 every fixture payload before reading it, then read a nonempty ExperimentData v1
 row through its actual reader and canonical re-encoder, a real `Value`
-`value.pkl` receipt, the actual TemplateBundle codec, and a code-free named
+`value.pkl` receipt, portable GeneratorSelector data, and a code-free named
 `TrainState.__setstate__` compatibility vector. The committed Value pickle has a
 static no-executable-opcode check before unpickling. A clean explicit generator
 destination reproduces every committed fixture byte with no missing or extra

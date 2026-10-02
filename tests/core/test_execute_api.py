@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from threading import Event
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -128,7 +129,10 @@ def test_core_executor_forwards_exact_selector_without_a_software_requirement(
     """
     repo = Repo(DirStore(tmp_path / "store", query_index="none"))
     executor = Executor(
-        SubProcessConfig(spool_directory=tmp_path),
+        SubProcessConfig(
+            spool_directory=tmp_path,
+            env_vars={"PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
+        ),
         core=CoreOptions(repo=repo, return_objects=False),
     )
     try:

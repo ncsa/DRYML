@@ -376,7 +376,7 @@ def test_reduction_factories_normalize_sources_at_the_function_boundary():
 
     assert fold.src == source.definition
     assert not fold.ready
-    with pytest.raises(SignatureError, match="authority is unavailable"):
+    with pytest.raises(SignatureError, match=r"requires explicit Ref\(\.\.\.\)"):
         mean(Definition(BatchDataset, ()), mode="global")
 
 

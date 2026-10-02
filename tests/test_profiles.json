@@ -7,9 +7,9 @@
       },
       "representative_functions": {
         "tests/core/test_template_api.py": {
-          "rationale": "Retain the public authoring, independent Match, captured generation, and executable documentation transition surface.",
+          "rationale": "Retain Definition-native authoring, independent Match, captured generation, and executable documentation transition behavior.",
           "functions": [
-            "test_template_direct_authoring_and_definition_conversion_are_inert",
+            "test_template_is_annotation_only_and_definition_owns_symbolic_authoring",
             "test_match_is_a_query_leaf_distinct_from_template_parameters",
             "test_documented_authoring_example_captures_complete_definitions",
             "test_factory_rejects_unresolved_expressions_before_target_invocation",
@@ -50,6 +50,7 @@
           "rationale": "Retain exact checkpoint Artifact binding and history readability without selecting a backend training matrix.",
           "functions": [
             "test_terminal_checkpoint_binds_artifact_to_exact_experiment_state",
+            "test_symbolic_metric_recipe_binds_through_ref_during_evaluation",
             "test_history_remains_readable_when_its_checkpoint_payload_is_unavailable"
           ]
         },
@@ -61,10 +62,9 @@
           ]
         },
         "tests/core/test_template_bundle.py": {
-          "rationale": "Retain inert quoted recipe persistence and its committed v1 bundle fixture.",
+          "rationale": "Retain the explicit absence of the retired runtime TemplateBundle carrier.",
           "functions": [
-            "test_bundle_ref_admission_codec_and_store_restore_remain_inert",
-            "test_bundle_v1_fixture_round_trips_without_resolving_its_recipe"
+            "test_template_bundle_is_not_a_public_runtime_value"
           ]
         },
         "tests/methods/test_preparation.py": {
@@ -328,9 +328,10 @@
           ]
         },
         "tests/core/test_repo_query_nested.py": {
-          "rationale": "Retain the inert CachedDataset reference-containment example; exhaustive mode owns traversal-policy combinations.",
+          "rationale": "Retain the inert CachedDataset reference-containment example and the symbolic Template quotation boundary; exhaustive mode owns traversal-policy combinations.",
           "functions": [
-            "test_cached_dataset_definition_only_reference_containment"
+            "test_cached_dataset_definition_only_reference_containment",
+            "test_symbolic_template_recipe_is_not_a_reference_containment_edge"
           ]
         },
         "tests/core/test_reference_query.py": {
@@ -352,9 +353,10 @@
           ]
         },
         "tests/core/test_query_federation.py": {
-          "rationale": "Retain replica provenance, source restriction, and global occurrence-cap behavior for reference-aware containment.",
+          "rationale": "Retain source restriction, replica provenance across distinct graph topologies, and global occurrence-cap behavior for reference-aware containment.",
           "functions": [
-            "test_reference_containment_keeps_replica_provenance_and_source_scope"
+            "test_reference_containment_keeps_replica_provenance_and_source_scope",
+            "test_reference_containment_cap_keeps_graph_distinct_owner_replicas"
           ]
         },
         "tests/core/test_repo_query_multistore.py": {

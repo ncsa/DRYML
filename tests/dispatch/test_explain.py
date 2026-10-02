@@ -147,6 +147,24 @@ def test_explain_does_not_emit_coverage_warning() -> None:
     ]
 
 
+def test_coverage_warning_names_diagnostics_and_explanation_path() -> None:
+    """Give accepted incomplete analysis an actionable bounded warning."""
+
+    prepared = SimpleNamespace(report=SimpleNamespace(
+        coverage="incomplete",
+        diagnostics=("source.unavailable", "static.unresolved"),
+        warnings=("dispatch.coverage_incomplete",),
+    ))
+
+    with pytest.warns(dispatch.DispatchCoverageWarning) as captured:
+        dispatch.api._warn_coverage(prepared)
+
+    message = str(captured[0].message)
+    assert "source.unavailable, static.unresolved" in message
+    assert "undiscovered calls may hide worker requirements" in message
+    assert "dispatch.explain(...)" in message
+
+
 class DiscoveryBackend(Backend):
     """Return controlled non-reserving discovery evidence."""
 

@@ -2,6 +2,40 @@
 
 ## 0.3.0b1 (unreleased)
 
+Symbolic construction now uses `Definition` as its only runtime value. `Par`
+expressions, discovery, static `sub(...)`, remapping, and loose selector
+projection live on Definition; symbolic resolution means only that no active
+expression remains, not that a constructor is complete or valid. `Mat[Definition]`,
+`Ref[Definition]`, and bare `Template` are distinct receiving roles. Template is
+the annotation-only shorthand for `Template[Definition]`, accepts inert symbolic
+quotation data, and is not a constructible runtime recipe value. `QuotedDef`
+remains the explicit local-data escape hatch.
+
+`Distribution` is prohibited in Definition structure. Bind fixed values with
+`Definition.sub(...)`, then use `Generator(definition, distributions)` with one
+exact active-root mapping for sampling, grids, and exact-support selection.
+`GeneratorSelector` replaces the beta selector name while retaining compatible
+`dryml-template` v1 `template-selector` bytes for built-in distributions. A
+Generator and arbitrary providers are nonportable.
+
+Experiment artifacts now accept only `Mapping[str, Template] | None`; entries are
+independently quoted and evaluated in canonical string-key order. Runtime
+Template values, TemplateBundle, TemplateGenerator, and TemplateSelector are
+intentionally removed without aliases, source/pickle compatibility, or persisted
+value migration. Previously persisted symbolic `Ref[Definition]` values likewise
+have no migration or replay guarantee.
+
+Symbolic errors are `ParameterizationError`, `UnresolvedDefinitionError`,
+`ParameterizationLimitError`, and `UnsupportedGeneratorVerificationError`.
+`CannotConcretizeParameterizedDefinition` remains the TypeError for attempting
+to concretize an active expression.
+
+Core Execute now preserves symbolic `Definition` values through worker transport
+instead of degrading their public Mapping view to an ordinary dictionary. This
+allows Mat arguments to materialize in workers and keeps `Ref[Definition]` data
+symbolic. Dispatch's incomplete-coverage warning now names its bounded diagnostic
+categories and directs callers to `dispatch.explain(...)` for the full report.
+
 `CachedDataset`, `CacheCodec`, and `CacheIntegrityError` are now concrete public
 Artifact APIs. Finite dense Dataset trees can be streamed into built-in NumPy,
 optional Parquet (`pyarrow>=25.0.1`), or optional NetCDF (`netCDF4>=1.7.4`) cache

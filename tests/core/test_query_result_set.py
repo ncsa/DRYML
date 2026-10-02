@@ -1,18 +1,31 @@
 import pytest
 
-from dryml.core import Definition, Object, ObjectId, ObjectRef, Repo, Serializable, SKIP_ARGS, StateRef
+from dryml.core import (
+    Definition,
+    Generator,
+    Object,
+    ObjectId,
+    ObjectRef,
+    Repo,
+    Serializable,
+    SKIP_ARGS,
+    StateRef,
+)
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
 from dryml.core.domains import UniformFromSet
-from dryml.core.template import Par, Template
-from dryml.core.template_selector import TemplateGenerator
+from dryml.core.template import Par
 from dryml.core.query import QueryCardinalityError, QueryDomainError
 from dryml.core.query.model import (
     ContainmentContext,
     ContainmentHop,
     ReferenceOccurrence,
 )
-from dryml.core.query.result import OccurrenceResultSet, QueryBackedDefinitionResultSet
+from dryml.core.query.result import (
+    DefinitionResultSet,
+    OccurrenceResultSet,
+    QueryBackedDefinitionResultSet,
+)
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.graph.path import GraphPath, Key
 
@@ -42,9 +55,9 @@ class ResultReferenceLeaf(Serializable):
 def _result_exact_selector():
     """Return a minimal exact selector used to reject reference-value refinement."""
 
-    return TemplateGenerator(
-        Template(ResultLeaf, Par("name")),
-        name=UniformFromSet(("target",)),
+    return Generator(
+        Definition(ResultLeaf, Par("name")),
+        {"name": UniformFromSet(("target",))},
     ).support_selector()
 
 
@@ -80,7 +93,9 @@ def test_refine_preserves_nested_nonmaterializable_domain(tmp_path):
     repo.save_object(parent)
 
     repo2 = Repo(stores=DirStore(store.base_dir))
-    nested_defs = repo2.query(Definition(ResultLeaf, SKIP_ARGS)).nested().definitions().defs()
+    nested_defs = (
+        repo2.query(Definition(ResultLeaf, SKIP_ARGS)).nested().definitions().defs()
+    )
     refined = nested_defs.refine(Definition(ResultLeaf, "child"))
 
     assert refined.domain == "nested-definitions"
@@ -178,8 +193,12 @@ def test_resultset_union_and_intersection_replica_metadata_is_commutative(tmp_pa
 
     assert len(one_replica.union(two_replicas).replicas(obj.definition)) == 2
     assert len(two_replicas.union(one_replica).replicas(obj.definition)) == 2
-    assert one_replica.union(two_replicas).replicas(obj.definition) == two_replicas.union(one_replica).replicas(obj.definition)
-    assert one_replica.intersection(two_replicas).replicas(obj.definition) == two_replicas.intersection(one_replica).replicas(obj.definition)
+    assert one_replica.union(two_replicas).replicas(
+        obj.definition
+    ) == two_replicas.union(one_replica).replicas(obj.definition)
+    assert one_replica.intersection(two_replicas).replicas(
+        obj.definition
+    ) == two_replicas.intersection(one_replica).replicas(obj.definition)
 
 
 def test_query_backed_resultset_preserves_adversarial_page_order(tmp_path):
@@ -208,7 +227,9 @@ def test_fixed_resultset_universe_rejects_domain_switch(tmp_path):
     parent = ResultParent(child, repo=repo)
     repo.save_object(parent)
 
-    nested_defs = repo.query(Definition(ResultLeaf, SKIP_ARGS)).nested().definitions().defs()
+    nested_defs = (
+        repo.query(Definition(ResultLeaf, SKIP_ARGS)).nested().definitions().defs()
+    )
 
     with pytest.raises(QueryDomainError, match="Cannot switch"):
         nested_defs.query(Definition(ResultLeaf, SKIP_ARGS)).stored().defs()
@@ -231,11 +252,15 @@ def test_containment_reference_projections_keep_complete_typed_identities(tmp_pa
         repo,
         (
             ReferenceOccurrence(
-                owner, GraphPath((Key("first"),)), first.object,
+                owner,
+                GraphPath((Key("first"),)),
+                first.object,
                 (ContainmentHop(GraphPath((Key("first"),)), EdgeKind.MATERIALIZE),),
             ),
             ReferenceOccurrence(
-                owner, GraphPath((Key("second"),)), second,
+                owner,
+                GraphPath((Key("second"),)),
+                second,
                 (ContainmentHop(GraphPath((Key("second"),)), EdgeKind.REF),),
             ),
         ),
@@ -246,7 +271,9 @@ def test_containment_reference_projections_keep_complete_typed_identities(tmp_pa
         repo,
         (
             ReferenceOccurrence(owner, GraphPath((Key("state"),)), first_state),
-            ReferenceOccurrence(owner, GraphPath((Key("other-state"),)), other_first_state),
+            ReferenceOccurrence(
+                owner, GraphPath((Key("other-state"),)), other_first_state
+            ),
         ),
         owner_replicas={owner: ()},
         containment=ContainmentContext(target_kind="state_ref", edges="all"),
@@ -269,12 +296,17 @@ def test_containment_reference_projections_keep_complete_typed_identities(tmp_pa
 
 @pytest.mark.parametrize("projection", ["object_refs", "state_refs"])
 def test_fixed_exact_reference_results_reject_exact_selector_refinement(
-        tmp_path, projection):
+    tmp_path, projection
+):
     """Reference targets cannot become exact-selector CDef candidates."""
 
     repo = Repo(DirStore(tmp_path / "store"))
     saved = repo.save_object(ResultReferenceLeaf("target", repo=repo))
-    target = saved.object if projection == "object_refs" else StateRef(saved.object, saved.states)
+    target = (
+        saved.object
+        if projection == "object_refs"
+        else StateRef(saved.object, saved.states)
+    )
     owner = ResultParent("owner", repo=repo).definition
     occurrences = OccurrenceResultSet(
         repo,
@@ -290,12 +322,16 @@ def test_fixed_exact_reference_results_reject_exact_selector_refinement(
         getattr(occurrences, projection)().query(_result_exact_selector())
 
 
-def test_containment_result_unions_keep_owner_witness_ledgers_and_fixed_refinement(tmp_path, monkeypatch):
+def test_containment_result_unions_keep_owner_witness_ledgers_and_fixed_refinement(
+    tmp_path, monkeypatch
+):
     repo = Repo(DirStore(tmp_path / "store"))
     first = repo.save_object(ResultLeaf("first", repo=repo))
     second = repo.save_object(ResultLeaf("second", repo=repo))
     owner = ResultParent("owner", repo=repo).definition
-    context = ContainmentContext(target_kind="object_ref", edges="all", source_scope=("source",))
+    context = ContainmentContext(
+        target_kind="object_ref", edges="all", source_scope=("source",)
+    )
     first_replica = object()
     second_replica = object()
 
@@ -320,7 +356,9 @@ def test_containment_result_unions_keep_owner_witness_ledgers_and_fixed_refineme
     monkeypatch.setattr(
         repo._query_catalog,
         "refresh",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fixed universe scanned Store")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("fixed universe scanned Store")
+        ),
     )
     refined = combined.query(first.object).nested(edges="all").owners().defs()
 
@@ -329,11 +367,14 @@ def test_containment_result_unions_keep_owner_witness_ledgers_and_fixed_refineme
     assert list(refined) == [owner]
     assert refined._containment_witnesses[0].target == first.object
     assert {item.target for item in intersected._containment_witnesses} == {
-        first.object, second.object,
+        first.object,
+        second.object,
     }
 
 
-def test_containment_result_context_rejects_incompatible_union_and_keeps_bounded_projection(tmp_path):
+def test_containment_result_context_rejects_incompatible_union_and_keeps_bounded_projection(
+    tmp_path,
+):
     repo = Repo(DirStore(tmp_path / "store"))
     target = repo.save_object(ResultLeaf("target", repo=repo)).object
     owner = ResultParent("owner", repo=repo).definition
@@ -386,14 +427,63 @@ def test_lazy_raw_containment_projection_requery_retains_visible_witnesses(tmp_p
 
     reference = repo.save_object(ResultReferenceLeaf("reference", repo=repo))
     reference_owner = ResultParent(
-        DefLink.finalized(EdgeKind.REF, reference.object), repo=repo,
+        DefLink.finalized(EdgeKind.REF, reference.object),
+        repo=repo,
     )
     repo.save_object(reference_owner)
-    reference_raw = repo.query(reference.object).nested(edges="all").max_occurrences(1).execute()
+    reference_raw = (
+        repo.query(reference.object).nested(edges="all").max_occurrences(1).execute()
+    )
 
-    assert list(reference_raw.owners().query(reference.object).nested(edges="all").owners().defs()) == [
+    assert list(
+        reference_raw.owners()
+        .query(reference.object)
+        .nested(edges="all")
+        .owners()
+        .defs()
+    ) == [
         reference_owner.definition,
     ]
+
+
+def test_fixed_raw_requery_restricts_all_witness_ledgers(tmp_path):
+    """Chained fixed raw requeries cannot restore filtered or capped occurrences."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    first = ResultLeaf("first", repo=repo)
+    second = ResultLeaf("second", repo=repo)
+    repo.save_object(ResultParent(first, repo=repo))
+    repo.save_object(ResultParent(second, repo=repo))
+
+    raw = repo.query(Definition(ResultLeaf, SKIP_ARGS)).nested(edges="all").execute()
+    narrowed = raw.query(Definition(ResultLeaf, "first")).nested(edges="all").execute()
+    capped_empty = narrowed.query().nested(edges="all").max_occurrences(0).execute()
+
+    assert {occ.target for occ in narrowed} == {first.definition}
+    assert tuple(narrowed.query().nested(edges="all").execute()) == tuple(narrowed)
+    assert tuple(capped_empty) == ()
+    assert tuple(capped_empty.query().nested(edges="all").execute()) == ()
+
+
+def test_complete_nonempty_fixed_containment_rejects_missing_private_proof(tmp_path):
+    """A nonempty complete claim without private topology proof fails closed."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    candidate = ResultLeaf("target", repo=repo).definition
+    incomplete = DefinitionResultSet(
+        repo,
+        (candidate,),
+        materializable=False,
+        domain="nested-definitions",
+        replicas={},
+        witnesses=(),
+        witness_complete=True,
+        containment=ContainmentContext(target_kind="definition", edges="all"),
+        containment_carrier="target",
+    )
+
+    with pytest.raises(QueryDomainError, match="complete retained witness evidence"):
+        incomplete.refine(_result_exact_selector())
 
 
 def test_direct_owner_projection_retains_carrier_and_target_ledgers(tmp_path):
@@ -402,7 +492,8 @@ def test_direct_owner_projection_retains_carrier_and_target_ledgers(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     target = repo.save_object(ResultReferenceLeaf("target", repo=repo))
     owner = ResultParent(
-        DefLink.finalized(EdgeKind.REF, target.object), repo=repo,
+        DefLink.finalized(EdgeKind.REF, target.object),
+        repo=repo,
     )
     other = ResultParent("other", repo=repo)
     repo.save_object(owner)
@@ -413,7 +504,9 @@ def test_direct_owner_projection_retains_carrier_and_target_ledgers(tmp_path):
     assert list(owners.query(owner.definition).nested(edges="all").owners().defs()) == [
         owner.definition,
     ]
-    assert list(owners.query(other.definition).nested(edges="all").owners().defs()) == []
+    assert (
+        list(owners.query(other.definition).nested(edges="all").owners().defs()) == []
+    )
     assert list(owners.query(target.object).nested(edges="all").owners().defs()) == [
         owner.definition,
     ]
@@ -427,19 +520,29 @@ def test_direct_definition_projection_refines_the_target_carrier(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     target = ResultLeaf("target", repo=repo)
     owner = ResultParent(
-        DefLink.finalized(EdgeKind.REF, target.definition), repo=repo,
+        DefLink.finalized(EdgeKind.REF, target.definition),
+        repo=repo,
     )
     repo.save_object(owner)
 
     definitions = repo.query(target.definition).nested(edges="all").definitions().defs()
 
-    assert list(definitions.query(target.definition).nested(edges="all").definitions().defs()) == [
+    assert list(
+        definitions.query(target.definition).nested(edges="all").definitions().defs()
+    ) == [
         target.definition,
     ]
-    assert list(definitions.query(owner.definition).nested(edges="all").definitions().defs()) == []
+    assert (
+        list(
+            definitions.query(owner.definition).nested(edges="all").definitions().defs()
+        )
+        == []
+    )
 
 
-def test_direct_definition_projection_keeps_owner_target_ledgers_across_replicas(tmp_path):
+def test_direct_definition_projection_keeps_owner_target_ledgers_across_replicas(
+    tmp_path,
+):
     """A target projection retains one witness for every contributing owner."""
 
     store1 = DirStore(tmp_path / "store1")
@@ -447,10 +550,12 @@ def test_direct_definition_projection_keeps_owner_target_ledgers_across_replicas
     repo = Repo(stores=[store1, store2])
     target = ResultLeaf("target", repo=repo)
     first_owner = ResultParent(
-        DefLink.finalized(EdgeKind.REF, target.definition), repo=repo,
+        DefLink.finalized(EdgeKind.REF, target.definition),
+        repo=repo,
     )
     second_owner = ResultParent(
-        {"target": DefLink.finalized(EdgeKind.REF, target.definition)}, repo=repo,
+        {"target": DefLink.finalized(EdgeKind.REF, target.definition)},
+        repo=repo,
     )
     repo.save_object(first_owner, store=store1)
     repo.save_object(first_owner, store=store2)
@@ -459,15 +564,28 @@ def test_direct_definition_projection_keeps_owner_target_ledgers_across_replicas
     definitions = repo.query(target.definition).nested(edges="all").definitions().defs()
     expected_owners = {first_owner.definition, second_owner.definition}
 
-    assert {witness.owner for witness in definitions._containment_witnesses} == expected_owners
-    assert {witness.target for witness in definitions._containment_witnesses} == {target.definition}
+    assert {
+        witness.owner for witness in definitions._containment_witnesses
+    } == expected_owners
+    assert {witness.target for witness in definitions._containment_witnesses} == {
+        target.definition
+    }
     assert len(definitions._containment_witnesses) == 2
 
-    for result in (definitions.union(definitions), definitions.intersection(definitions)):
-        refined = result.query(target.definition).nested(edges="all").definitions().defs()
+    for result in (
+        definitions.union(definitions),
+        definitions.intersection(definitions),
+    ):
+        refined = (
+            result.query(target.definition).nested(edges="all").definitions().defs()
+        )
 
-        assert {witness.owner for witness in refined._containment_witnesses} == expected_owners
-        assert {witness.target for witness in refined._containment_witnesses} == {target.definition}
+        assert {
+            witness.owner for witness in refined._containment_witnesses
+        } == expected_owners
+        assert {witness.target for witness in refined._containment_witnesses} == {
+            target.definition
+        }
         assert len(refined._containment_witnesses) == 2
 
 
@@ -477,7 +595,8 @@ def test_fixed_direct_containment_requery_rejects_projection_changes(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     target = ResultLeaf("target", repo=repo)
     owner = ResultParent(
-        DefLink.finalized(EdgeKind.REF, target.definition), repo=repo,
+        DefLink.finalized(EdgeKind.REF, target.definition),
+        repo=repo,
     )
     repo.save_object(owner)
 
@@ -490,7 +609,9 @@ def test_fixed_direct_containment_requery_rejects_projection_changes(tmp_path):
         owners.query(owner.definition).nested(edges="all").definitions()
 
 
-def test_direct_containment_results_retain_source_scope_for_unions_and_explanations(tmp_path):
+def test_direct_containment_results_retain_source_scope_for_unions_and_explanations(
+    tmp_path,
+):
     """Fixed direct projections neither widen source scope nor report live sources."""
 
     store1 = DirStore(tmp_path / "store1")
@@ -498,13 +619,18 @@ def test_direct_containment_results_retain_source_scope_for_unions_and_explanati
     repo = Repo(stores=[store1, store2])
     target = repo.save_object(ResultReferenceLeaf("target", repo=repo))
     owner = ResultParent(
-        DefLink.finalized(EdgeKind.REF, target.object), repo=repo,
+        DefLink.finalized(EdgeKind.REF, target.object),
+        repo=repo,
     )
     repo.save_object(owner, store=store1)
     repo.save_object(owner, store=store2)
 
-    first = repo.query(target.object).nested(edges="all").in_store(store1).owners().defs()
-    second = repo.query(target.object).nested(edges="all").in_store(store2).owners().defs()
+    first = (
+        repo.query(target.object).nested(edges="all").in_store(store1).owners().defs()
+    )
+    second = (
+        repo.query(target.object).nested(edges="all").in_store(store2).owners().defs()
+    )
     explanation = first.query(owner.definition).nested(edges="all").explain()
 
     assert explanation.containment_source_scope == (store1.catalog_key(),)

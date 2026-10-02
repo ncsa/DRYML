@@ -17,7 +17,7 @@ from dryml.core import (
     SelectorSpec,
     Satisfies,
     Template,
-    TemplateGenerator,
+    Generator,
     UniformFromSet,
     UniformIntRange,
     definition_mode,
@@ -163,10 +163,9 @@ def test_quoted_selector_is_data_not_graph_edge():
 
 
 def test_template_generation_replaces_search_space():
-    generator = TemplateGenerator(
-        Template(Cls1, Par("value"), test=Par("label")),
-        value=UniformIntRange(1, 2),
-        label=UniformFromSet(["a", "b"]),
+    generator = Generator(
+        Definition(Cls1, Par("value"), test=Par("label")),
+        {"value": UniformIntRange(1, 2), "label": UniformFromSet(["a", "b"])},
     )
 
     assert isinstance(generator.sample(), Definition)
@@ -186,8 +185,9 @@ def test_definition_and_selector_modes():
 
 
 def test_public_exports():
-    for name in ("Definition", "ConcreteDefinition", "Ref", "Mat", "Selector", "SelectorSpec", "QuotedDef", "Par", "Template", "TemplateGenerator"):
+    for name in ("Definition", "ConcreteDefinition", "Ref", "Mat", "Selector", "SelectorSpec", "QuotedDef", "Par", "Template", "Generator"):
         assert hasattr(dryml, name)
+    assert not hasattr(dryml, "TemplateGenerator")
     assert not hasattr(dryml, "SearchSpace")
     assert not hasattr(dryml, "space_mode")
 

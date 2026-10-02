@@ -10,12 +10,6 @@
       "sha256": "13bfd7e3af13c66f70731053b27575fd63252f3922b45a45beec6cbcec260409",
       "version": 1
     },
-    "template_bundle.json": {
-      "format": "dryml-template",
-      "kind": "template-bundle",
-      "sha256": "3ebccb530ab19e9b67df79884b3dd91d3e9aa3f490caac60b166cbeee53b4d23",
-      "version": 1
-    },
     "train_state.json": {
       "fixture": "dryml-train-state-named-state-vector",
       "fixture_version": 1,

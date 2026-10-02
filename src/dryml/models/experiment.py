@@ -9,7 +9,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 
 from dryml.artifacts import Artifact, Value
-from dryml.core import Ref, StateRef, TemplateBundle
+from dryml.core import Ref, StateRef, Template
 from dryml.core.object import Serializable
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.managed import (
@@ -62,8 +62,8 @@ class Experiment(Serializable):
         test_data: Exact saved Dataset reference available to Artifact recipes as
             ``this.test_data``. Missing required data fails binding; it never falls
             back to training or validation data.
-         artifacts: One Template, ordered Template sequence, string-keyed Template
-             mapping, or ``None``. Recipes remain inert until a checkpoint binds
+         artifacts: String-keyed Template-role Definition mapping, or ``None``.
+              Recipes remain inert until a checkpoint binds
              ``this`` to its exact Experiment StateRef.
          checkpoint_every_steps: Positive exact optimizer-step cadence for
              intermediate checkpoints, or ``None`` to suppress intermediate
@@ -73,7 +73,8 @@ class Experiment(Serializable):
         capabilities: Additional trainer-owned configuration.
 
     ``train`` publishes and associates each Experiment checkpoint, writes its
-    pending history row, evaluates Artifacts in declaration order, and then marks
+    pending history row, evaluates Artifacts in canonical artifact-key order, and
+    then marks
     the row terminal. History rows retain exact checkpoint references while their
     projected subject remains non-materializing.
     """
@@ -81,7 +82,7 @@ class Experiment(Serializable):
     def __init__(
             self, model, train_fn, train_data=None, val_data=None, *,
             test_data: Ref[StateRef | None] = None,
-            artifacts: Ref[TemplateBundle | None] = None,
+            artifacts: Mapping[str, Template] | None = None,
             metrics=None, checkpoint_every_steps: int | None = None, **capabilities):
         """Initialize inert training and exact-reference evaluation configuration.
 
@@ -91,7 +92,9 @@ class Experiment(Serializable):
             train_data: Optional Dataset for training.
             val_data: Optional Dataset for trainer-owned validation.
             test_data: Optional exact saved Dataset StateRef for Artifact binding.
-            artifacts: Optional inert TemplateBundle of named Artifact recipes.
+            artifacts: Optional inert mapping of named Definition recipes. The
+                activated signature boundary orders names canonically and quotes
+                every recipe independently.
             metrics: Optional trainer-local metric configuration.
             checkpoint_every_steps: Positive exact optimizer-step cadence, or
                 ``None`` for terminal-only checkpointing.
@@ -117,34 +120,6 @@ class Experiment(Serializable):
         self.checkpoint_every_steps = checkpoint_every_steps
         self.capabilities = dict(capabilities)
         self.state = TrainState()
-
-    @staticmethod
-    def __dryml_normalize_definition_arguments__(args, kwargs):
-        """Normalize Experiment-only public Artifact forms before CDef freezing.
-
-        Args:
-            args: Positional constructor values, unchanged by this keyword-only
-                Artifact normalization.
-            kwargs: Constructor keyword values that may contain ``artifacts``.
-
-        Returns:
-            The unchanged positional tuple and a copied keyword mapping whose
-            non-null Artifact input is one inert TemplateBundle.
-
-        Raises:
-            TypeError: If Artifact input is not a supported bundle public form.
-
-        Side Effects:
-            Constructs only the inert quotation carrier. It does not resolve a
-            recipe, bind ``this``, materialize dependencies, or save state.
-        """
-
-        if "artifacts" not in kwargs or kwargs["artifacts"] is None:
-            return args, kwargs
-        value = kwargs["artifacts"]
-        if isinstance(value, TemplateBundle):
-            return args, kwargs
-        return args, {**kwargs, "artifacts": TemplateBundle(value)}
 
     @_experiment_train_wrapper
     @managed_operation(resumable=True, return_state_ref=True)
@@ -304,7 +279,7 @@ class Experiment(Serializable):
 
         if self.artifacts is None:
             return (), OrderedDict()
-        recipes = OrderedDict(self.artifacts.recipes)
+        recipes = OrderedDict(self.artifacts)
         return tuple(recipes), recipes
 
     def _preflight_artifacts(self) -> None:
@@ -333,7 +308,7 @@ class Experiment(Serializable):
             {path: "dryml-" + "0" * 64 for path in self.object_ref.objects},
         )
         for name, recipe in recipes.items():
-            roots = set(recipe.names)
+            roots = self._artifact_recipe_roots(recipe)
             unknown = roots.difference({"this"})
             if unknown:
                 raise TypeError(
@@ -341,8 +316,8 @@ class Experiment(Serializable):
                     f"{sorted(unknown)!r}."
                 )
             try:
-                bound = recipe.sub(this=proof) if "this" in roots else recipe
-                definition = bound.to_definition().concretize()
+                _, bound = self._bind_artifact_recipe(recipe, proof)
+                definition = bound.concretize()
             except Exception as error:
                 raise TypeError(
                     f"Artifact recipe {name!r} cannot bind to an Experiment "
@@ -357,6 +332,28 @@ class Experiment(Serializable):
             if inspect.isabstract(artifact_cls):
                 raise TypeError(f"Artifact recipe {name!r} resolves to an abstract Artifact class.")
             self._validate_artifact_compute(name, artifact_cls)
+
+    @staticmethod
+    def _artifact_recipe_roots(recipe):
+        """Return active roots, including Ref-held artifact recipe structure."""
+        from dryml.core.template import _snapshot_parameters
+
+        return {
+            parameter.name
+            for parameter in _snapshot_parameters(recipe, traverse_refs=True)
+        }
+
+    @classmethod
+    def _bind_artifact_recipe(cls, recipe, checkpoint):
+        """Bind checkpoint roots through Ref-held artifact recipe structure."""
+
+        roots = cls._artifact_recipe_roots(recipe)
+        bound = (
+            recipe.sub(this=checkpoint, traverse_refs=True)
+            if "this" in roots
+            else recipe
+        )
+        return roots, bound
 
     @staticmethod
     def _validate_artifact_compute(name: str, artifact_cls: type[Artifact]) -> None:
@@ -408,8 +405,8 @@ class Experiment(Serializable):
         can enter history.
         """
 
-        bound = recipe.sub(this=checkpoint) if "this" in recipe.names else recipe
-        definition = bound.to_definition().concretize(repo=context.state_repo)
+        _, bound = self._bind_artifact_recipe(recipe, checkpoint)
+        definition = bound.concretize(repo=context.state_repo)
         if self.state.pending_observation_terminal:
             completed = Artifact.load_completed(
                 definition,

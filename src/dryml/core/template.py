@@ -1,4 +1,4 @@
-"""Inert definition-template authoring and symbolic expression syntax."""
+"""Symbolic Definition expression syntax and the Template annotation marker."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import math
 import re
 
-from .errors import TemplateError, TemplateLimitError, UnresolvedTemplateError
+from .errors import ParameterizationError, ParameterizationLimitError
 from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .utils.graph.path import GraphPath, Parameter, normalize_path
 
@@ -28,7 +28,7 @@ def _validate_number(value: object) -> bool:
 
 def _validate_integer_limit(value: object) -> None:
     if type(value) is int and value.bit_length() > _MAX_INTEGER_BITS:
-        raise TemplateLimitError("template integer bit-length limit exceeded")
+        raise ParameterizationLimitError("template integer bit-length limit exceeded")
 
 
 def _operand(value: object) -> object:
@@ -42,7 +42,7 @@ def _stable_operand(value: object) -> object:
 
 
 class Expr:
-    """Base class for immutable unresolved template arithmetic and repetition.
+    """Base class for immutable unresolved Definition arithmetic and repetition.
 
     Symbolic expressions record supported operations but never implement index
     conversion or call user constructors. Unsupported operands return
@@ -134,7 +134,7 @@ class Expr:
 
 @dataclass(frozen=True, slots=True, init=False)
 class Par(Expr):
-    """Identify one named template binding root and optional semantic path.
+    """Identify one named Definition binding root and optional semantic path.
 
     Args:
         name: ASCII qualified root, optionally followed by dot-separated
@@ -143,7 +143,7 @@ class Par(Expr):
             ``name`` syntax.
 
     Raises:
-        TemplateError: If the root, path spelling, or components are malformed.
+        ParameterizationError: If the root, path spelling, or components are malformed.
     """
 
     name: str
@@ -151,10 +151,10 @@ class Par(Expr):
 
     def __init__(self, name: str, /, *, path: object | None = None) -> None:
         if not isinstance(name, str):
-            raise TemplateError("template parameter name must be a string")
+            raise ParameterizationError("template parameter name must be a string")
         root, dot, suffix = name.partition(".")
         if path is not None and dot:
-            raise TemplateError("dotted parameter names cannot be combined with an explicit path")
+            raise ParameterizationError("dotted parameter names cannot be combined with an explicit path")
         _validate_root(root, "template parameter root")
         if path is None:
             if suffix:
@@ -165,7 +165,7 @@ class Par(Expr):
                     or not _COMPONENT.fullmatch(component)
                     for component in path_components
                 ):
-                    raise TemplateError("template parameter dotted path contains an invalid component")
+                    raise ParameterizationError("template parameter dotted path contains an invalid component")
                 normalized_path = GraphPath(tuple(Parameter(component) for component in path_components))
             else:
                 normalized_path = GraphPath()
@@ -173,7 +173,7 @@ class Par(Expr):
             try:
                 normalized_path = normalize_path(path)
             except Exception as error:
-                raise TemplateError("template parameter path is invalid") from error
+                raise ParameterizationError("template parameter path is invalid") from error
         object.__setattr__(self, "name", root)
         object.__setattr__(self, "path", normalized_path)
 
@@ -193,13 +193,13 @@ class _BinaryExpr(Expr):
 
 @dataclass(frozen=True, slots=True)
 class Shared:
-    """Request graph-sharing semantics for a repeated template group.
+    """Request graph-sharing semantics for a repeated symbolic Definition group.
 
     Args:
-        count: Exact nonnegative integer or unresolved template expression.
+        count: Exact nonnegative integer or unresolved symbolic expression.
 
     Raises:
-        TemplateError: If ``count`` is not a permitted repetition count.
+        ParameterizationError: If ``count`` is not a permitted repetition count.
     """
 
     count: int | Expr
@@ -227,7 +227,7 @@ def _validate_count(count: object) -> None:
     if isinstance(count, Expr):
         return
     if type(count) is not int or count < 0:
-        raise TemplateError("template repetition count must be a nonnegative exact int or Expr")
+        raise ParameterizationError("template repetition count must be a nonnegative exact int or Expr")
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,10 +260,10 @@ def repeat(group: list | tuple, count: int | Expr | Shared, /) -> Expr:
         An immutable repetition expression.
 
     Raises:
-        TemplateError: If the group or count is unsupported.
+        ParameterizationError: If the group or count is unsupported.
     """
     if not isinstance(group, (list, tuple)):
-        raise TemplateError("template repetition requires a list or tuple group")
+        raise ParameterizationError("template repetition requires a list or tuple group")
     if isinstance(count, Shared):
         return _RepeatExpr(group, count.count, shared=True)
     _validate_count(count)
@@ -276,8 +276,6 @@ def _template_children(value: object) -> tuple[object, ...]:
     from .factory import FactorySpec
     from .links import DefLink
 
-    if isinstance(value, TemplateBundle):
-        return tuple(value.recipes.values())
     if isinstance(value, DefLink):
         return (value.target,) if value.kind is EdgeKind.MATERIALIZE else ()
     if isinstance(value, FactorySpec):
@@ -320,467 +318,69 @@ def _active_parameters(value: object) -> tuple[Par, ...]:
     return tuple(found)
 
 
-@dataclass(frozen=True, slots=True, init=False, eq=False)
 class Template:
-    """Capture an immutable definition recipe without resolving its target.
+    """Annotation-only shorthand for a symbolic :class:`Definition` slot.
 
-    Args:
-        target: Class or symbolic class authority for a direct Definition root.
-        *args: Inert positional recipe values.
-        **kwargs: Inert keyword recipe values.
+    ``Template`` is equivalent to ``Template[Definition]`` at an activated
+    signature boundary. It accepts a symbolic or resolved Definition through Ref
+    authority, persists it as ``QuotedDef`` data, and delivers a Definition
+    without materializing it.
 
     Raises:
-        TypeError: If ``target`` is not a class, ImportRef, or SourceSpec.
+        TypeError: If called as a runtime value or subscribed with anything other
+            than exactly ``Definition``.
 
-    Direct construction never calls, imports, or otherwise resolves ``target``.
-    Use :meth:`from_value` for an existing Definition or a generic value root.
+    Side Effects:
+        None. This marker creates no recipe value and never resolves a target.
     """
 
-    _root: object
+    def __new__(cls, *args, **kwargs):
+        raise TypeError("Template is an annotation-only Definition role and cannot be instantiated.")
 
-    def __init__(self, target: object, /, *args: object, **kwargs: object) -> None:
-        from .symbol import ImportRef, SourceSpec
+    @classmethod
+    def __class_getitem__(cls, target):
+        """Return the fixed symbolic Definition role annotation.
 
-        if not isinstance(target, (type, ImportRef, SourceSpec)):
-            raise TypeError("Template target must be a class, ImportRef, or SourceSpec; use Template.from_value for existing values.")
+        Args:
+            target: The exact ``Definition`` class.
+
+        Returns:
+            The same passive annotation role as bare ``Template``.
+
+        Raises:
+            TypeError: If ``target`` is not exactly ``Definition``.
+
+        Side Effects:
+            None. Subscription creates annotation metadata only and does not
+            construct a recipe or resolve a target.
+        """
+
+        from typing import Annotated
+
         from .definition import Definition
+        from .signatures import _Role
 
-        root = Definition(target, *args, **kwargs)
-        _validate_template_set_members(root)
-        object.__setattr__(self, "_root", root)
+        if target is not Definition:
+            raise TypeError("Template supports only the exact Definition target.")
+        return Annotated[Definition, _Role("template")]
 
-    @classmethod
-    def from_value(cls, value: object, /) -> "Template":
-        """Convert an existing supported frozen value into an inert template.
+def _contains_expression(
+        value: object, *, traverse_refs: bool = False) -> bool:
+    from .cdef_graph import EdgeKind
+    from .links import DefLink
 
-        Args:
-            value: Existing Definition, FactorySpec, expression-bearing value,
-                or supported nested container root.
-
-        Returns:
-            A template retaining an immutable root value.
-
-        Raises:
-            TypeError: If ``value`` cannot be represented as a definition value.
-        """
-        if isinstance(value, cls):
-            return value
-        from .canonical import freeze_def_value
-
-        result = object.__new__(cls)
-        root = freeze_def_value(value)
-        _validate_template_set_members(root)
-        object.__setattr__(result, "_root", root)
-        return result
-
-    @classmethod
-    def _from_root(cls, root: object) -> "Template":
-        """Wrap an already-frozen root produced by template rewriting."""
-
-        result = object.__new__(cls)
-        object.__setattr__(result, "_root", root)
-        return result
-
-    @property
-    def root(self) -> object:
-        """Return the immutable inert recipe root without resolving it."""
-        return self._root
-
-    @property
-    def names(self) -> tuple[str, ...]:
-        """Return active binding roots once each in lexical traversal order."""
-        return tuple(parameter.name for parameter in _active_parameters(self._root))
-
-    @property
-    def is_resolved(self) -> bool:
-        """Return whether the active recipe contains no template expressions."""
-        return not _contains_expression(self._root)
-
-    def sub(
-        self,
-        *,
-        sub_dict: Mapping[str, object] | None = None,
-        namespace: object = (),
-        traverse_refs: bool = False,
-        **bindings: object,
-    ) -> "Template":
-        """Bind supplied roots once without sampling, construction, or mutation.
-
-        Args:
-            sub_dict: Fully qualified root-to-static-value bindings.
-            namespace: Optional namespace prepended only to keyword bindings.
-            traverse_refs: Whether to enter pre-existing ``Ref(Template)`` data.
-            **bindings: Unqualified static root bindings.
-
-        Returns:
-            A rewritten template with fully bound arithmetic and repetition
-            expressions evaluated. Parameters introduced by a replacement
-            template remain unresolved until a later call.
-
-        Raises:
-            TemplateError: If names, values, paths, traversal controls, or a
-                bound expression are invalid, including any nested Distribution
-                value. TemplateLimitError: If expression depth or expansion
-                exceeds a hard limit.
-        """
-
-        if type(traverse_refs) is not bool:
-            raise TemplateError("traverse_refs must be a bool")
-        occurrences = _snapshot_parameters(self._root, traverse_refs=traverse_refs)
-        roots = {parameter.name for parameter in occurrences}
-        supplied = _normalize_bindings(sub_dict, namespace, bindings)
-        _validate_distribution_free(supplied)
-        unknown = sorted(set(supplied) - roots)
-        if unknown:
-            raise TemplateError(f"unknown template binding roots: {unknown!r}")
-
-        projected: dict[tuple[str, GraphPath], object] = {}
-        replacements = {}
-        for parameter in occurrences:
-            if parameter.name not in supplied:
-                continue
-            key = parameter.name, parameter.path
-            if key not in projected:
-                projected[key] = _project_binding(
-                    supplied[parameter.name], parameter.path, parameter.name
-                )
-            replacements[id(parameter)] = projected[key]
-        return type(self)._from_root(
-            _evaluate_template_value(
-                _rewrite_template_value(
-                    self._root,
-                    replacements=replacements,
-                    remap=None,
-                    traverse_refs=traverse_refs,
-                ),
-                traverse_refs=traverse_refs,
-            )
-        )
-
-    def remap(
-        self,
-        mapping: Mapping[str, str] | None = None,
-        *,
-        prefix: object = (),
-        strip: object = (),
-        traverse_refs: bool = False,
-    ) -> "Template":
-        """Simultaneously rename, strip, and prefix active binding roots.
-
-        Args:
-            mapping: Explicit fully qualified old-to-new root names.
-            prefix: Namespace appended to every transformed root.
-            strip: Namespace removed from matching roots after explicit renames.
-            traverse_refs: Whether to enter pre-existing ``Ref(Template)`` data.
-
-        Returns:
-            A new template with unchanged relative graph paths.
-
-        Raises:
-            TemplateError: If roots, namespaces, mappings, or traversal controls
-                are malformed or refer to absent roots.
-        """
-
-        if type(traverse_refs) is not bool:
-            raise TemplateError("traverse_refs must be a bool")
-        occurrences = _snapshot_parameters(self._root, traverse_refs=traverse_refs)
-        roots = {parameter.name for parameter in occurrences}
-        renames = _normalize_remap(mapping, roots)
-        prefix_parts = _normalize_namespace(prefix, "prefix")
-        strip_parts = _normalize_namespace(strip, "strip")
-        mapped_roots = {root: renames.get(root, root) for root in roots}
-        if strip_parts and not any(_has_prefix(_root_parts(root), strip_parts) for root in mapped_roots.values()):
-            raise TemplateError("strip namespace does not match any active template root")
-
-        result_names = {
-            root: _remap_root(name, prefix_parts, strip_parts)
-            for root, name in mapped_roots.items()
-        }
-        return type(self)._from_root(
-            _rewrite_template_value(
-                self._root,
-                replacements=None,
-                remap=result_names,
-                traverse_refs=traverse_refs,
-            )
-        )
-
-    def resolve(self) -> object:
-        """Evaluate and return the root when no active expression remains.
-
-        Raises:
-            UnresolvedTemplateError: If a parameter, arithmetic, or repetition
-                expression still requires a later template operation.
-            TemplateError: If a fully bound expression is invalid.
-            TemplateLimitError: If expression depth or expansion exceeds a hard
-                limit.
-        """
-        root = _evaluate_template_value(self._root)
-        if _contains_expression(root):
-            raise UnresolvedTemplateError("template contains unresolved expressions")
-        return root
-
-    def as_selector(self, *, strict: bool = False):
-        """Project known structure into a deliberately loose ordinary Selector.
-
-        Args:
-            strict: Ordinary Selector strictness for retained known structure.
-
-        Returns:
-            A symbolic-class-exact Selector that omits unknown relationships.
-
-        Raises:
-            TemplateError: If this template does not have a soft Definition root.
-
-        This projection never samples domains, resolves targets, or asserts exact
-        parameter linkage, arithmetic, repetition topology, or factory builds.
-        """
-
-        from .template_selector import _loose_selector
-
-        selector = _loose_selector(self)
-        if strict:
-            from .selector import Selector
-
-            return Selector(selector.root, strict=True, cls_policy="exact")
-        return selector
-
-    def to_definition(self):
-        """Return a resolved soft Definition root without concretizing it.
-
-        Returns:
-            The retained Definition recipe.
-
-        Raises:
-            UnresolvedTemplateError: If active expressions remain.
-            TemplateError: If the template root is not a soft Definition.
-        """
-        from .definition import Definition
-
-        root = self.resolve()
-        if not isinstance(root, Definition):
-            raise TemplateError("Template.to_definition requires a Definition root")
-        return root
-
-    def stable_hash(self) -> str:
-        """Return a topology-sensitive deterministic digest for this recipe.
-
-        Raises:
-            TemplateError: If the recipe contains a nonportable value.
-        """
-        from .template_codec import stable_hash
-
-        return stable_hash(self)
-
-    def __stable_leaf_bytes__(self) -> bytes:
-        """Return a closed-codec leaf projection for enclosing CDef identity."""
-
-        return b"dryml-template:" + self.stable_hash().encode("ascii")
-
-    def __eq__(self, other: object) -> bool:
-        """Compare portable recipe meaning, including graph-local aliases.
-
-        Args:
-            other: Value to compare with this Template.
-
-        Returns:
-            ``True`` only for the same closed-codec recipe projection.
-
-        Raises:
-            TemplateError: If either Template is nonportable.
-        """
-        return isinstance(other, Template) and self.to_data() == other.to_data()
-
-    def __hash__(self) -> int:
-        """Return the portable topology-sensitive hash used by frozen values.
-
-        Raises:
-            TemplateError: If this Template is nonportable.
-        """
-        return int(self.stable_hash(), 16)
-
-    def to_data(self) -> dict[str, object]:
-        """Return the closed portable template payload without target resolution.
-
-        Returns:
-            Canonical ``dryml-template`` v1 data.
-
-        Raises:
-            TemplateError: If the recipe is nonportable or exceeds codec limits.
-        """
-        from .template_codec import template_to_data
-
-        return template_to_data(self)
-
-    @classmethod
-    def from_data(cls, data: Mapping[str, object], /) -> "Template":
-        """Decode a closed portable recipe without importing its target.
-
-        Args:
-            data: A canonical ``dryml-template`` v1 mapping.
-
-        Returns:
-            The decoded immutable Template.
-
-        Raises:
-            TemplateError: If data is malformed, unsupported, or noncanonical.
-        """
-        from .template_codec import template_from_data
-
-        return template_from_data(data)
-
-
-@dataclass(frozen=True, slots=True, init=False, eq=False)
-class TemplateBundle:
-    """Retain named inert Template recipes as one ordered quotation value.
-
-    Args:
-        recipes: One Template, an ordered list or tuple of Templates, or a
-            string-keyed mapping of Templates. Positional recipes are named
-            ``artifact_N`` in order; mapping insertion order is retained.
-
-    The bundle validates and freezes names and recipes only. It never resolves
-    parameters, invokes factories, constructs artifacts, or materializes inputs.
-    A bundle is admitted to a concrete definition only through
-    ``Ref[TemplateBundle]``.
-    """
-
-    _recipes: FrozenDict
-
-    def __init__(self, recipes: "Template | list[Template] | tuple[Template, ...] | Mapping[str, Template]", /) -> None:
-        if isinstance(recipes, Template):
-            items = (("artifact_0", recipes),)
-        elif isinstance(recipes, (list, tuple)):
-            items = tuple((f"artifact_{index}", recipe) for index, recipe in enumerate(recipes))
-        elif isinstance(recipes, Mapping):
-            items = tuple(recipes.items())
-        else:
-            raise TypeError("TemplateBundle requires a Template, ordered Template sequence, or string-keyed Template mapping.")
-        object.__setattr__(self, "_recipes", self._validated_recipes(items))
-
-    @staticmethod
-    def _validated_recipes(items: object) -> FrozenDict:
-        try:
-            pairs = tuple(items)
-        except TypeError as error:
-            raise TypeError("TemplateBundle recipes must be ordered name/Template pairs.") from error
-        if len(pairs) > 4_096:
-            raise TemplateLimitError("template bundle entry limit exceeded")
-        result = []
-        names = set()
-        for item in pairs:
-            if not isinstance(item, tuple) or len(item) != 2:
-                raise TypeError("TemplateBundle recipes must be ordered name/Template pairs.")
-            name, recipe = item
-            if not isinstance(name, str) or not name:
-                raise TypeError("TemplateBundle recipe names must be nonempty strings.")
-            if name in names:
-                raise TemplateError("TemplateBundle recipe names must be unique.")
-            if not isinstance(recipe, Template):
-                raise TypeError("TemplateBundle recipes must be Template instances.")
-            names.add(name)
-            result.append((name, recipe))
-        return FrozenDict(result)
-
-    @classmethod
-    def _from_recipes(cls, recipes: Mapping[str, Template]) -> "TemplateBundle":
-        """Wrap codec- or rewrite-owned frozen recipes after invariant checks."""
-
-        result = object.__new__(cls)
-        object.__setattr__(result, "_recipes", cls._validated_recipes(tuple(recipes.items())))
-        return result
-
-    @property
-    def recipes(self) -> FrozenDict:
-        """Return the frozen ordered mapping from artifact name to Template.
-
-        Returns:
-            The immutable name-to-recipe mapping in declared order.
-
-        Side Effects:
-            None. Access does not resolve or copy a recipe.
-        """
-
-        return self._recipes
-
-    @property
-    def names(self) -> tuple[str, ...]:
-        """Return artifact names in declared processing order.
-
-        Returns:
-            The immutable ordered tuple of bundle names.
-
-        Side Effects:
-            None.
-        """
-
-        return tuple(self._recipes)
-
-    def to_data(self) -> dict[str, object]:
-        """Return one aggregate closed v1 quotation payload for all recipes.
-
-        Returns:
-            Canonical ``dryml-template`` v1 aggregate data.
-
-        Raises:
-            TemplateError: If a recipe is nonportable or the aggregate exceeds
-                a codec limit.
-
-        Side Effects:
-            None. Encoding never resolves a recipe target.
-        """
-
-        from .template_codec import template_bundle_to_data
-
-        return template_bundle_to_data(self)
-
-    @classmethod
-    def from_data(cls, data: Mapping[str, object], /) -> "TemplateBundle":
-        """Decode one canonical bundle payload without resolving any recipe.
-
-        Args:
-            data: Canonical aggregate ``dryml-template`` v1 data.
-
-        Returns:
-            The decoded immutable bundle.
-
-        Raises:
-            TemplateError: If data is malformed, unsupported, noncanonical, or
-                exceeds an aggregate codec limit.
-
-        Side Effects:
-            None. Decoding does not import or invoke recipe targets.
-        """
-
-        from .template_codec import template_bundle_from_data
-
-        return template_bundle_from_data(data)
-
-    def __stable_leaf_bytes__(self) -> bytes:
-        """Return the closed aggregate quotation identity for enclosing CDefs."""
-
-        from .template_codec import _canonical_bytes
-
-        return b"dryml-template-bundle:" + _canonical_bytes(self.to_data())
-
-    def __eq__(self, other: object) -> bool:
-        """Compare canonical aggregate quotation meaning."""
-
-        return isinstance(other, TemplateBundle) and self.to_data() == other.to_data()
-
-    def __hash__(self) -> int:
-        """Return the canonical aggregate quotation hash."""
-
-        return hash(self.__stable_leaf_bytes__())
-
-
-def _contains_expression(value: object) -> bool:
     seen: set[int] = set()
 
     def visit(current: object) -> bool:
         if isinstance(current, Expr):
             return True
-        children = _template_children(current)
+        children = (
+            (current.target,)
+            if traverse_refs
+            and isinstance(current, DefLink)
+            and current.kind is EdgeKind.REF
+            else _template_children(current)
+        )
         if not children:
             return False
         marker = id(current)
@@ -794,7 +394,7 @@ def _contains_expression(value: object) -> bool:
 
 def _validate_root(name: object, label: str) -> str:
     if not isinstance(name, str) or "." in name:
-        raise TemplateError(f"{label} must be a fully qualified template root")
+        raise ParameterizationError(f"{label} must be a fully qualified template root")
     parts = name.split("/")
     if (
         not name
@@ -805,7 +405,7 @@ def _validate_root(name: object, label: str) -> str:
             for part in parts
         )
     ):
-        raise TemplateError(f"{label} contains an invalid qualified-name component")
+        raise ParameterizationError(f"{label} contains an invalid qualified-name component")
     return name
 
 
@@ -821,7 +421,7 @@ def _normalize_namespace(value: object, label: str) -> tuple[str, ...]:
     elif isinstance(value, tuple):
         parts = value
     else:
-        raise TemplateError(f"template {label} must be a string or tuple of components")
+        raise ParameterizationError(f"template {label} must be a string or tuple of components")
     if (
         len(parts) > _MAX_NAMESPACE_COMPONENTS
         or sum(len(part) for part in parts) + max(len(parts) - 1, 0) > _MAX_QUALIFIED_ROOT_LENGTH
@@ -832,52 +432,8 @@ def _normalize_namespace(value: object, label: str) -> tuple[str, ...]:
             for part in parts
         )
     ):
-        raise TemplateError(f"template {label} contains an invalid component")
+        raise ParameterizationError(f"template {label} contains an invalid component")
     return parts
-
-
-def _validate_template_set_members(value: object) -> None:
-    """Reject symbolic or structural values whose unordered positions are unstable.
-
-    Template expressions carry addressable construction structure.  Allowing them
-    in a set would make canonical ordering part of that structure, so only
-    literal scalar/symbol members are admitted at public template construction.
-    """
-
-    from .definition import ConcreteDefinition, Definition
-    from .factory import FactorySpec
-    from .links import DefLink
-    from .quoted import QuotedDef, SelectorSpec
-    from .reference_values import ObjectRef, StateRef
-    from .selector import Selector
-    from .symbol import ImportRef, SourceSpec
-
-    allowed = (type(None), bool, int, float, str, bytes, ImportRef, SourceSpec)
-    structural = (
-        Expr, Template, Definition, ConcreteDefinition, FactorySpec, DefLink,
-        QuotedDef, SelectorSpec, Selector, ObjectRef, StateRef,
-    )
-    seen: set[int] = set()
-
-    def visit(current: object) -> None:
-        if isinstance(current, (set, frozenset, FrozenSet)):
-            for member in current:
-                if isinstance(member, structural) or not isinstance(member, allowed):
-                    raise TemplateError("template set members must be literal portable values")
-            return
-        if isinstance(current, (Template, TemplateBundle)):
-            return
-        children = _template_children(current)
-        if not children:
-            return
-        marker = id(current)
-        if marker in seen:
-            return
-        seen.add(marker)
-        for child in children:
-            visit(child)
-
-    visit(value)
 
 
 def _normalize_bindings(
@@ -887,19 +443,19 @@ def _normalize_bindings(
 ) -> dict[str, object]:
     namespace_parts = _normalize_namespace(namespace, "namespace")
     if sub_dict is not None and not isinstance(sub_dict, Mapping):
-        raise TemplateError("sub_dict must be a mapping")
+        raise ParameterizationError("sub_dict must be a mapping")
     result: dict[str, object] = {}
     for name, value in (() if sub_dict is None else sub_dict.items()):
         normalized = _validate_root(name, "sub_dict key")
         if normalized in result:
-            raise TemplateError(f"duplicate template binding for {normalized!r}")
+            raise ParameterizationError(f"duplicate template binding for {normalized!r}")
         result[normalized] = value
     for name, value in bindings.items():
         if not _COMPONENT.fullmatch(name):
-            raise TemplateError(f"keyword binding {name!r} is not a valid root component")
+            raise ParameterizationError(f"keyword binding {name!r} is not a valid root component")
         normalized = _validate_root("/".join((*namespace_parts, name)), "keyword binding")
         if normalized in result:
-            raise TemplateError(f"duplicate template binding for {normalized!r}")
+            raise ParameterizationError(f"duplicate template binding for {normalized!r}")
         result[normalized] = value
     return result
 
@@ -908,13 +464,13 @@ def _normalize_remap(mapping: Mapping[str, str] | None, roots: set[str]) -> dict
     if mapping is None:
         return {}
     if not isinstance(mapping, Mapping):
-        raise TemplateError("template remap mapping must be a mapping")
+        raise ParameterizationError("template remap mapping must be a mapping")
     result: dict[str, str] = {}
     for source, target in mapping.items():
         source = _validate_root(source, "remap source")
         target = _validate_root(target, "remap target")
         if source not in roots:
-            raise TemplateError(f"remap source {source!r} is not an active template root")
+            raise ParameterizationError(f"remap source {source!r} is not an active template root")
         result[source] = target
     return result
 
@@ -929,7 +485,7 @@ def _remap_root(name: str, prefix: tuple[str, ...], strip: tuple[str, ...]) -> s
         parts = parts[len(strip):]
     parts = (*prefix, *parts)
     if not parts:
-        raise TemplateError("template remap produced an empty root")
+        raise ParameterizationError("template remap produced an empty root")
     return _validate_root("/".join(parts), "remapped root")
 
 
@@ -937,6 +493,7 @@ def _snapshot_parameters(value: object, *, traverse_refs: bool) -> tuple[Par, ..
     """Collect the pre-operation parameters allowed by one traversal boundary."""
 
     from .cdef_graph import EdgeKind
+    from .definition import Definition
     from .links import DefLink
 
     found: list[Par] = []
@@ -946,19 +503,13 @@ def _snapshot_parameters(value: object, *, traverse_refs: bool) -> tuple[Par, ..
         if isinstance(current, Par):
             found.append(current)
             return
-        if isinstance(current, Template):
-            return
         if isinstance(current, DefLink):
             if (
                 traverse_refs
                 and current.kind is EdgeKind.REF
-                and isinstance(current.target, (Template, TemplateBundle))
+                and isinstance(current.target, Definition)
             ):
-                if isinstance(current.target, Template):
-                    visit(current.target.root)
-                else:
-                    for recipe in current.target.recipes.values():
-                        visit(recipe.root)
+                visit(current.target)
             elif current.kind is EdgeKind.MATERIALIZE:
                 visit(current.target)
             return
@@ -988,14 +539,7 @@ def _validate_distribution_free(value: object) -> None:
 
     def visit(current: object) -> None:
         if isinstance(current, Distribution):
-            raise TemplateError("Template.sub does not accept Distribution values")
-        if isinstance(current, Template):
-            visit(current.root)
-            return
-        if isinstance(current, TemplateBundle):
-            for recipe in current.recipes.values():
-                visit(recipe.root)
-            return
+            raise ParameterizationError("Template.sub does not accept Distribution values")
         if isinstance(current, DefLink):
             visit(current.target)
             return
@@ -1048,19 +592,19 @@ def _project_binding(value: object, path: GraphPath, root: str) -> object:
                 value = value.graph_path(path)
             elif isinstance(value, Definition) and any(isinstance(segment, Parameter) for segment in path):
                 if value.cls is None or not isinstance(value.cls, type):
-                    raise TemplateError("semantic path requires an available soft Definition class")
+                    raise ParameterizationError("semantic path requires an available soft Definition class")
                 first, *rest = tuple(path)
                 if not isinstance(first, Parameter):
-                    raise TemplateError("semantic Definition path must begin with a Parameter")
+                    raise ParameterizationError("semantic Definition path must begin with a Parameter")
                 value = value.parameters[first.name]
                 if rest:
                     value = get_subtree(value, GraphPath(tuple(rest)))
             else:
                 value = get_subtree(value, path)
-    except TemplateError:
+    except ParameterizationError:
         raise
     except Exception as error:
-        raise TemplateError(f"template binding path is invalid for root {root!r}", path=path, root=root) from error
+        raise ParameterizationError(f"template binding path is invalid for root {root!r}", path=path, root=root) from error
     return _freeze_binding_value(value)
 
 
@@ -1075,8 +619,6 @@ def _freeze_binding_value(value: object) -> object:
     def lower(current: object) -> object:
         if isinstance(current, Object):
             return current.object_ref
-        if isinstance(current, (Template, TemplateBundle)):
-            return current
         if isinstance(current, Mapping):
             marker = id(current)
             if marker in memo:
@@ -1102,10 +644,9 @@ def _freeze_binding_value(value: object) -> object:
         return current
 
     try:
-        lowered = lower(value)
-        return lowered if isinstance(lowered, Template) else freeze_def_value(lowered)
+        return freeze_def_value(lower(value))
     except Exception as error:
-        raise TemplateError("template binding value is unsupported") from error
+        raise ParameterizationError("template binding value is unsupported") from error
 
 
 def _rewrite_template_value(
@@ -1128,27 +669,21 @@ def _rewrite_template_value(
     def rewrite(current: object) -> object:
         if isinstance(current, Par):
             if replacements is not None and id(current) in replacements:
-                replacement = replacements[id(current)]
-                return replacement.root if isinstance(replacement, Template) else replacement
+                return replacements[id(current)]
             if remap is not None and current.name in remap:
                 return Par(remap[current.name], path=current.path)
-            return current
-        if isinstance(current, Template):
             return current
         if isinstance(current, DefLink):
             marker = id(current)
             if marker in memo:
                 return memo[marker]
             if current.kind is EdgeKind.REF:
-                if not (traverse_refs and isinstance(current.target, (Template, TemplateBundle))):
+                if not (
+                    traverse_refs
+                    and isinstance(current.target, Definition)
+                ):
                     return current
-                if isinstance(current.target, Template):
-                    target = Template._from_root(rewrite(current.target.root))
-                else:
-                    target = TemplateBundle._from_recipes(FrozenDict(
-                        (name, Template._from_root(rewrite(recipe.root)))
-                        for name, recipe in current.target.recipes.items()
-                    ))
+                target = rewrite(current.target)
             elif current.kind is EdgeKind.MATERIALIZE:
                 target = rewrite(current.target)
             else:
@@ -1193,7 +728,7 @@ def _rewrite_template_value(
                 all(new is old for new, old in zip(args, current.args))
                 and all(kwargs[key] is value for key, value in current.kwargs.items())
             )
-            result = current if unchanged else FactorySpec._from_template_parts(current.target, args, kwargs)
+            result = current if unchanged else FactorySpec._from_symbolic_parts(current.target, args, kwargs)
             memo[marker] = result
             return result
         if isinstance(current, ConcreteDefinition):
@@ -1223,7 +758,7 @@ def _rewrite_template_value(
                 (args is None and current.args is None)
                 or (args is not None and all(new is old for new, old in zip(args, current.args)))
             ) and all(kwargs[key] is value for key, value in current.kwargs.items())
-            result = current if unchanged else Definition._from_template_parts(current.cls, args, kwargs)
+            result = current if unchanged else Definition._from_symbolic_parts(current.cls, args, kwargs)
             memo[marker] = result
             return result
         if isinstance(current, Mapping):
@@ -1275,7 +810,7 @@ class _ExpressionBudget:
         """Record generated ordered positions or fail before exceeding the hard cap."""
 
         if self.expansions + count > _MAX_EXPRESSION_VALUES:
-            raise TemplateLimitError("template expansion limit exceeded")
+            raise ParameterizationLimitError("template expansion limit exceeded")
         self.expansions += count
 
 
@@ -1297,7 +832,7 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
         if isinstance(current, _BinaryExpr):
             depth += 1
             if depth > _MAX_EXPRESSION_DEPTH:
-                raise TemplateLimitError("template expression depth limit exceeded")
+                raise ParameterizationLimitError("template expression depth limit exceeded")
             marker = id(current)
             if marker in memo:
                 return memo[marker]
@@ -1309,7 +844,7 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
                 )
             else:
                 if not _validate_number(left) or not _validate_number(right):
-                    raise TemplateError("template arithmetic operands must be exact finite built-in numbers")
+                    raise ParameterizationError("template arithmetic operands must be exact finite built-in numbers")
                 _validate_integer_limit(left)
                 _validate_integer_limit(right)
                 try:
@@ -1320,20 +855,20 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
                     elif current.operation == "floordiv":
                         result = left // right
                     else:
-                        raise TemplateError("template arithmetic operation is unsupported")
+                        raise ParameterizationError("template arithmetic operation is unsupported")
                 except ZeroDivisionError as error:
-                    raise TemplateError("template arithmetic division by zero") from error
+                    raise ParameterizationError("template arithmetic division by zero") from error
                 except OverflowError as error:
-                    raise TemplateError("template arithmetic result is not finite") from error
+                    raise ParameterizationError("template arithmetic result is not finite") from error
                 if not _validate_number(result):
-                    raise TemplateError("template arithmetic result must be a finite built-in number")
+                    raise ParameterizationError("template arithmetic result must be a finite built-in number")
                 _validate_integer_limit(result)
             memo[marker] = result
             return result
         if isinstance(current, _RepeatExpr):
             depth += 1
             if depth > _MAX_EXPRESSION_DEPTH:
-                raise TemplateLimitError("template expression depth limit exceeded")
+                raise ParameterizationLimitError("template expression depth limit exceeded")
             marker = id(current)
             if marker in memo:
                 return memo[marker]
@@ -1351,9 +886,9 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
                 memo[marker] = result
                 return result
             if type(count) is not int or count < 0:
-                raise TemplateError("template repetition count must resolve to a nonnegative exact int")
+                raise ParameterizationError("template repetition count must resolve to a nonnegative exact int")
             if count > _MAX_REPEAT_COUNT:
-                raise TemplateLimitError("template repetition count limit exceeded")
+                raise ParameterizationLimitError("template repetition count limit exceeded")
             budget.charge_expansion(count * len(current.group))
             if current.shared:
                 group = tuple(evaluate(item, depth) for item in current.group)
@@ -1375,19 +910,14 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
             result = FrozenList(items) if isinstance(current.group, FrozenList) else FrozenTuple(items)
             memo[marker] = result
             return result
-        if isinstance(current, (Template, TemplateBundle)):
-            return current
         if isinstance(current, DefLink):
             if current.kind is EdgeKind.REF:
-                if not (traverse_refs and isinstance(current.target, (Template, TemplateBundle))):
+                if not (
+                    traverse_refs
+                    and isinstance(current.target, Definition)
+                ):
                     return current
-                if isinstance(current.target, Template):
-                    target = Template._from_root(evaluate(current.target.root, depth))
-                else:
-                    target = TemplateBundle._from_recipes(FrozenDict(
-                        (name, Template._from_root(evaluate(recipe.root, depth)))
-                        for name, recipe in current.target.recipes.items()
-                    ))
+                target = evaluate(current.target, depth)
             elif current.kind is EdgeKind.MATERIALIZE:
                 target = evaluate(current.target, depth)
             else:
@@ -1418,7 +948,7 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
             result = current if (
                 all(new is old for new, old in zip(args, current.args))
                 and all(kwargs[key] is item for key, item in current.kwargs.items())
-            ) else FactorySpec._from_template_parts(current.target, args, kwargs)
+            ) else FactorySpec._from_symbolic_parts(current.target, args, kwargs)
             memo[marker] = result
             return result
         if isinstance(current, Definition):
@@ -1430,7 +960,7 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
             result = current if (
                 (args is None and current.args is None)
                 or (args is not None and all(new is old for new, old in zip(args, current.args)))
-            ) and all(kwargs[key] is item for key, item in current.kwargs.items()) else Definition._from_template_parts(
+            ) and all(kwargs[key] is item for key, item in current.kwargs.items()) else Definition._from_symbolic_parts(
                 current.cls, args, kwargs
             )
             memo[marker] = result
@@ -1483,8 +1013,6 @@ def _copy_template_construction_value(value: object, memo: dict[int, object]) ->
     from .factory import FactorySpec
     from .links import DefLink
 
-    if isinstance(value, Template):
-        return value
     if isinstance(value, DefLink):
         if value.kind is EdgeKind.REF:
             return value
@@ -1521,7 +1049,7 @@ def _copy_template_construction_value(value: object, memo: dict[int, object]) ->
             (key, _copy_template_construction_value(item, memo))
             for key, item in value.kwargs.items()
         )
-        result = Definition._from_template_parts(value.cls, args, kwargs)
+        result = Definition._from_symbolic_parts(value.cls, args, kwargs)
         memo[marker] = result
         return result
     if isinstance(value, FactorySpec):
@@ -1530,7 +1058,7 @@ def _copy_template_construction_value(value: object, memo: dict[int, object]) ->
             (key, _copy_template_construction_value(item, memo))
             for key, item in value.kwargs.items()
         )
-        result = FactorySpec._from_template_parts(value.target, args, kwargs)
+        result = FactorySpec._from_symbolic_parts(value.target, args, kwargs)
         memo[marker] = result
         return result
     if isinstance(value, _BinaryExpr):
@@ -1570,4 +1098,4 @@ def _copy_template_construction_value(value: object, memo: dict[int, object]) ->
     return value
 
 
-__all__ = ["Expr", "Par", "Shared", "Template", "TemplateBundle", "repeat"]
+__all__ = ["Expr", "Par", "Shared", "Template", "repeat"]

@@ -181,6 +181,11 @@ The core adapter supports ordinary functions, lambdas, nested functions and
 closures, bound methods, callable instances, `@function` callables, `Method`, and
 managed-operation callables. It sends one whole callable/argument/capture graph,
 including globals, defaults, annotations, instance fields, and `__slots__`.
+Symbolic `Definition` values have an explicit graph node and retain their class,
+positional-versus-skipped argument shape, keyword data, aliases, and frozen
+container spelling. They do not fall through the Definition's public `Mapping`
+view. A Mat boundary can therefore materialize a transported Definition in the
+worker, while an explicit `Ref[Definition]` remains symbolic data.
 Without an explicit signature role, built-in containers are traversed and known
 DRYML semantic leaves use their authority-aware representation. Other trusted
 Python leaves use bounded dill serialization with ordinary pickle state behavior;
@@ -329,11 +334,13 @@ earlier restores nor replays the workload.
 `decode_core_outcome()` exposes `CoreAdaptationOutcome` and
 `CoreOutcomeEvidence` value types. Evidence has exact StateRefs and
 Store-table-relative publication status only; it never carries a live Repo,
-Store, `StoreReport`, argument, or result. A delivered worker failure preserves
-known publication evidence but does not imply rollback, retry, or successful
-caller refresh. Coordinator recovery reports this bounded category as
-`core execution worker failed: <reason>` without including submitted values or
-remote exception payloads.
+Store, `StoreReport`, argument, or result. A delivered core-worker failure raises
+`CoreExecutionError` with `core execution worker failed: <reason>`, preserves
+only its bounded failure category and known publication evidence, and does not
+imply rollback, retry, or successful caller refresh. Because the core adapter
+returns an opaque outcome through generic Execute before coordinator recovery,
+this is not a generic `RemoteExecutionError`; submitted values, traceback text,
+and exception values are not transported.
 
 `PreparedCoreCall` contains only invocation bytes, frozen storage setup, and
 opaque update descriptors. It never retains caller Objects or refresh progress.

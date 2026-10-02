@@ -1,132 +1,111 @@
-# Definition Templates
+# Symbolic Definitions And Generation
 
-`Template` is an inert, reusable Definition recipe. Construct it class-first:
-`Template(Model, ...)` captures the supplied call without resolving or calling
-`Model`. Use `Template.from_value(value)` for an existing Definition or a generic
-list/tuple/container root, and `Definition.as_template()` for an existing soft
-Definition. `Template(Definition(...))` is not a constructor overload.
+`Definition` is DRYML's one immutable construction-description value, for both
+resolved and symbolic authoring. It can contain `Par` and supported arithmetic or
+repetition expressions without resolving a target, applying defaults, calling a
+factory, materializing an Object, or saving anything. `Definition.names` reports
+active roots in authored first-occurrence order. `Definition.is_resolved` means
+only that no active expression remains; it does not prove that a constructor call
+is complete or valid.
+
+Use `Definition.sub(...)` for static values. Substitution is immutable and one
+pass: it evaluates expressions made closed by the supplied values, but never
+samples a provider. A `Distribution` is invalid anywhere in Definition-owned
+structure, including nested containers.
 
 ```python
-import random
-from dryml.core import F, Par, Template, TemplateGenerator, UniformFromSet
+from dryml.core import Definition, Generator, Par, UniformFromSet
 
 class Model:
-    def __init__(self, layers, width):
-        self.layers = layers
+    def __init__(self, width, depth):
         self.width = width
+        self.depth = depth
 
-group = [F("builtins:tuple", Par("width")), F("builtins:tuple")]
-model = Template(Model, group * Par("depth"), width=Par("width"))
-bound = model.sub(width=64, depth=2)
-definition = bound.to_definition()
+authored = Definition(Model, width=Par("width"), depth=Par("depth"))
+fixed_depth = authored.sub(depth=2)
+assert fixed_depth.names == ("width",)
 
-generator = TemplateGenerator(
-    model,
-    width=UniformFromSet((32, 64)),
-    depth=UniformFromSet((1, 2)),
+generator = Generator(
+    fixed_depth,
+    {"width": UniformFromSet((32, 64))},
 )
-sample = generator.sample(random.Random(7))
+sample = generator.sample()
 grid = generator.grid()
-exact_selector = generator.support_selector()
-loose_selector = model.as_selector()
+support = generator.support_selector()
 ```
 
-`sub` accepts static supported values only. It never samples, invokes a factory,
-constructs an Object, computes an Artifact, or saves state. Bindings are one pass:
-parameters already present in the receiving template are replaced once, while
-parameters introduced by a replacement Template require a later `.sub(...)`.
-`TemplateGenerator` captures all static/domain bindings without sampling and its
-`sample()` and `grid()` return complete `Definition` values. Missing roots or a
-result that remains active raise `TemplateError` or `UnresolvedTemplateError`.
+`Generator(definition, distributions)` accepts exactly one Distribution mapping
+that covers every active selected root. Static values, missing roots, unknown
+roots, and sampled results that leave expressions active fail. Bind static
+values with `Definition.sub(...)` before creating a Generator. Providers are
+stored by sorted fully-qualified root name, preserving deterministic RNG draw
+and grid order. Generator construction does not sample, resolve targets,
+construct Objects, or persist providers. `sample()` and `grid()` return only
+resolved Definitions and are all-or-error at their provider boundary.
 
-## Names And Expressions
+## Receiving Roles
 
-`Par("encoder/width")` has the qualified binding root `encoder/width`.
-`Par("this.model")` uses `this` as its root and `model` as its relative graph
-path. Use `sub_dict` for qualified names that are not Python keywords, and use
-`namespace` to qualify keyword bindings. Equal qualified roots deliberately share
-one binding; composition does not create an implicit namespace.
+`Mat[Definition]`, `Ref[Definition]`, and bare `Template` are receiving roles,
+not alternate construction-value types.
 
-```python
-scaled = Template(Model, [], width=Par("encoder/width") * Par("scale"))
-scaled = scaled.sub(sub_dict={"encoder/width": 64}, scale=2)
-prefixed = scaled.remap(prefix="experiment")
-restored = prefixed.remap(strip="experiment")
-```
+| Receiving annotation | Accepts | Delivers | Active-expression rule |
+| --- | --- | --- | --- |
+| `Mat[Definition]` | materializing Definition structure | materialized Object | After activated roles establish quotation barriers, materializing structure must be resolved before CDef, Repo, target, cache, or Store effects. |
+| `Ref[Definition]` | selected Definition | Definition | The selected authored Definition must be resolved; constructor completeness is not tested. |
+| `Template` or `Template[Definition]` | symbolic or resolved Definition, including compatible `Ref(definition)` | Definition | Symbolic content is inert quotation data. |
 
-`*`, `/`, and `//` retain Python arithmetic semantics after every operand is
-bound. They reject unsupported operands and arithmetic failures rather than
-coercing or rounding values. List and tuple groups may be repeated with a static
-or symbolic count. Expansion is bounded; invalid or excessive counts raise
-`TemplateLimitError` rather than producing a completed definition.
+Bare `Template` is exactly shorthand for `Template[Definition]`. It cannot be
+instantiated, has no other subscription target, and is not a runtime recipe
+value. Role admission is delayed until the annotated boundary is activated. An
+authored outer Definition can therefore remain structurally unresolved because a
+nested Template slot carries an active expression, while materialization of that
+outer Definition succeeds because the nested recipe is quotation data. The same
+outer Definition supplied to `Ref[Definition]` is rejected without inspecting the
+outer constructor roles.
 
-```python
-from dryml.core import Shared, repeat
+`Ref(definition)` records a lossless non-materializing assertion and does not
+bypass the destination role's admission rule. `Definition.quote()` and
+`QuotedDef` instead make a Definition explicit local expression data, not an
+Object graph edge. Direct QuotedDef values are traversal barriers by default;
+they are delivered as `QuotedDef` only through an explicit `Ref[QuotedDef]` role.
 
-independent = Template.from_value(repeat([Par("width")], Par("depth")))
-shared = Template.from_value([Par("width")] * Shared(Par("depth")))
-```
+## Experiment Artifact Mappings
 
-Ordinary repetition freshens DRYML construction-node identity for every copy while
-retaining parameter names, so copies have linked configuration but independent
-nodes. `Shared(count)` retains corresponding DRYML graph nodes. This is distinct
-from two structurally equal nodes, which are never deduplicated automatically.
-Neither policy requires TensorFlow or PyTorch factory consumers to reuse a backend
-layer/module instance: backend weight tying remains author-owned.
+`Experiment.artifacts` accepts only `Mapping[str, Template] | None`, with
+`Mapping[str, Template[Definition]]` as the equivalent long spelling. Each value
+is admitted separately as a Template-role Definition. Keys must be nonempty
+strings; lists, tuples, singleton recipes, nested mappings, non-Definition
+values, and non-string keys fail before training effects. At the activated
+Experiment boundary, entries are ordered by `canonical_key_bytes`; that canonical
+order controls evaluation and checkpoint recovery. Definition and selector
+authoring retain an artifact mapping inertly until later concretization.
 
-## Selection, References, And Persistence
+## Exact Support And Persistence
 
-`Template.as_selector()` is a loose ordinary `Selector`: it retains known concrete
-structure and fixed sequence positions but drops unknown roots, arithmetic
-relationships, and sharing topology. `TemplateGenerator.support_selector()` is
-the exact alternative: it checks captured domains, linked names, arithmetic,
-ordering, and graph topology. Bounds from custom domains can reject candidates but
-never prove membership; unavailable exact verification raises
-`UnsupportedTemplateVerificationError`.
+`Generator.support_selector()` returns `GeneratorSelector`, which proves exact
+finite support including linked roots, arithmetic, ordering, and construction
+graph topology. Conservative provider bounds may reject a candidate but never
+prove membership. An unavailable finite proof raises
+`UnsupportedGeneratorVerificationError`; bounded grid and proof operations
+raise `ParameterizationLimitError` rather than returning partial results.
 
-An unresolved recipe can be carried only by a constructor slot declared
-`Ref[Template]`. That recipe is opaque to outer `sub` and `remap` calls by default;
-pass `traverse_refs=True` to enter pre-existing carried recipes. Ref opacity does
-not make undeclared slots valid and does not cause recursive same-call binding.
+Only immutable built-in distributions are portable selector data. A
+`GeneratorSelector` keeps the established `dryml-template` v1
+`template-selector` payload tag and canonical bytes for compatible definitions;
+it decodes directly to Definition-based state. A Generator and arbitrary runtime
+providers are intentionally nonportable. GeneratorSelector works with Repo
+queries and save routing while retaining exact witness verification.
 
-`TemplateBundle` carries an ordered named collection of inert recipes for an
-artifact owner. It accepts one `Template`, a list/tuple (named `artifact_0`,
-`artifact_1`, and so on), or a string-keyed mapping whose insertion order and
-punctuation-bearing nonempty names are retained. Bundles are accepted only through
-`Ref[TemplateBundle]`, encode all recipes in one bounded closed payload, and have
-the same default Ref traversal barrier as `Template`.
+Symbolic Definitions and providers operate on trusted DRYML code and values.
+They are not a sandbox or safe-deserialization boundary.
 
-The same boundary applies to recursive `object_projection()`: ordinary Ref-held
-`StateRef` values are weakened to their `ObjectRef` associations, while a
-Ref-held Template stays unchanged unless `traverse_refs=True`. Opting in retains
-the recipe's `Par` expressions and only weakens supported exact references; it
-does not resolve or construct the recipe.
+## Beta Removals
 
-```python
-from dryml.core import Definition, Object, Ref
-
-class RecipeConsumer(Object):
-    def __init__(self, recipe: Ref[Template]):
-        self.recipe = recipe
-
-consumer = Definition(RecipeConsumer, recipe=model).concretize()
-```
-
-The unresolved `model` recipe remains data while `RecipeConsumer` is
-materialized, saved, restored, and encoded. Its target is not constructed, and
-the consumer can later call `.sub(...)` on the received recipe explicitly.
-Template and built-in-domain selector data use closed portable codecs. Runtime
-providers and `TemplateGenerator` itself are not portable.
-
-Migration is direct: replace `Definition(...).as_space()` with a class-first
-`Template(...)` or `.as_template()`, then capture bindings in `TemplateGenerator`.
-`SearchSpace`, `space`, `space_mode`, old predicate-bearing `Par`, and the old
-generator classes have no aliases. Predicate helpers such as `Exact` and
-`IntRange` now return independent `Match` leaves for ordinary selectors; use
-`Par(name)` for template bindings and `UniformIntRange`/`UniformFromSet` domains
-with a generator.
-
-Templates operate on trusted DRYML code and values and are not a sandbox or safe
-deserialization boundary. Provider diagnostic disclosure and pre-parse payload
-ingestion hardening remain deferred security work; this documentation does not
-claim those limitations are fixed.
+There is no runtime `Template` carrier and no `TemplateBundle`,
+`TemplateGenerator`, or `TemplateSelector` API. There are no aliases, source or
+pickle compatibility shims, or persisted-value migration for those beta values,
+including previously persisted symbolic `Ref[Definition]` values. Re-author a
+recipe as a Definition, bind fixed values with `Definition.sub(...)`, and use
+`Generator` only for an explicit Distribution mapping. Compatible
+`GeneratorSelector` payloads are the sole retained beta-format compatibility
+commitment.

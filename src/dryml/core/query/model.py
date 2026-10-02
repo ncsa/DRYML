@@ -705,6 +705,8 @@ class ResultUniverse:
     witness_complete: bool = False
     containment: ContainmentContext | None = None
     containment_witnesses: tuple[DefinitionOccurrence | ReferenceOccurrence, ...] = ()
+    containment_private_witnesses: tuple[DefinitionOccurrence | ReferenceOccurrence, ...] = ()
+    containment_private_replicas: dict[object, tuple[Any, ...]] | None = None
     containment_carrier: ContainmentCarrier = "target"
 
 

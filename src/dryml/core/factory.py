@@ -29,7 +29,6 @@ def _validated_factory_target(value: Any) -> str | ImportRef | SourceSpec:
 def _freeze_factory_value(value: Any, path: tuple[str, ...] = ()) -> Any:
     from .definition import ConcreteDefinition, Definition
     from .object import Object
-    from .template import Template, TemplateBundle
 
     if isinstance(value, (Object, Definition, ConcreteDefinition)):
         loc = "/".join(path) or "<root>"
@@ -37,9 +36,6 @@ def _freeze_factory_value(value: Any, path: tuple[str, ...] = ()) -> Any:
             f"FactorySpec arguments cannot contain DRYML graph nodes at {loc}. "
             "Pass plain runtime construction values instead."
         )
-
-    if isinstance(value, (Template, TemplateBundle)):
-        return value
 
     symbol = maybe_symbol_ref(value)
     if symbol is not None:
@@ -231,12 +227,12 @@ class FactorySpec:
         return cls(target, *args, **kwargs)
 
     @classmethod
-    def _from_template_parts(
+    def _from_symbolic_parts(
         cls, target: Any, args: tuple[Any, ...], kwargs: FrozenDict
     ) -> "FactorySpec":
         """Rebuild an already-frozen call without resolving its target.
 
-        Template rewriting uses this private constructor to preserve inert
+        Symbolic rewriting uses this private constructor to preserve inert
         factory spelling and aliases among rewritten argument values.
         """
 
@@ -309,18 +305,18 @@ class FactorySpec:
         Raises:
             ValueError: If a short string target cannot be resolved.
             TypeError: If the built object is not ``instance_type``.
-            UnresolvedTemplateError: If an argument still contains an active
-                template expression; the target is not resolved or invoked.
+            UnresolvedDefinitionError: If an argument still contains an active
+                symbolic expression; the target is not resolved or invoked.
             Exception: Any resolution or target-constructor failure unchanged.
 
         Side Effects:
             May import target code and invokes the target constructor.
         """
-        from .errors import UnresolvedTemplateError
+        from .errors import UnresolvedDefinitionError
         from .template import _contains_expression
 
         if _contains_expression(self.args) or _contains_expression(self.kwargs):
-            raise UnresolvedTemplateError("FactorySpec cannot build unresolved template expressions")
+            raise UnresolvedDefinitionError("FactorySpec cannot build unresolved symbolic expressions")
         target = self.resolve_target(namespace=namespace)
         args = tuple(_resolve_factory_value(arg) for arg in self.args)
         kwargs = {

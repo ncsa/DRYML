@@ -1,30 +1,22 @@
-"""Closed persistence and Ref-delivery contracts for definition templates."""
+"""Persistence coverage for Definition values carried by the Template role."""
 
 from __future__ import annotations
 
-from copy import deepcopy
-import json
-from pathlib import Path
+from collections.abc import Mapping
 
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, F, Object, ObjectRef, Ref, Repo, StateRef, Template
-from dryml.core.cdef_codec import CDefGraphCodecError, decode_cdef_graph, encode_cdef_graph
-from dryml.core.errors import TemplateError
-from dryml.core.links import DefLink
-from dryml.core.repo_definition import RepoDefinition
-from dryml.core.store.dir import DirStore
-from dryml.core.template import Par
-from dryml.core.signatures import SignatureError
-from dryml.core.template_selector import TemplateGenerator, TemplateSelector
+from dryml.core import Definition, Generator, GeneratorSelector, Object, Par, Repo, Template
+from dryml.core.cdef_codec import decode_cdef_graph, encode_cdef_graph
 from dryml.core.domains import UniformFromSet
-
-
-FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "template_v1"
+from dryml.core.errors import ParameterizationError
+from dryml.core.quoted import QuotedDef
+from dryml.core.store.dir import DirStore
+from dryml.core.utils.graph.path import canonical_key_bytes
 
 
 class PortableLeaf(Object):
-    """Importable inert leaf used to prove template decoding stays lightweight."""
+    """Inert target proving symbolic quotation never constructs a recipe."""
 
     constructed = 0
 
@@ -34,283 +26,113 @@ class PortableLeaf(Object):
 
 
 class TemplateOwner(Object):
-    """Concrete owner that explicitly admits an unresolved carried recipe."""
+    """Own a single symbolic Definition through the Template receiving role."""
 
-    def __init__(self, recipe: Ref[Template]):
+    def __init__(self, recipe: Template):
         self.recipe = recipe
 
 
-class UndeclaredOwner(Object):
-    """Owner without a role declaration used to reject quotation bypasses."""
+class MappingOwner(Object):
+    """Own a flat canonical mapping of independently quoted Definition recipes."""
 
-    def __init__(self, recipe):
-        self.recipe = recipe
-
-
-class MaterializingOwner(Object):
-    """Materializing owner that must reject unresolved recipe data."""
-
-    def __init__(self, recipe: Ref[Definition]):
-        self.recipe = recipe
+    def __init__(self, recipes: Mapping[str, Template] | None = None):
+        self.recipes = recipes
 
 
-def _recipe() -> Template:
-    """Return a portable unresolved expression whose target need not exist."""
+def _recipe(name: str = "width") -> Definition:
+    """Return an inert symbolic Definition without constructing its target."""
 
-    return Template(PortableLeaf, Par("width") * 2)
+    return Definition(PortableLeaf, Par(name) * 2)
 
 
-def test_template_round_trip_preserves_expression_and_never_constructs_target():
-    """Portable recipe decoding remains inert and preserves its unresolved root."""
+def test_template_marker_is_noninstantiable_and_retired_carriers_are_not_public():
+    """Template remains annotation vocabulary while runtime carrier APIs are absent."""
+
+    import dryml
+    import dryml.core as core
+
+    with pytest.raises(TypeError, match="annotation-only"):
+        Template(PortableLeaf, 1)
+    assert not hasattr(dryml, "TemplateBundle")
+    assert not hasattr(core, "TemplateBundle")
+    assert not hasattr(dryml, "TemplateGenerator")
+    assert not hasattr(dryml, "TemplateSelector")
+
+
+def test_template_role_persists_symbolic_definition_as_quoted_data_without_construction(tmp_path):
+    """CDef and Store replay deliver the original Definition rather than a carrier."""
 
     PortableLeaf.constructed = 0
     recipe = _recipe()
+    cdef = Definition(TemplateOwner, recipe).concretize()
+    restored_cdef = decode_cdef_graph(encode_cdef_graph(cdef))
+    link = restored_cdef.parameters["recipe"]
+    assert isinstance(link.target, QuotedDef)
+    assert link.target.value.names == ("width",)
 
-    restored = Template.from_data(recipe.to_data())
+    repo = Repo(DirStore(tmp_path / "store"))
+    state = repo.save_object(TemplateOwner(recipe, repo=repo))
+    restored = Repo(DirStore(tmp_path / "store")).load_state_ref(state, reuse_live="never")
 
-    assert restored.to_data() == recipe.to_data()
-    assert restored.names == ("width",)
-    assert PortableLeaf.constructed == 0
-
-
-def test_synthetic_v1_fixture_decodes_without_resolving_its_target():
-    """The checked-in codec fixture remains portable independent of Store data."""
-
-    manifest = json.loads((FIXTURE_ROOT / "manifest.json").read_text(encoding="ascii"))
-    payload = json.loads((FIXTURE_ROOT / "template.json").read_text(encoding="ascii"))
-
-    decoded = Template.from_data(payload)
-
-    assert manifest["codec_schema"] == payload["schema"]
-    assert manifest["codec_version"] == payload["version"]
-    assert decoded.names == ("width",)
-
-    selector_payload = json.loads((FIXTURE_ROOT / "template_selector.json").read_text(encoding="ascii"))
-    selector = TemplateSelector.from_data(selector_payload)
-    assert selector._generator.template.names == ("width",)
-
-
-def test_synthetic_v1_fixtures_preserve_ref_owner_and_reference_meaning():
-    """Retained synthetic payloads decode inertly with their exact root meaning."""
-
-    manifest = json.loads((FIXTURE_ROOT / "manifest.json").read_text(encoding="ascii"))
-    expected = {
-        "ref_owner_cdef.json": ConcreteDefinition,
-        "object_ref.json": ObjectRef,
-        "state_ref.json": StateRef,
-    }
-    for name, root_type in expected.items():
-        payload = json.loads((FIXTURE_ROOT / name).read_text(encoding="ascii"))
-        restored = Template.from_data(payload)
-        assert restored.to_data() == payload
-        assert isinstance(restored.root, root_type)
-        assert manifest["fixtures"][name]["root_type"] == root_type.__name__
-
-    owner = Template.from_data(
-        json.loads((FIXTURE_ROOT / "ref_owner_cdef.json").read_text(encoding="ascii"))
-    ).root
-    assert isinstance(owner.parameters["recipe"], DefLink)
-    assert owner.parameters["recipe"].target.names == ("width",)
-
-    repo_data = json.loads((FIXTURE_ROOT / "repo_definition.json").read_text(encoding="ascii"))
-    assert RepoDefinition.from_data(repo_data).to_data() == repo_data
-
-
-def test_declared_ref_template_owner_persists_opaque_unresolved_recipe():
-    """Only an explicit Ref[Template] owner retains unresolved recipe data."""
-
-    PortableLeaf.constructed = 0
-    owner = Definition(TemplateOwner, _recipe()).concretize()
-    restored = decode_cdef_graph(encode_cdef_graph(owner))
-
-    link = restored.parameters["recipe"]
-    assert isinstance(link, DefLink)
-    assert isinstance(link.target, Template)
-    assert link.target.names == ("width",)
-    assert PortableLeaf.constructed == 0
-
-
-def test_declared_ref_template_owner_restores_through_a_store(tmp_path):
-    """Structural Store restoration delivers a carried recipe without building it."""
-
-    PortableLeaf.constructed = 0
-    store = DirStore(tmp_path / "store")
-    repo = Repo(store)
-    owner = TemplateOwner(_recipe(), repo=repo)
-
-    saved = repo.save_object(owner)
-    restored = Repo(DirStore(store.base_dir)).load_object(saved.definition)
-
-    assert isinstance(restored.recipe, Template)
+    assert isinstance(restored.recipe, Definition)
     assert restored.recipe.names == ("width",)
     assert PortableLeaf.constructed == 0
 
 
-@pytest.mark.parametrize("owner", (UndeclaredOwner, MaterializingOwner))
-def test_unresolved_template_requires_exact_ref_template_admission(owner):
-    """Raw and non-Template roles cannot bypass concrete-owner admission."""
+def test_template_mapping_quotes_each_recipe_in_canonical_key_order():
+    """Flat mapping admission uses canonical key bytes, not authored insertion order."""
 
-    with pytest.raises((TypeError, TemplateError)):
-        Definition(owner, _recipe()).concretize()
+    first, second = _recipe("first"), _recipe("second")
+    cdef = Definition(MappingOwner, {"z": first, "a!": second}).concretize()
+    recipes = cdef.parameters["recipes"]
 
-
-def test_finalized_template_link_is_rechecked_at_fresh_declared_boundary():
-    """A manually finalized link is not a generic Ref-wrapper admission bypass."""
-
-    link = DefLink.finalized(Ref.kind, _recipe())
-
-    with pytest.raises(SignatureError, match=r"explicit Ref\[Template\] declaration"):
-        Definition(UndeclaredOwner, link).concretize()
+    assert tuple(recipes) == tuple(sorted(("z", "a!"), key=canonical_key_bytes))
+    assert all(isinstance(link.target, QuotedDef) for link in recipes.values())
+    direct = MappingOwner({"z": first, "a!": second})
+    assert tuple(direct.recipes) == tuple(recipes)
 
 
-def test_template_codec_rejects_unknown_tags_and_duplicate_labels():
-    """Malformed closed payloads fail before exposing a recipe."""
+@pytest.mark.parametrize("recipes", ({"": _recipe()}, {1: _recipe()}, {"nested": {"x": _recipe()}}))
+def test_template_mapping_rejects_invalid_shape_before_owner_effects(recipes):
+    """Malformed mappings cannot reach the owning constructor boundary."""
 
-    data = _recipe().to_data()
-    unknown = deepcopy(data)
-    unknown["version"] = 2
-    duplicate = deepcopy(data)
-    duplicate["nodes"].append(deepcopy(duplicate["nodes"][0]))
-
-    with pytest.raises(TemplateError):
-        Template.from_data(unknown)
-    with pytest.raises(TemplateError):
-        Template.from_data(duplicate)
+    PortableLeaf.constructed = 0
+    with pytest.raises(Exception):
+        MappingOwner(recipes)
+    assert PortableLeaf.constructed == 0
 
 
-def test_template_codec_rejects_invalid_binary_operands_and_factory_targets():
-    """Closed payloads cannot manufacture states bypassing public invariants."""
+def test_template_mapping_rejects_more_than_4096_entries_before_construction():
+    """The operation-wide mapping limit is enforced before recipe targets run."""
 
-    binary = _recipe().to_data()
-    binary_node = next(
-        record["value"] for record in binary["nodes"]
-        if record["value"]["tag"] == "binary"
-    )
-    binary_node["right"] = {"tag": "str", "value": "not-a-number"}
-
-    factory = Template.from_value(F("portable", 1)).to_data()
-    factory_node = next(
-        record["value"] for record in factory["nodes"]
-        if record["value"]["tag"] == "factory"
-    )
-    factory_node["target"] = {"tag": "int", "value": "1"}
-
-    with pytest.raises(TemplateError, match="binary operands"):
-        Template.from_data(binary)
-    with pytest.raises(TemplateError, match="factory target"):
-        Template.from_data(factory)
+    recipes = {f"metric-{index}": _recipe() for index in range(4_097)}
+    with pytest.raises(Exception, match="4096"):
+        MappingOwner(recipes)
+    assert PortableLeaf.constructed == 0
 
 
-def test_template_codec_normalizes_float_overflow_and_preserves_definition_aliases():
-    """Malformed floats fail closed and valid soft-call aliases round-trip."""
+def test_quoted_symbolic_definition_expression_codec_fails_closed():
+    """Quoted Definition expression data round-trips and rejects malformed payloads."""
 
-    overflow = Template.from_value(1.0).to_data()
-    overflow["root"]["value"] = "0x1p+999999999999999999999"
-    with pytest.raises(TemplateError, match="float is invalid"):
-        Template.from_data(overflow)
+    from dryml.core.definition_expression_codec import from_data, to_data
 
-    definition = Definition(PortableLeaf, 1)
-    aliased = Template._from_root([definition, definition.args, definition.kwargs])
-    restored = Template.from_data(aliased.to_data())
-    assert restored.root[0].args is restored.root[1]
-    assert restored.root[0].kwargs is restored.root[2]
-
-
-def test_cdef_codec_rejects_template_payload_outside_ref_link():
-    """The additive CDef leaf cannot turn a Template into ordinary atom data."""
-
-    owner = Definition(TemplateOwner, _recipe()).concretize()
-    encoded = encode_cdef_graph(owner)
-    encoded["nodes"][0]["parameters"]["items"][0][1] = {
-        "kind": "template", "value": _recipe().to_data(),
-    }
-
-    with pytest.raises(CDefGraphCodecError):
-        decode_cdef_graph(encoded)
+    payload = to_data(_recipe())
+    restored = from_data(payload)
+    assert isinstance(restored, Definition)
+    assert restored.names == ("width",)
+    payload["version"] = 2
+    with pytest.raises(ParameterizationError):
+        from_data(payload)
 
 
-def test_exact_selector_round_trip_uses_only_builtin_domain_data():
-    """Exact support selectors retain built-in choices without providers/code."""
+def test_generator_selector_v1_payload_still_round_trips_definition_state():
+    """Generator selector persistence retains the established portable payload shape."""
 
-    selector = TemplateGenerator(
-        Template(PortableLeaf, value=Par("width")), sub_dict={"width": UniformFromSet((2, 4))}
+    selector = Generator(
+        Definition(PortableLeaf, value=Par("width")),
+        {"width": UniformFromSet((2, 4))},
     ).support_selector()
-
-    restored = TemplateSelector.from_data(selector.to_data())
+    restored = GeneratorSelector.from_data(selector.to_data())
 
     assert restored.matches(Definition(PortableLeaf, value=2))
     assert not restored.matches(Definition(PortableLeaf, value=3))
-
-
-def test_selector_codec_rejects_noncanonical_node_order():
-    """Selector decoding applies the same canonical graph check as Template data."""
-
-    selector = TemplateGenerator(
-        Template(PortableLeaf, value=Par("width")), sub_dict={"width": UniformFromSet((2, 4))}
-    ).support_selector()
-    payload = selector.to_data()
-    payload["nodes"].reverse()
-
-    with pytest.raises(TemplateError, match="canonical"):
-        TemplateSelector.from_data(payload)
-
-
-def test_template_codec_rejects_actual_private_cycles_before_back_references():
-    """A malformed private root cannot be encoded as a graph alias cycle."""
-
-    root = []
-    root.append(root)
-
-    with pytest.raises(TemplateError, match="cycle"):
-        Template._from_root(root).to_data()
-
-
-def test_template_name_limits_and_set_member_boundary():
-    """Public construction enforces portable root limits and unordered-value rules."""
-
-    component = "a" * 64
-    assert Par(component).name == component
-    with pytest.raises(TemplateError):
-        Par("a" * 65)
-    assert Par("/".join(["a"] * 16)).name.count("/") == 15
-    with pytest.raises(TemplateError):
-        Par("/".join(["a"] * 17))
-    assert Par("/".join(("a" * 64, "b" * 64, "c" * 64, "d" * 61))).name
-    with pytest.raises(TemplateError):
-        Par("/".join(("a" * 64, "b" * 64, "c" * 64, "d" * 62)))
-    qualified = "/".join(("a",) * 15 + ("width",))
-    assert Template(PortableLeaf, Par(qualified)).sub(namespace=("a",) * 15, width=1).is_resolved
-    with pytest.raises(TemplateError):
-        Template(PortableLeaf, Par(qualified)).sub(namespace=("a",) * 16, width=1)
-    with pytest.raises(TemplateError, match="set members"):
-        Template.from_value({Par("width")})
-
-
-def test_template_codec_rejects_expression_set_members():
-    """Parsed template data cannot place an expression in an unordered set."""
-
-    payload = Template.from_value({"literal"}).to_data()
-    record = next(record for record in payload["nodes"] if record["value"]["tag"] == "set")
-    record["value"]["items"] = [{"tag": "ref", "label": "n-expression"}]
-    payload["nodes"].append({
-        "label": "n-expression",
-        "value": {"tag": "par", "name": "width", "path": {"schema_version": 3, "segments": []}},
-    })
-
-    with pytest.raises(TemplateError, match="set members"):
-        Template.from_data(payload)
-
-
-def test_template_equality_and_hash_preserve_alias_topology():
-    """Shared and independent equal recipes remain distinct across round-trips."""
-
-    leaf = Definition(PortableLeaf, 1)
-    shared = Template.from_value([leaf, leaf])
-    independent = Template.from_value([Definition(PortableLeaf, 1), Definition(PortableLeaf, 1)])
-
-    assert shared != independent
-    assert shared.stable_hash() != independent.stable_hash()
-    restored_shared = Template.from_data(shared.to_data())
-    restored_independent = Template.from_data(independent.to_data())
-    assert restored_shared.root[0] is restored_shared.root[1]
-    assert restored_independent.root[0] is not restored_independent.root[1]

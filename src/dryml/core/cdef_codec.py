@@ -22,6 +22,7 @@ from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 
 CDEF_GRAPH_CODEC_VERSION = 2
+_MAX_QUOTED_DEFINITION_BYTES = 16 * 1024 * 1024
 
 
 class CDefGraphCodecError(ValueError):
@@ -49,6 +50,7 @@ def encode_cdef_graph(root: ConcreteDefinition) -> dict[str, Any]:
             f"Expected ConcreteDefinition, got {type(root).__name__}."
         )
     graph, labels = _graph_and_labels(root)
+    quotation_budget = _QuotationBudget()
     nodes = []
     for node in graph.nodes():
         cdef = node.definition
@@ -56,7 +58,9 @@ def encode_cdef_graph(root: ConcreteDefinition) -> dict[str, Any]:
             {
                 "label": labels[cdef_node_key(cdef)],
                 "cls": cdef.cls,
-                "parameters": _encode_value(cdef.parameters, labels),
+                "parameters": _encode_value(
+                    cdef.parameters, labels, quotation_budget
+                ),
                 "stateful_role": cdef._stateful_role,
             }
         )
@@ -123,6 +127,7 @@ def decode_cdef_graph(data: Any) -> ConcreteDefinition:
         )
     built: dict[str, ConcreteDefinition] = {}
     active: set[str] = set()
+    quotation_budget = _QuotationBudget()
 
     def build(label: str) -> ConcreteDefinition:
         if label in built:
@@ -134,7 +139,9 @@ def decode_cdef_graph(data: Any) -> ConcreteDefinition:
         active.add(label)
         try:
             node = payloads[label]
-            parameters = _decode_value(node["parameters"], build, payloads)
+            parameters = _decode_value(
+                node["parameters"], build, payloads, quotation_budget
+            )
             if not isinstance(parameters, FrozenDict):
                 raise CDefGraphCodecError(
                     f"CDef graph parameters for {label!r} must be a frozen mapping payload."
@@ -197,7 +204,7 @@ def object_projection_cdef(
 
     Args:
         root: Exact CDef graph to rewrite without resolving its class authority.
-        traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
+        traverse_refs: Whether to enter Ref-held quoted Definition data. Ordinary
             Ref-held exact references are always rewritten.
 
     Returns:
@@ -217,10 +224,10 @@ def object_projection_cdef(
     if type(traverse_refs) is not bool:
         raise TypeError("traverse_refs must be a bool.")
 
-    from .definition import Definition
     from .cdef_graph import EdgeKind
+    from .definition import Definition
     from .factory import FactorySpec
-    from .template import Template, TemplateBundle, _BinaryExpr, _RepeatExpr
+    from .template import _BinaryExpr, _RepeatExpr
 
     memo: dict[int, Any] = {}
     active: set[int] = set()
@@ -239,38 +246,6 @@ def object_projection_cdef(
         finally:
             active.remove(marker)
 
-    def rewrite_template(template: Template) -> Template:
-        marker = id(template)
-        if marker in memo:
-            return memo[marker]
-        if marker in active:
-            raise ValueError("Object projection does not support cyclic Template graphs.")
-        active.add(marker)
-        try:
-            root_value = rewrite(template.root)
-            result = template if root_value is template.root else Template._from_root(root_value)
-            memo[marker] = result
-            return result
-        finally:
-            active.remove(marker)
-
-    def rewrite_bundle(bundle: TemplateBundle) -> TemplateBundle:
-        """Rewrite quoted recipes only after the caller crosses their Ref barrier."""
-
-        marker = id(bundle)
-        if marker in memo:
-            return memo[marker]
-        if marker in active:
-            raise ValueError("Object projection does not support cyclic TemplateBundle graphs.")
-        active.add(marker)
-        try:
-            recipes = FrozenDict((name, rewrite_template(recipe)) for name, recipe in bundle.recipes.items())
-            result = bundle if all(recipes[name] is recipe for name, recipe in bundle.recipes.items()) else TemplateBundle._from_recipes(recipes)
-            memo[marker] = result
-            return result
-        finally:
-            active.remove(marker)
-
     def rewrite(current: Any) -> Any:
         if isinstance(current, StateRef):
             marker = id(current)
@@ -281,21 +256,21 @@ def object_projection_cdef(
             return result
         if isinstance(current, ObjectRef):
             return rewrite_reference(current)
-        if isinstance(current, Template):
-            return current
-        if isinstance(current, TemplateBundle):
-            return current
         if isinstance(current, DefLink):
             marker = id(current)
             if marker in memo:
                 return memo[marker]
             if (
-                current.kind is EdgeKind.REF
-                and isinstance(current.target, (Template, TemplateBundle))
+                traverse_refs
+                and current.kind is EdgeKind.REF
+                and isinstance(current.target, QuotedDef)
             ):
-                if not traverse_refs:
-                    return current
-                target = rewrite_template(current.target) if isinstance(current.target, Template) else rewrite_bundle(current.target)
+                value = rewrite(current.target.value)
+                target = (
+                    current.target
+                    if value is current.target.value
+                    else QuotedDef(value)
+                )
             else:
                 target = rewrite(current.target)
             result = current if target is current.target else (
@@ -346,7 +321,7 @@ def object_projection_cdef(
                     new is old for new, old in zip(args, current.args)
                 ))
             ) and all(kwargs[name] is value for name, value in current.kwargs.items()) else (
-                Definition._from_template_parts(current.cls, args, kwargs)
+                Definition._from_symbolic_parts(current.cls, args, kwargs)
             )
             memo[marker] = result
             return result
@@ -361,7 +336,7 @@ def object_projection_cdef(
             result = current if all(
                 new is old for new, old in zip(args, current.args)
             ) and all(kwargs[name] is value for name, value in current.kwargs.items()) else (
-                FactorySpec._from_template_parts(current.target, args, kwargs)
+                FactorySpec._from_symbolic_parts(current.target, args, kwargs)
             )
             memo[marker] = result
             return result
@@ -585,49 +560,95 @@ def _graph_and_labels(root: ConcreteDefinition):
     return graph, labels
 
 
-def _encode_value(value: Any, labels: dict[object, str]) -> dict[str, Any]:
+class _QuotationBudget:
+    """Bound cumulative quoted-expression bytes retained by one CDef record."""
+
+    def __init__(self) -> None:
+        self.bytes = 0
+
+    def consume(self, payload: Any) -> None:
+        try:
+            size = len(
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("ascii")
+            )
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise CDefGraphCodecError(
+                "CDef quoted Definition payload is invalid."
+            ) from error
+        self.bytes += size
+        if self.bytes > _MAX_QUOTED_DEFINITION_BYTES:
+            raise CDefGraphCodecError(
+                "CDef aggregate quoted Definition payload limit exceeded."
+            )
+
+
+def _encode_value(
+    value: Any,
+    labels: dict[object, str],
+    quotation_budget: _QuotationBudget,
+) -> dict[str, Any]:
     if isinstance(value, ObjectRef):
         return {"kind": "object_ref", "value": value.to_data()}
     if isinstance(value, StateRef):
         return {"kind": "state_ref", "value": value.to_data()}
     if isinstance(value, ConcreteDefinition):
         return {"kind": "cdef", "label": labels[cdef_node_key(value)]}
+    if isinstance(value, QuotedDef):
+        from .definition_expression_codec import to_data
+
+        payload = to_data(value.value)
+        quotation_budget.consume(payload)
+        return {"kind": "quoted-definition", "value": payload}
     if isinstance(value, DefLink):
         if not value.is_finalized:
             raise CDefGraphCodecError("Unresolved DefLink assertions cannot be encoded.")
+        if isinstance(value.target, QuotedDef):
+            from .definition import Definition
+
+            if not isinstance(value.target.value, Definition):
+                raise CDefGraphCodecError(
+                    "CDef quoted Definition link must contain a Definition."
+                )
         return {
             "kind": "link",
             "edge_kind": value.kind.value,
-            "target": _encode_value(value.target, labels),
+            "target": _encode_value(value.target, labels, quotation_budget),
         }
-    from .template import Template, TemplateBundle
-    if isinstance(value, Template):
-        return {"kind": "template", "value": value.to_data()}
-    if isinstance(value, TemplateBundle):
-        return {"kind": "template-bundle", "value": value.to_data()}
     if isinstance(value, FrozenDict):
         return {
             "kind": "dict",
             "items": [
-                [edge.segment.key, _encode_value(edge.value, labels)]
+                [
+                    edge.segment.key,
+                    _encode_value(edge.value, labels, quotation_budget),
+                ]
                 for edge in iter_value_edges(value)
             ],
         }
     if isinstance(value, FrozenList):
         return {
             "kind": "list",
-            "items": [_encode_value(item, labels) for item in value],
+            "items": [
+                _encode_value(item, labels, quotation_budget) for item in value
+            ],
         }
     if isinstance(value, FrozenTuple):
         return {
             "kind": "tuple",
-            "items": [_encode_value(item, labels) for item in value],
+            "items": [
+                _encode_value(item, labels, quotation_budget) for item in value
+            ],
         }
     if isinstance(value, FrozenSet):
         return {
             "kind": "set",
             "items": [
-                _encode_value(edge.value, labels)
+                _encode_value(edge.value, labels, quotation_budget)
                 for edge in iter_value_edges(value)
             ],
         }
@@ -635,7 +656,10 @@ def _encode_value(value: Any, labels: dict[object, str]) -> dict[str, Any]:
 
 
 def _decode_value(
-    data: Any, build, payloads: dict[str, dict[str, Any]]
+    data: Any,
+    build,
+    payloads: dict[str, dict[str, Any]],
+    quotation_budget: _QuotationBudget,
 ) -> Any:
     if not isinstance(data, dict) or "kind" not in data:
         raise CDefGraphCodecError(
@@ -656,10 +680,20 @@ def _decode_value(
                 f"CDef graph reference {label!r} is undeclared."
             )
         return build(label)
+    if kind == "quoted-definition":
+        _require_exact_keys(data, {"kind", "value"}, "QuotedDef")
+        from .definition_expression_codec import from_data
+
+        try:
+            quotation_budget.consume(data["value"])
+            return QuotedDef(from_data(data["value"]))
+        except CDefGraphCodecError:
+            raise
+        except Exception as error:
+            raise CDefGraphCodecError("CDef quoted Definition payload is invalid.") from error
     if kind == "link":
         _require_exact_keys(data, {"kind", "edge_kind", "target"}, "CDef link")
         from .cdef_graph import EdgeKind
-        from .template import Template, TemplateBundle
 
         try:
             edge_kind = EdgeKind(data["edge_kind"])
@@ -667,35 +701,28 @@ def _decode_value(
             raise CDefGraphCodecError(
                 f"Invalid CDef link kind {data['edge_kind']!r}."
             ) from error
-        target = _decode_value(data["target"], build, payloads)
+        target = _decode_value(
+            data["target"], build, payloads, quotation_budget
+        )
         if not isinstance(target, (
-            ConcreteDefinition, ObjectRef, StateRef, QuotedDef, SelectorSpec, Template, TemplateBundle,
+            ConcreteDefinition, ObjectRef, StateRef, QuotedDef, SelectorSpec,
         )):
             raise CDefGraphCodecError(
                 "CDef link target must be a CDef, ObjectRef, StateRef, or "
-            "exact constructor-data quotation, Template, or TemplateBundle."
+                "exact constructor-data quotation."
             )
         if isinstance(target, (QuotedDef, SelectorSpec)) and edge_kind is not EdgeKind.REF:
             raise CDefGraphCodecError(
                 "CDef constructor-data quotation links must use a Ref edge."
             )
-        if isinstance(target, (Template, TemplateBundle)) and edge_kind is not EdgeKind.REF:
-            raise CDefGraphCodecError("CDef Template quotation links must use a Ref edge.")
+        if isinstance(target, QuotedDef):
+            from .definition import Definition
+
+            if not isinstance(target.value, Definition):
+                raise CDefGraphCodecError(
+                    "CDef quoted Definition link must contain a Definition."
+                )
         return DefLink.finalized(edge_kind, target)
-    if kind == "template":
-        _require_exact_keys(data, {"kind", "value"}, "Template")
-        from .template import Template
-        try:
-            return Template.from_data(data["value"])
-        except Exception as error:
-            raise CDefGraphCodecError("CDef template payload is invalid.") from error
-    if kind == "template-bundle":
-        _require_exact_keys(data, {"kind", "value"}, "TemplateBundle")
-        from .template import TemplateBundle
-        try:
-            return TemplateBundle.from_data(data["value"])
-        except Exception as error:
-            raise CDefGraphCodecError("CDef template bundle payload is invalid.") from error
     if kind == "dict":
         _require_exact_keys(data, {"kind", "items"}, "CDef dict")
         if not isinstance(data["items"], list):
@@ -718,7 +745,14 @@ def _decode_value(
                     f"Duplicate CDef graph mapping key {item[0]!r}."
                 )
             seen_keys.add(item[0])
-            items.append((item[0], _decode_value(item[1], build, payloads)))
+            items.append(
+                (
+                    item[0],
+                    _decode_value(
+                        item[1], build, payloads, quotation_budget
+                    ),
+                )
+            )
         try:
             return FrozenDict(dict(items))
         except Exception as error:
@@ -728,7 +762,8 @@ def _decode_value(
         if not isinstance(data["items"], list):
             raise CDefGraphCodecError(f"CDef {kind} items must be a list.")
         items = [
-            _decode_value(item, build, payloads) for item in data["items"]
+            _decode_value(item, build, payloads, quotation_budget)
+            for item in data["items"]
         ]
         if kind == "list":
             return FrozenList(items)

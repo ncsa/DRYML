@@ -1,7 +1,7 @@
 """Explicit synchronous normalization for supported DRYML signatures.
 
-This module owns the Ref/Mat vocabulary, flat annotation grammar, lossless
-assertions, local activation, and read-only Repo-backed authority selection.
+This module owns the Ref/Mat/Template vocabulary, flat annotation grammar,
+lossless assertions, local activation, and read-only Repo-backed authority selection.
 Materialization stays with Repo and its later whole-boundary admission seam.
 """
 
@@ -322,6 +322,10 @@ def _is_union(annotation: Any) -> bool:
 def _contains_role(annotation: Any) -> bool:
     """Return whether a role occurs below a top-level annotation boundary."""
 
+    from .template import Template
+
+    if annotation is Template:
+        return True
     if get_origin(annotation) is Annotated:
         return any(isinstance(item, _Role) for item in get_args(annotation)[1:])
     return any(_contains_role(item) for item in get_args(annotation))
@@ -344,11 +348,11 @@ def _validate_target(target: Any, role: str, slot: str) -> None:
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectRef, StateRef
     from .selector import Selector
-    from .template import Template, TemplateBundle
+    from .template import Template
 
     supported = (
         Definition, ConcreteDefinition, ObjectRef, StateRef, Object, AutoRef,
-        QuotedDef, Selector, SelectorSpec, Template, TemplateBundle,
+        QuotedDef, Selector, SelectorSpec, Template,
     )
     if target not in supported:
         _reject_object_subclass(target, slot)
@@ -359,16 +363,35 @@ def _validate_target(target: Any, role: str, slot: str) -> None:
         raise SignatureError("AutoRef is only a reference target", slot)
     if target in (QuotedDef, Selector, SelectorSpec) and role != "ref":
         raise SignatureError("quotation targets are only reference data", slot)
-    if target in (Template, TemplateBundle) and role != "ref":
-        raise SignatureError("Template quotations are only reference targets", slot)
+    if target is Template:
+        raise SignatureError("Template is annotation vocabulary, not a Ref target", slot)
 
 
 def _parse_slot(annotation: Any, slot: str) -> _Slot:
     """Parse a top-level role annotation into flat mode metadata."""
 
+    from .definition import Definition
+    from .template import Template
+
+    template_annotation = Template[Definition]
+    template_role = get_args(template_annotation)[1]
+
+    def template_branch(branch: Any) -> Any:
+        if branch is Template:
+            return template_annotation
+        if get_origin(branch) is Mapping:
+            mapping_args = get_args(branch)
+            if len(mapping_args) == 2 and mapping_args[0] is str:
+                value = mapping_args[1]
+                if value is Template or value == template_annotation:
+                    return Annotated[branch, template_role]
+        return branch
+
     if annotation is inspect.Signature.empty:
         return _Slot("mat", (), False, "default")
-    branches = get_args(annotation) if _is_union(annotation) else (annotation,)
+    branches = tuple(template_branch(branch) for branch in (
+        get_args(annotation) if _is_union(annotation) else (annotation,)
+    ))
     role_branches = [branch for branch in branches if get_origin(branch) is Annotated]
     if not role_branches:
         if _contains_role(annotation):
@@ -378,6 +401,7 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
     roles: set[str] = set()
     members: list[Any] = []
     nullable = False
+    template_mapping = False
     for branch in branches:
         if branch is type(None):
             nullable = True
@@ -390,6 +414,15 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
             raise SignatureError("role annotation metadata is invalid", slot)
         roles.add(metadata[0].name)
         target = args[0]
+        if metadata[0].name == "template" and get_origin(target) is Mapping:
+            mapping_args = get_args(target)
+            value_annotation = template_branch(mapping_args[1]) if len(mapping_args) == 2 else None
+            if (
+                    len(mapping_args) != 2 or mapping_args[0] is not str
+                    or value_annotation != template_annotation):
+                raise SignatureError("Template mapping must be Mapping[str, Template]", slot)
+            template_mapping = True
+            continue
         if _contains_role(target):
             raise SignatureError("nested role annotation is unsupported", slot)
         target_members = get_args(target) if _is_union(target) else (target,)
@@ -400,8 +433,14 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
     if len(roles) != 1:
         raise SignatureError("mixed Ref/Mat unions are unsupported", slot)
     role = next(iter(roles))
+    if template_mapping:
+        if role != "template" or members:
+            raise SignatureError("Template mapping must be Mapping[str, Template]", slot)
+        return _Slot("template", (Definition,), nullable, "mapping")
     if not members:
         raise SignatureError("standalone None role target is unsupported", slot)
+    if role == "template" and members != [Definition]:
+        raise SignatureError("Template supports only the exact Definition target", slot)
     for member in members:
         if get_origin(member) is not None:
             raise SignatureError("container role target is unsupported", slot)
@@ -1003,6 +1042,31 @@ def _normalize_parameter_value(value: Any, parameter: inspect.Parameter,
                                preserve_finalized_links: bool = False) -> tuple[Any, Any]:
     """Normalize each explicitly annotated variadic occurrence independently."""
 
+    if slot.mode == "mapping":
+        if value is None and slot.nullable:
+            return None, None
+        if not isinstance(value, Mapping):
+            raise SignatureError("Template mapping value must be a mapping", name)
+        if len(value) > 4_096:
+            raise SignatureError("Template mapping exceeds the 4096-entry limit", name)
+        if any(type(key) is not str for key in value):
+            raise SignatureError("Template mapping keys must be strings", name)
+        if any(not key for key in value):
+            raise SignatureError("Template mapping keys must be nonempty", name)
+        from .utils.graph.path import canonical_key_bytes
+
+        authority, canonical = {}, {}
+        item_slot = _Slot("template", slot.targets, False, "exact")
+        for key in sorted(value, key=canonical_key_bytes):
+            selected, frozen = _normalize_value(
+                value[key], item_slot, f"{name}[{key!r}]", controls,
+                persist_role=persist_role,
+                preserve_finalized_links=preserve_finalized_links,
+                selection_key=name,
+            )
+            authority[key] = selected
+            canonical[key] = frozen
+        return authority, canonical
     if slot.explicit and parameter.kind is parameter.VAR_POSITIONAL:
         authority, canonical = [], []
         for index, item in enumerate(value):
@@ -1055,28 +1119,21 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
     from .links import DefLink
 
     asserted = False
+    edge_kind = EdgeKind.REF if slot.role in {"ref", "template"} else EdgeKind.MATERIALIZE
     if isinstance(value, DefLink):
         if value.is_finalized:
             # Decoded and structural links already carry their edge authority.
             # Bound replay and unannotated constructor structure stay inert;
             # fresh explicit constructor roles still enforce their exact edge.
-            from .template import Template, TemplateBundle
-
             if preserve_finalized_links:
                 return value, value
             if persist_role and not slot.explicit:
-                if isinstance(value.target, Template):
-                    raise SignatureError("Template requires an explicit Ref[Template] declaration", name)
-                if isinstance(value.target, TemplateBundle):
-                    raise SignatureError("TemplateBundle requires an explicit Ref[TemplateBundle] declaration", name)
                 return value, value
-            expected = EdgeKind.REF if slot.role == "ref" else EdgeKind.MATERIALIZE
-            if value.kind is not expected:
+            if value.kind is not edge_kind:
                 raise SignatureError("value assertion conflicts with the declared role", name)
             value, asserted = value.target, True
         else:
-            expected = EdgeKind.REF if slot.role == "ref" else EdgeKind.MATERIALIZE
-            if value.kind is not expected:
+            if value.kind is not edge_kind:
                 raise SignatureError("value assertion conflicts with the declared role", name)
             if value.target is None:
                 reason = (
@@ -1088,18 +1145,41 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
             value, asserted = value.target, True
     if value is None and slot.targets and not slot.nullable:
         raise SignatureError("None does not satisfy this role target", name)
-    selected = _select_authority(
-        value,
-        slot,
-        name,
-        controls,
-        selection_key=name if selection_key is None else selection_key,
-    )
-    if persist_role and slot.role == "ref" and slot.mode == "exact":
+    if slot.mode == "automatic":
+        from .definition import Definition
+
+        if isinstance(value, Definition):
+            if not asserted:
+                raise SignatureError(
+                    "Definition requires explicit Ref(...) for automatic reference selection",
+                    name,
+                )
+            selected = value
+        else:
+            selected = _select_authority(
+                value,
+                slot,
+                name,
+                controls,
+                selection_key=name if selection_key is None else selection_key,
+            )
+    else:
+        selected = _select_authority(
+            value,
+            slot,
+            name,
+            controls,
+            selection_key=name if selection_key is None else selection_key,
+        )
+    if slot.role == "ref" and slot.mode == "exact":
+        from .definition import Definition
+
+        if slot.targets[0] is Definition and isinstance(selected, Definition) and not selected.is_resolved:
+            raise SignatureError("Ref[Definition] requires a symbolically resolved Definition", name)
+    if persist_role and slot.role in {"ref", "template"} and slot.mode == "exact":
         from .definition import Definition
         from .quoted import QuotedDef, SelectorSpec
         from .selector import Selector
-        from .template import Template, TemplateBundle
 
         # Definition and selector roles carry expression data, not graph edges.
         # Quoting happens here, after the one owning signature has selected it.
@@ -1107,17 +1187,10 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
             return selected, DefLink.finalized(EdgeKind.REF, QuotedDef(selected))
         if slot.targets[0] is Selector and isinstance(selected, Selector):
             return selected, DefLink.finalized(EdgeKind.REF, SelectorSpec(selected))
-        if slot.targets[0] is Template and isinstance(selected, Template):
-            return selected, DefLink.finalized(EdgeKind.REF, selected)
-        if slot.targets[0] is TemplateBundle and isinstance(selected, TemplateBundle):
-            return selected, DefLink.finalized(EdgeKind.REF, selected)
         if selected is None or isinstance(selected, (QuotedDef, SelectorSpec)):
             return selected, selected
-    if asserted or (persist_role and slot.role == "ref" and selected is not None):
-        return selected, DefLink.finalized(
-            EdgeKind.REF if slot.role == "ref" else EdgeKind.MATERIALIZE,
-            selected,
-        )
+    if asserted or (persist_role and slot.role in {"ref", "template"} and selected is not None):
+        return selected, DefLink.finalized(edge_kind, selected)
     return selected, selected
 
 
@@ -1217,7 +1290,6 @@ def _select_exact(value: Any, target: Any, name: str,
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectRef, StateRef
     from .selector import Selector
-    from .template import Template, TemplateBundle
 
     if target is QuotedDef:
         return value if isinstance(value, QuotedDef) else QuotedDef(
@@ -1242,14 +1314,6 @@ def _select_exact(value: Any, target: Any, name: str,
             )
         )
         return SelectorSpec(selector)
-    if target is Template:
-        if isinstance(value, Template):
-            return value
-        raise _SelectionUnavailable()
-    if target is TemplateBundle:
-        if isinstance(value, TemplateBundle):
-            return value
-        raise _SelectionUnavailable()
     if isinstance(value, QuotedDef):
         if target is Definition:
             return value.value

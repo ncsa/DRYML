@@ -10,10 +10,12 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import ObjectRef, Repo, Serializable
+from dryml.core import (
+    SKIP_ARGS, Definition, Object, ObjectRef, Repo, Serializable,
+)
 from dryml.core.execute import CoreOptions, SharedDirStoreStrategy, prepare_shared_storage
 from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation
-from dryml.core.signatures import Mat, Ref, ReferenceSelection
+from dryml.core.signatures import AutoRef, Mat, Ref, ReferenceSelection
 from dryml.core.store.dir import DirStore
 from dryml.core.symbol import ImportRef
 
@@ -73,6 +75,15 @@ class OrdinaryEnvelope:
         self.value = value
 
 
+class DefinitionInput(Object):
+    """Materializable fixture carried to a worker as a symbolic Definition."""
+
+    def __init__(self, value=0, *, labels=()):
+        super().__init__()
+        self.value = value
+        self.labels = labels
+
+
 def _read_value(value):
     return value.value
 
@@ -96,6 +107,24 @@ def _reference_identity(value: Ref[ObjectRef]) -> Ref[ObjectRef]:
 def _return_assertion(value: Ref[ObjectRef]):
     """Return one transient assertion to prove result transport rejects it."""
     return Ref(value)
+
+
+def _definition_value(value: Object):
+    """Read one value after the ordinary Mat boundary materializes it."""
+
+    return value.value
+
+
+def _definition_identity(value: Ref[Definition]) -> Ref[Definition]:
+    """Retain exact symbolic Definition data across argument and result roles."""
+
+    return value
+
+
+def _automatic_definition_identity(value: Ref[AutoRef]) -> Ref[Definition]:
+    """Consume explicit soft-Definition intent at the worker boundary."""
+
+    return value
 
 
 def _path_identity(value):
@@ -135,6 +164,35 @@ def _invoke(strategy, fn, args, *, repo, **kwargs):
         repo=repo, args=args, kwargs={}, return_objects=False, update_args=False,
     )
     return prepared, result
+
+
+def test_symbolic_definition_transport_preserves_ref_data_and_mat_delivery(
+        tmp_path):
+    """Definition must not degrade to its Mapping view in the worker codec."""
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    definition = Definition(DefinitionInput, 7, labels=["first", "second"])
+    skipped = Definition(DefinitionInput, SKIP_ARGS, value=8)
+    strategy = SharedDirStoreStrategy()
+
+    _, value = _invoke(strategy, _definition_value, (definition,), repo=repo)
+    _, restored = _invoke(
+        strategy, _definition_identity, (definition,), repo=repo
+    )
+    _, restored_asserted = _invoke(
+        strategy, _automatic_definition_identity, (Ref(definition),), repo=repo
+    )
+    _, restored_skipped = _invoke(
+        strategy, _definition_identity, (skipped,), repo=repo
+    )
+
+    assert value == 7
+    assert isinstance(restored, Definition)
+    assert restored.stable_hash() == definition.stable_hash()
+    assert restored_asserted.stable_hash() == definition.stable_hash()
+    assert repr(restored.kwargs["labels"]).startswith("F[")
+    assert restored_skipped.args is None
+    assert restored_skipped.stable_hash() == skipped.stable_hash()
 
 
 def test_saved_authority_is_used_without_detecting_or_saving_later_mutation(tmp_path):
@@ -489,6 +547,29 @@ def test_malformed_assertion_fails_before_symbol_resolution(tmp_path, monkeypatc
     )
 
     with pytest.raises(CoreCallCodecError, match="malformed assertion"):
+        invoke_invocation(payload, repo=repo)
+
+
+def test_malformed_definition_shape_fails_before_symbol_resolution(
+        tmp_path, monkeypatch):
+    """Validate frozen Definition spelling before resolving its class."""
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    payload = dill.dumps({
+        "version": 2,
+        "root": 0,
+        "nodes": [
+            {"tag": "definition", "cls": 1, "args": 2, "kwargs": 3},
+            {"tag": "import", "module": "math", "qualname": None},
+            {"tag": "list", "items": []},
+            {"tag": "frozen_dict", "items": []},
+        ],
+    }, protocol=5)
+    monkeypatch.setattr(
+        ImportRef, "resolve", lambda self: pytest.fail("symbol resolution ran")
+    )
+
+    with pytest.raises(CoreCallCodecError, match="malformed Definition"):
         invoke_invocation(payload, repo=repo)
 
 

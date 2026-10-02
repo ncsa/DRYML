@@ -43,10 +43,11 @@ BackendChoice: TypeAlias = BackendConfig | InProcess | str
 class DispatchCoverageWarning(RuntimeWarning):
     """Warn that accepted static requirement collection was incomplete.
 
-    The warning carries no workload value, source, backend credentials, or
-    reservation. ``run`` and ``submit`` emit it for bounded-analysis limits or
-    when the caller opts into all incomplete-coverage warnings. ``explain``
-    retains diagnostics without emitting warnings.
+    The warning names the report's bounded diagnostic categories and directs
+    callers to :func:`dryml.dispatch.explain`; it carries no workload value,
+    source, backend credentials, or reservation. ``run`` and ``submit`` emit it
+    for bounded-analysis limits or when the caller opts into all incomplete-
+    coverage warnings. ``explain`` retains diagnostics without warning.
     """
 
 

@@ -22,7 +22,8 @@ import dill
 
 from .cdef_codec import decode_cdef_graph, encode_cdef_graph
 from .cdef_graph import has_stateful_materialization
-from .definition import ConcreteDefinition
+from .definition import ConcreteDefinition, Definition
+from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .links import DefLink
 from .object import Object, _AbstractObjectAdmissionError
 from .reference_values import ObjectRef, StateRef
@@ -94,7 +95,6 @@ class _DillLeafPickler(dill.Pickler):
         """Reject values that require the structural core transport."""
 
         from dryml.managed.config import ManagedConfig
-        from .template import TemplateBundle
 
         if isinstance(value, (asyncio.Future, asyncio.AbstractEventLoop)):
             raise _DillLeafError("live asyncio resource")
@@ -109,7 +109,6 @@ class _DillLeafPickler(dill.Pickler):
                 Object,
                 ObjectRef,
                 StateRef,
-                TemplateBundle,
             ),
         ):
             raise _DillLeafError("DRYML semantic value inside ordinary value")
@@ -446,9 +445,19 @@ class _Encoder:
                 "qualname": imported_capture.qualname,
             }
         automatic = id(value) in self.automatic_references
-        from .template import TemplateBundle
-        if isinstance(value, TemplateBundle):
-            return {"tag": "template-bundle", "value": value.to_data()}
+        if isinstance(value, Definition):
+            return {
+                "tag": "definition",
+                "cls": self.value(value.cls, f"{path}.cls", depth + 1),
+                "args": (
+                    None
+                    if value.args is None
+                    else self.value(value.args, f"{path}.args", depth + 1)
+                ),
+                "kwargs": self.value(
+                    value.kwargs, f"{path}.kwargs", depth + 1
+                ),
+            }
         if isinstance(value, ConcreteDefinition):
             return {"tag": "auto_cdef" if automatic else "cdef", "value": encode_cdef_graph(value)}
         if isinstance(value, Object):
@@ -471,6 +480,41 @@ class _Encoder:
                     "target": self.value(value.target, f"{path}.target", depth + 1),
                 }
             return {"tag": "link", "kind": value.kind.value, "target": self.value(value.target, f"{path}.target", depth + 1)}
+        if type(value) is FrozenTuple:
+            return {
+                "tag": "frozen_tuple",
+                "items": [
+                    self.value(item, f"{path}[{index}]", depth + 1)
+                    for index, item in enumerate(value)
+                ],
+            }
+        if type(value) is FrozenList:
+            return {
+                "tag": "frozen_list",
+                "items": [
+                    self.value(item, f"{path}[{index}]", depth + 1)
+                    for index, item in enumerate(value)
+                ],
+            }
+        if type(value) is FrozenSet:
+            return {
+                "tag": "frozen_set",
+                "items": [
+                    self.value(item, f"{path}.member[{index}]", depth + 1)
+                    for index, item in enumerate(value)
+                ],
+            }
+        if type(value) is FrozenDict:
+            return {
+                "tag": "frozen_dict",
+                "items": [
+                    [
+                        self.value(key, f"{path}.key[{index}]", depth + 1),
+                        self.value(item, f"{path}.value[{index}]", depth + 1),
+                    ]
+                    for index, (key, item) in enumerate(value.items())
+                ],
+            }
         if isinstance(value, tuple):
             return {"tag": "tuple", "items": [self.value(item, f"{path}[{index}]", depth + 1) for index, item in enumerate(value)]}
         if isinstance(value, list):
@@ -641,7 +685,8 @@ class _Decoder:
         if isinstance(self.graph.get("root"), bool) or not isinstance(self.graph.get("root"), int):
             _fail("malformed graph root", "$")
         allowed = {
-            "atom": {"tag", "value"}, "cdef": {"tag", "value"},
+            "atom": {"tag", "value"}, "definition": {"tag", "cls", "args", "kwargs"},
+            "cdef": {"tag", "value"},
             "auto_cdef": {"tag", "value"}, "state": {"tag", "value"},
             "auto_state": {"tag", "value"}, "object_ref": {"tag", "value"},
             "auto_object_ref": {"tag", "value"},
@@ -650,6 +695,8 @@ class _Decoder:
             "assertion": {"tag", "kind", "target"},
             "tuple": {"tag", "items"}, "list": {"tag", "items"}, "set": {"tag", "items"},
             "frozenset": {"tag", "items"}, "dict": {"tag", "items"},
+            "frozen_tuple": {"tag", "items"}, "frozen_list": {"tag", "items"},
+            "frozen_set": {"tag", "items"}, "frozen_dict": {"tag", "items"},
             "path": {"tag", "kind", "value"},
             "dill": {"tag", "value"},
             "bound_method": {"tag", "function", "receiver"},
@@ -672,7 +719,10 @@ class _Decoder:
                 or len(node["value"]) > self.limit_bytes
             ):
                 _fail("malformed ordinary value", f"$.node[{index}]")
-            if tag in {"tuple", "list", "set", "frozenset"} and not isinstance(node["items"], list):
+            if tag in {
+                "tuple", "list", "set", "frozenset",
+                "frozen_tuple", "frozen_list", "frozen_set",
+            } and not isinstance(node["items"], list):
                 _fail("malformed container", f"$.node[{index}]")
             if tag == "path" and (
                 not isinstance(node["kind"], str)
@@ -680,7 +730,7 @@ class _Decoder:
                 or not isinstance(node["value"], str)
             ):
                 _fail("malformed path", f"$.node[{index}]")
-            if tag == "dict" and (not isinstance(node["items"], list) or any(not isinstance(item, list) or len(item) != 2 for item in node["items"])):
+            if tag in {"dict", "frozen_dict"} and (not isinstance(node["items"], list) or any(not isinstance(item, list) or len(item) != 2 for item in node["items"])):
                 _fail("malformed mapping", f"$.node[{index}]")
             if tag == "managed_config":
                 if not self.allow_managed_config:
@@ -701,10 +751,17 @@ class _Decoder:
                 if not isinstance(mapping, Mapping) or not all(isinstance(name, str) for name in mapping):
                     _fail("malformed structural descriptor", f"$.node[{index}]")
             references: list[Any] = []
-            if tag in {"tuple", "list", "set", "frozenset"}:
+            if tag in {
+                "tuple", "list", "set", "frozenset",
+                "frozen_tuple", "frozen_list", "frozen_set",
+            }:
                 references.extend(node["items"])
-            elif tag == "dict":
+            elif tag in {"dict", "frozen_dict"}:
                 references.extend(part for pair in node["items"] for part in pair)
+            elif tag == "definition":
+                references.extend((node["cls"], node["kwargs"]))
+                if node["args"] is not None:
+                    references.append(node["args"])
             elif tag in {"link", "assertion"}:
                 references.append(node["target"])
             elif tag == "bound_method":
@@ -746,6 +803,23 @@ class _Decoder:
                     references.extend(node["callbacks"])
             if any(isinstance(reference, bool) or not isinstance(reference, int) or not 0 <= reference < len(self.nodes) for reference in references):
                 _fail("malformed graph reference", f"$.node[{index}]")
+            if tag == "definition":
+                args_node = (
+                    None if node["args"] is None else self.nodes[node["args"]]
+                )
+                kwargs_node = self.nodes[node["kwargs"]]
+                if (
+                    not isinstance(kwargs_node, Mapping)
+                    or kwargs_node.get("tag") != "frozen_dict"
+                    or (
+                        args_node is not None
+                        and (
+                            not isinstance(args_node, Mapping)
+                            or args_node.get("tag") != "frozen_tuple"
+                        )
+                    )
+                ):
+                    _fail("malformed Definition", f"$.node[{index}]")
             self._validate_managed_node_references(node, f"$.node[{index}]")
 
     def _validate_managed_node_references(self, node: Mapping[str, Any], path: str) -> None:
@@ -842,6 +916,19 @@ class _Decoder:
             if value is not None and type(value) not in {bool, int, float, str, bytes}:
                 _fail("malformed atom", path)
             return value
+        if tag == "definition":
+            cls = self.value(node["cls"], f"{path}.cls")
+            args = (
+                None
+                if node["args"] is None
+                else self.value(node["args"], f"{path}.args")
+            )
+            kwargs = self.value(node["kwargs"], f"{path}.kwargs")
+            if (args is not None and type(args) is not FrozenTuple) or type(
+                kwargs
+            ) is not FrozenDict:
+                _fail("malformed Definition", path)
+            return Definition._from_symbolic_parts(cls, args, kwargs)
         if tag in {"cdef", "auto_cdef"}:
             value = decode_cdef_graph(node.get("value"))
         elif tag in {"state", "auto_state"}:
@@ -854,22 +941,40 @@ class _Decoder:
             if tag.startswith("auto_"):
                 self.automatic_references.add(id(value))
             return value
-        if tag in {"tuple", "list", "set", "frozenset"}:
+        if tag in {
+            "tuple", "list", "set", "frozenset",
+            "frozen_tuple", "frozen_list", "frozen_set",
+        }:
             items = node.get("items")
             if not isinstance(items, list):
                 _fail("malformed container", path)
             values = [self.value(item, f"{path}[{position}]") for position, item in enumerate(items)]
-            return tuple(values) if tag == "tuple" else values if tag == "list" else set(values) if tag == "set" else frozenset(values)
-        if tag == "dict":
+            if tag == "tuple":
+                return tuple(values)
+            if tag == "list":
+                return values
+            if tag == "set":
+                return set(values)
+            if tag == "frozenset":
+                return frozenset(values)
+            if tag == "frozen_tuple":
+                return FrozenTuple(values)
+            if tag == "frozen_list":
+                return FrozenList(values)
+            return FrozenSet(values)
+        if tag in {"dict", "frozen_dict"}:
             items = node.get("items")
             if not isinstance(items, list):
                 _fail("malformed mapping", path)
-            result = {}
+            result = []
             for item in items:
                 if not isinstance(item, list) or len(item) != 2:
                     _fail("malformed mapping entry", path)
-                result[self.value(item[0], f"{path}.key")] = self.value(item[1], f"{path}.value")
-            return result
+                result.append((
+                    self.value(item[0], f"{path}.key"),
+                    self.value(item[1], f"{path}.value"),
+                ))
+            return FrozenDict(result) if tag == "frozen_dict" else dict(result)
         if tag == "path":
             kind, value = node.get("kind"), node.get("value")
             if (
@@ -893,14 +998,6 @@ class _Decoder:
             if not isinstance(module, str) or (qualname is not None and not isinstance(qualname, str)):
                 _fail("malformed import reference", path)
             return ImportRef(module, qualname).resolve()
-        if tag == "template-bundle":
-            from .template import TemplateBundle
-            try:
-                return TemplateBundle.from_data(node.get("value"))
-            except (TypeError, ValueError) as error:
-                raise CoreCallCodecError(
-                    f"core execution transport rejected malformed template bundle at {path}"
-                ) from error
         if tag in {"link", "assertion"}:
             from .cdef_graph import EdgeKind
             try:
@@ -1456,7 +1553,9 @@ class _ResultPublisher:
             _fail("live core resource", path)
         if isinstance(value, Object):
             return self._prospective_state(value)
-        if isinstance(value, (ObjectRef, StateRef, ConcreteDefinition)):
+        if isinstance(
+            value, (ObjectRef, StateRef, ConcreteDefinition, Definition)
+        ):
             return value
         identity = id(value)
         if isinstance(value, tuple):
@@ -1587,13 +1686,17 @@ class _ResultPublisher:
         self._validate_before_publication(value)
         self._reserve_evidence(value)
         self.publish_updates()
-        if isinstance(value, (ObjectRef, StateRef, ConcreteDefinition)):
+        if isinstance(
+            value, (ObjectRef, StateRef, ConcreteDefinition, Definition)
+        ):
             return value
         return self.value(value)
 
     def value(self, value: Any) -> Any:
         """Replace supported nested live Object leaves with automatic references."""
-        if isinstance(value, (ObjectRef, StateRef, ConcreteDefinition)):
+        if isinstance(
+            value, (ObjectRef, StateRef, ConcreteDefinition, Definition)
+        ):
             return value
         if isinstance(value, Object):
             state = self.references.get(id(value))

@@ -424,7 +424,7 @@ def test_active_finalized_links_deliver_compatible_targets_and_reject_conflicts(
         )
 
 
-@pytest.mark.parametrize("value", (1, [1], Definition(SignatureObject)))
+@pytest.mark.parametrize("value", (1, [1]))
 def test_auto_ref_rejects_values_outside_its_documented_family(value: object) -> None:
     """AutoRef failures are public SignatureErrors, never private control flow."""
 

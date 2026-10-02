@@ -470,7 +470,18 @@ def _descriptor_set_fingerprint(
         if kind == "link":
             return _stable_mapping_hash("dryml.core.links.DefLink", [("kind", _stable_leaf_hash(current["edge"])), ("target", item(current["target"], depth + 1))])
         if kind == "quoted-definition":
-            return _stable_mapping_hash("dryml.core.quoted.QuotedDef", [("value", item(current["value"], depth + 1))])
+            from .definition_expression_codec import from_data
+            from .quoted import QuotedDef
+            from .utils.stable_hash import stable_hash_function
+
+            try:
+                return stable_hash_function(
+                    QuotedDef(from_data(current["payload"]))
+                )
+            except (RecursionError, TypeError, ValueError, OverflowError):
+                raise _error(
+                    path, "quoted Definition set member is invalid"
+                ) from None
         if kind == "match":
             return match(current, depth + 1)
         if kind == "object-ref":
@@ -604,21 +615,18 @@ class _SelectorEncoder:
         from .quoted import QuotedDef, SelectorSpec
         from .reference_values import ObjectRef, StateRef
         from .selector import Selector
-        from .template import Template, TemplateBundle
-        from .template_selector import TemplateSelector
+        from .generator import GeneratorSelector
         from .symbol import ImportRef, SourceSpec
 
         self.budget.visit(path, depth)
-        if isinstance(value, Template):
-            return {"kind": "template", "payload": value.to_data()}
-        if isinstance(value, TemplateBundle):
-            return {"kind": "template-bundle", "payload": value.to_data()}
-        if isinstance(value, TemplateSelector):
+        if isinstance(value, GeneratorSelector):
             return {"kind": "template-selector", "payload": value.to_data()}
         if isinstance(value, (Definition, ConcreteDefinition)):
             return self.definition(value, path, depth + 1)
         if isinstance(value, QuotedDef):
-            return {"kind": "quoted-definition", "value": self.value(value.value, path + ".value", depth + 1)}
+            from .definition_expression_codec import to_data
+
+            return {"kind": "quoted-definition", "payload": to_data(value.value)}
         if isinstance(value, SelectorSpec):
             return {
                 "kind": "selector-spec",
@@ -750,9 +758,9 @@ class _SelectorEncoder:
         }
 
     def selector(self, selector: Any, path: str, depth: int = 0) -> dict[str, Any]:
-        from .template_selector import TemplateSelector
+        from .generator import GeneratorSelector
 
-        if isinstance(selector, TemplateSelector):
+        if isinstance(selector, GeneratorSelector):
             return {"kind": "template-selector", "payload": selector.to_data()}
         return {"root": self.definition(selector.root, path + ".root", depth + 1), "strict": selector.strict, "cls_policy": selector.cls_policy, "nodes": self.nodes}
 
@@ -832,8 +840,8 @@ def _validate_selector(value: Any, path: str) -> None:
     if isinstance(value, Mapping) and value.get("kind") == "template-selector":
         record = _exact_keys(value, {"kind", "payload"}, path)
         try:
-            from .template_selector import TemplateSelector
-            TemplateSelector.from_data(record["payload"])
+            from .generator import GeneratorSelector
+            GeneratorSelector.from_data(record["payload"])
         except (TypeError, ValueError):
             raise _error(path, "template selector payload is invalid") from None
         return
@@ -1043,27 +1051,25 @@ def _validate_selector(value: Any, path: str) -> None:
             definition_ref(current, item_path, depth + 1)
             return
         if kind == "quoted-definition":
-            _exact_keys(current, {"kind", "value"}, item_path)
-            item(current["value"], item_path + ".value", depth + 1)
+            _exact_keys(current, {"kind", "payload"}, item_path)
+            from .definition_expression_codec import from_data
+
+            try:
+                from_data(current["payload"])
+            except (TypeError, ValueError):
+                raise _error(item_path, "quoted Definition payload is invalid") from None
             return
         if kind == "selector-spec":
             _exact_keys(current, {"kind", "selector"}, item_path)
             _validate_selector(current["selector"], item_path + ".selector")
             return
-        if kind in {"template", "template-bundle", "template-selector"}:
+        if kind == "template-selector":
             _exact_keys(current, {"kind", "payload"}, item_path)
             try:
-                if kind == "template":
-                    from .template import Template
-                    Template.from_data(current["payload"])
-                elif kind == "template-bundle":
-                    from .template import TemplateBundle
-                    TemplateBundle.from_data(current["payload"])
-                else:
-                    from .template_selector import TemplateSelector
-                    TemplateSelector.from_data(current["payload"])
+                from .generator import GeneratorSelector
+                GeneratorSelector.from_data(current["payload"])
             except (TypeError, ValueError):
-                raise _error(item_path, "template payload is invalid") from None
+                raise _error(item_path, "generator selector payload is invalid") from None
             return
         if kind in {"list", "tuple"}:
             _exact_keys(current, {"kind", "items"}, item_path)
@@ -1418,12 +1424,11 @@ def _selector_from_data(value: Mapping[str, Any]):
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectId, ObjectRef, StateRef
     from .selector import Selector
-    from .template import Template, TemplateBundle
-    from .template_selector import TemplateSelector
+    from .generator import GeneratorSelector
     from .utils.graph.path import GraphPath
 
     if value.get("kind") == "template-selector":
-        return TemplateSelector.from_data(value["payload"])
+        return GeneratorSelector.from_data(value["payload"])
 
     nodes = {node["label"]: node for node in value["nodes"]}
     definitions: dict[str, Any] = {}
@@ -1437,15 +1442,13 @@ def _selector_from_data(value: Mapping[str, Any]):
         if kind == "definition-ref":
             return definition(current["label"])
         if kind == "quoted-definition":
-            return QuotedDef(item(current["value"]))
+            from .definition_expression_codec import from_data
+
+            return QuotedDef(from_data(current["payload"]))
         if kind == "selector-spec":
             return SelectorSpec(_selector_from_data(current["selector"]))
-        if kind == "template":
-            return Template.from_data(current["payload"])
-        if kind == "template-bundle":
-            return TemplateBundle.from_data(current["payload"])
         if kind == "template-selector":
-            return TemplateSelector.from_data(current["payload"])
+            return GeneratorSelector.from_data(current["payload"])
         if kind == "list":
             return FrozenList(item(child) for child in current["items"])
         if kind == "tuple":
@@ -1475,7 +1478,7 @@ def _selector_from_data(value: Mapping[str, Any]):
                 matcher = SubclassMatcher(_symbol_from_data(matcher_data["cls"], require_live=True))
             return Match(matcher, current["name"])
         if kind == "factory":
-            return FactorySpec._from_template_parts(
+            return FactorySpec._from_symbolic_parts(
                 item(current["target"]),
                 tuple(item(child) for child in current["args"]),
                 FrozenDict((name, item(child)) for name, child in current["kwargs"]),
