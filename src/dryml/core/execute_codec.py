@@ -156,14 +156,17 @@ def _result_graph(value: Any, *, limit_bytes: int,
     """Encode an already-published result graph with the call graph grammar."""
     encoder = _Encoder(
         limit_bytes=limit_bytes, automatic_references=automatic_references,
-        allow_managed_config=False,
+        allow_managed_config=False, allow_assertions=False,
     )
     return encoder.finish(encoder.value(value, "$.result"))
 
 
 def _load_result_graph(data: bytes, *, repo: Repo, limit_bytes: int) -> tuple[Any, frozenset[int]]:
     """Decode one result graph after its outcome envelope has been validated."""
-    decoder = _Decoder(data, repo=repo, limit_bytes=limit_bytes, allow_managed_config=False)
+    decoder = _Decoder(
+        data, repo=repo, limit_bytes=limit_bytes,
+        allow_managed_config=False, allow_assertions=False,
+    )
     return decoder.value(decoder.graph["root"], "$.result"), frozenset(decoder.automatic_references)
 
 
@@ -319,7 +322,8 @@ class _Encoder:
 
     def __init__(self, *, limit_bytes: int,
                  automatic_references: set[int] | None = None,
-                 allow_managed_config: bool = True) -> None:
+                 allow_managed_config: bool = True,
+                 allow_assertions: bool = False) -> None:
         self.nodes: list[dict[str, Any]] = []
         self.memo: dict[int, int] = {}
         self.active: set[int] = set()
@@ -327,6 +331,7 @@ class _Encoder:
         self.automatic_references = automatic_references or set()
         self.imported_captures: dict[int, ImportRef] = {}
         self.allow_managed_config = allow_managed_config
+        self.allow_assertions = allow_assertions
 
     def _capture(self, value: Any, path: str, depth: int) -> int:
         """Import stable DRYML dependencies and capture caller helpers by value."""
@@ -459,7 +464,12 @@ class _Encoder:
             return {"tag": "auto_object_ref" if automatic else "object_ref", "value": value.to_data()}
         if isinstance(value, DefLink):
             if not value.is_finalized:
-                _fail("unresolved reference assertion", path)
+                if not self.allow_assertions:
+                    _fail("unconsumed reference assertion", path)
+                return {
+                    "tag": "assertion", "kind": value.kind.value,
+                    "target": self.value(value.target, f"{path}.target", depth + 1),
+                }
             return {"tag": "link", "kind": value.kind.value, "target": self.value(value.target, f"{path}.target", depth + 1)}
         if isinstance(value, tuple):
             return {"tag": "tuple", "items": [self.value(item, f"{path}[{index}]", depth + 1) for index, item in enumerate(value)]}
@@ -603,7 +613,8 @@ class _Decoder:
     """Decode one validated graph after worker setup, preserving alias identity."""
 
     def __init__(self, data: bytes, *, repo: Repo, limit_bytes: int,
-                 allow_managed_config: bool = True) -> None:
+                 allow_managed_config: bool = True,
+                 allow_assertions: bool = False) -> None:
         if not isinstance(data, bytes) or len(data) > limit_bytes:
             raise CoreCallCodecError("core execution transport rejected oversized invocation")
         graph = _load(data, "$")
@@ -618,6 +629,7 @@ class _Decoder:
         if len(self.nodes) > _MAX_NODES:
             raise CoreCallCodecError("core execution transport rejected oversized call graph")
         self.allow_managed_config = allow_managed_config
+        self.allow_assertions = allow_assertions
         self._validate_graph()
         self.repo = repo
         self.memo: dict[int, Any] = {}
@@ -633,7 +645,9 @@ class _Decoder:
             "auto_cdef": {"tag", "value"}, "state": {"tag", "value"},
             "auto_state": {"tag", "value"}, "object_ref": {"tag", "value"},
             "auto_object_ref": {"tag", "value"},
-            "import": {"tag", "module", "qualname"}, "link": {"tag", "kind", "target"},
+            "import": {"tag", "module", "qualname"},
+            "link": {"tag", "kind", "target"},
+            "assertion": {"tag", "kind", "target"},
             "tuple": {"tag", "items"}, "list": {"tag", "items"}, "set": {"tag", "items"},
             "frozenset": {"tag", "items"}, "dict": {"tag", "items"},
             "path": {"tag", "kind", "value"},
@@ -672,6 +686,16 @@ class _Decoder:
                 if not self.allow_managed_config:
                     _fail("managed config result", f"$.node[{index}]")
                 self._validate_managed_config_node(node, f"$.node[{index}]")
+            if tag == "assertion" and (
+                not self.allow_assertions
+                or not isinstance(node["kind"], str)
+                or node["kind"] not in {"ref", "materialize"}
+            ):
+                reason = (
+                    "malformed assertion"
+                    if self.allow_assertions else "unconsumed reference assertion"
+                )
+                _fail(reason, f"$.node[{index}]")
             if tag in {"function", "class", "instance"}:
                 mapping = node.get("captures", node.get("namespace", node.get("fields")))
                 if not isinstance(mapping, Mapping) or not all(isinstance(name, str) for name in mapping):
@@ -681,7 +705,7 @@ class _Decoder:
                 references.extend(node["items"])
             elif tag == "dict":
                 references.extend(part for pair in node["items"] for part in pair)
-            elif tag == "link":
+            elif tag in {"link", "assertion"}:
                 references.append(node["target"])
             elif tag == "bound_method":
                 references.extend((node["function"], node["receiver"]))
@@ -877,13 +901,18 @@ class _Decoder:
                 raise CoreCallCodecError(
                     f"core execution transport rejected malformed template bundle at {path}"
                 ) from error
-        if tag == "link":
+        if tag in {"link", "assertion"}:
             from .cdef_graph import EdgeKind
             try:
                 kind = EdgeKind(node.get("kind"))
             except Exception as error:
                 raise CoreCallCodecError(f"core execution transport rejected malformed link at {path}") from error
-            return DefLink.finalized(kind, self.value(node.get("target"), f"{path}.target"))
+            target = self.value(node.get("target"), f"{path}.target")
+            return (
+                DefLink.assertion(kind, target)
+                if tag == "assertion"
+                else DefLink.finalized(kind, target)
+            )
         if tag == "bound_method":
             return types.MethodType(self.value(node.get("function"), f"{path}.function"), self.value(node.get("receiver"), f"{path}.receiver"))
         if tag == "function_owner":
@@ -1172,7 +1201,7 @@ def encode_invocation(
     owner = description.owner
     if description.native_modality != "sync":
         raise CoreCallCodecError("core execution transport rejected async or generator target")
-    encoder = _Encoder(limit_bytes=limit_bytes)
+    encoder = _Encoder(limit_bytes=limit_bytes, allow_assertions=True)
     if not isinstance(update_targets, tuple):
         raise CoreCallCodecError("core execution transport requires tuple update targets")
     managed_controls, ordinary_kwargs = _managed_store_control(fn, kwargs)
@@ -1182,7 +1211,9 @@ def encode_invocation(
 
 def decode_invocation(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LIMIT) -> tuple[Any, tuple[Any, ...], dict[str, Any], str, Mapping[Any, Any], tuple[Mapping[str, Any], ...]]:
     """Reconstruct a call graph after worker setup and before one local boundary."""
-    decoder = _Decoder(data, repo=repo, limit_bytes=limit_bytes)
+    decoder = _Decoder(
+        data, repo=repo, limit_bytes=limit_bytes, allow_assertions=True,
+    )
     decoded = decoder.value(decoder.graph["root"])
     if not isinstance(decoded, Mapping) or set(decoded) != {"target", "args", "kwargs", "owner", "selections", "updates", "managed_controls"}:
         raise CoreCallCodecError("core execution transport rejected malformed call descriptor")

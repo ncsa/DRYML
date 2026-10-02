@@ -11,7 +11,7 @@ import pytest
 
 import dryml.dispatch as dispatch
 import dryml.core.execute as core_execute
-from dryml.core import ObjectRef, Repo, Serializable, StateRef, function
+from dryml.core import AutoRef, ObjectRef, Ref, Repo, Serializable, StateRef, function
 from dryml.core.execute import CoreExecutionFuture, CoreOptions
 from dryml.core.store.dir import DirStore
 from dryml.environments import CurrentEnvironmentSpec
@@ -54,6 +54,12 @@ def _aliased_results(value: _StatefulResult):
 
     result = _StatefulResult(value.value + 1)
     return result, result, value.object_ref
+
+
+def _reference_kind(value: Ref[AutoRef]) -> str:
+    """Report the exact reference kind delivered by worker activation."""
+
+    return type(value).__name__
 
 
 @function
@@ -211,6 +217,22 @@ def test_dispatch_preserves_core_reference_and_alias_recovery(
     assert first is second
     assert isinstance(original, ObjectRef)
     assert original == value.object_ref
+
+
+def test_dispatch_carries_explicit_reference_assertion_to_worker(tmp_path) -> None:
+    """A subprocess worker consumes Ref intent at its signature boundary."""
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    dispatch.set_execute_backend_default(
+        SubProcessConfig(spool_directory=spool),
+        core=CoreOptions(repo=repo, return_objects=False),
+    )
+    value = _StatefulResult(4, repo=repo)
+    state = repo.save(value, deep_capture=True)
+
+    assert dispatch.run(_reference_kind, Ref(state)) == "StateRef"
 
 
 def test_dispatch_forwards_one_frozen_exact_selector_without_reresolution(

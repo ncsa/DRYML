@@ -13,7 +13,7 @@ pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 from dryml.core import ObjectRef, Repo, Serializable
 from dryml.core.execute import CoreOptions, SharedDirStoreStrategy, prepare_shared_storage
 from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation
-from dryml.core.signatures import Ref, ReferenceSelection
+from dryml.core.signatures import Mat, Ref, ReferenceSelection
 from dryml.core.store.dir import DirStore
 from dryml.core.symbol import ImportRef
 
@@ -93,6 +93,11 @@ def _reference_identity(value: Ref[ObjectRef]) -> Ref[ObjectRef]:
     return value
 
 
+def _return_assertion(value: Ref[ObjectRef]):
+    """Return one transient assertion to prove result transport rejects it."""
+    return Ref(value)
+
+
 def _path_identity(value):
     """Return public path data after transport reconstructs the concrete path."""
     return str(value), value.name
@@ -162,6 +167,38 @@ def test_pinned_reference_intent_and_diamond_aliases_cross_one_graph(tmp_path):
 
     assert reference == saved.object
     assert diamond is True
+
+
+def test_ref_and_mat_assertions_cross_to_worker_signature_activation(tmp_path):
+    """Invocation transport retains explicit roles until worker activation."""
+    store = DirStore(tmp_path / "state")
+    repo = Repo(store)
+    value = SavedValue(4, repo=repo)
+    saved = repo.save_object(value, deep_capture=True)
+    strategy = SharedDirStoreStrategy()
+
+    _, reference = _invoke(
+        strategy, _reference_identity, (Ref(saved),), repo=repo,
+    )
+    _, materialized = _invoke(strategy, _read_value, (Mat(saved),), repo=repo)
+
+    assert reference == saved.object
+    assert materialized == 4
+
+
+def test_result_transport_rejects_unconsumed_assertions(tmp_path):
+    """Transient assertions cannot escape the worker-owned signature boundary."""
+    repo = Repo(DirStore(tmp_path / "state"))
+    value = SavedValue(4, repo=repo)
+    saved = repo.save_object(value, deep_capture=True)
+    invocation = encode_invocation(
+        _return_assertion, (saved.object,), {}, repo=repo,
+    )
+
+    outcome = decode_outcome(invoke_invocation(invocation, repo=repo), repo=repo)
+
+    assert not outcome["success"]
+    assert outcome["reason"] == "CoreCallCodecError"
 
 
 def test_frozen_storage_snapshot_is_reused_and_rejects_unknown_selected_store(tmp_path, monkeypatch):
@@ -434,6 +471,25 @@ def test_malformed_nodes_fail_before_symbol_resolution_without_sensitive_fields(
     with pytest.raises(CoreCallCodecError, match="malformed graph node") as error:
         invoke_invocation(payload, repo=repo)
     assert secret not in str(error.value)
+
+
+def test_malformed_assertion_fails_before_symbol_resolution(tmp_path, monkeypatch):
+    """Invalid assertion kinds fail during inert graph validation."""
+    repo = Repo(DirStore(tmp_path / "state"))
+    payload = dill.dumps({
+        "version": 2,
+        "root": 0,
+        "nodes": [
+            {"tag": "assertion", "kind": "unsupported", "target": 1},
+            {"tag": "import", "module": "math", "qualname": None},
+        ],
+    }, protocol=5)
+    monkeypatch.setattr(
+        ImportRef, "resolve", lambda self: pytest.fail("symbol resolution ran"),
+    )
+
+    with pytest.raises(CoreCallCodecError, match="malformed assertion"):
+        invoke_invocation(payload, repo=repo)
 
 
 def test_malformed_path_kind_fails_with_codec_error(tmp_path):

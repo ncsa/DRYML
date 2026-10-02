@@ -28,7 +28,7 @@ _EXPECTED_CORE_EXPORTS = (
     "resolve_symbol", "CDefEdge", "CDefNode", "CDefOccurrence",
     "ConcreteDefinitionGraph", "ConcreteDefinitionGraphCycleError",
     "ConcreteDefinitionGraphError", "EdgeKind", "iter_direct_cdef_edges", "Arg",
-    "DefinitionPath", "DefinitionQuery", "DefinitionResultSet", "GraphPathError",
+    "ContainmentEdgePolicy", "DefinitionPath", "DefinitionQuery", "DefinitionResultSet", "GraphPathError",
     "Index", "Key", "Kwarg", "Parameter", "ObjectResultSet",
     "ObjectRefResultSet", "OccurrenceResultSet", "ReferenceOccurrence",
     "ReferenceQuery", "ReferenceResultSet", "MetadataField", "MetadataPredicate", "field", "QueryCardinalityError", "QueryDomainError",
@@ -70,7 +70,7 @@ _EXPORT_MODULES = {
     **dict.fromkeys(("configure", "reset_config", "status"), "dryml.core.session"),
     **dict.fromkeys(("ImportRef", "SourceSpec", "resolve_symbol", "symbol_ref"), "dryml.core.symbol"),
     **dict.fromkeys(("CDefEdge", "CDefNode", "CDefOccurrence", "ConcreteDefinitionGraph", "ConcreteDefinitionGraphCycleError", "ConcreteDefinitionGraphError", "EdgeKind", "iter_direct_cdef_edges"), "dryml.core.cdef_graph"),
-    **dict.fromkeys(("Arg", "DefinitionPath", "DefinitionQuery", "DefinitionResultSet", "GraphPathError", "Index", "Key", "Kwarg", "Parameter", "ObjectResultSet", "ObjectRefResultSet", "OccurrenceResultSet", "ReferenceOccurrence", "ReferenceQuery", "ReferenceResultSet", "MetadataField", "MetadataPredicate", "field", "QueryCardinalityError", "QueryDomainError", "QueryError", "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember", "StateRefResultSet"), "dryml.core.query"),
+    **dict.fromkeys(("Arg", "ContainmentEdgePolicy", "DefinitionPath", "DefinitionQuery", "DefinitionResultSet", "GraphPathError", "Index", "Key", "Kwarg", "Parameter", "ObjectResultSet", "ObjectRefResultSet", "OccurrenceResultSet", "ReferenceOccurrence", "ReferenceQuery", "ReferenceResultSet", "MetadataField", "MetadataPredicate", "field", "QueryCardinalityError", "QueryDomainError", "QueryError", "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember", "StateRefResultSet"), "dryml.core.query"),
     **dict.fromkeys(("CoreExecutionError", "CoreExecutionFuture", "CoreExecutionSnapshot", "CoreOptions", "CoreOutcomeEvidence", "CorePublicationEvidence", "CoreRefreshEvidence", "Executor", "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy", "run", "submit"), "dryml.core.execute"),
     **dict.fromkeys(("SaveAnnotations", "LineageMetadata", "SnapshotCapture", "SnapshotMetadata", "encode_metadata_mapping", "decode_metadata_mapping", "timestamp_to_seconds", "timestamp_from_seconds", "encode_current_annotations", "decode_current_annotations", "encode_lineage_metadata", "decode_lineage_metadata", "encode_snapshot_metadata", "decode_snapshot_metadata", "read_snapshot_metadata", "MetadataScalar", "MetadataValue", "MetadataMapping", "MetadataTarget", "MetadataDiagnostic", "EnvironmentStatus", "RequirementStatus", "EvidenceCoverage"), "dryml.core.metadata"),
 }

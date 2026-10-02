@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from contextlib import ExitStack
-from dataclasses import dataclass
 from typing import Any, Iterator
 
 from ..definition import ConcreteDefinition, Definition
@@ -18,6 +17,12 @@ from ..links import DefLink
 from ..reference_values import ObjectId, ObjectRef, StateRef
 from ..utils.graph.path import GraphPath, graph_path_sort_key, normalize_path
 from ..utils.graph.value import iter_value_edges
+from .model import (
+    ContainmentContext,
+    QueryDomainError,
+    ReferenceOccurrence,
+    containment_witness_key,
+)
 from .query import _query_match
 
 
@@ -33,22 +38,6 @@ def _owner_key(value: Any) -> tuple[str, str]:
     if isinstance(value, ConcreteDefinition):
         return ("definition", value.graph_hash())
     return (type(value).__qualname__, repr(value))
-
-
-@dataclass(frozen=True, slots=True)
-class ReferenceOccurrence:
-    """One exact lightweight reference occurrence in immutable authority.
-
-    Attributes:
-        owner: Complete aggregate reference or Definition record containing the
-            value.  Complete reference owners retain durable aggregate identity.
-        path: Typed GraphPath from ``owner`` to ``value``.
-        value: Exact ObjectRef or StateRef found at the path.
-    """
-
-    owner: Any
-    path: GraphPath
-    value: ObjectRef | StateRef
 
 
 def _occurrence_key(item: ReferenceOccurrence) -> tuple[Any, ...]:
@@ -141,11 +130,38 @@ class _ReferenceValueResultSet:
     typed paths that produced each projection.
     """
 
-    def __init__(self, repo, values: Iterable[ObjectRef | StateRef], occurrences: Iterable[ReferenceOccurrence] = ()):
+    def __init__(
+            self,
+            repo,
+            values: Iterable[ObjectRef | StateRef],
+            occurrences: Iterable[ReferenceOccurrence] = (),
+            *,
+            containment: ContainmentContext | None = None,
+            containment_witnesses: Iterable[ReferenceOccurrence] = (),
+            owner_replicas=None):
+        """Snapshot complete reference values and optional containment evidence.
+
+        Containment callers retain the raw owner/path/hop ledger so a later
+        fixed-universe refinement can filter evidence without a Store scan.
+        Ordinary authority result behavior remains unchanged when ``containment``
+        is omitted.
+        """
+
         self.repo = repo
         unique = {_reference_key(value): value for value in values}
         self._values = tuple(unique[key] for key in sorted(unique))
         self._occurrences = tuple(occurrences)
+        self._containment = containment
+        self._containment_witnesses = tuple(
+            {containment_witness_key(item): item for item in containment_witnesses}.values()
+        )
+        self._owner_replicas = {} if owner_replicas is None else dict(owner_replicas)
+        if containment is not None:
+            expected = "object_ref" if isinstance(self, ObjectRefResultSet) else "state_ref"
+            if containment.target_kind != expected:
+                raise QueryDomainError(
+                    f"{type(self).__name__} cannot project {containment.target_kind} containment evidence."
+                )
 
     def __iter__(self):
         """Iterate complete references in canonical identity order."""
@@ -187,23 +203,103 @@ class _ReferenceValueResultSet:
         """Project retained owner/path/value occurrences without collapsing owners."""
 
         values = set(self._values)
+        if self._containment is not None:
+            from .result import OccurrenceResultSet
+
+            return OccurrenceResultSet(
+                self.repo,
+                (item for item in self._occurrences if item.value in values),
+                owner_replicas=self._owner_replicas,
+                containment=self._containment,
+                containment_witnesses=self._containment_witnesses,
+            )
         return ReferenceResultSet(self.repo, (item for item in self._occurrences if item.value in values))
+
+    def query(self, selector=None):
+        """Refine complete containment evidence without reacquiring Store authority.
+
+        Raises:
+            QueryDomainError: If this ordinary authority projection has no fixed
+                containment evidence.
+        """
+
+        if self._containment is None:
+            raise QueryDomainError("Only containment reference results support fixed-universe refinement.")
+        return self.occurrences().query(selector)
+
+    def union(self, other):
+        """Union compatible complete reference results and retain both ledgers."""
+
+        containment = self._combined_containment(other)
+        values = (*self._values, *other._values)
+        witnesses = self._containment_witnesses + other._containment_witnesses
+        return type(self)(
+            self.repo,
+            values,
+            (*self._occurrences, *other._occurrences),
+            containment=containment,
+            containment_witnesses=witnesses,
+            owner_replicas=_merge_containment_replicas(
+                self._owner_replicas, other._owner_replicas,
+            ),
+        )
+
+    def intersection(self, other):
+        """Intersect compatible complete reference values by exact identity."""
+
+        containment = self._combined_containment(other)
+        values = tuple(value for value in self._values if value in other._values)
+        value_set = set(values)
+        witnesses = tuple(
+            item for item in (*self._containment_witnesses, *other._containment_witnesses)
+            if item.target in value_set
+        )
+        return type(self)(
+            self.repo,
+            values,
+            tuple(item for item in (*self._occurrences, *other._occurrences) if item.value in value_set),
+            containment=containment,
+            containment_witnesses=witnesses,
+            owner_replicas=_merge_containment_replicas(
+                self._owner_replicas, other._owner_replicas,
+            ),
+        )
+
+    def _combined_containment(self, other) -> ContainmentContext:
+        """Validate and merge fixed containment context for one set operation."""
+
+        if type(self) is not type(other) or self.repo is not other.repo:
+            raise ValueError("Cannot combine incompatible reference result sets.")
+        if self._containment is None or other._containment is None:
+            raise ValueError("Only containment reference results support set operations.")
+        return self._containment.combined_with(other._containment)
+
+
+def _merge_containment_replicas(left, right):
+    """Merge owner replica evidence without importing result classes eagerly."""
+
+    from .result import _merge_replica_maps
+
+    return _merge_replica_maps(left, right)
 
 
 class ObjectRefResultSet(_ReferenceValueResultSet):
-    """Deterministic projection of complete ObjectRefs from Store authority.
+    """Deterministic projection of complete ObjectRefs from query evidence.
 
     The terminal returns lightweight immutable identities, never live Objects
     or local-state payloads. Equal replicas deduplicate by complete ObjectRef
     identity, while :meth:`occurrences` retains distinct owners and paths.
+    Fixed containment results also retain their qualified path ledger for
+    scan-free requery and compatible set operations.
     """
 
 class StateRefResultSet(_ReferenceValueResultSet):
-    """Deterministic projection of complete StateRefs from Store authority.
+    """Deterministic projection of complete StateRefs from query evidence.
 
     The terminal returns exact immutable state identities without restoration.
     Equal replicas deduplicate by complete StateRef identity, while
-    :meth:`occurrences` retains distinct owners and paths.
+    :meth:`occurrences` retains distinct owners and paths. Fixed containment
+    results retain their qualified path ledger for scan-free requery.
     """
 
 class ReferenceQuery:
@@ -436,6 +532,52 @@ class ReferenceQuery:
             raise ValueError("in_store() requires a connected Store handle.")
         return self._replace(store=store)
 
+    def containing(
+            self,
+            target,
+            *,
+            edges="materialize",
+            contains_ref: bool = False,
+            refresh=None):
+        """Adapt an unfiltered reference builder to a nested containment query.
+
+        This is equivalent to ``repo.query(target).nested(...)`` and preserves
+        an attached connected Store restriction. It does not alter ordinary
+        reference-authority lookup or imply target loadability.
+
+        Args:
+            target: Exact ConcreteDefinition, ObjectRef, or StateRef to find
+                below authoritative stored CDef roots.
+            edges: Literal nested traversal policy.
+            contains_ref: Exact boolean reference-bearing path filter.
+            refresh: Optional nested derived-index refresh policy.
+
+        Returns:
+            A lazy DefinitionQuery carrying the same immutable containment intent
+            as ``repo.query(target).nested(...)``.
+
+        Raises:
+            TypeError: If ``target`` is not a supported exact containment value.
+            ValueError: If traversal policy is invalid.
+            QueryDomainError: If an authority predicate is already attached.
+
+        Side Effects:
+            None. The adapter neither scans Store authority nor changes ordinary
+            reference-query behavior.
+        """
+
+        self._require_unfiltered_containment_adapter()
+        from .model import validate_containment_target
+        from .query import DefinitionQuery
+
+        target = validate_containment_target(target)
+        query = DefinitionQuery.from_source(self.repo, target).nested(
+            edges=edges,
+            contains_ref=contains_ref,
+            refresh=refresh,
+        )
+        return query if self._store is None else query.in_store(self._store)
+
     def object_refs(self) -> ObjectRefResultSet:
         """Return matching complete aggregate ObjectRefs in canonical order.
 
@@ -495,6 +637,25 @@ class ReferenceQuery:
         }
         data.update(values)
         return ReferenceQuery(self.repo, **data)
+
+    def _require_unfiltered_containment_adapter(self) -> None:
+        """Reject authority predicates that cannot be reinterpreted as containment."""
+
+        if any(value is not None for value in (
+                self._definition,
+                self._object_id,
+                self._namespace,
+                self._object_ref,
+                self._contains,
+                self._alias,
+                self._path,
+                self._state_hash,
+                self._metadata,
+        )):
+            from .model import QueryDomainError
+            raise QueryDomainError(
+                "ReferenceQuery.containing() requires an unfiltered reference builder."
+            )
 
     def _scan(self):
         if self._metadata is None:

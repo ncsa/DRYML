@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from ..cdef_graph import EdgeKind
@@ -10,7 +10,77 @@ from .path import DefinitionPath
 RefreshPolicy = Literal[False, "auto", True]
 ClassMatchPolicy = Literal["selector", "exact"]
 QueryDomain = Literal["stored", "cached", "known", "nested"]
-QueryProjection = Literal["definitions", "owners"]
+QueryProjection = Literal["definitions", "owners", "object_refs", "state_refs"]
+ContainmentEdgePolicy = Literal["materialize", "ref", "all"]
+ContainmentTargetKind = Literal["definition", "object_ref", "state_ref"]
+ContainmentCarrier = Literal["target", "owner", "occurrence"]
+
+
+def validate_containment_policy(
+        edges: Any, contains_ref: Any) -> tuple[ContainmentEdgePolicy, bool]:
+    """Validate the immutable traversal controls for a nested containment query.
+
+    Args:
+        edges: Literal edge kinds permitted at every containment traversal hop.
+        contains_ref: Exact boolean requiring a qualifying path to include a
+            retained ``REF`` hop.
+
+    Returns:
+        The validated policy pair.
+
+    Raises:
+        ValueError: If ``edges`` is not ``"materialize"``, ``"ref"``, or
+            ``"all"``.
+        TypeError: If ``contains_ref`` is not an exact bool.
+
+    Side Effects:
+        None. Validation does not enumerate Store authority or traverse CDefs.
+    """
+
+    if not isinstance(edges, str) or edges not in {"materialize", "ref", "all"}:
+        raise ValueError("nested edges must be 'materialize', 'ref', or 'all'.")
+    if type(contains_ref) is not bool:
+        raise TypeError("nested contains_ref must be an exact bool.")
+    return edges, contains_ref
+
+
+def validate_containment_target(target: Any) -> Any:
+    """Require one exact value supported by containment query entry points.
+
+    Args:
+        target: Concrete CDef, ObjectRef, or StateRef retained as immutable
+            containment-query intent.
+
+    Returns:
+        The unchanged validated target.
+
+    Raises:
+        TypeError: If ``target`` is not an exact supported containment value.
+
+    Side Effects:
+        None. Exact reference targets remain data and are not resolved.
+    """
+
+    from ..definition import ConcreteDefinition
+    from ..reference_values import ObjectRef, StateRef
+
+    if not isinstance(target, (ConcreteDefinition, ObjectRef, StateRef)):
+        raise TypeError(
+            "containment target must be a ConcreteDefinition, ObjectRef, or StateRef."
+        )
+    return target
+
+
+def is_exact_reference_target(target: Any) -> bool:
+    """Return whether a containment target is an exact reference value.
+
+    Exact reference values select containment only; they do not select ordinary
+    reference-authority query domains.
+    """
+
+    from ..reference_values import ObjectRef, StateRef
+
+    return isinstance(target, (ObjectRef, StateRef))
 
 
 class QueryError(Exception):
@@ -211,10 +281,198 @@ class StoredRootMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class ContainmentHop:
+    """One direct edge in a root-local containment witness.
+
+    Attributes:
+        path: Typed path from the preceding CDef node to this direct target.
+        kind: Literal retained edge role at this hop.
+
+    The path is deliberately local to one CDef boundary.  Joining ordered hops
+    recovers the occurrence's full owner-to-target path without losing the
+    edge kind associated with each boundary.
+    """
+
+    path: DefinitionPath
+    kind: EdgeKind
+
+
+@dataclass(frozen=True, slots=True)
 class DefinitionOccurrence:
+    """One CDef occurrence, optionally with root-local containment evidence.
+
+    Attributes:
+        owner: Enclosing stored or query-owner CDef.
+        path: Typed path from ``owner`` to ``definition``.
+        definition: Matched CDef value.
+        hops: Ordered direct-edge evidence when supplied by containment.
+
+    ``hops`` is intentionally excluded from equality and hashing so existing
+    indexed occurrence construction and set behavior remain unchanged.
+    """
+
     owner: Any
     path: DefinitionPath
     definition: Any
+    hops: tuple[ContainmentHop, ...] = field(
+        default=(), compare=False, hash=False, repr=False,
+    )
+
+    @property
+    def target(self) -> Any:
+        """Return the matched terminal value without changing legacy fields."""
+
+        return self.definition
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceOccurrence:
+    """One exact lightweight reference occurrence in immutable authority.
+
+    Attributes:
+        owner: Complete aggregate reference or Definition record containing the
+            value.
+        path: Typed GraphPath from ``owner`` to ``value``.
+        value: Exact ObjectRef or StateRef found at the path.
+        hops: Ordered direct-edge evidence when supplied by containment.
+
+    ``hops`` is intentionally excluded from equality and hashing to preserve
+    ordinary reference-query occurrence identity and construction.
+    """
+
+    owner: Any
+    path: DefinitionPath
+    value: Any
+    hops: tuple[ContainmentHop, ...] = field(
+        default=(), compare=False, hash=False, repr=False,
+    )
+
+    @property
+    def target(self) -> Any:
+        """Return the matched terminal value without changing legacy fields."""
+
+        return self.value
+
+
+def containment_target_kind(value: Any) -> ContainmentTargetKind:
+    """Return the non-coercing containment kind for one terminal value.
+
+    Args:
+        value: A retained CDef, ObjectRef, or StateRef terminal.
+
+    Returns:
+        The terminal's exact containment kind.
+
+    Raises:
+        TypeError: If ``value`` is not a supported containment terminal.
+
+    Side Effects:
+        None. This classification neither resolves nor projects references.
+    """
+
+    from ..definition import ConcreteDefinition
+    from ..reference_values import ObjectRef, StateRef
+
+    if isinstance(value, ConcreteDefinition):
+        return "definition"
+    if isinstance(value, ObjectRef):
+        return "object_ref"
+    if isinstance(value, StateRef):
+        return "state_ref"
+    raise TypeError(f"Unsupported containment terminal {type(value).__name__}.")
+
+
+def containment_witness_key(item: DefinitionOccurrence | ReferenceOccurrence) -> tuple[Any, ...]:
+    """Return the complete deduplication key for a containment witness.
+
+    Args:
+        item: A CDef or exact-reference occurrence with optional ordered hops.
+
+    Returns:
+        A canonical owner/path/hops/terminal key that preserves exact references.
+
+    Side Effects:
+        None. The key only reads immutable occurrence evidence.
+    """
+
+    from ..definition import ConcreteDefinition
+    from ..utils.graph.path import graph_path_sort_key
+
+    def cdef_key(value: ConcreteDefinition) -> tuple[str, str, str]:
+        return ("definition", value.stable_hash(), repr(value))
+
+    def value_key(value: Any) -> tuple[Any, ...]:
+        kind = containment_target_kind(value)
+        if kind == "definition":
+            return cdef_key(value)
+        return (kind, value.digest())
+
+    return (
+        value_key(item.owner),
+        graph_path_sort_key(item.path),
+        tuple((graph_path_sort_key(hop.path), hop.kind.value) for hop in item.hops),
+        value_key(item.target),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ContainmentContext:
+    """Immutable fixed-universe semantics for one containment result.
+
+    Args:
+        target_kind: Exact terminal type selected by the containment query.
+        edges: Literal traversal policy retained by every result transformation.
+        contains_ref: Whether qualified paths require a reference hop.
+        source_scope: Canonical selected source identifiers.
+        complete: Whether retained witness evidence covers the selected universe.
+        bounded: Whether raw occurrence truncation may have omitted witnesses.
+
+    ``complete`` and ``bounded`` describe evidence rather than query identity, so
+    compatible set operations combine them conservatively.
+    """
+
+    target_kind: ContainmentTargetKind
+    edges: ContainmentEdgePolicy = "materialize"
+    contains_ref: bool = False
+    source_scope: tuple[str, ...] = ()
+    complete: bool = True
+    bounded: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate detached policy metadata without touching Store authority."""
+
+        if self.target_kind not in {"definition", "object_ref", "state_ref"}:
+            raise ValueError("Containment target_kind must be definition, object_ref, or state_ref.")
+        validate_containment_policy(self.edges, self.contains_ref)
+        if not isinstance(self.source_scope, tuple) or not all(isinstance(key, str) for key in self.source_scope):
+            raise TypeError("Containment source_scope must be a tuple of canonical source keys.")
+        if type(self.complete) is not bool or type(self.bounded) is not bool:
+            raise TypeError("Containment completeness and boundedness must be exact bools.")
+
+    def compatible_with(self, other: "ContainmentContext") -> bool:
+        """Return whether two contexts may combine without widening authority."""
+
+        return (
+            self.target_kind == other.target_kind
+            and self.edges == other.edges
+            and self.contains_ref == other.contains_ref
+            and self.source_scope == other.source_scope
+        )
+
+    def combined_with(self, other: "ContainmentContext") -> "ContainmentContext":
+        """Conservatively merge evidence state from compatible result contexts.
+
+        Raises:
+            ValueError: If policy, target kind, or source scope differs.
+        """
+
+        if not self.compatible_with(other):
+            raise ValueError("Cannot combine results with incompatible containment contexts.")
+        return replace(
+            self,
+            complete=self.complete and other.complete,
+            bounded=self.bounded or other.bounded,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,9 +536,9 @@ class OccurrenceTraversalSnapshot:
         for target_id in sorted(self.targets):
             if target_id not in self.cdefs:
                 continue
-            stack = [(target_id, DefinitionPath())]
+            stack = [(target_id, DefinitionPath(), ())]
             while stack:
-                cur_id, suffix = stack.pop()
+                cur_id, suffix, suffix_hops = stack.pop()
                 edges = sorted(
                     self.incoming.get(cur_id, ()),
                     key=lambda edge: (edge.parent_id, str(edge.path)),
@@ -288,12 +546,16 @@ class OccurrenceTraversalSnapshot:
                 )
                 for edge in edges:
                     path = edge.path.join(suffix)
+                    hops = (ContainmentHop(edge.path, edge.edge_kind),) + suffix_hops
                     if edge.parent_id in self.stored_ids:
                         yielded += 1
-                        yield DefinitionOccurrence(self.cdefs[edge.parent_id], path, self.cdefs[target_id])
+                        yield DefinitionOccurrence(
+                            self.cdefs[edge.parent_id], path,
+                            self.cdefs[target_id], hops,
+                        )
                         if max_occurrences is not None and yielded >= max_occurrences:
                             return
-                    stack.append((edge.parent_id, path))
+                    stack.append((edge.parent_id, path, hops))
 
 
 class AllOccurrenceTraversalSnapshot:
@@ -316,17 +578,25 @@ class AllOccurrenceTraversalSnapshot:
             for edge in sorted(self.outgoing.get(owner_id, ()), key=lambda edge: str(edge.path), reverse=True):
                 if edge.edge_kind is not EdgeKind.MATERIALIZE:
                     continue
-                stack.append((edge.child_id, edge.path))
+                stack.append((
+                    edge.child_id, edge.path,
+                    (ContainmentHop(edge.path, edge.edge_kind),),
+                ))
             while stack:
-                did, path = stack.pop()
+                did, path, hops = stack.pop()
                 yielded += 1
-                yield DefinitionOccurrence(self.cdefs[owner_id], path, self.cdefs[did])
+                yield DefinitionOccurrence(
+                    self.cdefs[owner_id], path, self.cdefs[did], hops,
+                )
                 if max_occurrences is not None and yielded >= max_occurrences:
                     return
                 for edge in sorted(self.outgoing.get(did, ()), key=lambda edge: str(edge.path), reverse=True):
                     if edge.edge_kind is not EdgeKind.MATERIALIZE:
                         continue
-                    stack.append((edge.child_id, path.join(edge.path)))
+                    stack.append((
+                        edge.child_id, path.join(edge.path),
+                        hops + (ContainmentHop(edge.path, edge.edge_kind),),
+                    ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +630,10 @@ class QueryExplanation:
     count_collision_buckets: int = 0
     terminal_stop_reason: str | None = None
     lowering_diagnostics: dict[str, Any] | None = None
+    containment_target_kind: ContainmentTargetKind | None = None
+    containment_edges: ContainmentEdgePolicy | None = None
+    containment_contains_ref: bool | None = None
+    containment_source_scope: tuple[str, ...] = ()
 
     def format(self) -> str:
         lines = [
@@ -390,6 +664,11 @@ class QueryExplanation:
             lines.append(f"lowering: {self.lowering_strategy}")
         if self.scan_required:
             lines.append(f"scan required: {self.scan_reason or 'unknown'}")
+        if self.containment_target_kind is not None:
+            lines.append(f"containment target: {self.containment_target_kind}")
+            lines.append(f"containment edges: {self.containment_edges}")
+            lines.append(f"containment contains ref: {self.containment_contains_ref}")
+            lines.append(f"containment sources: {self.containment_source_scope!r}")
         if self.candidate_rows_read or self.cdef_blobs_decoded or self.python_verifications:
             lines.append(f"candidate rows read: {self.candidate_rows_read}")
             lines.append(f"CDef blobs decoded: {self.cdef_blobs_decoded}")
@@ -418,12 +697,15 @@ class QueryExplanation:
 class ResultUniverse:
     kind: Literal["definitions", "occurrences"]
     definitions: tuple[Any, ...] = ()
-    occurrences: tuple[DefinitionOccurrence, ...] = ()
+    occurrences: tuple[DefinitionOccurrence | ReferenceOccurrence, ...] = ()
     materializable: bool = False
     domain: str = "stored"
     replicas: dict[Any, tuple[Any, ...]] | None = None
     witnesses: tuple[Any, ...] = ()
     witness_complete: bool = False
+    containment: ContainmentContext | None = None
+    containment_witnesses: tuple[DefinitionOccurrence | ReferenceOccurrence, ...] = ()
+    containment_carrier: ContainmentCarrier = "target"
 
 
 @dataclass(slots=True)

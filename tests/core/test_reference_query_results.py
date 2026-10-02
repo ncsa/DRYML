@@ -2,8 +2,12 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Definition, ObjectRef, Repo, Serializable
+from dryml.core import Definition, ObjectId, ObjectRef, Repo, Serializable
+from dryml.core.cdef_graph import EdgeKind
+from dryml.core.query.model import ContainmentHop, containment_witness_key
+from dryml.core.query.reference import ReferenceOccurrence
 from dryml.core.store.dir import DirStore
+from dryml.core.utils.graph.path import GraphPath
 
 
 class ReferenceResultLeaf(Serializable):
@@ -56,3 +60,35 @@ def test_reference_values_dedupe_identical_store_replicas(tmp_path):
     repo.add_store(second_store)
 
     assert list(repo.references().object_id(state.object_id).object_refs()) == [state.object]
+
+
+def test_reference_occurrence_hops_do_not_change_legacy_identity(tmp_path):
+    repo = Repo(DirStore(tmp_path / "store"))
+    state = repo.save_object(ReferenceResultLeaf(1, repo=repo))
+    original = ReferenceOccurrence(state, GraphPath(), state)
+    enriched = ReferenceOccurrence(
+        state,
+        GraphPath(),
+        state,
+        (ContainmentHop(GraphPath(), EdgeKind.REF),),
+    )
+
+    assert enriched == original
+    assert hash(enriched) == hash(original)
+    assert enriched.target == state
+    assert containment_witness_key(enriched) != containment_witness_key(original)
+
+
+def test_reference_containment_witness_key_keeps_complete_object_identity(tmp_path):
+    repo = Repo(DirStore(tmp_path / "store"))
+    state = repo.save_object(ReferenceResultLeaf(1, repo=repo))
+    other = ObjectRef(
+        state.definition,
+        {path: ObjectId() for path in state.object.objects},
+    )
+    first = ReferenceOccurrence(state.definition, GraphPath(), state.object)
+    second = ReferenceOccurrence(state.definition, GraphPath(), other)
+
+    assert state.object.definition == other.definition
+    assert state.object != other
+    assert containment_witness_key(first) != containment_witness_key(second)

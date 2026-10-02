@@ -61,7 +61,7 @@ def test_promoted_package_keeps_the_destination_export_manifest():
         "SpecHint", "TensorSpec", "ImportRef", "SourceSpec", "symbol_ref", "resolve_symbol",
         "CDefEdge", "CDefNode", "CDefOccurrence", "ConcreteDefinitionGraph",
         "ConcreteDefinitionGraphCycleError", "ConcreteDefinitionGraphError", "EdgeKind",
-        "iter_direct_cdef_edges", "Arg", "DefinitionPath", "DefinitionQuery", "DefinitionResultSet",
+        "iter_direct_cdef_edges", "Arg", "ContainmentEdgePolicy", "DefinitionPath", "DefinitionQuery", "DefinitionResultSet",
         "GraphPathError", "Index", "Key", "Kwarg", "Parameter", "ObjectResultSet",
         "ObjectRefResultSet", "OccurrenceResultSet", "ReferenceOccurrence", "ReferenceQuery", "ReferenceResultSet", "MetadataField", "MetadataPredicate", "field", "QueryCardinalityError", "QueryDomainError", "QueryError",
         "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember", "StateRefResultSet",

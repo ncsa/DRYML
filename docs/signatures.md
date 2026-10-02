@@ -192,7 +192,10 @@ delivery. It recursively walks closure globals, defaults, annotations, instance
 attributes, and `__slots__`; live Repo/Store resources are rejected rather than
 being carried by a pickle fallback. Selected declaration Stores are represented by
 the frozen execution Store table, never filesystem paths. This transport remains
-internal and bounded; it is not a general pickle or RPC format.
+internal and bounded; it is not a general pickle or RPC format. Explicit
+`Ref(value)` and `Mat(value)` assertions remain transient while crossing an
+invocation and are consumed by the reconstructed worker-local plan. They cannot
+cross the result boundary or enter persistent identity data.
 
 The callable graph includes globals, defaults, annotations, closure cells, bound
 receivers, instance attributes, and `__slots__` in one pass, preserving aliases

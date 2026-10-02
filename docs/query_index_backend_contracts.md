@@ -11,3 +11,38 @@ SQLite connections are process-local. Rebuild and mutation use staged activation
 `dryml.core.query.sqlite.open_connection(config, *, readonly=False)` is the public standalone connection owner. `config` must be a `SQLiteQueryIndexConfig`, `readonly` must be exactly `bool`, and `config.path` must be present; validation occurs before importing SQLite or creating a parent/database. Invalid argument types raise `TypeError`, while an absent configured path raises actionable `QueryIndexError`. The connection applies the same foreign-key, timeout, trusted-schema, journal, and durability configuration as the query-index connection manager and always closes its connection. Writable opening creates missing parent directories; read-only opening requires an existing database and creates neither the target nor its parent. SQLite open/configuration errors remain SQLite errors, while a missing optional backend is reported as `QueryIndexUnavailable`.
 
 The outer `open_connection` context is a handle scope, not a commit scope. Its connection uses standard-library deferred transactions and creator-thread affinity; callers use an inner `with con:` block to commit on successful exit or roll back on exceptional exit. When the outer scope ends, any transaction still open is rolled back rather than committed, then the handle is closed on normal exit, exceptions, and cancellation. Manager-cached index connections retain autocommit mode because index read views and mutations issue explicit `BEGIN`, `BEGIN IMMEDIATE`, `COMMIT`, and `ROLLBACK` statements. Manager cache keys remain process/thread/access-mode local and handles are never returned across keys. Cached handles disable SQLite creator-thread enforcement only so manager teardown can close an inactive worker's handles from a coordinator thread; callers must not race handle use with teardown, and a failed close remains visible and retained for recovery.
+
+## Reference-Aware Containment
+
+Reference-aware nested queries do not add persisted rows, schema versions, or a
+second authority format. Existing sidecars can remain in place and reopen with
+their current compatibility rules. Missing, dirty, corrupt, stale, or
+incompatible sidecars follow the existing visible rebuild or fallback policy;
+they never replace current authoritative root capture or turn a required
+containment scan into an empty result.
+
+Eligible materialize-only CDef containment continues to use the indexed
+definition/owner and captured materializing-edge paths. Reference-inclusive,
+reference-bearing, and exact ObjectRef/StateRef containment instead captures
+each selected Store's authoritative roots inside its read fence, then verifies
+the retained graph in memory. The derived index can prioritize that work but
+cannot exclude a root. `refresh=False` disables refresh, not this authority
+check. Each source contributes one valid cut; federated queries may combine
+separate source cuts, but no occurrence mixes two sources.
+
+`in_store()` selects an exact connected source before capture, replica
+deduplication, cardinality, ordering, or the global raw occurrence limit. A
+reference-aware residual has the explanation scan reason
+`reference-aware containment requires authoritative root verification`.
+`scan_policy("allow")` permits the residual, `"warn"` reports it before the
+first authority or recovery scan, and `"forbid"` and `require_indexed()` reject
+it before recovery. The valid materialize-plus-reference-bearing combination is
+deterministically empty and requires no scan.
+
+The residual only inspects retained definition structure. Exact ObjectRef and
+StateRef terminals retain their complete identities and declared hop kinds; they
+are not dereferenced, loaded, or promoted to CDef children. Consequently an
+occurrence is a definition-graph fact, not evidence of target ownership,
+independent storage, payload availability, loadability, restoration, or cleanup
+eligibility. Ordinary reference-authority lookup remains a separate query
+contract.

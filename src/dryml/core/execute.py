@@ -518,7 +518,7 @@ class SharedDirStoreStrategy:
         outcome = decoded.value
         if not outcome["success"]:
             raise CoreExecutionError(
-                f"core execution worker outcome failed: {outcome['reason']}",
+                f"core execution worker failed: {outcome['reason']}",
                 phase="invoke", evidence=decoded.evidence,
             )
         updates = tuple((item["target"], StateRef.from_data(item["state"])) for item in outcome["updates"])
@@ -761,7 +761,7 @@ def invoke_prepared_call(invocation: bytes) -> Any:
         repo=context.repo,
     )
     if not outcome["success"]:
-        raise CoreCallCodecError(f"core execution worker outcome failed: {outcome['reason']}")
+        raise CoreCallCodecError(f"core execution worker failed: {outcome['reason']}")
     return outcome["result"]
 
 
