@@ -17,6 +17,10 @@ print(info.id)
 
 Inspection uses `importlib.metadata` for installed distributions. It does not import package runtime modules to learn versions.
 
+Each inspection reads fresh metadata. File inventories used to infer distribution
+locations are read once per distribution during that inspection, not cached across
+calls; later inspections continue to observe installed-environment changes.
+
 The distribution inventory follows the interpreter's installation directories,
 including enabled user and inherited system site directories in import-path
 precedence order. Temporary application or backend-vendored `sys.path` entries

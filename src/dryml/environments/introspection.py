@@ -28,9 +28,12 @@ from .utils import normalize_distribution_name
 
 
 def _distribution_location(dist: metadata.Distribution) -> str | None:
+    """Find the first file's parent with one inventory read, or return unknown."""
+
     try:
-        if dist.files:
-            first = next(iter(dist.files), None)
+        files = dist.files
+        if files:
+            first = next(iter(files), None)
             if first is not None:
                 located = dist.locate_file(first)
                 return str(Path(located).parent)
@@ -87,6 +90,9 @@ def inspect_current() -> EnvironmentRecord:
     Transient application and vendored search paths do not change this
     inventory. Heavy modules such as TensorFlow, Torch, JAX, Ray, or Slurm
     integrations are never imported by this function.
+
+    Each call reads fresh metadata; a distribution's file inventory is read only
+    once to infer its location and is not retained across calls.
 
     Returns:
         An immutable environment record with interpreter, platform, installed
