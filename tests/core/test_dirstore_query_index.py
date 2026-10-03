@@ -8,6 +8,7 @@ import pytest
 
 import dryml.filesystem as filesystem
 from dryml.core import Definition, Object, Repo, Serializable, SKIP_ARGS
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core.store.dir import DirStore
@@ -386,6 +387,33 @@ def test_idempotent_query_visible_writes_do_not_publish_new_dirty_tokens(
     monkeypatch.setattr(store, "mark_query_index_dirty", unexpected_dirty)
     for write in writes:
         write()
+
+
+@pytest.mark.parametrize("direct_child", (False, True))
+def test_incremental_graph_registration_does_not_rescan_historical_snapshots(
+        tmp_path, monkeypatch, direct_child):
+    """Clear covered definition tokens without enumerating snapshot fallback authority."""
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    Repo(store).save_object(IndexedSerializable("historical"))
+    child = Definition(IndexedRecordObject, "child").concretize()
+    parent = Definition(IndexedRecordObject, child).concretize()
+    if direct_child:
+        store.write_definition_record(DefinitionRecord(child), stored_root=False)
+    store.write_definition_record(DefinitionRecord(parent))
+
+    def unexpected_scan():
+        raise AssertionError("incremental registration scanned historical snapshots")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(store, "iter_state_ref_records", unexpected_scan)
+        store.open_query_index().register_stored_roots(
+            ConcreteDefinitionGraph.from_root(parent), (parent,),
+        )
+
+    assert store.query_index_status().state == "ready"
+    assert Repo(store).query(parent).stored().count() == 1
+    assert Repo(store).query(child).stored().count() == 0
 
 
 @pytest.mark.skipif(not sqlite_available(), reason="sqlite3 unavailable")

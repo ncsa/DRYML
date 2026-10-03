@@ -124,6 +124,60 @@ def test_inspect_current_uses_importlib_metadata(monkeypatch):
     assert "environment_fragment" not in record.dryml.schema_versions
 
 
+def test_inspect_current_reads_distribution_files_once_per_observation(monkeypatch, tmp_path):
+    """Reuse each file inventory locally, without caching it across inspections."""
+
+    class CountingDist(FakeDist):
+        reads = 0
+        entries = ("first/module.py", "other/module.py")
+
+        @property
+        def files(self):
+            self.reads += 1
+            return self.entries
+
+        def locate_file(self, entry):
+            return tmp_path / entry
+
+    dist = CountingDist()
+    monkeypatch.setattr(metadata, "distributions", lambda **_: [dist])
+    monkeypatch.setattr(metadata, "version", lambda _name: "0.3.0")
+
+    first = introspection.inspect_current()
+    assert dist.reads == 1
+    assert first.distributions["fake-pkg"].location == str(tmp_path / "first")
+
+    dist.entries = ("changed/module.py",)
+    second = introspection.inspect_current()
+    assert dist.reads == 2
+    assert second.distributions["fake-pkg"].location == str(tmp_path / "changed")
+
+
+@pytest.mark.parametrize("files", (None, ()))
+def test_distribution_location_without_files_is_unknown(files):
+    """Missing or empty inventory has no inferred installation location."""
+
+    assert introspection._distribution_location(types.SimpleNamespace(files=files)) is None
+
+
+@pytest.mark.parametrize("stage", ("files", "locate"))
+@pytest.mark.parametrize("error_type", (OSError, TypeError, ValueError))
+def test_distribution_location_metadata_failure_is_unknown(stage, error_type):
+    """Unreadable inventories and invalid locations retain best-effort behavior."""
+
+    class FailingDist(FakeDist):
+        @property
+        def files(self):
+            if stage == "files":
+                raise error_type("unavailable inventory")
+            return ("module.py",)
+
+        def locate_file(self, entry):
+            raise error_type("unavailable location")
+
+    assert introspection._distribution_location(FailingDist()) is None
+
+
 def test_installed_software_evidence_ignores_transient_vendor_paths(
     monkeypatch, tmp_path,
 ):

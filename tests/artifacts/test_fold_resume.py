@@ -174,6 +174,7 @@ def _contains_forbidden_runtime(value) -> bool:
     return False
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_fold_resumes_saved_carry_and_position_without_rerunning_initializer(tmp_path):
     """Compatible resume restores carry, skips yields, and keeps one initializer call."""
 
@@ -213,6 +214,7 @@ def test_fold_resumes_saved_carry_and_position_without_rerunning_initializer(tmp
     assert (ResumeDataset.iterations, ResumeDataset.yields) == (2, 5)
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_fold_eof_checkpoint_retries_finalization_without_loading_source(tmp_path, monkeypatch):
     """Exhausted progress can finalize after failure without another source traversal."""
 
@@ -240,6 +242,7 @@ def test_fold_eof_checkpoint_retries_finalization_without_loading_source(tmp_pat
     assert ResumeDataset.iterations == 1
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_fold_rejects_non_positive_or_non_exact_checkpoint_intervals(tmp_path):
     """Cadence validation rejects booleans, non-integers, zero, and negatives."""
 
@@ -256,6 +259,7 @@ def test_fold_rejects_non_positive_or_non_exact_checkpoint_intervals(tmp_path):
         assert ResumeDataset.iterations == initial_iterations
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_fold_store_override_controls_checkpoint_and_final_publication(tmp_path):
     """One declared Store override governs both progress and completed state."""
 
@@ -292,6 +296,7 @@ def test_fold_store_override_controls_checkpoint_and_final_publication(tmp_path)
     assert routed.read_state_ref_record(final.digest()) is None
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_fold_resume_fails_if_fresh_source_exhausts_during_saved_skip(tmp_path):
     """A shortened replay source cannot silently combine its suffix with saved carry."""
 
@@ -372,6 +377,7 @@ assert fold.compute.status(state_repo=repo).state == 'completed'
     assert resumed.returncode == 0, resumed.stderr
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_fold_resumes_reservoir_and_confusion_carry_without_losing_components(tmp_path):
     """Reservoir counters/key/storage and confusion counts survive checkpoints."""
 
