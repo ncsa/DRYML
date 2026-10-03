@@ -17,6 +17,9 @@ from dryml.managed import ManagedConfig, ManagedRecoveryError, managed_operation
 from .test_fold import CountingDataset, _fold
 
 
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+
+
 class NestedResultState(Pickleable):
     """Mutable child used to prove exact recovery validates descendant state."""
 

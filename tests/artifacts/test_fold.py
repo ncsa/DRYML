@@ -270,6 +270,7 @@ def test_fold_failures_and_interruptions_leave_no_partial_payload_then_rerun_fre
     assert CountingDataset.iterations == 2
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_fold_rejects_empty_and_source_failures_without_replacing_old_result(tmp_path):
     """Bad source input and pre-install errors retain a prior complete Value payload."""
 
@@ -329,6 +330,7 @@ def test_fold_keeps_complete_live_result_when_final_managed_publication_fails(tm
     )
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_fold_rejects_missing_or_ambiguous_specs_and_invalid_role_results(tmp_path):
     """Input, carry, and finalizer contract errors cannot install a partial Value."""
 
@@ -579,6 +581,7 @@ def test_fold_iterator_close_failure_is_not_completed(tmp_path):
     assert fold.compute.status(state_repo=store).state == "failed"
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_fold_uses_one_managed_owner_and_services_interrupt_at_checkpoint(tmp_path):
     """A concurrent owner conflicts and a request stops at Fold's next safe point."""
 
