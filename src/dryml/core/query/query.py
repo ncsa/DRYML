@@ -3310,6 +3310,30 @@ def _compare_bounded_identity_entries(left, right) -> int:
     return (left_tie > right_tie) - (left_tie < right_tie)
 
 
+def _compare_bounded_occurrences(left, right) -> int:
+    """Compare typed occurrence keys, encoding roots only on digest ties."""
+
+    from .identity import _occurrence_path_key
+
+    left_key, right_key = left[0], right[0]
+    first, second = left_key.owner, right_key.owner
+    prefix_a, prefix_b = (first.kind, first.digest), (second.kind, second.digest)
+    if prefix_a != prefix_b:
+        return -1 if prefix_a < prefix_b else 1
+    if first._value is not second._value and first.sort_key != second.sort_key:
+        return -1 if first.sort_key < second.sort_key else 1
+    path_a, path_b = _occurrence_path_key(left_key.path), _occurrence_path_key(right_key.path)
+    if path_a != path_b:
+        return -1 if path_a < path_b else 1
+    first, second = left_key.target, right_key.target
+    prefix_a, prefix_b = (first.kind, first.digest), (second.kind, second.digest)
+    if prefix_a != prefix_b:
+        return -1 if prefix_a < prefix_b else 1
+    if first._value is second._value:
+        return 0
+    return (first.sort_key > second.sort_key) - (first.sort_key < second.sort_key)
+
+
 @dataclass(frozen=True, slots=True)
 class _AlgebraSource:
     """Deferred identity algebra whose operands share one terminal capture."""
@@ -3581,15 +3605,15 @@ class IdentityQuery:
 
         return self._combine(other, "intersection")
 
-    def take(self, limit: int) -> "IdentityQuery":
-        """Return an explicitly bounded canonical identity prefix plan.
+    def take(self, limit: int) -> "IdentitySet":
+        """Evaluate an explicitly bounded canonical identity prefix.
 
         Args:
             limit: Non-negative exact number of globally deduplicated members.
 
         Returns:
-            A plan whose collected fixed set remains visibly bounded through
-            later fixed-set refinement and algebra.
+            A fixed IdentitySet whose requested limit remains visible through
+            later fixed-set refinement; use its query() to compose further.
 
         Raises:
             ValueError: If ``limit`` is not a non-negative exact integer.
@@ -3597,7 +3621,7 @@ class IdentityQuery:
 
         if type(limit) is not int or limit < 0:
             raise ValueError("take limit must be a non-negative exact int.")
-        return replace(self, take_limit=limit)
+        return replace(self, take_limit=limit).collect()
 
     def max_witnesses(self, limit: int | None) -> "IdentityQuery":
         """Set the shared GeneratorSelector verification witness budget."""
@@ -4433,6 +4457,49 @@ class OccurrenceQuery:
             raise ValueError("max_occurrences must be a non-negative exact int or None.")
         return replace(self, occurrence_limit=limit)
 
+    def take(self, limit: int) -> "OccurrenceSet":
+        """Return a fixed canonical prefix without collecting all raw paths.
+
+        Args:
+            limit: Non-negative exact number of globally distinct occurrences.
+
+        Returns:
+            A bounded OccurrenceSet with its requested limit and captured evidence.
+
+        Raises:
+            ValueError: If the limit is not an exact non-negative integer.
+
+        Side Effects:
+            Evaluates selected roots and necessary metadata under a retryable cut;
+            zero-limit requests validate statically without reading sources.
+        """
+
+        from .identity import OccurrenceSet
+
+        if type(limit) is not int or limit < 0:
+            raise ValueError("take limit must be a non-negative exact int.")
+        if limit == 0:
+            return OccurrenceSet(bounded=True, requested_limit=0)
+        return self.roots._run_terminal(lambda cut: self._take_with_capture(cut, limit))
+
+    def _take_with_capture(self, capture, limit):
+        from .identity import OccurrenceSet
+
+        roots = self.roots._collect_with_capture(capture)
+        selected = []
+        for occurrence in self._iter_occurrences(capture, roots=roots):
+            sources = (
+                self.fixed.evidence_for(occurrence)
+                if self.fixed is not None else roots.evidence_for(occurrence.owner)
+            )
+            selected.append((occurrence.key, (occurrence, sources)))
+            selected.sort(key=cmp_to_key(_compare_bounded_occurrences))
+            if len(selected) > limit:
+                selected.pop()
+        return OccurrenceSet._from_entries(
+            dict(selected), bounded=True, requested_limit=limit,
+        )
+
     def max_depth(self, limit: int | None) -> "OccurrenceQuery":
         """Set a failing relationship-depth safety budget for this traversal."""
 
@@ -4550,12 +4617,12 @@ class OccurrenceQuery:
             ):
                 yield value, roots.evidence_for(root).sources
 
-    def _iter_occurrences(self, capture):
+    def _iter_occurrences(self, capture, *, roots=None):
         """Stream raw occurrences while retaining source evaluation once per terminal."""
 
         from .relationships import iter_relationship_occurrences
 
-        roots = self.roots._collect_with_capture(capture)
+        roots = self.roots._collect_with_capture(capture) if roots is None else roots
         matches = self._target_matcher(roots, capture)
         if self.fixed is not None:
             yield from self._iter_fixed_occurrences(matches=matches)

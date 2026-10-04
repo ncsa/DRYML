@@ -128,6 +128,25 @@ def test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships():
     assert roots.nested(child).targets().collect().bounded
 
 
+def test_v3_occurrence_take_returns_fixed_canonical_bounded_prefix(monkeypatch):
+    from dryml.core.query.query import OccurrenceQuery
+
+    child = Definition(V3TraversalLeaf, "child").concretize()
+    root = Definition(V3TraversalParent, [child, child]).concretize()
+    query = IdentityQuery.from_set(IdentitySet((root,))).nested(child)
+    expected = tuple(query.collect())[:1]
+    monkeypatch.setattr(
+        OccurrenceQuery, "collect",
+        lambda self: pytest.fail("take() built a complete occurrence set"),
+    )
+
+    prefix = query.take(1)
+    assert isinstance(prefix, OccurrenceSet)
+    assert prefix.bounded and prefix.requested_limit == 1
+    assert tuple(prefix) == expected
+    assert query.take(0).count() == 0
+
+
 def test_v3_occurrence_metadata_filters_targets_with_shared_authority(tmp_path):
     from dryml.core import Repo, SaveAnnotations
     from dryml.core.store.dir import DirStore
