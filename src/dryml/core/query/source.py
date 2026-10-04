@@ -70,6 +70,7 @@ class SourceCapture:
         self._facts: dict[str, CapturedStoreFacts] = {}
         self._exact_states: dict[str, dict[str, StateRef | None]] = {}
         self._topologies: dict[int, tuple[Store, ...]] = {}
+        self._cache_knowledge: dict[tuple[int, bool], IdentitySet] = {}
         self.active = False
         self.source_cuts = 0
         self.capture_rounds = 0
@@ -84,6 +85,16 @@ class SourceCapture:
             with repo.retain_topology():
                 self._topologies[key] = tuple(repo.stores)
         return self._topologies[key]
+
+    def cache_knowledge(self, repo, *, weak: bool) -> IdentitySet:
+        """Snapshot one Repo cache tier without creating identities or Store reads."""
+
+        key = id(repo), weak
+        if key not in self._cache_knowledge:
+            self._cache_knowledge[key] = IdentitySet(
+                _derive_identities(_cache_values(repo, weak=weak))
+            )
+        return self._cache_knowledge[key]
 
     def capture_store(
         self, source: StoreSource | Store, *, metadata_scopes: frozenset[str] = frozenset()
@@ -217,7 +228,7 @@ class SourceCapture:
         with retain_topology():
             stores = self.repo_stores(repo)
             facts = self.capture_stores(stores, metadata_scopes=metadata_scopes)
-            cache_values = _cache_values(repo, weak=source.weak)
+            cached = self.cache_knowledge(repo, weak=source.weak)
         members = [
             (value, facts_item.source)
             for facts_item in facts
@@ -225,7 +236,7 @@ class SourceCapture:
         ]
         members.extend(
             (value, SourceEvidence.from_source(repo))
-            for value in _derive_identities(cache_values)
+            for value in cached
         )
         return IdentitySet(members)
 
