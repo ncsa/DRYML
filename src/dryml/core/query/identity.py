@@ -496,6 +496,11 @@ class OccurrenceSet:
     def __len__(self) -> int:
         return len(self._entries)
 
+    def __contains__(self, occurrence: object) -> bool:
+        if not isinstance(occurrence, Occurrence):
+            return False
+        return occurrence.key in self._entries
+
     def count(self) -> int:
         """Return the fixed distinct-occurrence cardinality without source access."""
 
