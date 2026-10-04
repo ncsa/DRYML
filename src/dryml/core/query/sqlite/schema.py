@@ -12,7 +12,7 @@ from ..model import CANONICAL_QUERY_SEMANTICS_VERSION, FINGERPRINT_SCHEMA_VERSIO
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
-SQLITE_QUERY_INDEX_SCHEMA_VERSION = 7
+SQLITE_QUERY_INDEX_SCHEMA_VERSION = 8
 IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported"]
 
 
@@ -169,6 +169,36 @@ DDL = (
     ) WITHOUT ROWID
     """,
     "CREATE INDEX IF NOT EXISTS metadata_records_by_reference ON metadata_records(reference_kind, reference_digest, scope)",
+    """
+    CREATE TABLE IF NOT EXISTS v3_identity_projection (
+        root_graph_hash TEXT NOT NULL,
+        identity_kind TEXT NOT NULL CHECK (identity_kind IN ('cdef', 'object_ref', 'state_ref')),
+        identity_digest TEXT NOT NULL,
+        PRIMARY KEY (root_graph_hash, identity_kind, identity_digest)
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS v3_relationship_projection (
+        root_graph_hash TEXT NOT NULL,
+        owner_kind TEXT NOT NULL CHECK (owner_kind IN ('cdef', 'object_ref', 'state_ref')),
+        owner_digest TEXT NOT NULL,
+        relationship_kind TEXT NOT NULL,
+        path_blob BLOB NOT NULL,
+        target_kind TEXT NOT NULL CHECK (target_kind IN ('cdef', 'object_ref', 'state_ref')),
+        target_digest TEXT NOT NULL,
+        PRIMARY KEY (
+            root_graph_hash, owner_kind, owner_digest, relationship_kind,
+            path_blob, target_kind, target_digest
+        )
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS v3_projection_coverage (
+        family TEXT PRIMARY KEY,
+        row_count INTEGER NOT NULL,
+        row_digest BLOB NOT NULL
+    ) WITHOUT ROWID
+    """,
 )
 
 
@@ -188,6 +218,12 @@ def initialize_schema(con, *, store_key: str, canonical_version: int = CANONICAL
     for statement in DDL:
         con.execute(statement)
     _ensure_catalog_state(con, store_key=store_key, canonical_version=canonical_version, build_state=build_state)
+    # Empty projections are complete until rows are registered; their witnesses
+    # make an empty rebuilt Store distinguishable from missing coverage metadata.
+    con.executemany(
+        "INSERT OR IGNORE INTO v3_projection_coverage (family, row_count, row_digest) VALUES (?, 0, ?)",
+        ((family, bytes(32)) for family in ("identity", "relationship")),
+    )
 
 
 def validate_schema(con, *, store_key: str, canonical_version: int = CANONICAL_QUERY_SEMANTICS_VERSION, require_ready: bool = True) -> None:

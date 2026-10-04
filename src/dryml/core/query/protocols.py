@@ -8,7 +8,7 @@ from ..cdef_graph import EdgeKind
 from ..definition import ConcreteDefinition
 from .domain import DefinitionDomain
 from .lowering import CandidateBatch, CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
-from .model import DefinitionId, FeatureRequirement, IndexWriteResult, QueryIndexStatus, QueryStats, RefreshPolicy, ValidationReport
+from .model import DefinitionId, FeatureRequirement, IndexWriteResult, QueryIndexStatus, QueryStats, RefreshPolicy, V3ProjectionCoverage, ValidationReport
 from .path import DefinitionPath
 
 
@@ -244,6 +244,10 @@ class StoreQueryIndex(Protocol):
         ...
 
     def validate(self, *, thorough: bool = False) -> ValidationReport:
+        ...
+
+    def v3_projection_coverage(self) -> V3ProjectionCoverage:
+        """Return derived V3 projection integrity and authority coverage."""
         ...
 
     def ensure_exact_stored(self, cdef: ConcreteDefinition, *, stats: QueryStats | None = None) -> bool:

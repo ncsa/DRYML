@@ -184,6 +184,29 @@ class QueryIndexStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class V3ProjectionCoverage:
+    """Integrity and authority coverage for a derived Query V3 projection.
+
+    ``projection_complete`` means the backend's recorded row-set witnesses
+    still match its projection rows.  It is deliberately distinct from
+    ``authority_complete``: only the latter can support an indexed-only answer.
+    Current V3 projections remain candidate accelerators until every authority
+    inventory and mutable publication path has a compatible fenced witness.
+    """
+
+    backend: str
+    store_key: str
+    generation: int | None
+    projection_complete: bool
+    authority_complete: bool
+    indexed_only: bool
+    source_roots: int = 0
+    identities: int = 0
+    relationships: int = 0
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ValidationIssue:
     severity: Literal["error", "warning"]
     message: str

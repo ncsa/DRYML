@@ -349,6 +349,12 @@
             "test_u5_zero_prefix_validates_without_opening_source_inventory"
           ]
         },
+        "tests/core/test_query_v3_index.py": {
+          "rationale": "Retain the no-historical-rescan incremental SQLite coverage invariant in routine runs; keep schema/recovery and backend parity matrices focused.",
+          "functions": [
+            "test_incremental_v3_publication_does_not_rescan_historical_projection_rows"
+          ]
+        },
         "tests/core/test_query_graph_planner.py": {
           "rationale": "Keep every dependency-free planner and backend-contract case plus one authoritative graph-query comparison; exhaustive mode covers repeated Store-backed no-enumeration and projection compositions.",
           "functions": [
