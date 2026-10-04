@@ -3388,6 +3388,15 @@ class IdentityQuery:
         return cls(source, default_scope=source)
 
     @classmethod
+    def from_retained_repo_lookup(cls, repo, *, weak: bool = True) -> "IdentityQuery":
+        """Create the private V3 root-or-cache universe for retained Repo APIs."""
+
+        from .source import RetainedRepoLookupSource
+
+        source = RetainedRepoLookupSource(repo, weak=weak)
+        return cls(source, default_scope=source)
+
+    @classmethod
     def from_set(cls, members) -> "IdentityQuery":
         """Create an unevaluated V3 refinement over a fixed IdentitySet."""
 
@@ -3971,7 +3980,12 @@ class IdentityQuery:
 
     def _captured_members(self, capture=None):
         from .identity import IdentitySet
-        from .source import RepoSource, SourceCapture, StoreSource
+        from .source import (
+            RepoSource,
+            RetainedRepoLookupSource,
+            SourceCapture,
+            StoreSource,
+        )
         from ..definition import ConcreteDefinition
 
         capture = SourceCapture() if capture is None else capture
@@ -4054,8 +4068,21 @@ class IdentityQuery:
             result = capture.capture_store(self.source, metadata_scopes=scopes).knowledge()
         elif isinstance(self.source, RepoSource):
             result = capture.capture_repo(self.source, metadata_scopes=scopes)
+        elif isinstance(self.source, RetainedRepoLookupSource):
+            exact_cdefs = {
+                restriction.value
+                for restriction in self.restrictions
+                if restriction.kind == "sel" and isinstance(restriction.value, ConcreteDefinition)
+            }
+            result = capture.capture_retained_lookup_repo(
+                self.source,
+                exact_cdef=next(iter(exact_cdefs)) if len(exact_cdefs) == 1 else None,
+            )
         else:
-            raise TypeError("IdentityQuery source must be an IdentitySet, StoreSource, or RepoSource.")
+            raise TypeError(
+                "IdentityQuery source must be an IdentitySet, StoreSource, RepoSource, "
+                "or retained Repo lookup source."
+            )
         return dict(result._entries), capture, result.bounded
 
     def _exact_state_selector(self):

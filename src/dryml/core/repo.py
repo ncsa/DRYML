@@ -4969,20 +4969,82 @@ class Repo:
 
     def __getitem__(
             self, key: ConcreteDefinition):
-        """
-        Easy access to objects within.
+        """Return the one retained known Object with an exact CDef.
 
-        if unpack is true, plain objects are returned
+        Args:
+            key: Exact ConcreteDefinition to select from stored roots and live
+                retained cache entries.
+
+        Returns:
+            The matching live Object, reusing a retained cache instance when
+            available.
+
+        Raises:
+            TypeError: If ``key`` is not a ConcreteDefinition.
+            KeyError: If no retained lookup candidate matches ``key``.
+
+        Side Effects:
+            May read direct stored-root authority and structurally materialize a
+            stored root that is not already live.
         """
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_getitem"):
             if not isinstance(key, ConcreteDefinition):
                 raise TypeError("Repo.__getitem__ requires a ConcreteDefinition key.")
-            result = self.query(key).known().objects()
+            result = self._retained_lookup_objects(key)
             if len(result) == 0:
                 raise KeyError(f"Repo doesn't contain an object with definition {key}")
             return result.one()
+
+    def _retained_lookup_objects(self, selector, *, cache: CachePolicy = "weak") -> ObjectResultSet:
+        """Materialize the fixed V3 candidate universe retained by get/item.
+
+        Stored roots and explicit cache CDefs are selected without exposing
+        merely represented nested identities. Exact CDef selection uses V3's
+        direct stored-root reader; other authoritative root families remain
+        eligible through complete Store inspection when direct proof is absent.
+        """
+
+        from .generator import GeneratorSelector
+        from .query.model import QueryDomainError
+        from .query.query import IdentityQuery, _resolve_query_state_selectors
+        from .query.result import ObjectResultSet
+        from .reference_values import ObjectRef, StateRef
+        from .selector import Selector
+
+        if isinstance(selector, Object):
+            selector = selector.definition
+        if isinstance(selector, (ObjectRef, StateRef)):
+            raise QueryDomainError(
+                "Exact-reference containment queries can only select nested(), not known()."
+            )
+        if selector is not None and not isinstance(
+            selector, (Definition, ConcreteDefinition, Selector, GeneratorSelector),
+        ):
+            raise TypeError(
+                "Query source must be Selector, Definition, ConcreteDefinition, Object, "
+                f"or None, not {type(selector).__name__}."
+            )
+        if isinstance(selector, Selector):
+            selector = Selector(
+                _resolve_query_state_selectors(selector.root, self),
+                strict=selector.strict,
+                cls_policy=selector.cls_policy,
+                exact_root=selector.exact_root,
+            )
+        elif selector is not None and not isinstance(selector, GeneratorSelector):
+            selector = _resolve_query_state_selectors(selector, self)
+        candidates = (
+            IdentityQuery.from_retained_repo_lookup(self)
+            .sel(selector)
+            .cdefs()
+            .collect()
+        )
+        objects = {}
+        for cdef in candidates:
+            objects[cdef] = self.load_object(cdef, cache=cache)
+        return ObjectResultSet(self, objects, domain="known")
 
     def query(self, selector=None):
         """Create an immutable structural or exact GeneratorSelector definition query.
@@ -5131,6 +5193,29 @@ class Repo:
             sel_args=None, sel_kwargs=None,
             cache: CachePolicy = "weak",
             verbose: bool = True) -> ObjectResultSet:
+        """Return retained root/cache Objects selected by definitions or callables.
+
+        Definition-like selectors evaluate against stored roots plus the retained
+        strong/weak cache universe. Callable selectors retain their historical
+        strong-cache-only behavior and receive ``sel_args`` and ``sel_kwargs``.
+
+        Args:
+            selector: One selector, callable, or exact list/tuple of selectors.
+            sel_args: Positional arguments supplied to callable selectors.
+            sel_kwargs: Keyword arguments supplied to callable selectors.
+            cache: Cache policy for structurally materialized stored candidates.
+            verbose: Retained compatibility option; does not alter selection.
+
+        Returns:
+            A mapping-like ObjectResultSet in the retained ``"known"`` domain.
+
+        Raises:
+            TypeError: If a definition-like selector has an unsupported type.
+            QueryDomainError: If an exact reference is used outside containment.
+
+        Side Effects:
+            May read stored-root records and materialize selected stored CDefs.
+        """
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_get"):
@@ -5148,9 +5233,7 @@ class Repo:
                     continue
 
                 objs = (
-                    self.query(sel)
-                    .known()
-                    .objects(cache=cache)
+                    self._retained_lookup_objects(sel, cache=cache)
                 )
                 selected_objects.update(objs)
 
