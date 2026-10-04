@@ -233,48 +233,75 @@ class SourceCapture:
     def _capture_metadata(store: Store, facts: CapturedStoreFacts, scopes: frozenset[str]):
         """Detach requested fields for eligible targets while the fence is held."""
 
+        holders = {identity_key(record.object_ref) for record in facts.declarations}
+        stored_states = {identity_key(record.state_ref): record for record in facts.state_refs}
+        for record in facts.state_refs:
+            root = record.state_ref.object
+            holders.add(identity_key(root))
+            for path in root.objects:
+                holders.add(identity_key(root.at(path)))
+
+        snapshot_cache = {}
+
+        def snapshot_for(record):
+            if record.digest not in snapshot_cache:
+                try:
+                    snapshot_cache[record.digest] = store.read_snapshot_metadata(record.digest)
+                except Exception:
+                    snapshot_cache[record.digest] = _MetadataReadFailure()
+            return snapshot_cache[record.digest]
+
+        fallback_lineages = None
+
+        def snapshot_lineages():
+            nonlocal fallback_lineages
+            if fallback_lineages is None:
+                fallback_lineages = {}
+                for record in facts.state_refs:
+                    snapshot = snapshot_for(record)
+                    if isinstance(snapshot, _MetadataReadFailure):
+                        raise StoreCapabilityError("Query V3 snapshot lineage read failed.")
+                    if snapshot is not None:
+                        for lineage in snapshot.lineages.values():
+                            fallback_lineages.setdefault(identity_key(lineage.object_ref), lineage)
+            return fallback_lineages
+
         captured = []
         for value in facts.knowledge():
-            if not isinstance(value, (ObjectRef, StateRef)):
-                continue
-            object_ref = value.object if isinstance(value, StateRef) else value
-            if "object" in scopes and facts.holds_metadata(object_ref):
-                try:
-                    captured.append((identity_key(value), "object", deepcopy(store.read_metadata(object_ref))))
-                except Exception:
-                    captured.append((identity_key(value), "object", _MetadataReadFailure()))
-            if "state" in scopes and isinstance(value, StateRef) and facts.holds_metadata(value):
-                try:
-                    captured.append((identity_key(value), "state", deepcopy(store.read_metadata(value))))
-                except Exception:
-                    captured.append((identity_key(value), "state", _MetadataReadFailure()))
-            if "lineage" in scopes and facts.holds_metadata(object_ref):
-                try:
-                    lineage = store.read_lineage_metadata(object_ref)
-                    if lineage is None:
-                        for record in facts.state_refs:
-                            snapshot = store.read_snapshot_metadata(record.digest)
-                            if snapshot is not None:
-                                lineage = next((item for item in snapshot.lineages.values() if item.object_ref == object_ref), None)
-                                if lineage is not None:
-                                    break
-                    from ..metadata import LineageMetadata
+            key = identity_key(value)
+            if isinstance(value, ObjectRef) and key in holders:
+                if "object" in scopes:
+                    try:
+                        captured.append((key, "object", deepcopy(store.read_metadata(value))))
+                    except Exception:
+                        captured.append((key, "object", _MetadataReadFailure()))
+                if "lineage" in scopes:
+                    try:
+                        lineage = store.read_lineage_metadata(value)
+                        if lineage is None:
+                            lineage = snapshot_lineages().get(key)
+                        from ..metadata import LineageMetadata
 
-                    captured.append((
-                        identity_key(value), "lineage",
-                        LineageMetadata(object_ref, "unknown", None) if lineage is None else lineage,
-                    ))
-                except Exception:
-                    captured.append((identity_key(value), "lineage", _MetadataReadFailure()))
-            if "snapshot" in scopes and isinstance(value, StateRef) and facts.is_stored(value):
+                        captured.append((
+                            key, "lineage",
+                            LineageMetadata(value, "unknown", None) if lineage is None else lineage,
+                        ))
+                    except Exception:
+                        captured.append((key, "lineage", _MetadataReadFailure()))
+            if not isinstance(value, StateRef) or key not in stored_states:
+                continue
+            if "state" in scopes:
                 try:
-                    snapshot = store.read_snapshot_metadata(value.digest())
-                    captured.append((
-                        identity_key(value), "snapshot",
-                        snapshot if snapshot is not None and snapshot.state_ref == value else _MetadataReadFailure(),
-                    ))
+                    captured.append((key, "state", deepcopy(store.read_metadata(value))))
                 except Exception:
-                    captured.append((identity_key(value), "snapshot", _MetadataReadFailure()))
+                    captured.append((key, "state", _MetadataReadFailure()))
+            if "snapshot" in scopes:
+                snapshot = snapshot_for(stored_states[key])
+                captured.append((
+                    key, "snapshot",
+                    snapshot if snapshot is not None and not isinstance(snapshot, _MetadataReadFailure)
+                    and snapshot.state_ref == value else _MetadataReadFailure(),
+                ))
         return tuple(captured)
 
     @staticmethod

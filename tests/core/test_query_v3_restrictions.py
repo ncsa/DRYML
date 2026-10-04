@@ -178,6 +178,44 @@ def test_v3_earlier_structural_match_does_not_hide_later_metadata_error(tmp_path
         ).exists()
 
 
+def test_v3_metadata_capture_reads_each_holder_fact_once_per_cut(tmp_path, monkeypatch):
+    from collections import Counter
+
+    from dryml.core.query.source import SourceCapture
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    value = V3Leaf("first", repo=repo)
+    first = repo.save_object(value, annotations=SaveAnnotations(object={"team": "x"}))
+    value.value = "second"
+    second = repo.save_object(value)
+    assert first != second
+    calls = Counter()
+    snapshot_calls = Counter()
+    original = store.read_metadata
+    original_snapshot = store.read_snapshot_metadata
+
+    def counted(target):
+        calls[(type(target), target.digest())] += 1
+        return original(target)
+
+    def counted_snapshot(digest):
+        snapshot_calls[digest] += 1
+        return original_snapshot(digest)
+
+    monkeypatch.setattr(store, "read_metadata", counted)
+    monkeypatch.setattr(store, "read_snapshot_metadata", counted_snapshot)
+    facts = SourceCapture().capture_store(
+        store, metadata_scopes=frozenset(("object", "state", "lineage", "snapshot")),
+    )
+
+    assert facts.captured_metadata(first.object, "object") is not None
+    assert calls
+    assert all(count == 1 for count in calls.values())
+    assert snapshot_calls
+    assert all(count == 1 for count in snapshot_calls.values())
+
+
 def test_v3_metadata_lineage_and_snapshot_scopes_use_the_captured_store_cut(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store, clock=lambda: 0)
