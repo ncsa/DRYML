@@ -2781,90 +2781,9 @@ def _resolve_query_state_selectors(source, repo):
     rewrite only replaces soft selector leaves and retains all selector syntax.
     """
 
-    from ..cdef_graph import EdgeKind
-    from ..definition import Definition, SKIP_ARGS
-    from ..links import DefLink
-    from ..reference_values import StateSelectorRef
+    from ..selector import _resolve_state_selectors
 
-    memo = {}
-    active: set[int] = set()
-
-    def visit(value):
-        if isinstance(value, StateSelectorRef):
-            key = id(value)
-            if key not in memo:
-                resolver = getattr(repo, "resolve_state_selector", None)
-                if not callable(resolver):
-                    raise TypeError(
-                        "StateSelectorRef query values require a managing Repo."
-                    )
-                resolved = resolver(value)
-                if resolved.object != value.object:
-                    raise ValueError(
-                        "StateSelectorRef query resolution returned a StateRef outside its ObjectRef scope."
-                    )
-                memo[key] = resolved
-            return memo[key]
-        if not isinstance(
-            value,
-            (
-                DefLink,
-                Definition,
-                dict,
-                FrozenDict,
-                list,
-                FrozenList,
-                tuple,
-                FrozenTuple,
-                set,
-                FrozenSet,
-            ),
-        ):
-            return value
-        key = id(value)
-        if key in memo:
-            return memo[key]
-        if key in active:
-            raise ValueError("Cycle while resolving query state selectors.")
-        active.add(key)
-        try:
-            if isinstance(value, DefLink):
-                target = visit(value.target)
-                result = (
-                    target
-                    if value.kind is EdgeKind.MATERIALIZE
-                    else DefLink.finalized(value.kind, target)
-                )
-            elif isinstance(value, Definition):
-                args = (
-                    (SKIP_ARGS,)
-                    if value.args is None
-                    else tuple(visit(item) for item in value.args)
-                )
-                kwargs = {name: visit(item) for name, item in value.kwargs.items()}
-                result = (
-                    Definition(*args, **kwargs)
-                    if value.cls is None
-                    else Definition(value.cls, *args, **kwargs)
-                )
-            elif isinstance(value, (dict, FrozenDict)):
-                result = type(value)(
-                    {name: visit(item) for name, item in value.items()}
-                )
-            elif isinstance(value, (list, FrozenList, tuple, FrozenTuple)):
-                result = type(value)(visit(item) for item in value)
-            else:
-                result = type(value)(visit(item) for item in value)
-                if len(result) != len(value):
-                    raise ValueError(
-                        "Resolving query state selectors collapsed set members."
-                    )
-            memo[key] = result
-            return result
-        finally:
-            active.remove(key)
-
-    return visit(source)
+    return _resolve_state_selectors(source, repo)
 
 
 def _structural_match(
@@ -3466,14 +3385,20 @@ class IdentityQuery:
             return self
         from ..definition import ConcreteDefinition, Definition
         from ..generator import GeneratorSelector
-        from ..object import Object
         from ..reference_values import ObjectRef, StateRef
-        from ..selector import Selector
+        from ..selector import Selector, _contains_state_selector
 
-        if isinstance(value, Object):
-            value = value.object_ref if isinstance(value.object_ref, ObjectRef) else value.definition
         if not isinstance(value, (Definition, ConcreteDefinition, Selector, GeneratorSelector, ObjectRef, StateRef)):
             raise TypeError("IdentityQuery.sel requires a Definition, selector, generator, or exact reference.")
+        selector_root = (
+            value.root if isinstance(value, Selector)
+            else value.prefilter.root if isinstance(value, GeneratorSelector)
+            else value
+        )
+        if _contains_state_selector(selector_root):
+            raise TypeError(
+                "StateSelectorRef values supplied to IdentityQuery.sel require selector(value, scope=repo)."
+            )
         return self._append("sel", value)
 
     def cdefs(self) -> "IdentityQuery":

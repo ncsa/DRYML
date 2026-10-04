@@ -4,7 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core import Definition, Object, Repo, SaveAnnotations, Selector, Serializable
+from dryml.core import (
+    Definition,
+    Generator,
+    Object,
+    Repo,
+    SaveAnnotations,
+    Selector,
+    Serializable,
+    selector,
+)
+from dryml.core.domains import UniformFromSet
+from dryml.core.errors import ParameterizationLimitError
+from dryml.core.template import Par
 from dryml.core.query import field
 from dryml.core.query.identity import IdentitySet
 from dryml.core.query.model import QueryDomainError
@@ -30,6 +42,20 @@ class V3Parent(Object):
     def __init__(self, child, optional="default"):
         self.child = child
         self.optional = optional
+
+
+class V3StateConsumer(Object):
+    """Definition-only fixture that retains a selected StateRef."""
+
+    def __init__(self, selected):
+        self.selected = selected
+
+
+class V3ConstructionTrap(Object):
+    """Object type whose constructor must not run during V3 selection."""
+
+    def __init__(self, value):
+        raise AssertionError("V3 query selection must not construct Objects")
 
 
 def _saved(repo, value, *, object_metadata=None, state_metadata=None):
@@ -315,3 +341,89 @@ def test_v3_selector_value_edits_retain_exact_authority_without_widening(tmp_pat
     )
     with pytest.raises(Exception, match="ConcreteDefinition"):
         Selector(Definition(V3Leaf, "first")).exact()
+
+
+def test_v3_soft_state_selector_requires_explicit_scoped_preparation(tmp_path, monkeypatch):
+    """Prepared soft aliases pin their named Repo authority before V3 composition."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    value = V3Leaf("first", repo=repo)
+    first = repo.save_object(value)
+    value.value = "second"
+    second = repo.save_object(value)
+    repo.set_state_alias("chosen", first)
+    source = Definition(V3StateConsumer, first.object.state("chosen"))
+
+    with pytest.raises(TypeError, match=r"selector\(value, scope"):
+        IdentityQuery.from_set(IdentitySet(())).sel(source)
+
+    prepared = selector(source, scope=repo)
+    assert prepared.root.parameters["selected"] == first
+    repo.set_state_alias("chosen", second)
+    monkeypatch.setattr(
+        repo,
+        "resolve_state_selector",
+        lambda value: pytest.fail("prepared selector performed a hidden alias lookup"),
+    )
+    candidate = Definition(V3StateConsumer, first).concretize()
+
+    assert IdentityQuery.from_set(IdentitySet((candidate,))).sel(prepared).one() == candidate
+
+
+def test_v3_scoped_selector_failure_does_not_disclose_alias_or_upstream_error(tmp_path, monkeypatch):
+    repo = Repo(DirStore(tmp_path / "store"))
+    state = repo.save_object(V3Leaf("candidate", repo=repo))
+    secret = "query-v3-private-alias-sentinel"
+    source = Definition(V3StateConsumer, state.object.state(secret))
+    monkeypatch.setattr(
+        repo, "resolve_state_selector",
+        lambda value: (_ for _ in ()).throw(KeyError(secret)),
+    )
+
+    with pytest.raises(KeyError) as error:
+        selector(source, scope=repo)
+    assert secret not in str(error.value)
+    assert error.value.__context__ is None
+
+
+def test_v3_soft_alias_validation_does_not_skip_invalid_sibling(tmp_path):
+    from dryml.core.selector import _contains_state_selector
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    state = repo.save_object(V3Leaf("candidate", repo=repo))
+    cyclic = {}
+    cyclic["self"] = cyclic
+
+    with pytest.raises(ValueError, match="Cycle"):
+        _contains_state_selector({"soft": state.object.state("missing"), "later": cyclic})
+
+
+def test_v3_selection_rejects_live_objects_and_never_constructs_them():
+    """V3 selection consumes retained identities and definitions, never live Objects."""
+
+    candidate = Definition(V3ConstructionTrap, "value").concretize()
+
+    assert (
+        IdentityQuery.from_set(IdentitySet((candidate,)))
+        .sel(Definition(V3ConstructionTrap, "value"))
+        .one()
+        == candidate
+    )
+    with pytest.raises(TypeError, match="Definition, selector, generator, or exact reference"):
+        IdentityQuery.from_set(IdentitySet(())).sel(V3Leaf("value"))
+
+
+def test_v3_generator_selection_keeps_exact_support_and_shared_witness_budget():
+    """Generator support remains exact and exhausts one terminal witness budget."""
+
+    first = Definition(V3Leaf, "first").concretize()
+    second = Definition(V3Leaf, "second").concretize()
+    selector_value = Generator(
+        Definition(V3Leaf, Par("value")),
+        {"value": UniformFromSet(("first",))},
+    ).support_selector()
+    query = IdentityQuery.from_set(IdentitySet((first, second))).sel(selector_value)
+
+    assert query.one() == first
+    with pytest.raises(ParameterizationLimitError, match="witness limit"):
+        query.max_witnesses(1).collect()
