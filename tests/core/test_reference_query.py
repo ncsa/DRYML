@@ -1,17 +1,19 @@
+"""Integration tests for V3 reference-identity restrictions and traversal."""
+
 import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Definition, Object, ObjectRef, QueryDomainError, Repo, Serializable
-from dryml.core.cdef_graph import EdgeKind
+from dryml.core import Definition, Object, Repo, Serializable
+from dryml.core.query import EdgePolicy, RelationshipKind, field
 from dryml.core.links import DefLink
-from dryml.core.repo import RepoLoadError
+from dryml.core.cdef_graph import EdgeKind
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DeclarationRecord, DefinitionRecord
-from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
-class ReferenceQueryLeaf(Serializable):
+class QueryIdentityLeaf(Serializable):
+    """Small stateful identity fixture for V3 producer tests."""
+
     def __init__(self, value):
         self.value = value
 
@@ -19,215 +21,71 @@ class ReferenceQueryLeaf(Serializable):
         pass
 
 
-class ReferenceQueryWrapper(Object):
+class QueryIdentityWrapper(Object):
+    """Root that embeds one saved reference identity."""
+
     def __init__(self, child):
         self.child = child
 
 
-class ReferenceQueryRefParent(Object):
-    def __init__(self, selected):
-        self.selected = selected
-
-
-def test_reference_filters_scan_authority_without_materializing(tmp_path):
-    repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
-    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-
-    assert repo.references().object_id(state.object_id).object_refs().one() == state.object
-    assert repo.references().namespace(state.object_id.namespace).object_refs().one() == state.object
-    assert repo.references().definition(state.definition).object_refs().one() == state.object
-    assert repo.references().state_hash(next(iter(state.states.values()))).state_refs().one() == state
-
-
-def test_u4_prepared_selector_composes_with_reference_sidecars(tmp_path):
-    """Prepared semantic constraints remain sound through reference sidecar scans."""
-    from dryml.core import categorical_definition
+def test_reference_identity_filters_use_the_unified_producer(tmp_path):
+    """ObjectId, namespace, selector, and state-hash filters retain V3 identities."""
 
     repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
-    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-    repo.save_object(ReferenceQueryLeaf(4, repo=repo))
-    selector = categorical_definition(Definition(ReferenceQueryLeaf, 3))
+    state = repo.save_object(QueryIdentityLeaf(3, repo=repo))
 
-    assert repo.query(selector).references().object_refs().one() == state.object
+    assert repo.query().object_refs().object_id(state.object_id).one() == state.object
+    assert repo.query().object_refs().namespace(state.object_id.namespace).one() == state.object
+    assert repo.query().object_refs().sel(state.definition).one() == state.object
+    assert repo.query().state_refs().state_hash(next(iter(state.states.values()))).one() == state
 
 
-def test_object_id_lookup_is_closed_but_reference_query_returns_aggregate(tmp_path):
+def test_reference_metadata_and_alias_restrictions_stay_in_one_query(tmp_path):
+    """Metadata and aliases compose with reference identities without loading payloads."""
+
     repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
-    child = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-    aggregate = repo.save_object(ReferenceQueryWrapper(child, repo=repo))
+    state = repo.save_object(QueryIdentityLeaf(3, repo=repo))
+    repo.set_metadata(state.object, {"project": "forecasting"})
+    repo.set_alias("selected", state)
 
-    assert repo.lookup_object_ref(child.object_id) == child.object
-    assert aggregate.object in repo.references().object_id(child.object_id).object_refs()
-
-
-def test_reference_filters_keep_exact_paths_aliases_and_all_ephemeral_refs(tmp_path):
-    repo = Repo(DirStore(tmp_path / "store", query_index="sqlite"))
-    child = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-    aggregate = repo.save_object(ReferenceQueryWrapper(child, repo=repo))
-    repo.set_alias("aggregate", aggregate)
-
-    path = GraphPath((Parameter("child"),))
-    assert list(repo.references().contains(child.object).object_refs()) == [aggregate.object]
-    assert list(repo.references().alias("aggregate").object_refs()) == [aggregate.object]
-    assert list(repo.references().path(path).state_refs()) == [child]
-
-    ephemeral = repo.save_object(ReferenceQueryWrapper("value", repo=repo))
-    assert ephemeral.object.objects == {}
-    assert repo.references().exact(ephemeral.object).object_refs().one() == ephemeral.object
-    assert repo.references().definition(ephemeral.definition).state_refs().one() == ephemeral
-
-
-def test_object_terminal_preserves_nested_ref_state_reference(tmp_path):
-    repo = Repo(DirStore(tmp_path / "store"))
-    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-    parent = repo.save_object(
-        ReferenceQueryRefParent(DefLink.finalized(EdgeKind.REF, state), repo=repo)
+    assert (
+        repo.query()
+        .object_refs()
+        .alias("selected")
+        .where(field("object", "project").eq("forecasting"))
+        .one()
+        == state.object
     )
 
-    loaded = repo.query(parent.definition).stored().objects(cache="none").one()
 
-    assert loaded.selected == state
-    assert loaded.definition.parameters["selected"].target == state
+def test_reference_containment_uses_explicit_roots_and_nonempty_paths(tmp_path):
+    """Traversal starts from selected roots and owners are a composable V3 universe."""
 
-
-def test_derived_candidates_cannot_hide_conflicting_store_authority(
-    tmp_path, monkeypatch
-):
-    first = DirStore(tmp_path / "first", query_index="sqlite")
-    second = DirStore(tmp_path / "second", query_index="sqlite")
-    repo = Repo([first, second])
-    state = repo.save_object(ReferenceQueryLeaf(1, repo=repo), store=first)
-    incompatible = ObjectRef(
-        ReferenceQueryLeaf(2).definition,
-        {"$": state.object_id},
-    )
-    second.write_definition_record(
-        DefinitionRecord(incompatible.definition), stored_root=False
-    )
-    second.write_declaration_record(DeclarationRecord(incompatible))
-    query = repo.references().object_id(state.object_id)
-
-    monkeypatch.setattr(
-        type(query),
-        "_candidate_sources",
-        lambda self, store: (
-            (("state-ref", state.digest()),) if store is first else ()
-        ),
-    )
-
-    with pytest.raises(RepoLoadError, match="incompatible closed-subtree authority"):
-        query.object_refs()
-
-
-def test_exact_reference_containment_entry_is_lazy_and_preserves_intent(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
-    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-
-    monkeypatch.setattr(
-        store,
-        "iter_definition_records",
-        lambda: (_ for _ in ()).throw(AssertionError("containment builder scanned Store")),
-    )
-
-    query = repo.query(state).nested(edges="all", contains_ref=True, refresh=False)
-
-    assert query.selector is None
-    assert query.containment_target == state
-    assert query.containment_edges == "all"
-    assert query.contains_ref is True
-    assert query.refresh_policy is False
-    object_query = repo.query(state.object).nested(edges="ref")
-    assert object_query.containment_target == state.object
-    assert object_query.containment_edges == "ref"
-
-
-def test_exact_reference_containment_rejects_wrong_domains_projections_and_conversions(tmp_path):
-    repo = Repo(DirStore(tmp_path / "store"))
-    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-
-    for domain in ("stored", "cached", "known"):
-        with pytest.raises(QueryDomainError, match="[Ee]xact-reference"):
-            getattr(repo.query(state), domain)()
-    with pytest.raises(QueryDomainError, match="[Ee]xact-reference"):
-        repo.query(state).categorical()
-    with pytest.raises(QueryDomainError, match="reference authority"):
-        repo.query(state).references()
-    with pytest.raises(QueryDomainError, match="StateRef"):
-        repo.query(state).nested().definitions()
-    with pytest.raises(QueryDomainError, match="StateRef"):
-        repo.query(state).nested().object_refs()
-
-
-def test_reference_containing_adapts_unfiltered_source_and_source_scope(tmp_path):
-    store = DirStore(tmp_path / "store")
-    repo = Repo(store)
-    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-
-    direct = repo.query(state).nested(edges="ref", contains_ref=True, refresh=False).in_store(store)
-    adapted = repo.references().in_store(store).containing(
-        state, edges="ref", contains_ref=True, refresh=False,
-    )
-
-    assert adapted == direct
-    with pytest.raises(QueryDomainError, match="unfiltered"):
-        repo.references().exact(state.object).containing(state)
-
-
-def test_exact_state_ref_containment_entries_agree_several_levels_deep(tmp_path):
-    """Both entries retain exact checkpoint identity across mixed nested hops."""
-
-    repo = Repo(DirStore(tmp_path / "store"))
-    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-    owner = repo.save_object(ReferenceQueryWrapper(
-        ReferenceQueryRefParent(DefLink.finalized(EdgeKind.REF, state), repo=repo),
-        repo=repo,
-    ))
-
-    direct = repo.query(state).nested(edges="all", contains_ref=True)
-    adapted = repo.references().containing(state, edges="all", contains_ref=True)
-
-    assert tuple(direct.execute()) == tuple(adapted.execute())
-    assert direct.owners().defs().one() == adapted.owners().defs().one() == owner.definition
-    assert direct.state_refs().one() == adapted.state_refs().one() == state
-    assert tuple(hop.kind for hop in direct.one().hops) == (
-        EdgeKind.MATERIALIZE, EdgeKind.REF,
-    )
-    assert repo.references().exact(state.object).object_refs().one() == state.object
-
-
-def test_reference_containing_rejects_invalid_target_without_scanning_at_build_time(tmp_path):
-    repo = Repo(DirStore(tmp_path / "store"))
-    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
-
-    with pytest.raises(TypeError, match="containment target"):
-        repo.references().containing(object())
-    assert repo.query(state).nested().state_refs().count() == 0
-
-    assert repo.references().exact(state.object).object_refs().one() == state.object
-
-
-@pytest.mark.parametrize("query_index", ["memory", "sqlite"])
-def test_exact_reference_containment_uses_authoritative_roots_and_ref_policy(
-    tmp_path, query_index,
-):
-    """Exact StateRef containment is evaluated from retained owner definitions."""
-    repo = Repo(DirStore(tmp_path / "store", query_index=query_index))
-    state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
+    state = repo.save_object(QueryIdentityLeaf(3, repo=repo))
     owner = repo.save_object(
-        ReferenceQueryRefParent(
-            DefLink.finalized(EdgeKind.REF, state), repo=repo,
-        )
+        QueryIdentityWrapper(DefLink.finalized(EdgeKind.REF, state), repo=repo)
     )
 
-    query = repo.query(state).nested(edges="ref", contains_ref=True, refresh=False)
+    occurrences = (
+        repo.query()
+        .cdefs()
+        .stored(scope=store)
+        .nested(state, edges=EdgePolicy.ALL)
+        .through(RelationshipKind.REFERENCE)
+        .collect()
+    )
 
-    assert query.state_refs().one() == state
-    uncapped_values = query.max_occurrences(0).state_refs()
-    assert uncapped_values.one() == state
-    assert not uncapped_values._containment.bounded
-    assert query.owners().defs().one() == owner.definition
-    occurrence = query.one()
-    assert occurrence.owner == owner.definition
-    assert occurrence.value == state
-    assert tuple(hop.kind for hop in occurrence.hops) == (EdgeKind.REF,)
+    assert occurrences.one().target == state
+    assert occurrences.query().owners().cdefs().one() == owner.definition
+
+
+def test_reference_contains_restricts_aggregate_object_identities(tmp_path):
+    """A proper owned exact reference selects its aggregate ObjectRef identity."""
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="sqlite"))
+    child = repo.save_object(QueryIdentityLeaf(3, repo=repo))
+    aggregate = repo.save_object(QueryIdentityWrapper(child, repo=repo))
+
+    assert repo.query().object_refs().contains(child.object).one() == aggregate.object

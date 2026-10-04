@@ -202,48 +202,6 @@ def test_direct_quotation_roles_still_deliver_wrapper_types() -> None:
     assert result == (quoted, spec)
 
 
-@pytest.mark.parametrize(
-    ("consumer", "value", "query_value"),
-    (
-        (
-            ExactDefinitionDataConsumer,
-            Definition(ConsumerLeaf),
-            QuotedDef(Definition(ConsumerLeaf)),
-        ),
-        (
-            ExactSelectorDataConsumer,
-            Selector(Definition(ConsumerLeaf, value=Present())),
-            SelectorSpec(Selector(Definition(ConsumerLeaf, value=Present()))),
-        ),
-    ),
-)
-def test_constructor_exact_data_markers_remain_query_transparent(
-    consumer, value, query_value,
-) -> None:
-    """Query indexing treats constructor markers as their quotation payloads."""
-
-    cdef = Definition(consumer, value).concretize()
-    repo = Repo()
-    repo._query_catalog.register_stored(cdef, object())
-
-    selector = Definition(consumer, query_value)
-    assert repo.query(selector).stored(refresh=False).count() == 1
-
-
-def test_partial_query_definitions_do_not_activate_constructor_signatures(monkeypatch) -> None:
-    """Partial selectors keep matchers inert and never bind or prepare constructors."""
-
-    target = Definition(PlainConsumer, 3).concretize()
-    repo = Repo()
-    repo._query_catalog.register_stored(target, object())
-    monkeypatch.setattr(
-        "dryml.core.signatures.compile_signature",
-        lambda *args, **kwargs: pytest.fail("query selector activated a constructor signature"),
-    )
-
-    assert repo.query(Definition(PlainConsumer, value=Present())).stored(refresh=False).count() == 1
-
-
 def test_cdef_codec_never_compiles_signatures_or_resolves_classes(monkeypatch) -> None:
     """CDef graph hydration is a normalized-record operation with no live effects."""
 

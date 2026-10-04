@@ -12,7 +12,7 @@ from ..model import CANONICAL_QUERY_SEMANTICS_VERSION, FINGERPRINT_SCHEMA_VERSIO
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
-SQLITE_QUERY_INDEX_SCHEMA_VERSION = 8
+SQLITE_QUERY_INDEX_SCHEMA_VERSION = 9
 IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported"]
 
 
@@ -116,12 +116,21 @@ DDL = (
     """
     CREATE TABLE IF NOT EXISTS stored_roots (
         def_id INTEGER PRIMARY KEY REFERENCES definitions(def_id) ON DELETE CASCADE,
+        root_graph_hash TEXT NOT NULL,
         storage_hash BLOB NOT NULL,
         relative_def_path TEXT NOT NULL,
         def_size INTEGER,
         def_mtime_ns INTEGER,
         indexed_generation INTEGER NOT NULL
     )
+    """,
+    "CREATE INDEX IF NOT EXISTS stored_roots_by_graph_hash ON stored_roots(root_graph_hash, def_id)",
+    """
+    CREATE TABLE IF NOT EXISTS v3_stored_root_projection (
+        root_graph_hash TEXT NOT NULL,
+        root_blob BLOB NOT NULL,
+        PRIMARY KEY (root_graph_hash, root_blob)
+    ) WITHOUT ROWID
     """,
     """
     CREATE TABLE IF NOT EXISTS reference_records (
@@ -199,6 +208,54 @@ DDL = (
         row_digest BLOB NOT NULL
     ) WITHOUT ROWID
     """,
+    """
+    CREATE TABLE IF NOT EXISTS v3_projection_guard (
+        family TEXT PRIMARY KEY,
+        dirty INTEGER NOT NULL CHECK (dirty IN (0, 1))
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS stored_roots_guard_insert
+    AFTER INSERT ON stored_roots
+    BEGIN
+        UPDATE v3_projection_guard SET dirty = 1 WHERE family = 'stored_root';
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS stored_roots_guard_update
+    AFTER UPDATE ON stored_roots
+    BEGIN
+        UPDATE v3_projection_guard SET dirty = 1 WHERE family = 'stored_root';
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS stored_roots_guard_delete
+    AFTER DELETE ON stored_roots
+    BEGIN
+        UPDATE v3_projection_guard SET dirty = 1 WHERE family = 'stored_root';
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS v3_stored_roots_guard_insert
+    AFTER INSERT ON v3_stored_root_projection
+    BEGIN
+        UPDATE v3_projection_guard SET dirty = 1 WHERE family = 'stored_root';
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS v3_stored_roots_guard_update
+    AFTER UPDATE ON v3_stored_root_projection
+    BEGIN
+        UPDATE v3_projection_guard SET dirty = 1 WHERE family = 'stored_root';
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS v3_stored_roots_guard_delete
+    AFTER DELETE ON v3_stored_root_projection
+    BEGIN
+        UPDATE v3_projection_guard SET dirty = 1 WHERE family = 'stored_root';
+    END
+    """,
 )
 
 
@@ -223,6 +280,9 @@ def initialize_schema(con, *, store_key: str, canonical_version: int = CANONICAL
     con.executemany(
         "INSERT OR IGNORE INTO v3_projection_coverage (family, row_count, row_digest) VALUES (?, 0, ?)",
         ((family, bytes(32)) for family in ("identity", "relationship")),
+    )
+    con.execute(
+        "INSERT OR IGNORE INTO v3_projection_guard (family, dirty) VALUES ('stored_root', 0)"
     )
 
 

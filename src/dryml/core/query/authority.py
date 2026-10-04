@@ -18,6 +18,7 @@ from ..store.records import (
 )
 from ..store.store import StoreAuthorityError
 from .identity import IdentitySet, SourceEvidence, identity_key
+from .model import QueryError
 from .relationships import iter_direct_relationships
 
 
@@ -103,9 +104,17 @@ class CapturedStoreFacts:
             record = state_by_digest.get(alias.state_ref_digest)
             if record is None or record.state_ref.object != alias.object_ref:
                 raise StoreAuthorityError("State alias targets missing or incompatible StateRef authority.")
+        declarations = tuple(declarations)
+        object_aliases = tuple(object_aliases)
+        _validate_object_reference_roots((
+            *(record.object_ref for record in declarations),
+            *(record.state_ref.object for record in state_refs),
+            *(record.object_ref for record in object_aliases),
+            *(record.object_ref for record in state_aliases),
+        ))
         return cls(
-            definitions, stored_roots, tuple(declarations), state_refs,
-            tuple(object_aliases), state_aliases, main_definition, source,
+            definitions, stored_roots, declarations, state_refs,
+            object_aliases, state_aliases, main_definition, source,
             tuple(metadata), metadata_scopes,
         )
 
@@ -183,3 +192,33 @@ def _derive_identities(roots: Iterable[IdentityValue]) -> tuple[IdentityValue, .
         values[key] = value
         pending.extend(edge.target for edge in iter_direct_relationships(value))
     return tuple(values.values())
+
+
+def validate_captured_reference_authority(
+        facts: Iterable[CapturedStoreFacts]) -> None:
+    """Reject incompatible authoritative ObjectId mappings across Store cuts."""
+
+    roots = []
+    for item in facts:
+        roots.extend(record.object_ref for record in item.declarations)
+        roots.extend(record.state_ref.object for record in item.state_refs)
+        roots.extend(record.object_ref for record in item.object_aliases)
+        roots.extend(record.object_ref for record in item.state_aliases)
+    try:
+        _validate_object_reference_roots(roots)
+    except StoreAuthorityError:
+        raise QueryError("Query V3 object-reference authority conflicts.") from None
+
+
+def _validate_object_reference_roots(roots: Iterable[ObjectRef]) -> None:
+    """Validate authoritative projections without promoting embedded references."""
+
+    by_object_id = {}
+    for root in roots:
+        for path, object_id in root.objects.items():
+            projected = root.at(path)
+            previous = by_object_id.setdefault(object_id, projected)
+            if previous != projected:
+                raise StoreAuthorityError(
+                    "Object-reference authority contains incompatible ObjectId mappings."
+                )

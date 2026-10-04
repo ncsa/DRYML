@@ -269,12 +269,12 @@ class MetadataPredicate:
     """Immutable bounded Boolean expression over detached metadata projections.
 
     Expressions compose only with ``&``, ``|``, and ``~``. Evaluation occurs at
-    a :class:`ReferenceQuery` terminal against Store authority, never on a live
+    an identity-query terminal against Store authority, never on a live
     Object or state payload.
 
     Side Effects:
         Construction and composition are detached. Evaluation happens only at a
-        ReferenceQuery terminal.
+        identity-query terminal.
     """
 
     def __and__(self, other: "MetadataPredicate") -> "MetadataPredicate":

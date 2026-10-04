@@ -147,6 +147,47 @@ def test_u5_scalars_do_not_call_collect_or_build_a_final_identity_set(tmp_path, 
     assert query.sel(first).one_or_none() == first
 
 
+def test_u5_scalar_terminals_stop_at_distinct_cardinality_thresholds(monkeypatch):
+    """Scalar sinks avoid public ordering and retain only required witnesses."""
+
+    from dryml.core.query import identity as identity_module
+
+    values = tuple(
+        Definition(ExecutionLeaf, name).concretize()
+        for name in ("first", "second", "third")
+    )
+    query = IdentityQuery.from_set(IdentitySet(values))
+    original = IdentityQuery._iter_terminal_members
+    yielded = 0
+
+    def counted(self, capture, captured=None):
+        nonlocal yielded
+        for item in original(self, capture, captured):
+            yielded += 1
+            yield item
+
+    monkeypatch.setattr(IdentityQuery, "_iter_terminal_members", counted)
+    monkeypatch.setattr(
+        identity_module,
+        "_ordered_keys",
+        lambda *_args, **_kwargs: pytest.fail("scalar terminal requested public order"),
+    )
+
+    assert query.exists()
+    assert yielded == 1
+    yielded = 0
+    with pytest.raises(QueryCardinalityError):
+        query.one()
+    assert yielded == 2
+    yielded = 0
+    with pytest.raises(QueryCardinalityError):
+        query.one_or_none()
+    assert yielded == 2
+    yielded = 0
+    assert query.count() == 3
+    assert yielded == 3
+
+
 def test_u5_take_retains_requested_limit_and_canonical_prefix(tmp_path):
     """A requested prefix is bounded metadata, not a complete-result claim."""
 
@@ -167,11 +208,13 @@ def test_u5_take_retains_requested_limit_and_canonical_prefix(tmp_path):
     assert result.query().collect().requested_limit == 2
     assert IdentityQuery.from_store(store).state_refs().take(0).count() == 0
     assert not IdentityQuery.from_store(store).state_refs().take(0).exists()
-    assert (
+    combined = (
         IdentityQuery.from_store(store).state_refs().take(1).query().union(
             IdentityQuery.from_store(store).state_refs()
-        ).collect().bounded
+        ).collect()
     )
+    assert combined.bounded
+    assert combined.requested_limit == 1
 
 
 def test_u5_metadata_validation_precedes_scalar_early_stop(tmp_path):

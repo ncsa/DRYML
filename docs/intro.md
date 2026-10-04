@@ -68,10 +68,10 @@ Core object system:
 
 Query and persistence:
 
-- stored, cached, known, and nested query domains
-- definition result sets
-- object result sets
-- occurrence result sets
+- producer identity knowledge, membership restrictions, and typed traversal
+- one composable identity query universe
+- fixed identity and occurrence result sets
+- explicit loading after identity selection
 - aliases and main definitions
 
 ML workflow APIs:

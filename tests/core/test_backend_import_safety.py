@@ -148,7 +148,7 @@ import sys
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
-from dryml.core import Definition, Repo
+from dryml.core import Definition, IdentitySet
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
@@ -160,12 +160,10 @@ cdef = ConcreteDefinition._from_bound_record(
     BoundArguments((("layer_defs", FrozenTuple(())),)),
 )
 
-repo = Repo()
-repo._query_catalog.register_cached(cdef)
 legacy_target_fingerprint(cdef)
-assert repo._query_catalog.cdef_id(cdef) is not None
-assert repo.query(cdef).cached().count() == 0
-repo.query(cdef).cached().explain()
+query = IdentitySet((cdef,)).query().sel(cdef)
+assert query.count() == 1
+query.explain()
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -179,28 +177,23 @@ def test_exact_query_with_candidate_does_not_import_tensorflow():
 import sys
 
 assert "tensorflow" not in sys.modules
-from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core import Definition, IdentitySet, SKIP_ARGS, selector
 from dryml.core.bound_args import BoundArguments
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.symbol import ImportRef
 
-class FakeStore:
-    def catalog_key(self):
-        return "fake-tf-store"
-
 cdef = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
     BoundArguments((("layer_defs", FrozenTuple(())),)),
 )
-repo = Repo()
-repo._query_catalog.register_stored(cdef, FakeStore())
-
-assert repo.query(cdef).class_match("exact").stored(refresh=False).count() == 1
+universe = IdentitySet((cdef,)).query()
+assert universe.sel(cdef).count() == 1
 selector = Definition(ImportRef("dryml.models.tf.keras.base", "Sequential"), SKIP_ARGS)
-assert repo.query(selector).class_match("exact").stored(refresh=False).count() == 1
-repo.query(selector).class_match("exact").stored(refresh=False).explain()
+query = universe.sel(__import__("dryml.core", fromlist=["selector"]).selector(selector, cls_policy="exact"))
+assert query.count() == 1
+query.explain()
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -214,26 +207,20 @@ def test_exact_query_with_candidate_does_not_import_torch():
 import sys
 
 assert "torch" not in sys.modules
-from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core import Definition, IdentitySet, SKIP_ARGS, selector
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.symbol import ImportRef
 
-class FakeStore:
-    def catalog_key(self):
-        return "fake-torch-store"
-
 cdef = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.torch.base", "Sequential"),
     BoundArguments((("layer_defs", FrozenTuple(())),)),
 )
-repo = Repo()
-repo._query_catalog.register_stored(cdef, FakeStore())
-
 selector = Definition(ImportRef("dryml.models.torch.base", "Sequential"), SKIP_ARGS)
-assert repo.query(cdef).class_match("exact").stored(refresh=False).count() == 1
-assert repo.query(selector).class_match("exact").stored(refresh=False).count() == 1
+universe = IdentitySet((cdef,)).query()
+assert universe.sel(cdef).count() == 1
+assert universe.sel(__import__("dryml.core", fromlist=["selector"]).selector(selector, cls_policy="exact")).count() == 1
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -247,24 +234,19 @@ def test_unresolved_semantic_selector_query_is_import_free_and_rejects_positiona
 import sys
 
 assert "tensorflow" not in sys.modules
-from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core import Definition, IdentitySet, SKIP_ARGS
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.symbol import ImportRef
 
-class FakeStore:
-    def catalog_key(self):
-        return "unresolved-v2-store"
-
 cls = ImportRef("dryml.models.tf.keras.base", "Sequential")
 cdef = ConcreteDefinition._from_bound_record(cls, BoundArguments((("name", "safe"),)))
-repo = Repo()
-repo._query_catalog.register_stored(cdef, FakeStore())
+universe = IdentitySet((cdef,)).query()
 
 selector = Definition(cls, SKIP_ARGS, name="safe")
-assert tuple(repo.query(selector).stored(refresh=False).defs()) == (cdef,)
+assert tuple(universe.sel(selector).collect()) == (cdef,)
 with __import__("pytest").raises(TypeError, match="keyword spelling or SKIP_ARGS"):
-    repo.query(Definition(cls, "safe")).stored(refresh=False).count()
+    universe.sel(Definition(cls, "safe")).count()
 
 assert "tensorflow" not in sys.modules
         """
@@ -279,7 +261,7 @@ import sys
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
-from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core import Definition, IdentitySet, SKIP_ARGS
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.definition import ConcreteDefinition
@@ -297,20 +279,16 @@ root = ConcreteDefinition._from_bound_record(
     BoundArguments((("child", child),)),
 )
 
-class FakeStore:
-    def catalog_key(self):
-        return "fake-graph-store"
-
 graph = ConcreteDefinitionGraph.from_root(root)
 assert len(graph.nodes()) == 2
 target_local_fingerprint(root)
 compile_selector_graph(Definition(ImportRef("dryml.models.torch.base", "Model"), SKIP_ARGS, child=child))
 
-repo = Repo()
-repo._query_catalog.register_stored(root, FakeStore())
-assert repo.query(Definition(ImportRef("dryml.models.torch.base", "Model"), SKIP_ARGS, child=child)).stored(refresh=False).count() == 1
-assert repo.query(child).nested(refresh=False).owners().defs().count() == 1
-repo.query(child).nested(refresh=False).owners().defs().explanation.format()
+roots = IdentitySet((root,)).query()
+assert roots.sel(Definition(ImportRef("dryml.models.torch.base", "Model"), SKIP_ARGS, child=child)).count() == 1
+owners = roots.nested(child).owners().cdefs()
+assert owners.count() == 1
+owners.explain()
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -326,7 +304,7 @@ import sys
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
-from dryml.core import Definition, Repo
+from dryml.core import Definition, IdentitySet
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from dryml.core.definition import ConcreteDefinition
@@ -345,10 +323,6 @@ root = ConcreteDefinition._from_bound_record(
     BoundArguments((("child", DefLink.finalized(EdgeKind.REF, child)),)),
 )
 
-class FakeStore:
-    def catalog_key(self):
-        return "fake-ref-edge-store"
-
 graph = ConcreteDefinitionGraph.from_root(root)
 assert graph.edges()[0].kind is EdgeKind.REF
 target_local_fingerprint(root)
@@ -361,9 +335,7 @@ selector = Definition(
 selector_graph = compile_selector_graph(selector)
 assert selector_graph.edges[0].edge_kind is EdgeKind.REF
 
-repo = Repo()
-repo._query_catalog.register_stored(root, FakeStore())
-assert repo.query(root).stored(refresh=False).count() == 1
+assert IdentitySet((root,)).query().sel(root).count() == 1
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -381,7 +353,7 @@ from pathlib import Path
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
-from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core import Definition, IdentitySet, Repo, SKIP_ARGS
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
@@ -407,15 +379,16 @@ with tempfile.TemporaryDirectory() as tmp:
 
     repo = Repo(stores=store)
     assert repo.index_status(store=store)[0].state == "ready"
-    assert repo.query(root).stored().count() == 1
-    assert list(repo.query(root).stored().defs()) == [root]
+    roots = IdentitySet((root,)).query()
+    assert roots.sel(root).count() == 1
+    assert list(roots.sel(root).cdefs().collect()) == [root]
     selector = Definition(child_cls, SKIP_ARGS, name="tf-child")
-    assert list(repo.query(selector).nested().definitions().defs()) == [child]
-    assert list(repo.query(selector).nested().owners().defs()) == [root]
-    occurrences = tuple(repo.query(selector).nested().max_occurrences(2).execute())
+    assert list(roots.nested(selector).targets().cdefs().collect()) == [child]
+    assert list(roots.nested(selector).owners().cdefs().collect()) == [root]
+    occurrences = tuple(roots.nested(selector).max_occurrences(2).collect())
     assert len(occurrences) == 1
     assert occurrences[0].owner == root
-    assert occurrences[0].definition == child
+    assert occurrences[0].target == child
     repo.close(flush=False)
     store.close()
     assert store._query_index_instance is None
@@ -434,7 +407,7 @@ import tempfile
 from pathlib import Path
 
 assert "tensorflow" not in sys.modules
-from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core import Definition, IdentitySet, Repo, SKIP_ARGS
 from dryml.core.bound_args import BoundArguments
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
@@ -459,11 +432,12 @@ with tempfile.TemporaryDirectory() as tmp:
     index.close()
 
     repo = Repo(stores=store)
+    roots = IdentitySet((root,)).query()
     selector = Definition(leaf_cls, SKIP_ARGS, name="v2-child")
-    assert list(repo.query(selector).nested().definitions().defs()) == [child]
-    assert list(repo.query(selector).nested().owners().defs()) == [root]
+    assert list(roots.nested(selector).targets().cdefs().collect()) == [child]
+    assert list(roots.nested(selector).owners().cdefs().collect()) == [root]
     nested_selector = Definition(root_cls, child=selector)
-    assert list(repo.query(nested_selector).stored().defs()) == [root]
+    assert list(roots.sel(nested_selector).cdefs().collect()) == [root]
     repo.close(flush=False)
     store.close()
     assert store._query_index_instance is None
@@ -601,7 +575,7 @@ from pathlib import Path
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
-from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core import Definition, IdentitySet, Repo, SKIP_ARGS
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
@@ -627,15 +601,16 @@ with tempfile.TemporaryDirectory() as tmp:
 
     repo = Repo(stores=store)
     assert repo.index_status(store=store)[0].state == "ready"
-    assert repo.query(root).stored().count() == 1
-    assert list(repo.query(root).stored().defs()) == [root]
+    roots = IdentitySet((root,)).query()
+    assert roots.sel(root).count() == 1
+    assert list(roots.sel(root).cdefs().collect()) == [root]
     selector = Definition(child_cls, SKIP_ARGS, name="torch-child")
-    assert list(repo.query(selector).nested().definitions().defs()) == [child]
-    assert list(repo.query(selector).nested().owners().defs()) == [root]
-    occurrences = tuple(repo.query(selector).nested().max_occurrences(2).execute())
+    assert list(roots.nested(selector).targets().cdefs().collect()) == [child]
+    assert list(roots.nested(selector).owners().cdefs().collect()) == [root]
+    occurrences = tuple(roots.nested(selector).max_occurrences(2).collect())
     assert len(occurrences) == 1
     assert occurrences[0].owner == root
-    assert occurrences[0].definition == child
+    assert occurrences[0].target == child
     repo.close(flush=False)
     store.close()
     assert store._query_index_instance is None
@@ -735,7 +710,7 @@ from dryml.core.query.sqlite.utils import wal_runtime_is_known_safe
 assert SQLiteQueryIndexConfig is not None
 assert open_connection is not None
 assert SQLiteConnectionManager is not None
-assert SQLITE_QUERY_INDEX_SCHEMA_VERSION == 8
+assert SQLITE_QUERY_INDEX_SCHEMA_VERSION == 9
 assert wal_runtime_is_known_safe((3, 51, 3))
 assert "sqlite3" not in sys.modules
         """

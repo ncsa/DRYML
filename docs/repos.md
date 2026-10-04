@@ -106,6 +106,16 @@ later index, name, or commit boundary fails.
 
 `Repo.load(cdef)` and `load_object(cdef)` construct structural Objects and do not
 infer state. `Repo.load_or_build()` may create missing structure.
+
+## Query V3
+
+`Repo.query()` creates one unevaluated identity universe over connected Store
+authority and retained cache knowledge. `Store.query()` creates the equivalent
+single-Store universe. Use `sel()` for structural or exact identity restrictions,
+`cdefs()`/`object_refs()`/`state_refs()` for kind restrictions, and `collect()` or a
+scalar terminal to evaluate. Query terminals never construct Objects or open
+payloads; load an identity explicitly with `load_object()` or an exact-state load
+method. See [Graph Querying](graph_querying.md) and [Query V3 Migration](query_v3_migration.md).
 `Repo.load_state_ref(state_ref, reuse_live="matching")` is the exact-state load
 operation. It follows records across the connected Stores, not the current route
 map. `matching`, `greedy`, and `never` are live-reuse policies; structural

@@ -30,16 +30,15 @@ def test_public_categorical_controls_are_named_and_do_not_construct():
 
     projected = source.categorical(drop=("uid",), recursive=False)
     helper = categorical_definition(source, drop=("uid",))
-    queried = Repo().query(source).categorical(drop=("uid",), recursive=False)
+    queried = source.categorical(drop=("uid",), recursive=False)
 
     assert projected.args is None
     assert "uid" not in projected.parameters
     assert source.categorical().parameters["uid"] == "kept"
     assert source.categorical().parameters["metadata"] == {"note": "kept"}
-    assert queried.selector.parameters["metadata"] == {"note": "kept"}
+    assert queried.parameters["metadata"] == {"note": "kept"}
     assert helper == projected
-    assert queried.selector == projected
-    assert queried.restore().selector == source
+    assert queried == projected
 
 
 def test_constructor_binding_preserves_ordinary_controls_without_hooks():

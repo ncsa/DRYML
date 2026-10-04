@@ -430,15 +430,16 @@ def test_tf_sequential_factory_state_ref_round_trip(tmp_path):
     reopened = Repo(stores=tmp_path)
     state_hash = next(iter(state.states.values()))
 
-    assert reopened.references().exact(state.object).state_hash(state_hash).where(
+    assert reopened.query().sel(state.object).state_hash(state_hash).where(
         field("object", "scenario").eq("explicit-factory")
     ).state_refs().one() == state
     assert list(
-        reopened.query(root.definition)
+        reopened.query().sel(root.definition)
         .categorical(drop=("layer_defs",), recursive=True)
         .exact(path="primary")
+        .cdefs()
         .stored()
-        .defs()
+        .collect()
     ) == [root.definition]
 
     loaded = reopened.load_state_ref(state, reuse_live="never")

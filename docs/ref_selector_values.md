@@ -8,3 +8,5 @@
 
 Use [Signatures](signatures.md) for `Ref`/`Mat` conversion, automatic selection,
 quotation data, and the distinction between metadata selection and Repo realization.
+Query V3 treats complete ObjectRef and StateRef values as identity members without
+dereferencing them; see [Graph Querying](graph_querying.md).

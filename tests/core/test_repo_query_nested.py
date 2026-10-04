@@ -7,7 +7,8 @@ import pytest
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from dryml.artifacts import CachedDataset
-from dryml.core import Definition, Object, Par, QueryDomainError, Repo, Serializable, StateRef, Template
+from dryml.core import Definition, EdgePolicy, Object, Par, QueryDomainError, Repo, Serializable, StateRef, Template
+from dryml.core.query import RelationshipKind
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
@@ -78,8 +79,10 @@ def test_symbolic_template_recipe_is_not_a_reference_containment_edge(tmp_path):
     repo.save_object(owner)
 
     assert isinstance(owner.definition.parameters["recipe"].target, QuotedDef)
-    assert repo.query(target).nested(edges="all").owners().count() == 0
-    assert repo.references().containing(target, edges="ref").count() == 0
+    assert repo.query().cdefs().stored().nested(target, edges=EdgePolicy.ALL).owners().count() == 0
+    assert repo.query().cdefs().stored().nested(
+        target, edges=EdgePolicy(frozenset((RelationshipKind.REFERENCE,)))
+    ).count() == 0
 
 
 def test_cached_dataset_definition_only_reference_containment(tmp_path):
@@ -92,8 +95,10 @@ def test_cached_dataset_definition_only_reference_containment(tmp_path):
 
     repo.save_object(cached)
 
-    assert source.definition not in tuple(repo.query().stored().defs())
-    assert repo.query(source.definition).nested(edges="ref").owners().defs().one() == cached.definition
+    assert source.definition not in tuple(repo.query().cdefs().stored().collect())
+    assert repo.query().cdefs().stored().nested(
+        source.definition, edges=EdgePolicy(frozenset((RelationshipKind.REFERENCE,)))
+    ).owners().cdefs().one() == cached.definition
 
 
 def test_save_records_definition_closure_for_ephemeral_child(tmp_path):
@@ -118,29 +123,6 @@ def test_repeated_ephemeral_child_has_one_definition_record(tmp_path):
 
     records = tuple(store.iter_definition_records())
     assert {record.definition for record in records} == {parent.definition, child.definition}
-
-
-def test_nested_source_restriction_is_immutable_and_validated(tmp_path):
-    store = DirStore(tmp_path / "store")
-    other = DirStore(tmp_path / "other")
-    repo = Repo(stores=store)
-    child = QueryLeaf("child", repo=repo)
-
-    unrestricted = repo.query(child.definition).nested()
-    restricted = unrestricted.in_store(store)
-
-    assert unrestricted.source_store is None
-    assert restricted.source_store is store
-    with pytest.raises(ValueError, match="connected Store"):
-        unrestricted.in_store(other)
-
-
-def test_nested_source_restriction_executes_against_selected_authority(tmp_path):
-    store = DirStore(tmp_path / "store")
-    repo = Repo(stores=store)
-    child = QueryLeaf("child", repo=repo)
-
-    assert repo.query(child.definition).nested().in_store(store).count() == 0
 
 
 @pytest.mark.parametrize(

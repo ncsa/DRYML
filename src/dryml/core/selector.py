@@ -140,8 +140,9 @@ class Selector:
         if self.exact_root is None:
             raise QueryPathError("restore() requires an original ConcreteDefinition.")
         norm = normalize_path(path)
+        exact_path = _exact_authority_path(self.root, self.exact_root, norm)
         return Selector(
-            replace_subtree(self.root, norm, get_subtree(self.exact_root, norm)),
+            replace_subtree(self.root, norm, get_subtree(self.exact_root, exact_path)),
             strict=self.strict,
             cls_policy=self.cls_policy,
             exact_root=self.exact_root,
@@ -173,7 +174,8 @@ class Selector:
         if definition is None:
             if self.exact_root is None:
                 raise QueryPathError("exact() requires an explicit ConcreteDefinition.")
-            definition = get_subtree(self.exact_root, norm)
+            exact_path = _exact_authority_path(self.root, self.exact_root, norm)
+            definition = get_subtree(self.exact_root, exact_path)
         if not isinstance(definition, ConcreteDefinition):
             raise TypeError("exact() requires a ConcreteDefinition.")
         return Selector(
@@ -182,6 +184,25 @@ class Selector:
             cls_policy=self.cls_policy,
             exact_root=self.exact_root,
         )
+
+
+def _exact_authority_path(selector_root, exact_root, path):
+    """Translate one authored selector path to retained semantic CDef segments."""
+
+    from .query.path import DefinitionPath, get_subtree
+    from .query.selector_graph import _semantic_selector_path
+
+    selector_value = selector_root
+    exact_value = exact_root
+    exact_segments = []
+    for segment in path:
+        step = DefinitionPath((segment,))
+        semantic = _semantic_selector_path(selector_value, step)
+        selector_value = get_subtree(selector_value, step)
+        exact_step = step if semantic is None else semantic
+        exact_value = get_subtree(exact_value, exact_step)
+        exact_segments.extend(exact_step.segments)
+    return DefinitionPath(tuple(exact_segments))
 
 
 def selector(root: Any = None, *, scope=None, **kwargs) -> Selector:

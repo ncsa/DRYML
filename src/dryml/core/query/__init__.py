@@ -1,8 +1,8 @@
 from .path import Arg, DefinitionPath, GraphPath, GraphPathError, Index, Key, Kwarg, Parameter, QueryPathError, SetMember, normalize_path
 from .model import (
-    ContainmentEdgePolicy,
     QueryCardinalityError,
     QueryDomainError,
+    QueryDiagnostic,
     QueryError,
     QueryExplanation,
     QueryIndexError,
@@ -13,17 +13,16 @@ from .model import (
 )
 from .lowering import CandidateRelation, LoweredEdgeStep, LoweredGraphPlan, ScanPolicy
 from .metadata import MetadataField, MetadataPredicate, field
-from .query import DefinitionQuery
-from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet, QueryBackedDefinitionResultSet
-from .reference import ObjectRefResultSet, ReferenceOccurrence, ReferenceQuery, ReferenceResultSet, StateRefResultSet
+from .identity import IdentitySet, Occurrence, OccurrenceSet, SourceEvidence
+from .query import IdentityQuery, OccurrenceQuery, intersection, union
+from .relationships import EdgePolicy, RelationshipKind, RelationshipPath
+from .result import ObjectResultSet
 
 __all__ = [
     "Arg",
     "CandidateRelation",
-    "ContainmentEdgePolicy",
     "DefinitionPath",
-    "DefinitionQuery",
-    "DefinitionResultSet",
+    "EdgePolicy",
     "GraphPath",
     "GraphPathError",
     "Index",
@@ -34,11 +33,15 @@ __all__ = [
     "LoweredGraphPlan",
     "MetadataField",
     "MetadataPredicate",
+    "IdentityQuery",
+    "IdentitySet",
+    "Occurrence",
+    "OccurrenceQuery",
+    "OccurrenceSet",
     "ObjectResultSet",
-    "ObjectRefResultSet",
-    "OccurrenceResultSet",
     "QueryCardinalityError",
     "QueryDomainError",
+    "QueryDiagnostic",
     "QueryError",
     "QueryExplanation",
     "QueryIndexError",
@@ -47,13 +50,13 @@ __all__ = [
     "QueryVerifyBudgetExceeded",
     "QueryWouldScanError",
     "QueryPathError",
-    "QueryBackedDefinitionResultSet",
-    "ReferenceOccurrence",
-    "ReferenceQuery",
-    "ReferenceResultSet",
+    "RelationshipKind",
+    "RelationshipPath",
     "ScanPolicy",
     "SetMember",
-    "StateRefResultSet",
+    "SourceEvidence",
     "field",
     "normalize_path",
+    "intersection",
+    "union",
 ]

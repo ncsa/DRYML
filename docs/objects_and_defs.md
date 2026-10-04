@@ -63,6 +63,10 @@ Object. A restore hook failure invalidates that supplied graph for later framewo
 state IO. Load a fresh graph with `reuse_live="never"` from the preserved
 StateRef before continuing.
 
+Query V3 returns immutable identity values rather than live Objects. Select a CDef
+with `repo.query().sel(...).cdefs()` and pass the selected value to an explicit Repo
+load method when construction is intended.
+
 Default `Pickleable` restoration replaces ordinary payload fields rather than
 merging them. It removes fields absent from the checkpoint while preserving graph
 bindings and framework runtime metadata. A stateless Object root can own stateful

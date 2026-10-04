@@ -13,8 +13,8 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import MetadataConflictError, Repo, SaveAnnotations, Serializable
-from dryml.core.query import field
+from dryml.core import Repo, SaveAnnotations, Serializable
+from dryml.core.query import QueryError, field
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord, LocalStateManifest
 from dryml.core.metadata import LineageMetadata, SnapshotCapture
@@ -182,6 +182,7 @@ def test_distinct_zip_transactions_are_all_fenced_for_query_source_and_fork_read
     second.write_metadata(state.object, {"view": "second"})
     active = {}
     maximum = [0]
+    entered = set()
 
     for store in (first, second):
         original = store.authority_read_fence
@@ -190,6 +191,7 @@ def test_distinct_zip_transactions_are_all_fenced_for_query_source_and_fork_read
         def tracked(original=original, store=store):
             with original():
                 key = id(store)
+                entered.add(key)
                 active[key] = active.get(key, 0) + 1
                 maximum[0] = max(maximum[0], len(active))
                 try:
@@ -202,24 +204,29 @@ def test_distinct_zip_transactions_are_all_fenced_for_query_source_and_fork_read
         monkeypatch.setattr(store, "authority_read_fence", tracked)
 
     repo = Repo([first, second])
-    with pytest.raises(MetadataConflictError):
-        repo.references().exact(state.object).where(
+    with pytest.raises(QueryError, match="metadata authority conflicts"):
+        repo.query().sel(state.object).where(
             field("object", "view").eq("first")
-        ).object_refs()
-    assert maximum[0] == 2
+        ).object_refs().collect()
+    assert entered == {id(first), id(second)}
+    assert maximum[0] == 1
 
     maximum[0] = 0
+    entered.clear()
     repo.add_store(target)
     evidence = repo.reference_evidence(state.definition)
     assert evidence.states[0].state_ref == state
+    assert entered == {id(first), id(second)}
     assert maximum[0] == 2
 
     maximum[0] = 0
+    entered.clear()
     fork = repo.fork_state_ref(
         state, store=target, source_store=first,
         copy_annotations=("object", "state"),
     )
     assert target.read_state_ref_record(fork.digest()).state_ref == fork
+    assert id(first) in entered
     assert maximum[0] == 2
 
     first.close()
@@ -258,9 +265,9 @@ def test_distinct_zip_transaction_query_cut_blocks_overlapping_mapping_write(
 
     def query():
         try:
-            results.extend(repo.references().exact(state.object).where(
+            results.extend(repo.query().sel(state.object).where(
                 field("object", "view").eq("initial")
-            ).object_refs())
+            ).object_refs().collect())
         except BaseException as error:
             errors.append(error)
 

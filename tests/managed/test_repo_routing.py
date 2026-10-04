@@ -139,7 +139,7 @@ def test_checkpoint_and_final_preserve_per_object_replica_closures(tmp_path):
     assert all(store.read_state_ref_record(status.final_state_ref.digest()).state_ref == status.final_state_ref for store in roots)
     assert all(store.read_state_ref_record(final_child.digest()).state_ref == final_child for store in children)
     assert all(
-        list(Repo(store).query(checkpoint_child.definition).stored().defs())
+        list(Repo(store).query().sel(checkpoint_child.definition).cdefs().stored().collect())
         == [checkpoint_child.definition]
         for store in children
     )

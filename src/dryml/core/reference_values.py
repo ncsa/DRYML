@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import builtins
 import hashlib
 import json
@@ -263,6 +263,9 @@ class ObjectRef:
 
     definition: Any
     objects: Mapping[GraphPath, ObjectId]
+    _digest_cache: str | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False,
+    )
 
     def __init__(self, definition: Any, objects: Mapping[Any, ObjectId]):
         from .definition import ConcreteDefinition
@@ -289,6 +292,7 @@ class ObjectRef:
                 )
         object.__setattr__(self, "definition", definition)
         object.__setattr__(self, "objects", normalized)
+        object.__setattr__(self, "_digest_cache", None)
 
     @property
     def object_id(self) -> ObjectId | None:
@@ -355,9 +359,21 @@ class ObjectRef:
         }
 
     def digest(self) -> str:
-        """Return a deterministic digest for this complete exact identity."""
+        """Return and memoize a deterministic digest for this exact identity.
 
-        return hashlib.sha256(b"dryml-object-ref-v1\x00" + _canonical_bytes(self._identity_data())).hexdigest()
+        Memoization changes only private state on this immutable value and does
+        not read or mutate Store authority.
+        """
+
+        if self._digest_cache is None:
+            object.__setattr__(
+                self,
+                "_digest_cache",
+                hashlib.sha256(
+                    b"dryml-object-ref-v1\x00" + _canonical_bytes(self._identity_data())
+                ).hexdigest(),
+            )
+        return self._digest_cache
 
     def __stable_leaf_bytes__(self) -> bytes:
         return b"dryml-object-ref-v1\x00" + self.digest().encode("ascii")
@@ -422,6 +438,9 @@ class StateRef:
 
     object: ObjectRef
     states: Mapping[GraphPath, str]
+    _digest_cache: str | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False,
+    )
 
     def __init__(self, object: ObjectRef, states: Mapping[Any, str]):
         if not isinstance(object, ObjectRef):
@@ -433,6 +452,7 @@ class StateRef:
             raise ValueError("StateRef states must have exactly the ObjectRef primary paths.")
         builtins.object.__setattr__(self, "object", object)
         builtins.object.__setattr__(self, "states", normalized)
+        builtins.object.__setattr__(self, "_digest_cache", None)
 
     @property
     def definition(self) -> Any:
@@ -556,13 +576,25 @@ class StateRef:
             current = selected
 
     def digest(self) -> str:
-        """Return a deterministic digest for this complete state identity."""
+        """Return and memoize a deterministic digest for this state identity.
 
-        data = {
-            "object": self.object.digest(),
-            "states": [[_path_data(path), state_hash] for path, state_hash in self.states.items()],
-        }
-        return hashlib.sha256(b"dryml-state-ref-v1\x00" + _canonical_bytes(data)).hexdigest()
+        Memoization changes only private state on this immutable value and does
+        not read or mutate Store authority.
+        """
+
+        if self._digest_cache is None:
+            data = {
+                "object": self.object.digest(),
+                "states": [[_path_data(path), state_hash] for path, state_hash in self.states.items()],
+            }
+            builtins.object.__setattr__(
+                self,
+                "_digest_cache",
+                hashlib.sha256(
+                    b"dryml-state-ref-v1\x00" + _canonical_bytes(data)
+                ).hexdigest(),
+            )
+        return self._digest_cache
 
     def __stable_leaf_bytes__(self) -> bytes:
         return b"dryml-state-ref-v1\x00" + self.digest().encode("ascii")

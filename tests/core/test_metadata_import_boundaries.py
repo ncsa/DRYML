@@ -39,10 +39,10 @@ def test_fresh_process_inspects_metadata_without_heavy_imports_or_probes(tmp_pat
         manifest = json.loads((source / "manifest.json").read_text(encoding="ascii"))
         store = DirStore.open_existing(destination)
         repo = core.Repo(store)
-        states = list(repo.references().state_refs())
+        states = list(repo.query().state_refs().collect())
         assert len(states) == len(manifest["snapshots"])
         assert all(repo.get_snapshot_metadata(state, store=store).environment_status == "known" for state in states)
-        assert repo.references().where(core.field("snapshot", "requirements_status").eq("conflict")).state_refs().count() == 1
+        assert repo.query().where(core.field("snapshot", "requirements_status").eq("conflict")).state_refs().count() == 1
 
         assert not heavy.intersection(sys.modules)
         assert "dryml.code" not in sys.modules

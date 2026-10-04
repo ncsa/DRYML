@@ -2,7 +2,7 @@ import pytest
 
 from dryml import session
 from dryml.core import Object, Repo
-from dryml.core.query.result import DefinitionResultSet, ObjectResultSet
+from dryml.core.query.result import ObjectResultSet
 from dryml.runtime.errors import RuntimeTransitionError
 
 
@@ -19,19 +19,15 @@ def reset_runtime():
     session.reset()
 
 
-def test_strict_fences_object_yielding_definition_and_retained_results():
+def test_strict_fences_retained_non_query_object_results():
     repo = Repo()
     obj = QueryBoundaryObject("cached", repo=repo)
     repo.pin(obj)
-    definitions = DefinitionResultSet(
-        repo, (obj.definition,), materializable=True, replicas={obj.definition: ()}
-    )
     retained = ObjectResultSet(repo, {obj.definition: obj})
 
     session.set_mode("orchestrator")
 
     for call in (
-            definitions.objects,
             retained.one,
             retained.first,
             lambda: retained[obj.definition],

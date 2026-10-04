@@ -882,6 +882,7 @@ class ConcreteDefinition(DefInterface, Mapping):
     _args: FrozenTuple[Any, ...] = field(default_factory=lambda: FrozenTuple())
     _kwargs: FrozenDict[str, Any] = field(default_factory=lambda: FrozenDict({}))
     _stable_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
+    _graph_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
     _identity_version: int = field(default=V2_IDENTITY_VERSION, init=False, repr=False, compare=False, hash=False)
     _bound_args: BoundArguments = field(init=False, repr=False, compare=False, hash=False)
     _node_id: object = field(default_factory=new_node_id, init=False, repr=False, compare=False, hash=False)
@@ -920,6 +921,7 @@ class ConcreteDefinition(DefInterface, Mapping):
         object.__setattr__(self, "_identity_version", record.identity_version)
         object.__setattr__(self, "_bound_args", record._bound_args)
         object.__setattr__(self, "_stable_hash_cache", record._stable_hash_cache)
+        object.__setattr__(self, "_graph_hash_cache", record._graph_hash_cache)
         object.__setattr__(self, "_node_id", record._node_id)
         object.__setattr__(self, "_stateful_role", record._stateful_role)
 
@@ -1044,6 +1046,7 @@ class ConcreteDefinition(DefInterface, Mapping):
         object.__setattr__(result, "_args", FrozenTuple())
         object.__setattr__(result, "_kwargs", FrozenDict({}))
         object.__setattr__(result, "_stable_hash_cache", None)
+        object.__setattr__(result, "_graph_hash_cache", None)
         object.__setattr__(result, "_node_id", new_node_id())
         object.__setattr__(result, "_bound_args", bound_args)
         object.__setattr__(result, "_identity_version", V2_IDENTITY_VERSION)
@@ -1205,11 +1208,20 @@ class ConcreteDefinition(DefInterface, Mapping):
         Returns:
             A token-free graph digest that distinguishes sharing from
             independent structurally equal nodes.
+
+        Side Effects:
+            Memoizes the digest on this immutable CDef; no external state is
+            read or changed.
         """
 
+        cached = self._graph_hash_cache
+        if cached is not None:
+            return cached
         from .cdef_codec import cdef_graph_hash
 
-        return cdef_graph_hash(self)
+        value = cdef_graph_hash(self)
+        object.__setattr__(self, "_graph_hash_cache", value)
+        return value
 
     def freeze(self):
         """Return a non-materializing canonical reference to this CDef.

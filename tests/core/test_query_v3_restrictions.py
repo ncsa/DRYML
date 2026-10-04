@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from dryml.core import (
@@ -17,12 +19,15 @@ from dryml.core import (
 )
 from dryml.core.domains import UniformFromSet
 from dryml.core.errors import ParameterizationLimitError
+from dryml.core.factory import FactorySpec
+from dryml.core.params import AnyValue
 from dryml.core.template import Par
-from dryml.core.query import field
-from dryml.core.query.identity import IdentitySet
+from dryml.core.query import Arg, GraphPath, Kwarg, QueryError, QueryIndexUnavailable, field
+from dryml.core.query.identity import IdentitySet, SourceEvidence
 from dryml.core.query.model import QueryDomainError
 from dryml.core.query.query import IdentityQuery
 from dryml.core.store.dir import DirStore
+from dryml.core.store.zip import ZipStore
 
 
 class V3Leaf(Serializable):
@@ -57,6 +62,21 @@ class V3ConstructionTrap(Object):
 
     def __init__(self, value):
         raise AssertionError("V3 query selection must not construct Objects")
+
+
+class V3FactoryOwner(Object):
+    """Definition fixture retaining an inert partial FactorySpec pattern."""
+
+    def __init__(self, factory):
+        self.factory = factory
+
+
+class V3Variadic(Object):
+    """Selector fixture with semantic var-positional and var-keyword paths."""
+
+    def __init__(self, *values, **labels):
+        self.values = values
+        self.labels = labels
 
 
 def _saved(repo, value, *, object_metadata=None, state_metadata=None):
@@ -135,6 +155,85 @@ def test_v3_controls_report_or_reject_required_inventory_scans(tmp_path):
     assert exact.explain().fast_path == "exact-state-ref"
     assert exact.explain(analyze=True).source_cuts == 1
     assert exact.one() == state
+
+
+def test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals(
+        tmp_path, monkeypatch):
+    """Refresh executes once per terminal and warn reports a required scan."""
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    _saved(repo, "value")
+    calls = []
+    monkeypatch.setattr(
+        repo._query_index,
+        "refresh",
+        lambda policy, **_kwargs: calls.append(policy),
+    )
+
+    with pytest.warns(RuntimeWarning, match="authoritative inventory scan"):
+        assert repo.query().scan_policy("warn").exists()
+    assert calls == ["auto"]
+    assert repo.query().refresh(True).exists()
+    assert calls == ["auto", True]
+    assert repo.query().refresh(False).exists()
+    assert calls == ["auto", True]
+    with pytest.raises(QueryError, match="inventory scan"):
+        repo.query().scan_policy("forbid").exists()
+    assert calls == ["auto", True]
+
+
+@pytest.mark.parametrize("value", (0, 1, None, [], "invalid"))
+def test_v3_refresh_rejects_values_outside_its_exact_policy_domain(value):
+    with pytest.raises(ValueError, match="refresh policy"):
+        IdentitySet().query().refresh(value)
+
+
+@pytest.mark.parametrize("value", (0, 1, None, [], "invalid"))
+def test_v3_scan_policy_rejects_values_outside_its_string_domain(value):
+    with pytest.raises(ValueError, match="scan policy"):
+        IdentitySet().query().scan_policy(value)
+
+
+def test_v3_repo_refresh_reports_only_completed_reconciliation(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    _saved(repo, "value")
+    monkeypatch.setattr(repo._query_index, "refresh", lambda *_args, **_kwargs: False)
+
+    assert repo.query().explain(analyze=True).refresh_action == "none"
+
+    def unavailable(*_args, **_kwargs):
+        raise QueryIndexUnavailable("synthetic unavailable index")
+
+    monkeypatch.setattr(repo._query_index, "refresh", unavailable)
+    with pytest.raises(QueryIndexUnavailable, match="synthetic unavailable index"):
+        repo.query().refresh(True).exists()
+
+
+def test_v3_repo_auto_refresh_tolerates_index_open_unavailability(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+
+    def unavailable(_binding):
+        raise QueryIndexUnavailable("synthetic unavailable index")
+
+    monkeypatch.setattr(repo._query_index, "open_store_index", unavailable)
+    assert repo._query_index.refresh("auto") is False
+    with pytest.raises(QueryIndexUnavailable, match="synthetic unavailable index"):
+        repo._query_index.refresh(True)
+
+
+def test_v3_store_auto_refresh_tolerates_index_open_unavailability(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+
+    def unavailable():
+        raise QueryIndexUnavailable("synthetic unavailable index")
+
+    monkeypatch.setattr(store, "open_query_index", unavailable)
+    assert not store.query().exists()
+    with pytest.raises(QueryIndexUnavailable, match="synthetic unavailable index"):
+        store.query().refresh(True).exists()
 
 
 def test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed(tmp_path):
@@ -273,6 +372,80 @@ def test_v3_metadata_lineage_and_snapshot_scopes_use_the_captured_store_cut(tmp_
     ).state_refs().one() == state
 
 
+def test_v3_metadata_keeps_scalar_types_and_validates_every_populated_leaf(tmp_path):
+    """Typed equality and invalid ordering/containment cannot be short-circuited."""
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    state = _saved(
+        repo,
+        "typed",
+        object_metadata={
+            "bool": True,
+            "int": 1,
+            "float": 1.0,
+            "text": "vision baseline",
+            "tags": ["vision", "baseline"],
+            "mapping": {"value": 1},
+        },
+    )
+    selected = repo.query().sel(state.object).object_refs()
+
+    assert selected.where(field("object", "bool").eq(1)).count() == 0
+    assert selected.where(field("object", "int").eq(1.0)).count() == 0
+    assert selected.where(
+        field("object", "tags").eq(("vision", "baseline"))
+    ).count() == 0
+    assert selected.where(field("object", "text").contains("vision")).one() == state.object
+    assert selected.where(field("object", "tags").contains("vision")).one() == state.object
+    with pytest.raises(QueryError, match="numeric field"):
+        selected.where(
+            field("object", "text").lt(2)
+            | field("object", "missing").eq("absent")
+        ).collect()
+    with pytest.raises(QueryError, match="containment"):
+        selected.where(
+            field("object", "mapping").contains("value")
+            & field("object", "missing").eq("absent")
+        ).collect()
+
+
+def test_v3_unknown_and_epoch_lineage_times_remain_distinct(tmp_path, monkeypatch):
+    """Unknown lineage does not compare as the Unix epoch under V3 filtering."""
+
+    monkeypatch.setattr(
+        "dryml.core.snapshot_capture.current_utc_time",
+        lambda: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store, clock=lambda: 0)
+    unknown = repo.save_object(V3Parent(V3Leaf("child", repo=repo), repo=repo))
+    known = _saved(repo, "known")
+
+    assert repo.get_lineage_metadata(unknown.object).creation_status == "unknown"
+    assert repo.query().sel(unknown.object).where(
+        field("lineage", "created_at").ge(0)
+    ).object_refs().count() == 0
+    assert repo.query().sel(known.object).where(
+        field("lineage", "created_at").eq(0)
+    ).object_refs().one() == known.object
+
+
+def test_v3_metadata_authority_has_zipstore_parity(tmp_path):
+    """Buffered archive authority reopens with the same metadata query answer."""
+
+    archive = tmp_path / "metadata.zip"
+    store = ZipStore(archive)
+    repo = Repo(store)
+    state = _saved(repo, "zip", object_metadata={"team": "vision"})
+    repo.close(flush=True)
+    reopened = Repo(ZipStore.open_existing(archive))
+
+    assert reopened.query().where(
+        field("object", "team").eq("vision")
+    ).object_refs().one() == state.object
+
+
 def test_v3_fixed_metadata_requires_explicit_scope_and_alias_is_live_per_terminal(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
@@ -354,8 +527,42 @@ def test_v3_selector_value_edits_retain_exact_authority_without_widening(tmp_pat
         .count()
         == 1
     )
+    assert (
+        IdentityQuery.from_store(repo.stores[0])
+        .sel(first.object.definition)
+        .categorical(drop_args=True)
+        .exact()
+        .cdefs()
+        .stored()
+        .one()
+        == first.object.definition
+    )
     with pytest.raises(Exception, match="ConcreteDefinition"):
         Selector(Definition(V3Leaf, "first")).exact()
+
+
+def test_v3_selector_exact_translates_authored_paths_to_semantic_authority():
+    """Exact edits map authored keyword paths onto ConcreteDefinition parameters."""
+
+    root = V3Parent(V3Leaf("child")).definition
+    edited = Selector(root).categorical(
+        recursive=True, drop=("value",),
+    ).exact(path="child")
+
+    assert edited.root.parameters["child"] == root.parameters["child"]
+
+
+def test_v3_selector_exact_retains_complete_variadic_semantic_paths():
+    """Variadic authored paths keep Parameter plus Index or Key authority hops."""
+
+    positional = V3Leaf("positional").definition
+    keyword = V3Leaf("keyword").definition
+    authored = Definition(V3Variadic, positional, named=keyword)
+    exact = authored.concretize()
+    selected = Selector(authored, exact_root=exact)
+
+    assert selected.exact(path=GraphPath((Arg(0),))).root.args[0] == positional
+    assert selected.exact(path=GraphPath((Kwarg("named"),))).root.kwargs["named"] == keyword
 
 
 def test_v3_soft_state_selector_requires_explicit_scoped_preparation(tmp_path, monkeypatch):
@@ -442,3 +649,82 @@ def test_v3_generator_selection_keeps_exact_support_and_shared_witness_budget():
     assert query.one() == first
     with pytest.raises(ParameterizationLimitError, match="witness limit"):
         query.max_witnesses(1).collect()
+
+
+def _shared_v3_parent_selector():
+    child = Definition(V3Leaf, Par("value"))
+    return Generator(
+        Definition(V3Parent, [child, child]),
+        {"value": UniformFromSet(("shared",))},
+    ).support_selector()
+
+
+def test_v3_generator_retains_matching_graph_witness_before_deduplication():
+    """Generator selection distinguishes equal CDefs with different sharing."""
+
+    shared_leaf = V3Leaf("shared")
+    shared = V3Parent([shared_leaf, shared_leaf]).definition
+    independent = V3Parent([V3Leaf("shared"), V3Leaf("shared")]).definition
+    assert shared == independent
+    assert not shared.graph_equal(independent)
+
+    result = IdentityQuery.from_set(
+        IdentitySet((independent, shared)),
+    ).sel(_shared_v3_parent_selector()).collect()
+
+    assert tuple(result) == (shared,)
+
+
+@pytest.mark.parametrize("shared_first", [False, True])
+def test_v3_generator_preserves_graph_witnesses_across_stores(
+        tmp_path, shared_first):
+    """Store ordering cannot select an equal but topologically wrong witness."""
+
+    independent_store = DirStore(tmp_path / "independent")
+    shared_store = DirStore(tmp_path / "shared")
+    independent_repo = Repo(independent_store)
+    independent = V3Parent(
+        [
+            V3Leaf("shared", repo=independent_repo),
+            V3Leaf("shared", repo=independent_repo),
+        ],
+        repo=independent_repo,
+    )
+    independent_repo.save_object(independent)
+    shared_repo = Repo(shared_store)
+    leaf = V3Leaf("shared", repo=shared_repo)
+    shared = V3Parent([leaf, leaf], repo=shared_repo)
+    shared_repo.save_object(shared)
+    stores = (
+        (shared_store, independent_store)
+        if shared_first else (independent_store, shared_store)
+    )
+
+    result = Repo(stores).query().stored().cdefs().sel(
+        _shared_v3_parent_selector()
+    ).collect()
+
+    assert tuple(result) == (shared.definition,)
+    assert result.sources(shared.definition) == frozenset((
+        SourceEvidence.from_source(shared_store.authority_fence_key()),
+    ))
+
+
+def test_v3_partial_factory_pattern_uses_residual_scan_verification():
+    """Wildcard FactorySpec arguments retain every matching fixed candidate."""
+
+    first = V3FactoryOwner(FactorySpec("factory", 1)).definition
+    second = V3FactoryOwner(FactorySpec("factory", 2)).definition
+    selector_value = Definition(
+        V3FactoryOwner,
+        FactorySpec("factory", AnyValue()),
+    )
+    from dryml.core.query.selector_graph import compile_selector_graph
+
+    graph = compile_selector_graph(selector_value)
+    result = IdentityQuery.from_set(
+        IdentitySet((first, second)),
+    ).sel(selector_value).collect()
+
+    assert graph is not None and graph.requires_scan
+    assert set(result) == {first, second}

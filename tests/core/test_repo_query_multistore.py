@@ -34,7 +34,7 @@ class CountingDirStore(DirStore):
         return super().hydrate_index()
 
 
-def test_distinct_cdefs_in_two_stores_produce_two_logical_results(tmp_path):
+def test_distinct_cdefs_in_two_stores_produce_two_v3_identities(tmp_path):
     store1 = DirStore(tmp_path / "store1")
     store2 = DirStore(tmp_path / "store2")
     repo = Repo(stores=[store1, store2])
@@ -45,10 +45,10 @@ def test_distinct_cdefs_in_two_stores_produce_two_logical_results(tmp_path):
 
     repo2 = Repo(stores=[DirStore(store1.base_dir), DirStore(store2.base_dir)])
 
-    assert repo2.find_defs(None).count() == 2
+    assert repo2.query().cdefs().stored().count() == 2
 
 
-def test_same_cdef_in_two_stores_deduplicates_and_tracks_replicas(tmp_path):
+def test_same_cdef_in_two_stores_deduplicates_and_tracks_sources(tmp_path):
     store1 = DirStore(tmp_path / "store1")
     store2 = DirStore(tmp_path / "store2")
     repo = Repo(stores=[store1, store2])
@@ -57,10 +57,10 @@ def test_same_cdef_in_two_stores_deduplicates_and_tracks_replicas(tmp_path):
     repo.save_object(obj, store=store2)
 
     repo2 = Repo(stores=[DirStore(store1.base_dir), DirStore(store2.base_dir)])
-    results = repo2.find_defs(None)
+    results = repo2.query().cdefs().stored().collect()
 
     assert list(results) == [obj.definition]
-    assert len(results.replicas(obj.definition)) == 2
+    assert len(results.sources(obj.definition)) == 2
 
 
 def test_equivalent_store_instances_share_physical_identity(tmp_path):
@@ -70,13 +70,13 @@ def test_equivalent_store_instances_share_physical_identity(tmp_path):
     repo.save_object(obj)
 
     repo2 = Repo(stores=[DirStore(store.base_dir), DirStore(store.base_dir)])
-    results = repo2.find_defs(None)
+    results = repo2.query().cdefs().stored().collect()
 
     assert list(results) == [obj.definition]
-    assert len(results.replicas(obj.definition)) == 1
+    assert len(results.sources(obj.definition)) == 1
 
 
-def test_forced_refresh_deduplicates_equivalent_store_instances(tmp_path):
+def test_v3_capture_deduplicates_equivalent_store_instances(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     obj = MultiLeaf("same", repo=repo)
@@ -88,11 +88,11 @@ def test_forced_refresh_deduplicates_equivalent_store_instances(tmp_path):
         CountingDirStore(store.base_dir, query_index="memory"),
     ])
 
-    assert repo2.find_defs(None, refresh=True).count() == 1
-    assert CountingDirStore.calls == 1
+    assert repo2.query().cdefs().stored().count() == 1
+    assert CountingDirStore.calls == 0
 
 
-def test_forced_refresh_replaces_stale_store_reference(tmp_path):
+def test_v3_query_uses_replaced_connected_store_reference(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     obj = MultiLeaf("same", repo=repo)
@@ -100,13 +100,13 @@ def test_forced_refresh_replaces_stale_store_reference(tmp_path):
 
     old_store = DirStore(store.base_dir)
     repo2 = Repo(stores=old_store)
-    assert repo2.find_defs(None).count() == 1
+    assert repo2.query().cdefs().stored().count() == 1
 
     new_store = DirStore(store.base_dir)
     repo2.stores = [new_store]
-    refreshed = repo2.find_defs(None, refresh=True)
+    refreshed = repo2.query().cdefs().stored().collect()
 
-    assert refreshed.replicas(obj.definition) == (new_store,)
+    assert len(refreshed.sources(obj.definition)) == 1
 
 
 def test_structural_query_is_fresh_while_exact_state_ref_load_restores_state(tmp_path):
@@ -137,7 +137,7 @@ def test_result_order_is_independent_of_store_order(tmp_path):
     repo.save_object(first, store=store1)
     repo.save_object(second, store=store2)
 
-    order_a = list(Repo(stores=[DirStore(store1.base_dir), DirStore(store2.base_dir)]).find_defs(None))
-    order_b = list(Repo(stores=[DirStore(store2.base_dir), DirStore(store1.base_dir)]).find_defs(None))
+    order_a = list(Repo(stores=[DirStore(store1.base_dir), DirStore(store2.base_dir)]).query().cdefs().stored().collect())
+    order_b = list(Repo(stores=[DirStore(store2.base_dir), DirStore(store1.base_dir)]).query().cdefs().stored().collect())
 
     assert order_a == order_b

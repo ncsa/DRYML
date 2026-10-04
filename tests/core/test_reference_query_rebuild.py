@@ -16,7 +16,7 @@ class ReferenceRebuildValue(Serializable):
         pass
 
 
-def test_old_query_metadata_rebuilds_with_visible_progress(tmp_path, capsys):
+def test_v3_index_metadata_rebuilds_with_visible_progress(tmp_path, capsys):
     store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(store)
     repo.save_object(ReferenceRebuildValue(1, repo=repo))
