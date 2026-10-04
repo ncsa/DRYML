@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 from ..cdef_graph import EdgeKind
 from .index import DefinitionCatalog, MemoryDefinitionGraphReadView
-from .model import IndexWriteResult, OccurrenceTraversalSnapshot, QueryIndexStatus, ValidationReport
+from .model import IndexWriteResult, OccurrenceTraversalSnapshot, QueryIndexStatus, V3ProjectionCoverage, ValidationReport
 
 
 class AggregateMemoryQueryIndex(DefinitionCatalog):
@@ -63,6 +63,30 @@ class MemoryStoreQueryIndex:
 
     def validate(self, *, thorough: bool = False) -> ValidationReport:
         return ValidationReport("memory", self.source_key, True)
+
+    def v3_projection_coverage(self) -> V3ProjectionCoverage:
+        """Describe retained graph-exact rows without claiming Store completeness.
+
+        The memory catalog can preserve projection rows for roots registered in
+        this process, but it does not capture all V3 authority families or a
+        durable dirty-token cut.  Callers therefore must use authority fallback
+        or reject indexed-only execution.
+        """
+
+        with self.read_view() as view:
+            roots, identities, relationships = view._view.v3_projection_rows(self.source_key)
+            return V3ProjectionCoverage(
+                backend="memory",
+                store_key=self.source_key,
+                generation=view.generation,
+                projection_complete=True,
+                authority_complete=False,
+                indexed_only=False,
+                source_roots=len(roots),
+                identities=len(identities),
+                relationships=len(relationships),
+                reason="memory projection has no fenced complete V3 authority inventory",
+            )
 
     def ensure_exact_stored(self, cdef, *, stats=None) -> bool:
         return self.catalog.ensure_exact_stored(cdef, stats=stats)

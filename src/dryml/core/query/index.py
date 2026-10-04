@@ -25,7 +25,10 @@ from .model import (
     QueryStats,
     RefreshPolicy,
     StoreId,
+    V3ProjectionCoverage,
 )
+from .identity import identity_key
+from .relationships import iter_direct_relationships, relationship_closure
 from .path import DefinitionPath
 from .utils import cdef_equal
 
@@ -56,6 +59,7 @@ class MemoryDefinitionGraphReadView:
             parents_by_child_path: dict[tuple[DefinitionId, DefinitionPath, EdgeKind], frozenset[DefinitionId]],
             strong_cached_ids: set[DefinitionId],
             weak_cached_ids: set[DefinitionId],
+            v3_stored_roots_by_store: dict[StoreId, tuple[ConcreteDefinition, ...]],
             source_key: str = "memory-catalog",
             repo=None,
             store_by_id: dict[StoreId, Any] | None = None):
@@ -73,6 +77,7 @@ class MemoryDefinitionGraphReadView:
         self._parents_by_child_path = parents_by_child_path
         self._strong_cached_ids = frozenset(strong_cached_ids)
         self._weak_cached_ids = frozenset(weak_cached_ids)
+        self._v3_stored_roots_by_store = v3_stored_roots_by_store
         self._repo = repo
         self._store_by_id = {} if store_by_id is None else store_by_id
         self._active = True
@@ -195,6 +200,36 @@ class MemoryDefinitionGraphReadView:
     def all_known_ids(self, *, reuse_weak: bool = True) -> set[DefinitionId]:
         self._check_active()
         return self.all_stored_ids() | self.all_cached_ids(reuse_weak=reuse_weak)
+
+    def v3_projection_rows(self, store_id: StoreId | None = None):
+        """Return graph-exact identity and direct-relationship projection rows.
+
+        These rows are derived from retained roots only.  They are not a claim
+        that this legacy catalog covers every V3 Store authority family.
+        """
+
+        self._check_active()
+        roots = (
+            tuple(root for roots in self._v3_stored_roots_by_store.values() for root in roots)
+            if store_id is None else self._v3_stored_roots_by_store.get(store_id, ())
+        )
+        identities = set()
+        relationships = set()
+        for root in roots:
+            root_key = identity_key(root)
+            for value in relationship_closure((root,)):
+                value_key = identity_key(value)
+                identities.add((root_key.digest, value_key.kind, value_key.digest))
+                for edge in iter_direct_relationships(value):
+                    target_key = identity_key(edge.target)
+                    relationships.add((
+                        root_key.digest, value_key.kind, value_key.digest,
+                        edge.kind.value, str(edge.path), target_key.kind,
+                        target_key.digest,
+                    ))
+        # CDef ``frozenset`` would use structural equality and erase graph
+        # variants; source roots must remain a graph-exact sequence here.
+        return roots, frozenset(identities), frozenset(relationships)
 
     def replica_map(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[ConcreteDefinition, tuple[Any, ...]]:
         self._check_active()
@@ -438,6 +473,7 @@ class DefinitionCatalog:
         self.parents_by_child_path: dict[tuple[DefinitionId, DefinitionPath, EdgeKind], set[DefinitionId]] = defaultdict(set)
         self.store_by_id: dict[StoreId, Any] = {}
         self.hydrated_stores: set[StoreId] = set()
+        self.v3_stored_roots_by_store: dict[StoreId, tuple[ConcreteDefinition, ...]] = {}
         self.generation = 0
 
     def store_id(self, store) -> StoreId:
@@ -486,6 +522,7 @@ class DefinitionCatalog:
             parents_by_child_path=self.parents_by_child_path,
             strong_cached_ids=strong_cached_ids,
             weak_cached_ids=weak_cached_ids,
+            v3_stored_roots_by_store=self.v3_stored_roots_by_store,
             source_key="memory-catalog",
             repo=self.repo,
             store_by_id=self.store_by_id,
@@ -594,6 +631,7 @@ class DefinitionCatalog:
             )
             self.replicas_by_definition[did].add(sid)
             self.stored_definitions_by_store[sid].add(did)
+            self._register_v3_stored_roots_locked(sid, (cdef,))
             self.repo.light_index.add(cdef)
             if membership_changed or changed:
                 self.generation += 1
@@ -611,6 +649,7 @@ class DefinitionCatalog:
             )
             self.replicas_by_definition[did].add(sid)
             self.stored_definitions_by_store[sid].add(did)
+            self._register_v3_stored_roots_locked(sid, (cdef,))
             self.repo.light_index.add(cdef)
             if membership_changed or len(self.definitions_by_id) != before_count:
                 self.generation += 1
@@ -622,7 +661,7 @@ class DefinitionCatalog:
             store,
             *,
             graph: ConcreteDefinitionGraph | None = None) -> tuple[DefinitionId, ...]:
-        roots = tuple(dict.fromkeys(cdefs))
+        roots = _unique_graph_roots(cdefs)
         if not roots:
             return ()
         if graph is None:
@@ -645,12 +684,13 @@ class DefinitionCatalog:
                 self.replicas_by_definition[did].add(sid)
                 self.stored_definitions_by_store[sid].add(did)
                 self.repo.light_index.add(cdef)
+            self._register_v3_stored_roots_locked(sid, roots)
             if membership_changed or changed:
                 self.generation += 1
             return tuple(ids)
 
     def remove_stored_roots(self, cdefs, store) -> IndexWriteResult:
-        roots = tuple(dict.fromkeys(cdefs))
+        roots = _unique_graph_roots(cdefs)
         if not roots:
             return IndexWriteResult(generation=self.current_generation(), changed=False)
         with self.lock:
@@ -667,6 +707,7 @@ class DefinitionCatalog:
                     self.stored_definitions_by_store[sid].remove(did)
                 if not self.replicas_by_definition.get(did):
                     self.repo.light_index.discard(self.definitions_by_id[did].cdef)
+            self._remove_v3_stored_roots_locked(sid, roots)
             if removed:
                 self.generation += 1
             return IndexWriteResult(
@@ -912,6 +953,7 @@ class DefinitionCatalog:
         self.parents_by_child_path = replacement.parents_by_child_path
         self.store_by_id = replacement.store_by_id
         self.hydrated_stores = replacement.hydrated_stores
+        self.v3_stored_roots_by_store = replacement.v3_stored_roots_by_store
         self.repo.light_index.clear()
         self.repo.light_index.update(light_index)
         self.generation += 1
@@ -957,6 +999,9 @@ class DefinitionCatalog:
                     changed = True
                 self.replicas_by_definition[live_id].add(sid)
                 self.stored_definitions_by_store[sid].add(live_id)
+
+        for sid, roots in staged.v3_stored_roots_by_store.items():
+            self._register_v3_stored_roots_locked(sid, roots)
 
         before_light_count = len(self.repo.light_index)
         self.repo.light_index.update(light_index)
@@ -1035,6 +1080,17 @@ class DefinitionCatalog:
                 self.ids_by_cdef[cdef] = did
                 return did
         return None
+
+    def _register_v3_stored_roots_locked(self, sid: StoreId, roots) -> None:
+        existing = self.v3_stored_roots_by_store.get(sid, ())
+        self.v3_stored_roots_by_store[sid] = _unique_graph_roots((*existing, *roots))
+
+    def _remove_v3_stored_roots_locked(self, sid: StoreId, roots) -> None:
+        removed = tuple(roots)
+        self.v3_stored_roots_by_store[sid] = tuple(
+            existing for existing in self.v3_stored_roots_by_store.get(sid, ())
+            if not any(existing.graph_equal(root) for root in removed)
+        )
 
     def _register_graph_structure_locked(
             self,
@@ -1145,3 +1201,17 @@ def _graph_structure_signature(
         tuple(node.definition for node in nodes),
         tuple(edge_key(edge) for edge in edges),
     )
+
+
+def _unique_graph_roots(cdefs) -> tuple[ConcreteDefinition, ...]:
+    """Deduplicate roots by complete graph identity, not structural equality."""
+
+    roots: list[ConcreteDefinition] = []
+    seen = set()
+    for cdef in cdefs:
+        key = identity_key(cdef)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(cdef)
+    return tuple(roots)

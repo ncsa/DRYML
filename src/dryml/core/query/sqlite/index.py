@@ -5,6 +5,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -30,6 +31,7 @@ from ..model import (
     OccurrenceTraversalSnapshot,
     OwnerProjection,
     QueryIndexBusy,
+    QueryIndexCorrupt,
     QueryIndexDirty,
     QueryIndexError,
     QueryIndexIncompatible,
@@ -39,9 +41,12 @@ from ..model import (
     ReconcileReport,
     ValidationIssue,
     ValidationReport,
+    V3ProjectionCoverage,
     CANONICAL_QUERY_SEMANTICS_VERSION,
 )
 from ..lowering import CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, PhysicalRelationPlan, QueryTerminal, ScanPolicy
+from ..identity import identity_key
+from ..relationships import iter_direct_relationships, relationship_closure
 from ..utils import cdef_equal, chunked, feature_token_equal, stable_hash_from_blob, stable_hash_to_blob
 from . import SQLiteQueryIndexConfig, require_sqlite
 from .connection import SQLiteConnectionManager
@@ -262,6 +267,8 @@ class SQLiteStoreQueryIndex:
                 self._validate_decodable_rows(con, issues)
                 self._validate_stored_roots(con, issues)
                 self._validate_store_roots(con, issues)
+                if not _v3_projection_is_complete(con):
+                    issues.append(ValidationIssue("error", "Query V3 projection coverage is incomplete."))
             counts = _row_counts(con)
         except Exception as exc:
             issues.append(ValidationIssue("error", "SQLite query index validation failed.", repr(exc)))
@@ -270,6 +277,47 @@ class SQLiteStoreQueryIndex:
             except Exception:
                 counts = _empty_row_counts()
         return ValidationReport("sqlite", self.source_key, not any(issue.severity == "error" for issue in issues), tuple(issues), row_counts=counts, diagnostics=diagnostics)
+
+    def v3_projection_coverage(self) -> V3ProjectionCoverage:
+        """Return V3 projection integrity without promoting it to authority.
+
+        A ready sidecar can prove that its own graph-exact rows have not been
+        omitted only through the derived row-set witnesses.  It cannot yet prove
+        complete V3 Store inventory coverage: aliases, metadata and the mutable
+        main reference require authority-cut evidence, and ``write_main_ref``
+        intentionally has no dirty token.  Indexed-only execution is therefore
+        explicitly unavailable.
+        """
+
+        status = self.status()
+        if status.state != "ready":
+            return V3ProjectionCoverage(
+                backend="sqlite", store_key=self.source_key,
+                generation=status.generation, projection_complete=False,
+                authority_complete=False, indexed_only=False,
+                reason="derived sidecar is not ready",
+            )
+        try:
+            con = self._connections.connection(readonly=True)
+            complete = _v3_projection_is_complete(con)
+            roots = con.execute(
+                "SELECT COUNT(DISTINCT root_graph_hash) FROM v3_identity_projection"
+            ).fetchone()[0]
+            identities = con.execute("SELECT COUNT(*) FROM v3_identity_projection").fetchone()[0]
+            relationships = con.execute("SELECT COUNT(*) FROM v3_relationship_projection").fetchone()[0]
+        except Exception:
+            complete = False
+            roots = identities = relationships = 0
+        return V3ProjectionCoverage(
+            backend="sqlite", store_key=self.source_key,
+            generation=status.generation, projection_complete=complete,
+            authority_complete=False, indexed_only=False,
+            source_roots=roots, identities=identities, relationships=relationships,
+            reason=(
+                "V3 authority coverage is unavailable; use Store authority fallback "
+                "or reject indexed-only execution"
+            ),
+        )
 
     @contextmanager
     def read_view(self, *, include_cached: bool = True):
@@ -767,11 +815,12 @@ class SQLiteStoreQueryIndex:
                 "Cannot register Store roots while a SQLite query-index rebuild is active."
             )
         dirty_markers = self._dirty_markers()
-        roots = tuple(dict.fromkeys(roots))
+        roots = _unique_graph_roots(roots)
         graph = as_query_index_graph(graph, roots if roots else graph.roots)
         graph_nodes = graph.nodes()
         node_hash_blobs = {node.definition: stable_hash_to_blob(node.stable_hash) for node in graph_nodes}
         encoded_edges = tuple(_EncodedEdge.from_edge(edge) for edge in graph.edges())
+        v3_identities, v3_relationships = _v3_projection_rows(roots)
         if not roots and not graph_nodes and not encoded_edges:
             return IndexWriteResult(generation=self.current_generation(), changed=False)
         existing_node_ids, missing_nodes = self._preflight_graph_nodes(
@@ -848,6 +897,32 @@ class SQLiteStoreQueryIndex:
                     counters.roots_added += 1
                     counters.changed = True
 
+            added_identities = []
+            added_relationships = []
+            for row in v3_identities:
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO v3_identity_projection "
+                    "(root_graph_hash, identity_kind, identity_digest) VALUES (?, ?, ?)",
+                    row,
+                )
+                counters.changed = counters.changed or bool(cur.rowcount)
+                if cur.rowcount:
+                    added_identities.append(row)
+            for row in v3_relationships:
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO v3_relationship_projection "
+                    "(root_graph_hash, owner_kind, owner_digest, relationship_kind, "
+                    "path_blob, target_kind, target_digest) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    row,
+                )
+                counters.changed = counters.changed or bool(cur.rowcount)
+                if cur.rowcount:
+                    added_relationships.append(row)
+            _update_v3_projection_coverage(
+                con, added_identities=added_identities,
+                added_relationships=added_relationships,
+            )
+
             if counters.changed:
                 generation = _bump_generation(con, next_generation)
             return IndexWriteResult(
@@ -921,20 +996,55 @@ class SQLiteStoreQueryIndex:
         )
 
     def remove_stored_roots(self, roots):
-        roots = tuple(dict.fromkeys(roots))
+        roots = _unique_graph_roots(roots)
         if not roots:
             return IndexWriteResult(generation=self.current_generation(), changed=False)
         def operation(con):
             self._ensure_schema_in_transaction(con)
             generation = _read_generation(con)
             removed = 0
+            projection_changed = False
+            removed_identities = []
+            removed_relationships = []
             for root in roots:
                 for did in _exact_ids_for_cdef(con, root):
                     cur = con.execute("DELETE FROM stored_roots WHERE def_id = ?", (did,))
                     removed += cur.rowcount
-            if removed:
+                root_hash = root.graph_hash()
+                removed_identities.extend(con.execute(
+                    "SELECT root_graph_hash, identity_kind, identity_digest "
+                    "FROM v3_identity_projection WHERE root_graph_hash = ?",
+                    (root_hash,),
+                ).fetchall())
+                removed_relationships.extend(con.execute(
+                    "SELECT root_graph_hash, owner_kind, owner_digest, relationship_kind, "
+                    "path_blob, target_kind, target_digest "
+                    "FROM v3_relationship_projection WHERE root_graph_hash = ?",
+                    (root_hash,),
+                ).fetchall())
+                cur = con.execute(
+                    "DELETE FROM v3_identity_projection WHERE root_graph_hash = ?",
+                    (root_hash,),
+                )
+                projection_removed = cur.rowcount
+                cur = con.execute(
+                    "DELETE FROM v3_relationship_projection WHERE root_graph_hash = ?",
+                    (root_hash,),
+                )
+                projection_removed += cur.rowcount
+                if projection_removed:
+                    projection_changed = True
+            if removed or projection_changed:
+                _update_v3_projection_coverage(
+                    con, removed_identities=removed_identities,
+                    removed_relationships=removed_relationships,
+                )
                 generation = _bump_generation(con, generation + 1)
-            return IndexWriteResult(generation=generation, changed=bool(removed), roots_removed=removed)
+            return IndexWriteResult(
+                generation=generation,
+                changed=bool(removed or projection_changed),
+                roots_removed=removed,
+            )
 
         return self._run_write_transaction(operation)
 
@@ -2810,6 +2920,121 @@ def _metadata_authority_rows(store, *, state_refs=None):
         store.read_metadata(target)
         record_id, blob = record_blob(envelope)
         yield ("current", record_id, "state", "state", target.digest(), 1, blob)
+
+
+def _unique_graph_roots(roots) -> tuple[ConcreteDefinition, ...]:
+    """Deduplicate root inputs by complete graph identity."""
+
+    unique: list[ConcreteDefinition] = []
+    seen = set()
+    for root in roots:
+        if not isinstance(root, ConcreteDefinition):
+            raise TypeError("Query-index roots must be ConcreteDefinition values.")
+        key = identity_key(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return tuple(unique)
+
+
+def _v3_projection_rows(roots):
+    """Build graph-exact typed candidate rows for newly registered roots.
+
+    The rows deliberately contain only derived identity hashes and typed direct
+    relationship facts.  They never serialize a new authoritative identity or
+    make a Store completeness claim.
+    """
+
+    identities = set()
+    relationships = set()
+    for root in roots:
+        root_hash = root.graph_hash()
+        for value in relationship_closure((root,)):
+            owner = identity_key(value)
+            identities.add((root_hash, owner.kind, owner.digest))
+            for edge in iter_direct_relationships(value):
+                target = identity_key(edge.target)
+                relationships.add((
+                    root_hash, owner.kind, owner.digest, edge.kind.value,
+                    _CODEC.encode_graph_path(edge.path), target.kind, target.digest,
+                ))
+    return tuple(sorted(identities)), tuple(sorted(relationships))
+
+
+def _v3_row_digest(row) -> bytes:
+    """Hash one unambiguous typed projection row for commutative coverage."""
+
+    digest = hashlib.sha256()
+    for value in row:
+        payload = value if isinstance(value, bytes) else str(value).encode("ascii")
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.digest()
+
+
+def _v3_projection_digest(con, table: str, columns: str) -> tuple[int, bytes]:
+    """Verify a row-set witness only on explicit integrity checks."""
+
+    digest = bytearray(32)
+    count = 0
+    for row in con.execute(f"SELECT {columns} FROM {table} ORDER BY {columns}"):
+        count += 1
+        for index, byte in enumerate(_v3_row_digest(row)):
+            digest[index] ^= byte
+    return count, bytes(digest)
+
+
+def _update_v3_projection_coverage(
+    con, *, added_identities=(), added_relationships=(),
+    removed_identities=(), removed_relationships=(),
+) -> None:
+    """Update row-set witnesses with only rows changed by this transaction."""
+
+    families = (
+        ("identity", added_identities, removed_identities),
+        ("relationship", added_relationships, removed_relationships),
+    )
+    for family, additions, removals in families:
+        if not additions and not removals:
+            continue
+        stored = con.execute(
+            "SELECT row_count, row_digest FROM v3_projection_coverage WHERE family = ?",
+            (family,),
+        ).fetchone()
+        if stored is None or len(stored[1]) != 32:
+            raise QueryIndexCorrupt("Query V3 derived coverage witness is unavailable.")
+        count = stored[0] + len(additions) - len(removals)
+        if count < 0:
+            raise QueryIndexCorrupt("Query V3 derived coverage count is inconsistent.")
+        digest = bytearray(stored[1])
+        for row in (*additions, *removals):
+            for index, byte in enumerate(_v3_row_digest(row)):
+                digest[index] ^= byte
+        con.execute(
+            "UPDATE v3_projection_coverage SET row_count = ?, row_digest = ? WHERE family = ?",
+            (count, bytes(digest), family),
+        )
+
+
+def _v3_projection_is_complete(con) -> bool:
+    """Validate derived row-set witnesses without consulting Store authority."""
+
+    families = (
+        ("identity", "v3_identity_projection", "root_graph_hash, identity_kind, identity_digest"),
+        (
+            "relationship", "v3_relationship_projection",
+            "root_graph_hash, owner_kind, owner_digest, relationship_kind, path_blob, target_kind, target_digest",
+        ),
+    )
+    for family, table, columns in families:
+        stored = con.execute(
+            "SELECT row_count, row_digest FROM v3_projection_coverage WHERE family = ?",
+            (family,),
+        ).fetchone()
+        if stored is None or stored != _v3_projection_digest(con, table, columns):
+            return False
+    return True
 
 
 def _row_counts(con) -> dict[str, int]:
