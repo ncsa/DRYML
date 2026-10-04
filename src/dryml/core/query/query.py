@@ -4088,6 +4088,38 @@ class IdentityQuery:
                 direct = capture.read_exact_stored_cdef(self.source, exact_cdefs[0])
                 if direct is not None:
                     return IdentitySet(((direct, self._source_evidence(self.source)),))._entries, capture, False
+        if isinstance(self.source, RepoSource) and not scopes and self.restrictions:
+            exact_cdefs = [
+                restriction.value for restriction in self.restrictions
+                if restriction.kind == "sel" and isinstance(restriction.value, ConcreteDefinition)
+            ]
+            same_stored_scope = any(
+                restriction.kind == "stored"
+                and isinstance(restriction.scope, RepoSource)
+                and restriction.scope.repo is self.source.repo
+                for restriction in self.restrictions
+            )
+            if (
+                exact_cdefs and same_stored_scope
+                and any(restriction.kind == "kind" and restriction.value == "cdef"
+                        for restriction in self.restrictions)
+                and all(restriction.kind in {"sel", "kind", "stored", "source"}
+                        for restriction in self.restrictions)
+            ):
+                repo = self.source.repo
+                with repo.retain_topology():
+                    stores = capture.repo_stores(repo)
+                    if stores and all(
+                        capture.read_exact_stored_cdef(store, exact_cdefs[0]) is not None
+                        for store in stores
+                    ):
+                        members = [
+                            (exact_cdefs[0], self._source_evidence(store))
+                            for store in stores
+                        ]
+                        if exact_cdefs[0] in capture.cache_knowledge(repo, weak=self.source.weak):
+                            members.append((exact_cdefs[0], self._source_evidence(repo)))
+                        return IdentitySet(members)._entries, capture, False
         if (
             self.scan_policy_mode == "forbid"
             and not fixed_source
@@ -4233,12 +4265,18 @@ class IdentityQuery:
         if restriction.kind == "state_hash":
             return isinstance(value, StateRef) and restriction.value in value.states.values()
         if restriction.kind == "stored":
-            from .source import StoreSource
+            from .source import RepoSource, StoreSource
 
             if (
                 isinstance(value, ConcreteDefinition)
                 and isinstance(restriction.scope, StoreSource)
                 and capture.has_exact_stored_cdef(restriction.scope, value)
+            ):
+                return True
+            if (
+                isinstance(value, ConcreteDefinition)
+                and isinstance(restriction.scope, RepoSource)
+                and capture.has_exact_stored_cdef_for_repo(restriction.scope.repo, value)
             ):
                 return True
             return any(fact.is_stored(value) for fact in self._scope_facts(restriction.scope, capture))

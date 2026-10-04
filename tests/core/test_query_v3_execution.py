@@ -399,6 +399,26 @@ def test_v3_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_path):
     assert IdentityQuery.from_store(store).sel(saved.definition).cdefs().stored().scan_policy("forbid").one() == saved.definition
 
 
+def test_v3_repo_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_path):
+    original = DirStore(tmp_path / "store")
+    writer = Repo(original)
+    saved = writer.save_object(ExecutionLeaf("target", repo=writer))
+
+    class CountingStore(DirStore):
+        def iter_definition_records(self):
+            pytest.fail("Repo exact stored CDef lookup enumerated definition records")
+
+    store = CountingStore(original.base_dir)
+    reader = Repo(store)
+    query = IdentityQuery.from_repo(reader).sel(saved.definition).cdefs().stored()
+
+    assert query.one() == saved.definition
+    assert query.scan_policy("forbid").one() == saved.definition
+    explanation = query.explain(analyze=True)
+    assert explanation.source_cuts == 1
+    assert explanation.capture_rounds == 1
+
+
 def test_v3_alias_only_stored_cdef_falls_back_to_complete_authority(tmp_path):
     from dryml.core import ObjectId, ObjectRef
     from dryml.core.query.model import QueryWouldScanError
@@ -414,3 +434,20 @@ def test_v3_alias_only_stored_cdef_falls_back_to_complete_authority(tmp_path):
     assert query.one() == cdef
     with pytest.raises(QueryWouldScanError, match="inventory scan"):
         query.scan_policy("forbid").count()
+
+
+def test_v3_repo_exact_mixed_root_authority_retains_both_sources(tmp_path):
+    from dryml.core import ObjectId, ObjectRef
+    from dryml.core.store.records import DefinitionRecord, ObjectAliasRecord
+    from dryml.core.utils.graph.path import GraphPath
+
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    cdef = Definition(ExecutionStatefulLeaf, "shared").concretize()
+    first.write_definition_record(DefinitionRecord(cdef))
+    second.write_definition_record(DefinitionRecord(cdef), stored_root=False)
+    second.write_object_alias(ObjectAliasRecord("selected", ObjectRef(cdef, {GraphPath(): ObjectId()})))
+
+    result = IdentityQuery.from_repo(Repo((first, second))).sel(cdef).cdefs().stored().collect()
+    assert result.one() == cdef
+    assert len(result.sources(cdef)) == 2
