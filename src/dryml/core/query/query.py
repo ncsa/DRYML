@@ -4317,7 +4317,7 @@ class _RelationshipProjection:
             SourceCapture() if capture is None else capture
         )
         members = []
-        for value, sources in self.occurrence_query._project(self.projection, roots):
+        for value, sources in self.occurrence_query._project(self.projection, roots, capture):
             members.extend((value, source) for source in sources)
             if not sources:
                 members.append(value)
@@ -4345,6 +4345,8 @@ class OccurrenceQuery:
     max_depth_limit: int | None = None
     target_kind_filter: frozenset[str] = frozenset()
     fixed: Any | None = None
+    metadata_restrictions: tuple[tuple[Any, Any], ...] = ()
+    additional_selectors: tuple[Any, ...] = ()
 
     @classmethod
     def from_set(cls, occurrences) -> "OccurrenceQuery":
@@ -4389,15 +4391,44 @@ class OccurrenceQuery:
         if self.selector is not None:
             # Reuse the U3 selector validator without evaluating any source.
             IdentityQuery.from_set(IdentitySet()).sel(self.selector)
+        for selector in self.additional_selectors:
+            IdentityQuery.from_set(IdentitySet()).sel(selector)
 
     def sel(self, value=None) -> "OccurrenceQuery":
-        """Restrict occurrence targets by one U3-compatible selector."""
+        """Conjoin a U3-compatible target selector without changing roots."""
 
         if value is None:
             return self
         if self.selector is not None:
-            raise QueryDomainError("OccurrenceQuery supports one target selector before U5 composition.")
+            return replace(self, additional_selectors=(*self.additional_selectors, value))
         return replace(self, selector=value)
+
+    def where(self, predicate, *, scope=None) -> "OccurrenceQuery":
+        """Restrict eligible occurrence targets using one captured authority scope.
+
+        Args:
+            predicate: Valid object, state, lineage, or snapshot predicate.
+            scope: Store or Repo authority; defaults only for a live producer.
+
+        Returns:
+            An immutable target-restricted occurrence query.
+
+        Raises:
+            QueryDomainError: If a fixed source has no explicit authority scope.
+            TypeError: If the predicate or source is unsupported.
+
+        Side Effects:
+            None until a terminal captures target metadata under source fences.
+        """
+
+        from .metadata import _require_predicate
+
+        selected = self.roots.default_scope if scope is None else IdentityQuery._normalize_scope(scope)
+        if selected is None:
+            raise QueryDomainError("Fixed occurrences require an explicit scope for metadata.")
+        return replace(
+            self, metadata_restrictions=(*self.metadata_restrictions, (_require_predicate(predicate), selected)),
+        )
 
     def cdefs(self) -> "OccurrenceQuery":
         """Restrict occurrence targets to CDefs without changing paths."""
@@ -4457,12 +4488,19 @@ class OccurrenceQuery:
     def collect(self):
         """Evaluate typed raw occurrences into a bounded or complete OccurrenceSet."""
 
+        return self.roots._run_terminal(self._collect_with_capture)
+
+    def _collect_with_capture(self, capture):
+        """Capture roots and target metadata in the same retryable terminal."""
+
         from .identity import OccurrenceSet
         from .relationships import iter_relationship_occurrences
 
+        roots = self.roots._collect_with_capture(capture)
+        matches = self._target_matcher(roots, capture)
         if self.fixed is not None:
             members = []
-            for occurrence in self._iter_occurrences():
+            for occurrence in self._iter_fixed_occurrences(matches=matches):
                 sources = self.fixed.evidence_for(occurrence).sources
                 members.extend((occurrence, source) for source in sources)
                 if not sources:
@@ -4472,10 +4510,9 @@ class OccurrenceQuery:
                 bounded=self.fixed.bounded or self.occurrence_limit is not None,
                 requested_limit=self.fixed.requested_limit if self.occurrence_limit is None else self.occurrence_limit,
             )
-        roots = self.roots.collect()
         occurrences = iter_relationship_occurrences(
             roots,
-            self._matches_target,
+            matches,
             edges=self.edges,
             through=self.through_kinds,
             path=self.path_filter,
@@ -4495,17 +4532,17 @@ class OccurrenceQuery:
     def count(self) -> int:
         """Stream the distinct raw typed-occurrence count without a fixed set."""
 
-        return sum(1 for _ in self._iter_occurrences())
+        return self.roots._run_terminal(lambda cut: sum(1 for _ in self._iter_occurrences(cut)))
 
     def exists(self) -> bool:
         """Return whether one qualified occurrence exists without collection."""
 
-        return next(self._iter_occurrences(), None) is not None
+        return self.roots._run_terminal(lambda cut: next(self._iter_occurrences(cut), None) is not None)
 
     def one(self):
         """Return one streamed occurrence or raise the standard cardinality error."""
 
-        occurrences = self._up_to_two_occurrences()
+        occurrences = self.roots._run_terminal(self._up_to_two_occurrences)
         if len(occurrences) != 1:
             raise QueryCardinalityError(
                 f"Expected exactly one occurrence, found {len(occurrences)}."
@@ -4515,7 +4552,7 @@ class OccurrenceQuery:
     def one_or_none(self):
         """Return one streamed occurrence, ``None``, or raise on ambiguity."""
 
-        occurrences = self._up_to_two_occurrences()
+        occurrences = self.roots._run_terminal(self._up_to_two_occurrences)
         if len(occurrences) > 1:
             raise QueryCardinalityError(
                 f"Expected zero or one occurrence, found {len(occurrences)}."
@@ -4536,11 +4573,12 @@ class OccurrenceQuery:
             _RelationshipProjection(self, "targets"), default_scope=self.roots.default_scope,
         )
 
-    def _project(self, projection: str, roots):
+    def _project(self, projection: str, roots, capture):
         from .relationships import iter_relationship_owners, iter_relationship_targets
 
+        matches = self._target_matcher(roots, capture)
         if self.fixed is not None:
-            for occurrence in self._iter_fixed_occurrences(ignore_limit=True):
+            for occurrence in self._iter_fixed_occurrences(ignore_limit=True, matches=matches):
                 yield (
                     occurrence.owner if projection == "owners" else occurrence.target,
                     self.fixed.evidence_for(occurrence).sources,
@@ -4551,24 +4589,25 @@ class OccurrenceQuery:
         )
         for root in roots:
             for value in walker(
-                (root,), self._matches_target, edges=self.edges,
+                (root,), matches, edges=self.edges,
                 through=self.through_kinds, path=self.path_filter,
                 max_depth=self.max_depth_limit,
             ):
                 yield value, roots.evidence_for(root).sources
 
-    def _iter_occurrences(self):
+    def _iter_occurrences(self, capture):
         """Stream raw occurrences while retaining source evaluation once per terminal."""
 
         from .relationships import iter_relationship_occurrences
 
+        roots = self.roots._collect_with_capture(capture)
+        matches = self._target_matcher(roots, capture)
         if self.fixed is not None:
-            yield from self._iter_fixed_occurrences()
+            yield from self._iter_fixed_occurrences(matches=matches)
             return
-        roots = self.roots.collect()
         yield from iter_relationship_occurrences(
             roots,
-            self._matches_target,
+            matches,
             edges=self.edges,
             through=self.through_kinds,
             path=self.path_filter,
@@ -4576,7 +4615,7 @@ class OccurrenceQuery:
             max_depth=self.max_depth_limit,
         )
 
-    def _iter_fixed_occurrences(self, *, ignore_limit=False):
+    def _iter_fixed_occurrences(self, *, ignore_limit=False, matches=None):
         """Restrict captured paths without expanding them or reading a source."""
 
         from .relationships import RelationshipPath, _path_matches, _through_matches
@@ -4584,8 +4623,10 @@ class OccurrenceQuery:
         emitted = 0
         if self.occurrence_limit == 0 and not ignore_limit:
             return
+        if matches is None:
+            matches = self._matches_target
         for occurrence in self.fixed:
-            if not self._matches_target(occurrence.target):
+            if not matches(occurrence.target):
                 continue
             path = occurrence.path
             if self.path_filter is not None:
@@ -4604,15 +4645,41 @@ class OccurrenceQuery:
             if not ignore_limit and self.occurrence_limit is not None and emitted >= self.occurrence_limit:
                 return
 
-    def _up_to_two_occurrences(self):
+    def _up_to_two_occurrences(self, capture):
         """Retain only the cardinality evidence needed by singleton terminals."""
 
         occurrences = []
-        for occurrence in self._iter_occurrences():
+        for occurrence in self._iter_occurrences(capture):
             occurrences.append(occurrence)
             if len(occurrences) == 2:
                 break
         return occurrences
+
+    def _target_matcher(self, roots, capture):
+        """Validate eligible target metadata before any scalar can stop early."""
+
+        if not self.metadata_restrictions:
+            return self._matches_target
+        from .identity import IdentitySet, identity_key
+        from .relationships import iter_relationship_targets
+
+        if self.fixed is not None:
+            candidates = (
+                occ.target for occ in self._iter_fixed_occurrences(
+                    ignore_limit=True, matches=lambda value: True,
+                )
+            )
+        else:
+            candidates = iter_relationship_targets(
+                roots, lambda value: True, edges=self.edges,
+                through=self.through_kinds, path=self.path_filter,
+                max_depth=self.max_depth_limit,
+            )
+        query = IdentityQuery.from_set(IdentitySet(candidates))
+        for predicate, scope in self.metadata_restrictions:
+            query = query.where(predicate, scope=scope)
+        qualified = {identity_key(value) for value in query._collect_with_capture(capture)}
+        return lambda value: self._matches_target(value) and identity_key(value) in qualified
 
     def _matches_target(self, value) -> bool:
         from .identity import IdentitySet
@@ -4627,9 +4694,12 @@ class OccurrenceQuery:
         )
         if kind is None or (self.target_kind_filter and kind not in self.target_kind_filter):
             return False
-        if self.selector is None:
+        if self.selector is None and not self.additional_selectors:
             return True
-        return IdentityQuery.from_set(IdentitySet((value,))).sel(self.selector).exists()
+        query = IdentityQuery.from_set(IdentitySet((value,)))
+        for selector in ((self.selector,) if self.selector is not None else ()) + self.additional_selectors:
+            query = query.sel(selector)
+        return query.exists()
 
     def __bool__(self) -> bool:
         raise TypeError("OccurrenceQuery requires an explicit terminal.")

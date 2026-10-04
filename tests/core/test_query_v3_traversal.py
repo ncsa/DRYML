@@ -8,6 +8,8 @@ from dryml.core import Definition, Object, ObjectId, ObjectRef, Serializable, St
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
 from dryml.core.query.identity import IdentitySet
+from dryml.core.query import field
+from dryml.core.query.identity import Occurrence, OccurrenceSet
 from dryml.core.query.query import IdentityQuery
 from dryml.core.query.relationships import (
     EdgePolicy,
@@ -124,3 +126,99 @@ def test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships():
     assert roots.nested(child).collect().bounded
     assert roots.nested(child).owners().collect().bounded
     assert roots.nested(child).targets().collect().bounded
+
+
+def test_v3_occurrence_metadata_filters_targets_with_shared_authority(tmp_path):
+    from dryml.core import Repo, SaveAnnotations
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    child = V3TraversalLeaf("child", repo=repo)
+    state = repo.save_object(
+        child, annotations=SaveAnnotations(object={"team": "selected"}),
+    )
+    roots = IdentityQuery.from_set(IdentitySet((state,)))
+    nested = roots.nested().where(field("object", "team").eq("selected"), scope=store)
+
+    assert nested.targets().one() == state.object
+    assert nested.one().target == state.object
+    assert roots.nested().where(field("object", "team").eq("missing"), scope=store).count() == 0
+
+
+def test_v3_fixed_occurrence_metadata_requires_explicit_scope(tmp_path):
+    from dryml.core import Repo, SaveAnnotations
+    from dryml.core.query.model import QueryDomainError
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    state = repo.save_object(
+        V3TraversalLeaf("child", repo=repo),
+        annotations=SaveAnnotations(object={"team": "selected"}),
+    )
+    result = OccurrenceSet((Occurrence(state, GraphPath((Parameter("edge"),)), state.object),))
+
+    with pytest.raises(QueryDomainError, match="explicit scope"):
+        result.query().where(field("object", "team").eq("selected"))
+    assert result.query().where(field("object", "team").eq("selected"), scope=store).one().target == state.object
+
+
+def test_v3_occurrence_selector_cannot_hide_invalid_later_metadata(tmp_path):
+    from dryml.core import Repo, SaveAnnotations
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    invalid = repo.save_object(
+        V3TraversalLeaf("invalid", repo=repo),
+        annotations=SaveAnnotations(object={"score": "wrong-type"}),
+    )
+    selected = repo.save_object(
+        V3TraversalLeaf("selected", repo=repo),
+        annotations=SaveAnnotations(object={"score": 1}),
+    )
+    owner = Definition(V3TraversalParent, None).concretize()
+    fixed = OccurrenceSet((
+        Occurrence(owner, GraphPath((Parameter("first"),)), invalid.object),
+        Occurrence(owner, GraphPath((Parameter("second"),)), selected.object),
+    ))
+
+    with pytest.raises(Exception, match="numeric field"):
+        fixed.query().sel(selected.object).where(field("object", "score").lt(3), scope=store).exists()
+
+    assert fixed.query().sel(selected.object).sel(invalid.object).count() == 0
+
+
+def test_v3_occurrence_late_metadata_demand_restarts_root_evidence(tmp_path, monkeypatch):
+    from dryml.core import Repo, SaveAnnotations
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    state = repo.save_object(
+        V3TraversalLeaf("candidate", repo=repo),
+        annotations=SaveAnnotations(object={"team": "old"}),
+    )
+    lineage = repo.get_lineage_metadata(state.object)
+    roots = IdentityQuery.from_store(store).state_refs().where(
+        field("object", "team").eq("old")
+    )
+    original = IdentityQuery._collect_with_capture
+    mutated = False
+
+    def move_after_root(self, capture):
+        nonlocal mutated
+        result = original(self, capture)
+        if self is roots and not mutated:
+            mutated = True
+            repo.set_metadata(state.object, {"team": "new"}, store=store)
+        return result
+
+    monkeypatch.setattr(IdentityQuery, "_collect_with_capture", move_after_root)
+    nested = roots.nested().where(field("object", "team").eq("new")).where(
+        field("lineage", "creation_status").eq(lineage.creation_status)
+    )
+
+    assert nested.count() == 0
+    assert mutated
