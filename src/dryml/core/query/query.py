@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import cmp_to_key
-from heapq import heappop, heappush
 from typing import Any
-import warnings
 
 from ..canonical import matching_container_family
-from ..cdef_identity import cdef_node_key
 from ..definition import ConcreteDefinition, Definition, selector_match
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..links import DefLink
@@ -19,68 +15,28 @@ from ..selector import Selector
 from ..symbol import maybe_symbol_ref, resolve_symbol
 from ..errors import ParameterizationLimitError
 from ..utils.types import is_nonclass_callable
-from .graph_plan import graph_candidate_ids
-from .lowering import ScanPolicy
-from .domain import CachedDomain, KnownDomain, NestedDomain, StoredDomain
 from .model import (
     ClassMatchPolicy,
-    ContainmentContext,
-    ContainmentEdgePolicy,
-    DefinitionId,
-    QueryDomain,
     QueryDomainError,
     QueryExplanation,
     QueryCardinalityError,
-    QueryIndexError,
     QueryIndexUnavailable,
     QueryVerifyBudgetExceeded,
-    QueryProjection,
-    SourceQueryPlan,
     QueryStats,
     QueryWouldScanError,
     RefreshPolicy,
-    ResultUniverse,
-    containment_witness_key,
-    is_exact_reference_target,
-    validate_containment_policy,
-    validate_containment_target,
-)
-from .containment import (
-    iter_containment_occurrences_matching,
-    iter_containment_owners_matching,
-    iter_containment_projection_occurrences_matching,
-    iter_containment_targets_matching,
 )
 from .path import (
     DefinitionPath,
-    DefinitionPathLike,
     Kwarg,
     Parameter,
     QueryPathError,
-    get_subtree,
     iter_value_edges,
-    normalize_path,
-    replace_subtree,
 )
-from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet
-from .selector_graph import compile_selector_graph
 from .utils import cdef_equal
 
 
-@dataclass(frozen=True, slots=True)
-class CapturedNestedCandidates:
-    generation: int
-    cdefs_by_id: dict[DefinitionId, ConcreteDefinition]
-    stats: QueryStats
-
-
-class _QueryGenerationChanged(Exception):
-    pass
-
-
-_MAX_NESTED_QUERY_RETRIES = 3
 _DEFAULT_GENERATOR_WITNESS_LIMIT = 65_536
-_DEFAULT_MAX_WITNESSES = object()
 
 
 @dataclass(slots=True)
@@ -92,2706 +48,6 @@ class _GeneratorWitnessBudget:
         self.visited += 1
         if self.limit is not None and self.visited > self.limit:
             raise ParameterizationLimitError("generator query witness limit exceeded")
-
-
-@dataclass(frozen=True, slots=True)
-class DefinitionQuery:
-    """Immutable structural query builder with exact-reference preservation.
-
-    A query snapshots and resolves soft ``StateSelectorRef`` leaves before it is
-    finalized, then executes against the selected structural domain. Reference
-    leaves remain complete ``ObjectRef`` or ``StateRef`` values; callers use
-    :meth:`references` for authority-verified reference projections.
-
-    Attributes:
-        repo: Managing Repo used for selector resolution and domain access.
-        original: Resolved source retained for restore operations.
-        selector: Current resolved structural selector.
-        max_witness_limit: Exact-template authoritative-visit cap. The internal
-            default is 65,536; visits consume it before safe prefilter rejection
-            or duplicate suppression, and ``None`` permits an unbounded scan.
-        generator_selector: Optional exact GeneratorSelector residual applied
-            after structural prefiltering. Residual queries reject rewrites
-            that cannot preserve exact support semantics.
-    """
-
-    repo: Any
-    original: Definition | ConcreteDefinition | None
-    selector: Definition | ConcreteDefinition | None
-    domain: QueryDomain | None = None
-    projection: QueryProjection | None = None
-    class_match_policy: ClassMatchPolicy = "selector"
-    strict_policy: bool = False
-    refresh_policy: RefreshPolicy = "auto"
-    reuse_weak_policy: bool = True
-    universe: ResultUniverse | None = None
-    occurrence_limit: int | None = None
-    scan_policy_mode: str = "allow"
-    max_verify_limit: int | None = None
-    max_witness_limit: int | None | object = _DEFAULT_MAX_WITNESSES
-    generator_selector: Any | None = None
-    containment_target: Any | None = None
-    containment_edges: ContainmentEdgePolicy = "materialize"
-    contains_ref: bool = False
-    source_store: Any | None = None
-    _original_values: tuple[tuple[DefinitionPath, Any], ...] = ()
-
-    @classmethod
-    def from_source(
-            cls,
-            repo,
-            source=None,
-            *,
-            domain: QueryDomain | None = None,
-        universe: ResultUniverse | None = None,
-    ) -> "DefinitionQuery":
-        """Create a finalized query from a soft structural source.
-
-        Args:
-            repo: Managing Repo required to resolve StateSelectorRef leaves.
-            source: Optional Definition, CDef, ObjectRef, StateRef, Selector,
-                GeneratorSelector, or Object source. Exact references are lazy
-                containment targets and cannot select ordinary authority domains.
-                GeneratorSelector support retains an exact residual beside its
-                ordinary structural prefilter.
-            domain: Optional initial query domain.
-            universe: Optional fixed result universe for refinement.
-
-        Returns:
-            A query whose selector contains no soft StateSelectorRef.
-
-        Raises:
-            TypeError: If ``source`` has an unsupported type or no selector
-                resolver is available.
-            KeyError: If a selected state alias is missing.
-            ValueError: If a selector resolves outside its ObjectRef scope.
-            RepoLoadError: If connected Stores provide conflicting alias authority.
-        """
-        from ..reference_values import ObjectRef, StateRef
-        from ..generator import GeneratorSelector
-
-        if isinstance(source, (ObjectRef, StateRef)):
-            return cls(
-                repo=repo,
-                original=None,
-                selector=None,
-                domain=domain,
-                universe=universe,
-                containment_target=validate_containment_target(source),
-            )
-
-        if isinstance(source, GeneratorSelector):
-            prefilter = _resolve_query_state_selectors(source.prefilter.root, repo)
-            return cls(
-                repo=repo,
-                original=prefilter,
-                selector=prefilter,
-                domain=domain,
-                universe=universe,
-                class_match_policy="exact",
-                generator_selector=source,
-            )
-        if isinstance(source, Selector):
-            root = _resolve_query_state_selectors(source.root, repo)
-            return cls(
-                repo=repo,
-                original=root,
-                selector=root,
-                domain=domain,
-                universe=universe,
-                strict_policy=source.strict,
-                class_match_policy=source.cls_policy,
-            )
-        original = _resolve_query_state_selectors(_snapshot_source(source), repo)
-        target = original if isinstance(original, ConcreteDefinition) else None
-        return cls(
-            repo=repo,
-            original=original,
-            selector=original,
-            domain=domain,
-            universe=universe,
-            containment_target=target,
-        )
-
-    def references(self):
-        """Start an authority-verified lightweight reference query.
-
-        Returns:
-            A ReferenceQuery whose optional structural source filters referenced
-            CDefs without materializing Objects or loading state payloads.
-
-        Raises:
-            QueryDomainError: If an exact GeneratorSelector residual is attached;
-                ReferenceQuery cannot retain topology witness semantics, if this
-                query has an exact reference containment target, or if nested
-                containment has already been selected.
-
-        Side Effects:
-            None. This conversion does not query Store authority.
-        """
-
-        if self.generator_selector is not None:
-            raise QueryDomainError(
-                "GeneratorSelector queries cannot be converted to ReferenceQuery."
-            )
-        if is_exact_reference_target(self.containment_target):
-            raise QueryDomainError(
-                "Exact-reference containment queries cannot be converted to reference authority."
-            )
-        if self.domain == "nested":
-            raise QueryDomainError(
-                "Nested containment queries cannot be converted to reference authority."
-            )
-        from .reference import ReferenceQuery
-
-        return ReferenceQuery(self.repo, definition=self.selector)
-
-    def where(self, predicate):
-        """Conjoin a typed metadata predicate with this query's references.
-
-        Args:
-            predicate: A :class:`MetadataPredicate` constructed with
-                :func:`dryml.core.query.field`.
-
-        Returns:
-            An immutable ReferenceQuery with this query's structural selector and
-            the supplied metadata constraint.
-
-        Raises:
-            TypeError: If ``predicate`` is not a MetadataPredicate.
-            ValueError: If predicate construction bounds are invalid.
-
-        Side Effects:
-            None until a ReferenceQuery terminal runs; that terminal never
-            materializes Objects or opens state payloads.
-        """
-
-        return self.references().where(predicate)
-
-    def categorical(
-            self,
-            *,
-            path: DefinitionPathLike = "$",
-            recursive: bool = False,
-            drop=(),
-            drop_args: bool = False,
-        drop_class: bool = False,
-    ) -> "DefinitionQuery":
-        """Project one query occurrence onto named categorical constraints.
-
-        Args:
-            path: Root-relative occurrence to project.
-            recursive: Whether to project nested definitions.
-            drop: Constructor parameter names to omit from the selected traversal.
-            drop_args: Whether to omit every argument constraint.
-            drop_class: Whether to omit class constraints.
-
-        Returns:
-            An immutable query retaining original authority for :meth:`exact` and
-            :meth:`restore`. The resulting selector is a selection expression,
-            not a construction request.
-
-        Raises:
-            QueryPathError: If the query or selected occurrence is unconstrained.
-            TypeError: If projection controls or selected values are invalid.
-            ValueError: If requested names are absent, a cycle is encountered, or
-                projection collapses a set.
-
-        Side Effects:
-            Does not materialize Objects or alter source definitions, Store
-            records, or references. It may resolve an authored class only when
-            required to name supplied call constraints; CDef parameter projection
-            reads stored names without resolving its class.
-        """
-
-        self._reject_exact_reference_rewrite("categorical")
-        self._reject_residual_rewrite("categorical")
-        if self.selector is None:
-            raise QueryPathError(
-                "Cannot apply semantic categorical projection to an unconstrained query."
-            )
-        from ..categorical import _project_categorical_definition_with_origins
-
-        norm = normalize_path(path)
-        subtree = get_subtree(self.selector, norm)
-        projected, origins = _project_categorical_definition_with_origins(
-            subtree,
-            recursive=recursive,
-            drop=drop,
-            drop_args=drop_args,
-            drop_class=drop_class,
-        )
-        selector = replace_subtree(
-            self.selector,
-            norm,
-            projected,
-            _origins=origins,
-        )
-        previous_values = dict(self._original_values)
-        original_values = {}
-        for selector_path, (source_path, source_value) in _projection_origin_paths(
-            selector, self.selector, origins
-        ).items():
-            original_values[selector_path] = (
-                previous_values[source_path]
-                if source_path is not None and source_path in previous_values
-                else source_value
-            )
-        return replace(
-            self,
-            selector=selector,
-            _original_values=tuple(original_values.items()),
-        )
-
-    def restore(self, *, path: DefinitionPathLike = "$") -> "DefinitionQuery":
-        self._reject_exact_reference_rewrite("restore")
-        self._reject_residual_rewrite("restore")
-        if self.original is None or self.selector is None:
-            raise QueryPathError("Cannot restore() on an unconstrained query.")
-        norm = normalize_path(path)
-        subtree = self._original_value(norm)
-        replacement = deepcopy(subtree) if isinstance(subtree, Definition) else subtree
-        return replace(self, selector=replace_subtree(self.selector, norm, replacement))
-
-    def exact(
-            self,
-            definition: ConcreteDefinition | Object | None = None,
-            *,
-        path: DefinitionPathLike = "$",
-    ) -> "DefinitionQuery":
-        self._reject_exact_reference_rewrite("exact")
-        self._reject_residual_rewrite("exact")
-        if self.selector is None:
-            raise QueryPathError("Cannot apply exact() to an unconstrained query.")
-        norm = normalize_path(path)
-        if definition is None:
-            if self.original is None:
-                raise QueryPathError(
-                    f"Cannot infer exact subtree at {norm!s}; query has no original source."
-                )
-            definition = self._original_value(norm)
-        if isinstance(definition, Object):
-            definition = definition.definition
-        if not isinstance(definition, ConcreteDefinition):
-            raise TypeError(
-                f"Exact constraint at {norm!s} requires a ConcreteDefinition, got {type(definition).__name__}."
-            )
-        return replace(self, selector=replace_subtree(self.selector, norm, definition))
-
-    def _original_value(self, path: DefinitionPath) -> Any:
-        """Return the original authority retained for one selector occurrence."""
-
-        original_values = dict(self._original_values)
-        if path in original_values:
-            return original_values[path]
-        if self.original is None:
-            raise QueryPathError(
-                "Cannot resolve an original value without a source query."
-            )
-        return get_subtree(self.original, self._original_path(path))
-
-    def _original_path(self, path: DefinitionPath) -> DefinitionPath:
-        """Translate selector path segments to the original's V2 boundaries.
-
-        Categorical projections retain legacy call spelling, while each V2 CDef
-        in the original is addressed by semantic ``Parameter`` segments.
-
-        Args:
-            path: Path expressed against the current selector.
-
-        Returns:
-            The equivalent path through the original source.
-
-        Raises:
-            QueryPathError: If the path cannot be resolved through either tree.
-        """
-
-        from .selector_graph import _semantic_selector_path
-
-        original = self.original
-        selector = self.selector
-        translated = []
-        for segment in path:
-            original_path = DefinitionPath((segment,))
-            if isinstance(original, ConcreteDefinition):
-                semantic = _semantic_selector_path(selector, DefinitionPath((segment,)))
-                if semantic is not None:
-                    original_path = semantic
-            translated.extend(original_path.segments)
-            original = get_subtree(original, original_path)
-            selector = get_subtree(selector, DefinitionPath((segment,)))
-        return DefinitionPath(tuple(translated))
-
-    def class_match(self, policy: ClassMatchPolicy) -> "DefinitionQuery":
-        self._reject_exact_reference_rewrite("class_match")
-        if policy not in {"selector", "exact"}:
-            raise ValueError("class_match policy must be 'selector' or 'exact'.")
-        # Exact support comparisons intentionally do not resolve inheritance.
-        return replace(
-            self,
-            class_match_policy=(
-                "exact" if self.generator_selector is not None else policy
-            ),
-        )
-
-    def strict(self, enabled: bool = True) -> "DefinitionQuery":
-        self._reject_exact_reference_rewrite("strict")
-        return replace(self, strict_policy=bool(enabled))
-
-    def refresh(self, policy: RefreshPolicy = "auto") -> "DefinitionQuery":
-        if policy not in {False, "auto", True}:
-            raise ValueError("refresh policy must be False, 'auto', or True.")
-        return replace(self, refresh_policy=policy)
-
-    def reuse_weak(self, enabled: bool = True) -> "DefinitionQuery":
-        return replace(self, reuse_weak_policy=bool(enabled))
-
-    def stored(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
-        self._reject_exact_reference_domain("stored")
-        self._check_universe_domain_switch("stored")
-        q = replace(self, domain="stored", projection=None)
-        return q if refresh is None else q.refresh(refresh)
-
-    def cached(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
-        self._reject_exact_reference_domain("cached")
-        self._check_universe_domain_switch("cached")
-        q = replace(self, domain="cached", projection=None)
-        return q if refresh is None else q.refresh(refresh)
-
-    def known(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
-        self._reject_exact_reference_domain("known")
-        self._check_universe_domain_switch("known")
-        q = replace(self, domain="known", projection=None)
-        return q if refresh is None else q.refresh(refresh)
-
-    def nested(
-            self,
-            *,
-            edges: ContainmentEdgePolicy = "materialize",
-            contains_ref: bool = False,
-        refresh: RefreshPolicy | None = None,
-    ) -> "DefinitionQuery":
-        """Select immutable stored-root containment with literal edge controls.
-
-        Concrete CDef targets match structurally; exact ObjectRef and StateRef
-        targets retain complete typed identity as terminal graph values. Selecting
-        containment neither resolves nor loads a reference target.
-
-        Args:
-            edges: ``"materialize"`` (the compatibility default), ``"ref"``,
-                or ``"all"``. The selected edge kind applies at every hop.
-            contains_ref: Exact boolean retaining only qualifying paths that
-                include at least one retained reference edge.
-            refresh: Optional existing derived-index refresh policy.
-
-        Returns:
-            An immutable nested query preserving its target, policy, and later
-            authoritative source scope.
-
-        Raises:
-            ValueError: If ``edges`` or ``refresh`` is unsupported.
-            TypeError: If ``contains_ref`` is not an exact bool.
-
-        Side Effects:
-            None. This records containment intent without scanning Stores,
-            resolving references, or materializing Objects.
-        """
-
-        edges, contains_ref = validate_containment_policy(edges, contains_ref)
-        self._check_universe_domain_switch("nested")
-        if self.universe is not None and self.universe.containment is not None:
-            context = self.universe.containment
-            if context.edges != edges or context.contains_ref != contains_ref:
-                raise QueryDomainError(
-                    "Cannot change traversal policy for a fixed containment result universe."
-                )
-            if (
-                context.target_kind != "definition"
-                and self.generator_selector is not None
-            ):
-                raise QueryDomainError(
-                    "Exact selector refinement is unavailable for fixed reference containment results."
-                )
-            if (
-                    context.target_kind != "definition"
-                    and self.universe.containment_carrier != "owner"
-                    and not (
-                    self.containment_target is None
-                    or is_exact_reference_target(self.containment_target)
-                )
-            ):
-                raise QueryDomainError(
-                    "Exact-reference containment results require exact reference refinement."
-                )
-        q = replace(
-            self,
-            domain="nested",
-            projection=None,
-            containment_edges=edges,
-            contains_ref=contains_ref,
-        )
-        return q if refresh is None else q.refresh(refresh)
-
-    def in_store(self, store) -> "DefinitionQuery":
-        """Restrict a nested containment query to one connected Store handle.
-
-        Args:
-            store: Exact Store instance already connected to this query's Repo.
-
-        Returns:
-            An immutable containment query scoped to ``store``.
-
-        Raises:
-            QueryDomainError: If this is not a nested query.
-            ValueError: If ``store`` is not currently connected to the Repo.
-
-        Side Effects:
-            None. Store authority is not captured until supported containment
-            execution is selected.
-        """
-
-        if self.domain != "nested":
-            raise QueryDomainError(
-                "in_store() is only valid for nested containment queries."
-            )
-        if self.universe is not None and self.universe.containment is not None:
-            raise QueryDomainError(
-                "Cannot change source scope for a fixed containment result universe."
-            )
-        if not any(candidate is store for candidate in self.repo.stores):
-            raise ValueError("in_store() requires a connected Store handle.")
-        return replace(self, source_store=store)
-
-    def _check_universe_domain_switch(self, requested: str) -> None:
-        if self.universe is None:
-            return
-        if requested != self.universe.domain:
-            raise QueryDomainError(
-                f"Cannot switch a fixed ResultSet universe from domain {self.universe.domain!r} to {requested!r}."
-            )
-
-    def definitions(self) -> "DefinitionQuery":
-        """Project a nested CDef query onto matching contained definitions.
-
-        Returns:
-            An immutable query selecting the nested-definition projection.
-
-        Raises:
-            QueryDomainError: If an exact ObjectRef or StateRef target would be
-                coerced into a CDef projection.
-
-        Side Effects:
-            None. Projection selection does not execute the query.
-        """
-
-        if self.domain != "nested":
-            return self
-        self._require_fixed_containment_carrier("target")
-        self._require_cdef_target_projection("definitions")
-        return replace(self, projection="definitions")
-
-    def owners(self) -> "DefinitionQuery":
-        """Project a nested containment query onto enclosing stored CDefs.
-
-        Returns:
-            An immutable query selecting authoritative stored-root owners.
-
-        Raises:
-            QueryDomainError: If nested containment has not been selected.
-
-        Side Effects:
-            None. Projection selection does not execute the query.
-        """
-
-        if self.domain != "nested":
-            raise QueryDomainError("owners() is only valid for nested queries.")
-        self._require_fixed_containment_carrier("owner")
-        return replace(self, projection="owners")
-
-    def object_refs(self):
-        """Return exact ObjectRef containment values when execution supports them.
-
-        Fixed containment universes project their retained complete ObjectRef
-        evidence without rescanning Stores. Backend-owned fresh containment
-        execution remains unavailable until an authority traversal is selected.
-
-        Raises:
-            QueryDomainError: If the target is not an ObjectRef, nested domain is
-                not selected, or fresh exact-reference containment execution is
-                unavailable.
-
-        Returns:
-            An ObjectRefResultSet for fixed containment evidence.
-
-        Side Effects:
-            Fixed-universe projection has no Store side effects.
-        """
-
-        self._require_reference_target_projection("object_refs", "ObjectRef")
-        return replace(self, projection="object_refs").execute()
-
-    def state_refs(self):
-        """Return exact StateRef containment values when execution supports them.
-
-        Fixed containment universes project their retained complete StateRef
-        evidence without rescanning Stores. Backend-owned fresh containment
-        execution remains unavailable until an authority traversal is selected.
-
-        Raises:
-            QueryDomainError: If the target is not a StateRef, nested domain is
-                not selected, or fresh exact-reference containment execution is
-                unavailable.
-
-        Returns:
-            A StateRefResultSet for fixed containment evidence.
-
-        Side Effects:
-            Fixed-universe projection has no Store side effects.
-        """
-
-        self._require_reference_target_projection("state_refs", "StateRef")
-        return replace(self, projection="state_refs").execute()
-
-    def max_occurrences(self, limit: int | None) -> "DefinitionQuery":
-        if limit is not None and limit < 0:
-            raise ValueError("max_occurrences limit must be non-negative or None.")
-        # This bounds path enumeration. Capturing the candidate ancestor subgraph is terminal-specific.
-        return replace(self, occurrence_limit=limit)
-
-    def scan_policy(self, policy: str) -> "DefinitionQuery":
-        if policy not in {"allow", "warn", "forbid"}:
-            raise ValueError("scan policy must be 'allow', 'warn', or 'forbid'.")
-        return replace(self, scan_policy_mode=policy)
-
-    def require_indexed(self) -> "DefinitionQuery":
-        return self.scan_policy("forbid")
-
-    def max_verify(self, limit: int | None) -> "DefinitionQuery":
-        if limit is not None and limit < 0:
-            raise ValueError("max_verify limit must be non-negative or None.")
-        return replace(self, max_verify_limit=limit)
-
-    def max_witnesses(self, limit: int | None) -> "DefinitionQuery":
-        """Set the residual witness-discovery cap for one terminal execution.
-
-        Args:
-            limit: A positive exact integer, or ``None`` to disable the cap.
-
-        Returns:
-            A query copy retaining every existing structural and exact constraint.
-
-        Raises:
-            ValueError: If ``limit`` is bool, zero, negative, or non-integral.
-        """
-
-        if limit is not None and (type(limit) is not int or limit <= 0):
-            raise ValueError(
-                "max_witnesses limit must be a positive exact int or None."
-            )
-        return replace(self, max_witness_limit=limit)
-
-    def _reject_residual_rewrite(self, operation: str) -> None:
-        """Reject selector rewrites that cannot preserve an exact residual."""
-
-        if self.generator_selector is not None:
-            raise QueryDomainError(
-                f"GeneratorSelector queries cannot apply {operation}()."
-            )
-
-    def _reject_exact_reference_rewrite(self, operation: str) -> None:
-        """Reject structural rewrites for an exact reference containment target."""
-
-        if is_exact_reference_target(self.containment_target):
-            raise QueryDomainError(
-                f"Exact-reference containment queries cannot apply {operation}()."
-            )
-
-    def _reject_exact_reference_domain(self, domain: str) -> None:
-        """Reject ordinary definition authority domains for exact references."""
-
-        if is_exact_reference_target(self.containment_target):
-            raise QueryDomainError(
-                f"Exact-reference containment queries can only select nested(), not {domain}()."
-            )
-
-    def _require_cdef_target_projection(self, projection: str) -> None:
-        """Require a CDef-compatible target for a nested definition projection."""
-
-        if is_exact_reference_target(self.containment_target):
-            raise QueryDomainError(
-                f"{projection}() is unavailable for exact {type(self.containment_target).__name__} containment targets."
-            )
-
-    def _require_fixed_containment_carrier(self, carrier: str) -> None:
-        """Reject projection changes that would widen a fixed containment result."""
-
-        if (
-                self.universe is not None
-                and self.universe.containment is not None
-                and self.universe.kind == "definitions"
-                and self.universe.containment_carrier != carrier
-        ):
-            raise QueryDomainError(
-                "Cannot change the projection of a fixed containment result universe."
-            )
-
-    def _require_reference_target_projection(
-        self, projection: str, expected: str
-    ) -> None:
-        """Validate an exact-reference value terminal before unsupported execution."""
-
-        if self.domain != "nested":
-            raise QueryDomainError(
-                f"{projection}() is only valid for nested containment queries."
-            )
-        if type(self.containment_target).__name__ != expected:
-            actual = (
-                type(self.containment_target).__name__
-                if self.containment_target is not None
-                else "CDef selector"
-            )
-            raise QueryDomainError(
-                f"{projection}() requires an exact {expected} containment target, got {actual}."
-            )
-
-    @property
-    def lowering_scan_policy(self) -> ScanPolicy:
-        return ScanPolicy(self.scan_policy_mode, self.max_verify_limit)
-
-    def execute(self):
-        self._require_domain()
-        if self.generator_selector is not None:
-            return self._execute_generator_selector()
-        if self.domain == "nested":
-            if self.universe is not None and self.universe.kind == "definitions":
-                return self._execute_fixed_containment_definition_result()
-            if self.universe is None and self.projection == "definitions":
-                if self._uses_authoritative_containment_residual():
-                    cdefs, stats, _, evidence, private_evidence, private_replicas = (
-                        self._execute_authoritative_containment_projection_evidence(
-                            "target"
-                        )
-                    )
-                    return DefinitionResultSet(
-                        self.repo,
-                        cdefs,
-                        materializable=False,
-                        domain="nested-definitions",
-                        explanation=self._explanation(stats),
-                        replicas={},
-                        containment=self._fresh_containment_context(complete=True),
-                        containment_witnesses=evidence,
-                        witnesses=(item.target for item in private_evidence),
-                        witness_complete=True,
-                        containment_private_witnesses=private_evidence,
-                        containment_private_replicas=private_replicas,
-                        containment_carrier="target",
-                    )
-                cdefs, stats = self._execute_nested_definitions()
-                explanation = self._explanation(stats)
-                return DefinitionResultSet(
-                    self.repo,
-                    cdefs,
-                    materializable=False,
-                    domain="nested-definitions",
-                    explanation=explanation,
-                    replicas={},
-                    containment=self._fresh_containment_context(complete=False),
-                    containment_carrier="target",
-                )
-            if self.universe is None and self.projection == "owners":
-                if self._uses_authoritative_containment_residual():
-                    (
-                        cdefs,
-                        stats,
-                        replicas,
-                        evidence,
-                        private_evidence,
-                        private_replicas,
-                    ) = self._execute_authoritative_containment_projection_evidence(
-                        "owner"
-                    )
-                    return DefinitionResultSet(
-                        self.repo,
-                        cdefs,
-                        materializable=True,
-                        domain="owners",
-                        explanation=self._explanation(stats),
-                        replicas=replicas,
-                        containment=self._fresh_containment_context(complete=True),
-                        containment_witnesses=evidence,
-                        witnesses=(item.owner for item in private_evidence),
-                        witness_complete=True,
-                        containment_private_witnesses=private_evidence,
-                        containment_private_replicas=private_replicas,
-                        containment_carrier="owner",
-                    )
-                cdefs, stats, replicas = self._execute_nested_owners()
-                explanation = self._explanation(stats)
-                return DefinitionResultSet(
-                    self.repo,
-                    cdefs,
-                    materializable=True,
-                    domain="owners",
-                    explanation=explanation,
-                    replicas=replicas,
-                    containment=self._fresh_containment_context(complete=False),
-                    containment_carrier="owner",
-                )
-            occs, stats, owner_replicas, private_witnesses, private_replicas = (
-                self._execute_nested_occurrences()
-            )
-            explanation = self._explanation(stats)
-            containment = None if self.universe is None else self.universe.containment
-            containment_witnesses = (
-                None
-                if self.universe is None
-                else (
-                    occs
-                    if self.universe.containment is not None
-                    else self.universe.containment_witnesses
-                )
-            )
-            if containment is None and self.universe is None:
-                from .model import containment_target_kind
-
-                target_kind = (
-                    containment_target_kind(self.containment_target)
-                    if self.containment_target is not None
-                    else "definition"
-                )
-                containment = ContainmentContext(
-                    target_kind=target_kind,
-                    edges=self.containment_edges,
-                    contains_ref=self.contains_ref,
-                    source_scope=self._containment_source_scope(),
-                    complete=True,
-                    bounded=(
-                        self.occurrence_limit is not None
-                        and self.projection not in {"object_refs", "state_refs"}
-                    ),
-                )
-            if (
-                    containment is not None
-                    and self.occurrence_limit is not None
-                    and (
-                        self.universe is not None
-                        or self.projection not in {"object_refs", "state_refs"}
-                    )
-            ):
-                containment = replace(containment, bounded=True)
-            if callable(occs):
-                raw = OccurrenceResultSet(
-                    self.repo,
-                    occurrence_factory=occs,
-                    explanation=explanation,
-                    owner_replicas=owner_replicas,
-                    containment=containment,
-                    containment_witnesses=containment_witnesses,
-                    witnesses=private_witnesses or (),
-                    witness_complete=private_witnesses is not None
-                    and (containment is None or not containment.bounded),
-                    containment_private_witnesses=private_witnesses or (),
-                    containment_private_replicas=private_replicas,
-                )
-            else:
-                raw = OccurrenceResultSet(
-                    self.repo,
-                    occs,
-                    explanation=explanation,
-                    owner_replicas=owner_replicas,
-                    containment=containment,
-                    containment_witnesses=containment_witnesses,
-                    witnesses=private_witnesses or (),
-                    witness_complete=private_witnesses is not None
-                    and (containment is None or not containment.bounded),
-                    containment_private_witnesses=private_witnesses or (),
-                    containment_private_replicas=private_replicas,
-                )
-            if self.projection == "definitions":
-                return raw.definitions()
-            if self.projection == "owners":
-                return raw.owners()
-            if self.projection == "object_refs":
-                return raw.object_refs()
-            if self.projection == "state_refs":
-                return raw.state_refs()
-            return raw
-
-        if (
-            self.universe is None
-            and self.domain == "stored"
-            and self.repo._query_index.can_execute_query_domain("stored")
-        ):
-            query_backed = getattr(
-                self.repo._query_index, "query_backed_definition_result_set", None
-            )
-            if query_backed is not None:
-                result_set = query_backed(self)
-                if result_set is not None:
-                    return result_set
-
-        cdefs, stats, query_replicas = self._execute_definition_domain()
-        explanation = stats.explanation(
-            domain=self._domain_label(), refresh=self.refresh_policy
-        )
-        materializable = True
-        domain = self.domain or "stored"
-        if self.universe is not None:
-            materializable = self.universe.materializable
-            domain = self.universe.domain
-        replicas = {} if query_replicas is None else query_replicas
-        if self.universe is not None and self.universe.replicas is not None:
-            replicas = {cdef: self.universe.replicas.get(cdef, ()) for cdef in cdefs}
-        return DefinitionResultSet(
-            self.repo,
-            cdefs,
-            materializable=materializable,
-            domain=domain,
-            explanation=explanation,
-            replicas=replicas,
-        )
-
-    def defs(self):
-        result = self.execute()
-        if isinstance(result, DefinitionResultSet):
-            return result
-        raise QueryDomainError(
-            "Raw nested queries return occurrences; use .definitions().defs() or .owners().defs()."
-        )
-
-    def objects(self, **load_options) -> ObjectResultSet:
-        result = self.execute()
-        if isinstance(result, OccurrenceResultSet):
-            raise QueryDomainError(
-                "Raw nested occurrences cannot be materialized directly; use .owners().objects()."
-            )
-        return result.objects(**load_options)
-
-    def count(self) -> int:
-        return self._execute_count()
-
-    def exists(self) -> bool:
-        if self.generator_selector is not None:
-            return self._execute_count() > 0
-        if (
-            self.universe is None
-            and self.domain == "stored"
-            and self.repo._query_index.can_execute_query_domain("stored")
-        ):
-            count, _ = self.repo._query_index.count_definition_domain(
-                self, stop_after=1
-            )
-            return count > 0
-        if (
-            self.universe is None
-            and self.domain == "known"
-            and self.repo._query_index.can_execute_query_domain("stored")
-        ):
-            return bool(self._execute_federated_known_domain(stop_after=1)[0])
-        if self.universe is None and self.domain == "nested":
-            return bool(self._execute_terminal_items(stop_after=1))
-        return self._execute_count() > 0
-
-    def one(self):
-        items = self._execute_terminal_items(stop_after=2)
-        if len(items) != 1:
-            label = (
-                "occurrence"
-                if self.domain == "nested" and self.projection is None
-                else "result"
-            )
-            raise QueryCardinalityError(
-                f"Expected exactly one {label}, found {len(items)}."
-            )
-        return items[0]
-
-    def one_or_none(self):
-        items = self._execute_terminal_items(stop_after=2)
-        if len(items) > 1:
-            label = (
-                "occurrence"
-                if self.domain == "nested" and self.projection is None
-                else "result"
-            )
-            raise QueryCardinalityError(
-                f"Expected zero or one {label}, found {len(items)}."
-            )
-        return items[0] if items else None
-
-    def explain(self, *, analyze: bool = False, sql: bool = False) -> QueryExplanation:
-        return self._execute_explanation(analyze=analyze, sql=sql)
-
-    def _execute_count(self) -> int:
-        self._require_domain()
-        if self.generator_selector is not None:
-            return len(self._execute_generator_selector())
-        if (
-            self.universe is None
-            and self.domain == "stored"
-            and self.repo._query_index.can_execute_query_domain("stored")
-        ):
-            count, _ = self.repo._query_index.count_definition_domain(self)
-            return count
-        if (
-            self.universe is None
-            and self.domain == "known"
-            and self.repo._query_index.can_execute_query_domain("stored")
-        ):
-            cdefs, _, _ = self._execute_federated_known_domain()
-            return len(cdefs)
-        if self.domain == "nested":
-            if self.universe is not None and self.universe.kind == "definitions":
-                return len(self._execute_fixed_containment_definition_result())
-            if self.projection in {"object_refs", "state_refs"}:
-                return len(self.execute())
-            if self.universe is None and self.projection == "definitions":
-                if (
-                    not self._uses_authoritative_containment_residual()
-                    and self.repo._query_index.can_execute_query_domain("nested")
-                ):
-                    cdefs, _ = self.repo._query_index.execute_nested_definitions(self)
-                else:
-                    cdefs, _ = self._execute_nested_definitions()
-                return len(cdefs)
-            if self.universe is None and self.projection == "owners":
-                if (
-                    not self._uses_authoritative_containment_residual()
-                    and self.repo._query_index.can_execute_query_domain("nested")
-                ):
-                    cdefs, _, _ = self.repo._query_index.execute_nested_owners(self)
-                else:
-                    cdefs, _, _ = self._execute_nested_owners()
-                return len(cdefs)
-            occurrences, _, _, _, _ = self._execute_nested_occurrences()
-            if callable(occurrences):
-                return sum(1 for _ in occurrences())
-            return len(occurrences)
-
-        cdefs, _, _ = self._execute_definition_domain()
-        return len(cdefs)
-
-    def _execute_explanation(
-        self, *, analyze: bool = False, sql: bool = False
-    ) -> QueryExplanation:
-        self._require_domain()
-        if self.generator_selector is not None:
-            if self._is_deterministic_empty_containment():
-                return self._explanation(
-                    QueryStats(
-                        fast_path="deterministic-empty-containment",
-                        result_count=0,
-                    )
-                )
-            if not analyze:
-                stats = QueryStats(
-                    scan_required=self.universe is None,
-                    scan_reason=(
-                        "GeneratorSelector queries require complete witness scanning."
-                        if self.universe is None
-                        else None
-                    ),
-                )
-                return self._explanation(stats)
-            result = self._execute_generator_selector()
-            return result.explanation or QueryStats(
-                result_count=len(result)
-            ).explanation(
-                domain=self._domain_label(),
-                refresh=self.refresh_policy,
-            )
-        if analyze:
-            result = self.execute()
-            explanation = result.explanation
-            if explanation is None:
-                return QueryStats(result_count=len(result)).explanation(
-                    domain=self._domain_label(), refresh=self.refresh_policy
-                )
-            return explanation
-        if self.domain == "nested":
-            if self.universe is not None and self.universe.kind == "definitions":
-                result = self._execute_fixed_containment_definition_result()
-                return result.explanation or self._explanation(
-                    QueryStats(result_count=len(result))
-                )
-            if self._uses_authoritative_containment_residual() and not analyze:
-                stats = QueryStats(
-                    scan_required=True,
-                    scan_reason="reference-aware containment requires authoritative root verification",
-                )
-                return self._explanation(stats)
-            if self.universe is None and self.projection == "definitions":
-                _, stats = self._execute_nested_definitions()
-            elif self.universe is None and self.projection == "owners":
-                _, stats, _ = self._execute_nested_owners()
-            else:
-                _, stats, _, _, _ = self._execute_nested_occurrences()
-            return self._explanation(stats)
-
-        if (
-            self.universe is None
-            and self.domain == "stored"
-            and self.repo._query_index.can_execute_query_domain("stored")
-        ):
-            stats = self.repo._query_index.explain_definition_domain(self, sql=sql)
-            return stats.explanation(
-                domain=self._domain_label(), refresh=self.refresh_policy
-            )
-
-        _, stats, _ = self._execute_definition_domain()
-        return stats.explanation(
-            domain=self._domain_label(), refresh=self.refresh_policy
-        )
-
-    def _require_domain(self) -> None:
-        if self.domain is None:
-            raise QueryDomainError(
-                "Select a query domain with stored(), cached(), known(), or nested() before executing."
-            )
-
-    def _domain_label(self) -> str:
-        if self.domain == "nested" and self.projection is not None:
-            return f"nested-{self.projection}"
-        return self.domain or "unset"
-
-    def _explanation(self, stats: QueryStats) -> QueryExplanation:
-        """Attach immutable containment policy to an execution explanation."""
-
-        explanation = stats.explanation(
-            domain=self._domain_label(),
-            refresh=self.refresh_policy,
-        )
-        if self.domain != "nested":
-            return explanation
-        from .model import containment_target_kind
-
-        target_kind = (
-            self.universe.containment.target_kind
-            if self.universe is not None and self.universe.containment is not None
-            else (
-                containment_target_kind(self.containment_target)
-                if self.containment_target is not None
-                else "definition"
-            )
-        )
-        return replace(
-            explanation,
-            containment_target_kind=target_kind,
-            containment_edges=self.containment_edges,
-            containment_contains_ref=self.contains_ref,
-            containment_source_scope=(
-                self.universe.containment.source_scope
-                if self.universe is not None and self.universe.containment is not None
-                else self._containment_source_scope()
-            ),
-        )
-
-    def _execute_definition_domain(self):
-        stats = QueryStats()
-        if self.universe is not None:
-            if self.universe.kind != "definitions":
-                raise QueryDomainError(
-                    "A definition terminal cannot execute over an occurrence universe."
-                )
-            stats.universe_size = len(self.universe.definitions)
-            matches = self._verify_cdefs(tuple(self.universe.definitions), stats=stats)
-            stats.result_count = len(matches)
-            replicas = {}
-            if self.universe.replicas is not None:
-                replicas = {
-                    cdef: self.universe.replicas.get(cdef, ()) for cdef in matches
-                }
-            return matches, stats, replicas
-
-        if self.domain == "stored" and self.repo._query_index.can_execute_query_domain(
-            "stored"
-        ):
-            return self.repo._query_index.execute_definition_domain(self)
-        if self.domain == "known" and self.repo._query_index.can_execute_query_domain(
-            "stored"
-        ):
-            return self._execute_federated_known_domain()
-
-        catalog = self.repo._query_catalog
-        exact_root = (
-            self.selector if isinstance(self.selector, ConcreteDefinition) else None
-        )
-        if self.refresh_policy is True:
-            catalog.refresh(True, stats=stats)
-        elif (
-            exact_root is not None
-            and self.domain in {"stored", "known"}
-            and self.refresh_policy is not False
-        ):
-            catalog.ensure_exact_stored(exact_root, stats=stats)
-        elif self.domain in {"stored", "known"}:
-            catalog.refresh(self.refresh_policy, stats=stats)
-
-        live_domain = self._definition_domain(catalog)
-        live_domain.prepare(stats=stats)
-        with catalog.read_view(
-            include_cached=self.domain in {"cached", "known"}
-        ) as snapshot:
-            domain = live_domain.with_catalog(snapshot)
-            if exact_root is not None and self.domain in {"stored", "cached", "known"}:
-                candidate_ids = domain.filter(snapshot.exact_ids(exact_root))
-                stats.universe_size = len(candidate_ids)
-                stats.candidate_count = len(candidate_ids)
-            else:
-                stats.universe_size = domain.estimate_size()
-                selector_graph = compile_selector_graph(
-                    self.selector, class_match=self.class_match_policy
-                )
-                if selector_graph is not None:
-                    candidate_ids = graph_candidate_ids(
-                        snapshot, selector_graph, domain, stats=stats
-                    )
-                else:
-                    candidate_ids = domain.all_ids()
-                    stats.candidate_count = len(candidate_ids)
-                    stats.universe_size = len(candidate_ids)
-            cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
-            replicas = snapshot.replica_map(candidate_ids)
-        cdefs = tuple(cdefs_by_id.values())
-        matches = self._verify_cdefs(cdefs, stats=stats)
-        stats.result_count = len(matches)
-        replicas = {cdef: replicas.get(cdef, ()) for cdef in matches}
-        return matches, stats, replicas
-
-    def _execute_generator_selector(self):
-        """Verify exact support against complete graph-distinct domain witnesses.
-
-        Query indexes intentionally collapse structural CDefs, so they cannot be
-        used as terminal authority for topology-sensitive template support.  This
-        path scans authoritative roots (or retained immutable result witnesses)
-        before restoring the public structural-deduplication result semantics.
-        """
-
-        if (
-                self.scan_policy_mode == "forbid"
-                and self.universe is None
-                and not self._is_deterministic_empty_containment()
-        ):
-            raise QueryDomainError(
-                "GeneratorSelector queries require complete witness scanning."
-            )
-        if (
-                self.domain == "nested"
-                and self.universe is not None
-                and self.universe.kind == "definitions"
-                and self.universe.containment is not None
-        ):
-            return self._execute_fixed_containment_definition_result()
-        if self.domain == "nested" and not (
-            self.universe is not None and self.universe.kind == "definitions"
-        ):
-            return self._execute_generator_selector_nested()
-
-        stats = QueryStats(refresh_action="generator-witness-scan")
-        witness_budget = self._generator_witness_budget()
-        witnesses = self._generator_definition_witnesses(stats, witness_budget)
-        matches, replicas, verified_witnesses = self._verify_generator_witnesses(
-            witnesses, stats
-        )
-        stats.result_count = len(matches)
-        explanation = stats.explanation(
-            domain=self._domain_label(), refresh=self.refresh_policy
-        )
-        materializable = (
-            self.universe.materializable if self.universe is not None else True
-        )
-        domain = (
-            self.universe.domain
-            if self.universe is not None
-            else self.domain or "stored"
-        )
-        return DefinitionResultSet(
-            self.repo,
-            matches,
-            materializable=materializable,
-            domain=domain,
-            explanation=explanation,
-            replicas=replicas,
-            witnesses=verified_witnesses,
-            witness_complete=True,
-        )
-
-    def _generator_witness_budget(self) -> _GeneratorWitnessBudget:
-        limit = (
-            _DEFAULT_GENERATOR_WITNESS_LIMIT
-            if self.max_witness_limit is _DEFAULT_MAX_WITNESSES
-            else self.max_witness_limit
-        )
-        return _GeneratorWitnessBudget(limit)
-
-    def _generator_definition_witnesses(
-        self, stats: QueryStats, witness_budget: _GeneratorWitnessBudget
-    ):
-        """Stream complete roots after a conservative structural index prefilter."""
-
-        if self.universe is not None:
-            if self.universe.kind != "definitions":
-                raise QueryDomainError(
-                    "A definition terminal cannot execute over an occurrence universe."
-                )
-            if not self.universe.witness_complete:
-                raise QueryDomainError(
-                    "GeneratorSelector refinement requires complete immutable witness evidence."
-                )
-            replicas = self.universe.replicas or {}
-
-            def universe_witnesses():
-                for cdef in self.universe.witnesses:
-                    witness_budget.consume()
-                    yield cdef, tuple(replicas.get(cdef, ()))
-
-            return universe_witnesses()
-
-        indexed_candidates = None
-        if self.domain in {
-            "stored",
-            "known",
-        } and self.repo._query_index.can_execute_query_domain("stored"):
-            prefilter_query = replace(
-                self,
-                domain="stored",
-                generator_selector=None,
-                max_witness_limit=_DEFAULT_MAX_WITNESSES,
-            )
-            candidates, index_stats, _ = (
-                self.repo._query_index.execute_definition_domain(prefilter_query)
-            )
-            indexed_candidates = set(candidates)
-            stats.refresh_action = index_stats.refresh_action
-            stats.universe_size = index_stats.universe_size
-            stats.selected_features = index_stats.selected_features
-            stats.posting_sizes = index_stats.posting_sizes
-            stats.source_plans = index_stats.source_plans
-            stats.generation_vector = index_stats.generation_vector
-            stats.lowering_strategy = index_stats.lowering_strategy
-            stats.scan_required = index_stats.scan_required
-            stats.scan_reason = index_stats.scan_reason
-
-        def roots():
-            seen_cached: set[int] = set()
-            if self.domain in {"stored", "known"}:
-                for store in self.repo.stores:
-                    iterate = getattr(
-                        store, "iter_authoritative_root_definitions", None
-                    )
-                    if not callable(iterate):
-                        raise QueryDomainError(
-                            "GeneratorSelector stored queries require authoritative root enumeration."
-                        )
-                    for cdef in self._iter_generator_store_roots(store, iterate):
-                        witness_budget.consume()
-                        if indexed_candidates is None or cdef in indexed_candidates:
-                            yield cdef, (store,)
-            if self.domain in {"cached", "known"}:
-                caches = (self.repo.strong_obj_cache, self.repo.weak_obj_cache)
-                for cache in caches:
-                    for _, obj in cache.items():
-                        witness_budget.consume()
-                        marker = id(obj)
-                        if marker in seen_cached:
-                            continue
-                        seen_cached.add(marker)
-                        yield obj.definition, ()
-
-        if self.domain not in {"stored", "cached", "known"}:
-            raise QueryDomainError(
-                f"Unsupported GeneratorSelector definition domain {self.domain!r}."
-            )
-        return roots()
-
-    @staticmethod
-    def _iter_generator_store_roots(store, iterate):
-        """Validate one Store's streamed exact GeneratorSelector witness authority."""
-
-        try:
-            for cdef in iterate():
-                if not isinstance(cdef, ConcreteDefinition):
-                    raise QueryDomainError(
-                        "GeneratorSelector Store enumeration yielded a non-CDef root."
-                    )
-                yield cdef
-        except QueryDomainError:
-            raise
-        except Exception as error:
-            raise QueryDomainError(
-                f"GeneratorSelector Store enumeration failed for {store!r}."
-            ) from error
-
-    def _verify_generator_witnesses(self, witnesses, stats: QueryStats):
-        """Verify each witness before structural result representative selection."""
-
-        from ..generator import _AssignmentBudget
-
-        assignment_budget = _AssignmentBudget(self.generator_selector._max_assignments)
-        merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
-        replicas: dict[ConcreteDefinition, list[Any]] = {}
-        verified_witnesses = []
-        for cdef, stores in witnesses:
-            stats.candidate_count += 1
-            matched = self._verify_cdefs(
-                (cdef,), stats=stats, generator_budget=assignment_budget
-            )
-            if not matched:
-                continue
-            match = matched[0]
-            canonical = merged.setdefault(match, match)
-            replicas.setdefault(canonical, []).extend(stores)
-            verified_witnesses.append(match)
-        ordered = tuple(
-            sorted(merged.values(), key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
-        )
-        return (
-            ordered,
-            {cdef: tuple(dict.fromkeys(replicas.get(cdef, ()))) for cdef in ordered},
-            tuple(verified_witnesses),
-        )
-
-    def _execute_generator_selector_nested(self):
-        """Apply exact support over shared root-local containment witnesses.
-
-        Generator support visits every selected candidate before a raw-result cap
-        is applied, preserving the witness and assignment budgets. The shared
-        containment walker supplies literal edge-policy and hop evidence without
-        collapsing private graph topology.
-        """
-
-        stats = QueryStats(refresh_action="generator-witness-scan")
-        witness_budget = self._generator_witness_budget()
-        from ..generator import _AssignmentBudget
-
-        assignment_budget = _AssignmentBudget(self.generator_selector._max_assignments)
-
-        def matches(value) -> bool:
-            if not isinstance(value, ConcreteDefinition):
-                return False
-            witness_budget.consume()
-            stats.candidate_count += 1
-            return bool(
-                self._verify_cdefs(
-                    (value,),
-                    stats=stats,
-                    generator_budget=assignment_budget,
-                )
-            )
-
-        matched_candidates: dict[object, bool] = {}
-
-        def matches_once(value: ConcreteDefinition) -> bool:
-            """Verify each private CDef node once while retaining all its paths."""
-
-            node_key = cdef_node_key(value)
-            if node_key not in matched_candidates:
-                matched_candidates[node_key] = matches(value)
-            return matched_candidates[node_key]
-
-        if self._is_deterministic_empty_containment():
-            candidates = lambda: ()
-            context = ContainmentContext(
-                target_kind="definition",
-                edges=self.containment_edges,
-                contains_ref=self.contains_ref,
-                source_scope=self._containment_source_scope(),
-                complete=True,
-                bounded=self.projection is None and self.occurrence_limit is not None,
-            )
-        elif self.universe is not None:
-            context = self.universe.containment
-            complete = self.universe.witness_complete
-            if self.universe.kind != "occurrences" or not complete:
-                raise QueryDomainError(
-                    "GeneratorSelector refinement requires complete immutable witness evidence."
-                )
-            retained_private_replicas = self.universe.containment_private_replicas
-            evidence = (
-                self.universe.containment_private_witnesses
-                if context is not None
-                else self.universe.witnesses
-            )
-
-            def candidates():
-                if self.projection == "owners":
-                    if retained_private_replicas is None:
-                        raise QueryDomainError(
-                            "GeneratorSelector refinement requires complete retained witness evidence."
-                        )
-                    for occurrence in evidence:
-                        if matches_once(occurrence.owner):
-                            yield occurrence, tuple(
-                                retained_private_replicas.get(
-                                    cdef_node_key(occurrence.owner), ()
-                                )
-                            )
-                    return
-                for occurrence in evidence:
-                    if matches_once(occurrence.definition):
-                        yield occurrence, (
-                            ()
-                            if retained_private_replicas is None
-                            else tuple(
-                                retained_private_replicas.get(
-                                    cdef_node_key(occurrence.owner), ()
-                                )
-                            )
-                        )
-
-        else:
-            reason = "GeneratorSelector queries require complete witness scanning."
-            stats.scan_required = True
-            stats.scan_reason = reason
-            if self.scan_policy_mode == "warn":
-                warnings.warn(
-                    f"DRYML query requires scan fallback: {reason}",
-                    RuntimeWarning,
-                    stacklevel=3,
-                )
-            stores = self._containment_stores()
-
-            def candidates():
-                with self.repo._authority_read_fences(stores):
-                    for store in stores:
-                        iterate = getattr(
-                            store, "iter_authoritative_root_definitions", None
-                        )
-                        if not callable(iterate):
-                            raise QueryDomainError(
-                                "GeneratorSelector nested queries require authoritative root enumeration."
-                            )
-                        stats.store_scan_count += 1
-                        for root in self._iter_generator_store_roots(store, iterate):
-                            yield from (
-                                (occurrence, (store,))
-                                for occurrence in iter_containment_occurrences_matching(
-                                    (root,),
-                                    matches,
-                                    edges=self.containment_edges,
-                                    contains_ref=self.contains_ref,
-                                )
-                            )
-
-            context = ContainmentContext(
-                target_kind="definition",
-                edges=self.containment_edges,
-                contains_ref=self.contains_ref,
-                source_scope=self._containment_source_scope(),
-                complete=True,
-                bounded=self.projection is None and self.occurrence_limit is not None,
-            )
-
-        private_occurrences = []
-        private_replicas: dict[object, list[Any]] = {}
-        for occurrence, stores in candidates():
-            private_occurrences.append(occurrence)
-            private_replicas.setdefault(cdef_node_key(occurrence.owner), []).extend(
-                stores
-            )
-        merged: dict[tuple[Any, ...], Any] = {}
-        for occurrence in private_occurrences:
-            merged.setdefault(containment_witness_key(occurrence), occurrence)
-        occurrences = tuple(merged[key] for key in sorted(merged))
-        visible = occurrences
-        if self.projection is None and self.occurrence_limit is not None:
-            visible = visible[: self.occurrence_limit]
-        visible_keys = {containment_witness_key(occurrence) for occurrence in visible}
-        private_occurrences = tuple(
-            occurrence
-            for occurrence in private_occurrences
-            if containment_witness_key(occurrence) in visible_keys
-        )
-        private_owner_keys = {
-            cdef_node_key(occurrence.owner) for occurrence in private_occurrences
-        }
-        private_replicas = {
-            key: tuple(dict.fromkeys(stores))
-            for key, stores in private_replicas.items()
-            if key in private_owner_keys
-        }
-        owner_replicas: dict[ConcreteDefinition, list[Any]] = {}
-        for occurrence in private_occurrences:
-            owner_replicas.setdefault(occurrence.owner, []).extend(
-                private_replicas.get(cdef_node_key(occurrence.owner), ())
-            )
-        owner_replicas = {
-            owner: tuple(dict.fromkeys(stores))
-            for owner, stores in owner_replicas.items()
-        }
-        if self.projection == "definitions":
-            definitions = tuple(occ.definition for occ in occurrences)
-            stats.result_count = len(dict.fromkeys(definitions))
-            return DefinitionResultSet(
-                self.repo,
-                definitions,
-                materializable=False,
-                domain="nested-definitions",
-                explanation=self._explanation(stats),
-                replicas={},
-                witnesses=(item.target for item in private_occurrences),
-                witness_complete=True,
-                containment=context,
-                containment_witnesses=occurrences,
-                containment_private_witnesses=private_occurrences,
-            )
-        if self.projection == "owners":
-            owners = tuple(occ.owner for occ in occurrences)
-            stats.result_count = len(dict.fromkeys(owners))
-            return DefinitionResultSet(
-                self.repo,
-                owners,
-                materializable=True,
-                domain="owners",
-                explanation=self._explanation(stats),
-                replicas=owner_replicas,
-                witnesses=(item.owner for item in private_occurrences),
-                witness_complete=True,
-                containment=context,
-                containment_witnesses=occurrences,
-                containment_private_witnesses=private_occurrences,
-                containment_private_replicas=private_replicas,
-                containment_carrier="owner",
-            )
-        stats.result_count = len(visible)
-        return OccurrenceResultSet(
-            self.repo,
-            visible,
-            explanation=self._explanation(stats),
-            owner_replicas=owner_replicas,
-            witnesses=private_occurrences,
-            witness_complete=not context.bounded,
-            containment=context,
-            containment_witnesses=visible,
-            containment_private_witnesses=private_occurrences,
-            containment_private_replicas=private_replicas,
-        )
-
-    def _execute_federated_known_domain(self, *, stop_after: int | None = None):
-        from .federation import CACHE_SOURCE_KEY
-
-        stored_query = replace(self, domain="stored")
-        stored_cdefs, stored_stats, stored_replicas = (
-            self.repo._query_index.execute_definition_domain(
-                stored_query, stop_after=stop_after
-            )
-        )
-
-        if stop_after is not None and len(stored_cdefs) >= stop_after:
-            stats = QueryStats(refresh_action="federated-known")
-            stats.store_scan_count = stored_stats.store_scan_count
-            stats.candidate_count = stored_stats.candidate_count
-            stats.verified_count = stored_stats.verified_count
-            stats.result_count = len(stored_cdefs)
-            stats.universe_size = None
-            stats.generation_vector = dict(stored_stats.generation_vector or {})
-            stats.source_plans = stored_stats.source_plans
-            return stored_cdefs, stats, stored_replicas
-
-        cached_query = replace(self, domain="cached")
-        cached_cdefs, cached_stats, cached_replicas = (
-            cached_query._execute_definition_domain()
-        )
-        cache_generation = self.repo._query_catalog.current_generation()
-
-        merged = {cdef: cdef for cdef in stored_cdefs}
-        for cdef in cached_cdefs:
-            merged.setdefault(cdef, cdef)
-            if stop_after is not None and len(merged) >= stop_after:
-                break
-
-        out = tuple(
-            sorted(merged.values(), key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
-        )
-        replicas = {}
-        for cdef in out:
-            if cdef in stored_replicas:
-                replicas[cdef] = stored_replicas[cdef]
-            else:
-                replicas[cdef] = cached_replicas.get(cdef, ())
-
-        stats = QueryStats(refresh_action="federated-known")
-        stats.store_scan_count = (
-            stored_stats.store_scan_count + cached_stats.store_scan_count
-        )
-        stats.candidate_count = (
-            stored_stats.candidate_count + cached_stats.candidate_count
-        )
-        stats.verified_count = stored_stats.verified_count + cached_stats.verified_count
-        stats.result_count = len(out)
-        stats.universe_size = None
-        stats.generation_vector = dict(stored_stats.generation_vector or {})
-        stats.generation_vector[CACHE_SOURCE_KEY] = cache_generation
-        stats.source_plans = (
-            *stored_stats.source_plans,
-            SourceQueryPlan(
-            source_key=CACHE_SOURCE_KEY,
-            backend="memory-cache",
-            generation=cache_generation,
-            candidate_count=cached_stats.candidate_count,
-            verified_count=cached_stats.verified_count,
-            result_count=cached_stats.result_count,
-            refresh_action=cached_stats.refresh_action,
-            ),
-        )
-        return out, stats, replicas
-
-    def _execute_terminal_items(self, *, stop_after: int):
-        self._require_domain()
-        if self.generator_selector is not None:
-            return tuple(
-                item
-                for _, item in zip(
-                    range(stop_after), self._execute_generator_selector()
-                )
-            )
-        if self.domain == "nested":
-            if (
-                    self.universe is None
-                    and self.projection == "definitions"
-                    and not self._uses_authoritative_containment_residual()
-                    and self.repo._query_index.can_execute_query_domain("nested")
-            ):
-                return self.repo._query_index.execute_nested_definitions(
-                    self, stop_after=stop_after
-                )[0]
-            if (
-                    self.universe is None
-                    and self.projection == "owners"
-                    and not self._uses_authoritative_containment_residual()
-                    and self.repo._query_index.can_execute_query_domain("nested")
-            ):
-                return self.repo._query_index.execute_nested_owners(
-                    self, stop_after=stop_after
-                )[0]
-            if self.universe is None and self.projection is None:
-                limit = (
-                    stop_after
-                    if self.occurrence_limit is None
-                    else min(self.occurrence_limit, stop_after)
-                )
-                occurrences, _, _, _, _ = replace(
-                    self,
-                    occurrence_limit=limit,
-                )._execute_nested_occurrences()
-                if callable(occurrences):
-                    return tuple(
-                        item for _, item in zip(range(stop_after), occurrences())
-                    )
-                return tuple(occurrences[:stop_after])
-            result = self.execute()
-            return tuple(item for _, item in zip(range(stop_after), result))
-
-        if (
-            self.universe is None
-            and self.domain == "stored"
-            and self.repo._query_index.can_execute_query_domain("stored")
-        ):
-            return self.repo._query_index.execute_definition_domain(
-                self, stop_after=stop_after
-            )[0]
-        if (
-            self.universe is None
-            and self.domain == "known"
-            and self.repo._query_index.can_execute_query_domain("stored")
-        ):
-            return self._execute_federated_known_domain(stop_after=stop_after)[0]
-        cdefs, _, _ = self._execute_definition_domain()
-        return tuple(cdefs[:stop_after])
-
-    def _definition_domain(self, catalog):
-        if self.domain == "stored":
-            return StoredDomain(catalog)
-        if self.domain == "cached":
-            return CachedDomain(catalog, reuse_weak=self.reuse_weak_policy)
-        if self.domain == "known":
-            return KnownDomain(catalog, reuse_weak=self.reuse_weak_policy)
-        raise QueryDomainError(f"Unsupported definition domain {self.domain!r}.")
-
-    def _execute_nested_occurrences(self):
-        if self.universe is not None:
-            stats = QueryStats()
-            if self.universe.kind != "occurrences":
-                raise QueryDomainError(
-                    "A nested query cannot execute over a definition universe."
-                )
-            evidence = self.universe.containment_witnesses
-            stats.universe_size = len(evidence)
-            if self.universe.containment is not None:
-                context = self.universe.containment
-                target = self.containment_target
-                if target is not None:
-                    from .model import containment_target_kind
-
-                    if containment_target_kind(target) != context.target_kind:
-                        raise QueryDomainError(
-                            "Fixed containment refinement cannot change the exact target kind."
-                        )
-                    if is_exact_reference_target(target):
-                        out = tuple(item for item in evidence if item.target == target)
-                    else:
-                        out = tuple(
-                            item
-                            for item in evidence
-                            if isinstance(item.target, ConcreteDefinition)
-                            and _query_match(
-                                self.selector,
-                                item.target,
-                                strict=self.strict_policy,
-                                class_match=self.class_match_policy,
-                            )
-                        )
-                elif context.target_kind == "definition" and self.selector is not None:
-                    out = tuple(
-                        item
-                        for item in evidence
-                        if isinstance(item.target, ConcreteDefinition)
-                        and _query_match(
-                            self.selector,
-                            item.target,
-                            strict=self.strict_policy,
-                            class_match=self.class_match_policy,
-                        )
-                    )
-                else:
-                    out = tuple(evidence)
-                if self.occurrence_limit is not None:
-                    out = out[:self.occurrence_limit]
-                visible_keys = {containment_witness_key(item) for item in out}
-                private_evidence = tuple(
-                    item
-                    for item in self.universe.containment_private_witnesses
-                    if containment_witness_key(item) in visible_keys
-                )
-                private_replicas = self.universe.containment_private_replicas
-                if private_replicas is not None:
-                    private_owner_keys = {
-                        cdef_node_key(item.owner) for item in private_evidence
-                    }
-                    private_replicas = {
-                        key: stores
-                        for key, stores in private_replicas.items()
-                        if key in private_owner_keys
-                    }
-                    replicas = {}
-                    for item in private_evidence:
-                        replicas.setdefault(item.owner, []).extend(
-                            private_replicas.get(cdef_node_key(item.owner), ())
-                        )
-                    replicas = {
-                        owner: tuple(dict.fromkeys(stores))
-                        for owner, stores in replicas.items()
-                    }
-                else:
-                    replicas = {
-                        item.owner: self.universe.replicas.get(item.owner, ())
-                        for item in out
-                    }
-                stats.result_count = len(out)
-                return out, stats, replicas, private_evidence, private_replicas
-            verified_nested = self._verify_cdefs(
-                tuple({occ.definition for occ in self.universe.occurrences}),
-                stats=stats,
-            )
-            verified = set(verified_nested)
-            out = tuple(
-                occ for occ in self.universe.occurrences if occ.definition in verified
-            )
-            if self.occurrence_limit is not None:
-                out = out[:self.occurrence_limit]
-            stats.result_count = len(out)
-            return out, stats, self.universe.replicas, (), None
-
-        if self._is_deterministic_empty_containment():
-            stats = QueryStats(fast_path="deterministic-empty-containment")
-            stats.result_count = 0
-            return (), stats, {}, (), {}
-
-        if self._uses_authoritative_containment_residual():
-            return self._execute_authoritative_containment_occurrences()
-
-        if self.repo._query_index.can_execute_query_domain("nested"):
-            occurrences, stats, replicas = (
-                self.repo._query_index.execute_nested_occurrences(self)
-            )
-            return occurrences, stats, replicas, None, None
-
-        catalog = self.repo._query_catalog
-        for _ in range(_MAX_NESTED_QUERY_RETRIES):
-            stats = QueryStats()
-            captured = self._capture_nested_candidates(catalog, stats)
-            _, match_ids = self._verify_cdefs_by_id(captured.cdefs_by_id, stats=stats)
-            try:
-                traversal = self._capture_occurrence_traversal(
-                    catalog, match_ids, captured.generation
-                )
-                break
-            except _QueryGenerationChanged:
-                continue
-        else:
-            raise QueryIndexError(
-                "Catalog generation changed repeatedly during nested occurrence query."
-            )
-
-        def occurrence_factory():
-            return traversal.iter_occurrences(max_occurrences=self.occurrence_limit)
-
-        return occurrence_factory, stats, traversal.owner_replicas, None, None
-
-    def _execute_fixed_containment_definition_result(self) -> DefinitionResultSet:
-        """Refine one projected fixed universe without reacquiring Store authority.
-
-        CDef selectors refine the result's projected carrier.  Exact reference
-        targets instead filter the retained owner/terminal ledger, because an
-        owner result must retain its target evidence for later exact requery.
-        """
-
-        universe = self.universe
-        if (
-            universe is None
-            or universe.kind != "definitions"
-            or universe.containment is None
-        ):
-            raise QueryDomainError(
-                "A nested definition result requires containment universe metadata."
-            )
-        context = universe.containment
-        carrier = universe.containment_carrier
-        if carrier not in {"target", "owner"}:
-            raise QueryDomainError(
-                "Fixed containment result has an unsupported carrier."
-            )
-        stats = QueryStats(universe_size=len(universe.definitions))
-        evidence = universe.containment_witnesses
-        private_evidence = universe.containment_private_witnesses
-        private_replicas = universe.containment_private_replicas
-        if self.generator_selector is not None and (
-            not context.complete or not universe.witness_complete
-        ):
-            raise QueryDomainError(
-                "GeneratorSelector refinement requires complete retained witness evidence."
-            )
-        if is_exact_reference_target(self.containment_target):
-            if not context.complete:
-                raise QueryDomainError(
-                    "Exact containment refinement requires complete retained witness evidence."
-                )
-            evidence = tuple(
-                item for item in evidence if item.target == self.containment_target
-            )
-            if carrier != "owner":
-                raise QueryDomainError(
-                    "Exact-reference containment cannot refine a definition-target result."
-                )
-            retained = tuple(dict.fromkeys(item.owner for item in evidence))
-            private_evidence = tuple(
-                item
-                for item in private_evidence
-                if item.target == self.containment_target
-            )
-        else:
-            if self.generator_selector is None:
-                retained = self._verify_cdefs(tuple(universe.definitions), stats=stats)
-            else:
-                from ..generator import _AssignmentBudget
-
-                witness_budget = self._generator_witness_budget()
-                assignment_budget = _AssignmentBudget(
-                    self.generator_selector._max_assignments
-                )
-                retained_items = []
-                seen_candidates = set()
-                for candidate in universe.witnesses:
-                    node_key = cdef_node_key(candidate)
-                    if node_key in seen_candidates:
-                        continue
-                    seen_candidates.add(node_key)
-                    witness_budget.consume()
-                    retained_items.extend(
-                        self._verify_cdefs(
-                            (candidate,),
-                            stats=stats,
-                            generator_budget=assignment_budget,
-                        )
-                    )
-                if not private_evidence and universe.definitions:
-                    raise QueryDomainError(
-                        "GeneratorSelector refinement requires complete retained witness evidence."
-                    )
-                matched_nodes = {
-                    cdef_node_key(candidate) for candidate in retained_items
-                }
-                private_evidence = tuple(
-                    item
-                    for item in private_evidence
-                    if cdef_node_key(item.target if carrier == "target" else item.owner)
-                    in matched_nodes
-                )
-                public_evidence = {}
-                for item in private_evidence:
-                    public_evidence.setdefault(containment_witness_key(item), item)
-                evidence = tuple(
-                    public_evidence[key] for key in sorted(public_evidence)
-                )
-                merged = {}
-                for candidate in retained_items:
-                    merged.setdefault(candidate, candidate)
-                retained = tuple(
-                    sorted(
-                        merged.values(),
-                        key=lambda cdef: (cdef.stable_hash(), repr(cdef)),
-                )
-                )
-                matched_replicas = {}
-                if carrier == "owner":
-                    if private_replicas is None and private_evidence:
-                        raise QueryDomainError(
-                            "GeneratorSelector refinement requires complete retained witness evidence."
-                        )
-                    for candidate in retained_items:
-                        canonical = merged[candidate]
-                        matched_replicas.setdefault(canonical, []).extend(
-                            (private_replicas or {}).get(cdef_node_key(candidate), ())
-                        )
-            retained_set = set(retained)
-            if evidence and self.generator_selector is None:
-                evidence = tuple(
-                    item
-                    for item in evidence
-                    if (item.target if carrier == "target" else item.owner)
-                    in retained_set
-                )
-                private_evidence = tuple(
-                    item
-                    for item in private_evidence
-                    if (item.target if carrier == "target" else item.owner)
-                    in retained_set
-                )
-        if private_replicas is not None:
-            private_owner_keys = {
-                cdef_node_key(item.owner) for item in private_evidence
-            }
-            private_replicas = {
-                key: stores
-                for key, stores in private_replicas.items()
-                if key in private_owner_keys
-            }
-        replicas = {}
-        if carrier == "owner" and private_replicas is not None:
-            for item in private_evidence:
-                replicas.setdefault(item.owner, []).extend(
-                    private_replicas.get(cdef_node_key(item.owner), ())
-                )
-            replicas = {
-                cdef: tuple(dict.fromkeys(replicas.get(cdef, ()))) for cdef in retained
-            }
-        elif universe.replicas is not None:
-            replicas = {cdef: universe.replicas.get(cdef, ()) for cdef in retained}
-        witnesses = (
-            tuple(
-                item.target
-                for item in private_evidence
-                if isinstance(item.target, ConcreteDefinition)
-            )
-            if carrier == "target"
-            else tuple(item.owner for item in private_evidence)
-        )
-        stats.result_count = len(retained)
-        return DefinitionResultSet(
-            self.repo,
-            retained,
-            materializable=universe.materializable,
-            domain=("nested-definitions" if carrier == "target" else "owners"),
-            explanation=self._explanation(stats),
-            replicas=replicas,
-            containment=context,
-            containment_witnesses=evidence,
-            witnesses=witnesses,
-            witness_complete=(
-                context.complete and universe.witness_complete and not context.bounded
-            ),
-            containment_private_witnesses=private_evidence,
-            containment_private_replicas=private_replicas,
-            containment_carrier=carrier,
-        )
-
-    def _execute_nested_definitions(
-        self,
-    ) -> tuple[tuple[ConcreteDefinition, ...], QueryStats]:
-        if self._is_deterministic_empty_containment():
-            stats = QueryStats(
-                fast_path="deterministic-empty-containment", result_count=0
-            )
-            return (), stats
-        if self._uses_authoritative_containment_residual():
-            return self._execute_authoritative_containment_definitions()
-        if self.universe is None and self.repo._query_index.can_execute_query_domain(
-            "nested"
-        ):
-            return self.repo._query_index.execute_nested_definitions(self)
-        matches, _, stats, _ = self._execute_nested_definition_matches()
-        stats.result_count = len(matches)
-        return matches, stats
-
-    def _execute_nested_owners(self):
-        if self._is_deterministic_empty_containment():
-            stats = QueryStats(
-                fast_path="deterministic-empty-containment", result_count=0
-            )
-            return (), stats, {}
-        if self._uses_authoritative_containment_residual():
-            return self._execute_authoritative_containment_owners()
-        if self.universe is None and self.repo._query_index.can_execute_query_domain(
-            "nested"
-        ):
-            return self.repo._query_index.execute_nested_owners(self)
-        catalog = self.repo._query_catalog
-        for _ in range(_MAX_NESTED_QUERY_RETRIES):
-            matches, match_ids, stats, generation = (
-                self._execute_nested_definition_matches()
-            )
-            try:
-                projection = self._project_owners(catalog, match_ids, generation)
-                break
-            except _QueryGenerationChanged:
-                continue
-        else:
-            raise QueryIndexError(
-                "Catalog generation changed repeatedly during nested owner query."
-            )
-        owners = projection.cdefs
-        owner_replicas = projection.replicas
-        stats.result_count = len(owners)
-        owners = tuple(
-            sorted(owners, key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
-        )
-        return owners, stats, {cdef: owner_replicas.get(cdef, ()) for cdef in owners}
-
-    def _is_deterministic_empty_containment(self) -> bool:
-        """Return whether literal traversal policy makes nested membership empty.
-
-        Materialize-only traversal cannot contain a reference hop.  Classifying
-        this before touching a sidecar or Store lets strict indexed policy retain
-        its valid no-scan empty result.
-        """
-
-        return (
-            self.universe is None
-            and self.domain == "nested"
-            and self.containment_edges == "materialize"
-            and self.contains_ref
-        )
-
-    def _uses_authoritative_containment_residual(self) -> bool:
-        """Return whether nested execution needs root-local authority evidence.
-
-        The legacy materialize-only CDef paths remain index-backed.  Ref-aware,
-        exact-reference, and source-restricted queries have no sidecar
-        completeness certificate, so their results must be derived from a
-        fenced authoritative root cut.
-        """
-
-        return (
-            self.universe is None
-            and self.domain == "nested"
-            and not self._is_deterministic_empty_containment()
-            and (
-                self.containment_edges != "materialize"
-                or self.contains_ref
-                or is_exact_reference_target(self.containment_target)
-                or self.source_store is not None
-            )
-        )
-
-    def _containment_source_scope(self) -> tuple[str, ...]:
-        """Return canonical source keys selected for fresh containment evidence."""
-
-        return tuple(
-            sorted(
-                self._containment_source_key(store)
-                for store in self._containment_stores()
-            )
-        )
-
-    def _fresh_containment_context(self, *, complete: bool) -> ContainmentContext:
-        """Build fixed-result policy metadata for one fresh containment terminal."""
-
-        from .model import containment_target_kind
-
-        return ContainmentContext(
-            target_kind=(
-                containment_target_kind(self.containment_target)
-                if self.containment_target is not None
-                else "definition"
-            ),
-            edges=self.containment_edges,
-            contains_ref=self.contains_ref,
-            source_scope=self._containment_source_scope(),
-            complete=complete,
-            bounded=False,
-        )
-
-    def _containment_stores(self) -> tuple[Any, ...]:
-        """Return selected physical sources once, in Repo priority order."""
-
-        selected = (
-            (self.source_store,)
-            if self.source_store is not None
-            else tuple(self.repo.stores)
-        )
-        stores = []
-        seen = set()
-        for store in selected:
-            key = self._containment_source_key(store)
-            if key not in seen:
-                seen.add(key)
-                stores.append(store)
-        return tuple(stores)
-
-    @staticmethod
-    def _containment_source_key(store) -> str:
-        """Return the stable source identity used by containment evidence."""
-
-        if hasattr(store, "catalog_key"):
-            return store.catalog_key()
-        return f"{type(store).__module__}.{type(store).__qualname__}:id:{id(store)}"
-
-    def _refresh_authoritative_containment_sources(
-        self, stores, stats: QueryStats
-    ) -> None:
-        """Perform allowed sidecar recovery before taking an authority cut."""
-
-        if self.refresh_policy is False:
-            return
-        for store in stores:
-            index = store.open_query_index()
-            if index is not None:
-                index.refresh(self.refresh_policy, stats=stats)
-
-    def _capture_authoritative_containment_roots(self, stats: QueryStats):
-        """Detach complete selected roots under existing Store authority fences.
-
-        Sidecars can be stale, incomplete, or absent, therefore they are not
-        consulted to choose roots.  This U4 capture deliberately retains no
-        open index view or Store fence after returning.
-        """
-
-        stores = self._containment_stores()
-        reason = "reference-aware containment requires authoritative root verification"
-        stats.scan_required = True
-        stats.scan_reason = reason
-        if self.scan_policy_mode == "forbid":
-            raise QueryWouldScanError(reason)
-        if self.scan_policy_mode == "warn":
-            warnings.warn(
-                f"DRYML query requires scan fallback: {reason}",
-                RuntimeWarning,
-                stacklevel=3,
-            )
-
-        for _ in range(_MAX_NESTED_QUERY_RETRIES):
-            # Recovery has its own short fence; capture only after it releases it.
-            self._refresh_authoritative_containment_sources(stores, stats)
-            before = {
-                self._containment_source_key(store): store.query_index_status()
-                for store in stores
-            }
-            entries = []
-            source_plans = []
-            generations = {}
-            generation_changed = False
-            with self.repo._authority_read_fences(stores):
-                for store in stores:
-                    roots = tuple(store.authoritative_root_definitions())
-                    stats.store_scan_count += 1
-                    source_key = self._containment_source_key(store)
-                    status = store.query_index_status()
-                    previous = before[source_key]
-                    if (
-                            previous.state == "ready"
-                            and status.state == "ready"
-                            and (
-                                previous.backend != status.backend
-                                or previous.generation != status.generation
-                            )
-                    ):
-                        generation_changed = True
-                        break
-                    generation = status.generation
-                    if generation is not None:
-                        generations[source_key] = generation
-                    source_plans.append(
-                        SourceQueryPlan(
-                        source_key=source_key,
-                        backend=status.backend,
-                        generation=generation,
-                        candidate_count=len(roots),
-                        refresh_action="authority-root-residual",
-                        )
-                    )
-                    entries.extend((root, store) for root in roots)
-            if generation_changed:
-                continue
-            prior_action = stats.refresh_action
-            stats.refresh_action = (
-                "authority-root-residual"
-                if prior_action == "none"
-                else f"{prior_action}+authority-root-residual"
-            )
-            stats.universe_size = len(entries)
-            stats.generation_vector = generations or None
-            stats.source_plans = tuple(source_plans)
-            return tuple(entries)
-        raise QueryIndexError(
-            "Derived index generation changed repeatedly during authoritative containment capture."
-        )
-
-    def _containment_matcher(self, stats: QueryStats):
-        """Build a typed residual predicate while preserving verify budgets."""
-
-        exact_target = self.containment_target
-        if is_exact_reference_target(exact_target):
-            return (
-                lambda value: type(value) is type(exact_target)
-                and value == exact_target
-            )
-
-        verified: set[ConcreteDefinition] = set()
-
-        def matches(value) -> bool:
-            if not isinstance(value, ConcreteDefinition):
-                return False
-            if value not in verified:
-                verified.add(value)
-                stats.verified_count += 1
-                stats.python_verifications += 1
-                if (
-                    self.max_verify_limit is not None
-                    and stats.verified_count > self.max_verify_limit
-                ):
-                    raise QueryVerifyBudgetExceeded(
-                        f"Query exceeded max_verify budget {self.max_verify_limit}: "
-                        f"verified {stats.verified_count} CDefs."
-                    )
-            return _query_match(
-                self.selector,
-                value,
-                strict=self.strict_policy,
-                class_match=self.class_match_policy,
-            )
-
-        return matches
-
-    def _execute_authoritative_containment_definitions(self):
-        """Project qualified CDef terminals from a fenced authoritative cut."""
-
-        stats = QueryStats()
-        entries = self._capture_authoritative_containment_roots(stats)
-        matches = self._containment_matcher(stats)
-        merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
-        for value in iter_containment_targets_matching(
-            (root for root, _ in entries),
-            matches,
-            edges=self.containment_edges,
-            contains_ref=self.contains_ref,
-        ):
-            if isinstance(value, ConcreteDefinition):
-                merged.setdefault(value, value)
-        out = tuple(
-            sorted(merged.values(), key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
-        )
-        stats.result_count = len(out)
-        return out, stats
-
-    def _execute_authoritative_containment_owners(self):
-        """Project qualified stored roots without enumerating raw paths."""
-
-        stats = QueryStats()
-        entries = self._capture_authoritative_containment_roots(stats)
-        matches = self._containment_matcher(stats)
-        merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
-        replicas: dict[ConcreteDefinition, list[Any]] = {}
-        for root, store in entries:
-            for owner in iter_containment_owners_matching(
-                (root,),
-                matches,
-                edges=self.containment_edges,
-                contains_ref=self.contains_ref,
-            ):
-                canonical = merged.setdefault(owner, owner)
-                replicas.setdefault(canonical, []).append(store)
-        out = tuple(
-            sorted(merged.values(), key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
-        )
-        stats.result_count = len(out)
-        return (
-            out,
-            stats,
-            {owner: tuple(dict.fromkeys(replicas.get(owner, ()))) for owner in out},
-        )
-
-    def _execute_authoritative_containment_projection_evidence(self, carrier: str):
-        """Capture minimal complete owner/terminal ledgers for a direct projection.
-
-        The projection walker contributes one actual path per matching terminal
-        per root.  This supports fixed carrier and exact-target refinement while
-        avoiding raw enumeration of every path through a shared DAG.
-        """
-
-        if carrier not in {"target", "owner"}:
-            raise ValueError("Containment projection carrier must be target or owner.")
-        stats = QueryStats()
-        entries = self._capture_authoritative_containment_roots(stats)
-        matches = self._containment_matcher(stats)
-        selected: dict[ConcreteDefinition, ConcreteDefinition] = {}
-        replicas: dict[ConcreteDefinition, list[Any]] = {}
-        witness_map = {}
-        private_witnesses = []
-        private_replicas: dict[object, list[Any]] = {}
-        grouped_entries: dict[str, list[tuple[ConcreteDefinition, list[Any]]]] = {}
-        for root, store in entries:
-            groups = grouped_entries.setdefault(root.graph_hash(), [])
-            for representative, stores in groups:
-                if (
-                    all(
-                        self._containment_source_key(source)
-                        != self._containment_source_key(store)
-                        for source in stores
-                    )
-                    and representative.graph_equal(root)
-                ):
-                    stores.append(store)
-                    break
-            else:
-                groups.append((root, [store]))
-        root_groups = (group for groups in grouped_entries.values() for group in groups)
-        for root, stores in root_groups:
-            for occurrence in iter_containment_projection_occurrences_matching(
-                (root,),
-                matches,
-                edges=self.containment_edges,
-                    contains_ref=self.contains_ref,
-            ):
-                if carrier == "target":
-                    if not isinstance(occurrence.target, ConcreteDefinition):
-                        continue
-                    private_witnesses.append(occurrence)
-                    private_replicas.setdefault(cdef_node_key(occurrence.owner), []).extend(
-                        stores
-                    )
-                    selected.setdefault(occurrence.target, occurrence.target)
-                    owner_target = (occurrence.owner, occurrence.target)
-                    existing = witness_map.get(owner_target)
-                    if existing is None or containment_witness_key(
-                        occurrence
-                    ) < containment_witness_key(existing):
-                        witness_map[owner_target] = occurrence
-                    continue
-                owner = selected.setdefault(occurrence.owner, occurrence.owner)
-                replicas.setdefault(owner, []).extend(stores)
-                private_witnesses.append(occurrence)
-                private_replicas.setdefault(cdef_node_key(occurrence.owner), []).extend(
-                    stores
-                )
-                witness_map.setdefault(containment_witness_key(occurrence), occurrence)
-        out = tuple(
-            sorted(selected.values(), key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
-        )
-        evidence = tuple(
-            witness_map[key]
-            for key in sorted(
-                witness_map, key=(lambda key: containment_witness_key(witness_map[key]))
-            )
-        )
-        stats.result_count = len(out)
-        return (
-            out,
-            stats,
-            {cdef: tuple(dict.fromkeys(replicas.get(cdef, ()))) for cdef in out},
-            evidence,
-            tuple(private_witnesses),
-            {
-                key: tuple(dict.fromkeys(stores))
-                for key, stores in private_replicas.items()
-            },
-        )
-
-    def _execute_authoritative_containment_occurrences(self):
-        """Collect canonically ordered root-local witnesses under one global cap."""
-
-        from .model import containment_witness_key
-
-        stats = QueryStats()
-        entries = self._capture_authoritative_containment_roots(stats)
-        matches = self._containment_matcher(stats)
-        limit = (
-            None
-            if self.projection in {"object_refs", "state_refs"}
-            else self.occurrence_limit
-        )
-        if limit == 0:
-            stats.result_count = 0
-            return (), stats, {}, (), {}
-        occurrences = []
-        private_occurrences = []
-        private_replicas: dict[object, list[Any]] = {}
-        seen = set()
-        grouped_entries: dict[str, list[tuple[ConcreteDefinition, list[Any]]]] = {}
-        for root, store in entries:
-            groups = grouped_entries.setdefault(root.graph_hash(), [])
-            for representative, stores in groups:
-                if representative.graph_equal(root):
-                    stores.append(store)
-                    break
-            else:
-                groups.append((root, [store]))
-        root_groups = (group for groups in grouped_entries.values() for group in groups)
-
-        def root_occurrences(root, stores):
-            for occurrence in iter_containment_occurrences_matching(
-                (root,),
-                matches,
-                edges=self.containment_edges,
-                    contains_ref=self.contains_ref,
-            ):
-                yield occurrence, stores
-
-        def retain_private(occurrence, stores):
-            private_occurrences.append(occurrence)
-            private_replicas.setdefault(cdef_node_key(occurrence.owner), []).extend(
-                stores
-            )
-
-        def same_public_witness(left, right):
-            return (
-                left.owner == right.owner
-                and left.path == right.path
-                and left.hops == right.hops
-                and type(left.target) is type(right.target)
-                and left.target == right.target
-            )
-
-        pending = []
-        for index, (root, stores) in enumerate(root_groups):
-            iterator = root_occurrences(root, stores)
-            try:
-                occurrence, stores = next(iterator)
-            except StopIteration:
-                continue
-            heappush(
-                pending,
-                (containment_witness_key(occurrence), index, occurrence, stores, iterator),
-            )
-        while pending:
-            key, index, occurrence, stores, iterator = heappop(pending)
-            retain_private(occurrence, stores)
-            if key not in seen:
-                seen.add(key)
-                occurrences.append(occurrence)
-                if limit is not None and len(occurrences) >= limit:
-                    for _, _, pending_occurrence, pending_stores, _ in pending:
-                        if same_public_witness(occurrence, pending_occurrence):
-                            retain_private(pending_occurrence, pending_stores)
-                    break
-            try:
-                occurrence, stores = next(iterator)
-            except StopIteration:
-                continue
-            heappush(
-                pending,
-                (containment_witness_key(occurrence), index, occurrence, stores, iterator),
-            )
-        private_occurrences = tuple(
-            occurrence
-            for occurrence in private_occurrences
-            if any(
-                same_public_witness(visible, occurrence)
-                for visible in occurrences
-            )
-        )
-        private_owner_keys = {
-            cdef_node_key(occurrence.owner) for occurrence in private_occurrences
-        }
-        private_replicas = {
-            key: tuple(dict.fromkeys(stores))
-            for key, stores in private_replicas.items()
-            if key in private_owner_keys
-        }
-        replicas = {}
-        for occurrence in private_occurrences:
-            for visible in occurrences:
-                if same_public_witness(visible, occurrence):
-                    replicas.setdefault(visible.owner, []).extend(
-                        private_replicas.get(cdef_node_key(occurrence.owner), ())
-                    )
-        store_priority = {
-            self._containment_source_key(store): index
-            for index, store in enumerate(self._containment_stores())
-        }
-        stats.result_count = len(occurrences)
-        return (
-            tuple(occurrences),
-            stats,
-            {
-                owner: tuple(
-                    sorted(
-                        dict.fromkeys(stores),
-                        key=lambda store: store_priority[
-                            self._containment_source_key(store)
-                        ],
-                    )
-                )
-                for owner, stores in replicas.items()
-            },
-            private_occurrences,
-            private_replicas,
-        )
-
-    def _execute_nested_definition_matches(self):
-        stats = QueryStats()
-        catalog = self.repo._query_catalog
-        captured = self._capture_nested_candidates(catalog, stats)
-        matches, match_ids = self._verify_cdefs_by_id(captured.cdefs_by_id, stats=stats)
-        return matches, match_ids, stats, captured.generation
-
-    def _capture_nested_candidates(
-        self, catalog, stats: QueryStats
-    ) -> CapturedNestedCandidates:
-        catalog.refresh(self.refresh_policy, stats=stats)
-        with catalog.read_view(include_cached=False) as snapshot:
-            selector_graph = compile_selector_graph(
-                self.selector, class_match=self.class_match_policy
-            )
-            if selector_graph is not None:
-                candidate_ids = graph_candidate_ids(
-                    snapshot, selector_graph, None, stats=stats
-                )
-                candidate_ids = snapshot.filter_nested_ids(candidate_ids)
-                stats.candidate_count = len(candidate_ids)
-            else:
-                domain = NestedDomain(snapshot)
-                candidate_ids = domain.all_ids()
-                stats.candidate_count = len(candidate_ids)
-                stats.universe_size = None
-            cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
-            generation = snapshot.generation
-        return CapturedNestedCandidates(
-            generation=generation, cdefs_by_id=cdefs_by_id, stats=stats
-        )
-
-    def _capture_occurrence_traversal(
-        self, catalog, ids: set[DefinitionId] | frozenset[DefinitionId], generation: int
-    ):
-        with catalog.read_view(include_cached=False) as snapshot:
-            if snapshot.generation != generation:
-                raise _QueryGenerationChanged
-            return snapshot.occurrence_snapshot_for_nested_ids(set(ids))
-
-    def _project_owners(
-        self, catalog, ids: set[DefinitionId] | frozenset[DefinitionId], generation: int
-    ):
-        with catalog.read_view(include_cached=False) as snapshot:
-            if snapshot.generation != generation:
-                raise _QueryGenerationChanged
-            return snapshot.project_owners(set(ids))
-
-    def _verify_cdefs_by_id(
-        self, cdefs_by_id: dict[DefinitionId, ConcreteDefinition], *, stats: QueryStats
-    ) -> tuple[tuple[ConcreteDefinition, ...], set[DefinitionId]]:
-        matches = self._verify_cdefs(tuple(cdefs_by_id.values()), stats=stats)
-        match_set = set(matches)
-        match_ids = {did for did, cdef in cdefs_by_id.items() if cdef in match_set}
-        return matches, match_ids
-
-    def _verify_cdefs(
-            self,
-            cdefs: tuple[ConcreteDefinition, ...],
-            *,
-            stats: QueryStats,
-        generator_budget=None,
-    ) -> tuple[ConcreteDefinition, ...]:
-        if self.selector is None:
-            stats.verified_count += len(cdefs)
-            stats.python_verifications += len(cdefs)
-            if (
-                self.max_verify_limit is not None
-                and stats.verified_count > self.max_verify_limit
-            ):
-                raise QueryVerifyBudgetExceeded(
-                    f"Query exceeded max_verify budget {self.max_verify_limit}: verified {stats.verified_count} CDefs."
-                )
-            return tuple(
-                sorted(cdefs, key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
-            )
-
-        out: list[ConcreteDefinition] = []
-        for cdef in cdefs:
-            stats.verified_count += 1
-            stats.python_verifications += 1
-            if (
-                self.max_verify_limit is not None
-                and stats.verified_count > self.max_verify_limit
-            ):
-                raise QueryVerifyBudgetExceeded(
-                    f"Query exceeded max_verify budget {self.max_verify_limit}: verified {stats.verified_count} CDefs."
-                )
-            if not _structural_match(
-                    self.selector,
-                    cdef,
-                    strict=self.strict_policy,
-                class_match=self.class_match_policy,
-            ):
-                continue
-            if self.generator_selector is not None:
-                if generator_budget is None:
-                    matched = self.generator_selector.matches(cdef)
-                else:
-                    matched = self.generator_selector._matches(cdef, generator_budget)
-                if not matched:
-                    continue
-            out.append(cdef)
-        return tuple(sorted(out, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
-
-
-def _snapshot_source(source):
-    if source is None:
-        return None
-    if isinstance(source, Object):
-        return source.definition
-    if isinstance(source, ConcreteDefinition):
-        return source
-    if isinstance(source, Selector):
-        return source.root
-    from ..generator import GeneratorSelector
-
-    if isinstance(source, GeneratorSelector):
-        return source.prefilter.root
-    if isinstance(source, Definition):
-        return deepcopy(source)
-    raise TypeError(
-        f"Query source must be Selector, Definition, ConcreteDefinition, Object, or None, not {type(source).__name__}."
-    )
-
-
-def _resolve_query_state_selectors(source, repo):
-    """Resolve every soft StateSelectorRef before a DefinitionQuery exists.
-
-    Query selectors may remain partial and contain ``Par`` values, so they cannot
-    use Definition-to-CDef concretization as a resolver.  This graph-preserving
-    rewrite only replaces soft selector leaves and retains all selector syntax.
-    """
-
-    from ..selector import _resolve_state_selectors
-
-    return _resolve_state_selectors(source, repo)
-
-
-def _structural_match(
-    selector, cdef: ConcreteDefinition, *, strict: bool, class_match: ClassMatchPolicy
-) -> bool:
-    if not _query_match(selector, cdef, strict=strict, class_match=class_match):
-        return False
-    return True
 
 
 def _query_match(
@@ -3415,13 +671,26 @@ def intersection(left, right, *others):
 
 @dataclass(frozen=True, slots=True)
 class IdentityQuery:
-    """Private composable Query V3 restriction plan over complete identities.
+    """Compose deferred restrictions over complete CDef and reference identities.
 
-    The class is intentionally not yet produced by ``Repo.query`` or
-    ``Store.query``.  It provides U3's shared restriction semantics while the
-    public cutover remains owned by U7.  A terminal captures all requested Store
-    facts once, evaluates only detached identities and facts, and returns an
-    immutable :class:`IdentitySet` without constructing or saving Objects.
+    Instances come from :meth:`dryml.core.Repo.query`, :meth:`Store.query`, or a
+    fixed :class:`IdentitySet`. Restriction methods return immutable plans; an
+    explicit terminal captures required Store facts once and returns an
+    :class:`IdentitySet` or scalar identity. Query evaluation reads no payloads
+    and never constructs Objects, allocates ObjectIds, writes authority, observes
+    host state, or executes workloads.
+
+    Attributes:
+        source: Producer or fixed membership that supplies the initial universe.
+        restrictions: Ordered immutable identity, metadata, and source filters.
+        default_scope: Optional unambiguous authority scope for later operations.
+        max_witness_limit: Optional exact GeneratorSelector verification bound.
+        refresh_policy: Existing derived-index refresh policy.
+        scan_policy_mode: Authority-inventory scan policy.
+        max_verify_limit: Optional detached-candidate verification bound.
+        max_depth_limit: Optional later relationship traversal depth bound.
+        indexed_required: Whether unproved V3 index coverage is rejected.
+        take_limit: Optional explicit bounded terminal prefix size.
     """
 
     source: Any
@@ -3437,7 +706,20 @@ class IdentityQuery:
 
     @classmethod
     def from_store(cls, store) -> "IdentityQuery":
-        """Create an unevaluated V3 universe from one Store producer."""
+        """Create an unevaluated V3 universe from one Store producer.
+
+        Args:
+            store: Store whose authoritative and derived knowledge seeds the plan.
+
+        Returns:
+            A query with ``store`` as its default authority scope.
+
+        Raises:
+            TypeError: Immediately if ``store`` is unsupported.
+
+        Side Effects:
+            None. The Store is not read until a terminal executes.
+        """
 
         from .source import StoreSource
 
@@ -3446,7 +728,21 @@ class IdentityQuery:
 
     @classmethod
     def from_repo(cls, repo, *, weak: bool = True) -> "IdentityQuery":
-        """Create an unevaluated V3 universe from one Repo producer."""
+        """Create an unevaluated V3 universe from one Repo producer.
+
+        Args:
+            repo: Repo supplying connected Store and retained-cache knowledge.
+            weak: Include weak cache entries as well as strong entries.
+
+        Returns:
+            A query with ``repo`` as its default authority scope.
+
+        Raises:
+            TypeError: If ``weak`` is not an exact bool.
+
+        Side Effects:
+            None. Stores and caches are not read until a terminal executes.
+        """
 
         from .source import RepoSource
 
@@ -3455,7 +751,21 @@ class IdentityQuery:
 
     @classmethod
     def from_retained_repo_lookup(cls, repo, *, weak: bool = True) -> "IdentityQuery":
-        """Create the private V3 root-or-cache universe for retained Repo APIs."""
+        """Create the private root-or-cache universe for retained Repo lookups.
+
+        Args:
+            repo: Repo supplying explicit roots and retained cache entries.
+            weak: Include weak cache entries as well as strong entries.
+
+        Returns:
+            An unevaluated identity query for retained non-query Repo APIs.
+
+        Raises:
+            TypeError: If ``weak`` is not an exact bool.
+
+        Side Effects:
+            None until a terminal executes.
+        """
 
         from .source import RetainedRepoLookupSource
 
@@ -3464,7 +774,20 @@ class IdentityQuery:
 
     @classmethod
     def from_set(cls, members) -> "IdentityQuery":
-        """Create an unevaluated V3 refinement over a fixed IdentitySet."""
+        """Create an unevaluated V3 refinement over a fixed IdentitySet.
+
+        Args:
+            members: Detached :class:`IdentitySet` membership and evidence.
+
+        Returns:
+            A query restricted to the supplied fixed identities.
+
+        Raises:
+            TypeError: If ``members`` is not an IdentitySet.
+
+        Side Effects:
+            None. No external authority is adopted or read.
+        """
 
         from .identity import IdentitySet
 
@@ -3478,6 +801,21 @@ class IdentityQuery:
         Definitions remain structural even when complete; ConcreteDefinitions,
         exact references, and GeneratorSelector support retain their stricter
         established meanings.  ``None`` is an immutable no-op.
+
+        Args:
+            value: Definition, complete CDef, Selector, GeneratorSelector, exact
+                ObjectRef or StateRef, or ``None``.
+
+        Returns:
+            An immutable query with the selector appended, or this query for
+            ``None``.
+
+        Raises:
+            TypeError: If the selector type is unsupported or contains a
+                StateSelectorRef without an explicit selector scope.
+
+        Side Effects:
+            None. Selection remains deferred until a terminal executes.
         """
 
         if value is None:
@@ -3574,7 +912,20 @@ class IdentityQuery:
         )
 
     def object_id(self, value) -> "IdentityQuery":
-        """Restrict ObjectRef and StateRef candidates containing ``value``."""
+        """Restrict ObjectRef and StateRef candidates containing one ObjectId.
+
+        Args:
+            value: Exact ObjectId required at any retained reference path.
+
+        Returns:
+            An immutable restricted query.
+
+        Raises:
+            TypeError: If ``value`` is not an ObjectId.
+
+        Side Effects:
+            None until a terminal executes.
+        """
 
         from ..reference_values import ObjectId
 
@@ -3583,14 +934,41 @@ class IdentityQuery:
         return self._append("object_id", value)
 
     def namespace(self, prefix) -> "IdentityQuery":
-        """Restrict reference candidates to an already validated namespace prefix."""
+        """Restrict reference candidates to a normalized namespace prefix.
+
+        Args:
+            prefix: Iterable namespace prefix accepted by ObjectRef validation.
+
+        Returns:
+            An immutable restricted query.
+
+        Raises:
+            TypeError: If the namespace is not iterable or has invalid elements.
+            ValueError: If namespace validation rejects the prefix.
+
+        Side Effects:
+            None until a terminal executes.
+        """
 
         from ..reference_values import _normalize_namespace
 
         return self._append("namespace", _normalize_namespace(tuple(prefix)))
 
     def contains(self, value) -> "IdentityQuery":
-        """Restrict aggregates to a proper owned subtree exact ObjectRef."""
+        """Restrict aggregates to a proper owned subtree exact ObjectRef.
+
+        Args:
+            value: Exact ObjectRef required below an aggregate root.
+
+        Returns:
+            An immutable restricted query.
+
+        Raises:
+            TypeError: If ``value`` is not an ObjectRef.
+
+        Side Effects:
+            None until a terminal executes.
+        """
 
         from ..reference_values import ObjectRef
 
@@ -3599,7 +977,21 @@ class IdentityQuery:
         return self._append("contains", value)
 
     def state_hash(self, value: str) -> "IdentityQuery":
-        """Restrict StateRefs to an existing complete local state hash."""
+        """Restrict StateRefs to an existing complete local state hash.
+
+        Args:
+            value: Canonical local-state hash.
+
+        Returns:
+            An immutable restricted query.
+
+        Raises:
+            TypeError: If the hash is not a string.
+            ValueError: If the hash format is invalid.
+
+        Side Effects:
+            None until a terminal executes.
+        """
 
         from ..reference_values import _validate_state_hash
 
@@ -3607,14 +999,44 @@ class IdentityQuery:
         return self._append("state_hash", value)
 
     def alias(self, value: str, *, scope=None) -> "IdentityQuery":
-        """Restrict by aliases captured from the authority scope bound now."""
+        """Restrict by aliases captured from the authority scope bound now.
+
+        Args:
+            value: Non-empty alias name.
+            scope: Store or Repo authority, defaulting to the producer scope.
+
+        Returns:
+            An immutable alias restriction.
+
+        Raises:
+            ValueError: If ``value`` is not a non-empty string.
+            QueryDomainError: If no unambiguous scope is available.
+            TypeError: If ``scope`` is unsupported.
+
+        Side Effects:
+            None until a terminal captures aliases under an authority fence.
+        """
 
         if not isinstance(value, str) or not value:
             raise ValueError("alias requires a non-empty string.")
         return self._append("alias", value, self._bound_scope(scope))
 
     def stored(self, *, scope=None) -> "IdentityQuery":
-        """Restrict members by their kind-specific captured stored authority."""
+        """Restrict members by their kind-specific captured stored authority.
+
+        Args:
+            scope: Store or Repo authority, defaulting to the producer scope.
+
+        Returns:
+            An immutable stored-membership restriction.
+
+        Raises:
+            QueryDomainError: If no unambiguous scope is available.
+            TypeError: If ``scope`` is unsupported.
+
+        Side Effects:
+            None until a terminal reads authority or verified derived candidates.
+        """
 
         return self._append("stored", None, self._bound_scope(scope))
 
@@ -3648,14 +1070,42 @@ class IdentityQuery:
         return self._append("cached", weak, selected)
 
     def where(self, predicate, *, scope=None) -> "IdentityQuery":
-        """Conjoin typed metadata without changing the identity query family."""
+        """Conjoin typed metadata without changing the identity query family.
+
+        Args:
+            predicate: Typed Query V3 metadata predicate.
+            scope: Store or Repo authority, defaulting to the producer scope.
+
+        Returns:
+            An immutable metadata restriction.
+
+        Raises:
+            TypeError: If the predicate or scope is unsupported.
+            QueryDomainError: If no unambiguous scope is available.
+
+        Side Effects:
+            None until a terminal captures metadata under authority fences.
+        """
 
         from .metadata import _require_predicate
 
         return self._append("metadata", _require_predicate(predicate), self._bound_scope(scope))
 
     def in_source(self, source) -> "IdentityQuery":
-        """Restrict captured contribution evidence and bind later defaults to it."""
+        """Restrict contribution evidence and bind later authority defaults.
+
+        Args:
+            source: Contributing Store or Repo represented in captured evidence.
+
+        Returns:
+            An immutable source-evidence restriction.
+
+        Raises:
+            TypeError: If ``source`` is not a Store or Repo producer.
+
+        Side Effects:
+            None until a terminal executes.
+        """
 
         scope = self._normalize_scope(source)
         return replace(self._append("source", source), default_scope=scope)
@@ -3666,6 +1116,19 @@ class IdentityQuery:
         The result keeps a default authority scope only when both operand plans
         name the same Store or Repo object.  Different producers therefore
         compose without choosing authority by source order.
+
+        Args:
+            other: Identity query or fixed IdentitySet to combine.
+
+        Returns:
+            A deferred complete-identity union.
+
+        Raises:
+            TypeError: If ``other`` is unsupported.
+            QueryDomainError: If execution policies conflict.
+
+        Side Effects:
+            None until a terminal evaluates both operands under shared cuts.
         """
 
         return self._combine(other, "union")
@@ -3676,6 +1139,19 @@ class IdentityQuery:
         Matching identities retain the evidence supplied by both operands.  As
         with :meth:`union`, an ambiguous authority default is deliberately
         removed rather than selected from operand order.
+
+        Args:
+            other: Identity query or fixed IdentitySet to combine.
+
+        Returns:
+            A deferred complete-identity intersection.
+
+        Raises:
+            TypeError: If ``other`` is unsupported.
+            QueryDomainError: If execution policies conflict.
+
+        Side Effects:
+            None until a terminal evaluates both operands under shared cuts.
         """
 
         return self._combine(other, "intersection")
@@ -3692,6 +1168,10 @@ class IdentityQuery:
 
         Raises:
             ValueError: If ``limit`` is not a non-negative exact integer.
+
+        Side Effects:
+            Evaluates the query under authority fences. Eligible stored-CDef
+            plans may read derived keyset pages but never mutate authority.
         """
 
         if type(limit) is not int or limit < 0:
@@ -3699,40 +1179,126 @@ class IdentityQuery:
         return replace(self, take_limit=limit).collect()
 
     def max_witnesses(self, limit: int | None) -> "IdentityQuery":
-        """Set the shared GeneratorSelector verification witness budget."""
+        """Set the shared GeneratorSelector verification witness budget.
+
+        Args:
+            limit: Positive exact witness count, or ``None`` for no bound.
+
+        Returns:
+            An immutable query carrying the verification budget.
+
+        Raises:
+            ValueError: If ``limit`` is not positive, exact, or ``None``.
+
+        Side Effects:
+            None until a terminal verifies generator support.
+        """
 
         if limit is not None and (type(limit) is not int or limit <= 0):
             raise ValueError("max_witnesses limit must be a positive exact int or None.")
         return replace(self, max_witness_limit=limit)
 
     def refresh(self, policy: RefreshPolicy = "auto") -> "IdentityQuery":
-        """Record the existing refresh policy without changing V3 authority facts."""
+        """Return a plan with the requested derived-index refresh policy.
 
-        if policy not in {False, "auto", True}:
+        ``False`` leaves derived indexes untouched, ``"auto"`` reconciles stale
+        indexes when safe, and ``True`` forces reconciliation before each
+        terminal source cut. Authoritative Store records are never rewritten.
+
+        Args:
+            policy: Exact ``False``, ``"auto"``, or exact ``True`` behavior.
+
+        Returns:
+            An immutable query carrying the selected refresh policy.
+
+        Raises:
+            ValueError: If ``policy`` is not ``False``, ``"auto"``, or ``True``.
+
+        Side Effects:
+            None until a terminal executes. Terminal evaluation may open,
+            validate, rebuild, or replace derived query-index sidecars.
+        """
+
+        if policy is not False and policy is not True and policy != "auto":
             raise ValueError("refresh policy must be False, 'auto', or True.")
         return replace(self, refresh_policy=policy)
 
     def scan_policy(self, policy: str) -> "IdentityQuery":
-        """Control whether a required V3 source inventory scan is permitted."""
+        """Return a plan controlling required authoritative inventory scans.
 
-        if policy not in {"allow", "warn", "forbid"}:
+        ``"allow"`` scans silently, ``"warn"`` emits one ``RuntimeWarning`` per
+        terminal requiring a scan, and ``"forbid"`` raises
+        :class:`QueryWouldScanError` before scanning.
+
+        Args:
+            policy: One of ``"allow"``, ``"warn"``, or ``"forbid"``.
+
+        Returns:
+            An immutable query carrying the selected authority-scan policy.
+
+        Raises:
+            ValueError: If ``policy`` is not ``"allow"``, ``"warn"``, or
+                ``"forbid"``.
+
+        Side Effects:
+            None until a terminal executes; ``"warn"`` may then emit a warning.
+        """
+
+        if not isinstance(policy, str) or policy not in {"allow", "warn", "forbid"}:
             raise ValueError("scan policy must be 'allow', 'warn', or 'forbid'.")
         return replace(self, scan_policy_mode=policy)
 
     def require_indexed(self) -> "IdentityQuery":
-        """Require proved V3 index coverage, not merely a selective Store read."""
+        """Require proved V3 index coverage rather than authority fallback.
+
+        Returns:
+            An immutable query that also forbids authority inventory scans.
+
+        Raises:
+            None while building the plan. Terminals raise QueryIndexUnavailable
+            when the required coverage or direct authority proof is absent.
+
+        Side Effects:
+            None until a terminal validates the derived index.
+        """
 
         return replace(self, scan_policy_mode="forbid", indexed_required=True)
 
     def max_verify(self, limit: int | None) -> "IdentityQuery":
-        """Set the maximum detached identity candidates verified by a terminal."""
+        """Set the maximum detached identity candidates verified by a terminal.
+
+        Args:
+            limit: Non-negative exact candidate count, or ``None`` for no bound.
+
+        Returns:
+            An immutable query carrying the verification budget.
+
+        Raises:
+            ValueError: If ``limit`` is negative, inexact, or not ``None``.
+
+        Side Effects:
+            None until a terminal verifies candidates.
+        """
 
         if limit is not None and (type(limit) is not int or limit < 0):
             raise ValueError("max_verify limit must be a non-negative exact int or None.")
         return replace(self, max_verify_limit=limit)
 
     def max_depth(self, limit: int | None) -> "IdentityQuery":
-        """Set the relationship-depth safety budget for later closure or nesting."""
+        """Set the relationship-depth safety budget for closure or nesting.
+
+        Args:
+            limit: Non-negative exact depth, or ``None`` for no bound.
+
+        Returns:
+            An immutable query carrying the traversal budget.
+
+        Raises:
+            ValueError: If ``limit`` is negative, inexact, or not ``None``.
+
+        Side Effects:
+            None until a relationship terminal executes.
+        """
 
         if limit is not None and (type(limit) is not int or limit < 0):
             raise ValueError("max_depth limit must be a non-negative exact int or None.")
@@ -3744,6 +1310,21 @@ class IdentityQuery:
         ``sql`` is accepted for interface parity but reports no backend detail:
         U3 evaluates authoritative detached records rather than a SQL result.
         ``analyze`` evaluates the plan and includes its final result count.
+
+        Args:
+            analyze: Execute the plan to include runtime counts and refresh work.
+            sql: Request backend detail; currently retained for interface parity.
+
+        Returns:
+            A disclosure-safe structural QueryExplanation.
+
+        Raises:
+            QueryError: If analyzed execution, authority capture, or required
+                index validation fails.
+
+        Side Effects:
+            With ``analyze=True``, reads sources and may refresh derived indexes
+            according to the plan. Otherwise no query source is read.
         """
 
         del sql
@@ -3760,10 +1341,14 @@ class IdentityQuery:
             capture_rounds = capture.capture_rounds
             demand_recaptures = capture.demand_recaptures
         return QueryStats(
+            refresh_action=(capture.refresh_action if analyze else "none"),
             result_count=result_count,
             fast_path="exact-state-ref" if exact else None,
             scan_required=scan_required,
             scan_reason=("V3 identity inventory requires authoritative record enumeration" if scan_required else None),
+            candidate_rows_read=(capture.candidate_rows_read if analyze else 0),
+            cdef_blobs_decoded=(capture.cdef_blobs_decoded if analyze else 0),
+            pages_fetched=(capture.pages_fetched if analyze else 0),
             source_cuts=source_cuts,
             capture_rounds=capture_rounds,
             demand_recaptures=demand_recaptures,
@@ -3771,7 +1356,21 @@ class IdentityQuery:
         ).explanation(domain="identity", refresh=self.refresh_policy)
 
     def categorical(self, **kwargs) -> "IdentityQuery":
-        """Append the categorical edit of this query's latest selector restriction."""
+        """Append a categorical edit of the latest selector restriction.
+
+        Args:
+            **kwargs: Keyword arguments accepted by ``Selector.categorical``.
+
+        Returns:
+            An immutable query with the edited selector appended.
+
+        Raises:
+            QueryDomainError: If no selector restriction exists.
+            TypeError: If selector editing rejects the arguments.
+
+        Side Effects:
+            None. Selection remains deferred.
+        """
 
         selector = self._last_selector()
         if selector is None:
@@ -3779,7 +1378,21 @@ class IdentityQuery:
         return self.sel(selector.categorical(**kwargs))
 
     def restore(self, **kwargs) -> "IdentityQuery":
-        """Append the restored form of this query's latest selector restriction."""
+        """Append the restored form of the latest selector restriction.
+
+        Args:
+            **kwargs: Keyword arguments accepted by ``Selector.restore``.
+
+        Returns:
+            An immutable query with the restored selector appended.
+
+        Raises:
+            QueryDomainError: If no selector restriction exists.
+            TypeError: If selector editing rejects the arguments.
+
+        Side Effects:
+            None. Selection remains deferred.
+        """
 
         selector = self._last_selector()
         if selector is None:
@@ -3787,7 +1400,22 @@ class IdentityQuery:
         return self.sel(selector.restore(**kwargs))
 
     def exact(self, definition=None, **kwargs) -> "IdentityQuery":
-        """Append an exact subtree edit without discarding earlier restrictions."""
+        """Append an exact subtree edit without discarding restrictions.
+
+        Args:
+            definition: Optional subtree definition accepted by ``Selector.exact``.
+            **kwargs: Path edits accepted by ``Selector.exact``.
+
+        Returns:
+            An immutable query with the exact selector appended.
+
+        Raises:
+            QueryDomainError: If no selector restriction exists.
+            TypeError: If selector editing rejects the arguments.
+
+        Side Effects:
+            None. Selection remains deferred.
+        """
 
         selector = self._last_selector()
         if selector is None:
@@ -3795,26 +1423,70 @@ class IdentityQuery:
         return self.sel(selector.exact(definition, **kwargs))
 
     def collect(self):
-        """Finish detached membership evaluation and return a fixed IdentitySet."""
+        """Finish detached membership evaluation into a fixed IdentitySet.
+
+        Returns:
+            A deterministic fixed result with detached evidence and visible bounds.
+
+        Raises:
+            QueryError: If validation, authority capture, budgets, or required
+                index coverage fails.
+
+        Side Effects:
+            Reads source authority and caches under retryable cuts and may refresh
+            derived indexes according to the plan.
+        """
 
         return self._run_terminal(self._collect_with_capture)
 
     def count(self) -> int:
-        """Return the distinct V3 identity count after all validation."""
+        """Return the distinct identity count after all validation.
+
+        Returns:
+            Number of identities retained by the plan and any explicit bound.
+
+        Raises:
+            QueryError: If validation, authority capture, budgets, or required
+                index coverage fails.
+
+        Side Effects:
+            Executes the query without constructing a complete fixed result.
+        """
 
         if self.take_limit is not None:
             return self._run_terminal(lambda cut: len(self._bounded_terminal_entries(cut)[0]))
         return self._run_terminal(lambda cut: sum(1 for _ in self._iter_terminal_members(cut)))
 
     def exists(self) -> bool:
-        """Return whether one fully valid V3 identity remains."""
+        """Return whether one fully valid identity remains.
+
+        Returns:
+            ``True`` after the first conclusive valid member, otherwise ``False``.
+
+        Raises:
+            QueryError: If validation or source/index access fails.
+
+        Side Effects:
+            Executes only the source work needed for a conclusive answer.
+        """
 
         if self.take_limit == 0:
             return False
         return self._run_terminal(lambda cut: next(self._iter_terminal_members(cut), None) is not None)
 
     def one(self):
-        """Return one V3 identity or raise the normal cardinality error."""
+        """Return the sole retained identity.
+
+        Returns:
+            The one complete CDef, ObjectRef, or StateRef.
+
+        Raises:
+            QueryCardinalityError: If zero or multiple identities remain.
+            QueryError: If validation or source/index access fails.
+
+        Side Effects:
+            Executes enough source work to prove singleton cardinality.
+        """
 
         if self.take_limit is not None:
             items = self._run_terminal(lambda cut: tuple(self._bounded_terminal_entries(cut)[0].values()))
@@ -3827,7 +1499,18 @@ class IdentityQuery:
         return items[0][1][0]
 
     def one_or_none(self):
-        """Return zero or one V3 identity, rejecting ambiguous matches."""
+        """Return zero or one identity while rejecting ambiguity.
+
+        Returns:
+            The sole identity, or ``None`` when no identity remains.
+
+        Raises:
+            QueryCardinalityError: If multiple identities remain.
+            QueryError: If validation or source/index access fails.
+
+        Side Effects:
+            Executes enough source work to prove at-most-one cardinality.
+        """
 
         if self.take_limit is not None:
             items = self._run_terminal(lambda cut: tuple(self._bounded_terminal_entries(cut)[0].values()))
@@ -3851,7 +1534,24 @@ class IdentityQuery:
         from .model import QueryError
         from .source import SourceCapture, _SourceRecapture
 
+        if (
+                self.scan_policy_mode == "forbid"
+                and not self.indexed_required
+                and self._requires_authority_scan()
+                and not self._can_try_bounded_index()
+                and self._exact_stored_cdef_selector() is None
+                and not (
+                    self._exact_state_selector() is not None
+                    and not self._metadata_scopes()
+                    and not any(
+                        item.kind in {"alias", "stored"}
+                        for item in self.restrictions
+                    )
+                )):
+            raise QueryWouldScanError("Query V3 requires an authoritative inventory scan.")
+        refresh_action = self._refresh_derived_indexes()
         capture = SourceCapture()
+        capture.refresh_action = refresh_action
         capture.active = True
         while True:
             try:
@@ -3862,6 +1562,79 @@ class IdentityQuery:
                     capture.instability_retries += 1
                     if capture.instability_retries >= 3:
                         raise QueryError("Query V3 source changed during evaluation.") from None
+
+    def _refresh_derived_indexes(self) -> str:
+        """Apply the terminal's refresh policy once to producer-owned indexes."""
+
+        if self.refresh_policy is False or self.take_limit == 0:
+            return "none"
+        if self.refresh_policy == "auto" and (
+                self._exact_stored_cdef_selector() is not None
+                or (
+                    self._exact_state_selector() is not None
+                    and not self._metadata_scopes()
+                    and not any(
+                        item.kind in {"alias", "stored"}
+                        for item in self.restrictions
+                    )
+                )):
+            return "none"
+        from .source import RepoSource, RetainedRepoLookupSource, StoreSource
+
+        seen_repos = set()
+        seen_stores = set()
+        refreshed = False
+
+        def refresh_store(store):
+            nonlocal refreshed
+            key = store.authority_fence_key()
+            if key in seen_stores:
+                return
+            seen_stores.add(key)
+            if getattr(store, "query_index_policy", None) in {"memory", "none"}:
+                return
+            try:
+                index = store.open_query_index()
+            except QueryIndexUnavailable:
+                if self.refresh_policy is True:
+                    raise
+                return
+            if index is not None:
+                index.refresh(self.refresh_policy)
+                refreshed = True
+
+        def visit(query):
+            nonlocal refreshed
+            source = query.source
+            if isinstance(source, StoreSource):
+                refresh_store(source.store)
+            elif isinstance(source, (RepoSource, RetainedRepoLookupSource)):
+                repo = source.repo
+                if id(repo) not in seen_repos:
+                    seen_repos.add(id(repo))
+                    if any(
+                            getattr(store, "query_index_policy", None)
+                            not in {"memory", "none"}
+                            for store in repo.stores):
+                        refreshed = (
+                            repo._query_index.refresh(self.refresh_policy)
+                            or refreshed
+                        )
+                    seen_stores.update(
+                        store.authority_fence_key() for store in repo.stores
+                    )
+            elif isinstance(source, _RelationshipClosure):
+                visit(source.input_query)
+            elif isinstance(source, _RelationshipProjection):
+                visit(source.occurrence_query.roots)
+            elif isinstance(source, _AlgebraSource):
+                visit(source.left)
+                visit(source.right)
+
+        visit(self)
+        if not refreshed:
+            return "none"
+        return "forced" if self.refresh_policy is True else "auto"
 
     def _combine(self, other: "IdentityQuery", operation: str) -> "IdentityQuery":
         """Validate compatible terminal controls and defer one algebra stage."""
@@ -3934,11 +1707,60 @@ class IdentityQuery:
         else:
             members, bounded = self._bounded_terminal_entries(capture)
         limit = self.take_limit
-        if limit is None and isinstance(self.source, IdentitySet):
-            limit = self.source.requested_limit
+        limit_conflict = False
+        if limit is None:
+            limit, limit_conflict = self._retained_requested_limit_state()
         return IdentitySet._from_entries(
-            members, bounded=bounded, requested_limit=limit,
+            members,
+            bounded=bounded,
+            requested_limit=limit,
+            requested_limit_conflict=limit_conflict,
+            query_work=self._retained_query_work(),
+            query_stats=(
+                capture.candidate_rows_read,
+                capture.cdef_blobs_decoded,
+                capture.pages_fetched,
+            ),
         )
+
+    def _retained_query_work(self):
+        """Return deduplicated work provenance captured by fixed-set sources."""
+
+        from .identity import IdentitySet
+
+        if isinstance(self.source, IdentitySet):
+            return dict(self.source._query_work)
+        if isinstance(self.source, _AlgebraSource):
+            return {
+                **self.source.left._retained_query_work(),
+                **self.source.right._retained_query_work(),
+            }
+        if isinstance(self.source, _RelationshipClosure):
+            return self.source.input_query._retained_query_work()
+        if isinstance(self.source, _RelationshipProjection):
+            return self.source.occurrence_query.roots._retained_query_work()
+        return {}
+
+    def _retained_requested_limit_state(self):
+        """Return visible prefix-limit state retained by fixed-set sources."""
+
+        from .identity import IdentitySet, _combined_requested_limit_state
+
+        if isinstance(self.source, IdentitySet):
+            return (
+                self.source.requested_limit,
+                self.source._requested_limit_conflict,
+            )
+        if isinstance(self.source, _AlgebraSource):
+            return _combined_requested_limit_state(
+                *self.source.left._retained_requested_limit_state(),
+                *self.source.right._retained_requested_limit_state(),
+            )
+        if isinstance(self.source, _RelationshipClosure):
+            return self.source.input_query._retained_requested_limit_state()
+        if isinstance(self.source, _RelationshipProjection):
+            return self.source.occurrence_query.roots._retained_requested_limit_state()
+        return None, False
 
     def _evaluate_entries(self, capture):
         """Return complete private entries for an algebra operand, never public API."""
@@ -3971,12 +1793,181 @@ class IdentityQuery:
         assert self.take_limit is not None
         if self.take_limit == 0:
             return {}, True
+        indexed = self._bounded_index_entries(capture)
+        if indexed is not None:
+            return indexed, True
         selected = []
         for key, entry in self._iter_terminal_members(capture):
             _retain_bounded_identity_entry(selected, key, entry, self.take_limit)
         return (
             {key: entry for key, entry in selected},
             True,
+        )
+
+    def _bounded_index_entries(self, capture):
+        """Return a keyset-paged global CDef prefix when every source supports it."""
+
+        import heapq
+
+        from .identity import IdentitySet
+        from .model import (
+            QueryIndexDirty,
+            QueryIndexUnavailable,
+            QueryStats,
+            QueryWouldScanError,
+        )
+
+        stores = self._bounded_index_stores(capture)
+        if stores is None:
+            return None
+        streams = []
+        for store in stores:
+            if self.refresh_policy is False:
+                status = store.query_index_status()
+                if status.state != "ready":
+                    reason = (
+                        "The query index changed outside managed index publication."
+                        if status.state == "dirty"
+                        else "The query index is not ready."
+                    )
+                    if self.indexed_required:
+                        raise QueryIndexUnavailable(
+                            f"{reason} Query V3 requires an already-ready index when refresh is disabled."
+                        )
+                    if self.scan_policy_mode == "forbid":
+                        raise QueryWouldScanError(
+                            f"{reason} Query V3 cannot fall back when scans are forbidden."
+                        )
+                    return None
+            try:
+                index = store.open_query_index()
+            except QueryIndexUnavailable:
+                return None
+            if index is None:
+                return None
+
+            def pages(index=index):
+                after = None
+                while True:
+                    page_stats = QueryStats()
+                    with index.read_view(include_cached=False) as view:
+                        page = getattr(view, "iter_stored_identity_cdef_batches", None)
+                        if page is None:
+                            return
+                        batch = next(page(
+                            after=after,
+                            # One lookahead row proves the last retained digest
+                            # bucket is complete without fetching another page.
+                            batch_size=self.take_limit + 1,
+                            stats=page_stats,
+                        ), None)
+                    capture.candidate_rows_read += page_stats.candidate_rows_read
+                    capture.cdef_blobs_decoded += page_stats.cdef_blobs_decoded
+                    capture.pages_fetched += page_stats.pages_fetched
+                    if batch is None:
+                        return
+                    yield from batch.cdefs
+                    after = batch.next_cursor
+
+            stream = iter(pages())
+            streams.append((store, stream))
+
+        try:
+            frontier = []
+            for position, (store, stream) in enumerate(streams):
+                value = next(stream, None)
+                if value is not None:
+                    heapq.heappush(
+                        frontier, (value.graph_hash(), position, value, store, stream),
+                    )
+            selected = {}
+            while frontier and len(selected) < self.take_limit:
+                digest = frontier[0][0]
+                bucket = []
+                while frontier and frontier[0][0] == digest:
+                    _, position, value, store, stream = heapq.heappop(frontier)
+                    bucket.append((value, store))
+                    following = next(stream, None)
+                    if following is not None:
+                        heapq.heappush(
+                            frontier,
+                            (following.graph_hash(), position, following, store, stream),
+                        )
+                verified = []
+                for value, store in bucket:
+                    direct = capture.read_exact_stored_cdef(store, value)
+                    if direct is None:
+                        if self.indexed_required:
+                            raise QueryIndexUnavailable(
+                                "The derived index candidate lacks direct stored-root authority proof."
+                            )
+                        if self.scan_policy_mode == "forbid":
+                            raise QueryWouldScanError(
+                                "Verifying the derived index candidate requires an authority scan."
+                            )
+                        return None
+                    verified.append((direct, self._source_evidence(store)))
+                fixed = IdentitySet(verified)
+                for key in sorted(fixed._entries, key=lambda item: item.sort_key):
+                    selected[key] = fixed._entries[key]
+                    if len(selected) == self.take_limit:
+                        break
+            return selected
+        except QueryIndexDirty:
+            if self.indexed_required or self.scan_policy_mode == "forbid":
+                raise
+            return None
+
+    def _bounded_index_stores(self, capture):
+        """Return producer Stores for the narrow paged stored-CDef plan shape."""
+
+        from .source import RepoSource, StoreSource
+
+        if not self._can_try_bounded_index():
+            return None
+        if isinstance(self.source, StoreSource):
+            stores = (self.source.store,)
+        else:
+            stores = capture.repo_stores(self.source.repo)
+        if not stores or any(
+                getattr(store, "query_index_policy", None) in {"memory", "none"}
+                for store in stores):
+            return None
+        return stores
+
+    def _can_try_bounded_index(self) -> bool:
+        """Return whether this plan can use canonical stored-CDef index pages."""
+
+        from .source import RepoSource, StoreSource
+
+        if self.take_limit is None or self.take_limit <= 0:
+            return False
+        if not isinstance(self.source, (StoreSource, RepoSource)):
+            return False
+        if not self.restrictions or not all(
+                item.kind in {"kind", "stored"} for item in self.restrictions):
+            return False
+        if not any(
+                item.kind == "kind" and item.value == "cdef"
+                for item in self.restrictions):
+            return False
+        if any(
+                item.kind == "kind" and item.value != "cdef"
+                for item in self.restrictions):
+            return False
+        stored = tuple(item for item in self.restrictions if item.kind == "stored")
+        if not stored:
+            return False
+        if isinstance(self.source, StoreSource):
+            return all(
+                isinstance(item.scope, StoreSource)
+                and item.scope.store is self.source.store
+                for item in stored
+            )
+        return all(
+            isinstance(item.scope, RepoSource)
+            and item.scope.repo is self.source.repo
+            for item in stored
         )
 
     def _iter_terminal_members(self, capture, captured=None):
@@ -4048,6 +2039,28 @@ class IdentityQuery:
             )
         return True
 
+    def _requires_authority_scan(self) -> bool:
+        """Return whether this plan requires broad authoritative inventory."""
+
+        from .identity import IdentitySet
+
+        if self.take_limit == 0 or isinstance(self.source, IdentitySet):
+            return False
+        if isinstance(self.source, _RelationshipClosure):
+            return self.source.input_query._requires_authority_scan()
+        if isinstance(self.source, _RelationshipProjection):
+            return self.source.occurrence_query.roots._requires_authority_scan()
+        if isinstance(self.source, _AlgebraSource):
+            return (
+                self.source.left._requires_authority_scan()
+                or self.source.right._requires_authority_scan()
+            )
+        exact_state = self._exact_state_selector()
+        needs_inventory = any(
+            item.kind in {"alias", "stored"} for item in self.restrictions
+        )
+        return exact_state is None or bool(self._metadata_scopes()) or needs_inventory
+
     def _captured_members(self, capture=None):
         from .identity import IdentitySet
         from .source import (
@@ -4061,78 +2074,51 @@ class IdentityQuery:
         capture = SourceCapture() if capture is None else capture
         scopes = self._metadata_scopes()
         exact_state = self._exact_state_selector()
-        fixed_source = isinstance(
-            self.source, (IdentitySet, _RelationshipClosure, _RelationshipProjection),
-        )
         needs_inventory = any(
             restriction.kind in {"alias", "stored"} for restriction in self.restrictions
         )
-        if isinstance(self.source, StoreSource) and not scopes and self.restrictions:
-            exact_cdefs = [
-                restriction.value for restriction in self.restrictions
-                if restriction.kind == "sel" and isinstance(restriction.value, ConcreteDefinition)
-            ]
-            same_stored_scope = any(
-                restriction.kind == "stored"
-                and isinstance(restriction.scope, StoreSource)
-                and restriction.scope.store is self.source.store
-                for restriction in self.restrictions
-            )
-            if (
-                exact_cdefs and same_stored_scope
-                and any(restriction.kind == "kind" and restriction.value == "cdef"
-                        for restriction in self.restrictions)
-                and all(restriction.kind in {"sel", "kind", "stored", "source"}
-                        for restriction in self.restrictions)
-            ):
-                direct = capture.read_exact_stored_cdef(self.source, exact_cdefs[0])
-                if direct is not None:
-                    return IdentitySet(((direct, self._source_evidence(self.source)),))._entries, capture, False
-        if isinstance(self.source, RepoSource) and not scopes and self.restrictions:
-            exact_cdefs = [
-                restriction.value for restriction in self.restrictions
-                if restriction.kind == "sel" and isinstance(restriction.value, ConcreteDefinition)
-            ]
-            same_stored_scope = any(
-                restriction.kind == "stored"
-                and isinstance(restriction.scope, RepoSource)
-                and restriction.scope.repo is self.source.repo
-                for restriction in self.restrictions
-            )
-            if (
-                exact_cdefs and same_stored_scope
-                and any(restriction.kind == "kind" and restriction.value == "cdef"
-                        for restriction in self.restrictions)
-                and all(restriction.kind in {"sel", "kind", "stored", "source"}
-                        for restriction in self.restrictions)
-            ):
-                repo = self.source.repo
-                with repo.retain_topology():
-                    stores = capture.repo_stores(repo)
-                    if stores and all(
-                        capture.read_exact_stored_cdef(store, exact_cdefs[0]) is not None
+        exact_cdef = self._exact_stored_cdef_selector()
+        if isinstance(self.source, StoreSource) and exact_cdef is not None:
+            direct = capture.read_exact_stored_cdef(self.source, exact_cdef)
+            if direct is not None:
+                return IdentitySet(((direct, self._source_evidence(self.source)),))._entries, capture, False
+        if isinstance(self.source, RepoSource) and exact_cdef is not None:
+            repo = self.source.repo
+            with repo.retain_topology(allow_physical_duplicates=True):
+                stores = capture.repo_stores(repo)
+                if stores and all(
+                    capture.read_exact_stored_cdef(store, exact_cdef) is not None
+                    for store in stores
+                ):
+                    members = [
+                        (exact_cdef, self._source_evidence(store))
                         for store in stores
-                    ):
-                        members = [
-                            (exact_cdefs[0], self._source_evidence(store))
-                            for store in stores
-                        ]
-                        if exact_cdefs[0] in capture.cache_knowledge(repo, weak=self.source.weak):
-                            members.append((exact_cdefs[0], self._source_evidence(repo)))
-                        return IdentitySet(members)._entries, capture, False
-        if (
-            self.scan_policy_mode == "forbid"
-            and not fixed_source
-            and (exact_state is None or scopes or needs_inventory)
-        ):
+                    ]
+                    if exact_cdef in capture.cache_knowledge(repo, weak=self.source.weak):
+                        members.append((exact_cdef, self._source_evidence(repo)))
+                    return IdentitySet(members)._entries, capture, False
+        requires_scan = self._requires_authority_scan()
+        if self.scan_policy_mode == "forbid" and requires_scan:
             raise QueryWouldScanError("Query V3 requires an authoritative inventory scan.")
+        if (
+                self.scan_policy_mode == "warn"
+                and requires_scan
+                and not getattr(capture, "scan_warning_emitted", False)):
+            import warnings
+
+            warnings.warn(
+                "Query V3 requires an authoritative inventory scan.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+            capture.scan_warning_emitted = True
         if exact_state is not None and not scopes and not needs_inventory:
             if isinstance(self.source, StoreSource):
                 state = capture.read_exact_state(self.source, exact_state)
                 members = () if state is None else ((state, self._source_evidence(self.source)),)
                 return IdentitySet(members)._entries, capture, False
             if isinstance(self.source, RepoSource):
-                with self.source.repo.retain_topology():
+                with self.source.repo.retain_topology(allow_physical_duplicates=True):
                     members = [
                         (state, self._source_evidence(store))
                         for store in capture.repo_stores(self.source.repo)
@@ -4198,6 +2184,44 @@ class IdentityQuery:
         }
         return next(iter(states)) if len(states) == 1 else None
 
+    def _exact_stored_cdef_selector(self):
+        """Return one CDef eligible for the direct stored-root authority path."""
+
+        from ..definition import ConcreteDefinition
+        from .source import RepoSource, StoreSource
+
+        if self._metadata_scopes() or not self.restrictions:
+            return None
+        exact = {
+            item.value for item in self.restrictions
+            if item.kind == "sel" and isinstance(item.value, ConcreteDefinition)
+        }
+        if len(exact) != 1 or not any(
+                item.kind == "kind" and item.value == "cdef"
+                for item in self.restrictions):
+            return None
+        if not all(
+                item.kind in {"sel", "kind", "stored", "source"}
+                for item in self.restrictions):
+            return None
+        if isinstance(self.source, StoreSource):
+            same_scope = any(
+                item.kind == "stored"
+                and isinstance(item.scope, StoreSource)
+                and item.scope.store is self.source.store
+                for item in self.restrictions
+            )
+        elif isinstance(self.source, RepoSource):
+            same_scope = any(
+                item.kind == "stored"
+                and isinstance(item.scope, RepoSource)
+                and item.scope.repo is self.source.repo
+                for item in self.restrictions
+            )
+        else:
+            return None
+        return next(iter(exact)) if same_scope else None
+
     def _scope_facts(self, scope, capture):
         from .source import RepoSource, StoreSource
 
@@ -4206,7 +2230,7 @@ class IdentityQuery:
             return (capture.capture_store(scope, metadata_scopes=scopes),)
         if isinstance(scope, RepoSource):
             repo = scope.repo
-            with repo.retain_topology():
+            with repo.retain_topology(allow_physical_duplicates=True):
                 return capture.capture_stores(capture.repo_stores(repo), metadata_scopes=scopes)
         raise TypeError("Query V3 authority scope is invalid.")
 
@@ -4379,11 +2403,20 @@ class IdentityQuery:
         return evaluate_captured_metadata_predicate(predicate, value, projections)
 
     def _last_selector(self):
+        from ..definition import ConcreteDefinition, Definition
         from ..selector import Selector
 
         for restriction in reversed(self.restrictions):
-            if restriction.kind == "sel" and isinstance(restriction.value, Selector):
-                return restriction.value
+            if restriction.kind != "sel":
+                continue
+            value = restriction.value
+            if isinstance(value, Selector):
+                return value
+            if isinstance(value, (Definition, ConcreteDefinition)):
+                return Selector(
+                    value,
+                    exact_root=value if isinstance(value, ConcreteDefinition) else None,
+                )
         return None
 
 
@@ -4445,11 +2478,24 @@ class _RelationshipProjection:
 
 @dataclass(frozen=True, slots=True)
 class OccurrenceQuery:
-    """Private immutable Query V3 relationship occurrence plan.
+    """Compose deferred strict non-empty Query V3 relationship occurrences.
 
     The query traverses only identities retained by ``roots``. Its raw terminal
     preserves every non-empty typed path; ``owners`` and ``targets`` use direct
     existential traversal and therefore do not inherit ``max_occurrences``.
+
+    Attributes:
+        roots: Identity query supplying explicit relationship roots.
+        selector: Optional target selector.
+        edges: Retained directed relationship policy.
+        through_kinds: Required kinds on each matching typed path.
+        path_filter: Optional exact typed or graph-field path restriction.
+        occurrence_limit: Optional visible raw-output cap.
+        max_depth_limit: Optional traversal depth cap.
+        target_kind_filter: Optional complete identity kinds retained at terminals.
+
+    Evaluation remains deferred until an explicit terminal and only inspects
+    detached identities plus captured authority required by metadata filters.
     """
 
     roots: IdentityQuery
@@ -4459,14 +2505,27 @@ class OccurrenceQuery:
     path_filter: Any | None = None
     occurrence_limit: int | None = None
     max_depth_limit: int | None = None
-    target_kind_filter: frozenset[str] = frozenset()
+    target_kind_filter: frozenset[str] | None = None
     fixed: Any | None = None
     metadata_restrictions: tuple[tuple[Any, Any], ...] = ()
     additional_selectors: tuple[Any, ...] = ()
 
     @classmethod
     def from_set(cls, occurrences) -> "OccurrenceQuery":
-        """Refine only captured occurrences without adopting a live producer."""
+        """Refine captured occurrences without adopting a live producer.
+
+        Args:
+            occurrences: Detached :class:`OccurrenceSet` membership and evidence.
+
+        Returns:
+            A query restricted to the supplied fixed occurrences.
+
+        Raises:
+            TypeError: If ``occurrences`` is not an OccurrenceSet.
+
+        Side Effects:
+            None. No external authority is adopted or read.
+        """
 
         from .identity import IdentitySet, OccurrenceSet
         from .relationships import EdgePolicy
@@ -4502,7 +2561,9 @@ class OccurrenceQuery:
                 type(self.max_depth_limit) is not int or self.max_depth_limit < 0
         ):
             raise ValueError("max_depth must be a non-negative exact int or None.")
-        if not self.target_kind_filter <= {"cdef", "object_ref", "state_ref"}:
+        if (
+                self.target_kind_filter is not None
+                and not self.target_kind_filter <= {"cdef", "object_ref", "state_ref"}):
             raise ValueError("OccurrenceQuery target kinds are unsupported.")
         if self.selector is not None:
             # Reuse the U3 selector validator without evaluating any source.
@@ -4511,7 +2572,21 @@ class OccurrenceQuery:
             IdentityQuery.from_set(IdentitySet()).sel(selector)
 
     def sel(self, value=None) -> "OccurrenceQuery":
-        """Conjoin a U3-compatible target selector without changing roots."""
+        """Conjoin a V3-compatible target selector without changing roots.
+
+        Args:
+            value: Any selector accepted by :meth:`IdentityQuery.sel`, or
+                ``None`` for an immutable no-op.
+
+        Returns:
+            An immutable occurrence query with the target restriction appended.
+
+        Raises:
+            TypeError: Immediately if the selector is unsupported.
+
+        Side Effects:
+            None. Target matching remains deferred until a terminal executes.
+        """
 
         if value is None:
             return self
@@ -4549,27 +2624,73 @@ class OccurrenceQuery:
     def cdefs(self) -> "OccurrenceQuery":
         """Restrict occurrence targets to CDefs without changing paths."""
 
-        return replace(self, target_kind_filter=frozenset(("cdef",)))
+        return replace(
+            self,
+            target_kind_filter=self._narrow_target_kinds("cdef"),
+        )
 
     def object_refs(self) -> "OccurrenceQuery":
         """Restrict occurrence targets to ObjectRefs without expansion."""
 
-        return replace(self, target_kind_filter=frozenset(("object_ref",)))
+        return replace(
+            self,
+            target_kind_filter=self._narrow_target_kinds("object_ref"),
+        )
 
     def state_refs(self) -> "OccurrenceQuery":
         """Restrict occurrence targets to StateRefs without expansion."""
 
-        return replace(self, target_kind_filter=frozenset(("state_ref",)))
+        return replace(
+            self,
+            target_kind_filter=self._narrow_target_kinds("state_ref"),
+        )
 
     def target_kind(self, kind: str) -> "OccurrenceQuery":
-        """Restrict targets to one explicit V3 identity kind."""
+        """Restrict targets to one explicit V3 identity kind.
+
+        Args:
+            kind: ``"cdef"``, ``"object_ref"``, or ``"state_ref"``.
+
+        Returns:
+            An immutable narrowed occurrence query.
+
+        Raises:
+            ValueError: If ``kind`` is unsupported.
+
+        Side Effects:
+            None until a terminal executes.
+        """
 
         if kind not in {"cdef", "object_ref", "state_ref"}:
             raise ValueError("OccurrenceQuery target kind is unsupported.")
-        return replace(self, target_kind_filter=frozenset((kind,)))
+        return replace(
+            self,
+            target_kind_filter=self._narrow_target_kinds(kind),
+        )
+
+    def _narrow_target_kinds(self, kind: str) -> frozenset[str]:
+        current = (
+            frozenset(("cdef", "object_ref", "state_ref"))
+            if self.target_kind_filter is None
+            else self.target_kind_filter
+        )
+        return current & frozenset((kind,))
 
     def through(self, kind) -> "OccurrenceQuery":
-        """Require one relationship kind on the same retained typed path."""
+        """Require one relationship kind on each retained typed path.
+
+        Args:
+            kind: RelationshipKind that must occur on the path.
+
+        Returns:
+            An immutable path-restricted occurrence query.
+
+        Raises:
+            TypeError: If ``kind`` is not a RelationshipKind.
+
+        Side Effects:
+            None until a terminal traverses relationships.
+        """
 
         from .relationships import RelationshipKind
 
@@ -4578,7 +2699,20 @@ class OccurrenceQuery:
         return replace(self, through_kinds=self.through_kinds | frozenset((kind,)))
 
     def path(self, value) -> "OccurrenceQuery":
-        """Require an exact RelationshipPath or concatenated legacy GraphPath."""
+        """Require an exact RelationshipPath or concatenated GraphPath.
+
+        Args:
+            value: Exact typed relationship path or graph-field path.
+
+        Returns:
+            An immutable path-restricted occurrence query.
+
+        Raises:
+            TypeError: If ``value`` is not a RelationshipPath or GraphPath.
+
+        Side Effects:
+            None until a terminal traverses relationships.
+        """
 
         from .relationships import RelationshipPath
         from ..utils.graph.path import GraphPath
@@ -4588,7 +2722,20 @@ class OccurrenceQuery:
         return replace(self, path_filter=value)
 
     def max_occurrences(self, limit: int | None) -> "OccurrenceQuery":
-        """Set the visible raw-occurrence cap without bounding direct projections."""
+        """Set the raw-occurrence cap without bounding direct projections.
+
+        Args:
+            limit: Non-negative exact occurrence count, or ``None`` for no cap.
+
+        Returns:
+            An immutable occurrence query carrying the output cap.
+
+        Raises:
+            ValueError: If ``limit`` is negative, inexact, or not ``None``.
+
+        Side Effects:
+            None until a raw occurrence terminal executes.
+        """
 
         if limit is not None and (type(limit) is not int or limit < 0):
             raise ValueError("max_occurrences must be a non-negative exact int or None.")
@@ -4638,14 +2785,38 @@ class OccurrenceQuery:
         )
 
     def max_depth(self, limit: int | None) -> "OccurrenceQuery":
-        """Set a failing relationship-depth safety budget for this traversal."""
+        """Set a failing relationship-depth safety budget for traversal.
+
+        Args:
+            limit: Non-negative exact depth, or ``None`` for no bound.
+
+        Returns:
+            An immutable occurrence query carrying the traversal budget.
+
+        Raises:
+            ValueError: If ``limit`` is negative, inexact, or not ``None``.
+
+        Side Effects:
+            None until a terminal traverses relationships.
+        """
 
         if limit is not None and (type(limit) is not int or limit < 0):
             raise ValueError("max_depth must be a non-negative exact int or None.")
         return replace(self, max_depth_limit=limit)
 
     def collect(self):
-        """Evaluate typed raw occurrences into a bounded or complete OccurrenceSet."""
+        """Evaluate typed raw occurrences into a fixed OccurrenceSet.
+
+        Returns:
+            A deterministic fixed result with detached evidence and visible bounds.
+
+        Raises:
+            QueryError: If root capture, metadata validation, or traversal budgets
+                fail.
+
+        Side Effects:
+            Reads root authority and required target metadata under retryable cuts.
+        """
 
         return self.roots._run_terminal(self._collect_with_capture)
 
@@ -4689,17 +2860,48 @@ class OccurrenceQuery:
         )
 
     def count(self) -> int:
-        """Stream the distinct raw typed-occurrence count without a fixed set."""
+        """Stream the distinct raw typed-occurrence count.
+
+        Returns:
+            Number of retained occurrences after any explicit raw-output cap.
+
+        Raises:
+            QueryError: If root capture, metadata validation, or traversal fails.
+
+        Side Effects:
+            Executes traversal without constructing a complete fixed result.
+        """
 
         return self.roots._run_terminal(lambda cut: sum(1 for _ in self._iter_occurrences(cut)))
 
     def exists(self) -> bool:
-        """Return whether one qualified occurrence exists without collection."""
+        """Return whether one qualified occurrence exists.
+
+        Returns:
+            ``True`` after the first valid occurrence, otherwise ``False``.
+
+        Raises:
+            QueryError: If root capture, metadata validation, or traversal fails.
+
+        Side Effects:
+            Executes only traversal work needed for a conclusive answer.
+        """
 
         return self.roots._run_terminal(lambda cut: next(self._iter_occurrences(cut), None) is not None)
 
     def one(self):
-        """Return one streamed occurrence or raise the standard cardinality error."""
+        """Return the sole qualified occurrence.
+
+        Returns:
+            The one complete typed occurrence.
+
+        Raises:
+            QueryCardinalityError: If zero or multiple occurrences remain.
+            QueryError: If root capture, metadata validation, or traversal fails.
+
+        Side Effects:
+            Executes enough traversal to prove singleton cardinality.
+        """
 
         occurrences = self.roots._run_terminal(self._up_to_two_occurrences)
         if len(occurrences) != 1:
@@ -4709,7 +2911,18 @@ class OccurrenceQuery:
         return occurrences[0]
 
     def one_or_none(self):
-        """Return one streamed occurrence, ``None``, or raise on ambiguity."""
+        """Return zero or one occurrence while rejecting ambiguity.
+
+        Returns:
+            The sole occurrence, or ``None`` when no occurrence remains.
+
+        Raises:
+            QueryCardinalityError: If multiple occurrences remain.
+            QueryError: If root capture, metadata validation, or traversal fails.
+
+        Side Effects:
+            Executes enough traversal to prove at-most-one cardinality.
+        """
 
         occurrences = self.roots._run_terminal(self._up_to_two_occurrences)
         if len(occurrences) > 1:
@@ -4851,7 +3064,9 @@ class OccurrenceQuery:
             else "state_ref" if isinstance(value, StateRef)
             else None
         )
-        if kind is None or (self.target_kind_filter and kind not in self.target_kind_filter):
+        if kind is None or (
+                self.target_kind_filter is not None
+                and kind not in self.target_kind_filter):
             return False
         if self.selector is None and not self.additional_selectors:
             return True

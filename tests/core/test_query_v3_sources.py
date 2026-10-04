@@ -7,9 +7,9 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Definition, Object, Repo, Serializable
+from dryml.core import Definition, Object, ObjectId, ObjectRef, Repo, Serializable
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
+from dryml.core.store.records import DeclarationRecord, DefinitionRecord
 from dryml.core.store.zip import ZipStore
 from dryml.core.utils.graph.path import GraphPath, Parameter
 from dryml.core.query.authority import _derive_identities
@@ -113,6 +113,25 @@ def test_repo_capture_adds_retained_cache_receipts_without_new_capture(tmp_path,
     assert receipt in known
 
 
+def test_repo_query_strong_cache_selection_preserves_store_knowledge(tmp_path):
+    """weak=False excludes weak-only facts without narrowing Store knowledge."""
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    stored = repo.save_object(SourceLeaf("stored", repo=repo))
+    strong = SourceLeaf("strong", repo=repo)
+    weak = SourceLeaf("weak", repo=repo)
+    repo.cache_strong(strong)
+    repo.cache_weak(weak)
+    query = repo.query(weak=False).cdefs()
+
+    assert query.sel(stored.definition).one() == stored.definition
+    assert query.sel(strong.definition).one() == strong.definition
+    assert query.sel(weak.definition).count() == 0
+    with pytest.raises(TypeError, match="exact bool"):
+        repo.query(weak=1)
+
+
 def test_fixed_collections_remain_explicit_members_without_source_authority(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
@@ -133,7 +152,7 @@ def test_unsupported_alias_enumeration_fails_preflight_instead_of_reading_partia
 
 
 def test_broad_capture_reuses_one_record_family_pass_and_exact_state_reads_directly(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(store)
     state = repo.save_object(SourceLeaf("saved", repo=repo))
     calls = {}
@@ -150,15 +169,13 @@ def test_broad_capture_reuses_one_record_family_pass_and_exact_state_reads_direc
             return _original(*args, **kwargs)
 
         monkeypatch.setattr(store, name, counted)
-    capture = SourceCapture()
-
-    capture.capture_store(store)
-    capture.capture_store(store)
+    base = store.query()
+    base.union(base).collect()
 
     assert calls == {name: 1 for name in names}
     for name in names:
         monkeypatch.setattr(store, name, lambda: pytest.fail("exact read enumerated inventory"))
-    assert capture.read_exact_state(store, state) == state
+    assert SourceCapture().read_exact_state(store, state) == state
 
 
 def test_stored_restriction_builds_root_membership_once_per_cut(tmp_path, monkeypatch):
@@ -201,3 +218,54 @@ def test_distinct_zip_transactions_and_direct_relationships_remain_independent(t
     finally:
         first.close()
         second.close()
+
+
+def test_object_reference_authority_conflicts_fail_within_and_across_stores(tmp_path):
+    """One ObjectId cannot authoritatively identify incompatible ObjectRefs."""
+
+    object_id = ObjectId(("conflict",))
+    first_ref = ObjectRef(
+        Definition(SourceLeaf, "first").concretize(),
+        {GraphPath(): object_id},
+    )
+    second_ref = ObjectRef(
+        Definition(SourceLeaf, "second").concretize(),
+        {GraphPath(): object_id},
+    )
+    combined = DirStore(tmp_path / "combined")
+    combined.write_declaration_record(DeclarationRecord(first_ref))
+    combined.write_declaration_record(DeclarationRecord(second_ref))
+    with pytest.raises(Exception, match="incompatible ObjectId mappings"):
+        combined.query().object_refs().collect()
+
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    first.write_declaration_record(DeclarationRecord(first_ref))
+    second.write_declaration_record(DeclarationRecord(second_ref))
+    for stores in ((first, second), (second, first)):
+        with pytest.raises(Exception, match="object-reference authority conflicts"):
+            Repo(stores).query().object_refs().collect()
+
+
+def test_embedded_object_references_do_not_become_independent_authority(tmp_path):
+    """Structural references may conflict without becoming declaration authority."""
+
+    object_id = ObjectId(("embedded",))
+    first_ref = ObjectRef(
+        Definition(SourceLeaf, "first").concretize(),
+        {GraphPath(): object_id},
+    )
+    second_ref = ObjectRef(
+        Definition(SourceLeaf, "second").concretize(),
+        {GraphPath(): object_id},
+    )
+    first = DirStore(tmp_path / "first")
+    second = DirStore(tmp_path / "second")
+    first.write_definition_record(DefinitionRecord(
+        Definition(SourcePair, first_ref).concretize()
+    ))
+    second.write_definition_record(DefinitionRecord(
+        Definition(SourcePair, second_ref).concretize()
+    ))
+
+    assert Repo((first, second)).query().object_refs().count() == 2

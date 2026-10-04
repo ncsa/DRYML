@@ -147,18 +147,19 @@ def test_inspection_and_query_do_not_open_payloads_but_validation_does(tmp_path,
 
     monkeypatch.setattr(store, "_validate_local_state_dir", fail_payload_read)
     try:
-        assert {state.digest() for state in repo.references().state_refs()} == expected_digests
+        states = repo.query().state_refs().collect()
+        assert {state.digest() for state in states} == expected_digests
         assert {
             state.digest()
-            for state in repo.references().where(
+            for state in repo.query().where(
                 field("snapshot", "requirements_status").eq("conflict")
-            ).state_refs()
+            ).state_refs().collect()
         } == {manifest["snapshots"]["conflict"]["state_ref_digest"]}
-        for state in repo.references().state_refs():
+        for state in states:
             assert repo.get_snapshot_metadata(state, store=store).state_ref == state
         monkeypatch.setattr(store, "_validate_local_state_dir", original_validate)
         states = {
-            state.digest(): state for state in repo.references().state_refs()
+            state.digest(): state for state in repo.query().state_refs().collect()
         }
         for expected in manifest["snapshots"].values():
             state = states[expected["state_ref_digest"]]

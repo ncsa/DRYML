@@ -59,6 +59,27 @@ def test_ordering_avoids_extra_graph_encoding_without_digest_ties(monkeypatch):
     assert len(tuple(values)) == 2
 
 
+def test_complete_identity_digests_are_cached_across_query_operators(monkeypatch):
+    """Immutable witnesses compute graph identity once across refinements."""
+
+    from dryml.core import cdef_codec
+
+    value = Definition(V3IdentityLeaf, "shared").concretize()
+    calls = 0
+    original = cdef_codec.cdef_graph_hash
+
+    def counted(root):
+        nonlocal calls
+        calls += 1
+        return original(root)
+
+    monkeypatch.setattr(cdef_codec, "cdef_graph_hash", counted)
+    fixed = IdentitySet((value, value))
+
+    assert fixed.query().cdefs().union(fixed).intersection(fixed).one() == value
+    assert calls == 1
+
+
 def test_reference_identity_uses_complete_object_and_state_reference_values():
     cdef = Definition(V3IdentityLeaf, "target").concretize()
     first = ObjectRef(cdef, {GraphPath(): ObjectId()})
@@ -121,6 +142,22 @@ def test_fixed_set_algebra_propagates_boundedness_and_diagnostics_are_sanitized(
     assert secret not in repr(first.diagnostic())
 
 
+def test_fixed_algebra_does_not_resurrect_a_conflicting_prefix_limit():
+    first = IdentitySet(bounded=True, requested_limit=1)
+    second = IdentitySet(bounded=True, requested_limit=2)
+
+    assert first.union(second).union(first).requested_limit is None
+    assert first.intersection(second).intersection(first).requested_limit is None
+    assert first.query().union(second).union(first).collect().requested_limit is None
+
+    first_occurrences = OccurrenceSet(bounded=True, requested_limit=1)
+    second_occurrences = OccurrenceSet(bounded=True, requested_limit=2)
+    assert (
+        first_occurrences.union(second_occurrences).union(first_occurrences).requested_limit
+        is None
+    )
+
+
 def test_fixed_set_rejects_invalid_members_and_implicit_query_truth_testing():
     with pytest.raises(TypeError, match="identity members"):
         IdentitySet((object(),))
@@ -128,13 +165,6 @@ def test_fixed_set_rejects_invalid_members_and_implicit_query_truth_testing():
         OccurrenceSet(bounded=1)
     with pytest.raises(TypeError, match="positional"):
         IdentitySet().query("not-a-predicate")
-
-
-def test_fixed_set_refine_still_uses_explicit_predicate_query():
-    first = Definition(V3IdentityLeaf, "first").concretize()
-    second = Definition(V3IdentityLeaf, "second").concretize()
-
-    assert tuple(IdentitySet((first, second)).refine(lambda value: value is first)) == (first,)
 
 
 def test_fixed_identity_query_uses_same_v3_restriction_language():

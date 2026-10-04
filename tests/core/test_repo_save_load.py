@@ -324,7 +324,7 @@ def test_structural_load_without_state_restore_builds_from_definition_authority(
     assert loaded.value == 10
 
 
-def test_reopen_hydrates_definition_authority_and_discovers_queries_without_materializing(tmp_path):
+def test_reopen_v3_query_discovers_definition_authority_without_materializing(tmp_path):
     store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(store)
     first = SaveLoadValue("first", repo=repo)
@@ -334,9 +334,7 @@ def test_reopen_hydrates_definition_authority_and_discovers_queries_without_mate
 
     reopened = Repo(DirStore(store.base_dir, query_index="memory"))
 
-    assert reopened.find_defs(None, refresh=False).count() == 0
-    assert reopened._num_constructions == 0
-    assert set(reopened.find_defs(None, refresh=True)) == {first.definition, second.definition}
+    assert set(reopened.query().cdefs().stored().collect()) == {first.definition, second.definition}
     assert reopened._num_constructions == 0
     assert set(reopened.default_store.hydrate_index()) == {first.definition, second.definition}
 

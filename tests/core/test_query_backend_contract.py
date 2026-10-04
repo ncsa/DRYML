@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -10,7 +11,6 @@ from dryml.core.query.domain import StoredDomain
 from dryml.core.query.fingerprint import target_local_fingerprint
 from dryml.core.query.graph_plan import graph_candidate_ids
 from dryml.core.query.lowering import LoweringDiagnostics, ScanPolicy
-from dryml.core.query.federation import IndexGenerationVector, RepoGenerationVector
 from dryml.core.query.model import (
     DefinitionEdgeRecord,
     IndexWriteResult,
@@ -26,6 +26,7 @@ from dryml.core.query.selector_graph import compile_selector_graph
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DefinitionRecord
 
 
 class ContractLeaf(Object):
@@ -425,12 +426,73 @@ def test_contract_phase0_record_types_are_available():
         generation_after=2,
         roots_added=1,
     )
-    vector = IndexGenerationVector({"store-1": 2})
-
     assert StoredReplica is StoreReplica
-    assert RepoGenerationVector is IndexGenerationVector
     assert replica.definition_id == root.definition_id
-    assert report.generation_after == vector.generations["store-1"]
+    assert report.generation_after == 2
+
+
+def test_dirstore_rejects_unknown_or_factory_query_index_policy(tmp_path):
+    """DirStore accepts only declared index policies or SQLite configuration."""
+
+    with pytest.raises(ValueError, match="query_index"):
+        DirStore(tmp_path / "unknown", query_index="bad-policy")
+    with pytest.raises(ValueError, match="query_index"):
+        DirStore(tmp_path / "factory", query_index=lambda store: store)
+
+
+@pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
+def test_dirstore_accepts_sqlite_config_without_creating_a_sidecar(tmp_path):
+    """Opening configured SQLite support remains lazy until index mutation."""
+
+    store = DirStore(
+        tmp_path / "store",
+        query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    index = store.open_query_index()
+
+    assert index is not None
+    assert index.path == Path(store.query_index_path)
+    assert not index.path.exists()
+
+
+def test_dirstore_rejects_non_policy_non_config_query_index(tmp_path):
+    """Invalid index configuration cannot create Store-derived paths."""
+
+    with pytest.raises(ValueError, match="query_index"):
+        DirStore(tmp_path / "store", query_index=object())
+    assert not Path(tmp_path / "store", ".dryml").exists()
+
+
+@pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
+def test_query_index_status_reflects_each_current_policy(tmp_path):
+    """Every retained policy reports its configured backend and lifecycle state."""
+
+    statuses = [
+        DirStore(tmp_path / policy, query_index=policy).query_index_status()
+        for policy in ("auto", "memory", "none", "sqlite")
+    ]
+
+    assert [status.backend for status in statuses] == [
+        "sqlite", "memory", "none", "sqlite",
+    ]
+    assert [status.state for status in statuses] == [
+        "missing", "ready", "disabled", "missing",
+    ]
+    assert all(status.generation is None for status in statuses)
+
+
+def test_memory_and_none_policies_never_create_sqlite_sidecars(tmp_path):
+    """Non-SQLite policies leave persistent derived paths absent."""
+
+    for policy, state in (("memory", "ready"), ("none", "disabled")):
+        store = DirStore(tmp_path / policy, query_index=policy)
+        root = Definition(ContractLeaf, policy).concretize()
+        store.write_definition_record(DefinitionRecord(root))
+
+        assert store.open_query_index() is None
+        assert store.query_index_status().state == state
+        assert not Path(store.query_index_path).exists()
+        assert tuple(store.iter_definition_records())
 
 
 def test_contract_local_candidates_and_planner(backend_case):

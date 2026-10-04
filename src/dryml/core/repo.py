@@ -1081,11 +1081,17 @@ class Repo:
                 self._save_context_leases -= 1
 
     @contextmanager
-    def retain_topology(self):
-        """Retain the connected physical Store set without selecting save routes.
+    def retain_topology(self, *, allow_physical_duplicates: bool = False):
+        """Retain connected Store handles without selecting save routes.
+
+        Args:
+            allow_physical_duplicates: Permit distinct handles for one physical
+                destination. Query capture uses authority fence keys to merge
+                equivalent DirStore views while preserving independent ZipStore
+                transaction views. Other callers retain strict rejection.
 
         Returns:
-            A context manager covering the current connected physical Store set.
+            A context manager covering the current connected Store handles.
 
         Raises:
             RuntimeError: If the Repo is closing or closed.
@@ -1093,13 +1099,15 @@ class Repo:
         Side Effects:
             Prevents Store addition and Repo close until release. Routing and
             default-order changes remain valid because they do not alter the
-            physical connected set.
+            connected handle set.
         """
 
         with self._configuration_lock:
             if self._closing or self._closed:
                 raise RuntimeError("Cannot retain topology after Repo close begins.")
-            self._normalize_store_handles(self.stores, reject_physical=True)
+            self._normalize_store_handles(
+                self.stores, reject_physical=not allow_physical_duplicates,
+            )
             self._topology_leases += 1
         try:
             yield self
@@ -5008,10 +5016,10 @@ class Repo:
 
         from .generator import GeneratorSelector
         from .query.model import QueryDomainError
-        from .query.query import IdentityQuery, _resolve_query_state_selectors
+        from .query.query import IdentityQuery
         from .query.result import ObjectResultSet
         from .reference_values import ObjectRef, StateRef
-        from .selector import Selector
+        from .selector import Selector, _contains_state_selector, selector as prepare_selector
 
         if isinstance(selector, Object):
             selector = selector.definition
@@ -5026,15 +5034,19 @@ class Repo:
                 "Query source must be Selector, Definition, ConcreteDefinition, Object, "
                 f"or None, not {type(selector).__name__}."
             )
-        if isinstance(selector, Selector):
-            selector = Selector(
-                _resolve_query_state_selectors(selector.root, self),
+        if isinstance(selector, Selector) and _contains_state_selector(selector.root):
+            selector = prepare_selector(
+                selector.root,
+                scope=self,
                 strict=selector.strict,
                 cls_policy=selector.cls_policy,
                 exact_root=selector.exact_root,
             )
-        elif selector is not None and not isinstance(selector, GeneratorSelector):
-            selector = _resolve_query_state_selectors(selector, self)
+        elif (
+                selector is not None
+                and not isinstance(selector, GeneratorSelector)
+                and _contains_state_selector(selector)):
+            selector = prepare_selector(selector, scope=self).root
         candidates = (
             IdentityQuery.from_retained_repo_lookup(self)
             .sel(selector)
@@ -5046,48 +5058,36 @@ class Repo:
             objects[cdef] = self.load_object(cdef, cache=cache)
         return ObjectResultSet(self, objects, domain="known")
 
-    def query(self, selector=None):
-        """Create an immutable structural or exact GeneratorSelector definition query.
+    def query(self, *, weak: bool = True):
+        """Create an unevaluated Query V3 identity universe for this Repo.
 
         Args:
-            selector: A Definition, ConcreteDefinition, ObjectRef, StateRef,
-                Selector, GeneratorSelector, Object, or ``None``. ObjectRef and
-                StateRef values are exact lazy containment targets and require
-                ``nested()``; they do not alter ordinary reference authority.
-                Generator selectors retain an exact support residual and verify
-                graph-distinct witnesses at terminal execution.
+            weak: Include weak and strong cache entries when true; include only
+                strong cache entries when false. Store knowledge is retained in
+                either case.
 
         Returns:
-            A DefinitionQuery with no selected domain yet.
+            An :class:`~dryml.core.query.IdentityQuery` over identity knowledge
+            captured from connected Stores and retained caches. Call ``sel()``
+            for structural or exact identity restrictions, then use an explicit
+            terminal such as ``collect()``, ``count()``, or ``one()``.
 
         Raises:
-            TypeError: If ``selector`` is not a supported query source.
+            TypeError: If ``weak`` is not an exact bool.
+            StoreAuthorityError: At terminal evaluation when connected Store
+                authority is malformed, incomplete, or cannot provide the
+                required complete inventory.
 
         Side Effects:
-            Does not refresh indexes, enumerate Stores, materialize Objects, or
-            invoke template verification until a terminal is evaluated.
+            Construction has none. A terminal reads only query authority and
+            retained cache facts; it never constructs Objects, allocates
+            ObjectIds, opens payloads, saves, observes host state, or runs work.
         """
-        from .query import DefinitionQuery
+        from .query import IdentityQuery
 
-        return DefinitionQuery.from_source(self, selector)
-
-    def references(self):
-        """Start an authority-verified query over ObjectRefs and StateRefs.
-
-        Returns:
-            A ReferenceQuery over immutable Definition, Declaration, StateRef,
-            alias, and typed metadata authority in connected Stores.
-
-        Side Effects:
-            None until a terminal is evaluated. Evaluation never materializes an
-            Object or opens local-state payloads. Typed metadata predicates added
-            with ``where()`` are evaluated from current, lineage, and captured
-            Store authority rather than derived query indexes.
-        """
-
-        from .query.reference import ReferenceQuery
-
-        return ReferenceQuery(self)
+        if type(weak) is not bool:
+            raise TypeError("Repo.query weak must be an exact bool.")
+        return IdentityQuery.from_repo(self, weak=weak)
 
     def definition_graph(self, value) -> "ConcreteDefinitionGraph":
         def cdef_from(item):
@@ -5104,89 +5104,6 @@ class Repo:
         if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
             return ConcreteDefinitionGraph.from_roots(cdef_from(item) for item in value)
         raise TypeError(f"definition_graph() cannot inspect {type(value).__name__}.")
-
-    def find_defs(
-            self,
-            selector=None,
-            *,
-            scope: str = "stored",
-            refresh="auto",
-            class_match: str = "selector"):
-        q = self.query(selector).class_match(class_match).refresh(refresh)
-        if scope == "stored":
-            return q.stored().defs()
-        if scope == "known":
-            return q.known().defs()
-        if scope == "cached":
-            return q.cached().defs()
-        if scope == "nested":
-            return q.nested().definitions().defs()
-        raise ValueError("scope must be 'stored', 'known', 'cached', or 'nested'.")
-
-    def find_occurrences(
-            self,
-            selector=None,
-            *,
-            refresh="auto",
-            class_match: str = "selector",
-            max_occurrences: int | None = None):
-        return (
-            self.query(selector)
-            .class_match(class_match)
-            .refresh(refresh)
-            .nested()
-            .max_occurrences(max_occurrences)
-            .execute()
-        )
-
-    def find_owner_defs(
-            self,
-            selector=None,
-            *,
-            refresh="auto",
-            class_match: str = "selector"):
-        return self.query(selector).class_match(class_match).refresh(refresh).nested().owners().defs()
-
-    def find(
-            self,
-            selector=None,
-            *,
-            scope: str = "stored",
-            refresh="auto",
-            class_match: str = "selector",
-            **load_options):
-        from dryml.runtime import materialization_admission
-
-        with materialization_admission(operation="repo_find"):
-            q = self.query(selector).class_match(class_match).refresh(refresh)
-            if scope == "stored":
-                q = q.stored()
-            elif scope == "known":
-                q = q.known()
-            elif scope == "cached":
-                q = q.cached()
-            else:
-                raise ValueError("scope must be 'stored', 'known', or 'cached'.")
-            return q.objects(**load_options)
-
-    def find_owners(
-            self,
-            selector=None,
-            *,
-            refresh="auto",
-            class_match: str = "selector",
-            **load_options):
-        from dryml.runtime import materialization_admission
-
-        with materialization_admission(operation="repo_find_owners"):
-            return (
-                self.query(selector)
-                .class_match(class_match)
-                .refresh(refresh)
-                .nested()
-                .owners()
-                .objects(**load_options)
-            )
 
     def get(self,
             selector:  SelectorType | tuple[SelectorType] | list[SelectorType] | None = None,

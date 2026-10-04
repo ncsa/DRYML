@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import os
@@ -44,7 +44,7 @@ from ..model import (
     V3ProjectionCoverage,
     CANONICAL_QUERY_SEMANTICS_VERSION,
 )
-from ..lowering import CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, PhysicalRelationPlan, QueryTerminal, ScanPolicy
+from ..lowering import CandidateBatch, CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, PhysicalRelationPlan, QueryTerminal, ScanPolicy
 from ..identity import identity_key
 from ..relationships import iter_direct_relationships, relationship_closure
 from ..utils import cdef_equal, chunked, feature_token_equal, stable_hash_from_blob, stable_hash_to_blob
@@ -61,6 +61,24 @@ _CODEC = QueryIndexCodec()
 _REBUILD_BATCH_SIZE = 500
 _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredIdentityCursor:
+    """Private graph-complete cursor for one stored-CDef projection page."""
+
+    source_key: str
+    generation: int
+    graph_hash: str
+    root_blob: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredIdentityBatch:
+    """Private stored-CDef page with its continuation cursor."""
+
+    cdefs: tuple[ConcreteDefinition, ...]
+    next_cursor: _StoredIdentityCursor
 
 
 def _try_lock_claim_file(fd: int) -> bool:
@@ -191,9 +209,14 @@ class SQLiteStoreQueryIndex:
                 WHERE singleton = 1
                 """
             ).fetchone()
+            guard = con.execute(
+                "SELECT dirty FROM v3_projection_guard WHERE family = 'stored_root'"
+            ).fetchone()
+            guard_dirty = guard is None or guard[0] != 0
             journal_mode = con.execute("PRAGMA journal_mode").fetchone()[0]
             row_counts = _row_counts(con)
             diagnostics = _status_diagnostics(con, journal_mode)
+            diagnostics["stored_root_guard_dirty"] = guard_dirty
         except QueryIndexUnavailable:
             raise
         except Exception as exc:
@@ -228,7 +251,7 @@ class SQLiteStoreQueryIndex:
                 "query_index_codec_version": row[8],
                 "canonical_version": row[9],
             }
-            state = "dirty" if row[11] else row[10]
+            state = "dirty" if row[11] or guard_dirty else row[10]
         return QueryIndexStatus(
             backend="sqlite",
             store_key=self.source_key,
@@ -262,6 +285,13 @@ class SQLiteStoreQueryIndex:
             diagnostics.update(_status_diagnostics(con, journal_mode))
             if build_state != "ready":
                 issues.append(ValidationIssue("error", "SQLite query index is not ready.", f"build_state={build_state!r}"))
+            guard = con.execute(
+                "SELECT dirty FROM v3_projection_guard WHERE family = 'stored_root'"
+            ).fetchone()
+            if guard is None or guard[0] != 0:
+                issues.append(ValidationIssue(
+                    "error", "SQLite stored-root projection changed outside managed publication."
+                ))
             _validate_sqlite_integrity(con, issues)
             if thorough:
                 self._validate_decodable_rows(con, issues)
@@ -820,6 +850,7 @@ class SQLiteStoreQueryIndex:
         graph_nodes = graph.nodes()
         node_hash_blobs = {node.definition: stable_hash_to_blob(node.stable_hash) for node in graph_nodes}
         encoded_edges = tuple(_EncodedEdge.from_edge(edge) for edge in graph.edges())
+        encoded_roots = tuple((root.graph_hash(), _CODEC.encode_cdef(root)) for root in roots)
         v3_identities, v3_relationships = _v3_projection_rows(roots)
         if not roots and not graph_nodes and not encoded_edges:
             return IndexWriteResult(generation=self.current_generation(), changed=False)
@@ -841,6 +872,7 @@ class SQLiteStoreQueryIndex:
                 canonical_version=self.canonical_version,
                 require_ready=require_ready,
             )
+            _require_clean_stored_root_guard(con)
             generation = _read_generation(con)
             next_generation = generation + 1
             counters = _WriteCounters()
@@ -888,10 +920,23 @@ class SQLiteStoreQueryIndex:
                 cur = con.execute(
                     """
                     INSERT OR IGNORE INTO stored_roots (
-                        def_id, storage_hash, relative_def_path, def_size, def_mtime_ns, indexed_generation
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        def_id, root_graph_hash, storage_hash, relative_def_path,
+                        def_size, def_mtime_ns, indexed_generation
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (root_id, storage_hash, relative_def_path, def_size, def_mtime_ns, next_generation),
+                    (
+                        root_id, root.graph_hash(), storage_hash,
+                        relative_def_path, def_size, def_mtime_ns,
+                        next_generation,
+                    ),
+                )
+                counters.changed = counters.changed or bool(cur.rowcount)
+
+            for root_hash, root_blob in encoded_roots:
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO v3_stored_root_projection "
+                    "(root_graph_hash, root_blob) VALUES (?, ?)",
+                    (root_hash, root_blob),
                 )
                 if cur.rowcount:
                     counters.roots_added += 1
@@ -921,6 +966,10 @@ class SQLiteStoreQueryIndex:
             _update_v3_projection_coverage(
                 con, added_identities=added_identities,
                 added_relationships=added_relationships,
+            )
+            con.execute(
+                "UPDATE v3_projection_guard SET dirty = 0 "
+                "WHERE family = 'stored_root'"
             )
 
             if counters.changed:
@@ -1001,16 +1050,30 @@ class SQLiteStoreQueryIndex:
             return IndexWriteResult(generation=self.current_generation(), changed=False)
         def operation(con):
             self._ensure_schema_in_transaction(con)
+            _require_clean_stored_root_guard(con)
             generation = _read_generation(con)
             removed = 0
             projection_changed = False
             removed_identities = []
             removed_relationships = []
             for root in roots:
-                for did in _exact_ids_for_cdef(con, root):
-                    cur = con.execute("DELETE FROM stored_roots WHERE def_id = ?", (did,))
-                    removed += cur.rowcount
                 root_hash = root.graph_hash()
+                root_blob = _CODEC.encode_cdef(root)
+                cur = con.execute(
+                    "DELETE FROM v3_stored_root_projection "
+                    "WHERE root_graph_hash = ? AND root_blob = ?",
+                    (root_hash, root_blob),
+                )
+                removed += cur.rowcount
+                remaining_roots = tuple(
+                    _CODEC.decode_cdef(row[0])
+                    for row in con.execute(
+                        "SELECT root_blob FROM v3_stored_root_projection"
+                    )
+                )
+                if not any(cdef_equal(candidate, root) for candidate in remaining_roots):
+                    for did in _exact_ids_for_cdef(con, root):
+                        con.execute("DELETE FROM stored_roots WHERE def_id = ?", (did,))
                 removed_identities.extend(con.execute(
                     "SELECT root_graph_hash, identity_kind, identity_digest "
                     "FROM v3_identity_projection WHERE root_graph_hash = ?",
@@ -1038,6 +1101,10 @@ class SQLiteStoreQueryIndex:
                 _update_v3_projection_coverage(
                     con, removed_identities=removed_identities,
                     removed_relationships=removed_relationships,
+                )
+                con.execute(
+                    "UPDATE v3_projection_guard SET dirty = 0 "
+                    "WHERE family = 'stored_root'"
                 )
                 generation = _bump_generation(con, generation + 1)
             return IndexWriteResult(
@@ -1764,6 +1831,84 @@ class SQLiteQueryIndexReadView:
             cdef_loader=self.cdefs_by_id,
         )
         return compiler.iter_candidate_cdef_batches(plan, after=after, batch_size=batch_size)
+
+    def iter_stored_identity_cdef_batches(
+            self,
+            *,
+            after: _StoredIdentityCursor | None = None,
+            batch_size: int,
+            stats: QueryStats | None = None):
+        """Yield stored CDefs in Query V3 canonical digest order.
+
+        Args:
+            after: Optional cursor returned by the preceding page from this
+                source generation.
+            batch_size: Positive maximum rows decoded for this page.
+            stats: Optional terminal counters updated for rows and pages read.
+
+        Yields:
+            At most one detached private batch. Reinvoke with its cursor to
+            continue keyset paging.
+
+        Raises:
+            ValueError: If the page size or cursor is invalid.
+            QueryIndexError: If this read view is closed or its rows fail to
+                decode as complete CDefs.
+
+        Side Effects:
+            Reads only the current SQLite transaction and updates ``stats`` when
+            supplied; it does not consult or mutate Store authority.
+        """
+
+        self._check_active()
+        if type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("batch_size must be a positive exact int.")
+        _require_clean_stored_root_guard(self._con)
+        params = []
+        cursor_sql = ""
+        if after is not None:
+            if (
+                    after.source_key != self.source_key
+                    or after.generation != self.generation):
+                raise QueryIndexDirty(
+                    "Stored-CDef paging was invalidated by a query-index generation change."
+                )
+            cursor_sql = """
+                WHERE root_graph_hash > ?
+                   OR (root_graph_hash = ? AND root_blob > ?)
+            """
+            params.extend((after.graph_hash, after.graph_hash, after.root_blob))
+        params.append(batch_size)
+        rows = self._con.execute(
+            f"""
+            SELECT root_graph_hash, root_blob
+            FROM v3_stored_root_projection
+            {cursor_sql}
+            ORDER BY root_graph_hash, root_blob
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        if not rows:
+            return
+        try:
+            cdefs = tuple(_CODEC.decode_cdef(row[1]) for row in rows)
+        except Exception as error:
+            raise QueryIndexError(
+                "Stored identity page contains an invalid graph-complete CDef."
+            ) from error
+        last_digest, last_blob = rows[-1]
+        cursor = _StoredIdentityCursor(
+            source_key=self.source_key,
+            generation=self.generation,
+            graph_hash=last_digest,
+            root_blob=last_blob,
+        )
+        if stats is not None:
+            stats.candidate_rows_read += len(rows)
+            stats.cdef_blobs_decoded += len(cdefs)
+            stats.pages_fetched += 1
+        yield _StoredIdentityBatch(cdefs, cursor)
 
     def iter_relation_cdef_batches(
             self,
@@ -2767,7 +2912,7 @@ def _reference_authority_rows(store):
     """
 
     from ...store.records import DefinitionRecord
-    from ..reference import ReferenceOccurrence, _iter_embedded_references
+    from ..model import ReferenceOccurrence
     from ...reference_values import ObjectRef, StateRef
     from ...utils.graph.path import GraphPath
 
@@ -2792,7 +2937,9 @@ def _reference_authority_rows(store):
         )
 
     for record in store.iter_definition_records():
-        for occurrence in _iter_embedded_references(record.definition, owner=record.definition):
+        for occurrence in _iter_embedded_reference_occurrences(
+            record.definition, owner=record.definition,
+        ):
             yield encode("definition", record.digest, occurrence)
     for record in store.iter_declaration_records():
         reference = record.object_ref
@@ -2815,6 +2962,51 @@ def _reference_authority_rows(store):
         yield encode(
             "state-alias", f"{record.alias}:{record.state_ref_digest}",
             ReferenceOccurrence(state, GraphPath(), state), alias=record.alias,
+        )
+
+
+def _iter_embedded_reference_occurrences(value, *, owner, path=None, active=None):
+    """Yield exact embedded references for advisory legacy index projections."""
+
+    from ...definition import ConcreteDefinition
+    from ...links import DefLink
+    from ...reference_values import ObjectRef, StateRef
+    from ...utils.graph.path import GraphPath
+    from ...utils.graph.value import iter_value_edges
+    from ..model import ReferenceOccurrence
+
+    path = GraphPath() if path is None else path
+    active = set() if active is None else active
+    if isinstance(value, (ObjectRef, StateRef)):
+        yield ReferenceOccurrence(owner, path, value)
+        return
+    if isinstance(value, DefLink):
+        yield from _iter_embedded_reference_occurrences(
+            value.target, owner=owner, path=path, active=active,
+        )
+        return
+    if isinstance(value, ConcreteDefinition):
+        marker = id(value)
+        if marker in active:
+            return
+        active.add(marker)
+        try:
+            for edge in iter_value_edges(value):
+                yield from _iter_embedded_reference_occurrences(
+                    edge.value,
+                    owner=owner,
+                    path=path.child(edge.segment),
+                    active=active,
+                )
+        finally:
+            active.remove(marker)
+        return
+    for edge in iter_value_edges(value):
+        yield from _iter_embedded_reference_occurrences(
+            edge.value,
+            owner=owner,
+            path=path.child(edge.segment),
+            active=active,
         )
 
 
@@ -3037,12 +3229,25 @@ def _v3_projection_is_complete(con) -> bool:
     return True
 
 
+def _require_clean_stored_root_guard(con) -> None:
+    """Reject stored-root pages or deltas after unmanaged sidecar mutation."""
+
+    row = con.execute(
+        "SELECT dirty FROM v3_projection_guard WHERE family = 'stored_root'"
+    ).fetchone()
+    if row is None or row[0] != 0:
+        raise QueryIndexDirty(
+            "SQLite stored-root projection changed outside managed index publication."
+        )
+
+
 def _row_counts(con) -> dict[str, int]:
     return {
         table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         for table in (
             "definitions", "feature_tokens", "postings", "definition_edges",
-            "stored_roots", "reference_records", "reference_object_ids",
+            "stored_roots", "v3_stored_root_projection",
+            "reference_records", "reference_object_ids",
             "metadata_records",
         )
     }
@@ -3053,7 +3258,8 @@ def _empty_row_counts() -> dict[str, int]:
         table: 0
         for table in (
             "definitions", "feature_tokens", "postings", "definition_edges",
-            "stored_roots", "reference_records", "reference_object_ids",
+            "stored_roots", "v3_stored_root_projection",
+            "reference_records", "reference_object_ids",
             "metadata_records",
         )
     }

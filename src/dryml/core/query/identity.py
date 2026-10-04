@@ -7,7 +7,7 @@ stages a detached identity and evidence boundary.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 import hashlib
 from typing import Any, Literal
@@ -252,16 +252,50 @@ def _occurrence_path_key(path: GraphPath | "RelationshipPath") -> object:
     )
 
 
+def _combined_requested_limit_state(
+        first: int | None, first_conflict: bool,
+        second: int | None, second_conflict: bool,
+) -> tuple[int | None, bool]:
+    """Combine visible prefix limits without erasing an earlier conflict."""
+
+    if first_conflict or second_conflict:
+        return None, True
+    if first is None:
+        return second, False
+    if second is None or first == second:
+        return first, False
+    return None, True
+
+
 class IdentitySet:
     """Fixed, complete-identity result members with detached source evidence.
 
     Construction eagerly snapshots only supplied members. Iteration, truth
     testing, and cardinality methods never consult a source or execute a query.
-    ``bounded`` and an optional explicit ``requested_limit`` remain visible
-    through fixed refinements and set algebra.
+    ``bounded`` remains visible through fixed refinements and set algebra. An
+    explicit ``requested_limit`` is retained while one originating limit remains
+    unambiguous; algebra over different limits remains bounded without claiming a
+    single combined prefix size.
+
+    Args:
+        members: Complete CDefs, ObjectRefs, StateRefs, or values paired with
+            detached source evidence.
+        bounded: Whether an explicit terminal bound limits completeness.
+        requested_limit: The terminal prefix limit when ``bounded`` is true.
+
+    Raises:
+        TypeError: If boundedness or a member has an unsupported type.
+        ValueError: If the requested limit is invalid or lacks boundedness.
+
+    Side Effects:
+        Eagerly snapshots only supplied values and evidence. Construction never
+        reads Store authority or evaluates a query.
     """
 
-    __slots__ = ("_entries", "bounded", "requested_limit")
+    __slots__ = (
+        "_entries", "bounded", "requested_limit",
+        "_query_work", "_requested_limit_conflict",
+    )
 
     def __init__(
         self,
@@ -272,6 +306,9 @@ class IdentitySet:
         *,
         bounded: bool = False,
         requested_limit: int | None = None,
+        _query_stats: tuple[int, int, int] = (0, 0, 0),
+        _query_work: dict[object, tuple[int, int, int]] | None = None,
+        _requested_limit_conflict: bool = False,
     ):
         if type(bounded) is not bool:
             raise TypeError("IdentitySet bounded must be an exact bool.")
@@ -296,6 +333,10 @@ class IdentitySet:
         self._entries = entries
         self.bounded = bounded
         self.requested_limit = requested_limit
+        self._requested_limit_conflict = _requested_limit_conflict
+        self._query_work = dict(_query_work or {})
+        if any(_query_stats):
+            self._query_work[object()] = _query_stats
 
     @staticmethod
     def _member_and_evidence(member):
@@ -306,8 +347,15 @@ class IdentitySet:
     @classmethod
     def _from_entries(
         cls, entries, *, bounded: bool, requested_limit: int | None = None,
+        query_stats: tuple[int, int, int] = (0, 0, 0),
+        query_work: dict[object, tuple[int, int, int]] | None = None,
+        requested_limit_conflict: bool = False,
     ) -> "IdentitySet":
-        result = cls((), bounded=bounded, requested_limit=requested_limit)
+        result = cls(
+            (), bounded=bounded, requested_limit=requested_limit,
+            _query_stats=query_stats, _query_work=query_work,
+            _requested_limit_conflict=requested_limit_conflict,
+        )
         result._entries = entries
         return result
 
@@ -354,7 +402,20 @@ class IdentitySet:
         return next(iter(self), None)
 
     def evidence_for(self, member) -> IdentityEvidence:
-        """Return detached source evidence for a retained complete identity."""
+        """Return detached source evidence for a retained complete identity.
+
+        Args:
+            member: One complete identity in this fixed result.
+
+        Returns:
+            The immutable evidence ledger captured for ``member``.
+
+        Raises:
+            KeyError: If the identity is not a member.
+
+        Side Effects:
+            None. No authority source is consulted.
+        """
 
         return self._entries[identity_key(member)][1]
 
@@ -395,13 +456,22 @@ class IdentitySet:
 
         return IdentityQuery.from_set(self)
 
-    def refine(self, predicate: Callable[[Any], bool]) -> "IdentitySet":
-        """Return the fixed subset accepted by ``predicate``."""
-
-        return IdentitySetQuery(self, (predicate,)).collect()
-
     def union(self, other: "IdentitySet") -> "IdentitySet":
-        """Merge fixed complete identities and detached evidence without queries."""
+        """Merge fixed identities, evidence, bounds, and prior work provenance.
+
+        Args:
+            other: Another detached identity result.
+
+        Returns:
+            A fixed set containing either input's identities. Work performed by
+            shared producer terminals is counted once.
+
+        Raises:
+            None. Unsupported operands return ``NotImplemented``.
+
+        Side Effects:
+            None. No Store or query source is consulted.
+        """
 
         if not isinstance(other, IdentitySet):
             return NotImplemented
@@ -412,13 +482,34 @@ class IdentitySet:
                 value if existing is None else existing[0],
                 evidence if existing is None else existing[1].merged_with(evidence),
             )
+        requested_limit, limit_conflict = _combined_requested_limit_state(
+            self.requested_limit, self._requested_limit_conflict,
+            other.requested_limit, other._requested_limit_conflict,
+        )
         return self._from_entries(
             entries,
             bounded=self.bounded or other.bounded,
+            requested_limit=requested_limit,
+            requested_limit_conflict=limit_conflict,
+            query_work={**self._query_work, **other._query_work},
         )
 
     def intersection(self, other: "IdentitySet") -> "IdentitySet":
-        """Intersect fixed complete identities and retain both evidence ledgers."""
+        """Intersect fixed identities while retaining evidence and prior work.
+
+        Args:
+            other: Another detached identity result.
+
+        Returns:
+            A fixed set containing identities present in both inputs. Work
+            performed by shared producer terminals is counted once.
+
+        Raises:
+            None. Unsupported operands return ``NotImplemented``.
+
+        Side Effects:
+            None. No Store or query source is consulted.
+        """
 
         if not isinstance(other, IdentitySet):
             return NotImplemented
@@ -427,17 +518,42 @@ class IdentitySet:
             for key, (value, evidence) in self._entries.items()
             if key in other._entries
         }
+        requested_limit, limit_conflict = _combined_requested_limit_state(
+            self.requested_limit, self._requested_limit_conflict,
+            other.requested_limit, other._requested_limit_conflict,
+        )
         return self._from_entries(
             entries,
             bounded=self.bounded or other.bounded,
+            requested_limit=requested_limit,
+            requested_limit_conflict=limit_conflict,
+            query_work={**self._query_work, **other._query_work},
         )
 
     def diagnostic(self) -> QueryDiagnostic:
-        """Return bounded structural diagnostics without member or source values."""
+        """Return bounded structural diagnostics without sensitive values.
 
+        Returns:
+            A disclosure-capped :class:`QueryDiagnostic`. Keyset-page work
+            counters remain exact and preserve producer provenance.
+
+        Raises:
+            None.
+
+        Side Effects:
+            None. The result and its sources remain detached.
+        """
+
+        candidate_rows, cdef_blobs, pages = (
+            sum(values[index] for values in self._query_work.values())
+            for index in range(3)
+        )
         return QueryDiagnostic.for_fixed(
             "identity", len(self), self.bounded, self._source_count(),
             requested_limit=self.requested_limit,
+            candidate_rows_read=candidate_rows,
+            cdef_blobs_decoded=cdef_blobs,
+            pages_fetched=pages,
         )
 
     def _source_count(self) -> int:
@@ -448,9 +564,24 @@ class IdentitySet:
 
 
 class OccurrenceSet:
-    """Fixed typed occurrences with detached source evidence and visible bounds."""
+    """Fixed typed occurrences with detached source evidence and visible bounds.
 
-    __slots__ = ("_entries", "bounded", "requested_limit")
+    Args:
+        members: Complete occurrences, optionally paired with source evidence.
+        bounded: Whether an explicit output cap limits completeness.
+        requested_limit: The terminal prefix limit when ``bounded`` is true.
+
+    Raises:
+        TypeError: If a member or boundedness flag has an unsupported type.
+        ValueError: If the requested limit is invalid or lacks boundedness.
+
+    Side Effects:
+        Eagerly snapshots supplied values only; no authority source is read.
+    """
+
+    __slots__ = (
+        "_entries", "bounded", "requested_limit", "_requested_limit_conflict",
+    )
 
     def __init__(
         self,
@@ -458,6 +589,7 @@ class OccurrenceSet:
         *,
         bounded: bool = False,
         requested_limit: int | None = None,
+        _requested_limit_conflict: bool = False,
     ):
         if type(bounded) is not bool:
             raise TypeError("OccurrenceSet bounded must be an exact bool.")
@@ -480,12 +612,17 @@ class OccurrenceSet:
         self._entries = entries
         self.bounded = bounded
         self.requested_limit = requested_limit
+        self._requested_limit_conflict = _requested_limit_conflict
 
     @classmethod
     def _from_entries(
         cls, entries, *, bounded: bool, requested_limit: int | None = None,
+        requested_limit_conflict: bool = False,
     ) -> "OccurrenceSet":
-        result = cls((), bounded=bounded, requested_limit=requested_limit)
+        result = cls(
+            (), bounded=bounded, requested_limit=requested_limit,
+            _requested_limit_conflict=requested_limit_conflict,
+        )
         result._entries = entries
         return result
 
@@ -531,7 +668,20 @@ class OccurrenceSet:
         return next(iter(self), None)
 
     def evidence_for(self, occurrence: Occurrence) -> IdentityEvidence:
-        """Return detached source evidence for one retained occurrence."""
+        """Return detached source evidence for one retained occurrence.
+
+        Args:
+            occurrence: A complete occurrence in this fixed result.
+
+        Returns:
+            The immutable evidence ledger captured for ``occurrence``.
+
+        Raises:
+            KeyError: If the occurrence is not a member.
+
+        Side Effects:
+            None. No authority source is consulted.
+        """
 
         return self._entries[occurrence.key][1]
 
@@ -573,7 +723,20 @@ class OccurrenceSet:
         return OccurrenceQuery.from_set(self)
 
     def union(self, other: "OccurrenceSet") -> "OccurrenceSet":
-        """Merge fixed occurrence paths and evidence without source execution."""
+        """Merge fixed occurrence paths, evidence, and visible bounds.
+
+        Args:
+            other: Another detached occurrence result.
+
+        Returns:
+            A fixed result containing occurrences from either input.
+
+        Raises:
+            None. Unsupported operands return ``NotImplemented``.
+
+        Side Effects:
+            None. No source query executes.
+        """
 
         if not isinstance(other, OccurrenceSet):
             return NotImplemented
@@ -584,13 +747,32 @@ class OccurrenceSet:
                 value if existing is None else existing[0],
                 evidence if existing is None else existing[1].merged_with(evidence),
             )
+        requested_limit, limit_conflict = _combined_requested_limit_state(
+            self.requested_limit, self._requested_limit_conflict,
+            other.requested_limit, other._requested_limit_conflict,
+        )
         return self._from_entries(
             entries,
             bounded=self.bounded or other.bounded,
+            requested_limit=requested_limit,
+            requested_limit_conflict=limit_conflict,
         )
 
     def intersection(self, other: "OccurrenceSet") -> "OccurrenceSet":
-        """Intersect fixed occurrence paths and retain both evidence ledgers."""
+        """Intersect fixed occurrence paths and retain both evidence ledgers.
+
+        Args:
+            other: Another detached occurrence result.
+
+        Returns:
+            A fixed result containing occurrences present in both inputs.
+
+        Raises:
+            None. Unsupported operands return ``NotImplemented``.
+
+        Side Effects:
+            None. No source query executes.
+        """
 
         if not isinstance(other, OccurrenceSet):
             return NotImplemented
@@ -599,9 +781,15 @@ class OccurrenceSet:
             for key, (value, evidence) in self._entries.items()
             if key in other._entries
         }
+        requested_limit, limit_conflict = _combined_requested_limit_state(
+            self.requested_limit, self._requested_limit_conflict,
+            other.requested_limit, other._requested_limit_conflict,
+        )
         return self._from_entries(
             entries,
             bounded=self.bounded or other.bounded,
+            requested_limit=requested_limit,
+            requested_limit_conflict=limit_conflict,
         )
 
     def diagnostic(self) -> QueryDiagnostic:
@@ -617,84 +805,3 @@ class OccurrenceSet:
 
     def __repr__(self) -> str:
         return repr(self.diagnostic())
-
-
-class _FixedSetQuery:
-    """Common immutable refinement shell that rejects implicit evaluation."""
-
-    __slots__ = ("_source", "_predicates")
-
-    def __init__(self, source, predicates):
-        self._source = source
-        self._predicates = predicates
-
-    def where(self, predicate):
-        """Append one fixed-member predicate without evaluating the result."""
-
-        if not callable(predicate):
-            raise TypeError("Fixed result predicates must be callable.")
-        return type(self)(self._source, (*self._predicates, predicate))
-
-    def __bool__(self) -> bool:
-        raise TypeError("Fixed result queries require an explicit terminal.")
-
-    def exists(self) -> bool:
-        """Return whether an explicit fixed refinement has any member."""
-
-        return self.collect().exists()
-
-    def one(self):
-        """Return one refined member or raise the normal cardinality error."""
-
-        return self.collect().one()
-
-    def one_or_none(self):
-        """Return one refined member, ``None``, or raise on ambiguity."""
-
-        return self.collect().one_or_none()
-
-
-class IdentitySetQuery(_FixedSetQuery):
-    """Unevaluated refinement over an ``IdentitySet`` captured membership."""
-
-    def collect(self) -> IdentitySet:
-        """Evaluate only fixed members and return another detached identity set."""
-
-        entries = {
-            key: (value, evidence)
-            for key, (value, evidence) in self._source._entries.items()
-            if all(predicate(value) for predicate in self._predicates)
-        }
-        return IdentitySet._from_entries(
-            entries,
-            bounded=self._source.bounded,
-            requested_limit=self._source.requested_limit,
-        )
-
-    def count(self) -> int:
-        """Return the refined fixed-member count through an explicit terminal."""
-
-        return self.collect().count()
-
-
-class OccurrenceSetQuery(_FixedSetQuery):
-    """Unevaluated occurrence-aware refinement over fixed occurrence paths."""
-
-    def collect(self) -> OccurrenceSet:
-        """Evaluate only fixed occurrences and return a detached occurrence set."""
-
-        entries = {
-            key: (value, evidence)
-            for key, (value, evidence) in self._source._entries.items()
-            if all(predicate(value) for predicate in self._predicates)
-        }
-        return OccurrenceSet._from_entries(
-            entries,
-            bounded=self._source.bounded,
-            requested_limit=self._source.requested_limit,
-        )
-
-    def count(self) -> int:
-        """Return the refined fixed-occurrence count through an explicit terminal."""
-
-        return self.collect().count()

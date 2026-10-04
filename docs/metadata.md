@@ -144,17 +144,17 @@ current edits.
 
 ## Metadata Queries
 
-Use `field()` with `Repo.references().where(...)`. Repeated `where()` calls
-intersect predicates. Expressions combine with `&`, `|`, and `~`.
+Use `field()` with an identity query. Repeated `where()` calls intersect predicates.
+Expressions combine with `&`, `|`, and `~`.
 
 ```python
 from dryml.core import field
 
 matches = (
-    repo.references()
+    repo.query().state_refs()
     .where(field("object", "project").eq("forecasting"))
     .where(field("snapshot", "environment_status").eq("known"))
-    .state_refs()
+    .collect()
 )
 ```
 

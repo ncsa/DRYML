@@ -7,6 +7,7 @@ from dryml.core import (
     ConcreteDefinition,
     Definition,
     EdgeKind,
+    IdentitySet,
     Missing,
     Par,
     Present,
@@ -224,7 +225,7 @@ def test_indexed_query_can_inspect_ref_target_subgraph():
         ))),
     )
 
-    assert list(repo.query(selector).stored(refresh=False).defs()) == [a]
+    assert list(IdentitySet((a,)).query().sel(selector).collect()) == [a]
 
 
 def test_repo_query_selector_preserves_policy():
@@ -235,8 +236,9 @@ def test_repo_query_selector_preserves_policy():
     broad = Selector(Definition(objects.TestBase), cls_policy="selector")
     exact = Selector(Definition(objects.TestBase), cls_policy="exact")
 
-    assert repo.query(broad).stored(refresh=False).count() == 1
-    assert repo.query(exact).stored(refresh=False).count() == 0
+    universe = IdentitySet((child,)).query()
+    assert universe.sel(broad).count() == 1
+    assert universe.sel(exact).count() == 0
 
 
 def test_lens_set_deep_freezes_replacement_inside_frozen_container():
@@ -300,14 +302,15 @@ def test_indexed_query_missing_does_not_require_presence():
     for cdef in (root_missing, nested_missing, ref_parent):
         repo._query_catalog.register_stored(cdef, FakeStore())
 
-    assert list(repo.query(Definition(Cls2, missing=Missing())).stored(refresh=False).defs()) == [root_missing]
-    assert list(repo.query(Definition(Nest3, cfg={"x": Missing()})).stored(refresh=False).defs()) == [nested_missing]
+    universe = IdentitySet((root_missing, nested_missing, ref_parent)).query()
+    assert list(universe.sel(Definition(Cls2, missing=Missing())).collect()) == [root_missing]
+    assert list(universe.sel(Definition(Nest3, cfg={"x": Missing()})).collect()) == [nested_missing]
 
     ref_selector = Definition(
         Nest3,
         ref=_ref(Selector(Definition(Cls1, x={"missing": Missing()}))),
     )
-    assert list(repo.query(ref_selector).stored(refresh=False).defs()) == [ref_parent]
+    assert list(universe.sel(ref_selector).collect()) == [ref_parent]
 
 
 def test_concrete_definition_collapses_materialize_links():

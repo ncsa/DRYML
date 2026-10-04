@@ -45,7 +45,7 @@ def test_definition_identity_and_structural_query_paths_remain_available(tmp_pat
     assert cdef.stable_hash()
     assert repo.get_alias("planned") == state.object
     assert repo.definition_graph(cdef).roots == (cdef,)
-    assert list(repo.find_defs(cdef, scope="cached")) == [cdef]
+    assert list(repo.query().sel(cdef).cdefs().cached(scope=repo).collect()) == [cdef]
 
 
 def test_definition_build_rejects_before_preparation_or_constructor():

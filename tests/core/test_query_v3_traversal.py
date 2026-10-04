@@ -4,8 +4,18 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core import Definition, Object, ObjectId, ObjectRef, Serializable, StateRef
+from dryml.core import (
+    Definition,
+    Generator,
+    Object,
+    ObjectId,
+    ObjectRef,
+    Repo,
+    Serializable,
+    StateRef,
+)
 from dryml.core.cdef_graph import EdgeKind
+from dryml.core.domains import UniformFromSet
 from dryml.core.links import DefLink
 from dryml.core.query.identity import IdentitySet
 from dryml.core.query import field
@@ -17,6 +27,8 @@ from dryml.core.query.relationships import (
     RelationshipKind,
     RelationshipPath,
 )
+from dryml.core.store.dir import DirStore
+from dryml.core.template import Par
 from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
@@ -32,6 +44,28 @@ class V3TraversalParent(Object):
 
     def __init__(self, child):
         self.child = child
+
+
+class V3TemplateLeaf(Object):
+    """Stateless nested node selected through exact Generator support."""
+
+    def __init__(self, width):
+        self.width = width
+
+
+class V3TemplateParent(Object):
+    """Stateless root retaining generator-selected child topology."""
+
+    def __init__(self, children):
+        self.children = children
+
+
+class V3DiamondNode(Object):
+    """Labeled shared node for existential traversal work counters."""
+
+    def __init__(self, label, children):
+        self.label = label
+        self.children = children
 
 
 def _references():
@@ -104,6 +138,17 @@ def test_v3_all_policy_keeps_reference_edges_and_shared_paths_distinct():
     assert len({item.path for item in shared}) == 2
 
 
+def test_v3_occurrence_kind_restrictions_only_narrow_targets():
+    """Chained incompatible kind restrictions produce an empty intersection."""
+
+    root, child, _, _, _, _, child_path = _references()
+    occurrences = OccurrenceSet((Occurrence(root, child_path, child),))
+
+    assert occurrences.query().cdefs().count() == 1
+    assert occurrences.query().cdefs().object_refs().count() == 0
+    assert occurrences.query().target_kind("cdef").state_refs().count() == 0
+
+
 def test_v3_direct_projections_ignore_raw_caps_without_enumerating_occurrences(monkeypatch):
     root, child, _, _, _, _, _ = _references()
     query = IdentityQuery.from_set(IdentitySet((root,))).nested(child).max_occurrences(0)
@@ -115,6 +160,46 @@ def test_v3_direct_projections_ignore_raw_caps_without_enumerating_occurrences(m
 
     assert query.owners().one() == root
     assert query.targets().one() == child
+
+
+def test_v3_direct_projection_visits_each_diamond_state_once(monkeypatch):
+    """Existential projection stays linear over exponentially many raw paths."""
+
+    from dryml.core.query import relationships
+
+    target = Definition(V3TraversalLeaf, "target").concretize()
+    layer = (target, target)
+    nodes = {id(target)}
+    for depth in range(7):
+        layer = tuple(
+            Definition(
+                V3DiamondNode,
+                f"{depth}-{side}",
+                layer,
+            ).concretize()
+            for side in ("left", "right")
+        )
+        nodes.update(map(id, layer))
+    root = Definition(V3DiamondNode, "root", layer).concretize()
+    nodes.add(id(root))
+    query = IdentityQuery.from_set(IdentitySet((root,))).nested(target)
+    visits = []
+    original = relationships._ordered_direct_edges
+
+    def counted(value):
+        visits.append(id(value))
+        return original(value)
+
+    monkeypatch.setattr(relationships, "_ordered_direct_edges", counted)
+    monkeypatch.setattr(
+        relationships,
+        "iter_relationship_occurrences",
+        lambda *_args, **_kwargs: pytest.fail("direct projection built raw paths"),
+    )
+
+    assert query.targets().one() == target
+    assert len(visits) <= len(nodes)
+    assert len(visits) == len(set(visits))
 
 
 def test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships():
@@ -241,3 +326,77 @@ def test_v3_occurrence_late_metadata_demand_restarts_root_evidence(tmp_path, mon
 
     assert nested.count() == 0
     assert mutated
+
+
+def _v3_template_selector(*, shared: bool):
+    child = Definition(V3TemplateLeaf, Par("width"))
+    children = (
+        [child, child]
+        if shared else [child, Definition(V3TemplateLeaf, Par("width"))]
+    )
+    return Generator(
+        Definition(V3TemplateParent, children),
+        {"width": UniformFromSet((64,))},
+    ).support_selector()
+
+
+def _v3_template_leaf_selector():
+    return Generator(
+        Definition(V3TemplateLeaf, Par("width")),
+        {"width": UniformFromSet((64,))},
+    ).support_selector()
+
+
+def test_v3_nested_generator_preserves_shared_topology_witnesses(tmp_path):
+    """Nested exact support distinguishes shared and merely equal child graphs."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    shared_leaf = V3TemplateLeaf(64, repo=repo)
+    shared = V3TemplateParent([shared_leaf, shared_leaf], repo=repo)
+    independent = V3TemplateParent(
+        [V3TemplateLeaf(64, repo=repo), V3TemplateLeaf(64, repo=repo)],
+        repo=repo,
+    )
+    root = V3TemplateParent(
+        [shared.definition, independent.definition], repo=repo,
+    )
+    repo.save_object(root)
+
+    result = repo.query().stored().cdefs().nested(
+        _v3_template_selector(shared=True)
+    ).targets().collect()
+
+    assert tuple(result) == (shared.definition,)
+
+
+def test_v3_nested_generator_honors_reference_aware_edge_policies(tmp_path):
+    """Generator targets retain literal materializing and reference paths."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    material = V3TemplateParent(V3TemplateLeaf(64, repo=repo), repo=repo)
+    reference = V3TemplateParent(
+        DefLink.finalized(
+            EdgeKind.REF,
+            V3TemplateLeaf(64, repo=repo).definition,
+        ),
+        repo=repo,
+    )
+    mixed = V3TemplateParent(
+        DefLink.finalized(
+            EdgeKind.REF,
+            V3TemplateParent(V3TemplateLeaf(64, repo=repo), repo=repo).definition,
+        ),
+        repo=repo,
+    )
+    for value in (material, reference, mixed):
+        repo.save_object(value)
+
+    roots = repo.query().stored().cdefs()
+    selector_value = _v3_template_leaf_selector()
+    references = EdgePolicy(frozenset((RelationshipKind.REFERENCE,)))
+    all_occurrences = roots.nested(selector_value)
+
+    assert roots.nested(selector_value, edges=EdgePolicy.OWNED).count() == 1
+    assert roots.nested(selector_value, edges=references).count() == 1
+    assert all_occurrences.count() == 3
+    assert all_occurrences.through(RelationshipKind.REFERENCE).count() == 2

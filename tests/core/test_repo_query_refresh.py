@@ -12,35 +12,31 @@ class RefreshLeaf(Object):
         self.name = name
 
 
-def test_refresh_false_auto_and_forced_refresh_visibility(tmp_path):
+def test_v3_query_observes_committed_external_writes(tmp_path):
     store = DirStore(tmp_path / "store")
     repo_a = Repo(stores=store)
     first = RefreshLeaf("first", repo=repo_a)
     repo_a.save_object(first)
 
     repo_view = Repo(stores=DirStore(store.base_dir))
-    assert len(repo_view.find_defs(None, refresh=False)) == 1
-    assert len(repo_view.find_defs(None)) == 1
+    assert repo_view.query().cdefs().stored().count() == 1
 
     repo_b = Repo(stores=DirStore(store.base_dir))
     second = RefreshLeaf("second", repo=repo_b)
     repo_b.save_object(second)
 
-    # Persistent auto-SQLite indexes expose committed external writes on the
-    # next read transaction without Store hydration.
-    assert len(repo_view.find_defs(None, refresh=False)) == 2
-    assert len(repo_view.find_defs(None, refresh=True)) == 2
+    assert repo_view.query().cdefs().stored().count() == 2
 
 
-def test_current_process_save_updates_query_catalog_without_refresh(tmp_path):
+def test_current_process_save_updates_v3_cached_and_stored_membership(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     first = RefreshLeaf("first", repo=repo)
     repo.add_objects(first)
 
-    assert len(repo.find_defs(None, scope="cached", refresh=False)) == 1
-    assert len(repo.find_defs(None, scope="stored", refresh=False)) == 0
+    assert repo.query().cdefs().cached(scope=repo).count() == 1
+    assert repo.query().cdefs().stored().count() == 0
 
     repo.save_object(first)
 
-    assert len(repo.find_defs(None, scope="stored", refresh=False)) == 1
+    assert repo.query().cdefs().stored().count() == 1

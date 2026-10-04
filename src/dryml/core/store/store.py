@@ -150,6 +150,29 @@ class Store(ABC):
             main_ref=coverage("read_main_ref", Store.read_main_ref),
         )
 
+    def query(self):
+        """Create an unevaluated Query V3 identity universe for this Store.
+
+        Returns:
+            An :class:`~dryml.core.query.IdentityQuery` whose producer is this
+            exact Store. Use ``sel()``, kind restrictions, metadata predicates,
+            or relationship operations before an explicit terminal.
+
+        Raises:
+            StoreAuthorityError: At terminal evaluation if authoritative records
+                are malformed or incomplete.
+            StoreCapabilityError: At terminal evaluation if this backend cannot
+                enumerate a required authority family.
+
+        Side Effects:
+            Construction has none. A terminal reads fenced record authority but
+            never materializes Objects, reads local-state payloads, allocates
+            identities, writes records, or observes the current host.
+        """
+        from ..query import IdentityQuery
+
+        return IdentityQuery.from_store(self)
+
     def to_definition(self) -> dict[str, Any]:
         """Export a detached portable existing-Store descriptor.
 

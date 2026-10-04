@@ -99,9 +99,22 @@ class QueryCardinalityError(QueryError):
 class QueryDiagnostic:
     """Bounded structural diagnostics for detached Query V3 fixed results.
 
-    The diagnostic intentionally contains counts and a result domain only. It
-    never retains member representations, source values, paths, or upstream
-    exception text.
+    The diagnostic intentionally contains counts and a result domain only. Work
+    counters report keyset-page activity retained by a fixed result and remain
+    zero for non-indexed evaluation. It never retains member representations,
+    source values, paths, or upstream exception text.
+
+    Attributes:
+        domain: Fixed identity or occurrence result domain.
+        member_count: Disclosure-capped number of retained members.
+        member_count_exact: Whether ``member_count`` is uncapped.
+        bounded: Whether an explicit output bound limits completeness.
+        source_count: Disclosure-capped number of contributing sources.
+        source_count_exact: Whether ``source_count`` is uncapped.
+        requested_limit: Explicit terminal prefix limit, if present.
+        candidate_rows_read: Exact derived candidate rows fetched.
+        cdef_blobs_decoded: Exact candidate CDef blobs decoded.
+        pages_fetched: Exact derived keyset pages fetched.
     """
 
     domain: Literal["identity", "occurrence"]
@@ -112,13 +125,36 @@ class QueryDiagnostic:
     source_count_exact: bool
     # The terminal-provided prefix limit, not a safety or verification budget.
     requested_limit: int | None = None
+    candidate_rows_read: int = 0
+    cdef_blobs_decoded: int = 0
+    pages_fetched: int = 0
 
     @classmethod
     def for_fixed(
         cls, domain: Literal["identity", "occurrence"], member_count: int,
         bounded: bool, source_count: int, *, requested_limit: int | None = None,
+        candidate_rows_read: int = 0, cdef_blobs_decoded: int = 0,
+        pages_fetched: int = 0,
     ) -> "QueryDiagnostic":
-        """Create a disclosure-safe diagnostic with count caps applied."""
+        """Create a disclosure-safe diagnostic with count caps applied.
+
+        Args:
+            domain: Fixed identity or occurrence result domain.
+            member_count: Actual fixed member count.
+            bounded: Whether an explicit terminal bound limits completeness.
+            source_count: Number of detached contributing sources.
+            requested_limit: Explicit prefix limit, if any.
+            candidate_rows_read: Derived candidate rows fetched by the terminal.
+            cdef_blobs_decoded: Candidate CDef blobs decoded by the terminal.
+            pages_fetched: Derived keyset pages fetched by the terminal.
+
+        Returns:
+            A diagnostic with disclosure-sensitive member and source counts
+            capped while non-sensitive work counters remain exact.
+
+        Side Effects:
+            None.
+        """
 
         limit = 9_999
         return cls(
@@ -129,6 +165,9 @@ class QueryDiagnostic:
             source_count=min(source_count, limit),
             source_count_exact=source_count <= limit,
             requested_limit=requested_limit,
+            candidate_rows_read=candidate_rows_read,
+            cdef_blobs_decoded=cdef_blobs_decoded,
+            pages_fetched=pages_fetched,
         )
 
 

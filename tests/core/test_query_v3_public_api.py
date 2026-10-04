@@ -4,6 +4,8 @@ Query V3 cutover must not change item lookup, ``get()``, or explicit load
 semantics while public query producers migrate separately.
 """
 
+import dryml.core as core
+import dryml.core.query as query
 import pytest
 
 from dryml.core import Definition, Object, ObjectId, ObjectRef, Repo, Serializable, SKIP_ARGS
@@ -63,14 +65,14 @@ def test_retained_item_get_and_load_lookups_keep_their_candidate_universes(tmp_p
 
     reopened = Repo(DirStore(store.base_dir))
 
-    assert reopened.query(child.definition).known().defs().count() == 0
+    assert reopened.query().sel(child.definition).cdefs().stored().count() == 0
     assert reopened.get(child.definition).count() == 0
     with pytest.raises(KeyError):
         reopened[child.definition]
     retained_root = reopened[root.definition]
     assert retained_root.definition == root.definition
     assert reopened.get(root.definition).one().definition == root.definition
-    assert reopened.get(child.definition).count() == reopened.query(child.definition).known().defs().count()
+    assert reopened.get(child.definition).count() == reopened.query().sel(child.definition).cdefs().count()
     with pytest.raises(TypeError, match="ConcreteDefinition"):
         reopened[Definition(LookupRoot, SKIP_ARGS)]
 
@@ -110,8 +112,7 @@ def test_explicit_weak_cached_child_is_a_retained_get_candidate(tmp_path):
     repo.cache_weak(root)
     repo.cache_weak(child)
 
-    with pytest.raises(RepoLoadError, match="No connected Store"):
-        repo.query(child.definition).known().objects()
+    assert repo.query().sel(child.definition).cdefs().cached().count() == 1
     with pytest.raises(RepoLoadError, match="No connected Store"):
         repo.get(child.definition)
     with pytest.raises(RepoLoadError, match="No connected Store"):
@@ -131,5 +132,36 @@ def test_retained_get_preserves_alias_only_root_candidate_policy(tmp_path):
     store.write_object_alias(ObjectAliasRecord("selected", ObjectRef(cdef, {GraphPath(): ObjectId()})))
     repo = Repo(store)
 
-    expected = repo.query(cdef).known().defs().count()
+    expected = repo.query().sel(cdef).cdefs().stored().count()
     assert repo.get(cdef).count() == expected
+
+
+def test_v3_producers_and_exports_replace_the_retired_query_surface(tmp_path):
+    """Repo and Store produce V3 plans and retired public names are absent."""
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    root = LookupLeaf("root", repo=repo)
+    repo.save_object(root)
+
+    constructions = repo._num_constructions
+    repo_query = repo.query()
+    store_query = store.query()
+
+    assert type(repo_query).__name__ == "IdentityQuery"
+    assert type(store_query).__name__ == "IdentityQuery"
+    assert repo_query.sel(root.definition).cdefs().stored().one() == root.definition
+    assert store_query.sel(root.definition).cdefs().stored().one() == root.definition
+    assert repo_query.take(1).bounded
+    assert repo._num_constructions == constructions
+    assert not hasattr(repo, "references")
+    assert not hasattr(repo, "find_defs")
+    assert not hasattr(core, "DefinitionQuery")
+    assert not hasattr(core, "ReferenceQuery")
+    assert not hasattr(query, "DefinitionQuery")
+    assert not hasattr(query, "ReferenceQuery")
+    assert core.ObjectResultSet is query.ObjectResultSet
+    assert core.QueryDiagnostic is query.QueryDiagnostic
+    assert not hasattr(repo_query.take(1), "refine")
+    assert not hasattr(core, "ContainmentEdgePolicy")
+    assert not hasattr(query, "ContainmentEdgePolicy")

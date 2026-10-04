@@ -277,19 +277,6 @@
             "test_zip_metadata_mutations_remain_buffered_until_normal_flush"
           ]
         },
-        "tests/core/test_metadata_query.py": {
-          "rationale": "Keep the complete pure predicate validation plus representative current, state, prepared-selector sidecar, conflict, projection, and Zip-backed query proofs; exhaustive mode covers equivalent composition permutations.",
-          "functions": [
-            "test_field_validates_paths_and_all_predicates_are_inert_and_round_trip",
-            "test_predicate_bounds_and_codec_reject_malformed_noncanonical_input",
-            "test_current_metadata_paths_types_and_empty_roots_are_scope_local",
-            "test_predicate_construction_rejects_invalid_input_before_store_scanning",
-            "test_state_metadata_projects_unique_objects_and_keeps_structure_constraints",
-            "test_u4_prepared_selector_composes_with_metadata_sidecars",
-            "test_store_order_preserves_answers_and_exposes_current_or_snapshot_conflicts",
-            "test_definition_where_composition_store_authority_and_zip_scan"
-          ]
-        },
         "tests/core/test_pending_reference_save.py": {
           "rationale": "Retain claim completion, nested unwind, explicit/routed exclusion, dependency failure, generation fencing, and route ordering; exhaustive mode covers equivalent claim failure windows.",
           "functions": [
@@ -302,34 +289,28 @@
             "test_route_order_remains_a_then_b_while_declaration_b_claim_completes_first"
           ]
         },
-        "tests/core/test_query_index.py": {
-          "rationale": "Retain authoritative refresh, exact-hit verification, deleted-index recovery, reference occurrence semantics, retired-root rejection, and strict unindexed rejection; exhaustive mode covers a second closure-root shape.",
-          "functions": [
-            "test_definition_query_refreshes_from_definition_records",
-            "test_exact_definition_query_confirms_authoritative_record_after_hash_hit",
-            "test_deleting_derived_index_rebuilds_without_changing_authority",
-            "test_reference_results_preserve_exact_occurrences_while_definitions_dedupe",
-            "test_reference_query_never_treats_retired_object_roots_as_authority",
-            "test_strict_index_guard_rejects_unindexed_broad_query"
-          ]
-        },
         "tests/core/test_query_v3_identity.py": {
           "rationale": "Retain graph-exact deduplication and collision-only ordering without Store setup; run the complete fixed-result boundary in focused verification.",
           "functions": [
             "test_identity_set_characterizes_graph_identity_without_changing_cdef_equality",
-            "test_ordering_avoids_extra_graph_encoding_without_digest_ties"
+            "test_ordering_avoids_extra_graph_encoding_without_digest_ties",
+            "test_complete_identity_digests_are_cached_across_query_operators"
           ]
         },
         "tests/core/test_query_v3_sources.py": {
-          "rationale": "Retain complete Store inventory and owned-child authority without repeating the broader producer matrix in routine runs.",
+          "rationale": "Retain complete Store inventory, owned-child authority, and ObjectId conflict rejection without repeating the broader producer matrix in routine runs.",
           "functions": [
-            "test_store_capture_includes_represented_references_and_owned_derivatives"
+            "test_store_capture_includes_represented_references_and_owned_derivatives",
+            "test_broad_capture_reuses_one_record_family_pass_and_exact_state_reads_directly",
+            "test_object_reference_authority_conflicts_fail_within_and_across_stores"
           ]
         },
         "tests/core/test_query_v3_restrictions.py": {
-          "rationale": "Retain failed metadata-read disclosure and exact-selective coverage checks; run the full save-backed restriction matrix in focused verification.",
+          "rationale": "Retain typed metadata validation, failed-read disclosure, refresh controls, and exact-selective coverage checks; run the full save-backed restriction matrix in focused verification.",
           "functions": [
+            "test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals",
             "test_v3_metadata_read_failure_is_not_a_missing_field",
+            "test_v3_metadata_keeps_scalar_types_and_validates_every_populated_leaf",
             "test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed"
           ]
         },
@@ -338,6 +319,7 @@
           "functions": [
             "test_v3_closure_uses_typed_associations_and_owned_state_adjacency",
             "test_v3_direct_projections_ignore_raw_caps_without_enumerating_occurrences",
+            "test_v3_direct_projection_visits_each_diamond_state_once",
             "test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships"
           ]
         },
@@ -346,27 +328,25 @@
           "functions": [
             "test_u5_repeated_cut_instability_fails_without_a_partial_answer",
             "test_u5_fixed_prefix_does_not_reencode_unique_graph_digests",
-            "test_u5_zero_prefix_validates_without_opening_source_inventory"
+            "test_u5_zero_prefix_validates_without_opening_source_inventory",
+            "test_u5_scalar_terminals_stop_at_distinct_cardinality_thresholds"
           ]
         },
         "tests/core/test_query_v3_index.py": {
-          "rationale": "Retain the no-historical-rescan incremental SQLite coverage invariant in routine runs; keep schema/recovery and backend parity matrices focused.",
+          "rationale": "Retain corrupt-sidecar recovery and the no-historical-rescan incremental SQLite coverage invariant in routine runs; keep larger schema/recovery and backend parity matrices focused.",
           "functions": [
-            "test_incremental_v3_publication_does_not_rescan_historical_projection_rows"
+            "test_corrupt_sidecar_rebuild_preserves_authoritative_record_bytes",
+            "test_incremental_v3_publication_does_not_rescan_historical_projection_rows",
+            "test_clean_incremental_save_does_not_enumerate_historical_references"
           ]
         },
-        "tests/core/test_query_graph_planner.py": {
-          "rationale": "Keep every dependency-free planner and backend-contract case plus one authoritative graph-query comparison; exhaustive mode covers repeated Store-backed no-enumeration and projection compositions.",
+        "tests/core/test_query_v3_acceptance.py": {
+          "rationale": "Retain compact cross-layer V3 authority, metadata, traversal, algebra, effect, recovery, and exact save/load acceptance without repeating focused matrices.",
           "functions": [
-            "test_planner_can_choose_nested_exact_anchor",
-            "test_nested_exact_anchor_does_not_enumerate_full_root_domain",
-            "test_selective_known_query_never_constructs_known_id_set",
-            "test_selective_cached_query_never_constructs_cached_id_set",
-            "test_planner_propagates_child_scalar_candidates_to_parent",
-            "test_anchor_selection_estimates_every_node_and_materializes_chosen_branches",
-            "test_planner_runs_against_backend_without_lock_or_internal_dicts",
-            "test_graph_planner_matches_independent_bruteforce_matrix",
-            "test_graph_query_matches_bruteforce_across_domains_and_replicas"
+            "test_ae1_ae8_ae22_authority_metadata_and_query_effects",
+            "test_ae10_ae20_traversal_algebra_fixed_sets_and_terminals",
+            "test_ae21_ae23_save_load_and_missing_sidecar_recover_from_authority",
+            "test_ae24_trusted_selector_import_is_explicit_and_backend_free"
           ]
         },
         "tests/core/test_repo_query_nested.py": {
@@ -377,38 +357,28 @@
           ]
         },
         "tests/core/test_reference_query.py": {
-          "rationale": "Retain nonmaterializing scans, prepared-selector sidecars, aggregate identity, exact paths/aliases, nested state references, and conflicting-authority rejection as the complete reference-query boundary roster.",
+          "rationale": "Retain unified reference identity filters, metadata and alias composition, explicit typed traversal, and owned-subtree containment.",
           "functions": [
-            "test_reference_filters_scan_authority_without_materializing",
-            "test_u4_prepared_selector_composes_with_reference_sidecars",
-            "test_object_id_lookup_is_closed_but_reference_query_returns_aggregate",
-            "test_reference_filters_keep_exact_paths_aliases_and_all_ephemeral_refs",
-            "test_object_terminal_preserves_nested_ref_state_reference",
-            "test_exact_state_ref_containment_entries_agree_several_levels_deep",
-            "test_derived_candidates_cannot_hide_conflicting_store_authority"
-          ]
-        },
-        "tests/core/test_reference_query_index.py": {
-          "rationale": "Retain reopened ready-sidecar compatibility for exact reference containment without the recovery-state matrix.",
-          "functions": [
-            "test_reopened_existing_sidecar_preserves_exact_reference_containment"
-          ]
-        },
-        "tests/core/test_query_federation.py": {
-          "rationale": "Retain source restriction, replica provenance across distinct graph topologies, and global occurrence-cap behavior for reference-aware containment.",
-          "functions": [
-            "test_reference_containment_keeps_replica_provenance_and_source_scope",
-            "test_reference_containment_cap_keeps_graph_distinct_owner_replicas"
+            "test_reference_identity_filters_use_the_unified_producer",
+            "test_reference_metadata_and_alias_restrictions_stay_in_one_query",
+            "test_reference_containment_uses_explicit_roots_and_nonempty_paths",
+            "test_reference_contains_restricts_aggregate_object_identities"
           ]
         },
         "tests/core/test_repo_query_multistore.py": {
           "rationale": "Retain distinct and replicated result identity, equivalent physical handles, stale refresh replacement, and structural-versus-exact state behavior; exhaustive mode covers ordering and duplicate refresh variants.",
           "functions": [
-            "test_distinct_cdefs_in_two_stores_produce_two_logical_results",
-            "test_same_cdef_in_two_stores_deduplicates_and_tracks_replicas",
+            "test_distinct_cdefs_in_two_stores_produce_two_v3_identities",
+            "test_same_cdef_in_two_stores_deduplicates_and_tracks_sources",
             "test_equivalent_store_instances_share_physical_identity",
-            "test_forced_refresh_replaces_stale_store_reference",
+            "test_v3_query_uses_replaced_connected_store_reference",
             "test_structural_query_is_fresh_while_exact_state_ref_load_restores_state"
+          ]
+        },
+        "tests/core/test_repo_query_performance_contract.py": {
+          "rationale": "Retain canonical multi-Store bounded paging with duplicate frontiers and exact work counters in the representative gate.",
+          "functions": [
+            "test_v3_multistore_take_uses_only_canonical_index_frontier_pages"
           ]
         },
         "tests/core/test_repo_save_load.py": {
@@ -418,7 +388,7 @@
             "test_explicit_store_save_copies_reusable_state_into_its_closure",
             "test_failed_local_state_save_never_publishes_a_state_ref",
             "test_structural_load_without_state_restore_builds_from_definition_authority",
-            "test_reopen_hydrates_definition_authority_and_discovers_queries_without_materializing",
+            "test_reopen_v3_query_discovers_definition_authority_without_materializing",
             "test_u7_exact_state_ref_restores_nested_independent_local_states",
             "test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph"
           ]

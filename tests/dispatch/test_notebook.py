@@ -89,7 +89,7 @@ def test_repeated_notebook_dispatch_preserves_shell_and_kernel_task(tmp_path):
             for count in range(1, 4):
                 result = await execute(
                     f"result = view.run(notebook_fn, {count})\n"
-                    f"print('published', isinstance(result, StateRef), len(list(repo.find_defs(None, refresh=True))))\n"
+                    f"print('published', isinstance(result, StateRef), repo.query().cdefs().stored().count())\n"
                 )
                 assert f"published True {count}" in result
                 assert "DispatchCoverageWarning" not in result
@@ -118,7 +118,7 @@ def test_repeated_notebook_dispatch_preserves_shell_and_kernel_task(tmp_path):
                 assert "KeyboardInterrupt" in interrupted
             assert "Task was destroyed" not in interrupted
             after = await execute(
-                "print('after-interrupt', len(list(repo.find_defs(None, refresh=True))), not kernel_task.done())"
+                "print('after-interrupt', repo.query().cdefs().stored().count(), not kernel_task.done())"
             )
             assert f"after-interrupt {3 if status == 'error' else 4} True" in after
             await execute("kernel_task.cancel()")

@@ -16,7 +16,12 @@ from ..definition import ConcreteDefinition
 from ..reference_values import ObjectRef, StateRef
 from ..store.records import DefinitionRecord
 from ..store.store import Store, StoreCapabilityError
-from .authority import CapturedStoreFacts, IdentityValue, _derive_identities
+from .authority import (
+    CapturedStoreFacts,
+    IdentityValue,
+    _derive_identities,
+    validate_captured_reference_authority,
+)
 from .identity import IdentitySet, SourceEvidence, identity_key
 
 
@@ -99,6 +104,9 @@ class SourceCapture:
         self.capture_rounds = 0
         self.demand_recaptures = 0
         self.instability_retries = 0
+        self.candidate_rows_read = 0
+        self.cdef_blobs_decoded = 0
+        self.pages_fetched = 0
 
     def _record_cut(self, key: str) -> None:
         """Account for each fenced read, including selective Store authority."""
@@ -113,7 +121,7 @@ class SourceCapture:
 
         key = id(repo)
         if key not in self._topologies:
-            with repo.retain_topology():
+            with repo.retain_topology(allow_physical_duplicates=True):
                 self._topologies[key] = tuple(repo.stores)
         return self._topologies[key]
 
@@ -204,10 +212,12 @@ class SourceCapture:
     ) -> tuple[CapturedStoreFacts, ...]:
         """Capture each selected Store while preserving distinct transaction cuts."""
 
-        return tuple(
+        facts = tuple(
             self.capture_store(source, metadata_scopes=metadata_scopes)
             for source in sources
         )
+        validate_captured_reference_authority(facts)
+        return facts
 
     def read_exact_state(self, source: StoreSource | Store, target: StateRef) -> StateRef | None:
         """Read one complete exact StateRef without requiring broad inventory.
@@ -341,7 +351,7 @@ class SourceCapture:
         retain_topology = getattr(repo, "retain_topology", None)
         if not callable(retain_topology):
             raise TypeError("RepoSource requires a Repo-like topology producer.")
-        with retain_topology():
+        with retain_topology(allow_physical_duplicates=True):
             stores = self.repo_stores(repo)
             facts = self.capture_stores(stores, metadata_scopes=metadata_scopes)
             cached = self.cache_knowledge(repo, weak=source.weak)

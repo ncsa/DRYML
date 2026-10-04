@@ -292,7 +292,7 @@ def test_per_object_routing_projects_a_child_state_ref_without_copying_its_paylo
     assert Repo(list(child_snapshot.required_stores)).load_state_ref(
         child_snapshot.state_ref, reuse_live="never",
     ).value == 3
-    assert list(Repo(child_store).query(child_state.definition).stored().defs()) == [child_state.definition]
+    assert list(Repo(child_store).query().sel(child_state.definition).cdefs().stored().collect()) == [child_state.definition]
 
     with pytest.raises(RepoLoadError):
         Repo(parent_store).load_state_ref(state, reuse_live="never")
