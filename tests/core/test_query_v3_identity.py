@@ -171,6 +171,18 @@ def test_fixed_occurrence_query_restricts_captured_paths_and_projects_without_so
     assert occurrences.query().max_occurrences(0).owners().one() == owner
 
 
+def test_fixed_occurrence_membership_uses_graph_exact_root_identity():
+    shared, independent = _graph_distinct_parents()
+    target = Definition(V3IdentityLeaf, "same").concretize()
+    path = GraphPath((Key("child"),))
+    first = Occurrence(shared, path, target)
+    different = Occurrence(independent, path, target)
+
+    assert first == different  # Ordinary CDef/dataclass equality is structural.
+    assert first in OccurrenceSet((first,))
+    assert different not in OccurrenceSet((first,))
+
+
 class _ClosedSource:
     def close(self):
         pass
