@@ -20,6 +20,9 @@ from .model import (
     containment_witness_key,
 )
 
+# Query V3 fixed result primitives remain private until the U7 public cutover.
+from .identity import IdentitySet, Occurrence, OccurrenceSet
+
 
 def _sort_cdefs(cdefs: Iterable[ConcreteDefinition]) -> tuple[ConcreteDefinition, ...]:
     return tuple(sorted(cdefs, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
