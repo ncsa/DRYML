@@ -184,13 +184,20 @@ class Occurrence:
     """
 
     owner: ConcreteDefinition | ObjectRef | StateRef
-    path: GraphPath
+    path: GraphPath | "RelationshipPath"
     target: ConcreteDefinition | ObjectRef | StateRef
 
     def __post_init__(self) -> None:
+        from .relationships import RelationshipPath
+
         _identity_kind(self.owner)
         _identity_kind(self.target)
-        object.__setattr__(self, "path", normalize_path(self.path))
+        if not isinstance(self.path, (GraphPath, RelationshipPath)):
+            raise TypeError("Occurrence path must be a GraphPath or RelationshipPath.")
+        object.__setattr__(
+            self, "path",
+            normalize_path(self.path) if isinstance(self.path, GraphPath) else self.path,
+        )
 
     @property
     def key(self) -> "OccurrenceKey":
@@ -207,14 +214,15 @@ class OccurrenceKey:
     """Typed occurrence identity preserving owner, path, and target distinctions."""
 
     owner: IdentityKey
-    path: GraphPath
+    path: GraphPath | "RelationshipPath"
     target: IdentityKey
 
     @property
-    def sort_key(self) -> tuple[tuple[str, str, str], bytes, tuple[str, str, str]]:
+    def sort_key(self) -> tuple[tuple[str, str, str], object, tuple[str, str, str]]:
         """Return deterministic ordering without rendering occurrence values."""
 
-        return self.owner.sort_key, graph_path_sort_key(self.path), self.target.sort_key
+        path = _occurrence_path_key(self.path)
+        return self.owner.sort_key, path, self.target.sort_key
 
     def __repr__(self) -> str:
         return "OccurrenceKey(owner=<identity>, path=<typed-path>, target=<identity>)"
@@ -226,12 +234,22 @@ def _ordered_occurrences(keys: Iterable[OccurrenceKey]) -> Iterator[OccurrenceKe
     buckets: dict[tuple[Any, ...], list[OccurrenceKey]] = {}
     for key in keys:
         buckets.setdefault(
-            (key.owner.kind, key.owner.digest, graph_path_sort_key(key.path),
+            (key.owner.kind, key.owner.digest, _occurrence_path_key(key.path),
              key.target.kind, key.target.digest), []
         ).append(key)
     for bucket_id in sorted(buckets):
         bucket = buckets[bucket_id]
         yield from (bucket if len(bucket) == 1 else sorted(bucket, key=lambda key: key.sort_key))
+
+
+def _occurrence_path_key(path: GraphPath | "RelationshipPath") -> object:
+    """Return a typed path bucket key without erasing association hops."""
+
+    return (
+        ("graph", graph_path_sort_key(path))
+        if isinstance(path, GraphPath)
+        else ("relationship", path.sort_key)
+    )
 
 
 class IdentitySet:

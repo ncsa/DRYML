@@ -333,6 +333,14 @@
             "test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed"
           ]
         },
+        "tests/core/test_query_v3_traversal.py": {
+          "rationale": "Retain typed state associations, direct existential projections, and bounded evidence with lightweight detached fixtures.",
+          "functions": [
+            "test_v3_closure_uses_typed_associations_and_owned_state_adjacency",
+            "test_v3_direct_projections_ignore_raw_caps_without_enumerating_occurrences",
+            "test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships"
+          ]
+        },
         "tests/core/test_query_graph_planner.py": {
           "rationale": "Keep every dependency-free planner and backend-contract case plus one authoritative graph-query comparison; exhaustive mode covers repeated Store-backed no-enumeration and projection compositions.",
           "functions": [

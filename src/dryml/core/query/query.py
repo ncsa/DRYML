@@ -3354,6 +3354,7 @@ class IdentityQuery:
     refresh_policy: RefreshPolicy = "auto"
     scan_policy_mode: str = "allow"
     max_verify_limit: int | None = None
+    max_depth_limit: int | None = None
     indexed_required: bool = False
 
     @classmethod
@@ -3420,6 +3421,64 @@ class IdentityQuery:
         """Restrict retained members to StateRefs without projection or expansion."""
 
         return self._append("kind", "state_ref")
+
+    def closure(self, edges=None) -> "IdentityQuery":
+        """Expand retained identities through literal directed relationships.
+
+        Args:
+            edges: An immutable :class:`EdgePolicy`; omitted selects every
+                retained association, materializing edge, and reference edge.
+
+        Returns:
+            An immutable identity query whose terminal includes these input
+            identities and every identity reachable through the selected policy.
+
+        Raises:
+            TypeError: If ``edges`` is not an EdgePolicy.
+
+        Side Effects:
+            None until a terminal evaluates the input query. Expansion only
+            inspects detached identity values and never loads payloads or finds
+            reverse saved-state relationships.
+        """
+
+        from .relationships import normalize_edge_policy
+
+        return replace(
+            self,
+            source=_RelationshipClosure(
+                self, normalize_edge_policy(edges), self.max_depth_limit,
+            ),
+            restrictions=(),
+        )
+
+    def nested(self, selector=None, *, edges=None) -> "OccurrenceQuery":
+        """Create strict non-empty typed relationship occurrences from these roots.
+
+        Args:
+            selector: Optional target selector with the established V3 identity
+                meanings. ``None`` retains every reachable target.
+            edges: Immutable relationship policy, defaulting to all retained
+                directed relationship kinds.
+
+        Returns:
+            An immutable occurrence query retaining root identities, typed paths,
+            and exact target identities.
+
+        Raises:
+            TypeError: If the selector or policy is unsupported.
+
+        Side Effects:
+            None. Evaluation remains deferred and never searches for reverse
+            ObjectRef-to-StateRef relationships.
+        """
+
+        from .relationships import normalize_edge_policy
+
+        return OccurrenceQuery(
+            self, selector=selector, edges=normalize_edge_policy(edges),
+            max_depth_limit=self.max_depth_limit,
+        )
 
     def object_id(self, value) -> "IdentityQuery":
         """Restrict ObjectRef and StateRef candidates containing ``value``."""
@@ -3512,6 +3571,13 @@ class IdentityQuery:
             raise ValueError("max_verify limit must be a non-negative exact int or None.")
         return replace(self, max_verify_limit=limit)
 
+    def max_depth(self, limit: int | None) -> "IdentityQuery":
+        """Set the relationship-depth safety budget for later closure or nesting."""
+
+        if limit is not None and (type(limit) is not int or limit < 0):
+            raise ValueError("max_depth limit must be a non-negative exact int or None.")
+        return replace(self, max_depth_limit=limit)
+
     def explain(self, *, analyze: bool = False, sql: bool = False) -> QueryExplanation:
         """Describe whether this immutable V3 plan requires an authority scan.
 
@@ -3564,7 +3630,7 @@ class IdentityQuery:
 
         if self.indexed_required and not isinstance(self.source, IdentitySet):
             raise QueryIndexUnavailable("Query V3 index coverage is not available for this plan.")
-        members, capture = self._captured_members()
+        members, capture, bounded = self._captured_members()
         if self.max_verify_limit is not None and len(members) > self.max_verify_limit:
             raise QueryVerifyBudgetExceeded("Query V3 verification budget exceeded.")
         generator_budget = _GeneratorWitnessBudget(self.max_witness_limit)
@@ -3591,7 +3657,7 @@ class IdentityQuery:
                     key: entry for key, entry in validation_domain.items()
                     if self._source_evidence(restriction.value) in entry[1].sources
                 }
-        return IdentitySet._from_entries(members, bounded=False)
+        return IdentitySet._from_entries(members, bounded=bounded)
 
     def count(self) -> int:
         """Return the distinct V3 identity count after all validation."""
@@ -3655,12 +3721,15 @@ class IdentityQuery:
         capture = SourceCapture()
         scopes = self._metadata_scopes()
         exact_state = self._exact_state_selector()
+        fixed_source = isinstance(
+            self.source, (IdentitySet, _RelationshipClosure, _RelationshipProjection),
+        )
         needs_inventory = any(
             restriction.kind in {"alias", "stored"} for restriction in self.restrictions
         )
         if (
             self.scan_policy_mode == "forbid"
-            and not isinstance(self.source, IdentitySet)
+            and not fixed_source
             and (exact_state is None or scopes or needs_inventory)
         ):
             raise QueryWouldScanError("Query V3 requires an authoritative inventory scan.")
@@ -3668,7 +3737,7 @@ class IdentityQuery:
             if isinstance(self.source, StoreSource):
                 state = capture.read_exact_state(self.source, exact_state)
                 members = () if state is None else ((state, self._source_evidence(self.source)),)
-                return IdentitySet(members)._entries, capture
+                return IdentitySet(members)._entries, capture, False
             if isinstance(self.source, RepoSource):
                 with self.source.repo.retain_topology():
                     members = tuple(
@@ -3676,16 +3745,20 @@ class IdentityQuery:
                         for store in self.source.repo.stores
                         if (state := capture.read_exact_state(store, exact_state)) is not None
                     )
-                return IdentitySet(members)._entries, capture
+                return IdentitySet(members)._entries, capture, False
         if isinstance(self.source, IdentitySet):
             result = self.source
+        elif isinstance(self.source, _RelationshipClosure):
+            result = self.source.collect()
+        elif isinstance(self.source, _RelationshipProjection):
+            result = self.source.collect()
         elif isinstance(self.source, StoreSource):
             result = capture.capture_store(self.source, metadata_scopes=scopes).knowledge()
         elif isinstance(self.source, RepoSource):
             result = capture.capture_repo(self.source, metadata_scopes=scopes)
         else:
             raise TypeError("IdentityQuery source must be an IdentitySet, StoreSource, or RepoSource.")
-        return dict(result._entries), capture
+        return dict(result._entries), capture, result.bounded
 
     def _exact_state_selector(self):
         """Return one terminal-selective StateRef filter, if the plan has one."""
@@ -3863,3 +3936,294 @@ class IdentityQuery:
             if restriction.kind == "sel" and isinstance(restriction.value, Selector):
                 return restriction.value
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class _RelationshipClosure:
+    """Deferred relationship expansion applied after an input identity plan."""
+
+    input_query: IdentityQuery
+    edges: Any
+    max_depth: int | None
+
+    def collect(self):
+        """Expand captured input identities without introducing source reads."""
+
+        from .identity import IdentitySet
+        from .relationships import relationship_closure
+
+        roots = self.input_query.collect()
+        members = []
+        for root in roots:
+            for value in relationship_closure(
+                    (root,), edges=self.edges, max_depth=self.max_depth,
+            ):
+                members.extend((value, source) for source in roots.evidence_for(root).sources)
+                if not roots.evidence_for(root).sources:
+                    members.append(value)
+        return IdentitySet(members, bounded=roots.bounded)
+
+
+@dataclass(frozen=True, slots=True)
+class _RelationshipProjection:
+    """Deferred existential owner or target projection over an occurrence plan."""
+
+    occurrence_query: "OccurrenceQuery"
+    projection: str
+
+    def collect(self):
+        """Project identities without materializing raw occurrence paths."""
+
+        from .identity import IdentitySet
+
+        roots = self.occurrence_query.roots.collect()
+        members = []
+        for value, sources in self.occurrence_query._project(self.projection, roots):
+            members.extend((value, source) for source in sources)
+            if not sources:
+                members.append(value)
+        return IdentitySet(members, bounded=roots.bounded)
+
+
+@dataclass(frozen=True, slots=True)
+class OccurrenceQuery:
+    """Private immutable Query V3 relationship occurrence plan.
+
+    The query traverses only identities retained by ``roots``. Its raw terminal
+    preserves every non-empty typed path; ``owners`` and ``targets`` use direct
+    existential traversal and therefore do not inherit ``max_occurrences``.
+    """
+
+    roots: IdentityQuery
+    selector: Any | None = None
+    edges: Any = None
+    through_kinds: frozenset[Any] = frozenset()
+    path_filter: Any | None = None
+    occurrence_limit: int | None = None
+    max_depth_limit: int | None = None
+    target_kind_filter: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        from .identity import IdentitySet
+        from .relationships import EdgePolicy, RelationshipKind, RelationshipPath
+        from ..utils.graph.path import GraphPath
+
+        if not isinstance(self.roots, IdentityQuery):
+            raise TypeError("OccurrenceQuery roots must be an IdentityQuery.")
+        if not isinstance(self.edges, EdgePolicy):
+            raise TypeError("OccurrenceQuery edges must be an EdgePolicy.")
+        if not isinstance(self.through_kinds, frozenset) or not all(
+                isinstance(kind, RelationshipKind) for kind in self.through_kinds
+        ):
+            raise TypeError("OccurrenceQuery through kinds must be RelationshipKind values.")
+        if self.path_filter is not None and not isinstance(
+                self.path_filter, (RelationshipPath, GraphPath)
+        ):
+            raise TypeError("OccurrenceQuery path must be a RelationshipPath or GraphPath.")
+        if self.occurrence_limit is not None and (
+                type(self.occurrence_limit) is not int or self.occurrence_limit < 0
+        ):
+            raise ValueError("max_occurrences must be a non-negative exact int or None.")
+        if self.max_depth_limit is not None and (
+                type(self.max_depth_limit) is not int or self.max_depth_limit < 0
+        ):
+            raise ValueError("max_depth must be a non-negative exact int or None.")
+        if not self.target_kind_filter <= {"cdef", "object_ref", "state_ref"}:
+            raise ValueError("OccurrenceQuery target kinds are unsupported.")
+        if self.selector is not None:
+            # Reuse the U3 selector validator without evaluating any source.
+            IdentityQuery.from_set(IdentitySet()).sel(self.selector)
+
+    def sel(self, value=None) -> "OccurrenceQuery":
+        """Restrict occurrence targets by one U3-compatible selector."""
+
+        if value is None:
+            return self
+        if self.selector is not None:
+            raise QueryDomainError("OccurrenceQuery supports one target selector before U5 composition.")
+        return replace(self, selector=value)
+
+    def cdefs(self) -> "OccurrenceQuery":
+        """Restrict occurrence targets to CDefs without changing paths."""
+
+        return replace(self, target_kind_filter=frozenset(("cdef",)))
+
+    def object_refs(self) -> "OccurrenceQuery":
+        """Restrict occurrence targets to ObjectRefs without expansion."""
+
+        return replace(self, target_kind_filter=frozenset(("object_ref",)))
+
+    def state_refs(self) -> "OccurrenceQuery":
+        """Restrict occurrence targets to StateRefs without expansion."""
+
+        return replace(self, target_kind_filter=frozenset(("state_ref",)))
+
+    def target_kind(self, kind: str) -> "OccurrenceQuery":
+        """Restrict targets to one explicit V3 identity kind."""
+
+        if kind not in {"cdef", "object_ref", "state_ref"}:
+            raise ValueError("OccurrenceQuery target kind is unsupported.")
+        return replace(self, target_kind_filter=frozenset((kind,)))
+
+    def through(self, kind) -> "OccurrenceQuery":
+        """Require one relationship kind on the same retained typed path."""
+
+        from .relationships import RelationshipKind
+
+        if not isinstance(kind, RelationshipKind):
+            raise TypeError("OccurrenceQuery through requires a RelationshipKind.")
+        return replace(self, through_kinds=self.through_kinds | frozenset((kind,)))
+
+    def path(self, value) -> "OccurrenceQuery":
+        """Require an exact RelationshipPath or concatenated legacy GraphPath."""
+
+        from .relationships import RelationshipPath
+        from ..utils.graph.path import GraphPath
+
+        if not isinstance(value, (RelationshipPath, GraphPath)):
+            raise TypeError("OccurrenceQuery path requires a RelationshipPath or GraphPath.")
+        return replace(self, path_filter=value)
+
+    def max_occurrences(self, limit: int | None) -> "OccurrenceQuery":
+        """Set the visible raw-occurrence cap without bounding direct projections."""
+
+        if limit is not None and (type(limit) is not int or limit < 0):
+            raise ValueError("max_occurrences must be a non-negative exact int or None.")
+        return replace(self, occurrence_limit=limit)
+
+    def max_depth(self, limit: int | None) -> "OccurrenceQuery":
+        """Set a failing relationship-depth safety budget for this traversal."""
+
+        if limit is not None and (type(limit) is not int or limit < 0):
+            raise ValueError("max_depth must be a non-negative exact int or None.")
+        return replace(self, max_depth_limit=limit)
+
+    def collect(self):
+        """Evaluate typed raw occurrences into a bounded or complete OccurrenceSet."""
+
+        from .identity import OccurrenceSet
+        from .relationships import iter_relationship_occurrences
+
+        roots = self.roots.collect()
+        occurrences = iter_relationship_occurrences(
+            roots,
+            self._matches_target,
+            edges=self.edges,
+            through=self.through_kinds,
+            path=self.path_filter,
+            max_occurrences=self.occurrence_limit,
+            max_depth=self.max_depth_limit,
+        )
+        members = []
+        for occurrence in occurrences:
+            sources = roots.evidence_for(occurrence.owner).sources
+            members.extend((occurrence, source) for source in sources)
+            if not sources:
+                members.append(occurrence)
+        return OccurrenceSet(
+            members, bounded=self.occurrence_limit is not None or roots.bounded,
+        )
+
+    def count(self) -> int:
+        """Stream the distinct raw typed-occurrence count without a fixed set."""
+
+        return sum(1 for _ in self._iter_occurrences())
+
+    def exists(self) -> bool:
+        """Return whether one qualified occurrence exists without collection."""
+
+        return next(self._iter_occurrences(), None) is not None
+
+    def one(self):
+        """Return one streamed occurrence or raise the standard cardinality error."""
+
+        occurrences = self._up_to_two_occurrences()
+        if len(occurrences) != 1:
+            raise QueryCardinalityError(
+                f"Expected exactly one occurrence, found {len(occurrences)}."
+            )
+        return occurrences[0]
+
+    def one_or_none(self):
+        """Return one streamed occurrence, ``None``, or raise on ambiguity."""
+
+        occurrences = self._up_to_two_occurrences()
+        if len(occurrences) > 1:
+            raise QueryCardinalityError(
+                f"Expected zero or one occurrence, found {len(occurrences)}."
+            )
+        return occurrences[0] if occurrences else None
+
+    def owners(self) -> IdentityQuery:
+        """Return a deferred direct existential projection of qualified roots."""
+
+        return IdentityQuery(
+            _RelationshipProjection(self, "owners"), default_scope=self.roots.default_scope,
+        )
+
+    def targets(self) -> IdentityQuery:
+        """Return a deferred direct existential projection of qualified targets."""
+
+        return IdentityQuery(
+            _RelationshipProjection(self, "targets"), default_scope=self.roots.default_scope,
+        )
+
+    def _project(self, projection: str, roots):
+        from .relationships import iter_relationship_owners, iter_relationship_targets
+
+        walker = (
+            iter_relationship_owners if projection == "owners" else iter_relationship_targets
+        )
+        for root in roots:
+            for value in walker(
+                (root,), self._matches_target, edges=self.edges,
+                through=self.through_kinds, path=self.path_filter,
+                max_depth=self.max_depth_limit,
+            ):
+                yield value, roots.evidence_for(root).sources
+
+    def _iter_occurrences(self):
+        """Stream raw occurrences while retaining source evaluation once per terminal."""
+
+        from .relationships import iter_relationship_occurrences
+
+        roots = self.roots.collect()
+        yield from iter_relationship_occurrences(
+            roots,
+            self._matches_target,
+            edges=self.edges,
+            through=self.through_kinds,
+            path=self.path_filter,
+            max_occurrences=self.occurrence_limit,
+            max_depth=self.max_depth_limit,
+        )
+
+    def _up_to_two_occurrences(self):
+        """Retain only the cardinality evidence needed by singleton terminals."""
+
+        occurrences = []
+        for occurrence in self._iter_occurrences():
+            occurrences.append(occurrence)
+            if len(occurrences) == 2:
+                break
+        return occurrences
+
+    def _matches_target(self, value) -> bool:
+        from .identity import IdentitySet
+        from ..definition import ConcreteDefinition
+        from ..reference_values import ObjectRef, StateRef
+
+        kind = (
+            "cdef" if isinstance(value, ConcreteDefinition)
+            else "object_ref" if isinstance(value, ObjectRef)
+            else "state_ref" if isinstance(value, StateRef)
+            else None
+        )
+        if kind is None or (self.target_kind_filter and kind not in self.target_kind_filter):
+            return False
+        if self.selector is None:
+            return True
+        return IdentityQuery.from_set(IdentitySet((value,))).sel(self.selector).exists()
+
+    def __bool__(self) -> bool:
+        raise TypeError("OccurrenceQuery requires an explicit terminal.")
