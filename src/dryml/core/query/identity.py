@@ -257,10 +257,11 @@ class IdentitySet:
 
     Construction eagerly snapshots only supplied members. Iteration, truth
     testing, and cardinality methods never consult a source or execute a query.
-    ``bounded`` remains visible through fixed refinements and set algebra.
+    ``bounded`` and an optional explicit ``requested_limit`` remain visible
+    through fixed refinements and set algebra.
     """
 
-    __slots__ = ("_entries", "bounded")
+    __slots__ = ("_entries", "bounded", "requested_limit")
 
     def __init__(
         self,
@@ -270,9 +271,16 @@ class IdentitySet:
         ] = (),
         *,
         bounded: bool = False,
+        requested_limit: int | None = None,
     ):
         if type(bounded) is not bool:
             raise TypeError("IdentitySet bounded must be an exact bool.")
+        if requested_limit is not None and (
+                type(requested_limit) is not int or requested_limit < 0
+        ):
+            raise ValueError("IdentitySet requested_limit must be a non-negative exact int or None.")
+        if requested_limit is not None and not bounded:
+            raise ValueError("IdentitySet requested_limit requires bounded=True.")
         entries: dict[
             IdentityKey,
             tuple[ConcreteDefinition | ObjectRef | StateRef, IdentityEvidence],
@@ -287,6 +295,7 @@ class IdentitySet:
             )
         self._entries = entries
         self.bounded = bounded
+        self.requested_limit = requested_limit
 
     @staticmethod
     def _member_and_evidence(member):
@@ -295,8 +304,10 @@ class IdentitySet:
         return member, IdentityEvidence()
 
     @classmethod
-    def _from_entries(cls, entries, *, bounded: bool) -> "IdentitySet":
-        result = cls((), bounded=bounded)
+    def _from_entries(
+        cls, entries, *, bounded: bool, requested_limit: int | None = None,
+    ) -> "IdentitySet":
+        result = cls((), bounded=bounded, requested_limit=requested_limit)
         result._entries = entries
         return result
 
@@ -370,7 +381,10 @@ class IdentitySet:
                 value if existing is None else existing[0],
                 evidence if existing is None else existing[1].merged_with(evidence),
             )
-        return self._from_entries(entries, bounded=self.bounded or other.bounded)
+        return self._from_entries(
+            entries,
+            bounded=self.bounded or other.bounded,
+        )
 
     def intersection(self, other: "IdentitySet") -> "IdentitySet":
         """Intersect fixed complete identities and retain both evidence ledgers."""
@@ -382,12 +396,18 @@ class IdentitySet:
             for key, (value, evidence) in self._entries.items()
             if key in other._entries
         }
-        return self._from_entries(entries, bounded=self.bounded or other.bounded)
+        return self._from_entries(
+            entries,
+            bounded=self.bounded or other.bounded,
+        )
 
     def diagnostic(self) -> QueryDiagnostic:
         """Return bounded structural diagnostics without member or source values."""
 
-        return QueryDiagnostic.for_fixed("identity", len(self), self.bounded, self._source_count())
+        return QueryDiagnostic.for_fixed(
+            "identity", len(self), self.bounded, self._source_count(),
+            requested_limit=self.requested_limit,
+        )
 
     def _source_count(self) -> int:
         return len({source for _, evidence in self._entries.values() for source in evidence.sources})
@@ -399,16 +419,23 @@ class IdentitySet:
 class OccurrenceSet:
     """Fixed typed occurrences with detached source evidence and visible bounds."""
 
-    __slots__ = ("_entries", "bounded")
+    __slots__ = ("_entries", "bounded", "requested_limit")
 
     def __init__(
         self,
         members: Iterable[Occurrence | tuple[Occurrence, SourceEvidence]] = (),
         *,
         bounded: bool = False,
+        requested_limit: int | None = None,
     ):
         if type(bounded) is not bool:
             raise TypeError("OccurrenceSet bounded must be an exact bool.")
+        if requested_limit is not None and (
+                type(requested_limit) is not int or requested_limit < 0
+        ):
+            raise ValueError("OccurrenceSet requested_limit must be a non-negative exact int or None.")
+        if requested_limit is not None and not bounded:
+            raise ValueError("OccurrenceSet requested_limit requires bounded=True.")
         entries: dict[OccurrenceKey, tuple[Occurrence, IdentityEvidence]] = {}
         for member in members:
             occurrence, evidence = IdentitySet._member_and_evidence(member)
@@ -421,10 +448,13 @@ class OccurrenceSet:
             )
         self._entries = entries
         self.bounded = bounded
+        self.requested_limit = requested_limit
 
     @classmethod
-    def _from_entries(cls, entries, *, bounded: bool) -> "OccurrenceSet":
-        result = cls((), bounded=bounded)
+    def _from_entries(
+        cls, entries, *, bounded: bool, requested_limit: int | None = None,
+    ) -> "OccurrenceSet":
+        result = cls((), bounded=bounded, requested_limit=requested_limit)
         result._entries = entries
         return result
 
@@ -487,7 +517,10 @@ class OccurrenceSet:
                 value if existing is None else existing[0],
                 evidence if existing is None else existing[1].merged_with(evidence),
             )
-        return self._from_entries(entries, bounded=self.bounded or other.bounded)
+        return self._from_entries(
+            entries,
+            bounded=self.bounded or other.bounded,
+        )
 
     def intersection(self, other: "OccurrenceSet") -> "OccurrenceSet":
         """Intersect fixed occurrence paths and retain both evidence ledgers."""
@@ -499,12 +532,18 @@ class OccurrenceSet:
             for key, (value, evidence) in self._entries.items()
             if key in other._entries
         }
-        return self._from_entries(entries, bounded=self.bounded or other.bounded)
+        return self._from_entries(
+            entries,
+            bounded=self.bounded or other.bounded,
+        )
 
     def diagnostic(self) -> QueryDiagnostic:
         """Return bounded structural diagnostics without occurrence values."""
 
-        return QueryDiagnostic.for_fixed("occurrence", len(self), self.bounded, self._source_count())
+        return QueryDiagnostic.for_fixed(
+            "occurrence", len(self), self.bounded, self._source_count(),
+            requested_limit=self.requested_limit,
+        )
 
     def _source_count(self) -> int:
         return len({source for _, evidence in self._entries.values() for source in evidence.sources})
@@ -559,7 +598,11 @@ class IdentitySetQuery(_FixedSetQuery):
             for key, (value, evidence) in self._source._entries.items()
             if all(predicate(value) for predicate in self._predicates)
         }
-        return IdentitySet._from_entries(entries, bounded=self._source.bounded)
+        return IdentitySet._from_entries(
+            entries,
+            bounded=self._source.bounded,
+            requested_limit=self._source.requested_limit,
+        )
 
     def count(self) -> int:
         """Return the refined fixed-member count through an explicit terminal."""
@@ -578,7 +621,11 @@ class OccurrenceSetQuery(_FixedSetQuery):
             for key, (value, evidence) in self._source._entries.items()
             if all(predicate(value) for predicate in self._predicates)
         }
-        return OccurrenceSet._from_entries(entries, bounded=self._source.bounded)
+        return OccurrenceSet._from_entries(
+            entries,
+            bounded=self._source.bounded,
+            requested_limit=self._source.requested_limit,
+        )
 
     def count(self) -> int:
         """Return the refined fixed-occurrence count through an explicit terminal."""

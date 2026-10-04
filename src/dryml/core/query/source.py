@@ -22,6 +22,14 @@ class InventoryCapabilityError(StoreCapabilityError):
     """Raised before a broad Query V3 capture lacks complete record coverage."""
 
 
+class _SourceRecapture(Exception):
+    """Signal that dependent terminal stages must restart after a new cut."""
+
+    def __init__(self, invalidated: bool):
+        super().__init__("Query V3 source cut changed.")
+        self.invalidated = invalidated
+
+
 @dataclass(frozen=True, slots=True)
 class _MetadataReadFailure:
     """Record a failed read without retaining its exception or private message."""
@@ -51,10 +59,31 @@ class RepoSource:
 
 
 class SourceCapture:
-    """One terminal-local registry of detached Store facts and cache inventory."""
+    """One terminal-local registry of detached Store facts and cache inventory.
+
+    ``source_cuts`` counts distinct authority-fence domains, while
+    ``capture_rounds`` and ``demand_recaptures`` distinguish monotonic metadata
+    demand growth from source instability retries owned by later execution work.
+    """
 
     def __init__(self):
         self._facts: dict[str, CapturedStoreFacts] = {}
+        self._exact_states: dict[str, dict[str, StateRef | None]] = {}
+        self._topologies: dict[int, tuple[Store, ...]] = {}
+        self.active = False
+        self.source_cuts = 0
+        self.capture_rounds = 0
+        self.demand_recaptures = 0
+        self.instability_retries = 0
+
+    def repo_stores(self, repo) -> tuple[Store, ...]:
+        """Retain the first connected producer topology for this terminal."""
+
+        key = id(repo)
+        if key not in self._topologies:
+            with repo.retain_topology():
+                self._topologies[key] = tuple(repo.stores)
+        return self._topologies[key]
 
     def capture_store(
         self, source: StoreSource | Store, *, metadata_scopes: frozenset[str] = frozenset()
@@ -73,7 +102,13 @@ class SourceCapture:
         cached = self._facts.get(key)
         if cached is not None and metadata_scopes <= cached.metadata_scopes:
             return cached
+        self.capture_rounds += 1
+        if cached is None:
+            self.source_cuts += 1
+        else:
+            self.demand_recaptures += 1
         self._require_complete_inventory(store)
+        requested_scopes = metadata_scopes | (cached.metadata_scopes if cached else frozenset())
         with store.authority_read_fence():
             main = store.read_main_ref()
             definitions = tuple(store.iter_definition_records())
@@ -94,7 +129,7 @@ class SourceCapture:
                 main_definition=main_definition,
                 source=SourceEvidence.from_source(store.authority_fence_key()),
             )
-            if metadata_scopes:
+            if requested_scopes:
                 facts = CapturedStoreFacts.build(
                     definitions=facts.definitions,
                     stored_roots=facts.stored_roots,
@@ -104,10 +139,21 @@ class SourceCapture:
                     state_aliases=facts.state_aliases,
                     main_definition=facts.main_definition,
                     source=facts.source,
-                    metadata=self._capture_metadata(store, facts, metadata_scopes),
-                    metadata_scopes=metadata_scopes,
+                    metadata=self._capture_metadata(store, facts, requested_scopes),
+                    metadata_scopes=requested_scopes,
                 )
+        exact = self._exact_states.pop(key, {})
+        exact_changed = False
+        if exact:
+            current_states = {record.digest: record.state_ref for record in facts.state_refs}
+            exact_changed = any(
+                previous != current_states.get(digest) for digest, previous in exact.items()
+            )
         self._facts[key] = facts
+        if exact_changed and self.active:
+            raise _SourceRecapture(True)
+        if cached is not None and self.active:
+            raise _SourceRecapture(_cut_invalidated(cached, facts))
         return facts
 
     def capture_stores(
@@ -133,12 +179,28 @@ class SourceCapture:
             raise TypeError("Exact state lookup requires a Store or StoreSource.")
         if not isinstance(target, StateRef):
             raise TypeError("Exact state lookup requires a StateRef.")
-        with store.authority_read_fence():
-            record = store.read_state_ref_record(target.digest())
+        key = store.authority_fence_key()
+        digest = target.digest()
+        if key in self._facts:
+            record = next(
+                (item for item in self._facts[key].state_refs if item.digest == digest), None
+            )
+        elif digest in self._exact_states.get(key, {}):
+            value = self._exact_states[key][digest]
+            if value is not None and value != target:
+                raise InventoryCapabilityError("Exact StateRef authority is incompatible with its digest.")
+            return value
+        else:
+            with store.authority_read_fence():
+                record = store.read_state_ref_record(digest)
         if record is None:
+            if key not in self._facts:
+                self._exact_states.setdefault(key, {})[digest] = None
             return None
         if record.state_ref != target:
             raise InventoryCapabilityError("Exact StateRef authority is incompatible with its digest.")
+        if key not in self._facts:
+            self._exact_states.setdefault(key, {})[digest] = record.state_ref
         return record.state_ref
 
     def capture_repo(
@@ -153,7 +215,7 @@ class SourceCapture:
         if not callable(retain_topology):
             raise TypeError("RepoSource requires a Repo-like topology producer.")
         with retain_topology():
-            stores = tuple(repo.stores)
+            stores = self.repo_stores(repo)
             facts = self.capture_stores(stores, metadata_scopes=metadata_scopes)
             cache_values = _cache_values(repo, weak=source.weak)
         members = [
@@ -226,6 +288,40 @@ class SourceCapture:
             raise InventoryCapabilityError(
                 "Store cannot provide complete Query V3 inventory for required authority families."
             )
+
+
+def _cut_invalidated(old: CapturedStoreFacts, new: CapturedStoreFacts) -> bool:
+    """Compare earlier authoritative facts and mutable demand without rendering data."""
+
+    def record_keys(facts):
+        return (
+            tuple(record.digest for record in facts.definitions),
+            tuple(record.definition_digest for record in facts.stored_roots),
+            tuple(record.digest for record in facts.declarations),
+            tuple(record.digest for record in facts.state_refs),
+            tuple((record.alias, record.object_ref.digest()) for record in facts.object_aliases),
+            tuple((record.alias, record.object_ref.digest(), record.state_ref_digest)
+                  for record in facts.state_aliases),
+            None if facts.main_definition is None else facts.main_definition.graph_hash(),
+        )
+
+    if record_keys(old) != record_keys(new):
+        return True
+    from ..metadata import encode_metadata_mapping
+
+    def comparable(value):
+        if isinstance(value, dict):
+            return encode_metadata_mapping(value)
+        return value
+
+    for key, scope, value in old.metadata:
+        try:
+            current = new.captured_metadata(key._value, scope)
+        except KeyError:
+            return True
+        if type(value) is not type(current) or comparable(value) != comparable(current):
+            return True
+    return False
 
 
 def _cache_values(repo, *, weak: bool) -> tuple[IdentityValue, ...]:

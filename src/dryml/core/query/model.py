@@ -110,11 +110,13 @@ class QueryDiagnostic:
     bounded: bool
     source_count: int
     source_count_exact: bool
+    # The terminal-provided prefix limit, not a safety or verification budget.
+    requested_limit: int | None = None
 
     @classmethod
     def for_fixed(
         cls, domain: Literal["identity", "occurrence"], member_count: int,
-        bounded: bool, source_count: int,
+        bounded: bool, source_count: int, *, requested_limit: int | None = None,
     ) -> "QueryDiagnostic":
         """Create a disclosure-safe diagnostic with count caps applied."""
 
@@ -126,6 +128,7 @@ class QueryDiagnostic:
             bounded=bounded,
             source_count=min(source_count, limit),
             source_count_exact=source_count <= limit,
+            requested_limit=requested_limit,
         )
 
 
@@ -668,6 +671,10 @@ class QueryExplanation:
     containment_edges: ContainmentEdgePolicy | None = None
     containment_contains_ref: bool | None = None
     containment_source_scope: tuple[str, ...] = ()
+    source_cuts: int = 0
+    capture_rounds: int = 0
+    demand_recaptures: int = 0
+    instability_retries: int = 0
 
     def format(self) -> str:
         lines = [
@@ -714,6 +721,13 @@ class QueryExplanation:
             lines.append(f"count collision buckets: {self.count_collision_buckets}")
         if self.terminal_stop_reason is not None:
             lines.append(f"terminal stop: {self.terminal_stop_reason}")
+        if self.source_cuts or self.capture_rounds:
+            lines.append(f"source cuts: {self.source_cuts}")
+            lines.append(f"capture rounds: {self.capture_rounds}")
+        if self.demand_recaptures:
+            lines.append(f"demand recaptures: {self.demand_recaptures}")
+        if self.instability_retries:
+            lines.append(f"instability retries: {self.instability_retries}")
         for source in self.source_plans:
             result_count = source.result_count if source.result_count is not None else "unknown"
             lines.append(
@@ -773,6 +787,10 @@ class QueryStats:
     count_collision_buckets: int = 0
     terminal_stop_reason: str | None = None
     lowering_diagnostics: dict[str, Any] | None = None
+    source_cuts: int = 0
+    capture_rounds: int = 0
+    demand_recaptures: int = 0
+    instability_retries: int = 0
 
     def explanation(self, *, domain: str, refresh: RefreshPolicy) -> QueryExplanation:
         return QueryExplanation(
@@ -805,4 +823,8 @@ class QueryStats:
             count_collision_buckets=self.count_collision_buckets,
             terminal_stop_reason=self.terminal_stop_reason,
             lowering_diagnostics=None if self.lowering_diagnostics is None else dict(self.lowering_diagnostics),
+            source_cuts=self.source_cuts,
+            capture_rounds=self.capture_rounds,
+            demand_recaptures=self.demand_recaptures,
+            instability_retries=self.instability_retries,
         )

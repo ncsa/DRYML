@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import cmp_to_key
 from heapq import heappop, heappush
 from typing import Any
 import warnings
@@ -3336,6 +3337,73 @@ class _V3Restriction:
     scope: Any | None = None
 
 
+def _same_v3_scope(left, right) -> bool:
+    """Return whether two defaults name the same authority object, not a key."""
+
+    if left is None or right is None:
+        return False
+    from .source import RepoSource, StoreSource
+
+    return (
+        isinstance(left, StoreSource)
+        and isinstance(right, StoreSource)
+        and left.store is right.store
+    ) or (
+        isinstance(left, RepoSource)
+        and isinstance(right, RepoSource)
+        and left.repo is right.repo
+        and left.weak == right.weak
+    )
+
+
+def _bounded_identity_entries(entries, limit: int):
+    """Retain only the canonical prefix without sorting the whole result domain."""
+
+    selected = []
+    for key, entry in entries.items():
+        _retain_bounded_identity_entry(selected, key, entry, limit)
+    return {key: entry for key, entry in selected}
+
+
+def _retain_bounded_identity_entry(selected, key, entry, limit: int) -> None:
+    """Insert one candidate into a small canonical-prefix selection buffer."""
+
+    if limit == 0:
+        return
+    selected.append((key, entry))
+    selected.sort(key=cmp_to_key(_compare_bounded_identity_entries))
+    if len(selected) > limit:
+        selected.pop()
+
+
+def _compare_bounded_identity_entries(left, right) -> int:
+    """Use canonical graph encodings only for colliding identity digests."""
+
+    from .identity import _canonical_tie
+
+    left_key, right_key = left[0], right[0]
+    left_prefix = (left_key.kind, left_key.digest)
+    right_prefix = (right_key.kind, right_key.digest)
+    if left_prefix != right_prefix:
+        return -1 if left_prefix < right_prefix else 1
+    left_tie = _canonical_tie(left_key._value)
+    right_tie = _canonical_tie(right_key._value)
+    return (left_tie > right_tie) - (left_tie < right_tie)
+
+
+@dataclass(frozen=True, slots=True)
+class _AlgebraSource:
+    """Deferred identity algebra whose operands share one terminal capture."""
+
+    left: "IdentityQuery"
+    right: "IdentityQuery"
+    operation: str
+
+    def __post_init__(self) -> None:
+        if self.operation not in {"union", "intersection"}:
+            raise ValueError("Query V3 algebra operation is unsupported.")
+
+
 @dataclass(frozen=True, slots=True)
 class IdentityQuery:
     """Private composable Query V3 restriction plan over complete identities.
@@ -3356,6 +3424,7 @@ class IdentityQuery:
     max_verify_limit: int | None = None
     max_depth_limit: int | None = None
     indexed_required: bool = False
+    take_limit: int | None = None
 
     @classmethod
     def from_store(cls, store) -> "IdentityQuery":
@@ -3538,6 +3607,44 @@ class IdentityQuery:
         scope = self._normalize_scope(source)
         return replace(self._append("source", source), default_scope=scope)
 
+    def union(self, other: "IdentityQuery") -> "IdentityQuery":
+        """Return a deferred complete-identity union with shared source cuts.
+
+        The result keeps a default authority scope only when both operand plans
+        name the same Store or Repo object.  Different producers therefore
+        compose without choosing authority by source order.
+        """
+
+        return self._combine(other, "union")
+
+    def intersection(self, other: "IdentityQuery") -> "IdentityQuery":
+        """Return a deferred complete-identity intersection with shared cuts.
+
+        Matching identities retain the evidence supplied by both operands.  As
+        with :meth:`union`, an ambiguous authority default is deliberately
+        removed rather than selected from operand order.
+        """
+
+        return self._combine(other, "intersection")
+
+    def take(self, limit: int) -> "IdentityQuery":
+        """Return an explicitly bounded canonical identity prefix plan.
+
+        Args:
+            limit: Non-negative exact number of globally deduplicated members.
+
+        Returns:
+            A plan whose collected fixed set remains visibly bounded through
+            later fixed-set refinement and algebra.
+
+        Raises:
+            ValueError: If ``limit`` is not a non-negative exact integer.
+        """
+
+        if type(limit) is not int or limit < 0:
+            raise ValueError("take limit must be a non-negative exact int.")
+        return replace(self, take_limit=limit)
+
     def max_witnesses(self, limit: int | None) -> "IdentityQuery":
         """Set the shared GeneratorSelector verification witness budget."""
 
@@ -3587,16 +3694,27 @@ class IdentityQuery:
         """
 
         del sql
-        from .identity import IdentitySet
-
         exact = self._exact_state_selector() is not None and not self._metadata_scopes()
-        scan_required = not exact and not isinstance(self.source, IdentitySet)
-        result_count = self.collect().count() if analyze else None
+        scan_required = not exact and self._requires_authority_inventory()
+        result_count = None
+        source_cuts = capture_rounds = demand_recaptures = 0
+        if analyze:
+            result_count, capture = self._run_terminal(
+                lambda cut: sum(1 for _ in self._iter_terminal_members(cut)),
+                return_capture=True,
+            )
+            source_cuts = capture.source_cuts
+            capture_rounds = capture.capture_rounds
+            demand_recaptures = capture.demand_recaptures
         return QueryStats(
             result_count=result_count,
             fast_path="exact-state-ref" if exact else None,
             scan_required=scan_required,
             scan_reason=("V3 identity inventory requires authoritative record enumeration" if scan_required else None),
+            source_cuts=source_cuts,
+            capture_rounds=capture_rounds,
+            demand_recaptures=demand_recaptures,
+            instability_retries=capture.instability_retries if analyze else 0,
         ).explanation(domain="identity", refresh=self.refresh_policy)
 
     def categorical(self, **kwargs) -> "IdentityQuery":
@@ -3626,64 +3744,99 @@ class IdentityQuery:
     def collect(self):
         """Finish detached membership evaluation and return a fixed IdentitySet."""
 
-        from .identity import IdentitySet
-
-        if self.indexed_required and not isinstance(self.source, IdentitySet):
-            raise QueryIndexUnavailable("Query V3 index coverage is not available for this plan.")
-        members, capture, bounded = self._captured_members()
-        if self.max_verify_limit is not None and len(members) > self.max_verify_limit:
-            raise QueryVerifyBudgetExceeded("Query V3 verification budget exceeded.")
-        generator_budget = _GeneratorWitnessBudget(self.max_witness_limit)
-        validation_domain = members
-        for restriction in self.restrictions:
-            if restriction.kind == "metadata":
-                facts = self._scope_facts(restriction.scope, capture)
-                validated = {
-                    key: self._matches_metadata(entry[0], restriction.value, facts)
-                    for key, entry in validation_domain.items()
-                }
-                members = {
-                    key: entry for key, entry in members.items() if validated[key]
-                }
-                continue
-            members = {
-                key: entry for key, entry in members.items()
-                if self._matches(
-                    restriction, entry[0], entry[1], capture, generator_budget
-                )
-            }
-            if restriction.kind == "source":
-                validation_domain = {
-                    key: entry for key, entry in validation_domain.items()
-                    if self._source_evidence(restriction.value) in entry[1].sources
-                }
-        return IdentitySet._from_entries(members, bounded=bounded)
+        return self._run_terminal(self._collect_with_capture)
 
     def count(self) -> int:
         """Return the distinct V3 identity count after all validation."""
 
-        return self.collect().count()
+        if self.take_limit is not None:
+            return self._run_terminal(lambda cut: len(self._bounded_terminal_entries(cut)[0]))
+        return self._run_terminal(lambda cut: sum(1 for _ in self._iter_terminal_members(cut)))
 
     def exists(self) -> bool:
         """Return whether one fully valid V3 identity remains."""
 
-        return self.collect().exists()
+        if self.take_limit == 0:
+            return False
+        return self._run_terminal(lambda cut: next(self._iter_terminal_members(cut), None) is not None)
 
     def one(self):
         """Return one V3 identity or raise the normal cardinality error."""
 
-        return self.collect().one()
+        if self.take_limit is not None:
+            items = self._run_terminal(lambda cut: tuple(self._bounded_terminal_entries(cut)[0].values()))
+            if len(items) != 1:
+                raise QueryCardinalityError(f"Expected exactly one result, found {len(items)}.")
+            return items[0][0]
+        items = self._run_terminal(self._up_to_two_terminal_members)
+        if len(items) != 1:
+            raise QueryCardinalityError(f"Expected exactly one result, found {len(items)}.")
+        return items[0][1][0]
 
     def one_or_none(self):
         """Return zero or one V3 identity, rejecting ambiguous matches."""
 
-        return self.collect().one_or_none()
+        if self.take_limit is not None:
+            items = self._run_terminal(lambda cut: tuple(self._bounded_terminal_entries(cut)[0].values()))
+            if len(items) > 1:
+                raise QueryCardinalityError(f"Expected zero or one result, found {len(items)}.")
+            return items[0][0] if items else None
+        items = self._run_terminal(self._up_to_two_terminal_members)
+        if len(items) > 1:
+            raise QueryCardinalityError(f"Expected zero or one result, found {len(items)}.")
+        return items[0][1][0] if items else None
 
     def __bool__(self) -> bool:
         raise TypeError("IdentityQuery requires an explicit terminal.")
 
     def _append(self, kind, value, scope=None) -> "IdentityQuery":
         return replace(self, restrictions=(*self.restrictions, _V3Restriction(kind, value, scope)))
+
+    def _run_terminal(self, evaluate, *, return_capture=False):
+        """Restart all dependent stages on demand growth or an invalidated cut."""
+
+        from .model import QueryError
+        from .source import SourceCapture, _SourceRecapture
+
+        capture = SourceCapture()
+        capture.active = True
+        while True:
+            try:
+                answer = evaluate(capture)
+                return (answer, capture) if return_capture else answer
+            except _SourceRecapture as recapture:
+                if recapture.invalidated:
+                    capture.instability_retries += 1
+                    if capture.instability_retries >= 3:
+                        raise QueryError("Query V3 source changed during evaluation.") from None
+
+    def _combine(self, other: "IdentityQuery", operation: str) -> "IdentityQuery":
+        """Validate compatible terminal controls and defer one algebra stage."""
+
+        if not isinstance(other, IdentityQuery):
+            raise TypeError("Query V3 algebra requires another IdentityQuery.")
+        controls = (
+            "refresh_policy", "scan_policy_mode", "max_verify_limit",
+            "max_witness_limit", "max_depth_limit", "indexed_required",
+        )
+        if any(getattr(self, name) != getattr(other, name) for name in controls):
+            raise QueryDomainError(
+                "Cannot combine Query V3 plans with conflicting execution policies."
+            )
+        return IdentityQuery(
+            _AlgebraSource(self, other, operation),
+            default_scope=(
+                self.default_scope
+                if _same_v3_scope(self.default_scope, other.default_scope)
+                else None
+            ),
+            max_witness_limit=self.max_witness_limit,
+            refresh_policy=self.refresh_policy,
+            scan_policy_mode=self.scan_policy_mode,
+            max_verify_limit=self.max_verify_limit,
+            max_depth_limit=self.max_depth_limit,
+            indexed_required=self.indexed_required,
+        )
 
     def _bound_scope(self, scope):
         if scope is None:
@@ -3714,11 +3867,132 @@ class IdentityQuery:
             for leaf in _leaves(restriction.value)
         )
 
-    def _captured_members(self):
+    def _collect_with_capture(self, capture):
+        """Collect this plan using a terminal-owned capture registry."""
+
+        from .identity import IdentitySet
+
+        if self.take_limit is None:
+            members, bounded = self._terminal_entries(capture)
+        else:
+            members, bounded = self._bounded_terminal_entries(capture)
+        return IdentitySet._from_entries(
+            members, bounded=bounded, requested_limit=self.take_limit,
+        )
+
+    def _evaluate_entries(self, capture):
+        """Return complete private entries for an algebra operand, never public API."""
+
+        members, _ = self._evaluated_entries(capture)
+        return members
+
+    def _evaluated_entries(self, capture):
+        """Evaluate this plan while preserving any operand-local explicit bound."""
+
+        return (
+            self._terminal_entries(capture)
+            if self.take_limit is None
+            else self._bounded_terminal_entries(capture)
+        )
+
+    def _terminal_entries(self, capture):
+        """Evaluate all fallible validation, then return qualified private entries."""
+
+        if self.indexed_required and self._requires_authority_inventory():
+            raise QueryIndexUnavailable("Query V3 index coverage is not available for this plan.")
+        captured = self._captured_members(capture)
+        return {
+            key: entry for key, entry in self._iter_terminal_members(capture, captured)
+        }, captured[2]
+
+    def _bounded_terminal_entries(self, capture):
+        """Select a canonical prefix while retaining at most its requested size."""
+
+        assert self.take_limit is not None
+        if self.take_limit == 0:
+            return {}, True
+        selected = []
+        for key, entry in self._iter_terminal_members(capture):
+            _retain_bounded_identity_entry(selected, key, entry, self.take_limit)
+        return (
+            {key: entry for key, entry in selected},
+            True,
+        )
+
+    def _iter_terminal_members(self, capture, captured=None):
+        """Yield qualified entries without constructing a final IdentitySet.
+
+        Metadata predicates are validated across their eligible candidate domain
+        before this iterator can stop.  That preserves late authority failures
+        while allowing structural cardinality sinks to retain only one or two
+        members.
+        """
+
+        if self.indexed_required and self._requires_authority_inventory():
+            raise QueryIndexUnavailable("Query V3 index coverage is not available for this plan.")
+        members, _, _ = self._captured_members(capture) if captured is None else captured
+        if self.max_verify_limit is not None and len(members) > self.max_verify_limit:
+            raise QueryVerifyBudgetExceeded("Query V3 verification budget exceeded.")
+        generator_budget = _GeneratorWitnessBudget(self.max_witness_limit)
+        validation_domain = members
+        metadata_matches = {}
+        for restriction in self.restrictions:
+            if restriction.kind == "metadata":
+                facts = self._scope_facts(restriction.scope, capture)
+                metadata_matches[id(restriction)] = {
+                    key: self._matches_metadata(entry[0], restriction.value, facts)
+                    for key, entry in validation_domain.items()
+                }
+            elif restriction.kind == "source":
+                validation_domain = {
+                    key: entry for key, entry in validation_domain.items()
+                    if self._source_evidence(restriction.value) in entry[1].sources
+                }
+        for key, entry in members.items():
+            for restriction in self.restrictions:
+                if restriction.kind == "metadata":
+                    if not metadata_matches[id(restriction)].get(key, False):
+                        break
+                elif not self._matches(
+                    restriction, entry[0], entry[1], capture, generator_budget,
+                ):
+                    break
+            else:
+                yield key, entry
+
+    def _up_to_two_terminal_members(self, capture):
+        """Keep only cardinality evidence required by singleton sinks."""
+
+        items = []
+        for item in self._iter_terminal_members(capture):
+            items.append(item)
+            if len(items) == 2:
+                break
+        return items
+
+    def _requires_authority_inventory(self) -> bool:
+        """Return whether this plan can reach Store authority through its source."""
+
+        from .identity import IdentitySet
+
+        if isinstance(self.source, IdentitySet):
+            return False
+        if isinstance(self.source, _RelationshipClosure):
+            return self.source.input_query._requires_authority_inventory()
+        if isinstance(self.source, _RelationshipProjection):
+            return self.source.occurrence_query.roots._requires_authority_inventory()
+        if isinstance(self.source, _AlgebraSource):
+            return (
+                self.source.left._requires_authority_inventory()
+                or self.source.right._requires_authority_inventory()
+            )
+        return True
+
+    def _captured_members(self, capture=None):
         from .identity import IdentitySet
         from .source import RepoSource, SourceCapture, StoreSource
 
-        capture = SourceCapture()
+        capture = SourceCapture() if capture is None else capture
         scopes = self._metadata_scopes()
         exact_state = self._exact_state_selector()
         fixed_source = isinstance(
@@ -3742,16 +4016,33 @@ class IdentityQuery:
                 with self.source.repo.retain_topology():
                     members = tuple(
                         (state, self._source_evidence(store))
-                        for store in self.source.repo.stores
+                        for store in capture.repo_stores(self.source.repo)
                         if (state := capture.read_exact_state(store, exact_state)) is not None
                     )
                 return IdentitySet(members)._entries, capture, False
         if isinstance(self.source, IdentitySet):
             result = self.source
+        elif isinstance(self.source, _AlgebraSource):
+            left, left_bounded = self.source.left._evaluated_entries(capture)
+            right, right_bounded = self.source.right._evaluated_entries(capture)
+            if self.source.operation == "union":
+                entries = dict(left)
+                for key, (value, evidence) in right.items():
+                    existing = entries.get(key)
+                    entries[key] = (
+                        value if existing is None else existing[0],
+                        evidence if existing is None else existing[1].merged_with(evidence),
+                    )
+            else:
+                entries = {
+                    key: (value, evidence.merged_with(right[key][1]))
+                    for key, (value, evidence) in left.items() if key in right
+                }
+            return entries, capture, left_bounded or right_bounded
         elif isinstance(self.source, _RelationshipClosure):
-            result = self.source.collect()
+            result = self.source.collect(capture=capture)
         elif isinstance(self.source, _RelationshipProjection):
-            result = self.source.collect()
+            result = self.source.collect(capture=capture)
         elif isinstance(self.source, StoreSource):
             result = capture.capture_store(self.source, metadata_scopes=scopes).knowledge()
         elif isinstance(self.source, RepoSource):
@@ -3780,7 +4071,7 @@ class IdentityQuery:
         if isinstance(scope, RepoSource):
             repo = scope.repo
             with repo.retain_topology():
-                return capture.capture_stores(repo.stores, metadata_scopes=scopes)
+                return capture.capture_stores(capture.repo_stores(repo), metadata_scopes=scopes)
         raise TypeError("Query V3 authority scope is invalid.")
 
     def _matches(self, restriction, value, evidence, capture, generator_budget) -> bool:
@@ -3946,13 +4237,16 @@ class _RelationshipClosure:
     edges: Any
     max_depth: int | None
 
-    def collect(self):
+    def collect(self, *, capture=None):
         """Expand captured input identities without introducing source reads."""
 
         from .identity import IdentitySet
+        from .source import SourceCapture
         from .relationships import relationship_closure
 
-        roots = self.input_query.collect()
+        roots = self.input_query._collect_with_capture(
+            SourceCapture() if capture is None else capture
+        )
         members = []
         for root in roots:
             for value in relationship_closure(
@@ -3971,12 +4265,15 @@ class _RelationshipProjection:
     occurrence_query: "OccurrenceQuery"
     projection: str
 
-    def collect(self):
+    def collect(self, *, capture=None):
         """Project identities without materializing raw occurrence paths."""
 
         from .identity import IdentitySet
+        from .source import SourceCapture
 
-        roots = self.occurrence_query.roots.collect()
+        roots = self.occurrence_query.roots._collect_with_capture(
+            SourceCapture() if capture is None else capture
+        )
         members = []
         for value, sources in self.occurrence_query._project(self.projection, roots):
             members.extend((value, source) for source in sources)
