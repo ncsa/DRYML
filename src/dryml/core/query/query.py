@@ -31,6 +31,7 @@ from .model import (
     QueryExplanation,
     QueryCardinalityError,
     QueryIndexError,
+    QueryIndexUnavailable,
     QueryVerifyBudgetExceeded,
     QueryProjection,
     SourceQueryPlan,
@@ -3324,3 +3325,541 @@ def _projection_origin_paths(
 
     visit(projected, source, DefinitionPath(), DefinitionPath())
     return paths
+
+
+@dataclass(frozen=True, slots=True)
+class _V3Restriction:
+    """One immutable V3 membership restriction and its bound authority scope."""
+
+    kind: str
+    value: Any
+    scope: Any | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityQuery:
+    """Private composable Query V3 restriction plan over complete identities.
+
+    The class is intentionally not yet produced by ``Repo.query`` or
+    ``Store.query``.  It provides U3's shared restriction semantics while the
+    public cutover remains owned by U7.  A terminal captures all requested Store
+    facts once, evaluates only detached identities and facts, and returns an
+    immutable :class:`IdentitySet` without constructing or saving Objects.
+    """
+
+    source: Any
+    restrictions: tuple[_V3Restriction, ...] = ()
+    default_scope: Any | None = None
+    max_witness_limit: int | None = _DEFAULT_GENERATOR_WITNESS_LIMIT
+    refresh_policy: RefreshPolicy = "auto"
+    scan_policy_mode: str = "allow"
+    max_verify_limit: int | None = None
+    indexed_required: bool = False
+
+    @classmethod
+    def from_store(cls, store) -> "IdentityQuery":
+        """Create an unevaluated V3 universe from one Store producer."""
+
+        from .source import StoreSource
+
+        source = StoreSource(store)
+        return cls(source, default_scope=source)
+
+    @classmethod
+    def from_repo(cls, repo, *, weak: bool = True) -> "IdentityQuery":
+        """Create an unevaluated V3 universe from one Repo producer."""
+
+        from .source import RepoSource
+
+        source = RepoSource(repo, weak=weak)
+        return cls(source, default_scope=source)
+
+    @classmethod
+    def from_set(cls, members) -> "IdentityQuery":
+        """Create an unevaluated V3 refinement over a fixed IdentitySet."""
+
+        from .identity import IdentitySet
+
+        if not isinstance(members, IdentitySet):
+            raise TypeError("IdentityQuery.from_set requires an IdentitySet.")
+        return cls(members)
+
+    def sel(self, value=None) -> "IdentityQuery":
+        """Restrict this fixed universe by one structural or exact selector.
+
+        Definitions remain structural even when complete; ConcreteDefinitions,
+        exact references, and GeneratorSelector support retain their stricter
+        established meanings.  ``None`` is an immutable no-op.
+        """
+
+        if value is None:
+            return self
+        from ..definition import ConcreteDefinition, Definition
+        from ..generator import GeneratorSelector
+        from ..object import Object
+        from ..reference_values import ObjectRef, StateRef
+        from ..selector import Selector
+
+        if isinstance(value, Object):
+            value = value.object_ref if isinstance(value.object_ref, ObjectRef) else value.definition
+        if not isinstance(value, (Definition, ConcreteDefinition, Selector, GeneratorSelector, ObjectRef, StateRef)):
+            raise TypeError("IdentityQuery.sel requires a Definition, selector, generator, or exact reference.")
+        return self._append("sel", value)
+
+    def cdefs(self) -> "IdentityQuery":
+        """Restrict retained members to CDefs without expanding membership."""
+
+        return self._append("kind", "cdef")
+
+    def object_refs(self) -> "IdentityQuery":
+        """Restrict retained members to ObjectRefs without projection or expansion."""
+
+        return self._append("kind", "object_ref")
+
+    def state_refs(self) -> "IdentityQuery":
+        """Restrict retained members to StateRefs without projection or expansion."""
+
+        return self._append("kind", "state_ref")
+
+    def object_id(self, value) -> "IdentityQuery":
+        """Restrict ObjectRef and StateRef candidates containing ``value``."""
+
+        from ..reference_values import ObjectId
+
+        if not isinstance(value, ObjectId):
+            raise TypeError("object_id requires an ObjectId.")
+        return self._append("object_id", value)
+
+    def namespace(self, prefix) -> "IdentityQuery":
+        """Restrict reference candidates to an already validated namespace prefix."""
+
+        from ..reference_values import _normalize_namespace
+
+        return self._append("namespace", _normalize_namespace(tuple(prefix)))
+
+    def contains(self, value) -> "IdentityQuery":
+        """Restrict aggregates to a proper owned subtree exact ObjectRef."""
+
+        from ..reference_values import ObjectRef
+
+        if not isinstance(value, ObjectRef):
+            raise TypeError("contains requires an ObjectRef.")
+        return self._append("contains", value)
+
+    def state_hash(self, value: str) -> "IdentityQuery":
+        """Restrict StateRefs to an existing complete local state hash."""
+
+        from ..reference_values import _validate_state_hash
+
+        _validate_state_hash(value)
+        return self._append("state_hash", value)
+
+    def alias(self, value: str, *, scope=None) -> "IdentityQuery":
+        """Restrict by aliases captured from the authority scope bound now."""
+
+        if not isinstance(value, str) or not value:
+            raise ValueError("alias requires a non-empty string.")
+        return self._append("alias", value, self._bound_scope(scope))
+
+    def stored(self, *, scope=None) -> "IdentityQuery":
+        """Restrict members by their kind-specific captured stored authority."""
+
+        return self._append("stored", None, self._bound_scope(scope))
+
+    def where(self, predicate, *, scope=None) -> "IdentityQuery":
+        """Conjoin typed metadata without changing the identity query family."""
+
+        from .metadata import _require_predicate
+
+        return self._append("metadata", _require_predicate(predicate), self._bound_scope(scope))
+
+    def in_source(self, source) -> "IdentityQuery":
+        """Restrict captured contribution evidence and bind later defaults to it."""
+
+        scope = self._normalize_scope(source)
+        return replace(self._append("source", source), default_scope=scope)
+
+    def max_witnesses(self, limit: int | None) -> "IdentityQuery":
+        """Set the shared GeneratorSelector verification witness budget."""
+
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise ValueError("max_witnesses limit must be a positive exact int or None.")
+        return replace(self, max_witness_limit=limit)
+
+    def refresh(self, policy: RefreshPolicy = "auto") -> "IdentityQuery":
+        """Record the existing refresh policy without changing V3 authority facts."""
+
+        if policy not in {False, "auto", True}:
+            raise ValueError("refresh policy must be False, 'auto', or True.")
+        return replace(self, refresh_policy=policy)
+
+    def scan_policy(self, policy: str) -> "IdentityQuery":
+        """Control whether a required V3 source inventory scan is permitted."""
+
+        if policy not in {"allow", "warn", "forbid"}:
+            raise ValueError("scan policy must be 'allow', 'warn', or 'forbid'.")
+        return replace(self, scan_policy_mode=policy)
+
+    def require_indexed(self) -> "IdentityQuery":
+        """Require proved V3 index coverage, not merely a selective Store read."""
+
+        return replace(self, scan_policy_mode="forbid", indexed_required=True)
+
+    def max_verify(self, limit: int | None) -> "IdentityQuery":
+        """Set the maximum detached identity candidates verified by a terminal."""
+
+        if limit is not None and (type(limit) is not int or limit < 0):
+            raise ValueError("max_verify limit must be a non-negative exact int or None.")
+        return replace(self, max_verify_limit=limit)
+
+    def explain(self, *, analyze: bool = False, sql: bool = False) -> QueryExplanation:
+        """Describe whether this immutable V3 plan requires an authority scan.
+
+        ``sql`` is accepted for interface parity but reports no backend detail:
+        U3 evaluates authoritative detached records rather than a SQL result.
+        ``analyze`` evaluates the plan and includes its final result count.
+        """
+
+        del sql
+        from .identity import IdentitySet
+
+        exact = self._exact_state_selector() is not None and not self._metadata_scopes()
+        scan_required = not exact and not isinstance(self.source, IdentitySet)
+        result_count = self.collect().count() if analyze else None
+        return QueryStats(
+            result_count=result_count,
+            fast_path="exact-state-ref" if exact else None,
+            scan_required=scan_required,
+            scan_reason=("V3 identity inventory requires authoritative record enumeration" if scan_required else None),
+        ).explanation(domain="identity", refresh=self.refresh_policy)
+
+    def categorical(self, **kwargs) -> "IdentityQuery":
+        """Append the categorical edit of this query's latest selector restriction."""
+
+        selector = self._last_selector()
+        if selector is None:
+            raise QueryDomainError("categorical() requires an existing Selector restriction.")
+        return self.sel(selector.categorical(**kwargs))
+
+    def restore(self, **kwargs) -> "IdentityQuery":
+        """Append the restored form of this query's latest selector restriction."""
+
+        selector = self._last_selector()
+        if selector is None:
+            raise QueryDomainError("restore() requires an existing Selector restriction.")
+        return self.sel(selector.restore(**kwargs))
+
+    def exact(self, definition=None, **kwargs) -> "IdentityQuery":
+        """Append an exact subtree edit without discarding earlier restrictions."""
+
+        selector = self._last_selector()
+        if selector is None:
+            raise QueryDomainError("exact() requires an existing Selector restriction.")
+        return self.sel(selector.exact(definition, **kwargs))
+
+    def collect(self):
+        """Finish detached membership evaluation and return a fixed IdentitySet."""
+
+        from .identity import IdentitySet
+
+        if self.indexed_required and not isinstance(self.source, IdentitySet):
+            raise QueryIndexUnavailable("Query V3 index coverage is not available for this plan.")
+        members, capture = self._captured_members()
+        if self.max_verify_limit is not None and len(members) > self.max_verify_limit:
+            raise QueryVerifyBudgetExceeded("Query V3 verification budget exceeded.")
+        generator_budget = _GeneratorWitnessBudget(self.max_witness_limit)
+        validation_domain = members
+        for restriction in self.restrictions:
+            if restriction.kind == "metadata":
+                facts = self._scope_facts(restriction.scope, capture)
+                validated = {
+                    key: self._matches_metadata(entry[0], restriction.value, facts)
+                    for key, entry in validation_domain.items()
+                }
+                members = {
+                    key: entry for key, entry in members.items() if validated[key]
+                }
+                continue
+            members = {
+                key: entry for key, entry in members.items()
+                if self._matches(
+                    restriction, entry[0], entry[1], capture, generator_budget
+                )
+            }
+            if restriction.kind == "source":
+                validation_domain = {
+                    key: entry for key, entry in validation_domain.items()
+                    if self._source_evidence(restriction.value) in entry[1].sources
+                }
+        return IdentitySet._from_entries(members, bounded=False)
+
+    def count(self) -> int:
+        """Return the distinct V3 identity count after all validation."""
+
+        return self.collect().count()
+
+    def exists(self) -> bool:
+        """Return whether one fully valid V3 identity remains."""
+
+        return self.collect().exists()
+
+    def one(self):
+        """Return one V3 identity or raise the normal cardinality error."""
+
+        return self.collect().one()
+
+    def one_or_none(self):
+        """Return zero or one V3 identity, rejecting ambiguous matches."""
+
+        return self.collect().one_or_none()
+
+    def __bool__(self) -> bool:
+        raise TypeError("IdentityQuery requires an explicit terminal.")
+
+    def _append(self, kind, value, scope=None) -> "IdentityQuery":
+        return replace(self, restrictions=(*self.restrictions, _V3Restriction(kind, value, scope)))
+
+    def _bound_scope(self, scope):
+        if scope is None:
+            if self.default_scope is None:
+                raise QueryDomainError("Collection-backed authority restrictions require an explicit scope.")
+            return self.default_scope
+        return self._normalize_scope(scope)
+
+    @staticmethod
+    def _normalize_scope(scope):
+        from ..store.store import Store
+        from .source import RepoSource, StoreSource
+
+        if isinstance(scope, (StoreSource, RepoSource)):
+            return scope
+        if isinstance(scope, Store):
+            return StoreSource(scope)
+        if hasattr(scope, "stores") and hasattr(scope, "retain_topology"):
+            return RepoSource(scope)
+        raise TypeError("Query V3 authority scope must be a Store or Repo producer.")
+
+    def _metadata_scopes(self) -> frozenset[str]:
+        from .metadata import _leaves
+
+        return frozenset(
+            leaf.field.scope
+            for restriction in self.restrictions if restriction.kind == "metadata"
+            for leaf in _leaves(restriction.value)
+        )
+
+    def _captured_members(self):
+        from .identity import IdentitySet
+        from .source import RepoSource, SourceCapture, StoreSource
+
+        capture = SourceCapture()
+        scopes = self._metadata_scopes()
+        exact_state = self._exact_state_selector()
+        needs_inventory = any(
+            restriction.kind in {"alias", "stored"} for restriction in self.restrictions
+        )
+        if (
+            self.scan_policy_mode == "forbid"
+            and not isinstance(self.source, IdentitySet)
+            and (exact_state is None or scopes or needs_inventory)
+        ):
+            raise QueryWouldScanError("Query V3 requires an authoritative inventory scan.")
+        if exact_state is not None and not scopes and not needs_inventory:
+            if isinstance(self.source, StoreSource):
+                state = capture.read_exact_state(self.source, exact_state)
+                members = () if state is None else ((state, self._source_evidence(self.source)),)
+                return IdentitySet(members)._entries, capture
+            if isinstance(self.source, RepoSource):
+                with self.source.repo.retain_topology():
+                    members = tuple(
+                        (state, self._source_evidence(store))
+                        for store in self.source.repo.stores
+                        if (state := capture.read_exact_state(store, exact_state)) is not None
+                    )
+                return IdentitySet(members)._entries, capture
+        if isinstance(self.source, IdentitySet):
+            result = self.source
+        elif isinstance(self.source, StoreSource):
+            result = capture.capture_store(self.source, metadata_scopes=scopes).knowledge()
+        elif isinstance(self.source, RepoSource):
+            result = capture.capture_repo(self.source, metadata_scopes=scopes)
+        else:
+            raise TypeError("IdentityQuery source must be an IdentitySet, StoreSource, or RepoSource.")
+        return dict(result._entries), capture
+
+    def _exact_state_selector(self):
+        """Return one terminal-selective StateRef filter, if the plan has one."""
+
+        from ..reference_values import StateRef
+
+        states = {
+            restriction.value for restriction in self.restrictions
+            if restriction.kind == "sel" and isinstance(restriction.value, StateRef)
+        }
+        return next(iter(states)) if len(states) == 1 else None
+
+    def _scope_facts(self, scope, capture):
+        from .source import RepoSource, StoreSource
+
+        scopes = self._metadata_scopes()
+        if isinstance(scope, StoreSource):
+            return (capture.capture_store(scope, metadata_scopes=scopes),)
+        if isinstance(scope, RepoSource):
+            repo = scope.repo
+            with repo.retain_topology():
+                return capture.capture_stores(repo.stores, metadata_scopes=scopes)
+        raise TypeError("Query V3 authority scope is invalid.")
+
+    def _matches(self, restriction, value, evidence, capture, generator_budget) -> bool:
+        from ..definition import ConcreteDefinition, Definition
+        from ..generator import GeneratorSelector
+        from ..reference_values import ObjectRef, StateRef
+        from ..selector import Selector
+        from .identity import SourceEvidence
+
+        if restriction.kind == "kind":
+            return (
+                (restriction.value == "cdef" and isinstance(value, ConcreteDefinition))
+                or (restriction.value == "object_ref" and isinstance(value, ObjectRef))
+                or (restriction.value == "state_ref" and isinstance(value, StateRef))
+            )
+        if restriction.kind == "source":
+            return self._source_evidence(restriction.value) in evidence.sources
+        if restriction.kind == "sel":
+            selector = restriction.value
+            if isinstance(selector, ObjectRef):
+                return isinstance(value, ObjectRef) and value == selector
+            if isinstance(selector, StateRef):
+                return isinstance(value, StateRef) and value == selector
+            target = value.definition if isinstance(value, (ObjectRef, StateRef)) else value
+            if isinstance(selector, GeneratorSelector):
+                return self._generator_matches(selector, target, generator_budget)
+            if isinstance(selector, Selector):
+                if isinstance(selector.root, ConcreteDefinition):
+                    return selector.root.graph_equal(target)
+                return _query_match(
+                    selector.root, target, strict=selector.strict,
+                    class_match=selector.cls_policy,
+                )
+            if isinstance(selector, ConcreteDefinition):
+                return isinstance(target, ConcreteDefinition) and selector.graph_equal(target)
+            return isinstance(selector, Definition) and _query_match(
+                selector, target, strict=False, class_match="selector"
+            )
+        if restriction.kind == "object_id":
+            ref = value.object if isinstance(value, StateRef) else value
+            return isinstance(ref, ObjectRef) and restriction.value in ref.objects.values()
+        if restriction.kind == "namespace":
+            ref = value.object if isinstance(value, StateRef) else value
+            return isinstance(ref, ObjectRef) and any(
+                item.namespace[:len(restriction.value)] == restriction.value
+                for item in ref.objects.values()
+            )
+        if restriction.kind == "contains":
+            ref = value.object if isinstance(value, StateRef) else value
+            return isinstance(ref, ObjectRef) and any(
+                path and ref.at(path) == restriction.value for path in ref.objects
+            )
+        if restriction.kind == "state_hash":
+            return isinstance(value, StateRef) and restriction.value in value.states.values()
+        if restriction.kind == "stored":
+            return any(fact.is_stored(value) for fact in self._scope_facts(restriction.scope, capture))
+        if restriction.kind == "alias":
+            return self._matches_alias(value, restriction.value, self._scope_facts(restriction.scope, capture))
+        if restriction.kind == "metadata":
+            return self._matches_metadata(value, restriction.value, self._scope_facts(restriction.scope, capture))
+        raise QueryDomainError("Query V3 restriction is unsupported.")
+
+    @staticmethod
+    def _generator_matches(selector, target, budget) -> bool:
+        budget.consume()
+        if not _query_match(selector.prefilter.root, target, strict=False, class_match="exact"):
+            return False
+        return selector.matches(target)
+
+    @staticmethod
+    def _matches_alias(value, alias, facts) -> bool:
+        from ..reference_values import ObjectRef, StateRef
+        from .model import QueryError
+
+        targets = set()
+        for fact in facts:
+            targets.update(record.object_ref for record in fact.object_aliases if record.alias == alias)
+            for record in fact.state_aliases:
+                if record.alias != alias:
+                    continue
+                state = next((item.state_ref for item in fact.state_refs if item.digest == record.state_ref_digest), None)
+                if state is None:
+                    raise QueryError("Query V3 alias authority is unavailable.")
+                targets.add(state)
+        if len(targets) > 1:
+            raise QueryError("Query V3 alias authority conflicts.")
+        if not targets:
+            return False
+        target = next(iter(targets))
+        if isinstance(target, ObjectRef):
+            return (isinstance(value, ObjectRef) and value == target) or (
+                isinstance(value, StateRef) and value.object == target
+            )
+        return isinstance(value, StateRef) and value == target
+
+    @staticmethod
+    def _source_evidence(source):
+        """Return the same detached token used by U2 Store contribution capture."""
+
+        from ..store.store import Store
+        from .source import StoreSource
+        from .identity import SourceEvidence
+
+        if isinstance(source, StoreSource):
+            source = source.store
+        if isinstance(source, Store):
+            return SourceEvidence.from_source(source.authority_fence_key())
+        return SourceEvidence.from_source(source)
+
+    @staticmethod
+    def _matches_metadata(value, predicate, facts) -> bool:
+        from ..reference_values import ObjectRef, StateRef
+        from .metadata import (
+            _MISSING, _leaves, _lineage_projection, _snapshot_projection,
+            evaluate_captured_metadata_predicate, predicate_requires_state,
+        )
+        from .model import QueryError
+        from .source import _MetadataReadFailure
+
+        if predicate_requires_state(predicate) and not isinstance(value, StateRef):
+            return False
+        if not isinstance(value, (ObjectRef, StateRef)):
+            return False
+        projections = {}
+        for scope in {leaf.field.scope for leaf in _leaves(predicate)}:
+            values = []
+            for fact in facts:
+                target = value.object if scope in {"object", "lineage"} and isinstance(value, StateRef) else value
+                try:
+                    captured = fact.captured_metadata(target, scope)
+                except KeyError:
+                    continue
+                values.append(captured)
+            if not values:
+                raise QueryError("Query V3 metadata authority is unavailable.")
+            if any(isinstance(item, _MetadataReadFailure) for item in values):
+                raise QueryError("Query V3 metadata read failed.")
+            if any(item != values[0] for item in values[1:]):
+                raise QueryError("Query V3 metadata authority conflicts.")
+            captured = values[0]
+            if scope in {"object", "state"}:
+                projections[scope] = _MISSING if captured is None else captured
+            elif scope == "lineage":
+                projections[scope] = _lineage_projection(captured)
+            else:
+                projections[scope] = _snapshot_projection(captured)
+        return evaluate_captured_metadata_predicate(predicate, value, projections)
+
+    def _last_selector(self):
+        from ..selector import Selector
+
+        for restriction in reversed(self.restrictions):
+            if restriction.kind == "sel" and isinstance(restriction.value, Selector):
+                return restriction.value
+        return None

@@ -7,7 +7,7 @@ The module owns no Repo configuration and never reads a Store after capture.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 
 from ..definition import ConcreteDefinition
@@ -40,6 +40,17 @@ class CapturedStoreFacts:
     state_aliases: tuple[StateAliasRecord, ...]
     main_definition: ConcreteDefinition | None
     source: SourceEvidence
+    metadata: tuple[tuple[IdentityKey, str, object], ...] = ()
+    metadata_scopes: frozenset[str] = frozenset()
+    _metadata_index: dict[tuple[IdentityKey, str], object] = field(
+        init=False, compare=False, repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "_metadata_index",
+            {(key, scope): value for key, scope, value in self.metadata},
+        )
 
     @classmethod
     def build(
@@ -53,6 +64,8 @@ class CapturedStoreFacts:
         state_aliases: Iterable[StateAliasRecord],
         main_definition: ConcreteDefinition | None,
         source: SourceEvidence,
+        metadata: Iterable[tuple[IdentityKey, str, object]] = (),
+        metadata_scopes: frozenset[str] = frozenset(),
     ) -> "CapturedStoreFacts":
         """Validate cross-record references and create one detached fact table."""
 
@@ -76,6 +89,7 @@ class CapturedStoreFacts:
         return cls(
             definitions, stored_roots, tuple(declarations), state_refs,
             tuple(object_aliases), state_aliases, main_definition, source,
+            tuple(metadata), metadata_scopes,
         )
 
     def knowledge(self) -> IdentitySet:
@@ -120,6 +134,19 @@ class CapturedStoreFacts:
                 if record.state_ref.object.at(path) == value:
                     return True
         return False
+
+    def captured_metadata(self, value: ObjectRef | StateRef, scope: str):
+        """Return one fact captured under this Store cut.
+
+        A missing entry means that the target was not a holder or authority was
+        unavailable while fenced; it is deliberately not interpreted as a
+        missing metadata field.
+        """
+
+        try:
+            return self._metadata_index[identity_key(value), scope]
+        except KeyError:
+            raise KeyError("captured metadata authority is unavailable") from None
 
     def _authoritative_root_definitions(self) -> Iterable[ConcreteDefinition]:
         by_digest = {record.digest: record.definition for record in self.definitions}
