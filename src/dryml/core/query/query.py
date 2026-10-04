@@ -3594,7 +3594,7 @@ class IdentityQuery:
         scope = self._normalize_scope(source)
         return replace(self._append("source", source), default_scope=scope)
 
-    def union(self, other: "IdentityQuery") -> "IdentityQuery":
+    def union(self, other: "IdentityQuery | IdentitySet") -> "IdentityQuery":
         """Return a deferred complete-identity union with shared source cuts.
 
         The result keeps a default authority scope only when both operand plans
@@ -3604,7 +3604,7 @@ class IdentityQuery:
 
         return self._combine(other, "union")
 
-    def intersection(self, other: "IdentityQuery") -> "IdentityQuery":
+    def intersection(self, other: "IdentityQuery | IdentitySet") -> "IdentityQuery":
         """Return a deferred complete-identity intersection with shared cuts.
 
         Matching identities retain the evidence supplied by both operands.  As
@@ -3800,8 +3800,12 @@ class IdentityQuery:
     def _combine(self, other: "IdentityQuery", operation: str) -> "IdentityQuery":
         """Validate compatible terminal controls and defer one algebra stage."""
 
+        from .identity import IdentitySet
+
+        if isinstance(other, IdentitySet):
+            other = other.query()
         if not isinstance(other, IdentityQuery):
-            raise TypeError("Query V3 algebra requires another IdentityQuery.")
+            raise TypeError("Query V3 algebra requires an IdentityQuery or IdentitySet.")
         controls = (
             "refresh_policy", "scan_policy_mode", "max_verify_limit",
             "max_witness_limit", "max_depth_limit", "indexed_required",
