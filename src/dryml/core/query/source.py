@@ -60,6 +60,25 @@ class RepoSource:
             raise TypeError("RepoSource weak must be an exact bool.")
 
 
+@dataclass(frozen=True, slots=True)
+class RetainedRepoLookupSource:
+    """Private V3 producer for retained Repo root-or-cache lookup APIs.
+
+    Unlike :class:`RepoSource`, this producer intentionally excludes derived
+    identities represented below stored roots unless independently cached.
+    It preserves the historical ``Repo.get`` and ``Repo.__getitem__`` universe:
+    all independently authoritative root families plus strong/weak cache
+    CDefs. Incidental embedded definitions are not roots unless cached.
+    """
+
+    repo: object
+    weak: bool = True
+
+    def __post_init__(self) -> None:
+        if type(self.weak) is not bool:
+            raise TypeError("RetainedRepoLookupSource weak must be an exact bool.")
+
+
 class SourceCapture:
     """One terminal-local registry of detached Store facts and cache inventory.
 
@@ -306,6 +325,52 @@ class SourceCapture:
         )
         return IdentitySet(members)
 
+    def capture_retained_lookup_repo(
+        self,
+        source: RetainedRepoLookupSource,
+        *,
+        exact_cdef: ConcreteDefinition | None = None,
+    ) -> IdentitySet:
+        """Capture the historical stored-root plus cache lookup candidate set.
+
+        An exact CDef uses each Store's direct root marker reader, preserving
+        the old exact lookup path's avoidance of broad definition hydration.
+        Structural selections include declared, saved, alias and main roots,
+        but never incidental embedded CDefs without independent authority.
+        """
+
+        if not isinstance(source, RetainedRepoLookupSource):
+            raise TypeError("Retained Repo lookup capture requires its dedicated source.")
+        repo = source.repo
+        retain_topology = getattr(repo, "retain_topology", None)
+        if not callable(retain_topology):
+            raise TypeError("Retained Repo lookup source requires a Repo-like producer.")
+        members = []
+        with retain_topology():
+            seen = set()
+            for store in self.repo_stores(repo):
+                key = store.authority_fence_key()
+                if key in seen:
+                    continue
+                seen.add(key)
+                evidence = SourceEvidence.from_source(key)
+                if exact_cdef is not None:
+                    value = self.read_exact_stored_cdef(store, exact_cdef)
+                    if value is not None:
+                        members.append((value, evidence))
+                        continue
+                self._require_complete_inventory(store)
+                with store.authority_read_fence():
+                    for value in store.authoritative_root_definitions():
+                        if exact_cdef is None or value.graph_equal(exact_cdef):
+                            members.append((value, evidence))
+            strong, weak = _retained_lookup_cache_cdefs(repo, weak=source.weak)
+            members.extend(
+                (value, SourceEvidence.from_source(repo))
+                for value in (*strong, *weak)
+            )
+        return IdentitySet(members)
+
     @staticmethod
     def _capture_metadata(store: Store, facts: CapturedStoreFacts, scopes: frozenset[str]):
         """Detach requested fields for eligible targets while the fence is held."""
@@ -445,3 +510,23 @@ def _cache_values(repo, *, weak: bool) -> tuple[IdentityValue, ...]:
             if isinstance(receipt, StateRef) and receipt.object == reference:
                 values.append(receipt)
     return tuple(values)
+
+
+def _retained_lookup_cache_cdefs(
+    repo, *, weak: bool,
+) -> tuple[tuple[ConcreteDefinition, ...], tuple[ConcreteDefinition, ...]]:
+    """Return explicitly retained strong and weak cache CDefs without derivation."""
+
+    strong = tuple(
+        obj.definition
+        for _, obj in tuple(repo.strong_obj_cache.items())
+        if isinstance(obj, Object)
+    )
+    if not weak:
+        return strong, ()
+    weak_values = tuple(
+        obj.definition
+        for _, obj in tuple(repo.weak_obj_cache.items())
+        if isinstance(obj, Object)
+    )
+    return strong, weak_values
