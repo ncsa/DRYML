@@ -123,8 +123,9 @@ def test_u5_take_retains_requested_limit_and_canonical_prefix(tmp_path):
         for name in ("first", "second", "third")
     ]
 
-    result = IdentityQuery.from_store(store).state_refs().take(2).collect()
+    result = IdentityQuery.from_store(store).state_refs().take(2)
 
+    assert isinstance(result, IdentitySet)
     assert result.bounded
     assert result.requested_limit == 2
     assert result.diagnostic().requested_limit == 2
@@ -133,7 +134,7 @@ def test_u5_take_retains_requested_limit_and_canonical_prefix(tmp_path):
     assert IdentityQuery.from_store(store).state_refs().take(0).count() == 0
     assert not IdentityQuery.from_store(store).state_refs().take(0).exists()
     assert (
-        IdentityQuery.from_store(store).state_refs().take(1).union(
+        IdentityQuery.from_store(store).state_refs().take(1).query().union(
             IdentityQuery.from_store(store).state_refs()
         ).collect().bounded
     )
@@ -190,13 +191,13 @@ def test_u5_fixed_prefix_does_not_reencode_unique_graph_digests(monkeypatch):
 
     first = Definition(ExecutionLeaf, "first").concretize()
     second = Definition(ExecutionLeaf, "second").concretize()
-    query = IdentityQuery.from_set(IdentitySet((first, second))).take(1)
+    query = IdentityQuery.from_set(IdentitySet((first, second)))
     monkeypatch.setattr(
         cdef_codec, "cdef_graph_hash",
         lambda root: (_ for _ in ()).throw(AssertionError("unnecessary ordering encoding")),
     )
 
-    assert query.collect().count() == 1
+    assert query.take(1).count() == 1
 
 
 def test_u5_zero_prefix_validates_without_opening_source_inventory(tmp_path, monkeypatch):
