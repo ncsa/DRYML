@@ -40,6 +40,31 @@ class StoreAliasConflictError(StoreAuthorityError):
 
 
 @dataclass(frozen=True, slots=True)
+class StoreInventoryCapabilities:
+    """Declare whether a Store can completely enumerate Query V3 authority.
+
+    Each field is ``"complete"`` when its record family can be enumerated,
+    ``"absent"`` when the backend proves that family cannot exist, or
+    ``"unsupported"`` when a complete broad inventory cannot be answered.
+    The declaration is query-private: it prevents an optional empty iterator
+    from being interpreted as proof that no aliases exist.
+    """
+
+    definitions: str
+    stored_roots: str
+    declarations: str
+    state_refs: str
+    object_aliases: str
+    state_aliases: str
+    main_ref: str
+
+    def __post_init__(self) -> None:
+        states = {"complete", "absent", "unsupported"}
+        if any(getattr(self, name) not in states for name in self.__dataclass_fields__):
+            raise ValueError("Store inventory capabilities must use known coverage states.")
+
+
+@dataclass(frozen=True, slots=True)
 class StorePublicationCapabilities:
     """Declared backend guarantees used before local-state publication.
 
@@ -97,6 +122,33 @@ class Store(ABC):
     def preflight_publication(self, operation: str, *, local_state: bool = False) -> None:
         """Validate writable publication semantics before a caller invokes hooks."""
         self.publication_capabilities.require_writable(operation, local_state=local_state)
+
+    def _query_v3_inventory_capabilities(self) -> StoreInventoryCapabilities:
+        """Return private broad-inventory coverage for Query V3 source capture.
+
+        Built-in Stores implement every immutable record iterator. Alias
+        enumeration is deliberately different: the base optional iterator is a
+        direct-lookup compatibility fallback and cannot establish empty alias
+        inventory. Backends that inherit it therefore fail broad V3 inventory
+        preflight instead of producing a silently partial result.
+        """
+
+        def coverage(method_name: str, base_method) -> str:
+            return (
+                "complete"
+                if getattr(type(self), method_name) is not base_method
+                else "unsupported"
+            )
+
+        return StoreInventoryCapabilities(
+            definitions=coverage("iter_definition_records", Store.iter_definition_records),
+            stored_roots=coverage("iter_stored_root_records", Store.iter_stored_root_records),
+            declarations=coverage("iter_declaration_records", Store.iter_declaration_records),
+            state_refs=coverage("iter_state_ref_records", Store.iter_state_ref_records),
+            object_aliases=coverage("iter_object_alias_records", Store.iter_object_alias_records),
+            state_aliases=coverage("iter_state_alias_records", Store.iter_state_alias_records),
+            main_ref=coverage("read_main_ref", Store.read_main_ref),
+        )
 
     def to_definition(self) -> dict[str, Any]:
         """Export a detached portable existing-Store descriptor.
