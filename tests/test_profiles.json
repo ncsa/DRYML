@@ -341,6 +341,14 @@
             "test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships"
           ]
         },
+        "tests/core/test_query_v3_execution.py": {
+          "rationale": "Retain terminal cut-retry failure, collision-free prefix ordering, and zero-limit behavior without the full save-backed algebra matrix.",
+          "functions": [
+            "test_u5_repeated_cut_instability_fails_without_a_partial_answer",
+            "test_u5_fixed_prefix_does_not_reencode_unique_graph_digests",
+            "test_u5_zero_prefix_validates_without_opening_source_inventory"
+          ]
+        },
         "tests/core/test_query_graph_planner.py": {
           "rationale": "Keep every dependency-free planner and backend-contract case plus one authoritative graph-query comparison; exhaustive mode covers repeated Store-backed no-enumeration and projection compositions.",
           "functions": [
