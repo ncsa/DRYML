@@ -93,11 +93,20 @@ class SourceCapture:
         self._exact_stored_cdefs: dict[str, set[object]] = {}
         self._topologies: dict[int, tuple[Store, ...]] = {}
         self._cache_knowledge: dict[tuple[int, bool], IdentitySet] = {}
+        self._cut_domains: set[str] = set()
         self.active = False
         self.source_cuts = 0
         self.capture_rounds = 0
         self.demand_recaptures = 0
         self.instability_retries = 0
+
+    def _record_cut(self, key: str) -> None:
+        """Account for each fenced read, including selective Store authority."""
+
+        self.capture_rounds += 1
+        if key not in self._cut_domains:
+            self._cut_domains.add(key)
+            self.source_cuts += 1
 
     def repo_stores(self, repo) -> tuple[Store, ...]:
         """Retain the first connected producer topology for this terminal."""
@@ -135,14 +144,12 @@ class SourceCapture:
         cached = self._facts.get(key)
         if cached is not None and metadata_scopes <= cached.metadata_scopes:
             return cached
-        self.capture_rounds += 1
-        if cached is None:
-            self.source_cuts += 1
-        else:
-            self.demand_recaptures += 1
         self._require_complete_inventory(store)
         requested_scopes = metadata_scopes | (cached.metadata_scopes if cached else frozenset())
         with store.authority_read_fence():
+            self._record_cut(key)
+            if cached is not None:
+                self.demand_recaptures += 1
             main = store.read_main_ref()
             definitions = tuple(store.iter_definition_records())
             definition_by_digest = {record.digest: record.definition for record in definitions}
@@ -228,6 +235,7 @@ class SourceCapture:
             return value
         else:
             with store.authority_read_fence():
+                self._record_cut(key)
                 record = store.read_state_ref_record(digest)
         if record is None:
             if key not in self._facts:
@@ -272,6 +280,7 @@ class SourceCapture:
             return target if self._facts[key].is_stored(target) else None
         digest = DefinitionRecord(target).digest
         with store.authority_read_fence():
+            self._record_cut(key)
             marker = store.read_stored_root_record(digest)
             if marker is None:
                 return None
@@ -297,6 +306,28 @@ class SourceCapture:
 
         return identity_key(value) in self._exact_stored_cdefs.get(
             source.store.authority_fence_key(), set(),
+        )
+
+    def has_exact_stored_cdef_for_repo(self, repo, value: ConcreteDefinition) -> bool:
+        """Return whether every selected Store directly proved this stored CDef.
+
+        Args:
+            repo: Repo whose first terminal topology was retained.
+            value: Complete CDef identity selected for stored membership.
+
+        Returns:
+            True only when at least one Store is connected and every selected
+            authority fence has a verified positive root marker.
+
+        Side Effects:
+            None. This checks terminal-local evidence without Store access.
+        """
+
+        stores = self.repo_stores(repo)
+        return bool(stores) and all(
+            identity_key(value) in self._exact_stored_cdefs.get(
+                store.authority_fence_key(), set(),
+            ) for store in stores
         )
 
     def capture_repo(
@@ -361,6 +392,7 @@ class SourceCapture:
                         continue
                 self._require_complete_inventory(store)
                 with store.authority_read_fence():
+                    self._record_cut(key)
                     for value in store.authoritative_root_definitions():
                         if exact_cdef is None or value.graph_equal(exact_cdef):
                             members.append((value, evidence))

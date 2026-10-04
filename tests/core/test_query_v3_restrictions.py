@@ -133,6 +133,7 @@ def test_v3_controls_report_or_reject_required_inventory_scans(tmp_path):
         IdentityQuery.from_store(store).scan_policy("forbid").collect()
     exact = IdentityQuery.from_store(store).sel(state).state_refs().scan_policy("forbid")
     assert exact.explain().fast_path == "exact-state-ref"
+    assert exact.explain(analyze=True).source_cuts == 1
     assert exact.one() == state
 
 
