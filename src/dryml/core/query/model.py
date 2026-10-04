@@ -95,6 +95,40 @@ class QueryCardinalityError(QueryError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class QueryDiagnostic:
+    """Bounded structural diagnostics for detached Query V3 fixed results.
+
+    The diagnostic intentionally contains counts and a result domain only. It
+    never retains member representations, source values, paths, or upstream
+    exception text.
+    """
+
+    domain: Literal["identity", "occurrence"]
+    member_count: int
+    member_count_exact: bool
+    bounded: bool
+    source_count: int
+    source_count_exact: bool
+
+    @classmethod
+    def for_fixed(
+        cls, domain: Literal["identity", "occurrence"], member_count: int,
+        bounded: bool, source_count: int,
+    ) -> "QueryDiagnostic":
+        """Create a disclosure-safe diagnostic with count caps applied."""
+
+        limit = 9_999
+        return cls(
+            domain=domain,
+            member_count=min(member_count, limit),
+            member_count_exact=member_count <= limit,
+            bounded=bounded,
+            source_count=min(source_count, limit),
+            source_count_exact=source_count <= limit,
+        )
+
+
 class QueryIndexError(QueryError):
     pass
 
