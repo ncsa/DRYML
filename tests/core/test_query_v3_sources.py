@@ -161,6 +161,26 @@ def test_broad_capture_reuses_one_record_family_pass_and_exact_state_reads_direc
     assert capture.read_exact_state(store, state) == state
 
 
+def test_stored_restriction_builds_root_membership_once_per_cut(tmp_path, monkeypatch):
+    from dryml.core.query.authority import CapturedStoreFacts
+    from dryml.core.query.query import IdentityQuery
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    repo.save_object(SourceLeaf("first", repo=repo))
+    repo.save_object(SourceLeaf("second", repo=repo))
+    original = CapturedStoreFacts._authoritative_root_definitions
+    calls = []
+
+    def counted(self):
+        calls.append(1)
+        yield from original(self)
+
+    monkeypatch.setattr(CapturedStoreFacts, "_authoritative_root_definitions", counted)
+    assert IdentityQuery.from_store(store).stored().cdefs().count() == 2
+    assert len(calls) <= 1
+
+
 def test_distinct_zip_transactions_and_direct_relationships_remain_independent(tmp_path):
     archive = tmp_path / "store.zip"
     cdef = Definition(

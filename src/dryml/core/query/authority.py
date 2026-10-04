@@ -45,11 +45,28 @@ class CapturedStoreFacts:
     _metadata_index: dict[tuple[IdentityKey, str], object] = field(
         init=False, compare=False, repr=False,
     )
+    _stored_cdefs: frozenset[IdentityKey] = field(init=False, compare=False, repr=False)
+    _stored_objects: frozenset[IdentityKey] = field(init=False, compare=False, repr=False)
+    _stored_states: frozenset[IdentityKey] = field(init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "_metadata_index",
             {(key, scope): value for key, scope, value in self.metadata},
+        )
+        object.__setattr__(
+            self, "_stored_cdefs",
+            frozenset(identity_key(value) for value in self._authoritative_root_definitions()),
+        )
+        object.__setattr__(
+            self, "_stored_objects",
+            frozenset(identity_key(record.object_ref) for record in self.declarations) | frozenset(
+                identity_key(record.state_ref.object) for record in self.state_refs
+            ),
+        )
+        object.__setattr__(
+            self, "_stored_states",
+            frozenset(identity_key(record.state_ref) for record in self.state_refs),
         )
 
     @classmethod
@@ -108,16 +125,11 @@ class CapturedStoreFacts:
         """Return kind-specific independent stored authority from captured records."""
 
         if isinstance(value, ConcreteDefinition):
-            return any(
-                identity_key(candidate) == identity_key(value)
-                for candidate in self._authoritative_root_definitions()
-            )
+            return identity_key(value) in self._stored_cdefs
         if isinstance(value, ObjectRef):
-            return any(record.object_ref == value for record in self.declarations) or any(
-                record.state_ref.object == value for record in self.state_refs
-            )
+            return identity_key(value) in self._stored_objects
         if isinstance(value, StateRef):
-            return any(record.state_ref == value for record in self.state_refs)
+            return identity_key(value) in self._stored_states
         raise TypeError("Stored membership requires a Query V3 identity value.")
 
     def holds_metadata(self, value: ObjectRef | StateRef) -> bool:
