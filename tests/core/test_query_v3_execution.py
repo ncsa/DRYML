@@ -105,6 +105,24 @@ def test_v3_query_algebra_accepts_fixed_members_without_source_adoption(tmp_path
         combined.where(field("object", "team").eq("value"))
 
 
+def test_v3_top_level_algebra_keeps_fixed_inputs_source_free(tmp_path, monkeypatch):
+    from dryml.core.query.query import intersection, union
+
+    first = Definition(ExecutionLeaf, "first").concretize()
+    second = Definition(ExecutionLeaf, "second").concretize()
+    left, right = IdentitySet((first,)), IdentitySet((second,))
+    store = DirStore(tmp_path / "store")
+    monkeypatch.setattr(
+        store, "iter_definition_records",
+        lambda: pytest.fail("fixed-only algebra read Store authority"),
+    )
+
+    assert isinstance(union(left, right), IdentitySet)
+    assert union(left, right).count() == 2
+    assert intersection(left, right).count() == 0
+    assert union(IdentityQuery.from_store(store).cdefs(), right).take(0).bounded
+
+
 def test_u5_scalars_do_not_call_collect_or_build_a_final_identity_set(tmp_path, monkeypatch):
     """Cardinality sinks retain only the evidence required for their answer."""
 

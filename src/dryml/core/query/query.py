@@ -3347,6 +3347,72 @@ class _AlgebraSource:
             raise ValueError("Query V3 algebra operation is unsupported.")
 
 
+def union(left, right, *others):
+    """Combine fixed and live identity universes without assigning a new scope.
+
+    Args:
+        left: IdentityQuery or IdentitySet supplying initial members.
+        right: Second IdentityQuery or IdentitySet operand.
+        *others: Additional identity operands, evaluated in the supplied order.
+
+    Returns:
+        A fixed IdentitySet when all operands are fixed; otherwise a deferred
+        IdentityQuery that merges complete identities and detached evidence.
+
+    Raises:
+        TypeError: If any operand is not an identity query or fixed set.
+
+    Side Effects:
+        Fixed-only combinations never read a source; source-backed queries
+        remain unevaluated until an explicit terminal.
+    """
+
+    from .identity import IdentitySet
+
+    result = left
+    for other in (right, *others):
+        if isinstance(result, IdentitySet):
+            result = result.union(other) if isinstance(other, IdentitySet) else result.query().union(other)
+        elif isinstance(result, IdentityQuery):
+            result = result.union(other)
+        else:
+            raise TypeError("Query V3 union requires identity queries or fixed sets.")
+    return result
+
+
+def intersection(left, right, *others):
+    """Intersect fixed and live identity universes under the algebra scope rules.
+
+    Args:
+        left: Initial IdentityQuery or IdentitySet.
+        right: Second identity operand.
+        *others: Additional operands evaluated in order.
+
+    Returns:
+        A source-free IdentitySet for fixed-only operands, otherwise a deferred
+        IdentityQuery with conservative default authority.
+
+    Raises:
+        TypeError: If an operand is not an identity query or fixed set.
+
+    Side Effects:
+        No source access occurs until a query terminal; fixed-only work stays
+        detached from Stores.
+    """
+
+    from .identity import IdentitySet
+
+    result = left
+    for other in (right, *others):
+        if isinstance(result, IdentitySet):
+            result = result.intersection(other) if isinstance(other, IdentitySet) else result.query().intersection(other)
+        elif isinstance(result, IdentityQuery):
+            result = result.intersection(other)
+        else:
+            raise TypeError("Query V3 intersection requires identity queries or fixed sets.")
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class IdentityQuery:
     """Private composable Query V3 restriction plan over complete identities.
@@ -4130,7 +4196,9 @@ class IdentityQuery:
         if restriction.kind == "sel":
             selector = restriction.value
             if isinstance(selector, ObjectRef):
-                return isinstance(value, ObjectRef) and value == selector
+                return isinstance(value, (ObjectRef, StateRef)) and (
+                    value.object if isinstance(value, StateRef) else value
+                ) == selector
             if isinstance(selector, StateRef):
                 return isinstance(value, StateRef) and value == selector
             target = value.definition if isinstance(value, (ObjectRef, StateRef)) else value

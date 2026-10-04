@@ -12,6 +12,7 @@ from dryml.core import (
     SaveAnnotations,
     Selector,
     Serializable,
+    StateRef,
     selector,
 )
 from dryml.core.domains import UniformFromSet
@@ -104,6 +105,19 @@ def test_v3_exact_state_selection_uses_the_digest_addressed_authority_path(tmp_p
     )
 
     assert IdentityQuery.from_store(store).sel(state).state_refs().one() == state
+
+
+def test_v3_object_ref_selector_keeps_its_existing_state_members(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    state = _saved(repo, "selected")
+    other = _saved(repo, "other")
+    older = StateRef(state.object, {path: "pkl-" + "0" * 64 for path in state.states})
+    fixed = IdentitySet((state.object, state, older, other.object, other))
+
+    assert fixed.query().sel(state.object).count() == 3
+    assert fixed.query().sel(state.object).state_refs().count() == 2
+    assert fixed.query().sel(state).one() == state
 
 
 def test_v3_controls_report_or_reject_required_inventory_scans(tmp_path):
