@@ -89,6 +89,22 @@ def test_u5_algebra_drops_ambiguous_default_and_validates_policies(tmp_path):
         ).count()
 
 
+def test_v3_query_algebra_accepts_fixed_members_without_source_adoption(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    repo.save_object(ExecutionLeaf("stored", repo=repo))
+    extra = Definition(ExecutionLeaf, "extra").concretize()
+    fixed = IdentitySet((extra,), bounded=True)
+
+    combined = IdentityQuery.from_store(store).cdefs().union(fixed)
+    assert extra in combined.collect()
+    assert combined.collect().bounded
+    assert IdentityQuery.from_store(store).cdefs().intersection(fixed).count() == 0
+    assert fixed.query().union(IdentitySet((extra,))).one() == extra
+    with pytest.raises(QueryDomainError, match="explicit scope"):
+        combined.where(field("object", "team").eq("value"))
+
+
 def test_u5_scalars_do_not_call_collect_or_build_a_final_identity_set(tmp_path, monkeypatch):
     """Cardinality sinks retain only the evidence required for their answer."""
 
