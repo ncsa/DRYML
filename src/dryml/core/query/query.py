@@ -3876,8 +3876,11 @@ class IdentityQuery:
             members, bounded = self._terminal_entries(capture)
         else:
             members, bounded = self._bounded_terminal_entries(capture)
+        limit = self.take_limit
+        if limit is None and isinstance(self.source, IdentitySet):
+            limit = self.source.requested_limit
         return IdentitySet._from_entries(
-            members, bounded=bounded, requested_limit=self.take_limit,
+            members, bounded=bounded, requested_limit=limit,
         )
 
     def _evaluate_entries(self, capture):
@@ -4279,7 +4282,10 @@ class _RelationshipProjection:
             members.extend((value, source) for source in sources)
             if not sources:
                 members.append(value)
-        return IdentitySet(members, bounded=roots.bounded)
+        fixed = self.occurrence_query.fixed
+        return IdentitySet(
+            members, bounded=roots.bounded or (fixed.bounded if fixed is not None else False),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -4299,14 +4305,28 @@ class OccurrenceQuery:
     occurrence_limit: int | None = None
     max_depth_limit: int | None = None
     target_kind_filter: frozenset[str] = frozenset()
+    fixed: Any | None = None
+
+    @classmethod
+    def from_set(cls, occurrences) -> "OccurrenceQuery":
+        """Refine only captured occurrences without adopting a live producer."""
+
+        from .identity import IdentitySet, OccurrenceSet
+        from .relationships import EdgePolicy
+
+        if not isinstance(occurrences, OccurrenceSet):
+            raise TypeError("OccurrenceQuery.from_set requires an OccurrenceSet.")
+        return cls(IdentityQuery.from_set(IdentitySet()), edges=EdgePolicy.ALL, fixed=occurrences)
 
     def __post_init__(self) -> None:
-        from .identity import IdentitySet
+        from .identity import IdentitySet, OccurrenceSet
         from .relationships import EdgePolicy, RelationshipKind, RelationshipPath
         from ..utils.graph.path import GraphPath
 
         if not isinstance(self.roots, IdentityQuery):
             raise TypeError("OccurrenceQuery roots must be an IdentityQuery.")
+        if self.fixed is not None and not isinstance(self.fixed, OccurrenceSet):
+            raise TypeError("OccurrenceQuery fixed source must be an OccurrenceSet.")
         if not isinstance(self.edges, EdgePolicy):
             raise TypeError("OccurrenceQuery edges must be an EdgePolicy.")
         if not isinstance(self.through_kinds, frozenset) or not all(
@@ -4401,6 +4421,18 @@ class OccurrenceQuery:
         from .identity import OccurrenceSet
         from .relationships import iter_relationship_occurrences
 
+        if self.fixed is not None:
+            members = []
+            for occurrence in self._iter_occurrences():
+                sources = self.fixed.evidence_for(occurrence).sources
+                members.extend((occurrence, source) for source in sources)
+                if not sources:
+                    members.append(occurrence)
+            return OccurrenceSet(
+                members,
+                bounded=self.fixed.bounded or self.occurrence_limit is not None,
+                requested_limit=self.fixed.requested_limit if self.occurrence_limit is None else self.occurrence_limit,
+            )
         roots = self.roots.collect()
         occurrences = iter_relationship_occurrences(
             roots,
@@ -4468,6 +4500,13 @@ class OccurrenceQuery:
     def _project(self, projection: str, roots):
         from .relationships import iter_relationship_owners, iter_relationship_targets
 
+        if self.fixed is not None:
+            for occurrence in self._iter_fixed_occurrences(ignore_limit=True):
+                yield (
+                    occurrence.owner if projection == "owners" else occurrence.target,
+                    self.fixed.evidence_for(occurrence).sources,
+                )
+            return
         walker = (
             iter_relationship_owners if projection == "owners" else iter_relationship_targets
         )
@@ -4484,6 +4523,9 @@ class OccurrenceQuery:
 
         from .relationships import iter_relationship_occurrences
 
+        if self.fixed is not None:
+            yield from self._iter_fixed_occurrences()
+            return
         roots = self.roots.collect()
         yield from iter_relationship_occurrences(
             roots,
@@ -4494,6 +4536,34 @@ class OccurrenceQuery:
             max_occurrences=self.occurrence_limit,
             max_depth=self.max_depth_limit,
         )
+
+    def _iter_fixed_occurrences(self, *, ignore_limit=False):
+        """Restrict captured paths without expanding them or reading a source."""
+
+        from .relationships import RelationshipPath, _path_matches, _through_matches
+
+        emitted = 0
+        if self.occurrence_limit == 0 and not ignore_limit:
+            return
+        for occurrence in self.fixed:
+            if not self._matches_target(occurrence.target):
+                continue
+            path = occurrence.path
+            if self.path_filter is not None:
+                if isinstance(path, RelationshipPath):
+                    if not _path_matches(path, self.path_filter):
+                        continue
+                elif path != self.path_filter:
+                    continue
+            if self.through_kinds and (
+                not isinstance(path, RelationshipPath)
+                or not _through_matches(path, self.through_kinds)
+            ):
+                continue
+            yield occurrence
+            emitted += 1
+            if not ignore_limit and self.occurrence_limit is not None and emitted >= self.occurrence_limit:
+                return
 
     def _up_to_two_occurrences(self):
         """Retain only the cardinality evidence needed by singleton terminals."""

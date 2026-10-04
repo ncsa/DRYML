@@ -358,16 +358,47 @@ class IdentitySet:
 
         return self._entries[identity_key(member)][1]
 
-    def query(self, predicate: Callable[[Any], bool] | None = None) -> "IdentitySetQuery":
-        """Return an unevaluated fixed-member refinement with no source scope."""
+    def sources(self, member) -> frozenset[SourceEvidence]:
+        """Return captured contributors without consulting current Store authority.
 
-        query = IdentitySetQuery(self, ())
-        return query if predicate is None else query.where(predicate)
+        Args:
+            member: One complete identity in this fixed result.
+
+        Returns:
+            Detached source tokens that contributed the member, possibly empty.
+
+        Raises:
+            KeyError: If the identity is not a member.
+
+        Side Effects:
+            None. Contribution is not independent stored-membership proof.
+        """
+
+        return self.evidence_for(member).sources
+
+    def query(self) -> "IdentityQuery":
+        """Start a V3 identity query limited to this fixed membership.
+
+        Returns:
+            An :class:`IdentityQuery` over exactly this collection's captured
+            members and bounds, without an implicit external authority scope.
+
+        Raises:
+            None.
+
+        Side Effects:
+            Does not read a source. Restrictions remain unevaluated until an
+            explicit terminal is called.
+        """
+
+        from .query import IdentityQuery
+
+        return IdentityQuery.from_set(self)
 
     def refine(self, predicate: Callable[[Any], bool]) -> "IdentitySet":
         """Return the fixed subset accepted by ``predicate``."""
 
-        return self.query(predicate).collect()
+        return IdentitySetQuery(self, (predicate,)).collect()
 
     def union(self, other: "IdentitySet") -> "IdentitySet":
         """Merge fixed complete identities and detached evidence without queries."""
@@ -499,11 +530,42 @@ class OccurrenceSet:
 
         return self._entries[occurrence.key][1]
 
-    def query(self, predicate: Callable[[Occurrence], bool] | None = None) -> "OccurrenceSetQuery":
-        """Return an unevaluated occurrence-aware fixed-member refinement."""
+    def sources(self, occurrence: Occurrence) -> frozenset[SourceEvidence]:
+        """Return detached contributors for a captured occurrence.
 
-        query = OccurrenceSetQuery(self, ())
-        return query if predicate is None else query.where(predicate)
+        Args:
+            occurrence: A member with its complete root and typed path.
+
+        Returns:
+            Detached contributing source tokens, possibly empty.
+
+        Raises:
+            KeyError: If the occurrence is not in this fixed result.
+
+        Side Effects:
+            None. No source is reopened or granted authority.
+        """
+
+        return self.evidence_for(occurrence).sources
+
+    def query(self) -> "OccurrenceQuery":
+        """Start a V3 occurrence query over these captured paths alone.
+
+        Returns:
+            An :class:`OccurrenceQuery` over exactly this collection's
+            captured occurrence paths and bounds.
+
+        Raises:
+            None.
+
+        Side Effects:
+            Does not read a source. Path and target restrictions remain
+            unevaluated until an explicit terminal is called.
+        """
+
+        from .query import OccurrenceQuery
+
+        return OccurrenceQuery.from_set(self)
 
     def union(self, other: "OccurrenceSet") -> "OccurrenceSet":
         """Merge fixed occurrence paths and evidence without source execution."""

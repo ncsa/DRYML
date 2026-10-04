@@ -98,15 +98,10 @@ def test_occurrence_set_keeps_paths_distinct_and_refines_without_source_executio
         ),
         bounded=True,
     )
-    calls = []
-    refined = occurrences.query(
-        lambda occurrence: calls.append(occurrence)
-        or occurrence.path == GraphPath((Key("first"),))
-    )
+    refined = occurrences.query().path(GraphPath((Key("first"),)))
 
     with pytest.raises(TypeError, match="explicit terminal"):
         bool(refined)
-    assert calls == []
     assert refined.collect().one().path == GraphPath((Key("first"),))
     assert refined.collect().bounded
     assert refined.exists()
@@ -131,8 +126,49 @@ def test_fixed_set_rejects_invalid_members_and_implicit_query_truth_testing():
         IdentitySet((object(),))
     with pytest.raises(TypeError, match="exact bool"):
         OccurrenceSet(bounded=1)
-    with pytest.raises(TypeError, match="callable"):
+    with pytest.raises(TypeError, match="positional"):
         IdentitySet().query("not-a-predicate")
+
+
+def test_fixed_set_refine_still_uses_explicit_predicate_query():
+    first = Definition(V3IdentityLeaf, "first").concretize()
+    second = Definition(V3IdentityLeaf, "second").concretize()
+
+    assert tuple(IdentitySet((first, second)).refine(lambda value: value is first)) == (first,)
+
+
+def test_fixed_identity_query_uses_same_v3_restriction_language():
+    from dryml.core.query.query import IdentityQuery
+
+    first = Definition(V3IdentityLeaf, "first").concretize()
+    second = Definition(V3IdentityLeaf, "second").concretize()
+    values = IdentitySet((first, second), bounded=True)
+
+    assert isinstance(values.query(), IdentityQuery)
+    assert values.query().sel(first).one() == first
+    assert values.query().sel(first).collect().bounded
+    with pytest.raises(TypeError, match="explicit terminal"):
+        bool(values.query())
+
+
+def test_fixed_occurrence_query_restricts_captured_paths_and_projects_without_source():
+    from dryml.core.query.query import OccurrenceQuery
+
+    owner = Definition(V3IdentityPair, None, None).concretize()
+    target = Definition(V3IdentityLeaf, "same").concretize()
+    first_path = GraphPath((Key("first"),))
+    occurrences = OccurrenceSet(
+        (Occurrence(owner, first_path, target), Occurrence(owner, GraphPath((Key("second"),)), target)),
+        bounded=True,
+    )
+
+    assert isinstance(occurrences.query(), OccurrenceQuery)
+    assert occurrences.query().path(first_path).one().path == first_path
+    assert occurrences.query().path(first_path).collect().bounded
+    assert occurrences.query().targets().collect().bounded
+    assert occurrences.query().owners().one() == owner
+    assert occurrences.query().max_occurrences(0).count() == 0
+    assert occurrences.query().max_occurrences(0).owners().one() == owner
 
 
 class _ClosedSource:
