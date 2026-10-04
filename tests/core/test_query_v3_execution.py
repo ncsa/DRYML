@@ -2,7 +2,7 @@
 
 import pytest
 
-from dryml.core import Definition, Object, Repo, SaveAnnotations
+from dryml.core import Definition, Object, Repo, SaveAnnotations, Serializable
 from dryml.core.query import field
 from dryml.core.query.identity import IdentitySet, OccurrenceSet
 from dryml.core.query.model import QueryCardinalityError, QueryDomainError, QueryIndexUnavailable
@@ -16,6 +16,16 @@ class ExecutionLeaf(Object):
 
     def __init__(self, name):
         self.name = name
+
+
+class ExecutionStatefulLeaf(Serializable):
+    """Stateful fixture with a root ObjectId for alias-only authority."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        pass
 
 
 def test_u5_red_query_algebra_and_bounded_terminal_are_available(tmp_path):
@@ -338,3 +348,34 @@ def test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut(tmp_path, mo
 
     monkeypatch.setattr(IdentityQuery, "_evaluated_entries", publish_after_miss)
     assert left.intersection(right).one() == state
+
+
+def test_v3_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_path):
+    original = DirStore(tmp_path / "store")
+    repo = Repo(original)
+    saved = repo.save_object(ExecutionLeaf("target", repo=repo))
+
+    class CountingStore(DirStore):
+        def iter_definition_records(self):
+            pytest.fail("exact stored CDef lookup enumerated definition records")
+
+    store = CountingStore(original.base_dir)
+    assert IdentityQuery.from_store(store).sel(saved.definition).cdefs().stored().one() == saved.definition
+    assert IdentityQuery.from_store(store).sel(saved.definition).cdefs().stored().scan_policy("forbid").one() == saved.definition
+
+
+def test_v3_alias_only_stored_cdef_falls_back_to_complete_authority(tmp_path):
+    from dryml.core import ObjectId, ObjectRef
+    from dryml.core.query.model import QueryWouldScanError
+    from dryml.core.store.records import DefinitionRecord, ObjectAliasRecord
+    from dryml.core.utils.graph.path import GraphPath
+
+    store = DirStore(tmp_path / "store")
+    cdef = Definition(ExecutionStatefulLeaf, "alias-only").concretize()
+    store.write_definition_record(DefinitionRecord(cdef), stored_root=False)
+    store.write_object_alias(ObjectAliasRecord("selected", ObjectRef(cdef, {GraphPath(): ObjectId()})))
+
+    query = IdentityQuery.from_store(store).sel(cdef).cdefs().stored()
+    assert query.one() == cdef
+    with pytest.raises(QueryWouldScanError, match="inventory scan"):
+        query.scan_policy("forbid").count()

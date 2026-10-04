@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from ..object import Object
+from ..definition import ConcreteDefinition
 from ..reference_values import ObjectRef, StateRef
+from ..store.records import DefinitionRecord
 from ..store.store import Store, StoreCapabilityError
 from .authority import CapturedStoreFacts, IdentityValue, _derive_identities
 from .identity import IdentitySet, SourceEvidence, identity_key
@@ -69,6 +71,7 @@ class SourceCapture:
     def __init__(self):
         self._facts: dict[str, CapturedStoreFacts] = {}
         self._exact_states: dict[str, dict[str, StateRef | None]] = {}
+        self._exact_stored_cdefs: dict[str, set[object]] = {}
         self._topologies: dict[int, tuple[Store, ...]] = {}
         self._cache_knowledge: dict[tuple[int, bool], IdentitySet] = {}
         self.active = False
@@ -154,6 +157,7 @@ class SourceCapture:
                     metadata_scopes=requested_scopes,
                 )
         exact = self._exact_states.pop(key, {})
+        exact_cdefs = self._exact_stored_cdefs.pop(key, set())
         exact_changed = False
         if exact:
             current_states = {record.digest: record.state_ref for record in facts.state_refs}
@@ -161,7 +165,9 @@ class SourceCapture:
                 previous != current_states.get(digest) for digest, previous in exact.items()
             )
         self._facts[key] = facts
-        if exact_changed and self.active:
+        if self.active and (exact_changed or any(
+            not facts.is_stored(identity._value) for identity in exact_cdefs
+        )):
             raise _SourceRecapture(True)
         if cached is not None and self.active:
             raise _SourceRecapture(_cut_invalidated(cached, facts))
@@ -213,6 +219,66 @@ class SourceCapture:
         if key not in self._facts:
             self._exact_states.setdefault(key, {})[digest] = record.state_ref
         return record.state_ref
+
+    def read_exact_stored_cdef(
+        self, source: StoreSource | Store, target: ConcreteDefinition,
+    ) -> ConcreteDefinition | None:
+        """Use complete direct root authority for a positive exact CDef hit.
+
+        Args:
+            source: Store authority to inspect under its read fence.
+            target: Graph-exact CDef whose direct root marker is requested.
+
+        Returns:
+            The validated stored root or ``None`` if direct proof is unavailable.
+
+        Raises:
+            TypeError: If source or target has an unsupported type.
+            InventoryCapabilityError: If direct marker and definition disagree.
+
+        A missing direct marker is not a negative V3 answer: declarations,
+        snapshots, aliases, and main references may establish stored authority,
+        so callers must fall back to complete inventory. Backends inheriting the
+        optional iterator-based direct reader also use that fallback. This
+        method reads only direct authority and never changes the Store.
+        """
+
+        store = source.store if isinstance(source, StoreSource) else source
+        if not isinstance(store, Store) or not isinstance(target, ConcreteDefinition):
+            raise TypeError("Exact stored CDef lookup requires a Store and CDef.")
+        if type(store).read_stored_root_record is Store.read_stored_root_record:
+            return None
+        key = store.authority_fence_key()
+        if key in self._facts:
+            return target if self._facts[key].is_stored(target) else None
+        digest = DefinitionRecord(target).digest
+        with store.authority_read_fence():
+            marker = store.read_stored_root_record(digest)
+            if marker is None:
+                return None
+            record = store.read_definition_record(digest)
+            if record is None or not record.definition.graph_equal(target):
+                raise InventoryCapabilityError("Exact stored CDef authority is incompatible.")
+        self._exact_stored_cdefs.setdefault(key, set()).add(identity_key(record.definition))
+        return record.definition
+
+    def has_exact_stored_cdef(self, source: StoreSource, value: ConcreteDefinition) -> bool:
+        """Return whether this cut already verified an exact stored root.
+
+        Args:
+            source: Store producer for the prior direct read.
+            value: Candidate CDef to check by complete graph identity.
+
+        Returns:
+            Whether a matching positive marker was verified in this terminal.
+
+        Side Effects:
+            None. This does not reread or change Store authority.
+        """
+
+        return identity_key(value) in self._exact_stored_cdefs.get(
+            source.store.authority_fence_key(), set(),
+        )
 
     def capture_repo(
         self, source: RepoSource, *, metadata_scopes: frozenset[str] = frozenset()

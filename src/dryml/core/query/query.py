@@ -4023,6 +4023,7 @@ class IdentityQuery:
     def _captured_members(self, capture=None):
         from .identity import IdentitySet
         from .source import RepoSource, SourceCapture, StoreSource
+        from ..definition import ConcreteDefinition
 
         capture = SourceCapture() if capture is None else capture
         scopes = self._metadata_scopes()
@@ -4033,6 +4034,27 @@ class IdentityQuery:
         needs_inventory = any(
             restriction.kind in {"alias", "stored"} for restriction in self.restrictions
         )
+        if isinstance(self.source, StoreSource) and not scopes and self.restrictions:
+            exact_cdefs = [
+                restriction.value for restriction in self.restrictions
+                if restriction.kind == "sel" and isinstance(restriction.value, ConcreteDefinition)
+            ]
+            same_stored_scope = any(
+                restriction.kind == "stored"
+                and isinstance(restriction.scope, StoreSource)
+                and restriction.scope.store is self.source.store
+                for restriction in self.restrictions
+            )
+            if (
+                exact_cdefs and same_stored_scope
+                and any(restriction.kind == "kind" and restriction.value == "cdef"
+                        for restriction in self.restrictions)
+                and all(restriction.kind in {"sel", "kind", "stored", "source"}
+                        for restriction in self.restrictions)
+            ):
+                direct = capture.read_exact_stored_cdef(self.source, exact_cdefs[0])
+                if direct is not None:
+                    return IdentitySet(((direct, self._source_evidence(self.source)),))._entries, capture, False
         if (
             self.scan_policy_mode == "forbid"
             and not fixed_source
@@ -4163,6 +4185,14 @@ class IdentityQuery:
         if restriction.kind == "state_hash":
             return isinstance(value, StateRef) and restriction.value in value.states.values()
         if restriction.kind == "stored":
+            from .source import StoreSource
+
+            if (
+                isinstance(value, ConcreteDefinition)
+                and isinstance(restriction.scope, StoreSource)
+                and capture.has_exact_stored_cdef(restriction.scope, value)
+            ):
+                return True
             return any(fact.is_stored(value) for fact in self._scope_facts(restriction.scope, capture))
         if restriction.kind == "cached":
             return value in capture.cache_knowledge(
