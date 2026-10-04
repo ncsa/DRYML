@@ -499,6 +499,37 @@ def evaluate_metadata_predicate(predicate: MetadataPredicate, reference, repo, *
     return _reduce(predicate, values)
 
 
+def evaluate_captured_metadata_predicate(
+    predicate: MetadataPredicate, reference, projections: Mapping[str, Any]
+) -> bool:
+    """Evaluate ``predicate`` from one already captured V3 authority projection.
+
+    Args:
+        predicate: A bounded immutable metadata predicate.
+        reference: The eligible exact ObjectRef or StateRef candidate.
+        projections: Captured scope roots keyed by ``object``, ``state``,
+            ``lineage``, and ``snapshot``. A missing key denotes unavailable
+            authority, while a present ``_MISSING`` value denotes an absent field.
+
+    Returns:
+        Whether the predicate matches after validating every populated leaf.
+
+    Raises:
+        QueryDomainError: If a state-only scope is applied to an ObjectRef.
+        QueryError: If a required authority fact is unavailable or a populated
+            value is incompatible with its requested operator.
+
+    Side Effects:
+        None. This helper never calls Repo or Store getters and is the V3
+        evaluation boundary for facts captured under an authority fence.
+    """
+
+    _require_predicate(predicate)
+    context = _CapturedMetadataContext(reference, projections)
+    values = {id(leaf): _evaluate_leaf(leaf, context) for leaf in _leaves(predicate)}
+    return _reduce(predicate, values)
+
+
 class _MetadataContext:
     def __init__(self, reference, repo, store):
         from ..reference_values import ObjectRef, StateRef
@@ -547,6 +578,33 @@ class _MetadataContext:
 
         if not isinstance(self.reference, StateRef):
             raise QueryDomainError(f"Metadata scope {scope!r} requires StateRef candidates.")
+
+
+class _CapturedMetadataContext:
+    """Metadata context that cannot escape a Query V3 captured authority cut."""
+
+    def __init__(self, reference, projections: Mapping[str, Any]) -> None:
+        from ..reference_values import ObjectRef, StateRef
+
+        if not isinstance(reference, (ObjectRef, StateRef)):
+            raise TypeError("Metadata query candidates must be ObjectRef or StateRef values.")
+        self.reference = reference
+        self.projections = projections
+
+    def value(self, selector: MetadataField):
+        from ..reference_values import StateRef
+
+        if selector.scope in {"state", "snapshot"} and not isinstance(
+            self.reference, StateRef
+        ):
+            from .model import QueryDomainError
+
+            raise QueryDomainError(
+                f"Metadata scope {selector.scope!r} requires StateRef candidates."
+            )
+        if selector.scope not in self.projections:
+            raise QueryError("Query V3 metadata authority is unavailable.")
+        return _traverse(self.projections[selector.scope], selector.path)
 
 
 def _evaluate_leaf(predicate: _LeafPredicate, context: _MetadataContext) -> bool:
@@ -863,4 +921,4 @@ def _value_from_data(data: Any, *, depth: int = 0, count: list[int] | None = Non
     raise QueryCodecError("Metadata query value data is unsupported.")
 
 
-__all__ = ["MetadataField", "MetadataPredicate", "evaluate_metadata_predicate", "field", "predicate_requires_state"]
+__all__ = ["MetadataField", "MetadataPredicate", "evaluate_captured_metadata_predicate", "evaluate_metadata_predicate", "field", "predicate_requires_state"]

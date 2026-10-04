@@ -313,6 +313,26 @@
             "test_strict_index_guard_rejects_unindexed_broad_query"
           ]
         },
+        "tests/core/test_query_v3_identity.py": {
+          "rationale": "Retain graph-exact deduplication and collision-only ordering without Store setup; run the complete fixed-result boundary in focused verification.",
+          "functions": [
+            "test_identity_set_characterizes_graph_identity_without_changing_cdef_equality",
+            "test_ordering_avoids_extra_graph_encoding_without_digest_ties"
+          ]
+        },
+        "tests/core/test_query_v3_sources.py": {
+          "rationale": "Retain complete Store inventory and owned-child authority without repeating the broader producer matrix in routine runs.",
+          "functions": [
+            "test_store_capture_includes_represented_references_and_owned_derivatives"
+          ]
+        },
+        "tests/core/test_query_v3_restrictions.py": {
+          "rationale": "Retain failed metadata-read disclosure and exact-selective coverage checks; run the full save-backed restriction matrix in focused verification.",
+          "functions": [
+            "test_v3_metadata_read_failure_is_not_a_missing_field",
+            "test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed"
+          ]
+        },
         "tests/core/test_query_graph_planner.py": {
           "rationale": "Keep every dependency-free planner and backend-contract case plus one authoritative graph-query comparison; exhaustive mode covers repeated Store-backed no-enumeration and projection compositions.",
           "functions": [

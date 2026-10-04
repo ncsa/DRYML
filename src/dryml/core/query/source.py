@@ -7,6 +7,7 @@ capture and groups only identical authority-fence domains.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -14,11 +15,16 @@ from ..object import Object
 from ..reference_values import ObjectRef, StateRef
 from ..store.store import Store, StoreCapabilityError
 from .authority import CapturedStoreFacts, IdentityValue, _derive_identities
-from .identity import IdentitySet, SourceEvidence
+from .identity import IdentitySet, SourceEvidence, identity_key
 
 
 class InventoryCapabilityError(StoreCapabilityError):
     """Raised before a broad Query V3 capture lacks complete record coverage."""
+
+
+@dataclass(frozen=True, slots=True)
+class _MetadataReadFailure:
+    """Record a failed read without retaining its exception or private message."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,15 +56,22 @@ class SourceCapture:
     def __init__(self):
         self._facts: dict[str, CapturedStoreFacts] = {}
 
-    def capture_store(self, source: StoreSource | Store) -> CapturedStoreFacts:
-        """Capture one complete Store inventory exactly once per authority fence."""
+    def capture_store(
+        self, source: StoreSource | Store, *, metadata_scopes: frozenset[str] = frozenset()
+    ) -> CapturedStoreFacts:
+        """Capture inventory and requested metadata under one authority fence.
+
+        Growing metadata demand replaces earlier facts with a complete new cut;
+        V3 predicate evaluation therefore never reads live metadata after its
+        identity inventory was captured.
+        """
 
         store = source.store if isinstance(source, StoreSource) else source
         if not isinstance(store, Store):
             raise TypeError("Store capture requires a Store or StoreSource.")
         key = store.authority_fence_key()
         cached = self._facts.get(key)
-        if cached is not None:
+        if cached is not None and metadata_scopes <= cached.metadata_scopes:
             return cached
         self._require_complete_inventory(store)
         with store.authority_read_fence():
@@ -81,13 +94,31 @@ class SourceCapture:
                 main_definition=main_definition,
                 source=SourceEvidence.from_source(store.authority_fence_key()),
             )
+            if metadata_scopes:
+                facts = CapturedStoreFacts.build(
+                    definitions=facts.definitions,
+                    stored_roots=facts.stored_roots,
+                    declarations=facts.declarations,
+                    state_refs=facts.state_refs,
+                    object_aliases=facts.object_aliases,
+                    state_aliases=facts.state_aliases,
+                    main_definition=facts.main_definition,
+                    source=facts.source,
+                    metadata=self._capture_metadata(store, facts, metadata_scopes),
+                    metadata_scopes=metadata_scopes,
+                )
         self._facts[key] = facts
         return facts
 
-    def capture_stores(self, sources: Iterable[StoreSource | Store]) -> tuple[CapturedStoreFacts, ...]:
+    def capture_stores(
+        self, sources: Iterable[StoreSource | Store], *, metadata_scopes: frozenset[str] = frozenset()
+    ) -> tuple[CapturedStoreFacts, ...]:
         """Capture each selected Store while preserving distinct transaction cuts."""
 
-        return tuple(self.capture_store(source) for source in sources)
+        return tuple(
+            self.capture_store(source, metadata_scopes=metadata_scopes)
+            for source in sources
+        )
 
     def read_exact_state(self, source: StoreSource | Store, target: StateRef) -> StateRef | None:
         """Read one complete exact StateRef without requiring broad inventory.
@@ -110,7 +141,9 @@ class SourceCapture:
             raise InventoryCapabilityError("Exact StateRef authority is incompatible with its digest.")
         return record.state_ref
 
-    def capture_repo(self, source: RepoSource) -> IdentitySet:
+    def capture_repo(
+        self, source: RepoSource, *, metadata_scopes: frozenset[str] = frozenset()
+    ) -> IdentitySet:
         """Capture Repo Store topology and retained cache identities once."""
 
         if not isinstance(source, RepoSource):
@@ -121,7 +154,7 @@ class SourceCapture:
             raise TypeError("RepoSource requires a Repo-like topology producer.")
         with retain_topology():
             stores = tuple(repo.stores)
-            facts = self.capture_stores(stores)
+            facts = self.capture_stores(stores, metadata_scopes=metadata_scopes)
             cache_values = _cache_values(repo, weak=source.weak)
         members = [
             (value, facts_item.source)
@@ -133,6 +166,54 @@ class SourceCapture:
             for value in _derive_identities(cache_values)
         )
         return IdentitySet(members)
+
+    @staticmethod
+    def _capture_metadata(store: Store, facts: CapturedStoreFacts, scopes: frozenset[str]):
+        """Detach requested fields for eligible targets while the fence is held."""
+
+        captured = []
+        for value in facts.knowledge():
+            if not isinstance(value, (ObjectRef, StateRef)):
+                continue
+            object_ref = value.object if isinstance(value, StateRef) else value
+            if "object" in scopes and facts.holds_metadata(object_ref):
+                try:
+                    captured.append((identity_key(value), "object", deepcopy(store.read_metadata(object_ref))))
+                except Exception:
+                    captured.append((identity_key(value), "object", _MetadataReadFailure()))
+            if "state" in scopes and isinstance(value, StateRef) and facts.holds_metadata(value):
+                try:
+                    captured.append((identity_key(value), "state", deepcopy(store.read_metadata(value))))
+                except Exception:
+                    captured.append((identity_key(value), "state", _MetadataReadFailure()))
+            if "lineage" in scopes and facts.holds_metadata(object_ref):
+                try:
+                    lineage = store.read_lineage_metadata(object_ref)
+                    if lineage is None:
+                        for record in facts.state_refs:
+                            snapshot = store.read_snapshot_metadata(record.digest)
+                            if snapshot is not None:
+                                lineage = next((item for item in snapshot.lineages.values() if item.object_ref == object_ref), None)
+                                if lineage is not None:
+                                    break
+                    from ..metadata import LineageMetadata
+
+                    captured.append((
+                        identity_key(value), "lineage",
+                        LineageMetadata(object_ref, "unknown", None) if lineage is None else lineage,
+                    ))
+                except Exception:
+                    captured.append((identity_key(value), "lineage", _MetadataReadFailure()))
+            if "snapshot" in scopes and isinstance(value, StateRef) and facts.is_stored(value):
+                try:
+                    snapshot = store.read_snapshot_metadata(value.digest())
+                    captured.append((
+                        identity_key(value), "snapshot",
+                        snapshot if snapshot is not None and snapshot.state_ref == value else _MetadataReadFailure(),
+                    ))
+                except Exception:
+                    captured.append((identity_key(value), "snapshot", _MetadataReadFailure()))
+        return tuple(captured)
 
     @staticmethod
     def _require_complete_inventory(store: Store) -> None:
