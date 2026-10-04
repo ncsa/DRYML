@@ -7,6 +7,7 @@ import pytest
 from dryml.core import Definition, Object, Repo, SaveAnnotations, Selector, Serializable
 from dryml.core.query import field
 from dryml.core.query.identity import IdentitySet
+from dryml.core.query.model import QueryDomainError
 from dryml.core.query.query import IdentityQuery
 from dryml.core.store.dir import DirStore
 
@@ -246,6 +247,34 @@ def test_v3_fixed_metadata_requires_explicit_scope_and_alias_is_live_per_termina
     assert query.one() == first.object
     repo.set_alias("chosen", second.object)
     assert query.one() == second.object
+
+
+def test_v3_cached_restricts_input_members_with_explicit_repo_cache_scope(tmp_path):
+    from dryml.core.query.identity import IdentitySet
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    strong = V3Leaf("strong", repo=repo)
+    weak = V3Leaf("weak", repo=repo)
+    repo.cache_strong(strong)
+    repo.cache_weak(weak)
+    candidates = IdentitySet((strong.definition, weak.definition))
+
+    assert candidates.query().cached(scope=repo).count() == 2
+    assert candidates.query().cached(scope=repo, weak=False).one() == strong.definition
+    with pytest.raises(QueryDomainError, match="explicit Repo scope"):
+        candidates.query().cached()
+    assert IdentityQuery.from_store(store).cached(scope=repo).count() == 0
+
+
+def test_v3_exact_repo_selection_retains_cache_only_state_receipt(tmp_path):
+    source_repo = Repo(DirStore(tmp_path / "source"))
+    value = V3Leaf("cached", repo=source_repo)
+    state = source_repo.save_object(value)
+    repo = Repo(DirStore(tmp_path / "empty"))
+    repo.cache_strong(value)
+
+    assert IdentityQuery.from_repo(repo).sel(state).state_refs().one() == state
 
 
 def test_v3_source_scope_preserves_conflicts_without_reading_live_metadata(tmp_path):

@@ -3594,6 +3594,35 @@ class IdentityQuery:
 
         return self._append("stored", None, self._bound_scope(scope))
 
+    def cached(self, *, scope=None, weak: bool = True) -> "IdentityQuery":
+        """Retain members found in one selected Repo cache view, without adding any.
+
+        Args:
+            scope: Repo whose cache membership is tested, or the input Repo
+                producer's bound default. Fixed and Store sources require it.
+            weak: Include weak and strong entries when true; strong only when false.
+
+        Returns:
+            An unevaluated identity restriction over the existing input universe.
+
+        Raises:
+            TypeError: For a non-Repo scope or non-boolean tier selection.
+            QueryDomainError: If a fixed or Store producer lacks explicit scope.
+
+        Side Effects:
+            Terminal evaluation reads retained cache entries once; it never
+            constructs Objects, captures states, or populates a cache.
+        """
+
+        from .source import RepoSource
+
+        if type(weak) is not bool:
+            raise TypeError("cached weak must be an exact bool.")
+        selected = self.default_scope if scope is None else self._normalize_scope(scope)
+        if not isinstance(selected, RepoSource):
+            raise QueryDomainError("cached requires an explicit Repo scope.")
+        return self._append("cached", weak, selected)
+
     def where(self, predicate, *, scope=None) -> "IdentityQuery":
         """Conjoin typed metadata without changing the identity query family."""
 
@@ -4017,11 +4046,15 @@ class IdentityQuery:
                 return IdentitySet(members)._entries, capture, False
             if isinstance(self.source, RepoSource):
                 with self.source.repo.retain_topology():
-                    members = tuple(
+                    members = [
                         (state, self._source_evidence(store))
                         for store in capture.repo_stores(self.source.repo)
                         if (state := capture.read_exact_state(store, exact_state)) is not None
-                    )
+                    ]
+                    if exact_state in capture.cache_knowledge(
+                        self.source.repo, weak=self.source.weak,
+                    ):
+                        members.append((exact_state, self._source_evidence(self.source.repo)))
                 return IdentitySet(members)._entries, capture, False
         if isinstance(self.source, IdentitySet):
             result = self.source
@@ -4131,6 +4164,10 @@ class IdentityQuery:
             return isinstance(value, StateRef) and restriction.value in value.states.values()
         if restriction.kind == "stored":
             return any(fact.is_stored(value) for fact in self._scope_facts(restriction.scope, capture))
+        if restriction.kind == "cached":
+            return value in capture.cache_knowledge(
+                restriction.scope.repo, weak=restriction.value,
+            )
         if restriction.kind == "alias":
             return self._matches_alias(value, restriction.value, self._scope_facts(restriction.scope, capture))
         if restriction.kind == "metadata":
@@ -4175,11 +4212,13 @@ class IdentityQuery:
         """Return the same detached token used by U2 Store contribution capture."""
 
         from ..store.store import Store
-        from .source import StoreSource
+        from .source import RepoSource, StoreSource
         from .identity import SourceEvidence
 
         if isinstance(source, StoreSource):
             source = source.store
+        if isinstance(source, RepoSource):
+            source = source.repo
         if isinstance(source, Store):
             return SourceEvidence.from_source(source.authority_fence_key())
         return SourceEvidence.from_source(source)
