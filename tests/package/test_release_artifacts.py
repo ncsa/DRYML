@@ -63,7 +63,6 @@ _REQUIRED_MODULES = {
     "dryml/core/reference_values.py",
     "dryml/core/repo.py",
     "dryml/core/repo_plan.py",
-    "dryml/core/query/reference.py",
     "dryml/core/query/metadata.py",
     "dryml/core/store/records.py",
     "dryml/formats/__init__.py",
