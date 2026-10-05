@@ -122,7 +122,6 @@ def test_exact_current_pin_requires_fresh_identity_without_candidate_search(
         spool_directory=tmp_path,
         python_executable=Path("/definitely/not/the-selected-python"),
         automatic_environment_discovery=False,
-        env_vars={"PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
     ))
     try:
         assert executor.run(_add,
