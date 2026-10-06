@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 
 import pytest
 
@@ -17,6 +18,7 @@ from dryml.execute._protocol import (
     ProtocolConversation,
     decode_bootstrap_descriptor,
     decode_control,
+    decode_setup_terminal,
     decode_worker_error,
     decode_exact_frame,
     decode_frame,
@@ -26,6 +28,7 @@ from dryml.execute._protocol import (
     encode_frame,
     encode_frame_parts,
     encode_owner_envelope,
+    encode_worker_error,
 )
 
 
@@ -73,8 +76,8 @@ def test_worker_deadline_error_is_closed_and_distinct_from_user_timeout(setup):
         payload_limit=512,
     )
 
-    assert decode_worker_error(deadline_frame, limit_bytes=512, setup=setup) == (None, True, ())
-    assert decode_worker_error(timeout_frame, limit_bytes=512, setup=setup) == ("TimeoutError", False, ())
+    assert decode_worker_error(deadline_frame, limit_bytes=512, setup=setup) == (None, True, (), None)
+    assert decode_worker_error(timeout_frame, limit_bytes=512, setup=setup) == ("TimeoutError", False, (), None)
 
 
 @pytest.mark.parametrize(
@@ -95,6 +98,49 @@ def test_worker_deadline_error_rejects_malformed_or_wrong_variant_fields(payload
     )
     with pytest.raises(FrameError):
         decode_worker_error(frame, limit_bytes=512, setup=False)
+
+
+@pytest.mark.parametrize("setup", (False, True))
+def test_raw_worker_traceback_requires_opt_in_and_preserves_closed_error_shape(setup):
+    """Only an opted-in error terminal may carry bounded raw exception text."""
+
+    text = 'File "/private/worker.py", line 7\nValueError: private value'
+    payload = encode_worker_error(
+        "ValueError", deadline_elapsed=False, setup=setup,
+        limit_bytes=512, remote_traceback=text,
+    )
+    frame = decode_exact_frame(
+        encode_frame(FrameState.ERROR, FrameType.ERROR, _correlation(), payload, header_limit=512),
+        header_limit=512, payload_limit=512,
+    )
+    with pytest.raises(FrameError, match="not requested"):
+        decode_worker_error(frame, limit_bytes=512, setup=setup)
+    assert decode_worker_error(frame, limit_bytes=512, setup=setup, allow_traceback=True) == (
+        "ValueError", False, (), text,
+    )
+    with pytest.raises(FrameError, match="invalid"):
+        decode_worker_error(
+            frame, limit_bytes=512, setup=setup,
+            allow_traceback=True, traceback_limit_bytes=8,
+        )
+    if setup:
+        assert decode_setup_terminal(frame, limit_bytes=512, allow_traceback=True) == (
+            None, "ValueError", (), False, text,
+        )
+    for invalid in (
+        b'{"type":"ValueError","traceback":null}',
+        b'{"type":"ValueError","traceback":23}',
+        b'{"deadline":"pre-invocation","traceback":"raw"}',
+        b'{"type":"ValueError","traceback":"raw","extra":true}',
+    ):
+        if setup:
+            invalid = invalid[:-1] + b',"cleanup":[]}'
+        bad = decode_exact_frame(
+            encode_frame(FrameState.ERROR, FrameType.ERROR, _correlation(), invalid, header_limit=512),
+            header_limit=512, payload_limit=512,
+        )
+        with pytest.raises(FrameError):
+            decode_worker_error(bad, limit_bytes=512, setup=setup, allow_traceback=True)
 
 
 def test_short_reads_malformed_headers_and_controls_fail_closed_without_hidden_cap():
@@ -291,6 +337,10 @@ def test_bootstrap_descriptor_is_closed_and_bounded_before_transport():
     )
     encoded = encode_bootstrap_descriptor(descriptor)
     assert decode_bootstrap_descriptor(encoded, header_limit=512) == descriptor
+    raw = replace(descriptor, raw_traceback=True, traceback_limit_bytes=128)
+    assert decode_bootstrap_descriptor(encode_bootstrap_descriptor(raw), header_limit=512) == raw
+    with pytest.raises(FrameError, match="raw traceback"):
+        replace(descriptor, raw_traceback="raw")
     assert "token-1" not in repr(descriptor)
     with pytest.raises(FrameError, match="limit"):
         decode_bootstrap_descriptor(encoded, header_limit=len(encoded) - 1)

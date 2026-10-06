@@ -9,7 +9,11 @@ from dryml.runtime.frameworks import FrameworkImportPlan, FrameworkPostResult
 
 
 class TensorFlowRuntimeAdapter:
-    """Apply conservative TensorFlow post-import controls without eager imports."""
+    """Apply selected TensorFlow visibility and thread controls on watched import.
+
+    Planning and validation remain dependency-light; only ``post_import`` uses
+    the already selected TensorFlow module's configuration API.
+    """
 
     def plan(self, runtime, visibility):
         """Return immutable visibility, threading, allocator, and memory controls."""
@@ -35,7 +39,25 @@ class TensorFlowRuntimeAdapter:
             raise FrameworkImportSafetyError("TensorFlow import has no immutable runtime plan")
 
     def post_import(self, plan, module_name):
-        """Configure TensorFlow APIs and return truthful independent outcomes."""
+        """Configure selected GPUs and threads, then report observed outcomes.
+
+        Args:
+            plan: FrameworkImportPlan containing selected visibility and thread
+                controls for the active runtime allocation.
+            module_name: Watched TensorFlow module already present in sys.modules.
+
+        Returns:
+            FrameworkPostResult with observed visibility and thread statuses.
+
+        Raises:
+            FrameworkImportSafetyError: If mandatory device visibility cannot
+                be configured or verified. TensorFlow configuration errors also
+                propagate, including late device reconfiguration failures.
+
+        Side Effects:
+            Configures TensorFlow GPU visibility and optional threading before
+            the import is finalized; it neither reserves nor creates devices.
+        """
         module = sys.modules[module_name]
         config = getattr(module, "config", None)
         if config is None:
@@ -45,7 +67,7 @@ class TensorFlowRuntimeAdapter:
         setter = getattr(config, "set_visible_devices", None)
         if setter is None or (expected and len(physical) != len(expected)):
             raise FrameworkImportSafetyError("TensorFlow cannot configure mandatory visible devices")
-        setter(physical if expected else [], "GPU")
+        setter(list(physical) if expected else [], "GPU")
         if len(_devices(config, "get_visible_devices")) != len(expected):
             raise FrameworkImportSafetyError("TensorFlow did not enforce mandatory visible devices")
         statuses = {"visibility": "visibility-enforced", "process_memory": "declarative"}

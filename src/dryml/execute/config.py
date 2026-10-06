@@ -73,6 +73,10 @@ class BackendConfig(ABC):
     reconciliation attempts retained one-off owners make per cleanup budget.
     ``one_off_cleanup_retry_interval`` schedules later attempts while a retained
     owner remains incomplete. An owner remains inspectable when attempts fail.
+    ``raw_traceback`` defaults to true and includes unredacted worker traceback
+    text in generic and Core-owned invocation errors. Set it to false to send
+    only the failure type/category. Raw text can expose paths, source, exception
+    values, and credentials in logs; no redaction guarantee is made.
 
     Raises:
         TypeError: If a field has an unsupported type.
@@ -101,6 +105,7 @@ class BackendConfig(ABC):
     live_output_queue_limit_bytes: int = 262_144
     diagnostic_text_limit_bytes: int = 65_536
     diagnostic_issue_limit: int = 64
+    raw_traceback: bool = True
     discovery_candidate_limit: int = 128
     discovery_directory_entry_limit: int = 1024
     process_read_chunk_bytes: int = 8192
@@ -131,7 +136,7 @@ class BackendConfig(ABC):
         if self.control_header_limit_bytes > _MAX_HEADER_LENGTH:
             raise ValueError("control_header_limit_bytes exceeds the 4-byte framing header range")
         _positive_limit("environment_search_depth", self.environment_search_depth, allow_zero=True)
-        for name in ("stream_output", "automatic_environment_discovery"):
+        for name in ("stream_output", "automatic_environment_discovery", "raw_traceback"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be bool")
         if not isinstance(self.conda_executable, str) or not self.conda_executable:

@@ -16,3 +16,4 @@ def test_execution_errors_retain_typed_reports_without_sensitive_expansion():
     assert not hasattr(cleanup, "cleanup_owner")
     assert remote.remote_type == "ValueError"
     assert remote.remote_traceback == "trace"
+    assert "Remote traceback (raw, unredacted):\ntrace" in str(remote)

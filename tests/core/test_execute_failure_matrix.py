@@ -11,7 +11,7 @@ pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 import dryml.core.execute as execute_module
 from dryml.core import Repo, Serializable
 from dryml.core.execute import CoreExecutionError, CoreOptions, SharedDirStoreStrategy
-from dryml.core.execute_codec import decode_outcome
+from dryml.core.execute_codec import CoreCallCodecError, decode_outcome
 from dryml.core.store.dir import DirStore
 from dryml.execute.errors import CleanupError
 from dryml.execute.subprocess import SubProcessConfig
@@ -41,7 +41,7 @@ def _mutate_pair(first, second):
 
 
 def _raise_secret():
-    """Raise a diagnostic-bearing workload error that transport must redact."""
+    """Exercise both type-only and explicitly raw workload error transport."""
     raise RuntimeError("token=matrix-secret path=/private/matrix payload=captured")
 
 
@@ -105,6 +105,41 @@ def test_worker_failure_keeps_secret_payload_out_of_core_outcome_and_publishes_n
         )
     assert raised.value.phase == "invoke"
     assert "matrix-secret" not in str(raised.value)
+
+
+def test_raw_core_failure_requires_an_enabled_decoder_and_retains_its_reason(tmp_path):
+    """The optional text never changes the typed reason or publication evidence."""
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    strategy = SharedDirStoreStrategy()
+    prepared = strategy.prepare(_raise_secret, (), {}, repo=repo, control_store=None, update_args=False)
+    outcome = strategy.invoke(
+        prepared.invocation, repo=repo, update_args=False,
+        raw_traceback=True, traceback_limit_bytes=4096,
+    )
+
+    with pytest.raises(CoreCallCodecError, match="unrequested"):
+        decode_outcome(outcome, repo=repo)
+    decoded = decode_outcome(outcome, repo=repo, allow_raw_traceback=True)
+    assert decoded["reason"] == "RuntimeError"
+    assert "matrix-secret" in decoded["traceback"]
+    assert decoded["publications"] == []
+
+    with pytest.raises(CoreExecutionError) as raised:
+        strategy.recover(
+            outcome, prepared, repo=repo, args=(), kwargs={},
+            return_objects=False, update_args=False, allow_raw_traceback=True,
+        )
+    assert raised.value.remote_traceback == decoded["traceback"]
+    assert "matrix-secret" in str(raised.value)
+
+    limited = strategy.invoke(
+        prepared.invocation, repo=repo, update_args=False,
+        raw_traceback=True, result_limit_bytes=256, traceback_limit_bytes=4096,
+    )
+    bounded = decode_outcome(limited, repo=repo, limit_bytes=256, allow_raw_traceback=True)
+    assert bounded["reason"] == "RuntimeError"
+    assert bounded["traceback"] is None
 
 
 @pytest.mark.parametrize(

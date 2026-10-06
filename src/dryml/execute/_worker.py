@@ -23,6 +23,7 @@ from dryml.worlds import ProcessSpec, ResourceSpec, RoleSpec, WorldAllocation, W
 from ._protocol import WORKER_PROTOCOL_ID, BootstrapDescriptor, FrameError, FrameState, FrameType, OwnerEnvelopeType, ProtocolConversation, SocketFrameReader, decode_bootstrap_descriptor, decode_control, decode_owner_envelopes, encode_control, encode_frame, encode_owner_envelope, encode_worker_error
 from ._spooling import deserialize_call, serialize_result
 from .admission import _admit_observed_logical, admit
+from .errors import _format_raw_traceback
 from .models import WorkerSetupContext
 
 
@@ -351,13 +352,31 @@ def _invoke(
             except BaseException as exc:
                 cleanup_issues.append(type(exc).__name__[:128])
         if workload_error is not None:
-            outcome = encode_worker_error(
-                None if deadline_elapsed else type(workload_error).__name__[:128],
-                deadline_elapsed=deadline_elapsed,
-                cleanup_types=cleanup_issues,
-                setup=setup is not None,
-                limit_bytes=descriptor.result_limit_bytes,
-            )
+            remote_traceback = None
+            if descriptor.raw_traceback and not deadline_elapsed:
+                remote_traceback = _format_raw_traceback(
+                    workload_error,
+                    min(descriptor.traceback_limit_bytes, descriptor.result_limit_bytes // 2),
+                )
+            try:
+                outcome = encode_worker_error(
+                    None if deadline_elapsed else type(workload_error).__name__[:128],
+                    deadline_elapsed=deadline_elapsed,
+                    cleanup_types=cleanup_issues,
+                    setup=setup is not None,
+                    limit_bytes=descriptor.result_limit_bytes,
+                    remote_traceback=remote_traceback,
+                )
+            except FrameError:
+                # A bounded terminal type is still required if traceback formatting
+                # or JSON escaping consumes the available result budget.
+                outcome = encode_worker_error(
+                    None if deadline_elapsed else type(workload_error).__name__[:128],
+                    deadline_elapsed=deadline_elapsed,
+                    cleanup_types=cleanup_issues,
+                    setup=setup is not None,
+                    limit_bytes=descriptor.result_limit_bytes,
+                )
             outcome_type = FrameType.ERROR
     finally:
         _flush_standard_streams()

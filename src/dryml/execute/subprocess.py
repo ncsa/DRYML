@@ -499,7 +499,7 @@ class SubProcessBackend(Backend):
             listener.listen(1)
             listener.settimeout(max(0.001, call.admission_deadline - time.monotonic()))
             correlation = Correlation(call.submission_id, 0, 1)
-            descriptor = BootstrapDescriptor(correlation, secrets.token_hex(32), "127.0.0.1", listener.getsockname()[1], self._config.control_header_limit_bytes, self._config.owner_envelope_limit_bytes, self._config.admission_message_limit_bytes, self._config.invocation_limit_bytes, self._config.result_limit_bytes, self._config.output_frame_limit_bytes, self._config.output_final_timeout)
+            descriptor = BootstrapDescriptor(correlation, secrets.token_hex(32), "127.0.0.1", listener.getsockname()[1], self._config.control_header_limit_bytes, self._config.owner_envelope_limit_bytes, self._config.admission_message_limit_bytes, self._config.invocation_limit_bytes, self._config.result_limit_bytes, self._config.output_frame_limit_bytes, self._config.output_final_timeout, self._config.raw_traceback, self._config.diagnostic_text_limit_bytes)
             encoded_descriptor = base64.urlsafe_b64encode(encode_bootstrap_descriptor(descriptor)).decode("ascii")
             process = self._launch(
                 executable,
@@ -700,7 +700,7 @@ class SubProcessBackend(Backend):
                     raise ExecutionError("worker setup readiness evidence is invalid")
                 return True
             if frame.state is FrameState.ERROR:
-                _, remote_type, issues, deadline_elapsed = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                _, remote_type, issues, deadline_elapsed, remote_traceback = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes, allow_traceback=descriptor.raw_traceback, traceback_limit_bytes=descriptor.traceback_limit_bytes)
                 future._record_worker_cleanup_issues(issues)
                 if deadline_elapsed:
                     self._expire_deadline(run)
@@ -708,7 +708,7 @@ class SubProcessBackend(Backend):
                     return False
                 if not self._claim_outcome(run):
                     return False
-                future._publish_exception(RemoteExecutionError(f"remote subprocess setup failed ({remote_type})", remote_type=remote_type or "RemoteError"))
+                future._publish_exception(RemoteExecutionError(f"remote subprocess setup failed ({remote_type})", remote_type=remote_type or "RemoteError", remote_traceback=remote_traceback))
                 run.qualified_terminal = True
                 self._drain_setup_failure(call, run, reader, conversation)
                 return False
@@ -800,7 +800,7 @@ class SubProcessBackend(Backend):
                 try:
                     payload = frame.payload
                     if call.worker_setup is not None:
-                        payload, _, issues, _ = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                        payload, _, issues, _, _ = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
                         assert payload is not None
                         future._record_worker_cleanup_issues(issues)
                     value = self._receive_result(future, payload)
@@ -812,10 +812,11 @@ class SubProcessBackend(Backend):
                 continue
             if frame.state is FrameState.ERROR:
                 if call.worker_setup is not None:
-                    _, remote_type, issues, deadline_elapsed = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                    _, remote_type, issues, deadline_elapsed, remote_traceback = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes, allow_traceback=descriptor.raw_traceback, traceback_limit_bytes=descriptor.traceback_limit_bytes)
                 else:
-                    remote_type, deadline_elapsed, issues = decode_worker_error(
+                    remote_type, deadline_elapsed, issues, remote_traceback = decode_worker_error(
                         frame, limit_bytes=self._config.result_limit_bytes, setup=False,
+                        allow_traceback=descriptor.raw_traceback, traceback_limit_bytes=descriptor.traceback_limit_bytes,
                     )
                 future._record_worker_cleanup_issues(issues)
                 if deadline_elapsed:
@@ -825,7 +826,7 @@ class SubProcessBackend(Backend):
                 if outcome_seen or not self._claim_outcome(run):
                     return
                 outcome_seen = True
-                future._publish_exception(RemoteExecutionError(f"remote subprocess execution failed ({remote_type})", remote_type=remote_type))
+                future._publish_exception(RemoteExecutionError(f"remote subprocess execution failed ({remote_type})", remote_type=remote_type, remote_traceback=remote_traceback))
                 run.qualified_terminal = True
                 continue
             if outcome_seen:

@@ -120,6 +120,7 @@ def test_inspect_current_uses_importlib_metadata(monkeypatch):
     assert record.python.version
     assert record.platform.system
     assert record.distributions["fake-pkg"].version == "1.2.3"
+    assert record.dryml.version is None
     assert record.dryml.features == ("dryml.environments.v1.1",)
     assert "environment_fragment" not in record.dryml.schema_versions
 
@@ -223,6 +224,34 @@ def test_installed_software_evidence_ignores_transient_vendor_paths(
     )
 
 
+def test_dryml_version_uses_installed_inventory_not_source_path_metadata(monkeypatch, tmp_path):
+    """A source checkout on PYTHONPATH cannot contradict installed DRYML evidence."""
+
+    from dryml.environments.selection import software_digest
+
+    installed = tmp_path / "site-packages"
+    source = tmp_path / "source"
+    for root, version in ((installed, "1.0"), (source, "2.0")):
+        info = root / f"dryml-{version}.dist-info"
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text(f"Name: dryml\nVersion: {version}\n", encoding="utf-8")
+    monkeypatch.setattr(introspection, "_distribution_paths", lambda: (str(installed),))
+    monkeypatch.syspath_prepend(str(installed))
+    before = introspection.inspect_current()
+    monkeypatch.syspath_prepend(str(source))
+    assert metadata.version("dryml") == "2.0"
+    after = introspection.inspect_current()
+
+    assert after.dryml.version == after.distributions["dryml"].version == "1.0"
+    assert software_digest(before) == software_digest(after)
+    (installed / "dryml-1.0.dist-info" / "METADATA").write_text(
+        "Name: dryml\nVersion: 1.1\n", encoding="utf-8",
+    )
+    changed = introspection.inspect_current()
+    assert changed.dryml.version == changed.distributions["dryml"].version == "1.1"
+    assert software_digest(changed) != software_digest(before)
+
+
 @pytest.mark.parametrize("user_enabled", [False, True])
 def test_distribution_paths_retain_enabled_site_precedence(
     monkeypatch, tmp_path, user_enabled,
@@ -306,7 +335,8 @@ def test_deterministic_fresh_inspection_has_the_reduced_capability_id(monkeypatc
     record = introspection.inspect_current()
 
     assert "environment_fragment" not in record.dryml.schema_versions
-    assert record.id == "envrec-v1.1-5118a37db47900df6c688dae3f74e8f5caa97a671f0960245ce83e0b82741350"
+    assert record.dryml.version is None  # No installed DRYML record in this inventory.
+    assert record.id == "envrec-v1.1-88ac552fd6c6cae6dc4ccfe1ac53c76b35c3abdaee186959e3927ecbaed4a236"
 
 
 def test_inspect_current_does_not_import_heavy_modules(monkeypatch):

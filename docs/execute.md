@@ -115,7 +115,7 @@ encoding; an exit failure preserves an already encoded result or workload error,
 but leaves the Future cleanup state incomplete and `cleanup()` raises rather than
 claiming that unobserved worker teardown was reconciled.
 
-The generic private worker protocol is version 4. After admission and `GO`,
+The generic private worker protocol is version 5. After admission and `GO`,
 setup-bearing calls send `SETUP` and wait for `SETUP_READY` before `PAYLOAD`.
 Bounded `OUTPUT` may arrive during setup, invocation, and teardown; terminal
 outcomes and final output fences complete the exchange. An incompatible worker fails before `GO`;
@@ -336,11 +336,16 @@ earlier restores nor replays the workload.
 Store-table-relative publication status only; it never carries a live Repo,
 Store, `StoreReport`, argument, or result. A delivered core-worker failure raises
 `CoreExecutionError` with `core execution worker failed: <reason>`, preserves
-only its bounded failure category and known publication evidence, and does not
-imply rollback, retry, or successful caller refresh. Because the core adapter
-returns an opaque outcome through generic Execute before coordinator recovery,
-this is not a generic `RemoteExecutionError`; submitted values, traceback text,
-and exception values are not transported.
+its bounded failure category and known publication evidence, and does not imply
+rollback, retry, or successful caller refresh. With the backend's default
+`raw_traceback=True`, the failed Core outcome also transports bounded, unredacted
+worker text in `CoreExecutionError.remote_traceback` and its displayed error.
+The private Core outcome codec is version 2; raw diagnostics are dropped before
+publication evidence or the primary failure category if the result budget is
+tight. With `raw_traceback=False`, Core errors remain type/category-only. No
+remote exception instance, submitted argument value, or Store resource is
+transported as part of this diagnostic. Core failures remain separate from the
+generic `RemoteExecutionError` used for worker setup/transport failures.
 
 `PreparedCoreCall` contains only invocation bytes, frozen storage setup, and
 opaque update descriptors. It never retains caller Objects or refresh progress.
@@ -418,6 +423,17 @@ evidence. `AdmissionError` reports rejected environment, world, or backend
 admission; `BackendUnavailableError` reports an unavailable selected backend;
 and `RemoteExecutionError` reports a bounded worker type without reconstructing
 its exception class. This includes a user callable's own `TimeoutError`.
+By default `SubProcessConfig` and `RayBackendConfig` have `raw_traceback=True`
+and include up to `diagnostic_text_limit_bytes` of worker-formatted Python
+traceback in `RemoteExecutionError.remote_traceback` or
+`CoreExecutionError.remote_traceback` and their displayed error text.
+**This text is unredacted**: exception messages, source lines, filenames,
+interpreter paths, user data, and credentials may be included. Use only when
+that disclosure to the caller and notebook/log is acceptable. Set
+`raw_traceback=False` on the backend configuration for type-only errors.
+Traceback text is never persisted as Store authority. An oversized diagnostic
+falls back to the type-only failure without dropping completed publication
+evidence.
 `ExecutionDeadlineExceeded` means the worker or coordinator observed the
 execution deadline and owned termination was then confirmed; a worker marker
 alone is insufficient. `ExecutionUncertainError` means available
@@ -465,6 +481,7 @@ capture does not probe or create them.
 | `live_output_queue_limit_bytes` | `262,144`, positive integer bytes | Bounded coordinator live-delivery queue; overflow disables mirroring but preserves retained capture. |
 | `diagnostic_text_limit_bytes` | `65,536`, positive integer bytes | Bounded retained framework diagnostic text. |
 | `diagnostic_issue_limit` | `64`, positive integer | Maximum retained cleanup diagnostics. |
+| `raw_traceback` | `True`, bool | Include bounded unredacted worker traceback text in generic remote and Core invocation failures; set `False` for type-only errors. No redaction or secret-safe logging is promised. |
 | `discovery_candidate_limit` | `128`, positive integer | Bound on discovered environment candidates. |
 | `discovery_directory_entry_limit` | `1,024`, positive integer | Bound on entries examined in each discovery directory. |
 | `process_read_chunk_bytes` | `8,192`, positive integer bytes | Bounded chunk size while reading owned probes/process output. |
@@ -580,7 +597,7 @@ Invocation and result data remain in the submission child until qualified future
 cleanup; the caller-owned spool parent, current directory, existing
 environments, and Ray deployment are preserved.
 
-The coordinator validates private protocol v4 and executes only after the worker
+The coordinator validates private protocol v5 and executes only after the worker
 handshake/admission evidence and GO gate. Setup-bearing calls add `SETUP`,
 setup-time `OUTPUT`, and `SETUP_READY` before `PAYLOAD`; `RESULT` is forbidden
 before payload transfer. A setup `ERROR` cannot resume with readiness or payload,

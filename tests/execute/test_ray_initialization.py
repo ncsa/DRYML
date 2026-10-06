@@ -844,7 +844,7 @@ def _receive_ray_error(monkeypatch, frame, *, setup=False, backend=None):
     )
     monkeypatch.setattr(ray_module, "SocketFrameReader", lambda *args, **kwargs: _TerminalReader(frame))
     call = SimpleNamespace(output=output, worker_setup=object() if setup else None)
-    descriptor = SimpleNamespace(control_header_limit_bytes=1024)
+    descriptor = SimpleNamespace(control_header_limit_bytes=1024, raw_traceback=False, traceback_limit_bytes=65_536)
     conversation = SimpleNamespace(accept_frame=lambda value: value)
     backend._receive_active(call, future, run, descriptor, conversation)
     return backend, future, run

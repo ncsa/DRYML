@@ -18,7 +18,7 @@ from dryml.execute import executor as executor_module
 from dryml.execute import subprocess as subprocess_module
 from dryml.execute._protocol import BootstrapDescriptor, Correlation, FrameState, decode_exact_frame, encode_control
 from dryml.execute.accounting import ResourceAuthority
-from dryml.execute.errors import AdmissionError, CleanupError, ExecutionUncertainError
+from dryml.execute.errors import AdmissionError, CleanupError, ExecutionUncertainError, RemoteExecutionError
 from dryml.execute.executor import Executor
 from dryml.execute.models import WorkerSetup
 from dryml.execute.output import ExecutionOutput
@@ -399,14 +399,30 @@ def test_subprocess_spool_retry_skips_retired_backend_cleanup(tmp_path: Path, mo
 
 
 def test_subprocess_supports_lambda_closure_and_remote_failure(tmp_path: Path):
-    """Dill snapshots supported closures once and sanitizes remote failures."""
+    """Dill snapshots closures; the raw-traceback opt-out retains type-only errors."""
     offset = 4
-    executor = Executor(SubProcessConfig(spool_directory=tmp_path))
+    executor = Executor(SubProcessConfig(spool_directory=tmp_path, raw_traceback=False))
     assert executor.run(lambda value: value + offset, 3) == 7
     failed = executor.submit(lambda: (_ for _ in ()).throw(ValueError("private argument text")))
-    with pytest.raises(Exception, match="remote"):
+    with pytest.raises(RemoteExecutionError, match="remote") as failure:
         failed.result(timeout=10)
+    assert failure.value.remote_traceback is None
+    assert "private argument text" not in str(failure.value)
     failed.cleanup(timeout=5)
+    executor.close(timeout=5)
+
+
+def test_subprocess_default_raw_traceback_reaches_the_caller(tmp_path: Path):
+    """Default worker text is visible without configuring diagnostic options."""
+
+    executor = Executor(SubProcessConfig(spool_directory=tmp_path))
+    future = executor.submit(lambda: (_ for _ in ()).throw(ValueError("trusted diagnostic detail")))
+    with pytest.raises(RemoteExecutionError) as failure:
+        future.result(timeout=10)
+    assert failure.value.remote_type == "ValueError"
+    assert "trusted diagnostic detail" in failure.value.remote_traceback
+    assert "test_subprocess_backend.py" in str(failure.value)
+    future.cleanup(timeout=5)
     executor.close(timeout=5)
 
 

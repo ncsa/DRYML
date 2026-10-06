@@ -1242,7 +1242,7 @@ class RayBackend(Backend):
                     raise ExecutionError("Ray worker setup readiness evidence is invalid")
                 return True
             if frame.state is FrameState.ERROR:
-                _, remote_type, issues, deadline_elapsed = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                _, remote_type, issues, deadline_elapsed, remote_traceback = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes, allow_traceback=descriptor.raw_traceback, traceback_limit_bytes=descriptor.traceback_limit_bytes)
                 future._record_worker_cleanup_issues(issues)
                 if deadline_elapsed:
                     run.outcome_validated = True
@@ -1252,7 +1252,7 @@ class RayBackend(Backend):
                 if not self._claim_outcome(run):
                     return False
                 run.outcome_validated = True
-                future._publish_exception(RemoteExecutionError(f"remote Ray setup failed ({remote_type})", remote_type=remote_type or "RemoteError"))
+                future._publish_exception(RemoteExecutionError(f"remote Ray setup failed ({remote_type})", remote_type=remote_type or "RemoteError", remote_traceback=remote_traceback))
                 self._drain_setup_failure(call, run, reader, conversation)
                 return False
             raise FrameError("Ray worker setup sent an invalid frame")
@@ -1311,7 +1311,7 @@ class RayBackend(Backend):
                 try:
                     payload = frame.payload
                     if call.worker_setup is not None:
-                        payload, _, issues, _ = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                        payload, _, issues, _, _ = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
                         assert payload is not None
                         future._record_worker_cleanup_issues(issues)
                     future._publish_result(future._receive_result(payload))
@@ -1319,10 +1319,11 @@ class RayBackend(Backend):
                     future._publish_exception(ExecutionError("Ray worker result could not be decoded"))
             elif frame.state is FrameState.ERROR:
                 if call.worker_setup is not None:
-                    _, remote_type, issues, deadline_elapsed = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes)
+                    _, remote_type, issues, deadline_elapsed, remote_traceback = decode_setup_terminal(frame, limit_bytes=self._config.result_limit_bytes, allow_traceback=descriptor.raw_traceback, traceback_limit_bytes=descriptor.traceback_limit_bytes)
                 else:
-                    remote_type, deadline_elapsed, issues = decode_worker_error(
+                    remote_type, deadline_elapsed, issues, remote_traceback = decode_worker_error(
                         frame, limit_bytes=self._config.result_limit_bytes, setup=False,
+                        allow_traceback=descriptor.raw_traceback, traceback_limit_bytes=descriptor.traceback_limit_bytes,
                     )
                 future._record_worker_cleanup_issues(issues)
                 if deadline_elapsed:
@@ -1334,7 +1335,7 @@ class RayBackend(Backend):
                     return
                 outcome_seen = True
                 run.outcome_validated = True
-                future._publish_exception(RemoteExecutionError(f"remote Ray execution failed ({remote_type})", remote_type=remote_type))
+                future._publish_exception(RemoteExecutionError(f"remote Ray execution failed ({remote_type})", remote_type=remote_type, remote_traceback=remote_traceback))
 
     def _watch_native(self, run: _Run) -> None:
         """Pair the exact task's marker with channel evidence for qualified release."""
@@ -1658,7 +1659,7 @@ class RayBackend(Backend):
 
     def _descriptor(self, call: SubmittedCall[T], listener: socket.socket) -> BootstrapDescriptor:
         """Create the sole bounded native task argument using effective config limits."""
-        return BootstrapDescriptor(Correlation(call.submission_id, 0, 1), secrets.token_hex(32), "127.0.0.1", listener.getsockname()[1], self._config.control_header_limit_bytes, self._config.owner_envelope_limit_bytes, self._config.admission_message_limit_bytes, self._config.invocation_limit_bytes, self._config.result_limit_bytes, self._config.output_frame_limit_bytes, self._config.output_final_timeout)
+        return BootstrapDescriptor(Correlation(call.submission_id, 0, 1), secrets.token_hex(32), "127.0.0.1", listener.getsockname()[1], self._config.control_header_limit_bytes, self._config.owner_envelope_limit_bytes, self._config.admission_message_limit_bytes, self._config.invocation_limit_bytes, self._config.result_limit_bytes, self._config.output_frame_limit_bytes, self._config.output_final_timeout, self._config.raw_traceback, self._config.diagnostic_text_limit_bytes)
 
     def _require_connection(self) -> _Connection:
         """Return the started connection or reject uninitialized backend use."""

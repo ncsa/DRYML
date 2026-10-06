@@ -514,9 +514,11 @@ def test_good_enough_policy_retains_required_boundary_proofs():
         "tests/execute/test_subprocess_backend.py": {
             "test_subprocess_setup_entry_failure_withholds_payload_deserialization",
             "test_subprocess_setup_teardown_failure_preserves_result_and_cleanup_evidence",
+            "test_subprocess_default_raw_traceback_reaches_the_caller",
         },
         "tests/core/test_execute_integration.py": {
             "test_real_subprocess_core_pre_and_post_go_cancellation_are_not_reported_as_results",
+            "test_real_subprocess_core_default_raw_workload_failure_is_visible",
         },
         "tests/core/test_repo_forks.py": {
             "test_interruption_after_state_fork_boundary_leaves_complete_discoverable_authority",

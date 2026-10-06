@@ -56,6 +56,28 @@ def _record_then_raise_workload_error(path):
     raise ValueError("workload failed")
 
 
+def test_real_subprocess_core_default_raw_workload_failure_is_visible(tmp_path):
+    """Default Core delivery displays the actual worker failure location."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(
+        SubProcessConfig(spool_directory=spool),
+        core=CoreOptions(repo=repo, return_objects=False),
+    )
+    try:
+        future = executor.submit(_raise_workload_error)
+        with pytest.raises(CoreExecutionError, match="ValueError") as failure:
+            future.result(timeout=10)
+        assert "ValueError: workload failed" in failure.value.remote_traceback
+        assert "_raise_workload_error" in str(failure.value)
+        assert future.backend_future.exception(timeout=0) is None
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=5)
+
+
 def _run_child(script, tmp_path):
     """Run an isolated assertion process with a bounded wait and readable failure output."""
     completed = subprocess.run(
@@ -229,14 +251,16 @@ def setup_output_flood(_context, _data):
         os.write(2, b"t" * 131_072)
 
 
-def test_core_setup_failure_withholds_payload_from_a_real_subprocess(tmp_path, monkeypatch):
+@pytest.mark.parametrize("raw_traceback", (False, True))
+def test_core_setup_failure_withholds_payload_from_a_real_subprocess(tmp_path, monkeypatch, raw_traceback):
     """Malformed core setup reaches terminal failure before the worker receives call bytes."""
     repo = Repo(DirStore(tmp_path / "store", query_index="none"))
     spool = tmp_path / "spool"
     spool.mkdir()
     marker = tmp_path / "payload-marker"
     executor = CoreExecutor(
-        SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False),
+        SubProcessConfig(spool_directory=spool, raw_traceback=raw_traceback),
+        core=CoreOptions(repo=repo, return_objects=False),
     )
 
     def malformed_setup(self, runtime=None, *, cache="weak"):
@@ -246,8 +270,13 @@ def test_core_setup_failure_withholds_payload_from_a_real_subprocess(tmp_path, m
     monkeypatch.setattr(PreparedCoreCall, "worker_setup", malformed_setup)
     try:
         future = executor.submit(_payload_marker, str(marker))
-        with pytest.raises(RemoteExecutionError):
+        with pytest.raises(RemoteExecutionError) as failure:
             future.result(timeout=10)
+        if raw_traceback:
+            assert "core_worker_setup" in failure.value.remote_traceback
+            assert "Remote traceback (raw, unredacted)" in str(failure.value)
+        else:
+            assert failure.value.remote_traceback is None
         assert future.snapshot().phase == "backend"
         assert not marker.exists()
         future.cleanup(timeout=5)
@@ -601,16 +630,19 @@ finally:
     assert completed.returncode == 0, completed.stderr
 
 
-def test_real_subprocess_core_retries_cache_close_without_replaying_workload(tmp_path, monkeypatch):
+@pytest.mark.parametrize("raw_traceback", (None, False, True))
+def test_real_subprocess_core_retries_cache_close_without_replaying_workload(tmp_path, monkeypatch, raw_traceback):
     """A successful worker close retry preserves one workload failure and no issue."""
     repo = Repo(DirStore(tmp_path / "state", query_index="none"))
     spool = tmp_path / "spool"
     close_marker = tmp_path / "close-attempts"
     workload_marker = tmp_path / "workload-attempts"
     spool.mkdir()
-    executor = CoreExecutor(
-        SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False),
+    backend = (
+        SubProcessConfig(spool_directory=spool)
+        if raw_traceback is None else SubProcessConfig(spool_directory=spool, raw_traceback=raw_traceback)
     )
+    executor = CoreExecutor(backend, core=CoreOptions(repo=repo, return_objects=False))
     original_worker_setup = PreparedCoreCall.worker_setup
 
     def injected_worker_setup(self, runtime=None, *, cache="weak"):
@@ -626,6 +658,12 @@ def test_real_subprocess_core_retries_cache_close_without_replaying_workload(tmp
         with pytest.raises(CoreExecutionError, match="ValueError") as raised:
             future.result(timeout=10)
         assert raised.value.phase == "invoke"
+        if raw_traceback is False:
+            assert raised.value.remote_traceback is None
+            assert "workload failed" not in str(raised.value)
+        else:
+            assert "ValueError: workload failed" in raised.value.remote_traceback
+            assert "Remote traceback (raw, unredacted)" in str(raised.value)
         assert future.backend_future.exception(timeout=0) is None
         assert future.backend_future.snapshot().cleanup_issues == ()
         assert workload_marker.read_text(encoding="ascii") == "1"
