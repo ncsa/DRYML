@@ -6,6 +6,7 @@ import importlib
 import subprocess
 import sys
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -134,3 +135,41 @@ assert publication.current().statuses['torch:threading'] == 'framework-configure
         text=True,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("requested", ((), ("0",), ("0", "1")))
+def test_tensorflow_adapter_passes_a_list_to_set_visible_devices(monkeypatch, requested):
+    """TensorFlow treats a tuple of PhysicalDevices as one unrecognized device."""
+
+    from dryml.tf.runtime import TensorFlowRuntimeAdapter
+
+    physical = [
+        SimpleNamespace(name=f"/physical_device:GPU:{index}", device_type="GPU")
+        for index in range(len(requested) or 1)
+    ]
+
+    class Config:
+        visible = physical
+
+        def get_physical_devices(self, kind):
+            assert kind == "GPU"
+            return physical
+
+        def set_visible_devices(self, devices, kind):
+            assert kind == "GPU"
+            if type(devices) is not list:
+                raise ValueError(f"Unrecognized device: {devices!r}")
+            self.visible = devices
+
+        def get_visible_devices(self, kind):
+            assert kind == "GPU"
+            return self.visible
+
+    config = Config()
+    monkeypatch.setitem(sys.modules, "tensorflow", SimpleNamespace(config=config))
+    plan = FrameworkImportPlan(visible_devices={"gpu": requested})
+
+    result = TensorFlowRuntimeAdapter().post_import(plan, "tensorflow")
+
+    assert config.visible == (physical if requested else [])
+    assert result.statuses["visibility"] == "visibility-enforced"

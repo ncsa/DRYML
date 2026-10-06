@@ -185,6 +185,11 @@ The status vocabulary is closed to `undeclared`, `not-applicable`,
 | Torch | Mandatory before import | Best effort after import | Declarative unless process-enforced | Best effort per known device |
 | JAX/JAXlib | Mandatory shared group | Unsupported unless proven | Declarative | Best effort for supported uniform fractions |
 
+The TensorFlow adapter passes a flat list of selected physical GPUs to
+`tf.config.set_visible_devices` after the watched import. Passing its internal
+tuple of devices as one argument would be treated by TensorFlow as a single
+unrecognized device, even when the selected GPU is present.
+
 Framework factories are lazy. Registration freezes on the first active
 managed/orchestrator publication or watched-root observation. Late registration,
 overlapping roots, direct callable factories, and roots already imported or
