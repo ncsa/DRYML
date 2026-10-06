@@ -58,13 +58,6 @@ def _environment_kind() -> str:
     return "system"
 
 
-def _dryml_version() -> str | None:
-    try:
-        return metadata.version("dryml")
-    except metadata.PackageNotFoundError:
-        return None
-
-
 def _distribution_paths() -> tuple[str, ...]:
     """Select installation roots, retaining active site-path precedence."""
 
@@ -93,6 +86,8 @@ def inspect_current() -> EnvironmentRecord:
 
     Each call reads fresh metadata; a distribution's file inventory is read only
     once to infer its location and is not retained across calls.
+    The DRYML version uses that same installed inventory, or is unknown when
+    DRYML has no installed record; source-tree metadata cannot override it.
 
     Returns:
         An immutable environment record with interpreter, platform, installed
@@ -129,8 +124,9 @@ def inspect_current() -> EnvironmentRecord:
         if value:
             details[env_name.lower()] = value
 
+    dryml_package = distributions.get("dryml")
     dryml = DrymlRuntimeRecord(
-        version=_dryml_version(),
+        version=None if dryml_package is None else dryml_package.version,
         schema_versions={
             "environment_record": ENVIRONMENT_RECORD_SCHEMA_VERSION,
             "environment_requirement": ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION,

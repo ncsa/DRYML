@@ -28,6 +28,13 @@ do not change installed-software evidence. This keeps exact-selector checks
 stable when a backend imports its bundled dependencies, while still detecting
 changes to installed distribution versions.
 
+The DRYML version in runtime evidence comes from the same installed distribution
+inventory, not a separate search of application/source-tree paths. If DRYML has
+no installed distribution record, its version is unknown. This prevents an
+editable checkout's extra metadata from making an otherwise identical caller
+and worker disagree about the selected environment; actual installed version
+changes still invalidate exact software evidence.
+
 ## Requirements And Reports
 
 Use Python packaging requirement strings for package constraints.
