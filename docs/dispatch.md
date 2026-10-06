@@ -91,6 +91,16 @@ message includes bounded diagnostic categories and directs callers to
 Incomplete coverage means undiscovered calls may hide worker requirements,
 not that the workload failed or that no declarations were found.
 
+Execute-backed Dispatch uses the backend's default `raw_traceback=True` policy
+for `SubProcessConfig` and `RayBackendConfig`. Generic worker failures retain a
+bounded **unredacted** Python traceback in `RemoteExecutionError.remote_traceback`
+and its displayed text. Core-owned invocation failures use the same policy on
+`CoreExecutionError.remote_traceback`. Set `raw_traceback=False` on the backend
+configuration to opt out and receive type-only errors. Raw output can expose
+private paths, source lines, exception values, and credentials in notebook output
+or logs. Failure categories and completed publication evidence remain intact.
+See [Execute](execute.md).
+
 ## Probing And Static Coverage
 
 `ProbeOptions` is an immutable, inert policy with defaults

@@ -21,10 +21,10 @@ from typing import BinaryIO
 from dryml.formats import CanonicalJSONError, canonical_json_bytes, canonical_json_load_bytes, json_ready
 
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 # This is deliberately a protocol identity, rather than a package version: a
 # selected interpreter must execute the same worker implementation contract.
-WORKER_PROTOCOL_ID = "dryml.execute.worker.v4"
+WORKER_PROTOCOL_ID = "dryml.execute.worker.v5"
 _HEADER_LENGTH_BYTES = 4
 _PAYLOAD_LENGTH_BYTES = 8
 _MAX_HEADER_LENGTH = (1 << (_HEADER_LENGTH_BYTES * 8)) - 1
@@ -133,6 +133,8 @@ class BootstrapDescriptor:
     result_limit_bytes: int
     output_frame_limit_bytes: int
     output_final_timeout: float = 5.0
+    raw_traceback: bool = True
+    traceback_limit_bytes: int = 65_536
 
     def __post_init__(self) -> None:
         """Validate values that must be known before the first frame is read."""
@@ -154,6 +156,7 @@ class BootstrapDescriptor:
             ("invocation_limit_bytes", self.invocation_limit_bytes, _MAX_PAYLOAD_LENGTH),
             ("result_limit_bytes", self.result_limit_bytes, _MAX_PAYLOAD_LENGTH),
             ("output_frame_limit_bytes", self.output_frame_limit_bytes, _MAX_PAYLOAD_LENGTH),
+            ("traceback_limit_bytes", self.traceback_limit_bytes, _MAX_PAYLOAD_LENGTH),
         )
         for name, value, maximum in values:
             _validate_limit(name, value, maximum)
@@ -166,6 +169,8 @@ class BootstrapDescriptor:
             raise FrameError("output_final_timeout is invalid")
         if self.control_header_limit_bytes > self.admission_message_limit_bytes:
             raise FrameError("control header limit exceeds admission message limit")
+        if type(self.raw_traceback) is not bool:
+            raise FrameError("raw traceback option is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,25 +458,30 @@ def encode_worker_error(
     cleanup_types: Iterable[str] = (),
     setup: bool,
     limit_bytes: int,
+    remote_traceback: str | None = None,
 ) -> bytes:
-    """Encode one closed type-only worker error or pre-invocation deadline marker.
+    """Encode one bounded worker error or pre-invocation deadline marker.
 
     The deadline variant is selected only by worker control flow, never by an
     exception class name. Setup terminals additionally retain bounded cleanup
-    type names; exception values and tracebacks are never transported.
+    type names. Raw traceback text is included unless disabled by backend policy.
     """
     _validate_limit("worker error limit", limit_bytes, _MAX_PAYLOAD_LENGTH)
     cleanup = tuple(cleanup_types)
     if any(not isinstance(value, str) or len(value) > 128 for value in cleanup):
         raise FrameError("worker cleanup type is invalid")
     if deadline_elapsed:
-        if error_type is not None:
-            raise FrameError("worker deadline error cannot include a remote type")
+        if error_type is not None or remote_traceback is not None:
+            raise FrameError("worker deadline error cannot include remote diagnostics")
         data: dict[str, object] = {"deadline": _PRE_INVOCATION_DEADLINE}
     else:
         if not isinstance(error_type, str) or len(error_type) > 128:
             raise FrameError("worker error type is invalid")
         data = {"type": error_type}
+        if remote_traceback is not None:
+            if not isinstance(remote_traceback, str):
+                raise FrameError("worker traceback is invalid")
+            data["traceback"] = remote_traceback
     if setup:
         data["cleanup"] = [{"type": value} for value in cleanup]
     elif cleanup:
@@ -490,20 +500,25 @@ def decode_worker_error(
     *,
     limit_bytes: int,
     setup: bool,
-) -> tuple[str | None, bool, tuple[str, ...]]:
+    allow_traceback: bool = False,
+    traceback_limit_bytes: int = 65_536,
+) -> tuple[str | None, bool, tuple[str, ...], str | None]:
     """Decode a closed worker error without inferring deadlines from type names.
 
     Returns:
-        ``(remote_type, deadline_elapsed, cleanup_types)``. Exactly one of a
+        ``(remote_type, deadline_elapsed, cleanup_types, remote_traceback)``. Exactly one of a
         remote type or the private pre-invocation deadline marker is present.
 
     Raises:
         FrameError: If the frame or selected ordinary/setup payload variant is
-        malformed, oversized, or contains extra fields.
+        malformed, oversized, contains extra fields, or includes a traceback
+        when the receiver policy disallows it.
     """
     if frame.state is not FrameState.ERROR or frame.frame_type is not FrameType.ERROR:
         raise FrameError("frame is not a worker error")
     _validate_limit("worker error limit", limit_bytes, _MAX_PAYLOAD_LENGTH)
+    if allow_traceback:
+        _validate_limit("worker traceback limit", traceback_limit_bytes, _MAX_PAYLOAD_LENGTH)
     if len(frame.payload) > limit_bytes:
         raise FrameError("worker error exceeds configured result limit")
     try:
@@ -525,18 +540,26 @@ def decode_worker_error(
         ):
             raise FrameError("setup terminal cleanup evidence is invalid")
         cleanup_types = tuple(issue["type"] for issue in cleanup)
+    has_traceback = "traceback" in variant
+    remote_traceback = variant.pop("traceback", None)
+    if has_traceback and (
+            not allow_traceback or not isinstance(remote_traceback, str)
+            or len(remote_traceback.encode("utf-8")) > min(limit_bytes, traceback_limit_bytes)):
+        raise FrameError("worker traceback was not requested or is invalid")
     if set(variant) == {"deadline"} and variant["deadline"] == _PRE_INVOCATION_DEADLINE:
-        return None, True, cleanup_types
+        if has_traceback:
+            raise FrameError("worker deadline cannot carry a traceback")
+        return None, True, cleanup_types, None
     if set(variant) == {"type"} and isinstance(variant["type"], str) and len(variant["type"]) <= 128:
-        return variant["type"], False, cleanup_types
+        return variant["type"], False, cleanup_types, remote_traceback
     raise FrameError("worker error has an invalid shape")
 
 
-def decode_setup_terminal(frame: Frame, *, limit_bytes: int) -> tuple[bytes | None, str | None, tuple[str, ...], bool]:
+def decode_setup_terminal(frame: Frame, *, limit_bytes: int, allow_traceback: bool = False, traceback_limit_bytes: int = 65_536) -> tuple[bytes | None, str | None, tuple[str, ...], bool, str | None]:
     """Decode a setup-bearing terminal while retaining result bytes and cleanup facts.
 
     Returns:
-        ``(result_bytes, error_type, cleanup_types, deadline_elapsed)``. A result,
+        ``(result_bytes, error_type, cleanup_types, deadline_elapsed, remote_traceback)``. A result,
         remote error type, or private deadline marker is present; cleanup types
         are bounded safe type names.
 
@@ -546,10 +569,11 @@ def decode_setup_terminal(frame: Frame, *, limit_bytes: int) -> tuple[bytes | No
     if frame.state not in {FrameState.RESULT, FrameState.ERROR} or frame.frame_type not in {FrameType.RESULT, FrameType.ERROR}:
         raise FrameError("frame is not a setup terminal")
     if frame.frame_type is FrameType.ERROR:
-        remote_type, deadline_elapsed, cleanup_types = decode_worker_error(
+        remote_type, deadline_elapsed, cleanup_types, remote_traceback = decode_worker_error(
             frame, limit_bytes=limit_bytes, setup=True,
+            allow_traceback=allow_traceback, traceback_limit_bytes=traceback_limit_bytes,
         )
-        return None, remote_type, cleanup_types, deadline_elapsed
+        return None, remote_type, cleanup_types, deadline_elapsed, remote_traceback
     try:
         value = canonical_json_load_bytes(frame.payload, max_depth=3, max_nodes=128, max_entries=64, max_string=limit_bytes, max_int_bits=64)
     except CanonicalJSONError as exc:
@@ -565,7 +589,7 @@ def decode_setup_terminal(frame: Frame, *, limit_bytes: int) -> tuple[bytes | No
         payload = base64.b64decode(value["payload"].encode("ascii"), validate=True)
     except (UnicodeEncodeError, ValueError) as exc:
         raise FrameError("setup result terminal payload is invalid") from exc
-    return payload, None, tuple(issue["type"] for issue in cleanup), False
+    return payload, None, tuple(issue["type"] for issue in cleanup), False, None
 
 
 def encode_owner_envelope(state: FrameState, correlation: Correlation, owner: OwnerEnvelopeType, envelope: bytes, *, header_limit: int, owner_limit: int) -> bytes:
@@ -614,9 +638,11 @@ def encode_bootstrap_descriptor(descriptor: BootstrapDescriptor) -> bytes:
         "result_limit_bytes": descriptor.result_limit_bytes,
         "output_frame_limit_bytes": descriptor.output_frame_limit_bytes,
         "output_final_timeout": descriptor.output_final_timeout,
+        "raw_traceback": descriptor.raw_traceback,
+        "traceback_limit_bytes": descriptor.traceback_limit_bytes,
     }
     try:
-        encoded = canonical_json_bytes(data, max_depth=1, max_nodes=15, max_entries=13, max_string=128, max_int_bits=64)
+        encoded = canonical_json_bytes(data, max_depth=1, max_nodes=17, max_entries=15, max_string=128, max_int_bits=64)
     except CanonicalJSONError as exc:
         raise FrameError("bootstrap descriptor is not canonical") from exc
     if len(encoded) > descriptor.control_header_limit_bytes:
@@ -630,14 +656,14 @@ def decode_bootstrap_descriptor(data: bytes, *, header_limit: int) -> BootstrapD
     if not isinstance(data, bytes) or len(data) > header_limit:
         raise FrameError("bootstrap descriptor exceeds control header limit")
     try:
-        value = canonical_json_load_bytes(data, max_depth=1, max_nodes=15, max_entries=13, max_string=128, max_int_bits=64)
+        value = canonical_json_load_bytes(data, max_depth=1, max_nodes=17, max_entries=15, max_string=128, max_int_bits=64)
     except CanonicalJSONError as exc:
         raise FrameError("bootstrap descriptor is not canonical") from exc
-    fields = {"attempt", "generation", "rendezvous_token", "rendezvous_host", "rendezvous_port", "submission_id", "control_header_limit_bytes", "owner_envelope_limit_bytes", "admission_message_limit_bytes", "invocation_limit_bytes", "result_limit_bytes", "output_frame_limit_bytes", "output_final_timeout"}
+    fields = {"attempt", "generation", "rendezvous_token", "rendezvous_host", "rendezvous_port", "submission_id", "control_header_limit_bytes", "owner_envelope_limit_bytes", "admission_message_limit_bytes", "invocation_limit_bytes", "result_limit_bytes", "output_frame_limit_bytes", "output_final_timeout", "raw_traceback", "traceback_limit_bytes"}
     if not isinstance(value, Mapping) or set(value) != fields:
         raise FrameError("bootstrap descriptor has an invalid shape")
     try:
-        return BootstrapDescriptor(Correlation(value["submission_id"], value["attempt"], value["generation"]), value["rendezvous_token"], value["rendezvous_host"], value["rendezvous_port"], value["control_header_limit_bytes"], value["owner_envelope_limit_bytes"], value["admission_message_limit_bytes"], value["invocation_limit_bytes"], value["result_limit_bytes"], value["output_frame_limit_bytes"], value["output_final_timeout"])
+        return BootstrapDescriptor(Correlation(value["submission_id"], value["attempt"], value["generation"]), value["rendezvous_token"], value["rendezvous_host"], value["rendezvous_port"], value["control_header_limit_bytes"], value["owner_envelope_limit_bytes"], value["admission_message_limit_bytes"], value["invocation_limit_bytes"], value["result_limit_bytes"], value["output_frame_limit_bytes"], value["output_final_timeout"], value["raw_traceback"], value["traceback_limit_bytes"])
     except (FrameError, TypeError) as exc:
         raise FrameError("bootstrap descriptor is invalid") from exc
 

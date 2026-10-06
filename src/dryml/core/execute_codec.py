@@ -40,7 +40,7 @@ _VERSION = 2
 _DEFAULT_LIMIT = 67_108_864
 _MAX_NODES = 65_536
 _MAX_DEPTH = 64
-_OUTCOME_VERSION = 1
+_OUTCOME_VERSION = 2
 _PATH_TYPES = {
     cls.__name__: cls
     for cls in (
@@ -170,9 +170,10 @@ def _load_result_graph(data: bytes, *, repo: Repo, limit_bytes: int) -> tuple[An
 
 
 def _outcome(success: bool, *, result: bytes | None = None,
-             updates: list[dict[str, Any]] | None = None,
-             publications: list[dict[str, Any]] | None = None,
-             reason: str | None = None, limit_bytes: int) -> bytes:
+              updates: list[dict[str, Any]] | None = None,
+              publications: list[dict[str, Any]] | None = None,
+              reason: str | None = None, traceback_text: str | None = None,
+              limit_bytes: int) -> bytes:
     """Encode one bounded tagged worker outcome without live core values."""
     value = {
         "version": _OUTCOME_VERSION,
@@ -182,12 +183,20 @@ def _outcome(success: bool, *, result: bytes | None = None,
         "updates": updates or [],
         "publications": publications or [],
         "reason": reason,
+        "traceback": traceback_text,
     }
     try:
         encoded = dill.dumps(value, protocol=5, byref=False, recurse=True)
     except Exception as error:
         raise CoreCallCodecError("core execution transport could not encode result outcome") from error
     if len(encoded) > limit_bytes:
+        if value["traceback"] is not None:
+            # Optional diagnostics must never displace completed publication
+            # evidence or change the primary failure classification.
+            value["traceback"] = None
+            encoded = dill.dumps(value, protocol=5, byref=False, recurse=True)
+            if len(encoded) <= limit_bytes:
+                return encoded
         # Publication/update evidence is authority already made durable; only the
         # result graph may be dropped after a completed publication.
         value["success"] = False
@@ -208,7 +217,9 @@ def _failure_reason(error: Exception) -> str:
     return type(error).__name__
 
 
-def decode_outcome(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LIMIT) -> dict[str, Any]:
+def decode_outcome(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LIMIT,
+                   allow_raw_traceback: bool = False,
+                   traceback_limit_bytes: int = 65_536) -> dict[str, Any]:
     """Decode one closed worker outcome into portable result and update authority.
 
     The returned mapping contains only ordinary values, immutable references, and
@@ -217,15 +228,20 @@ def decode_outcome(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LIMIT
     if not isinstance(data, bytes) or len(data) > limit_bytes:
         raise CoreCallCodecError("core execution transport rejected oversized result")
     value = _load(data, "$.outcome")
-    fields = {"version", "tag", "success", "result", "updates", "publications", "reason"}
+    fields = {"version", "tag", "success", "result", "updates", "publications", "reason", "traceback"}
     if not isinstance(value, Mapping) or set(value) != fields or value.get("version") != _OUTCOME_VERSION or value.get("tag") != "core-outcome":
         raise CoreCallCodecError("core execution transport rejected malformed result outcome")
     if type(value["success"]) is not bool or not isinstance(value["updates"], list) or not isinstance(value["publications"], list):
         raise CoreCallCodecError("core execution transport rejected malformed result outcome")
     if value["reason"] is not None and not isinstance(value["reason"], str):
         raise CoreCallCodecError("core execution transport rejected malformed result outcome")
+    raw_traceback = value["traceback"]
+    if raw_traceback is not None and (
+            not allow_raw_traceback or not isinstance(raw_traceback, str)
+            or len(raw_traceback.encode("utf-8")) > min(limit_bytes, traceback_limit_bytes)):
+        raise CoreCallCodecError("core execution transport rejected unrequested or oversized traceback")
     if value["success"]:
-        if not isinstance(value["result"], bytes):
+        if not isinstance(value["result"], bytes) or raw_traceback is not None:
             raise CoreCallCodecError("core execution transport rejected malformed successful outcome")
         value = dict(value)
         value["result"], value["automatic_references"] = _load_result_graph(
@@ -1741,7 +1757,9 @@ class _ResultPublisher:
 
 
 def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = _DEFAULT_LIMIT,
-                        result_limit_bytes: int = _DEFAULT_LIMIT, update_args: bool = False) -> bytes:
+                        result_limit_bytes: int = _DEFAULT_LIMIT, update_args: bool = False,
+                        raw_traceback: bool = False,
+                        traceback_limit_bytes: int = 65_536) -> bytes:
     """Invoke once, publish selected state, and return a tagged portable outcome.
 
     Result publication happens at each owner's raw-return seam, before its one
@@ -1826,9 +1844,17 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
     except Exception as error:
         publications = [] if publisher is None else publisher.publications
         updates = [] if publisher is None else publisher.update_states
+        traceback_text = None
+        if raw_traceback:
+            from dryml.execute.errors import _format_raw_traceback
+
+            traceback_text = _format_raw_traceback(
+                error, min(traceback_limit_bytes, result_limit_bytes // 2),
+            )
         return _outcome(
             False, updates=updates, publications=publications,
-            reason=_failure_reason(error), limit_bytes=result_limit_bytes,
+            reason=_failure_reason(error), traceback_text=traceback_text,
+            limit_bytes=result_limit_bytes,
         )
 
 

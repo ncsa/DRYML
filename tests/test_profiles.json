@@ -117,9 +117,10 @@
           ]
         },
         "tests/core/test_execute_integration.py": {
-          "rationale": "Retain real-worker payload withholding, output draining, Store publication/recovery, cleanup uncertainty, and cancellation; exhaustive mode covers repeated setup/cache compositions and callable-owner transport.",
+          "rationale": "Retain real-worker payload withholding, default raw Core failures, output draining, Store publication/recovery, cleanup uncertainty, and cancellation; exhaustive mode covers repeated setup/cache compositions and callable-owner transport.",
           "functions": [
             "test_core_setup_failure_withholds_payload_from_a_real_subprocess",
+            "test_real_subprocess_core_default_raw_workload_failure_is_visible",
             "test_real_setup_and_teardown_output_flood_drains_before_payload_completion",
             "test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_keeps_control_store_separate",
             "test_real_subprocess_core_setup_reports_unresolved_cache_cleanup_after_workload_failure",
@@ -607,7 +608,7 @@
           ]
         },
         "tests/execute/test_subprocess_backend.py": {
-          "rationale": "Retain protocol/pin validation, real happy path and setup ordering, payload withholding, cleanup uncertainty/retry, callable failure, result bounds, STOP-before-deserialize, output uncertainty, cancellation cleanup, and Windows ownership; exhaustive mode covers duplicate process starts.",
+          "rationale": "Retain protocol/pin validation, real happy path and setup ordering, payload withholding, cleanup uncertainty/retry, default raw and opted-out remote failures, result bounds, STOP-before-deserialize, output uncertainty, cancellation cleanup, and Windows ownership; exhaustive mode covers duplicate process starts.",
           "functions": [
             "test_subprocess_rejects_old_v3_worker_before_go_or_payload",
             "test_affinity_marker_is_visible_only_after_payload_write",
@@ -617,6 +618,7 @@
             "test_subprocess_setup_entry_failure_withholds_payload_deserialization",
             "test_subprocess_spool_retry_skips_retired_backend_cleanup",
             "test_subprocess_supports_lambda_closure_and_remote_failure",
+            "test_subprocess_default_raw_traceback_reaches_the_caller",
             "test_subprocess_rejects_oversized_worker_result_without_success",
             "test_rejected_go_never_deserializes_payload_at_actual_worker_boundary",
             "test_known_result_survives_missing_output_fences_and_group_cleanup",

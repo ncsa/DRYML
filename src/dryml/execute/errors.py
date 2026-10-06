@@ -2,11 +2,31 @@
 
 from __future__ import annotations
 
+import traceback
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .future import ExecutionFuture
     from .models import AdmissionReport
+
+
+def _format_raw_traceback(error: BaseException, limit_bytes: int) -> str | None:
+    """Bound unredacted traceback text without replacing the original failure."""
+
+    if limit_bytes <= 0:
+        return None
+    try:
+        parts = bytearray()
+        for fragment in traceback.TracebackException.from_exception(
+                error, limit=64, capture_locals=False).format():
+            chunk = fragment.encode("utf-8", errors="replace")
+            remaining = limit_bytes - len(parts)
+            parts.extend(chunk[:remaining])
+            if len(chunk) >= remaining:
+                break
+        return parts.decode("utf-8", errors="ignore") or None
+    except Exception:
+        return None
 
 
 class ExecutionError(RuntimeError):
@@ -32,7 +52,8 @@ class RemoteExecutionError(ExecutionError):
     Args:
         message: Safe summary of the worker failure.
         remote_type: Bounded worker exception type name.
-        remote_traceback: Optional bounded worker traceback text.
+        remote_traceback: Optional bounded raw worker traceback text, enabled by
+            default in backend configuration. It is not redacted.
 
     Side Effects:
         Retains diagnostic strings only; it does not import worker exception code.
@@ -42,6 +63,19 @@ class RemoteExecutionError(ExecutionError):
         super().__init__(message)
         self.remote_type = remote_type
         self.remote_traceback = remote_traceback
+
+    def __str__(self) -> str:
+        """Display the summary, plus raw worker text if enabled and available.
+
+        Returns:
+            The worker type summary and any available unredacted
+            traceback. Raw text may contain paths, exception values, or secrets.
+        """
+
+        summary = super().__str__()
+        if self.remote_traceback is None:
+            return summary
+        return f"{summary}\nRemote traceback (raw, unredacted):\n{self.remote_traceback}"
 
 
 class BackendUnavailableError(ExecutionError):

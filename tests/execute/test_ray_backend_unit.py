@@ -15,9 +15,9 @@ import dryml.execute.ray as ray_module
 from dryml.execute._protocol import (
     BootstrapDescriptor, Correlation, FrameState, FrameType, OwnerEnvelopeType,
     ProtocolConversation, decode_exact_frame, encode_control, encode_frame,
-    encode_owner_envelope,
+    encode_owner_envelope, encode_worker_error,
 )
-from dryml.execute.errors import AdmissionError
+from dryml.execute.errors import AdmissionError, RemoteExecutionError
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.admission import _admit_observed_logical
 from dryml.execute.models import (EnvironmentCandidate, ResourceAmounts,
@@ -491,11 +491,12 @@ def test_fake_ray_setup_sends_native_evidence_and_drains_output_before_readiness
     assert output.snapshot().stdout == "setup output"
 
 
-def test_fake_ray_setup_failure_publishes_validated_terminal_before_withholding_payload(monkeypatch):
+@pytest.mark.parametrize("raw_traceback", (False, True))
+def test_fake_ray_setup_failure_publishes_validated_terminal_before_withholding_payload(monkeypatch, raw_traceback):
     """A fake Ray setup terminal publishes failure without sending a workload payload."""
-    backend = RayBackendConfig(control_header_limit_bytes=512, owner_envelope_limit_bytes=512, admission_message_limit_bytes=512).create_backend()
+    backend = RayBackendConfig(control_header_limit_bytes=512, owner_envelope_limit_bytes=512, admission_message_limit_bytes=512, raw_traceback=raw_traceback).create_backend()
     correlation = Correlation("ray-failure", 0, 1)
-    descriptor = BootstrapDescriptor(correlation, "token", "127.0.0.1", 43123, 512, 512, 512, 512, 512, 128)
+    descriptor = BootstrapDescriptor(correlation, "token", "127.0.0.1", 43123, 512, 512, 512, 512, 512, 128, raw_traceback=raw_traceback)
     socket = _SetupSocket()
     output = ExecutionOutput()
     output._bind("ray-failure", output_limit_bytes=512, live_output_queue_limit_bytes=512, stream_output=False, start_live=False)
@@ -515,13 +516,20 @@ def test_fake_ray_setup_failure_publishes_validated_terminal_before_withholding_
 
     monkeypatch.setattr(future, "_publish_exception", assert_validated_before_terminal)
     call = SimpleNamespace(worker_setup=WorkerSetup(factory="tests.execute.test_ray_backend_unit:setup_factory", data={}), submission_id="ray-failure", output=output)
-    terminal = b'{"cleanup":[{"type":"RuntimeError"}],"type":"ValueError"}'
+    terminal = encode_worker_error(
+        "ValueError", deadline_elapsed=False, setup=True, limit_bytes=512,
+        cleanup_types=("RuntimeError",),
+        remote_traceback="ValueError: raw setup detail" if raw_traceback else None,
+    )
     reader = _SetupReader((
         decode_exact_frame(encode_frame(FrameState.ERROR, FrameType.ERROR, correlation, terminal, header_limit=512), header_limit=512, payload_limit=512),
     ))
 
     assert not backend._send_setup(call, future, run, descriptor, _setup_conversation(correlation), reader, None, {})
     assert future.snapshot().cleanup_state == "incomplete"
+    error = future.exception(timeout=1)
+    assert isinstance(error, RemoteExecutionError)
+    assert error.remote_traceback == ("ValueError: raw setup detail" if raw_traceback else None)
     assert len(socket.frames) == 1
 
 

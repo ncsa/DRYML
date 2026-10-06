@@ -180,18 +180,35 @@ class CoreExecutionError(ExecutionError):
         phase: Core adaptation phase which failed.
         execution: Optional future retaining this adaptation.
         evidence: Publication/update/refresh facts completed before the failure.
+        remote_traceback: Bounded unredacted worker traceback when enabled by
+            the selected backend; absent for type-only or local failures.
 
     This error does not claim rollback or retry. A future retains it directly rather
     than introducing a second outcome-error scheme.
     """
 
     def __init__(self, message: str, *, phase: str,
-                 evidence: CoreOutcomeEvidence | None = None,
-                 execution: Any = None) -> None:
+                  evidence: CoreOutcomeEvidence | None = None,
+                  execution: Any = None,
+                  remote_traceback: str | None = None) -> None:
         super().__init__(message)
         self.phase = phase
         self.evidence = evidence
         self.execution = execution
+        self.remote_traceback = remote_traceback
+
+    def __str__(self) -> str:
+        """Display the failure category and any enabled raw worker traceback.
+
+        Returns:
+            The original category summary plus available unredacted worker text.
+            Raw text can include paths, user values, and credentials.
+        """
+
+        summary = super().__str__()
+        if self.remote_traceback is None:
+            return summary
+        return f"{summary}\nRemote traceback (raw, unredacted):\n{self.remote_traceback}"
 
 
 class _RefreshLedger:
@@ -453,9 +470,32 @@ class SharedDirStoreStrategy:
         return _CoreRecovery.bind(prepared, args, kwargs)
 
     def invoke(self, invocation: bytes, *, repo: Repo | None, update_args: bool,
-               invocation_limit_bytes: int = 67_108_864,
-               result_limit_bytes: int | None = None) -> bytes:
-        """Run one reconstructed worker-local call through its single signature boundary."""
+                invocation_limit_bytes: int = 67_108_864,
+                result_limit_bytes: int | None = None,
+                raw_traceback: bool = False,
+                traceback_limit_bytes: int = 65_536) -> bytes:
+        """Run one worker call, optionally retaining bounded raw failure text.
+
+        Args:
+            invocation: Prepared invocation bytes.
+            repo: Selected worker Repo; absence is an error.
+            update_args: Whether selected arguments may publish updates.
+            invocation_limit_bytes: Bound for decoded invocation bytes.
+            result_limit_bytes: Bound for the tagged outcome; omitted uses the
+                invocation bound.
+            raw_traceback: Include unredacted worker traceback text on failure.
+            traceback_limit_bytes: Maximum diagnostic text bytes when enabled.
+
+        Returns:
+            Bounded tagged result or failed outcome retaining publication facts.
+
+        Raises:
+            ValueError: If the required worker Repo is absent.
+            CoreCallCodecError: If invocation/outcome transport fails.
+
+        Side Effects:
+            Executes the selected call and may publish exact Store state.
+        """
         if repo is None:
             raise ValueError("SharedDirStoreStrategy requires worker Repo authority")
         from .execute_codec import invoke_invocation
@@ -466,7 +506,8 @@ class SharedDirStoreStrategy:
             return invoke_invocation(
                 invocation, repo=repo, invocation_limit_bytes=invocation_limit_bytes,
                 result_limit_bytes=result_limit_bytes or invocation_limit_bytes,
-                update_args=update_args,
+                update_args=update_args, raw_traceback=raw_traceback,
+                traceback_limit_bytes=traceback_limit_bytes,
             )
 
         # Core worker setup normally establishes this selection. Direct strategy
@@ -482,7 +523,9 @@ class SharedDirStoreStrategy:
             args: tuple[Any, ...], kwargs: Mapping[str, Any], return_objects: bool,
             update_args: bool, _recovery: _CoreRecovery | None = None,
             _decoded: CoreAdaptationOutcome | None = None,
-            result_limit_bytes: int = 67_108_864) -> Any:
+            result_limit_bytes: int = 67_108_864,
+            allow_raw_traceback: bool = False,
+            traceback_limit_bytes: int = 65_536) -> Any:
         """Recover one tagged outcome and optionally restore original arguments.
 
         Args:
@@ -496,6 +539,9 @@ class SharedDirStoreStrategy:
                 the original live argument instances.
             result_limit_bytes: Frozen generic transport budget used to validate
                 this delivered outcome.
+            allow_raw_traceback: Accept unredacted diagnostics in the failed
+                worker outcome when explicitly selected for this call.
+            traceback_limit_bytes: Maximum accepted diagnostic text bytes.
 
         Returns:
             The decoded result, or its requested fresh local materialization.
@@ -514,12 +560,15 @@ class SharedDirStoreStrategy:
             raise ValueError("SharedDirStoreStrategy requires caller Repo authority")
         decoded = _decoded or decode_core_outcome(
             result, repo=repo, result_limit_bytes=result_limit_bytes,
+            allow_raw_traceback=allow_raw_traceback,
+            traceback_limit_bytes=traceback_limit_bytes,
         )
         outcome = decoded.value
         if not outcome["success"]:
             raise CoreExecutionError(
                 f"core execution worker failed: {outcome['reason']}",
                 phase="invoke", evidence=decoded.evidence,
+                remote_traceback=outcome["traceback"],
             )
         updates = tuple((item["target"], StateRef.from_data(item["state"])) for item in outcome["updates"])
         recovery = _recovery or self.bind_recovery(prepared, args=args, kwargs=kwargs)
@@ -581,6 +630,8 @@ class SharedDirStoreStrategy:
 
 def decode_core_outcome(
         result: bytes, *, repo: Repo, result_limit_bytes: int = 67_108_864,
+        allow_raw_traceback: bool = False,
+        traceback_limit_bytes: int = 65_536,
 ) -> CoreAdaptationOutcome:
     """Decode a tagged outcome into a value plus detached exact evidence.
 
@@ -588,6 +639,8 @@ def decode_core_outcome(
             result: Bounded bytes returned by :class:`SharedDirStoreStrategy`.
             repo: Caller-owned Repo used only to validate the closed result graph.
             result_limit_bytes: Frozen generic outcome byte budget.
+            allow_raw_traceback: Admit opt-in unredacted worker text.
+            traceback_limit_bytes: Maximum accepted diagnostic bytes.
 
     Returns:
         A future-retainable value/evidence pair. Failed outcomes retain ``value`` as
@@ -603,7 +656,11 @@ def decode_core_outcome(
     """
     from .execute_codec import CoreCallCodecError, decode_outcome
 
-    outcome = decode_outcome(result, repo=repo, limit_bytes=result_limit_bytes)
+    outcome = decode_outcome(
+        result, repo=repo, limit_bytes=result_limit_bytes,
+        allow_raw_traceback=allow_raw_traceback,
+        traceback_limit_bytes=traceback_limit_bytes,
+    )
     publications = []
     for item in outcome["publications"]:
         if not isinstance(item, Mapping) or set(item) != {"state", "store", "phase", "status", "path"}:
@@ -767,7 +824,7 @@ def invoke_prepared_call(invocation: bytes) -> Any:
 
 def _invoke_prepared_outcome(
         invocation: bytes, invocation_limit_bytes: int, result_limit_bytes: int,
-        update_args: bool,
+        update_args: bool, raw_traceback: bool, traceback_limit_bytes: int,
 ) -> bytes:
     """Return one opaque core outcome from an already configured worker.
 
@@ -780,6 +837,8 @@ def _invoke_prepared_outcome(
         invocation_limit_bytes: Captured public backend invocation bound.
         result_limit_bytes: Captured public backend outcome bound.
         update_args: Captured caller-refresh policy.
+        raw_traceback: Captured backend policy for unredacted failure text.
+        traceback_limit_bytes: Captured maximum diagnostic text bytes.
 
     Returns:
         The strategy-owned tagged outcome bytes.
@@ -792,6 +851,7 @@ def _invoke_prepared_outcome(
         invocation, repo=context.repo, update_args=update_args,
         invocation_limit_bytes=invocation_limit_bytes,
         result_limit_bytes=result_limit_bytes,
+        raw_traceback=raw_traceback, traceback_limit_bytes=traceback_limit_bytes,
     )
 
 
@@ -1551,6 +1611,8 @@ class CoreExecutionFuture:
         recovery: Caller-object bindings created before submission returns.
         return_objects: Captured result-materialization decision.
         result_limit_bytes: Captured public generic result limit.
+        raw_traceback: Whether failed worker outcomes may retain unredacted
+            traceback text under the backend diagnostic byte limit.
         done_callbacks: Coordinator-local callbacks receiving this facade.
         one_off: Whether generic one-off cleanup should also release recovery state.
 
@@ -1574,6 +1636,7 @@ class CoreExecutionFuture:
             self, backend_future: ExecutionFuture[bytes], *,
             prepared_storage: _PreparedSharedStorage, prepared: PreparedCoreCall,
             recovery: _CoreRecovery, return_objects: bool, result_limit_bytes: int,
+            raw_traceback: bool = False,
             done_callbacks: Sequence[CoreCallback] = (), one_off: bool = False,
     ) -> None:
         if not isinstance(backend_future, ExecutionFuture):
@@ -1587,6 +1650,7 @@ class CoreExecutionFuture:
         self._recovery = recovery
         self._return_objects = return_objects
         self._result_limit_bytes = result_limit_bytes
+        self._raw_traceback = raw_traceback
         self._condition = Condition(RLock())
         self._state = "pending"
         self._phase = "prepare"
@@ -1957,6 +2021,8 @@ class CoreExecutionFuture:
             decoded = decode_core_outcome(
                 data, repo=self._storage.recovery_repo,
                 result_limit_bytes=self._result_limit_bytes,
+                allow_raw_traceback=self._raw_traceback,
+                traceback_limit_bytes=self._diagnostic_text_limit_bytes,
             )
             # Recovery runs in generic callback threads, which do not inherit the
             # caller's ContextVars.  Install only this frozen call's owned Repo and
@@ -1967,6 +2033,8 @@ class CoreExecutionFuture:
                     args=(), kwargs={}, return_objects=self._return_objects,
                     update_args=self._storage.update_args, _recovery=self._recovery,
                     _decoded=decoded, result_limit_bytes=self._result_limit_bytes,
+                    allow_raw_traceback=self._raw_traceback,
+                    traceback_limit_bytes=self._diagnostic_text_limit_bytes,
                 )
             with self._condition:
                 self._evidence = self._recovery.ledger.evidence(decoded.evidence)
@@ -2290,6 +2358,8 @@ def _submit_frozen_core_submission(
                 config.invocation_limit_bytes,
                 frozen.result_limit_bytes,
                 frozen.effective.update_args,
+                config.raw_traceback,
+                config.diagnostic_text_limit_bytes,
                 kwargs=None,
                 environment=environment,
                 environment_spec=environment_spec,
@@ -2307,6 +2377,7 @@ def _submit_frozen_core_submission(
                 recovery=frozen.recovery,
                 return_objects=frozen.return_objects,
                 result_limit_bytes=frozen.result_limit_bytes,
+                raw_traceback=config.raw_traceback,
                 done_callbacks=callbacks,
                 one_off=one_off,
             )

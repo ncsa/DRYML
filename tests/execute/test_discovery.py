@@ -27,7 +27,7 @@ def test_bootstrap_probe_uses_the_canonical_protocol_version():
     """Selected runtimes must prove the coordinator's current private grammar."""
     command = _bootstrap_command(CurrentEnvironmentSpec(), Path(sys.executable))
 
-    assert PROTOCOL_VERSION == 4
+    assert PROTOCOL_VERSION == 5
     assert command[-1].endswith(f"assert PROTOCOL_VERSION == {PROTOCOL_VERSION}")
 
 

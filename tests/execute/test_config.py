@@ -27,6 +27,8 @@ def test_config_defaults_are_inert_and_nested_values_are_frozen(tmp_path: Path):
     env["TOKEN"] = "changed"
     assert config.admission_timeout == 30.0
     assert config.spool_limit_bytes == 4_294_967_296
+    assert config.raw_traceback is True
+    assert FakeConfig(raw_traceback=False).raw_traceback is False
     assert config.env_vars == {"TOKEN": "secret"}
     assert config.environment_candidates == (candidate,)
     assert config.environment_search_roots == (tmp_path,)
@@ -39,6 +41,14 @@ def test_config_rejects_invalid_durations(value: object):
     """Duration controls accept only finite positive numeric seconds."""
     with pytest.raises((TypeError, ValueError)):
         FakeConfig(admission_timeout=value)
+
+
+@pytest.mark.parametrize("value", (None, 0, 1, "raw"))
+def test_raw_traceback_requires_an_exact_boolean(value):
+    """The remote traceback policy accepts only bool, not truthy lookalikes."""
+
+    with pytest.raises(TypeError, match="raw_traceback"):
+        FakeConfig(raw_traceback=value)
 
 
 @pytest.mark.parametrize("field", ["spool_limit_bytes", "spool_file_limit", "preflight_limit", "invocation_limit_bytes"])

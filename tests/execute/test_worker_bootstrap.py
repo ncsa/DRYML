@@ -46,12 +46,13 @@ class _Thread:
         pass
 
 
-def _invoke_at(monkeypatch, clock, *, setup=None, manager=None):
+def _invoke_at(monkeypatch, clock, *, setup=None, manager=None, raw_traceback=False, result_limit=4096):
     """Invoke the worker with inert descriptors and return its terminal frame."""
     correlation = Correlation("worker-deadline", 0, 1)
     descriptor = BootstrapDescriptor(
         correlation, "token", "127.0.0.1", 43123,
-        1024, 1024, 4096, 4096, 4096, 1024,
+        1024, 1024, 4096, 4096, result_limit, 1024,
+        raw_traceback=raw_traceback,
     )
     connection = _Connection()
     monkeypatch.setattr(_worker.os, "dup", lambda fd: fd)
@@ -86,8 +87,8 @@ def test_worker_bootstrap_imports_the_execute_protocol_marker_directly():
     assert "deserialize_call(payload" in source
     assert "go_frame.state" in source
     assert "dryml.execute.v0.3" not in source
-    assert PROTOCOL_VERSION == 4
-    assert WORKER_PROTOCOL_ID == "dryml.execute.worker.v4"
+    assert PROTOCOL_VERSION == 5
+    assert WORKER_PROTOCOL_ID == "dryml.execute.worker.v5"
 
 
 def test_worker_marks_deadline_before_deserialization_without_loading_workload(monkeypatch):
@@ -97,7 +98,7 @@ def test_worker_marks_deadline_before_deserialization_without_loading_workload(m
 
     frame = _invoke_at(monkeypatch, [2.0])
 
-    assert decode_worker_error(frame, limit_bytes=4096, setup=False) == (None, True, ())
+    assert decode_worker_error(frame, limit_bytes=4096, setup=False) == (None, True, (), None)
     deserialize.assert_not_called()
 
 
@@ -113,7 +114,7 @@ def test_worker_marks_deadline_before_invocation_without_calling_workload(monkey
     monkeypatch.setattr(_worker, "deserialize_call", deserialize)
     frame = _invoke_at(monkeypatch, clock)
 
-    assert decode_worker_error(frame, limit_bytes=4096, setup=False) == (None, True, ())
+    assert decode_worker_error(frame, limit_bytes=4096, setup=False) == (None, True, (), None)
     workload.assert_not_called()
 
 
@@ -129,9 +130,60 @@ def test_callable_timeout_error_is_not_a_worker_deadline_marker(monkeypatch):
     frame = _invoke_at(monkeypatch, [0.0])
 
     assert decode_worker_error(frame, limit_bytes=4096, setup=False) == (
-        "TimeoutError", False, (),
+        "TimeoutError", False, (), None,
     )
     assert b"credential" not in frame.payload
+
+
+def test_enabled_raw_traceback_includes_worker_failure(monkeypatch):
+    """Enabled text contains the worker stack and message, without redaction."""
+
+    def deserialize(payload, *, limit_bytes):
+        def workload():
+            raise ValueError("private input from trusted call")
+
+        return workload, (), {}
+
+    monkeypatch.setattr(_worker, "deserialize_call", deserialize)
+    frame = _invoke_at(monkeypatch, [0.0], raw_traceback=True)
+    remote_type, deadline, issues, text = decode_worker_error(
+        frame, limit_bytes=4096, setup=False, allow_traceback=True,
+    )
+    assert (remote_type, deadline, issues) == ("ValueError", False, ())
+    assert "workload" in text
+    assert "ValueError: private input from trusted call" in text
+
+
+def test_raw_traceback_does_not_replace_a_failure_when_result_budget_is_small(monkeypatch):
+    """An oversized formatted traceback degrades to the existing type-only error."""
+
+    def deserialize(payload, *, limit_bytes):
+        def workload():
+            raise ValueError("detail" * 100)
+
+        return workload, (), {}
+
+    monkeypatch.setattr(_worker, "deserialize_call", deserialize)
+    frame = _invoke_at(monkeypatch, [0.0], raw_traceback=True, result_limit=64)
+    assert decode_worker_error(frame, limit_bytes=64, setup=False, allow_traceback=True) == (
+        "ValueError", False, (), None,
+    )
+
+
+def test_explicit_raw_traceback_covers_worker_setup_failure(monkeypatch):
+    """A setup error remains inspectable even before the callable is received."""
+
+    class Manager:
+        def __enter__(self):
+            raise ValueError("setup detail")
+
+        def __exit__(self, error_type, error, tb):
+            raise AssertionError("failed setup must not enter teardown")
+
+    frame = _invoke_at(monkeypatch, [0.0], setup={}, manager=Manager(), raw_traceback=True)
+    assert "ValueError: setup detail" in decode_worker_error(
+        frame, limit_bytes=4096, setup=True, allow_traceback=True,
+    )[3]
 
 
 def test_setup_deadline_marker_preserves_cleanup_failure(monkeypatch):
@@ -152,7 +204,7 @@ def test_setup_deadline_marker_preserves_cleanup_failure(monkeypatch):
     frame = _invoke_at(monkeypatch, [2.0], setup={}, manager=Manager())
 
     assert decode_worker_error(frame, limit_bytes=4096, setup=True) == (
-        None, True, ("RuntimeError",),
+        None, True, ("RuntimeError",), None,
     )
     assert b"cleanup detail" not in frame.payload
 

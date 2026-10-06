@@ -93,7 +93,7 @@ def _receive_error(monkeypatch, frame, *, confirmed=True, setup=False):
         output=output,
         worker_setup=WorkerSetup(factory="tests.execute.test_subprocess_cancellation:unused", data={}) if setup else None,
     )
-    descriptor = SimpleNamespace(control_header_limit_bytes=1024)
+    descriptor = SimpleNamespace(control_header_limit_bytes=1024, raw_traceback=False, traceback_limit_bytes=65_536)
     conversation = SimpleNamespace(accept_frame=lambda value: value)
     backend._receive_active(call, future, run, descriptor, conversation)
     return backend, future, run, owner
