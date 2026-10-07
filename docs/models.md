@@ -359,9 +359,11 @@ order for every training safe point and for the terminal state:
    decided by managed lifecycle handling.
 
 `this.model` and `this.test_data` therefore come from the exact saved Experiment
-checkpoint. `test_data` must be an exact saved Dataset reference; a missing value
-or invalid recipe binding fails rather than falling back to training or validation
-data. Empty Artifact configuration still creates a completed facts-only row.
+checkpoint. `test_data` is a materializing Dataset slot: it accepts deterministic
+stateless definitions as well as saved reference authority, and Artifact recipes
+receive its exact checkpoint projection. A missing value or invalid recipe binding
+fails rather than falling back to training or validation data. Empty Artifact
+configuration still creates a completed facts-only row.
 
 Before changing training phase, model, progress, or checkpoint state,
 `Experiment.train` preflights every inert Artifact recipe. Active roots may only

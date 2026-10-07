@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from concurrent.futures import CancelledError as FuturesCancelledError
 
 from dryml.artifacts import Artifact, Value
-from dryml.core import Ref, StateRef, Template
+from dryml.core import Mat, Object, StateRef, Template
 from dryml.core.factory import FactorySpec
 from dryml.core.object import Serializable
 from dryml.core.utils.general import pickle_load, pickle_save
@@ -197,9 +197,9 @@ class Experiment(Serializable):
         train_fn: Training procedure, optionally exposing truthful safe points.
         train_data: Optional Dataset consumed by the training procedure.
         val_data: Optional Dataset used only by the training procedure.
-        test_data: Exact saved Dataset reference available to Artifact recipes as
-            ``this.test_data``. Missing required data fails binding; it never falls
-            back to training or validation data.
+        test_data: Optional materialized Dataset available to Artifact recipes as
+            ``this.test_data``. Missing required data fails binding; it never
+            falls back to training or validation data.
          artifacts: String-keyed Template-role Definition mapping, or ``None``.
               Recipes remain inert until a checkpoint binds
              ``this`` to its exact Experiment StateRef.
@@ -219,7 +219,7 @@ class Experiment(Serializable):
 
     def __init__(
             self, model, train_fn, train_data=None, val_data=None, *,
-            test_data: Ref[StateRef | None] = None,
+            test_data: Mat[Object | None] = None,
             artifacts: Mapping[str, Template] | None = None,
             metrics=None, checkpoint_every_steps: int | None = None, **capabilities):
         """Initialize inert training and exact-reference evaluation configuration.
@@ -229,7 +229,10 @@ class Experiment(Serializable):
             train_fn: Training procedure used only by :meth:`train`.
             train_data: Optional Dataset for training.
             val_data: Optional Dataset for trainer-owned validation.
-            test_data: Optional exact saved Dataset StateRef for Artifact binding.
+            test_data: Optional Dataset materialized with the Experiment graph.
+                Artifact recipes bind its exact checkpoint projection, whether
+                the Dataset originated from a deterministic definition or saved
+                reference authority.
             artifacts: Optional inert mapping of named Definition recipes. The
                 activated signature boundary orders names canonically and quotes
                 every recipe independently.

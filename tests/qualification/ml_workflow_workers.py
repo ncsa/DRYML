@@ -920,7 +920,7 @@ def _validate_coordinator_reference_metadata(evidence, *, output_store) -> None:
     repo = Repo((output, fixture))
     try:
         expected_model = evidence.final_experiment_ref.at("model")
-        expected_test = evidence.final_experiment_ref.reference_value_at("test_data")
+        expected_test = evidence.final_experiment_ref.at("test_data")
         if expected_model != evidence.model_ref or expected_test != evidence.test_ref:
             raise FixtureManifestError("Evidence model/test bindings disagree with final Experiment StateRef.")
         for reference in (

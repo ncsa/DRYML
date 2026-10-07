@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from dryml.artifacts import Artifact, ArtifactRecoveryError, Value
-from dryml.core import Definition, Par, Ref, Repo, StateRef, definition_mode, selector_mode
+from dryml.core import AutoRef, Definition, Par, Ref, Repo, StateRef, definition_mode, selector_mode
+from dryml.data import ArrayDataset, Map, as_supervised
 from dryml.core.object import Pickleable
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
@@ -45,11 +47,11 @@ class TerminalOnly(TrainFunction):
 
 
 class SavedTestDataValue(Value):
-    """Artifact that records the exact Ref-held test-data StateRef."""
+    """Artifact that records the test Dataset's automatic reference authority."""
 
     calls = []
 
-    def __init__(self, data: Ref[StateRef]):
+    def __init__(self, data: Ref[AutoRef]):
         self.data = data
 
     @property
@@ -409,8 +411,8 @@ def test_history_remains_readable_when_its_checkpoint_payload_is_unavailable(tmp
         repo.load_state_ref(final, reuse_live="never", cache="none")
 
 
-def test_test_data_recipe_binds_the_exact_ref_held_dataset_state(tmp_path):
-    """``this.test_data`` preserves the configured StateRef with no live fallback."""
+def test_test_data_recipe_binds_the_materialized_checkpoint_dataset_state(tmp_path):
+    """A saved Dataset is republished under its retained object identity."""
 
     repo = Repo(DirStore(tmp_path / "store"))
     test_data = repo.save_object(CounterModel(9))
@@ -420,9 +422,35 @@ def test_test_data_recipe_binds_the_exact_ref_held_dataset_state(tmp_path):
         artifacts={"test-data": Definition(SavedTestDataValue, Par("this.test_data"))}, repo=repo,
     )
 
-    exp.train(managed=ManagedConfig(state_repo=repo))
+    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    projected = final.at(GraphPath((Parameter("test_data"),)))
 
-    assert SavedTestDataValue.calls == [test_data]
+    assert projected.object == test_data.object
+    assert SavedTestDataValue.calls == [projected]
+
+
+def test_test_data_materializes_a_stateless_definition_for_artifact_binding(tmp_path):
+    """A deterministic Dataset definition needs no pre-existing saved StateRef."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    test_data = as_supervised(
+        ArrayDataset.defn({"cart": np.asarray([[1.0, 2.0, 3.0]])}),
+        "cart",
+        input_as_target=True,
+    )
+    SavedTestDataValue.calls.clear()
+    exp = Experiment(
+        CounterModel(), TerminalOnly(), test_data=test_data,
+        artifacts={"test-data": Definition(SavedTestDataValue, Par("this.test_data"))},
+        repo=repo,
+    )
+
+    assert isinstance(exp.test_data, Map)
+    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    projected = final.at(GraphPath((Parameter("test_data"),)))
+
+    assert projected.states == {}
+    assert SavedTestDataValue.calls == [projected]
 
 
 def test_missing_test_data_recipe_fails_before_training_or_checkpoint_mutation(tmp_path):

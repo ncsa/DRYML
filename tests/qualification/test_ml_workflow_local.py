@@ -271,7 +271,10 @@ def test_all_workload_artifact_recipes_construct_from_public_dataset_shapes(
     else:
         _, fixture_store, manifest = _authority(tmp_path)
     output_store = DirStore(tmp_path / "output")
-    repo = Repo(output_store)
+    repo = Repo((
+        output_store,
+        DirStore.open_existing(fixture_store, query_index="none"),
+    ))
     control_store = DirStore(tmp_path / "control", query_index="none")
     managed = ManagedConfig(state_repo=repo, control_store=control_store)
     case = case_from_manifest(
@@ -294,12 +297,12 @@ def test_all_workload_artifact_recipes_construct_from_public_dataset_shapes(
         mnist_source=lambda split, tensorflow_mode: source,
     )
     if workload == "W3":
-        assert experiment.test_data == first
+        assert experiment.test_data.object_ref == first.object
     experiment._preflight_artifacts()
     model_ref = repo.save(experiment.model, deep_capture=True)
     x_path, y_path = ((0,), (1,)) if workload in {"W1", "W2"} else ("x", "y")
     artifact = _QualificationMetric(
-        experiment.test_data,
+        experiment.test_data.last_state_ref,
         model_ref,
         metric="accuracy" if workload == "W1" else "mse",
         x=x_path,
@@ -318,10 +321,14 @@ def test_all_workload_artifact_recipes_construct_from_public_dataset_shapes(
     assert np.asarray(result).shape == () and np.isfinite(result)
     assert snapshot(fixture_store) == fixture_before
     if workload in {"W1", "W2"}:
-        assert output_store.read_state_ref_record(experiment.test_data.digest()) is not None
+        assert output_store.read_state_ref_record(
+            experiment.test_data.last_state_ref.digest()
+        ) is not None
         fixture_handle = DirStore.open_existing(fixture_store, query_index="none")
         try:
-            assert fixture_handle.read_state_ref_record(experiment.test_data.digest()) is None
+            assert fixture_handle.read_state_ref_record(
+                experiment.test_data.last_state_ref.digest()
+            ) is None
         finally:
             fixture_handle.close()
 
@@ -787,7 +794,10 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     ).expanduser().resolve(strict=False)
     if control_path == manifest.fixture_store or not control_path.is_dir():
         raise FixtureManifestError("Real case control Store must be an existing non-fixture authority.")
-    repo = Repo(DirStore(output_path))
+    repo = Repo((
+        DirStore(output_path),
+        DirStore.open_existing(manifest.fixture_store, query_index="none"),
+    ))
     control = DirStore.open_existing(control_path)
     managed = ManagedConfig(state_repo=repo, control_store=control)
     started = time.monotonic()
@@ -993,40 +1003,24 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     artifact_ref = row.eval_artifacts[_METRIC_NAMES[case.workload]]
     artifact_value = float(repo.load_state_ref(artifact_ref, reuse_live="never").value())
     model_ref = final.at("model")
-    test_ref = final.reference_value_at("test_data")
+    test_ref = final.at("test_data")
     model = repo.load_state_ref(model_ref, reuse_live="never")
-    formula_repo = None
-    if case.workload == "W3":
-        formula_repo = Repo(DirStore.open_existing(
-            manifest.fixture_store,
-            query_index="none",
-        ))
-        test_data = formula_repo.load_state_ref(
-            test_ref,
-            reuse_live="never",
-            source_store=formula_repo.stores[0],
-        )
-    else:
-        test_data = repo.load_state_ref(test_ref, reuse_live="never")
+    test_data = repo.load_state_ref(test_ref, reuse_live="never")
     prepare_exact_model_for_formula(model, case)
     predictions, observations = [], []
-    try:
-        for sample in test_data:
-            if isinstance(sample, dict):
-                inputs, targets = sample["x"], sample["y"]
-            else:
-                inputs, targets = sample
-            prediction = model(inputs)
-            if case.accelerator == "gpu":
-                if native_device_evidence(model, training_tensors=(prediction,)) != "gpu:0":
-                    raise FixtureManifestError("Exact-loaded formula model did not remain on the selected GPU.")
-            prediction = prediction.detach().cpu() if hasattr(prediction, "detach") else prediction
-            observation = targets.detach().cpu() if hasattr(targets, "detach") else targets
-            predictions.append(np.asarray(prediction))
-            observations.append(np.asarray(observation))
-    finally:
-        if formula_repo is not None:
-            formula_repo.close(flush=False)
+    for sample in test_data:
+        if isinstance(sample, dict):
+            inputs, targets = sample["x"], sample["y"]
+        else:
+            inputs, targets = sample
+        prediction = model(inputs)
+        if case.accelerator == "gpu":
+            if native_device_evidence(model, training_tensors=(prediction,)) != "gpu:0":
+                raise FixtureManifestError("Exact-loaded formula model did not remain on the selected GPU.")
+        prediction = prediction.detach().cpu() if hasattr(prediction, "detach") else prediction
+        observation = targets.detach().cpu() if hasattr(targets, "detach") else targets
+        predictions.append(np.asarray(prediction))
+        observations.append(np.asarray(observation))
     if case.workload == "W1":
         formula_value = accuracy_formula(np.argmax(np.asarray(predictions), axis=-1), np.asarray(observations))
     else:

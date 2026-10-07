@@ -1248,13 +1248,17 @@ def validate_evidence(
         raise FixtureManifestError("W3 evidence changed the retained fixture StateRef.")
     try:
         expected_model = evidence.final_experiment_ref.at("model")
-        expected_test = evidence.final_experiment_ref.reference_value_at("test_data")
+        expected_test = evidence.final_experiment_ref.at("test_data")
     except ValueError as error:
         raise FixtureManifestError("Final Experiment StateRef lacks exact model/test bindings.") from error
     if expected_model != evidence.model_ref or expected_test != evidence.test_ref:
         raise FixtureManifestError("Evidence model/test bindings disagree with final Experiment StateRef.")
-    if case.workload == "W3" and evidence.test_ref != manifest.references.numpy:
-        raise FixtureManifestError("W3 Experiment did not retain the manifest NumPy cache StateRef.")
+    if (
+            case.workload == "W3"
+            and evidence.test_ref.object != manifest.references.numpy.object):
+        raise FixtureManifestError(
+            "W3 Experiment did not retain the manifest NumPy cache object identity."
+        )
     coordinator_refs = evidence.worker["coordinator_validated_refs"]
     if coordinator_refs is None:
         raise FixtureManifestError("Worker provisional evidence has no coordinator final-reference authority.")
@@ -1309,7 +1313,7 @@ def validate_evidence(
             raise FixtureManifestError("Qualification receipt does not equal exact selected Store authority.")
         if (
                 final_experiment.last_state_ref.at("model") != evidence.model_ref
-                or final_experiment.last_state_ref.reference_value_at("test_data") != evidence.test_ref):
+                or final_experiment.last_state_ref.at("test_data") != evidence.test_ref):
             raise FixtureManifestError("Loaded final Experiment bindings disagree with evidence authority.")
         observed_parameters = _native_parameter_values(model)
         observed_devices = {
@@ -1598,11 +1602,13 @@ def build_workload(
             autoencode=case.workload == "W2",
             label_dtype=label_dtype,
         )
-        test_ref = CachedDataset(test, repo=repo).compute(
+        test_cache = CachedDataset(test, repo=repo)
+        test_ref = test_cache.compute(
             codec="numpy",
             store=repo.stores[0],
             managed=managed,
         )
+        test_data = None if test_ref is None else test_cache
     else:
         train = Batch(
             as_supervised(
@@ -1613,6 +1619,9 @@ def build_workload(
             64,
         )
         test_ref = case.w3_test_ref
+        test_data = repo.load_state_ref(test_ref, reuse_live="never")
+    if test_data is not None:
+        repo.cache_strong(test_data)
     if case.workload == "W1":
         artifact_name = "accuracy"
         artifact = Definition(
@@ -1637,7 +1646,7 @@ def build_workload(
             fixture_store=None if case.workload == "W2" else case.fixture_store,
         )
     return Experiment(
-        model, trainer, train_data=train, test_data=test_ref,
+        model, trainer, train_data=train, test_data=test_data,
         artifacts={artifact_name: artifact}, checkpoint_every_steps=32,
     )
 

@@ -41,7 +41,8 @@ assert case.w3_test_ref == manifest.references.numpy
 
 This does not open the Store, TFDS, or regenerate a seed-derived dataset. The real
 runner supplies that exact reference as `Experiment.test_data`, then verifies the
-same reference survives checkpoint binding and every repeat. See
+materialized checkpoint projection retains the fixture's object identity through
+every repeat. See
 [ML Workflow Qualification Verification](ml_workflow_qualification_verification.md)
 for fixture preparation,
 fixed gates, and evidence requirements.
