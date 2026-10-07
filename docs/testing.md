@@ -379,6 +379,16 @@ rather than skip. Each job prints the resolved Python, DRYML, and framework
 versions. Workflow configuration is not support evidence until the jobs pass on
 the exact child commit.
 
+The separate manual `JAX training qualification` matrix uses Python 3.12 and
+installs `jax_training_test_requirements.txt` for two clean dependency sets:
+the CPU JAX stack alone and the same stack with DRYML's existing `tf` and
+`torch` extras. It pins JAX/JAXlib, Flax (including `flax.nnx`), and Optax,
+requires their imports, and records a CPU backend with CPU devices before
+running the focused JAX import tests. This file is qualification-only: DRYML's
+existing lazy `jax` extra remains unchanged, and Flax/Optax are neither base
+dependencies nor a new package extra. The experimental training API that will
+use them remains responsible for selecting and reporting those dependencies.
+
 The separately gated `Existing Ray integration (Ubuntu, Python 3.12)` job uses an
 ephemeral Conda coordinator and a venv derived from that same interpreter. It
 builds DRYML once, installs that artifact with `dill` and

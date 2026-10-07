@@ -369,3 +369,7 @@ def test_wheel_metadata_declares_ml_workflow_dependencies(
     tf_marker = 'python_version < "3.14" and extra == "tf"'
     assert ("tensorflow", "", tf_marker) in observed
     assert ("tensorflow_datasets", "", tf_marker) in observed
+    assert ("jax", "", 'extra == "jax"') in observed
+    assert ("jaxlib", "", 'extra == "jax"') in observed
+    assert not {"flax", "optax"} & {requirement.name.lower() for requirement in requirements}
+    assert "jax-training" not in set(metadata.get_all("Provides-Extra", []))

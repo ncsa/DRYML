@@ -1,0 +1,6 @@
+# Python 3.12 CPU qualification stack for the experimental JAX training work.
+# This is intentionally not a package extra or a runtime dependency.
+jax==0.5.3
+jaxlib==0.5.3
+flax==0.10.6
+optax==0.2.4

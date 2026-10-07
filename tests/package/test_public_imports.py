@@ -681,7 +681,7 @@ try:
 except ModuleNotFoundError:
     retired = False
 print(json.dumps({
-    "heavy": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib", "ray") if name in sys.modules),
+    "heavy": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib", "flax", "optax", "ray") if name in sys.modules),
     "retired": retired,
 }))
 """,
