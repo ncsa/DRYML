@@ -1742,25 +1742,26 @@ class Training(BasicTraining):
         for metric in metrics:
             _reset_metric(metric)
         total_loss = 0.0
-        steps = 0
+        total_examples = 0
         from dryml.tf.training_data import iter_training_batches
 
         cursor = iter_training_batches(val_data, self.validation_preparation)
         try:
             for x, y in cursor:
+                examples = val_data.dataset.examples_in((x, y))
                 y_pred = model(x)
                 loss_value = tf.reduce_mean(loss_fn(y, y_pred))
-                total_loss += float(metric_value(loss_value))
-                steps += 1
+                total_loss += float(metric_value(loss_value)) * examples
+                total_examples += examples
                 for metric in metrics:
                     _update_metric(metric, y, y_pred)
         finally:
             cursor.close()
 
-        if steps == 0:
+        if total_examples == 0:
             return {}
 
-        results = {"loss": total_loss / steps}
+        results = {"loss": total_loss / total_examples}
         results.update(_metric_results(metrics))
         return results
 

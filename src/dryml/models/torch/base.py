@@ -888,30 +888,31 @@ class Training(TrainFunction):
         metric_totals = {}
         metric_counts = {}
         total_loss = 0.0
-        steps = 0
+        total_examples = 0
         from dryml.torch.training_data import iter_training_batches
 
         cursor = iter_training_batches(val_data, self.validation_preparation)
         try:
             with torch.no_grad():
                 for x, y in cursor:
+                    examples = val_data.dataset.examples_in((x, y))
                     x = _tree_to_torch(x, torch, device=device)
                     y = _tree_to_torch(y, torch, device=device)
                     y_pred = model(x)
                     loss_value = loss_fn(y_pred, y)
-                    total_loss += float(metric_value(loss_value))
-                    steps += 1
+                    total_loss += float(metric_value(loss_value)) * examples
+                    total_examples += examples
                     batch_metrics = self._update_metrics(metrics, y_pred, y)
                     for name, value in batch_metrics.items():
-                        metric_totals[name] = metric_totals.get(name, 0.0) + value
-                        metric_counts[name] = metric_counts.get(name, 0) + 1
+                        metric_totals[name] = metric_totals.get(name, 0.0) + value * examples
+                        metric_counts[name] = metric_counts.get(name, 0) + examples
         finally:
             cursor.close()
 
-        if steps == 0:
+        if total_examples == 0:
             return {}
 
-        results = {"loss": total_loss / steps}
+        results = {"loss": total_loss / total_examples}
         results.update(_metric_results(metrics))
         for name, total in metric_totals.items():
             results.setdefault(name, total / metric_counts[name])

@@ -1777,3 +1777,44 @@ def test_tf_unknown_stream_retains_validation_metrics_across_progress_retry(monk
     exp.train_fn(exp)
     assert evaluations == ["validation"]
     assert Progress.received == [retained_metrics, retained_metrics]
+
+
+def test_tf_validation_loss_weights_a_short_final_batch_by_examples(monkeypatch):
+    """Validation loss remains an example mean for uneven authored batches."""
+    from dryml.models.tf import Loss, Model, Optimizer, Training
+    import dryml.models.tf.base as tf_base
+
+    class Progress:
+        received = []
+
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def update(self, *args, **kwargs):
+            del args, kwargs
+
+        def epoch_end(self, *args, **kwargs):
+            del args
+            type(self).received.append(kwargs["metrics"])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tf_base, "TrainingProgress", Progress)
+    trainer = Training(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, verbose=0,
+    )
+    train_data = Batch(ArrayDataset((
+        np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32),
+    )), 1)
+    val_data = Batch(ArrayDataset((
+        np.zeros((3, 1), dtype=np.float32),
+        np.asarray([[0.0], [0.0], [3.0]], dtype=np.float32),
+    )), 2)
+
+    trainer(Experiment(
+        Model(ZeroKerasModel), trainer, train_data=train_data, val_data=val_data,
+    ))
+
+    assert Progress.received[0]["val_loss"] == pytest.approx(3.0)

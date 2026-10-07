@@ -335,7 +335,9 @@ def test_jax_managed_subprocess_restores_exact_graph(tmp_path):
         python=PythonExecutableSpec(
             sys.executable,
             pythonpath_policy="explicit",
-            extra_pythonpath=(str(checkout / "src"), str(checkout)),
+            extra_pythonpath=(
+                str(checkout / "src"), str(checkout), str(Path(__file__).parent),
+            ),
         ),
     )
     final = view.run(_run_jax_train, initial)

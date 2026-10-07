@@ -313,7 +313,7 @@ def test_all_workload_artifact_recipes_construct_from_public_dataset_shapes(
     )
     result = repo.load_state_ref(result_ref, reuse_live="never").value()
 
-    assert experiment.artifacts.names == (artifact_name,)
+    assert tuple(experiment.artifacts) == (artifact_name,)
     assert experiment.train_data.example_cardinality().require_finite() in {4, 4096}
     assert np.asarray(result).shape == () and np.isfinite(result)
     assert snapshot(fixture_store) == fixture_before
@@ -353,7 +353,7 @@ def test_all_workload_artifact_definitions_preflight_without_framework_imports(
 
     definition = recipe.concretize()
 
-    assert definition.cls is _QualificationMetric
+    assert definition.cls.resolve() is _QualificationMetric
     assert definition.parameters["metric"] == (
         "accuracy" if artifact_name == "accuracy" else "mse"
     )

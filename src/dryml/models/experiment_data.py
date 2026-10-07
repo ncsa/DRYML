@@ -28,8 +28,11 @@ from dryml.core.store.store import StoreAliasConflictError, StoreAuthorityError
 
 
 _FORMAT = "dryml-experiment-data"
-_VERSION = 1
+_VERSION = 2
+_READABLE_VERSIONS = frozenset((1, 2))
 _FILENAME = "experiment_data.json"
+# Retain the established alias so v1 histories migrate in place when their next
+# immutable v2 snapshot becomes current.
 _ALIAS = "experiment_data_current_v1"
 _MAX_BYTES = 64 * 1024 * 1024
 _MAX_ROWS = 100_000
@@ -58,7 +61,7 @@ _COLUMN_KINDS = {
 
 
 class ExperimentDataError(ValueError):
-    """Raised when history rows or their closed v1 payload are invalid."""
+    """Raised when history rows or their closed versioned payload are invalid."""
 
 
 def _copy(value):
@@ -78,7 +81,7 @@ def _reject_duplicate_keys(pairs):
 
 def _json_loads(raw: bytes):
     if len(raw) > _MAX_BYTES:
-        raise ExperimentDataError("ExperimentData payload exceeds the 64 MiB v1 limit.")
+        raise ExperimentDataError("ExperimentData payload exceeds the 64 MiB limit.")
     try:
         return json.loads(
             raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys,
@@ -161,13 +164,15 @@ def _encode_ref(value: StateRef) -> dict[str, object]:
     return {"tag": "state_ref", "value": _reference_to_json(value.to_data())}
 
 
-def _decode_ref(value: object, *, nullable: bool = False) -> StateRef | None:
+def _decode_ref(
+        value: object, *, nullable: bool = False, version: int = _VERSION,
+) -> StateRef | None:
     if value is None and nullable:
         return None
     if not isinstance(value, Mapping) or set(value) != {"tag", "value"} or value["tag"] != "state_ref":
         raise ExperimentDataError("History references require an exact state_ref record.")
     try:
-        return StateRef.from_data(_reference_from_json(value["value"]))
+        return StateRef.from_data(_reference_from_json(value["value"], version=version))
     except (TypeError, ValueError) as error:
         raise ExperimentDataError("History reference record is malformed.") from error
 
@@ -181,7 +186,7 @@ def _reference_to_json(value: object) -> dict[str, object]:
     """
 
     from dryml.core.factory import FactorySpec
-    from dryml.core.freeze import FrozenNDArray
+    from dryml.core.freeze import FrozenDict, FrozenList, FrozenNDArray, FrozenSet, FrozenTuple
     from dryml.core.symbol import ImportRef, SourceSpec
     from dryml.core.tensor_spec import Dim, TensorSpec
 
@@ -243,6 +248,23 @@ def _reference_to_json(value: object) -> dict[str, object]:
             "shape": list(value.shape),
             "bytes": base64.b64encode(value.tobytes(order="C")).decode("ascii"),
         }
+    if isinstance(value, FrozenList):
+        return {"type": "frozen_list", "items": [_reference_to_json(item) for item in value]}
+    if isinstance(value, FrozenTuple):
+        return {"type": "frozen_tuple", "items": [_reference_to_json(item) for item in value]}
+    if isinstance(value, FrozenSet):
+        items = [_reference_to_json(item) for item in value]
+        items.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+        return {"type": "frozen_set", "items": items}
+    if isinstance(value, FrozenDict):
+        return {
+            "type": "frozen_dict",
+            "items": [[key, _reference_to_json(item)] for key, item in value.items()],
+        }
+    if isinstance(value, frozenset):
+        items = [_reference_to_json(item) for item in value]
+        items.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+        return {"type": "frozenset", "items": items}
     if isinstance(value, list):
         return {"type": "list", "items": [_reference_to_json(item) for item in value]}
     if isinstance(value, tuple):
@@ -259,17 +281,25 @@ def _reference_to_json(value: object) -> dict[str, object]:
     )
 
 
-def _reference_from_json(value: object) -> object:
+def _reference_from_json(value: object, *, version: int = _VERSION) -> object:
     """Rebuild the exact StateRef.to_data tree before strict reference decoding."""
 
     from dryml.core.factory import FactorySpec
-    from dryml.core.freeze import FrozenNDArray
+    from dryml.core.freeze import FrozenDict, FrozenList, FrozenNDArray, FrozenSet, FrozenTuple
     from dryml.core.symbol import ImportRef, SourceSpec
     from dryml.core.tensor_spec import Dynamic, TensorSpec
 
+    if version not in _READABLE_VERSIONS:
+        raise ExperimentDataError("Unsupported ExperimentData reference version.")
     if not isinstance(value, Mapping) or not isinstance(value.get("type"), str):
         raise ExperimentDataError("StateRef record is not a closed JSON value tree.")
     tag = value["type"]
+    if version == 1 and tag not in {
+            "null", "bool", "str", "float", "int", "list", "tuple",
+            "import_ref", "source_spec", "factory_spec", "tensor_spec",
+            "frozen_ndarray", "dict",
+    }:
+        raise ExperimentDataError(f"StateRef record tag {tag!r} is not valid in v1.")
     if tag == "null" and set(value) == {"type"}:
         return None
     if tag == "bool" and set(value) == {"type", "value"} and type(value["value"]) is bool:
@@ -283,8 +313,30 @@ def _reference_from_json(value: object) -> object:
     if tag in {"list", "tuple"} and set(value) == {"type", "items"}:
         if not isinstance(value["items"], list):
             raise ExperimentDataError("StateRef sequence record has invalid items.")
-        items = [_reference_from_json(item) for item in value["items"]]
+        items = [_reference_from_json(item, version=version) for item in value["items"]]
         return items if tag == "list" else tuple(items)
+    if tag in {"frozen_list", "frozen_tuple", "frozen_set", "frozenset"} and set(value) == {"type", "items"}:
+        if not isinstance(value["items"], list):
+            raise ExperimentDataError("Frozen StateRef sequence record has invalid items.")
+        items = [_reference_from_json(item, version=version) for item in value["items"]]
+        if tag == "frozen_list":
+            return FrozenList(items)
+        if tag == "frozen_tuple":
+            return FrozenTuple(items)
+        if tag == "frozen_set":
+            return FrozenSet(items)
+        return frozenset(items)
+    if tag == "frozen_dict" and set(value) == {"type", "items"}:
+        if not isinstance(value["items"], list):
+            raise ExperimentDataError("Frozen StateRef mapping record has invalid items.")
+        pairs = []
+        for entry in value["items"]:
+            if not isinstance(entry, list) or len(entry) != 2 or type(entry[0]) is not str:
+                raise ExperimentDataError("Frozen StateRef mapping entry is malformed.")
+            pairs.append((entry[0], _reference_from_json(entry[1], version=version)))
+        if len({key for key, _ in pairs}) != len(pairs):
+            raise ExperimentDataError("Frozen StateRef mapping repeats a key.")
+        return FrozenDict(pairs)
     if tag == "import_ref" and set(value) == {"type", "module", "qualname"}:
         try:
             return ImportRef(value["module"], value["qualname"])
@@ -295,7 +347,7 @@ def _reference_from_json(value: object) -> object:
             raise ExperimentDataError("Source StateRef record has invalid imports.")
         try:
             imports = {
-                name: _reference_from_json(reference)
+                name: _reference_from_json(reference, version=version)
                 for name, reference in value["imports"].items()
             }
             if not all(type(name) is str and isinstance(reference, ImportRef) for name, reference in imports.items()):
@@ -307,14 +359,19 @@ def _reference_from_json(value: object) -> object:
         if not isinstance(value["args"], list) or not isinstance(value["kwargs"], Mapping):
             raise ExperimentDataError("Factory StateRef record has invalid fields.")
         try:
-            target = _reference_from_json(value["target"])
-            args = [_reference_from_json(item) for item in value["args"]]
-            kwargs = {
-                key: _reference_from_json(item) for key, item in value["kwargs"].items()
-            }
+            target = _reference_from_json(value["target"], version=version)
+            args = tuple(
+                _reference_from_json(item, version=version) for item in value["args"]
+            )
+            kwargs = FrozenDict(
+                (key, _reference_from_json(item, version=version))
+                for key, item in value["kwargs"].items()
+            )
             if not all(type(key) is str for key in kwargs):
                 raise ValueError("invalid keyword")
-            return FactorySpec(target, *args, **kwargs)
+            if version == 1:
+                return FactorySpec(target, *args, **dict(kwargs.items()))
+            return FactorySpec._from_symbolic_parts(target, args, kwargs)
         except (TypeError, ValueError) as error:
             raise ExperimentDataError("StateRef record has an invalid factory specification.") from error
     if tag == "tensor_spec" and set(value) == {
@@ -368,13 +425,13 @@ def _reference_from_json(value: object) -> object:
             raise ExperimentDataError("Frozen array StateRef record is malformed.") from error
         return FrozenNDArray.from_array(array)
     if tag == "list" and set(value) == {"type", "items"} and isinstance(value["items"], list):
-        return [_reference_from_json(item) for item in value["items"]]
+        return [_reference_from_json(item, version=version) for item in value["items"]]
     if tag == "dict" and set(value) == {"type", "items"} and isinstance(value["items"], list):
         result = {}
         for item in value["items"]:
             if not isinstance(item, list) or len(item) != 2 or type(item[0]) is not str or item[0] in result:
                 raise ExperimentDataError("StateRef record has an invalid mapping entry.")
-            result[item[0]] = _reference_from_json(item[1])
+            result[item[0]] = _reference_from_json(item[1], version=version)
         return result
     raise ExperimentDataError("StateRef record has an unknown JSON value tag.")
 
@@ -669,7 +726,8 @@ class ExperimentData(Serializable):
 
         Raises:
             ExperimentDataError: If facts, references, values, status, or limits
-                violate v1, or an existing key has conflicting immutable facts.
+                violate the history contract, or an existing key has conflicting
+                immutable facts.
 
         Side Effects:
             Changes only this live Object and queues an idempotent publication
@@ -916,7 +974,7 @@ class ExperimentData(Serializable):
     def _validate_row(self, row):
         facts = row["facts"]
         if set(facts) != set(_FACT_NAMES):
-            raise ExperimentDataError("Row facts must contain exactly the v1 built-ins.")
+            raise ExperimentDataError("Row facts must contain exactly the built-in fields.")
         _name(facts["row_key"], "row_key")
         if facts["prev_row_key"] is not _MISSING:
             _name(facts["prev_row_key"], "prev_row_key")
@@ -973,7 +1031,7 @@ class ExperimentData(Serializable):
     def _install_row(self, key, row):
         columns = tuple(OrderedDict.fromkeys((*self._columns, *row["scalars"])))
         if len(_COLUMN_KINDS) + len(columns) > _MAX_COLUMNS:
-            raise ExperimentDataError("ExperimentData exceeds the 1,024-column v1 limit.")
+            raise ExperimentDataError("ExperimentData exceeds the 1,024-column limit.")
         self._rows[key] = row
         self._columns = columns
 
@@ -1020,15 +1078,15 @@ class ExperimentData(Serializable):
         return {"format": _FORMAT, "version": _VERSION, "columns": columns, "rows": rows}
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
-        """Write the closed, schema-controlled v1 JSON history payload.
+        """Write the closed, schema-controlled v2 JSON history payload.
 
         Args:
             dest_dir: Framework-provided empty payload directory.
-            codec: Accepted Object state-codec marker; v1 payload semantics are
+            codec: Accepted Object state-codec marker; v2 payload semantics are
                 fixed independently of this marker.
 
         Raises:
-            ExperimentDataError: If rows or encoded bytes exceed v1 limits.
+            ExperimentDataError: If rows or encoded bytes exceed format limits.
 
         Side Effects:
             Creates ``experiment_data.json`` in ``dest_dir``; no pandas serializer
@@ -1037,11 +1095,11 @@ class ExperimentData(Serializable):
 
         raw = json.dumps(self._payload(), ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > _MAX_BYTES:
-            raise ExperimentDataError("ExperimentData payload exceeds the 64 MiB v1 limit.")
+            raise ExperimentDataError("ExperimentData payload exceeds the 64 MiB limit.")
         Path(dest_dir, _FILENAME).write_bytes(raw)
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
-        """Decode and validate a v1 history payload before replacing local rows.
+        """Decode and validate a v1 or v2 history before replacing local rows.
 
         Args:
             src_dir: Framework payload directory containing ``experiment_data.json``.
@@ -1049,7 +1107,7 @@ class ExperimentData(Serializable):
 
         Raises:
             ExperimentDataError: If JSON, exact references, bounds, or row status
-                invariants violate the closed v1 grammar.
+                invariants violate the selected closed grammar.
 
         Side Effects:
             Replaces retained rows only after the entire payload validates; failed
@@ -1065,12 +1123,15 @@ class ExperimentData(Serializable):
     def _decode_payload(self, data):
         if not isinstance(data, Mapping) or set(data) != {"format", "version", "columns", "rows"}:
             raise ExperimentDataError("ExperimentData envelope must contain exactly format, version, columns, and rows.")
-        if data["format"] != _FORMAT or type(data["version"]) is not int or data["version"] != _VERSION:
+        if (
+                data["format"] != _FORMAT
+                or type(data["version"]) is not int
+                or data["version"] not in _READABLE_VERSIONS):
             raise ExperimentDataError("Unsupported ExperimentData payload format or version.")
         if not isinstance(data["columns"], list) or not isinstance(data["rows"], list):
             raise ExperimentDataError("ExperimentData columns and rows must be arrays.")
         if len(data["columns"]) > _MAX_COLUMNS or len(data["rows"]) > _MAX_ROWS:
-            raise ExperimentDataError("ExperimentData payload exceeds a v1 table bound.")
+            raise ExperimentDataError("ExperimentData payload exceeds a table bound.")
         names = []
         dynamic = []
         for entry in data["columns"]:
@@ -1080,36 +1141,36 @@ class ExperimentData(Serializable):
             kind = entry["kind"]
             expected = _COLUMN_KINDS.get(name, "scalar")
             if kind != expected or (name in _COLUMN_KINDS and kind == "scalar"):
-                raise ExperimentDataError("Column declaration has an invalid v1 kind.")
+                raise ExperimentDataError("Column declaration has an invalid kind.")
             names.append(name)
             if kind == "scalar":
                 dynamic.append(name)
         if len(names) != len(set(names)) or tuple(name for name in names if name in _COLUMN_KINDS) != tuple(_COLUMN_KINDS):
-            raise ExperimentDataError("Columns must declare every built-in once in v1 order.")
+            raise ExperimentDataError("Columns must declare every built-in once in format order.")
         if any(name in _RESERVED_COLUMNS for name in dynamic):
             raise ExperimentDataError("A scalar column collides with a reserved history field.")
         decoded = OrderedDict()
         for encoded in data["rows"]:
-            row = self._decode_row(encoded, tuple(dynamic))
+            row = self._decode_row(encoded, tuple(dynamic), version=data["version"])
             key = row["facts"]["row_key"]
             if key in decoded:
                 raise ExperimentDataError(f"ExperimentData payload repeats row_key {key!r}.")
             decoded[key] = row
         return tuple(dynamic), decoded
 
-    def _decode_row(self, encoded, columns):
+    def _decode_row(self, encoded, columns, *, version):
         fields = {
             "facts", "expected_artifacts", "artifact_inputs", "eval_artifacts",
             "evaluation_status", "failed_artifact", "scalars",
         }
         if not isinstance(encoded, Mapping) or set(encoded) != fields:
-            raise ExperimentDataError("ExperimentData rows require exactly the v1 row fields.")
+            raise ExperimentDataError("ExperimentData rows require exactly the format row fields.")
         raw_facts = encoded["facts"]
         if not isinstance(raw_facts, Mapping) or set(raw_facts) != set(_FACT_NAMES):
-            raise ExperimentDataError("ExperimentData facts require exactly the v1 fact fields.")
+            raise ExperimentDataError("ExperimentData facts require exactly the format fact fields.")
         facts = {
-            name: _decode_ref(raw_facts[name]) if name == "state_ref"
-            else _decode_ref(raw_facts[name], nullable=True) if name == "prev_state_ref"
+            name: _decode_ref(raw_facts[name], version=version) if name == "state_ref"
+            else _decode_ref(raw_facts[name], nullable=True, version=version) if name == "prev_state_ref"
             else _decode_cell(raw_facts[name])
             for name in _FACT_NAMES
         }
@@ -1119,8 +1180,12 @@ class ExperimentData(Serializable):
         expected = tuple(_name(name, "Artifact name") for name in expected_raw)
         if len(expected) != len(set(expected)) or len(expected) > _MAX_ARTIFACTS:
             raise ExperimentDataError("expected_artifacts is invalid.")
-        inputs = self._decode_mapping(encoded["artifact_inputs"], expected, "artifact_inputs")
-        results = self._decode_mapping(encoded["eval_artifacts"], expected, "eval_artifacts")
+        inputs = self._decode_mapping(
+            encoded["artifact_inputs"], expected, "artifact_inputs", version=version,
+        )
+        results = self._decode_mapping(
+            encoded["eval_artifacts"], expected, "eval_artifacts", version=version,
+        )
         scalars = OrderedDict()
         if not isinstance(encoded["scalars"], list):
             raise ExperimentDataError("scalars must be an ordered array.")
@@ -1138,7 +1203,7 @@ class ExperimentData(Serializable):
         return row
 
     @staticmethod
-    def _decode_mapping(value, expected, what):
+    def _decode_mapping(value, expected, what, *, version):
         if not isinstance(value, list) or len(value) > _MAX_ARTIFACTS:
             raise ExperimentDataError(f"{what} must be an ordered bounded array.")
         result = []
@@ -1147,7 +1212,9 @@ class ExperimentData(Serializable):
                 raise ExperimentDataError(f"{what} entries require exactly name and state_ref.")
             name = _name(entry["name"], "Artifact name")
             try:
-                reference = StateRef.from_data(_reference_from_json(entry["state_ref"]))
+                reference = StateRef.from_data(
+                    _reference_from_json(entry["state_ref"], version=version)
+                )
             except (TypeError, ValueError) as error:
                 raise ExperimentDataError(f"{what} contains a malformed StateRef.") from error
             result.append((name, reference))

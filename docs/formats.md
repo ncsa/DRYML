@@ -115,11 +115,15 @@ Store records.
 ## Workflow Records
 
 `ExperimentData` persists its authoritative `experiment_data.json` as the closed
-`dryml-experiment-data` v1 format. It stores declared column kinds, ordered row
-facts, opaque `ObjectRef`/`StateRef` values, artifact-reference mappings, and
+`dryml-experiment-data` v2 format. It stores declared column kinds, ordered row
+facts, exact `ObjectRef`/`StateRef` values, artifact-reference mappings, and
 status cells without opening an Experiment, checkpoint, Dataset, or Artifact
-payload. Pandas is only a lazy inspection dependency; it is not part of this
-format or a reader requirement.
+payload. V2 adds explicit inert `SourceSpec`, `FactorySpec`, `TensorSpec`, tuple,
+and frozen-container records needed by native model definitions. The reader
+retains the closed v1 grammar, and an existing v1 history migrates under its
+established current-history alias when its next immutable v2 snapshot publishes.
+Pandas is only a lazy inspection dependency; it is not part of this format or a
+reader requirement.
 
 Completed `Value` Artifacts retain their result through the
 `dryml.artifacts.value` v1 envelope. A `TrainState` is ordinary Object state, not

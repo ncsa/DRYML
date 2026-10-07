@@ -48,6 +48,11 @@ fixture manifest are now schema version 2; existing version 1 authority remains
 untouched and must be replaced by preparation into new empty roots. GPU
 qualification remains the existing TensorFlow/W1 and Torch/W3 pair.
 
+Experiment history now writes `dryml-experiment-data` v2 so exact native model
+references retain source, factory, tensor-specification, tuple, and frozen
+container identity. The reader continues to accept closed v1 histories and
+migrates them in place on their next immutable publication.
+
 Keras, Torch, and experimental JAX trainers now provide saved, recoverable
 completed-epoch early stopping. The shared monitor/patience/mode/minimum-
 improvement contract retains its best metric, wait count, accepted shortened

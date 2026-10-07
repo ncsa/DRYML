@@ -234,6 +234,15 @@ jobs:
               print(f"{package}: {metadata.version(package)}")
           PY
 
+      - name: Run TensorFlow and Torch authored-batch representatives
+        if: matrix.install == 'tf-torch'
+        run: |
+          ./tests.sh \
+            tests/models/test_dataset_training_integration.py::test_native_trainers_consume_authored_dataset_batches \
+            tests/models/test_tf_training.py::test_tf_validation_loss_weights_a_short_final_batch_by_examples \
+            tests/models/test_torch_training.py::test_torch_validation_loss_weights_a_short_final_batch_by_examples \
+            --no-cov -x
+
       - name: Run JAX qualification tests
         env:
           JAX_PLATFORMS: cpu
