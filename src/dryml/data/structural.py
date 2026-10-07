@@ -7,12 +7,6 @@ from dryml.data.dataset import Dataset, DatasetCursor, DatasetExhaustedError
 from dryml.data.split import default_split, split_for_spec
 
 
-def _as_cardinality(value):
-    if isinstance(value, Cardinality):
-        return value
-    return Cardinality.finite(int(value))
-
-
 class Batch(Dataset):
     _stream_operator = "batch"
     def __init__(self, src: Dataset, batch_size: int, *, drop_remainder: bool = False):
@@ -46,7 +40,7 @@ class Batch(Dataset):
             yield collate(batch)
 
     def __len__(self) -> Cardinality:
-        src_cardinality = _as_cardinality(self.src.__len__())
+        src_cardinality = self.src.yield_cardinality()
         if src_cardinality.is_infinite:
             return Cardinality.INFINITE
         if src_cardinality.is_unknown:
@@ -180,7 +174,7 @@ class Skip(Dataset):
         yield from it
 
     def __len__(self) -> Cardinality:
-        src_cardinality = _as_cardinality(self.src.__len__())
+        src_cardinality = self.src.yield_cardinality()
         if src_cardinality.is_unknown:
             return Cardinality.UNKNOWN
         if src_cardinality.is_infinite:
@@ -207,7 +201,7 @@ class Repeat(Dataset):
     def __len__(self) -> Cardinality:
         if self.count is None:
             return Cardinality.INFINITE
-        src_cardinality = _as_cardinality(self.src.__len__())
+        src_cardinality = self.src.yield_cardinality()
         if src_cardinality.is_unknown:
             return Cardinality.UNKNOWN
         if src_cardinality.is_infinite:
@@ -246,7 +240,7 @@ class Shuffle(Dataset):
                 pass
 
     def __len__(self) -> Cardinality:
-        return _as_cardinality(self.src.__len__())
+        return self.src.yield_cardinality()
 
 
 __all__ = ["Batch", "Repeat", "Shuffle", "Skip", "Take", "Unbatch"]

@@ -7,17 +7,35 @@ The DRYML Data API provides reusable, repo-backed dataset objects and dataset tr
 ## Dataset Contract
 
 `Dataset` is an abstract iterable dataset type. Every concrete Dataset subclass
-must implement `__iter__`; `__len__` remains optional because cardinality can be
-unknown. The supported source, mapped, and structural dataset classes implement
-iteration and remain constructible.
+must implement `__iter__`; legacy `__len__` remains optional because cardinality
+can be unknown. The supported source, mapped, and structural dataset classes
+implement iteration and remain constructible.
 
 Important expectations:
 
 - A dataset should be re-iterable.
 - `iter(dataset)` should produce a fresh iterator.
 - `dataset.spec` describes one yielded element.
-- `len(dataset)` should return cardinality when known.
+- `yield_cardinality()` returns the declared number of yielded values as a
+  finite, unknown, or infinite `Cardinality`. It normalizes legacy integer and
+  `Cardinality` `__len__` declarations without opening a cursor.
+- `example_cardinality()` returns an example total only when declared TensorSpec
+  batch metadata proves it. Unbatched values have one example per yield; fixed
+  uniform batches multiply yield cardinality; dynamic batches remain unknown.
+  A zero-yield dataset has zero examples regardless of batch metadata.
+- `examples_in(value)` validates one runtime TensorSpec tree and returns its
+  exact positive example count. Batched leaves must expose non-rank-zero,
+  nonempty matching leading dimensions and honor fixed batch declarations;
+  coherent unbatched trees count as one example.
 - `peek()` returns one element without permanently consuming the dataset.
+
+These count methods do not open, peek, scan, or otherwise consume a Dataset,
+and they import no optional tensor backend. Generic values without a complete
+TensorSpec tree retain normal iteration behavior but have unknown metadata
+example cardinality and cannot be runtime-counted. Yield positions, cursor
+positions, and `Take(source, n)` remain yield-based: `Take` still requests
+exactly `n` source yields and reports exhaustion rather than silently clipping
+to a short source declaration.
 
 `dryml.artifacts.CachedDataset` implements this same contract after completion.
 Its persisted output spec is the codec's actual NumPy-backed `SpecTree`, so

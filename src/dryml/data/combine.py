@@ -53,17 +53,10 @@ def _iter_dataset_leaves(tree):
     raise TypeError(f"Zip expects Dataset leaves, got {type(tree).__name__}.")
 
 
-def _as_cardinality(value):
-    if isinstance(value, Cardinality):
-        return value
-    return Cardinality.finite(int(value))
-
-
 def _min_cardinality(cardinalities):
     finite_values = []
     saw_infinite = False
     for cardinality in cardinalities:
-        cardinality = _as_cardinality(cardinality)
         if cardinality.is_unknown:
             return Cardinality.UNKNOWN
         if cardinality.is_infinite:
@@ -82,7 +75,6 @@ def _sum_cardinality(cardinalities):
     total = 0
     saw_unknown = False
     for cardinality in cardinalities:
-        cardinality = _as_cardinality(cardinality)
         if cardinality.is_infinite:
             return Cardinality.INFINITE
         if cardinality.is_unknown:
@@ -135,7 +127,9 @@ class Zip(Dataset):
             yield build(self.sources)
 
     def __len__(self) -> Cardinality:
-        return _min_cardinality(ds.__len__() for ds in _iter_dataset_leaves(self.sources))
+        return _min_cardinality(
+            ds.yield_cardinality() for ds in _iter_dataset_leaves(self.sources)
+        )
 
 
 class Chain(Dataset):
@@ -157,7 +151,7 @@ class Chain(Dataset):
             yield from source
 
     def __len__(self) -> Cardinality:
-        return _sum_cardinality(source.__len__() for source in self.sources)
+        return _sum_cardinality(source.yield_cardinality() for source in self.sources)
 
 
 __all__ = ["Chain", "Zip"]
