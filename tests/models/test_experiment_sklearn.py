@@ -4,7 +4,7 @@ import pytest
 from dryml.core import Repo, StateRef
 from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import ArrayDataset
+from dryml.data import ArrayDataset, Batch, as_supervised
 from dryml.models import Experiment
 from dryml.models.sklearn import BasicTraining, ClassifierModel, Model, RegressionModel
 from dryml.managed import ManagedConfig
@@ -41,7 +41,7 @@ class ArrayAPIClassifier:
 def _train_data():
     x = np.array([[0.0, 10.0], [1.0, 11.0], [2.0, 12.0]], dtype=np.float32)
     y = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-    return ArrayDataset((x, y))
+    return Batch(as_supervised(ArrayDataset((x, y)), 0, 1), 2)
 
 
 def test_basic_sklearn_training_updates_model_and_experiment_state(tmp_path):
@@ -55,7 +55,7 @@ def test_basic_sklearn_training_updates_model_and_experiment_state(tmp_path):
     assert isinstance(result, StateRef)
     assert result == exp.train.status(state_repo=repo).final_state_ref
     assert exp.state.epoch == 1
-    assert exp.state.step == 3
+    assert exp.state.step == 1
     assert exp.state.phase == "trained"
     assert model.infer_output_spec(TensorSpec("float32", shape=(2,), backend="numpy")) == TensorSpec(
         "float32",
@@ -88,7 +88,7 @@ def test_experiment_save_load_restores_train_state_and_model(tmp_path):
     )
 
     assert loaded.state.epoch == 1
-    assert loaded.state.step == 3
+    assert loaded.state.step == 1
     assert loaded.state.phase == "trained"
     np.testing.assert_allclose(loaded.model(np.array([[3.0, 13.0]], dtype=np.float32)), np.array([4.0]), atol=1e-6)
 
@@ -119,6 +119,45 @@ def test_sklearn_inference_does_not_probe_estimators_and_pickle_state_stays_loca
     fresh = repo.load_state_ref(state, reuse_live="never")
     assert fresh.call_mode == "eager"
     assert fresh.default_batched is None
+
+
+def test_sklearn_materializes_unbatched_and_short_authored_batches_identically():
+    class CaptureEstimator:
+        def fit(self, x, y):
+            self.x = x.copy()
+            self.y = y.copy()
+            return self
+
+    source = ArrayDataset((
+        np.asarray([[0.0], [1.0], [2.0]], dtype=np.float32),
+        np.asarray([0.0, 2.0, 4.0], dtype=np.float32),
+    ))
+    unbatched = as_supervised(source, 0, 1)
+    batched = Batch(as_supervised(source, 0, 1), 2)
+    results = []
+    for data in (unbatched, batched):
+        model = Model(CaptureEstimator)
+        exp = Experiment(model, BasicTraining(), train_data=data)
+        exp.train_fn(exp)
+        results.append((model.obj.x, model.obj.y, exp.state.step, exp.state.examples_seen))
+
+    np.testing.assert_allclose(results[0][0], results[1][0])
+    np.testing.assert_allclose(results[0][1], results[1][1])
+    assert results[0][2:] == results[1][2:] == (1, 3)
+
+
+def test_sklearn_fit_failure_records_no_successful_transition():
+    class FailingEstimator:
+        def fit(self, x, y):
+            del x, y
+            raise RuntimeError("fit failed")
+
+    exp = Experiment(Model(FailingEstimator), BasicTraining(), train_data=_train_data())
+
+    with pytest.raises(RuntimeError, match="fit failed"):
+        exp.train_fn(exp)
+
+    assert (exp.state.epoch, exp.state.step, exp.state.examples_seen) == (0, 0, 0)
 
 
 def test_classifier_probability_spec_matches_fitted_predict_proba_output():

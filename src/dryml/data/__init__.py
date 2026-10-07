@@ -23,6 +23,7 @@ from dryml.data.util import (
     collect_xy,
     collate_xy,
     iter_xy,
+    materialize_supervised,
     as_supervised,
 )
 
@@ -56,6 +57,7 @@ __all__ = [
     "iter_xy",
     "collect_xy",
     "collate_xy",
+    "materialize_supervised",
     "Collect",
     "as_supervised",
     "Abs",

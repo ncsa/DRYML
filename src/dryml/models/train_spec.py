@@ -271,6 +271,30 @@ class TrainState:
         self.loss_denominator += examples
         self.next_batch += 1
 
+    def record_fit(self, *, examples: int) -> None:
+        """Retain one successful one-shot fit without claiming update telemetry.
+
+        Args:
+            examples: Exact positive number of submitted training examples.
+
+        Raises:
+            TypeError: If ``examples`` is not an exact integer.
+            ValueError: If ``examples`` is nonpositive.
+
+        Side Effects:
+            Advances the coarse successful-fit transition and exposure count only.
+            It deliberately leaves loss-window and safe-point facts unchanged
+            because a one-shot backend exposes no truthful optimizer boundary.
+        """
+
+        if type(examples) is not int:
+            raise TypeError("examples must be an exact integer.")
+        if examples <= 0:
+            raise ValueError("examples must be positive.")
+        self.step += 1
+        self.examples_seen += examples
+        self.next_batch += 1
+
     def begin_invocation(self, epochs: int) -> int:
         """Return the retained target epoch for this training invocation.
 

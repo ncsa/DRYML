@@ -12,17 +12,15 @@ from dryml.core.repo import manage_repo
 from dryml.core.tensor_spec import TensorSpec, iter_specs, map_spec_tree, match_input_batch
 from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
-from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress, metric_value
 from dryml.models.utils import (
     finite_dataset_len,
-    prepare_training_data,
     record_train_update,
     require_bounded_safe_points,
+    require_supervised_dataset,
     TrainingPreparation,
-    validate_num_examples,
     validate_training_callbacks,
 )
 from dryml.methods import ImplementationSelectionError, MethodError, traits
@@ -486,20 +484,10 @@ class Training(TrainFunction):
         loss_kwargs=None,
         metrics=(),
         epochs: int = 1,
-        batch_size: int | None = 32,
-        x_path=0,
-        y_path=1,
-        num_examples: int | None = None,
-        shuffle: bool = False,
-        shuffle_seed=None,
-        shuffle_buffer_size: int | None = None,
         verbose: int = 1,
     ):
         if epochs < 0:
             raise ValueError("epochs must be non-negative.")
-        if batch_size is not None and batch_size <= 0:
-            raise ValueError("batch_size must be positive or None.")
-        validate_num_examples(num_examples)
 
         self.optimizer = optimizer
         self.optimizer_cls = optimizer_cls
@@ -511,14 +499,12 @@ class Training(TrainFunction):
         self.loss_kwargs = dict(loss_kwargs or {})
         self.metrics = _normalize_list(metrics)
         self.epochs = epochs
-        self.batch_size = batch_size
-        self.x_path = x_path
-        self.y_path = y_path
-        self.num_examples = num_examples
-        self.shuffle = shuffle
-        self.shuffle_seed = shuffle_seed
-        self.shuffle_buffer_size = shuffle_buffer_size
         self.verbose = verbose
+
+    __dryml_retired_constructor_parameters__ = (
+        "batch_size", "num_examples", "shuffle", "shuffle_seed",
+        "shuffle_buffer_size", "x_path", "y_path",
+    )
 
     def __call__(self, exp, *, callbacks=()):
         """Train one Experiment with the PyTorch optimizer loop.
@@ -549,17 +535,10 @@ class Training(TrainFunction):
         loss_fn = self._make_loss(torch, exp)
         _require_mean_torch_loss(loss_fn)
         self._begin_training_preparation_generation()
-        train_data = prepare_training_data(
-            exp.train_data,
-            num_examples=self.num_examples,
-            shuffle=self.shuffle,
-            shuffle_seed=self.shuffle_seed,
-            shuffle_buffer_size=self.shuffle_buffer_size,
-        )
-        if self.batch_size is not None:
-            train_data = Batch(train_data, self.batch_size)
+        train_data = exp.train_data
+        require_supervised_dataset(train_data, batched=True)
         require_bounded_safe_points(train_data, callbacks)
-        train_xy = Map(train_data, Project(Select(self.x_path), Select(self.y_path)))
+        train_xy = train_data
         self.training_preparation = TrainingPreparation.from_specs(
             self, train_xy.spec[0], train_xy.spec[1], "torch"
         )
@@ -567,10 +546,9 @@ class Training(TrainFunction):
         val_xy = None
         self.validation_preparation = None
         if exp.val_data is not None:
-            val_data = prepare_training_data(exp.val_data)
-            if self.batch_size is not None:
-                val_data = Batch(val_data, self.batch_size)
-            val_xy = Map(val_data, Project(Select(self.x_path), Select(self.y_path)))
+            val_data = exp.val_data
+            require_supervised_dataset(val_data, batched=True)
+            val_xy = val_data
             self.validation_preparation = TrainingPreparation.from_specs(
                 self, val_xy.spec[0], val_xy.spec[1], "torch"
             )
@@ -610,6 +588,7 @@ class Training(TrainFunction):
                     cursor.skip(resume_batch)
                 try:
                     for x, y in cursor:
+                        examples = train_xy.examples_in((x, y))
                         # The once-planned U6 handoff completes before native
                         # forward/backward work; only device placement remains.
                         x, y = self.training_preparation.prepare(x, y)
@@ -632,7 +611,8 @@ class Training(TrainFunction):
                             exp,
                             x,
                             loss_float,
-                            batched=self.batch_size is not None,
+                            batched=True,
+                            examples=examples,
                             complete_epoch=(
                                 steps_per_epoch is not None
                                 and exp.state.next_batch + 1 == steps_per_epoch

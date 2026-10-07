@@ -5,6 +5,7 @@ Utility functions for data methods
 import inspect
 from typing import Callable
 
+from dryml.core.tensor_spec import iter_specs
 from dryml.data.collate import default_collate
 from dryml.data.methods import Project, Select
 
@@ -101,6 +102,61 @@ def collect_xy(dataset, *, x_path=0, y_path=1):
 def collate_xy(dataset, *, x_path=0, y_path=1, collate=default_collate):
     x_values, y_values = collect_xy(dataset, x_path=x_path, y_path=y_path)
     return collate(x_values), collate(y_values), len(x_values)
+
+
+def materialize_supervised(dataset):
+    """Materialize a canonical supervised Dataset for one-shot consumers.
+
+    Args:
+        dataset: Dataset yielding exactly ``(inputs, targets)`` pairs. It may
+            yield examples directly or authored batches with dynamic final sizes.
+
+    Returns:
+        ``(inputs, targets, examples)`` with authored batches flattened to one
+        dense collection and the exact submitted example count.
+
+    Raises:
+        ValueError: If the Dataset is noncanonical or empty.
+        TypeError: If its values cannot be collated by the declared data backend.
+
+    Side Effects:
+        Opens and closes Dataset cursors. Existing Dataset batching and order are
+        preserved; no trainer policy is applied.
+    """
+
+    if not isinstance(dataset.spec, tuple) or len(dataset.spec) != 2:
+        raise ValueError("Expected a canonical Dataset yielding (inputs, targets).")
+    branches = tuple(tuple(iter_specs(branch)) for branch in dataset.spec)
+    if not all(branches):
+        raise TypeError("Supervised Dataset branches require TensorSpec leaves.")
+    flags = []
+    for branch in branches:
+        values = {spec.batched for spec in branch}
+        if len(values) != 1:
+            raise ValueError("Supervised Dataset branches must be uniformly batched or unbatched.")
+        flags.append(values.pop())
+    if flags[0] != flags[1]:
+        raise ValueError("Supervised Dataset inputs and targets must have matching batching declarations.")
+    examples = 0
+    x_values = []
+    y_values = []
+    cursor = dataset.iterator()
+    try:
+        for value in cursor:
+            examples += dataset.examples_in(value)
+            x, y = value
+            if flags[0]:
+                for index in range(dataset.examples_in(value)):
+                    x_values.append(nested_slice(x, index))
+                    y_values.append(nested_slice(y, index))
+            else:
+                x_values.append(x)
+                y_values.append(y)
+    finally:
+        cursor.close()
+    if not x_values:
+        raise ValueError("Cannot materialize an empty supervised Dataset.")
+    return default_collate(x_values), default_collate(y_values), examples
 
 
 _MISSING = object()

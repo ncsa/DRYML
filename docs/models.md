@@ -117,12 +117,12 @@ they do not invoke a forward pass, build/compile a model, start a runtime, or
 save state.
 
 `dryml.models.measurements.dataset_size(dataset)` returns declared effective
-Dataset cardinality after selection/subsetting and unbatching but before trainer
-batching or epoch repetition. It returns `Cardinality.finite(n)`,
+Dataset example cardinality from the final Dataset persisted by an Experiment.
+It returns `Cardinality.finite(n)`,
 `Cardinality.UNKNOWN`, or `Cardinality.INFINITE` without opening a cursor;
-unknown and infinite inputs are never scanned to manufacture a count. Unbatching
-an opaque natively batched source is unknown unless that source explicitly
-declares its example cardinality; its batch count is never reported as examples.
+unknown and infinite inputs are never scanned to manufacture a count. It delegates
+to `Dataset.example_cardinality()`, so an opaque native batch count is never
+relabeled as an example count.
 
 ### Retained Accounting
 
@@ -187,6 +187,24 @@ unweighted losses are supported. Unknown-but-finite Keras streams may complete
 normally without DRYML safe-point callbacks; callbacks require a declared finite
 deterministic batch count, and infinite streams require an explicit finite bound
 before training starts.
+
+### Dataset-Owned Training Input
+
+Supplied trainers consume one canonical Dataset yielding `(inputs, targets)`.
+Use `dryml.data.as_supervised(...)` to select source fields, and apply `Take`,
+`Shuffle`, `Batch`, `Repeat`, and related operators to that Dataset before
+constructing the Experiment. TensorFlow/Keras, explicit TensorFlow, and Torch
+require both branches to be explicitly batched; use `Batch(dataset, 1)` when a
+singleton update is intended. They preserve authored selection, order, and batch
+boundaries and validate the actual examples in every accepted batch. sklearn
+materializes either canonical examples or authored batches once for `fit`, records
+one successful-fit transition, and exposes no optimizer safe points.
+
+Trainer constructors no longer accept `batch_size`, `num_examples`, `shuffle`,
+`shuffle_seed`, `shuffle_buffer_size`, `x_path`, or `y_path`. Saved definitions
+containing these retired fields fail during definition projection before source,
+model, optimizer, or Store mutation. Rebuild the trainer and move those controls
+to its Dataset; there is no legacy migration mode.
 
 ## Experiments
 

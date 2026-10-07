@@ -219,11 +219,26 @@ def project_bound_arguments(cls: type, bound_args: BoundArguments) -> tuple[tupl
         elif parameter.kind is Parameter.VAR_KEYWORD:
             var_keyword = parameter
 
+    retired = set(getattr(cls, "__dryml_retired_constructor_parameters__", ()))
     if var_keyword is not None and var_keyword.name in values:
         extra = values.pop(var_keyword.name)
         if not isinstance(extra, Mapping):
             raise TypeError(f"Invalid variadic keyword value at {var_keyword.name}: expected mapping.")
+        removed = retired.intersection(extra)
+        if removed:
+            raise TypeError(
+                f"Saved {cls.__name__} definition uses retired trainer parameters "
+                f"{sorted(removed)!r}. Rebuild the trainer and author selection, ordering, "
+                "and batching on its Dataset instead."
+            )
         kwargs.update(extra)
+    removed = retired.intersection(values)
+    if removed:
+        raise TypeError(
+            f"Saved {cls.__name__} definition uses retired trainer parameters "
+            f"{sorted(removed)!r}. Rebuild the trainer and author selection, ordering, "
+            "and batching on its Dataset instead."
+        )
     kwargs.update(values)
 
     try:

@@ -4,7 +4,7 @@ import sys
 
 from dryml import F
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
+from dryml.data import ArgMax, ArrayDataset, Batch, Map, Pipe, Project, Select
 from dryml.core import Repo
 from dryml.managed import ManagedConfig
 from dryml.models import AutoEncoder, Experiment
@@ -41,7 +41,7 @@ def test_torch_basic_training_updates_experiment_state():
     assert get_default_repo() is None
     x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
     y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
-    ds = ArrayDataset((x, y))
+    ds = Batch(ArrayDataset((x, y)), 2)
 
     model = Model(torch.nn.Linear, 1, 1)
     optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.01)
@@ -49,7 +49,6 @@ def test_torch_basic_training_updates_experiment_state():
         optimizer=optimizer,
         loss_cls=torch.nn.MSELoss,
         epochs=2,
-        batch_size=2,
         verbose=0,
     )
     exp = Experiment(model, train_fn, train_data=ds)
@@ -72,7 +71,7 @@ def test_torch_model_and_optimizer_state_ref_round_trip(tmp_path):
     repo = Repo(stores=tmp_path)
     x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
     y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
-    ds = ArrayDataset((x, y), repo=repo)
+    ds = Batch(ArrayDataset((x, y), repo=repo), 2, repo=repo)
     model = Model(torch.nn.Linear, 1, 1, repo=repo)
     optimizer = Optimizer(
         torch.optim.SGD, target=model, lr=0.01, momentum=0.9, repo=repo
@@ -81,7 +80,6 @@ def test_torch_model_and_optimizer_state_ref_round_trip(tmp_path):
         optimizer=optimizer,
         loss_cls=torch.nn.MSELoss,
         epochs=2,
-        batch_size=2,
         verbose=0,
         repo=repo,
     )
@@ -263,7 +261,7 @@ def test_torch_autoencoder_optimizer_targets_composite_model():
         ],
         dtype=np.float32,
     )
-    ds = ArrayDataset((x, x.copy()))
+    ds = Batch(ArrayDataset((x, x.copy())), 2)
     encoder = Sequential(
         layer_defs=(
             F("Linear", 3, 8),
@@ -284,7 +282,6 @@ def test_torch_autoencoder_optimizer_targets_composite_model():
         optimizer=optimizer,
         loss_cls=torch.nn.MSELoss,
         epochs=2,
-        batch_size=2,
         verbose=0,
     )
     exp = Experiment(model, train_fn, train_data=ds)
@@ -329,11 +326,10 @@ def test_torch_training_restore_skips_completed_batch_and_keeps_exposure(tmp_pat
             optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.01, repo=repo),
             loss_cls=torch.nn.MSELoss,
             epochs=1,
-            batch_size=2,
             verbose=0,
             repo=repo,
         ),
-        train_data=ArrayDataset((x, y), repo=repo),
+        train_data=Batch(ArrayDataset((x, y), repo=repo), 2, repo=repo),
         repo=repo,
     )
 
@@ -366,11 +362,10 @@ def _torch_accounting_experiment(*, repo=None, count=64, batch_size=1, lr=0.01):
             optimizer=Optimizer(torch.optim.SGD, target=model, lr=lr, repo=repo),
             loss_cls=torch.nn.MSELoss,
             epochs=1,
-            batch_size=batch_size,
             verbose=0,
             repo=repo,
         ),
-        train_data=ArrayDataset((x, y), repo=repo),
+        train_data=Batch(ArrayDataset((x, y), repo=repo), batch_size, repo=repo),
         repo=repo,
     )
 
@@ -436,10 +431,9 @@ def test_torch_weighted_loss_uses_actual_short_final_batch_and_normalizes_before
             optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
             loss_cls=torch.nn.MSELoss,
             epochs=1,
-            batch_size=64,
             verbose=0,
         ),
-        train_data=ArrayDataset((x, y)),
+        train_data=Batch(ArrayDataset((x, y)), 64),
     )
     observed = []
 
@@ -459,8 +453,8 @@ def test_torch_callback_and_loss_preflight_leave_training_objects_untouched():
     optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.01)
     exp = Experiment(
         model,
-        Training(optimizer=optimizer, loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0),
-        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+        Training(optimizer=optimizer, loss_cls=torch.nn.MSELoss, epochs=1, verbose=0),
+        train_data=Batch(ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))), 1),
     )
 
     with pytest.raises(TypeError, match="callbacks"):
@@ -474,7 +468,6 @@ def test_torch_callback_and_loss_preflight_leave_training_objects_untouched():
         loss_cls=torch.nn.MSELoss,
         loss_kwargs={"reduction": "sum"},
         epochs=1,
-        batch_size=1,
         verbose=0,
     )
     with pytest.raises(ValueError, match="reduction='mean'"):
@@ -510,10 +503,9 @@ def test_torch_training_prepares_cross_backend_data_before_model_invocation(monk
             optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
             loss_cls=torch.nn.MSELoss,
             epochs=1,
-            batch_size=1,
             verbose=0,
         ),
-        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+        train_data=Batch(ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))), 1),
     )
 
     exp.train_fn(exp)
@@ -533,14 +525,14 @@ def test_torch_training_prepares_tensorflow_data_through_its_retained_method_edg
     model = Model(torch.nn.Linear, 1, 1)
     trainer = Training(
         optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
-        loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0,
+        loss_cls=torch.nn.MSELoss, epochs=1, verbose=0,
     )
     exp = Experiment(
         model, trainer,
-        train_data=GeneratorDataset(
+        train_data=Batch(GeneratorDataset(
             _tiny_tensorflow_pairs, cardinality=Cardinality.finite(2),
             spec=(TensorSpec("float32", shape=(1,), backend="tf"), TensorSpec("float32", shape=(1,), backend="tf")),
-        ),
+        ), 1),
     )
 
     trainer(exp)
@@ -572,9 +564,9 @@ def test_torch_final_callback_resume_runs_one_validation_postlude_without_an_upd
     model = Model(torch.nn.Linear, 1, 1)
     trainer = Training(
         optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
-        loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0,
+        loss_cls=torch.nn.MSELoss, epochs=1, verbose=0,
     )
-    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     exp = Experiment(model, trainer, train_data=data, val_data=data)
     evaluations = []
     monkeypatch.setattr(trainer, "_evaluate", lambda *args, **kwargs: evaluations.append("validation") or {})
@@ -615,11 +607,11 @@ def test_torch_training_plans_cross_backend_handoffs_once(monkeypatch):
     model = Model(torch.nn.Linear, 1, 1)
     trainer = Training(
         optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
-        loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0,
+        loss_cls=torch.nn.MSELoss, epochs=1, verbose=0,
     )
     exp = Experiment(
         model, trainer,
-        train_data=ArrayDataset((np.zeros((3, 1), dtype=np.float32), np.zeros((3, 1), dtype=np.float32))),
+        train_data=Batch(ArrayDataset((np.zeros((3, 1), dtype=np.float32), np.zeros((3, 1), dtype=np.float32))), 1),
     )
 
     trainer(exp)
@@ -662,9 +654,9 @@ def test_torch_unknown_stream_retains_validation_metrics_across_progress_retry(m
     model = Model(torch.nn.Linear, 1, 1)
     trainer = Training(
         optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
-        loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0,
+        loss_cls=torch.nn.MSELoss, epochs=1, verbose=0,
     )
-    data = UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     exp = Experiment(model, trainer, train_data=data, val_data=data)
     evaluations = []
     monkeypatch.setattr(trainer, "_evaluate", lambda *args, **kwargs: evaluations.append("validation") or {"loss": 3.0})

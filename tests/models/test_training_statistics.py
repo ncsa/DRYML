@@ -63,6 +63,15 @@ def test_train_state_rejects_failed_or_invalid_updates_without_advancing_account
     assert state.step == 0
 
 
+def test_train_state_records_one_shot_fit_without_optimizer_loss_telemetry():
+    state = TrainState()
+
+    state.record_fit(examples=3)
+
+    assert (state.step, state.examples_seen, state.next_batch) == (1, 3, 1)
+    assert (state.loss_numerator, state.loss_denominator) == (0.0, 0)
+
+
 def test_train_state_retains_normalized_epoch_postlude_until_completion():
     state = TrainState()
     state.record_update(examples=1, loss=1.0)

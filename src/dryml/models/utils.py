@@ -7,7 +7,6 @@ from typing import Any
 
 from dryml.core.tensor_spec import iter_specs
 from dryml.core.utils.recurse import iter_leaves
-from dryml.data import Shuffle, Take, Unbatch
 from dryml.models.train_spec import TrainState
 
 expected_context_errors = (NoContextError, WrongContextError, ContextIncompatibilityError)
@@ -102,53 +101,28 @@ class TrainingPreparation:
         )
 
 
-def validate_num_examples(num_examples: int | None) -> None:
-    if num_examples is not None and num_examples < 0:
-        raise ValueError("num_examples must be non-negative or None.")
-
-
-def dataset_is_batched(dataset) -> bool:
-    try:
-        return any(spec.batched for spec in iter_specs(dataset.spec))
-    except ValueError:
-        return False
-
-
 def finite_dataset_len(dataset) -> int | None:
-    try:
-        cardinality = dataset.__len__()
-    except Exception:
-        return None
+    """Return a Dataset's finite yield count without opening a cursor."""
 
-    if hasattr(cardinality, "is_finite"):
-        if cardinality.is_finite:
-            return cardinality.require_finite()
-        return None
-    return int(cardinality)
+    cardinality = dataset.yield_cardinality()
+    return cardinality.require_finite() if cardinality.is_finite else None
 
 
 def training_cardinality(dataset):
     """Return declared training cardinality without acquiring a cursor.
 
     Args:
-        dataset: Prepared Dataset whose cardinality is queried.
+        dataset: Canonical Dataset whose yield cardinality is queried.
 
     Returns:
-        A finite, unknown, or infinite ``Cardinality`` declaration. Plain integer
-        lengths are normalized to finite cardinality.
+        A finite, unknown, or infinite ``Cardinality`` declaration.
 
     Side Effects:
-        Calls only ``dataset.__len__``; it does not open, scan, or consume a
-        Dataset iterator.
+        Calls only ``dataset.yield_cardinality()``; it does not open, scan, or
+        consume a Dataset iterator.
     """
 
-    from dryml.core.cardinality import Cardinality
-
-    try:
-        cardinality = dataset.__len__()
-    except (NotImplementedError, TypeError):
-        return Cardinality.UNKNOWN
-    return cardinality if isinstance(cardinality, Cardinality) else Cardinality.finite(int(cardinality))
+    return dataset.yield_cardinality()
 
 
 def require_bounded_safe_points(dataset, callbacks) -> None:
@@ -175,31 +149,55 @@ def require_bounded_safe_points(dataset, callbacks) -> None:
         )
 
 
-def prepare_training_data(
-    train_data,
-    *,
-    num_examples: int | None = None,
-    shuffle: bool = False,
-    shuffle_seed=None,
-    shuffle_buffer_size: int | None = None,
-):
-    if train_data is None:
+def require_supervised_dataset(dataset, *, batched: bool) -> None:
+    """Validate a canonical Dataset pair for a supplied trainer.
+
+    Args:
+        dataset: Dataset that must yield exactly ``(inputs, targets)``. Each
+            branch may be a nested TensorSpec tree.
+        batched: Whether both branches must carry an explicit leading example
+            dimension for a native update loop.
+
+    Raises:
+        ValueError: If data is absent, noncanonical, or has incompatible batch
+            declarations.
+        TypeError: If a Dataset specification has no TensorSpec leaves.
+
+    Side Effects:
+        Reads public Dataset specification metadata only. It does not inspect
+        Dataset operators, open a cursor, or alter selection/order/batching.
+    """
+
+    if dataset is None:
         raise ValueError("Experiment has no train_data.")
-    validate_num_examples(num_examples)
-
-    if dataset_is_batched(train_data):
-        train_data = Unbatch(train_data)
-
-    if shuffle:
-        buffer_size = shuffle_buffer_size or finite_dataset_len(train_data)
-        if buffer_size is None:
-            raise ValueError("shuffle_buffer_size is required when train_data length is unknown.")
-        train_data = Shuffle(train_data, buffer_size, seed=shuffle_seed)
-
-    if num_examples is not None:
-        train_data = Take(train_data, num_examples)
-
-    return train_data
+    try:
+        inputs, targets = dataset.spec
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "Training data must be a canonical Dataset yielding (inputs, targets); "
+            "use data.as_supervised(...)."
+        ) from error
+    if not isinstance(dataset.spec, tuple) or len(dataset.spec) != 2:
+        raise ValueError(
+            "Training data must be a canonical Dataset yielding (inputs, targets); "
+            "use data.as_supervised(...)."
+        )
+    branch_batches = []
+    for branch in (inputs, targets):
+        specs = tuple(iter_specs(branch))
+        if not specs:
+            raise TypeError("Training data branches require TensorSpec leaves.")
+        flags = {spec.batched for spec in specs}
+        if len(flags) != 1:
+            raise ValueError("Training data branches must be uniformly batched or unbatched.")
+        branch_batches.append(flags.pop())
+    if branch_batches[0] != branch_batches[1]:
+        raise ValueError("Training inputs and targets must have matching batching declarations.")
+    if batched and not branch_batches[0]:
+        raise ValueError(
+            "Native training requires explicitly batched (inputs, targets) data; "
+            "author Batch(dataset, 1) or another Dataset batch before training."
+        )
 
 
 def advance_train_state(exp, *, epochs: int = 0, steps: int = 0, phase: str = TrainState.trained):
@@ -297,14 +295,12 @@ def signature_discovery(obj: Any, **kwargs):
 
 __all__ = [
     "advance_train_state",
-    "dataset_is_batched",
     "finite_dataset_len",
-    "require_bounded_safe_points",
-    "prepare_training_data",
     "record_train_update",
+    "require_bounded_safe_points",
+    "require_supervised_dataset",
     "signature_discovery",
     "TrainingPreparation",
     "training_cardinality",
-    "validate_num_examples",
     "validate_training_callbacks",
 ]

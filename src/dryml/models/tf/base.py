@@ -13,17 +13,16 @@ from dryml.core.repo import manage_repo
 from dryml.core.tensor_spec import Dynamic, TensorSpec, batch_spec_tree, iter_specs, map_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
 from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
-from dryml.data import Batch, Map, Project, Select
+from dryml.data import DatasetExhaustedError
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress, metric_value
 from dryml.models.utils import (
     finite_dataset_len,
-    prepare_training_data,
     record_train_update,
     require_bounded_safe_points,
+    require_supervised_dataset,
     TrainingPreparation,
-    validate_num_examples,
     validate_training_callbacks,
 )
 from dryml.tf.tensor_spec import output_signature as tf_output_signature
@@ -304,6 +303,36 @@ def _freeze_native_keras_callbacks(tf, configured, fit_kwargs) -> tuple:
         return values
 
     return (*freeze(configured, "callbacks"), *freeze(fit_kwargs.pop("callbacks", ()), "fit callbacks"))
+
+
+def _require_dataset_owned_keras_fit_inputs(fit_args, fit_kwargs) -> None:
+    """Reject Keras fit routes that would replace Dataset-owned data policy.
+
+    Args:
+        fit_args: Positional arguments configured for ``keras.Model.fit``.
+        fit_kwargs: Per-invocation copy of Keras fit keyword arguments.
+
+    Raises:
+        ValueError: If inputs, targets, batching, shuffle, or step bounds would
+            compete with the canonical Dataset supplied by the Experiment.
+
+    Side Effects:
+        None. This preflight runs before Dataset iteration, model construction,
+        compilation, optimizer restoration, or TrainState mutation.
+    """
+
+    if fit_args:
+        raise ValueError("Keras fit_args are unsupported; the Experiment Dataset supplies training data.")
+    reserved = {
+        "x", "y", "batch_size", "shuffle", "steps_per_epoch",
+        "validation_data", "validation_batch_size", "validation_steps",
+    }
+    supplied = reserved.intersection(fit_kwargs)
+    if supplied:
+        raise ValueError(
+            "Keras fit options that control Dataset inputs or iteration are unsupported: "
+            f"{sorted(supplied)!r}. Author the Dataset pipeline instead."
+        )
 
 
 def _keras_accounting_model(tf, model):
@@ -912,16 +941,9 @@ class BasicTraining(TrainFunction):
         metrics: Optional native Keras metric collection.
         compile_kwargs: Additional Keras compile options.
         epochs: Epochs requested by a fresh invocation.
-        batch_size: Positive trainer batch size, or ``None`` for source batches.
-        x_path: Dataset path selecting model inputs.
-        y_path: Dataset path selecting training targets.
-        num_examples: Optional finite training-source prefix.
-        shuffle: Whether to apply deterministic Dataset shuffling.
-        shuffle_seed: Optional shuffle seed.
-        shuffle_buffer_size: Required finite shuffle buffer for unknown sources.
         callbacks: Native Keras callbacks, invoked after DRYML accounting.
-        fit_args: Positional arguments forwarded to ``keras.Model.fit``.
-        fit_kwargs: Keyword arguments forwarded to ``keras.Model.fit``.
+        fit_args: Must be empty because the Experiment Dataset supplies inputs.
+        fit_kwargs: Keras options excluding Dataset input/iteration controls.
         verbose: Keras fit verbosity.
 
     Raises:
@@ -942,13 +964,6 @@ class BasicTraining(TrainFunction):
         metrics=(),
         compile_kwargs=None,
         epochs: int = 1,
-        batch_size: int | None = 32,
-        x_path=0,
-        y_path=1,
-        num_examples: int | None = None,
-        shuffle: bool = False,
-        shuffle_seed=None,
-        shuffle_buffer_size: int | None = None,
         callbacks=(),
         fit_args=(),
         fit_kwargs=None,
@@ -956,22 +971,11 @@ class BasicTraining(TrainFunction):
     ):
         if epochs < 0:
             raise ValueError("epochs must be non-negative.")
-        if batch_size is not None and batch_size <= 0:
-            raise ValueError("batch_size must be positive or None.")
-        validate_num_examples(num_examples)
-
         self.optimizer = optimizer
         self.loss = loss
         self.metrics = _normalize_list(metrics)
         self.compile_kwargs = dict(compile_kwargs or {})
         self.epochs = epochs
-        self.batch_size = batch_size
-        self.x_path = x_path
-        self.y_path = y_path
-        self.num_examples = num_examples
-        self.shuffle = shuffle
-        self.shuffle_seed = shuffle_seed
-        self.shuffle_buffer_size = shuffle_buffer_size
         if callbacks is None:
             self.callbacks = ()
         elif isinstance(callbacks, (tuple, list)):
@@ -982,11 +986,17 @@ class BasicTraining(TrainFunction):
         self.fit_kwargs = dict(fit_kwargs or {})
         self.verbose = verbose
 
+    __dryml_retired_constructor_parameters__ = (
+        "batch_size", "num_examples", "shuffle", "shuffle_seed",
+        "shuffle_buffer_size", "x_path", "y_path",
+    )
+
     def __call__(self, exp, *, callbacks=()):
         import tensorflow as tf
 
         callbacks = validate_training_callbacks(callbacks)
         fit_kwargs = dict(self.fit_kwargs)
+        _require_dataset_owned_keras_fit_inputs(self.fit_args, fit_kwargs)
         native_callbacks = _freeze_native_keras_callbacks(tf, self._callbacks(tf), fit_kwargs)
         if callbacks and (native_callbacks or exp.val_data is not None):
             raise ValueError(
@@ -998,7 +1008,7 @@ class BasicTraining(TrainFunction):
         configured_loss = compile_kwargs.get("loss", self._make_loss(tf, exp))
         _require_mean_keras_loss(configured_loss)
         self._begin_training_preparation_generation()
-        train_data = self._prepare_data(exp.train_data, for_training=True)
+        train_data = self._prepare_data(exp.train_data)
         require_bounded_safe_points(train_data, callbacks)
         train_xy = self._xy_data(train_data)
         self.training_preparation = TrainingPreparation.from_specs(
@@ -1009,7 +1019,7 @@ class BasicTraining(TrainFunction):
         val_xy = None
         self.validation_preparation = None
         if exp.val_data is not None:
-            val_data = self._prepare_data(exp.val_data, for_training=False)
+            val_data = self._prepare_data(exp.val_data)
             val_xy = self._xy_data(val_data)
             self.validation_preparation = TrainingPreparation.from_specs(
                 self, val_xy.spec[0], val_xy.spec[1], "tf"
@@ -1218,31 +1228,34 @@ class BasicTraining(TrainFunction):
             base = tf.keras.Model(inputs=inputs, outputs=model(inputs))
         return _keras_accounting_model(tf, base)
 
-    def _prepare_data(self, data, *, for_training: bool):
-        data = prepare_training_data(
-            data,
-            num_examples=self.num_examples if for_training else None,
-            shuffle=self.shuffle if for_training else False,
-            shuffle_seed=self.shuffle_seed,
-            shuffle_buffer_size=self.shuffle_buffer_size,
-        )
-        if self.batch_size is not None:
-            data = Batch(data, self.batch_size)
+    def _prepare_data(self, data):
+        """Validate Dataset-owned canonical batches without changing their pipeline."""
+
+        require_supervised_dataset(data, batched=True)
         return data
 
     def _xy_data(self, data):
-        return Map(data, Project(Select(self.x_path), Select(self.y_path)))
+        """Return the already-canonical supervised Dataset unchanged."""
+
+        return data
 
     def _tf_dataset(self, tf, data, preparation):
         """Expose explicitly prepared Dataset batches to Keras iteration."""
 
+        expected = finite_dataset_len(data)
+
         def prepared_values():
             cursor = data.iterator()
+            yielded = 0
             try:
                 for x, y in cursor:
+                    data.examples_in((x, y))
+                    yielded += 1
                     yield preparation.prepare(x, y)
             finally:
                 cursor.close()
+            if expected is not None and yielded != expected:
+                raise DatasetExhaustedError(expected, yielded)
 
         return tf.data.Dataset.from_generator(
             prepared_values,
@@ -1290,7 +1303,7 @@ class Training(BasicTraining):
         loss_fn = self._make_loss(tf, exp)
         _require_mean_keras_loss(loss_fn)
         self._begin_training_preparation_generation()
-        train_data = self._prepare_data(exp.train_data, for_training=True)
+        train_data = self._prepare_data(exp.train_data)
         require_bounded_safe_points(train_data, callbacks)
         train_xy = self._xy_data(train_data)
         self.training_preparation = TrainingPreparation.from_specs(
@@ -1300,7 +1313,7 @@ class Training(BasicTraining):
         val_xy = None
         self.validation_preparation = None
         if exp.val_data is not None:
-            val_data = self._prepare_data(exp.val_data, for_training=False)
+            val_data = self._prepare_data(exp.val_data)
             val_xy = self._xy_data(val_data)
             self.validation_preparation = TrainingPreparation.from_specs(
                 self, val_xy.spec[0], val_xy.spec[1], "tf"
@@ -1337,6 +1350,7 @@ class Training(BasicTraining):
                     cursor.skip(resume_batch)
                 try:
                     for x, y in cursor:
+                        examples = train_xy.examples_in((x, y))
                         # The once-planned U6 handoff executes before this native
                         # differentiation scope begins.
                         x, y = self.training_preparation.prepare(x, y)
@@ -1371,7 +1385,8 @@ class Training(BasicTraining):
                             exp,
                             x,
                             loss_float,
-                            batched=self.batch_size is not None,
+                            batched=True,
+                            examples=examples,
                             complete_epoch=(
                                 steps_per_epoch is not None
                                 and exp.state.next_batch + 1 == steps_per_epoch

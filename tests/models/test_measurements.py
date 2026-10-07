@@ -46,11 +46,11 @@ def test_parameter_counts_deduplicate_identity_and_preserve_effective_trainabili
     assert reversed_counts == counts
 
 
-def test_dataset_size_returns_declared_cardinality_without_iteration():
+def test_dataset_size_requires_the_public_dataset_example_contract_without_iteration():
     for cardinality in (Cardinality.finite(17), Cardinality.UNKNOWN, Cardinality.INFINITE):
         dataset = CountingDataset(cardinality)
 
-        assert dataset_size(dataset) == cardinality
+        assert dataset_size(dataset) is Cardinality.UNKNOWN
         assert dataset.iterations == 0
 
 
@@ -70,7 +70,7 @@ def test_dataset_size_never_relabels_native_batch_count_as_example_count():
 
     class NativeBatches(Dataset):
         def __init__(self, examples=None):
-            self.example_cardinality = examples
+            self.examples = examples
             super().__init__(TensorSpec("float32", shape=(1,), batch=3, backend="numpy"))
 
         def __iter__(self):
@@ -78,6 +78,9 @@ def test_dataset_size_never_relabels_native_batch_count_as_example_count():
 
         def __len__(self):
             return Cardinality.finite(2)
+
+        def example_cardinality(self):
+            return Cardinality.UNKNOWN if self.examples is None else Cardinality.finite(self.examples)
 
     assert dataset_size(Unbatch(NativeBatches())) is Cardinality.UNKNOWN
     assert dataset_size(Unbatch(NativeBatches(5))) == Cardinality.finite(5)
