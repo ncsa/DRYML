@@ -17,10 +17,12 @@ def _xy_dataset(dataset, *, x_path=0, y_path=1):
 
 
 def as_supervised(dataset, inputs, targets=None, *, input_as_target: bool = False):
-    """Return a persisted Dataset graph yielding canonical ``(inputs, targets)`` pairs.
+    """Return a Dataset graph yielding canonical ``(inputs, targets)`` pairs.
 
     Args:
-        dataset: Source Dataset with a declared element specification.
+        dataset: Source Dataset with a declared element specification, or a soft
+            Definition, ConcreteDefinition, ObjectRef, StateRef, or explicit
+            ``Ref(...)``/``Mat(...)`` assertion expected to identify one.
         inputs: One scalar path, :class:`Select`, or nonempty tree of explicit
             ``Select`` leaves describing model inputs.
         targets: Matching target selection. It is required unless
@@ -29,26 +31,37 @@ def as_supervised(dataset, inputs, targets=None, *, input_as_target: bool = Fals
             autoencoder-style Dataset without copying or backend conversion.
 
     Returns:
-        An ordinary :class:`~dryml.data.dataset.Map` Dataset whose values are
-        ``(inputs, targets)`` and whose Method tree is persisted with the graph.
+        An ordinary :class:`~dryml.data.dataset.Map` Dataset for a live source,
+        or an inert Map Definition for a symbolic source. Its values are
+        ``(inputs, targets)`` and its Method tree is persisted with the graph.
 
     Raises:
-        TypeError: If ``dataset`` is not a Dataset or a selection tree is malformed.
+        TypeError: If ``dataset`` is not a Dataset or supported Dataset authority,
+            or a selection tree is malformed. A symbolic source that does not
+            materialize a Dataset fails at its normal Definition
+            binding/materialization boundary.
         ValueError: If a selection tree is empty or targets conflict with
             ``input_as_target``.
 
     Side Effects:
-        None. This helper does not open the Dataset, copy values, select a backend,
-        or add batching.
+        None. This helper does not open or materialize the Dataset, copy values,
+        select a backend, or add batching.
     """
 
+    from dryml.core import ConcreteDefinition, DefLink, Definition, ObjectRef, StateRef
     from dryml.data.dataset import Dataset, Map
 
-    if not isinstance(dataset, Dataset):
-        raise TypeError("as_supervised requires a Dataset.")
+    symbolic_types = (Definition, ConcreteDefinition, ObjectRef, StateRef)
+    symbolic = isinstance(dataset, (*symbolic_types, DefLink))
+    if not isinstance(dataset, Dataset) and not symbolic:
+        raise TypeError("as_supervised requires a Dataset or Dataset reference.")
+    if isinstance(dataset, DefLink):
+        dataset = dataset.target
+        if not isinstance(dataset, (Dataset, *symbolic_types)):
+            raise TypeError("as_supervised received an unsupported Ref/Mat target.")
     if type(input_as_target) is not bool:
         raise TypeError("input_as_target must be an exact bool.")
-    input_method = _selection_method(inputs)
+    input_method = _selection_method(inputs, symbolic=symbolic)
     if input_as_target:
         if targets is not None:
             raise ValueError("input_as_target does not accept an explicit target selection.")
@@ -56,29 +69,45 @@ def as_supervised(dataset, inputs, targets=None, *, input_as_target: bool = Fals
     else:
         if targets is None:
             raise ValueError("as_supervised requires targets unless input_as_target is true.")
-        target_method = _selection_method(targets)
-    return Map(dataset, Project(input_method, target_method), preserves_examples=True)
+        target_method = _selection_method(targets, symbolic=symbolic)
+    project = (
+        Project.defn(input_method, target_method)
+        if symbolic else Project(input_method, target_method)
+    )
+    if symbolic:
+        return Map.defn(dataset, project, preserves_examples=True)
+    return Map(dataset, project, preserves_examples=True)
 
 
-def _selection_method(selection, *, tree_leaf: bool = False):
+def _selection_method(
+        selection, *, tree_leaf: bool = False, symbolic: bool = False,
+):
     """Build one Project-compatible Method tree while rejecting tuple/list ambiguity."""
 
     if isinstance(selection, Select):
-        return selection
+        return Select.defn(selection.idxs) if symbolic else selection
     if isinstance(selection, (str, int)):
         if tree_leaf:
             raise TypeError("Selection trees require Select.from_path leaves.")
-        return Select.from_path((selection,))
+        return Select.defn(selection) if symbolic else Select.from_path((selection,))
     if isinstance(selection, dict):
         if not selection:
             raise ValueError("Selection trees must not be empty.")
-        return Project({key: _selection_method(branch, tree_leaf=True) for key, branch in selection.items()})
+        branches = {
+            key: _selection_method(branch, tree_leaf=True, symbolic=symbolic)
+            for key, branch in selection.items()
+        }
+        return Project.defn(branches) if symbolic else Project(branches)
     if isinstance(selection, (tuple, list)):
         if not selection:
             raise ValueError("Selection trees must not be empty.")
         if any(not isinstance(branch, Select) for branch in selection):
             raise TypeError("Ambiguous tuple/list selections require Select.from_path leaves.")
-        return Project(type(selection)(_selection_method(branch, tree_leaf=True) for branch in selection))
+        branches = type(selection)(
+            _selection_method(branch, tree_leaf=True, symbolic=symbolic)
+            for branch in selection
+        )
+        return Project.defn(branches) if symbolic else Project(branches)
     raise TypeError("Selections must be a scalar path, Select, or tree of Select leaves.")
 
 

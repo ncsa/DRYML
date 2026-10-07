@@ -4,6 +4,7 @@ import sys
 import numpy as np
 import pytest
 
+from dryml.core import Definition, Mat, Ref
 from dryml.core.cardinality import Cardinality
 from dryml.core.backend import Backend
 from dryml.core.tensor_spec import Dynamic, TensorSpec
@@ -773,6 +774,31 @@ def test_as_supervised_projects_scalar_whole_tree_named_and_autoencoder_targets(
     assert autoencoder_value[0] is autoencoder_value[1]
 
 
+@pytest.mark.parametrize("authority", ("soft", "concrete", "mat", "ref"))
+def test_as_supervised_authors_definition_native_autoencoder_projection(authority):
+    """Symbolic Dataset sources remain inert until their Map graph is built."""
+
+    source = Definition(
+        ListDataset,
+        [{"cart": np.array([1, 2])}],
+        {"cart": TensorSpec("int64", shape=(2,), backend="numpy")},
+    )
+    if authority == "concrete":
+        source = source.concretize()
+    elif authority == "mat":
+        source = Mat(source)
+    elif authority == "ref":
+        source = Ref(source)
+
+    projected = as_supervised(source, "cart", input_as_target=True)
+
+    assert isinstance(projected, Definition)
+    assert projected.cls is Map
+    inputs, targets = next(iter(projected.build()))
+    assert inputs is targets
+    assert inputs.tolist() == [1, 2]
+
+
 def test_as_supervised_rejects_empty_or_ambiguous_selection_trees():
     source = ListDataset(
         [{"x": np.array([1]), "y": np.array([2])}],
@@ -792,6 +818,35 @@ def test_as_supervised_rejects_empty_or_ambiguous_selection_trees():
         as_supervised(source, "x")
     with pytest.raises(ValueError, match="does not accept"):
         as_supervised(source, "x", "y", input_as_target=True)
+    with pytest.raises(TypeError, match="Dataset or Dataset reference"):
+        as_supervised(object(), "x", "y")
+
+
+def test_as_supervised_authors_graph_from_persisted_dataset_references(tmp_path):
+    """ObjectRef and StateRef inputs stay inert until the authored graph is built."""
+
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    source = ListDataset(
+        [{"x": np.array([1]), "y": np.array([2])}],
+        {
+            "x": TensorSpec("int64", shape=(1,), backend="numpy"),
+            "y": TensorSpec("int64", shape=(1,), backend="numpy"),
+        },
+    )
+    state_ref = repo.save_object(source, deep_capture=True)
+
+    for reference in (state_ref.object, state_ref):
+        projected = as_supervised(reference, "x", "y")
+
+        assert isinstance(projected, Definition)
+        assert projected.cls is Map
+
+    inputs, targets = next(iter(as_supervised(state_ref, "x", "y").build(repo=repo)))
+    assert inputs.tolist() == [1]
+    assert targets.tolist() == [2]
 
 
 def test_as_supervised_nested_and_tuple_selection_trees_survive_save_load(tmp_path):

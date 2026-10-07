@@ -325,11 +325,16 @@ Utility functions help with common supervised-learning structures:
 
 `as_supervised(dataset, inputs, targets)` builds a persisted ordinary Dataset
 projection yielding `(inputs, targets)`, rather than asking trainers to select
-fields. A scalar path selects one branch (and can retain a nested dictionary);
-named/nested selections use dictionaries of `Select.from_path(...)` leaves.
-Tuple/list selection trees require explicit `Select.from_path` leaves so path and
-output-tree intent cannot be guessed. `input_as_target=True` produces an
-autoencoder-style pair without copies or implicit batching.
+fields. A live Dataset returns a live `Map`. A soft Definition,
+ConcreteDefinition, ObjectRef, StateRef, or explicit `Ref(...)`/`Mat(...)`
+assertion returns an inert `Map` Definition without resolving or materializing
+the source; an assertion contributes its retained target to that new materializing
+Dataset graph. A scalar path selects one branch (and can retain a nested
+dictionary); named/nested selections use dictionaries of
+`Select.from_path(...)` leaves. Tuple/list selection trees require explicit
+`Select.from_path` leaves so path and output-tree intent cannot be guessed.
+`input_as_target=True` produces an autoencoder-style pair without copies or
+implicit batching.
 
 Native trainers consume this authored Dataset as-is. Put `Batch`, `Shuffle`,
 `Take`, and related controls in the Dataset graph before constructing an
