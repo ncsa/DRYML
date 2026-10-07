@@ -34,6 +34,8 @@ def test_train_state_round_trip_retains_progress_and_pending_loss_window():
     assert restored.next_batch == 1
     assert restored.loss_numerator == pytest.approx(135.0)
     assert restored.loss_denominator == 86
+    assert restored.epoch_loss_numerator == pytest.approx(20.0)
+    assert restored.epoch_loss_denominator == 5
 
 
 def test_train_state_retains_one_invocation_target_across_restore_then_allows_fresh_work():
@@ -61,6 +63,7 @@ def test_train_state_rejects_failed_or_invalid_updates_without_advancing_account
 
     assert state.examples_seen == 0
     assert state.step == 0
+    assert state.epoch_loss_denominator == 0
 
 
 def test_train_state_records_one_shot_fit_without_optimizer_loss_telemetry():
@@ -90,12 +93,35 @@ def test_train_state_retains_normalized_epoch_postlude_until_completion():
 def test_train_state_round_trip_retains_pending_epoch_postlude():
     state = TrainState(target_epoch=1)
     state.record_update(examples=1, loss=1.0)
-    state.finish_epoch(postlude_pending=True)
+    state.finish_epoch(postlude_pending=True, metrics={"loss": 1.0})
 
     restored = pickle.loads(pickle.dumps(state))
 
     assert restored.pending_epoch_postlude == 0
     assert (restored.epoch, restored.next_batch, restored.target_epoch) == (1, 0, 1)
+    assert restored.pending_epoch_metrics == {"loss": 1.0}
+
+
+def test_train_state_completed_epoch_loss_is_example_weighted_and_resume_stable():
+    state = TrainState(target_epoch=1)
+    state.record_update(examples=4, loss=1.0)
+    restored = pickle.loads(pickle.dumps(state))
+    restored.record_update(examples=1, loss=6.0)
+
+    restored.finish_epoch(postlude_pending=True, metrics={"loss": 99.0})
+
+    assert restored.pending_epoch_metrics == {"loss": 2.0}
+    assert (restored.epoch_loss_numerator, restored.epoch_loss_denominator) == (0.0, 0)
+
+
+def test_train_state_rejects_invalid_completed_epoch_metrics_before_installation():
+    state = TrainState(target_epoch=1)
+    state.record_update(examples=1, loss=1.0)
+
+    with pytest.raises(ValueError, match="finite string-keyed"):
+        state.finish_epoch(postlude_pending=True, metrics={"loss": float("nan")})
+
+    assert (state.epoch, state.next_batch, state.pending_epoch_postlude) == (0, 1, None)
 
 
 def test_train_state_restores_legacy_slotted_schema_with_new_defaults():
@@ -105,6 +131,7 @@ def test_train_state_restores_legacy_slotted_schema_with_new_defaults():
 
     assert (state.epoch, state.step, state.phase) == (3, 5, TrainState.training)
     assert state.examples_seen == 0
+    assert state.epoch_loss_denominator == 0
     assert state.pending_epoch_postlude is None
     assert state.pending_epoch_metrics is None
     assert state.pending_observation is None
@@ -117,6 +144,7 @@ def test_train_state_restores_genuine_three_slot_pickle_state_with_defaults():
 
     assert (state.epoch, state.step, state.phase) == (3, 5, TrainState.training)
     assert state.examples_seen == state.loss_denominator == state.next_batch == 0
+    assert state.epoch_loss_denominator == 0
     assert state.target_epoch is state.pending_epoch_postlude is None
 
 

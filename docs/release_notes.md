@@ -36,6 +36,18 @@ allows Mat arguments to materialize in workers and keeps `Ref[Definition]` data
 symbolic. Dispatch's incomplete-coverage warning now names its bounded diagnostic
 categories and directs callers to `dispatch.explain(...)` for the full report.
 
+Keras, Torch, and experimental JAX trainers now provide saved, recoverable
+completed-epoch early stopping. The shared monitor/patience/mode/minimum-
+improvement contract retains its best metric, wait count, accepted shortened
+target, and, when restoration is enabled, best Model snapshot across pending-
+postlude recovery. Optional best-weight restoration changes only Model parameters
+and mutable buffers;
+optimizer progression and JAX RNG remain at the stopping epoch. The resulting
+mixed-point Experiment is published as a new exact terminal StateRef. Keras uses
+this dedicated DRYML behavior adapter with managed safe points and supported
+validation, without claiming recovery for arbitrary native callbacks or deferred
+`validation_freq` scheduling.
+
 `CachedDataset`, `CacheCodec`, and `CacheIntegrityError` are now concrete public
 Artifact APIs. Finite dense Dataset trees can be streamed into built-in NumPy,
 optional Parquet (`pyarrow>=25.0.1`), or optional NetCDF (`netCDF4>=1.7.4`) cache

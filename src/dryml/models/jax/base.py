@@ -7,18 +7,25 @@ training implementation owns differentiated updates and coordinated installation
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import fields
 from dataclasses import replace
 
 from dryml.core.backend import Backend
 from dryml.core.factory import FactorySpec
 from dryml.core.object import Serializable
+from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.core.utils.stable_hash import stable_hash_function
 from dryml.methods import ImplementationSelectionError, traits
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress
+from dryml.models.train_spec import (
+    _EarlyStoppingState,
+    _update_early_stopping,
+    _validate_early_stopping_config,
+)
 from dryml.models.utils import (
     TrainingPreparation,
     finite_dataset_len,
@@ -30,6 +37,7 @@ from dryml.models.utils import (
 from .state import (
     _read_tree_payload,
     _restore_tree_payload,
+    _write_tree_payload,
     read_owner_envelope,
     read_tree_state,
     write_owner_envelope,
@@ -849,10 +857,12 @@ class Training(TrainFunction):
         steps = 0
 
         try:
-            self._finish_pending_epoch(
+            stopped = self._finish_pending_epoch(
                 jax, exp, prepared_val, loss_fn, progress, target_epoch,
             )
             for epoch in range(start_epoch, target_epoch):
+                if stopped:
+                    break
                 resume_batch = exp.state.next_batch if epoch == start_epoch else 0
                 if steps_per_epoch is not None and resume_batch > steps_per_epoch:
                     raise ValueError("Saved JAX batch position exceeds the training epoch.")
@@ -877,6 +887,10 @@ class Training(TrainFunction):
                         loss, parameters, mutable_state, rng, slots = candidate
                         _synchronize_tree(candidate, jax)
                         loss_float = self._validated_loss(loss, jax)
+                        complete_epoch = (
+                            steps_per_epoch is not None
+                            and exp.state.next_batch + 1 == steps_per_epoch
+                        )
                         self._commit_update(
                             exp,
                             parameters,
@@ -885,9 +899,10 @@ class Training(TrainFunction):
                             slots,
                             examples=examples,
                             loss=loss_float,
-                            complete_epoch=(
-                                steps_per_epoch is not None
-                                and exp.state.next_batch + 1 == steps_per_epoch
+                            complete_epoch=complete_epoch,
+                            epoch_metrics=(
+                                {"loss": (epoch_loss + loss_float) / (epoch_steps + 1)}
+                                if complete_epoch else None
                             ),
                         )
                         for callback in callbacks:
@@ -902,7 +917,7 @@ class Training(TrainFunction):
                 if epoch_steps == 0 and resume_batch == 0:
                     continue
                 epoch_metrics = {"loss": epoch_loss / epoch_steps} if epoch_steps and not resume_batch else {}
-                self._finish_epoch(
+                stopped = self._finish_epoch(
                     jax, exp, epoch, epoch_metrics, prepared_val, loss_fn, progress, target_epoch,
                 )
         except BaseException:
@@ -917,15 +932,20 @@ class Training(TrainFunction):
         finally:
             progress.close()
 
-        if steps == 0 and target_epoch > start_epoch and exp.state.epoch < target_epoch:
+        if (
+            steps == 0
+            and target_epoch > start_epoch
+            and exp.state.epoch < target_epoch
+            and not stopped
+        ):
             if fresh_target:
                 exp.state.abandon_new_invocation(
                     target_epoch, initial_epoch=start_epoch, initial_step=initial_step,
                 )
             raise ValueError("Cannot train on an empty dataset.")
-        if exp.state.epoch < target_epoch:
+        if exp.state.epoch < target_epoch and not stopped:
             raise ValueError("JAX training ended before its retained invocation target.")
-        exp.state.finish_invocation(target_epoch)
+        exp.state.finish_invocation(target_epoch, accept_shortened=stopped)
         return losses
 
     def _loss_callable(self):
@@ -975,7 +995,10 @@ class Training(TrainFunction):
             raise ValueError("JAX Training loss must be finite.")
         return result
 
-    def _commit_update(self, exp, parameters, mutable_state, rng, slots, *, examples, loss, complete_epoch):
+    def _commit_update(
+        self, exp, parameters, mutable_state, rng, slots, *, examples, loss,
+        complete_epoch, epoch_metrics=None,
+    ):
         """Install one completely validated candidate or repair every owner on interruption."""
 
         import jax
@@ -1001,7 +1024,10 @@ class Training(TrainFunction):
         _restore_train_state(candidate_state, exp.state)
         candidate_state.record_update(examples=examples, loss=loss)
         if complete_epoch:
-            candidate_state.finish_epoch(postlude_pending=True)
+            candidate_state.finish_epoch(
+                postlude_pending=True,
+                metrics=epoch_metrics,
+            )
         candidate_state._validate_restored_state(candidate_state.__getstate__())
         committed = False
         try:
@@ -1040,15 +1066,20 @@ class Training(TrainFunction):
 
         epoch = exp.state.pending_epoch_postlude
         if epoch is None:
-            return
+            return False
         metrics = dict(exp.state.pending_epoch_metrics or {})
         if exp.state.pending_epoch_postlude_phase == "start":
             if val_data is not None:
                 metrics.update({f"val_{name}": value for name, value in self._evaluate(jax, exp.model, val_data, loss_fn).items()})
             exp.state.advance_epoch_postlude(epoch, "progress", metrics=metrics)
         if exp.state.pending_epoch_postlude_phase == "progress":
+            stopped = self._finish_training_behavior_epoch(
+                jax, exp, epoch, exp.state.pending_epoch_metrics or metrics
+            )
             progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=metrics)
             exp.state.finish_epoch_postlude(epoch)
+            return stopped
+        return False
 
     def _finish_epoch(self, jax, exp, epoch, metrics, val_data, loss_fn, progress, target_epoch):
         """Normalize and complete one epoch postlude after its final accepted update."""
@@ -1061,15 +1092,26 @@ class Training(TrainFunction):
                     metrics.update({f"val_{name}": value for name, value in self._evaluate(jax, exp.model, val_data, loss_fn).items()})
                 exp.state.advance_epoch_postlude(epoch, "progress", metrics=metrics)
             if exp.state.pending_epoch_postlude_phase == "progress":
+                stopped = self._finish_training_behavior_epoch(
+                    jax, exp, epoch, exp.state.pending_epoch_metrics or metrics
+                )
                 progress.epoch_end(
                     epoch + 1, epochs=target_epoch,
                     metrics=exp.state.pending_epoch_metrics or metrics,
                 )
                 exp.state.finish_epoch_postlude(epoch)
-            return
+                return stopped
+            return False
         if val_data is not None:
             metrics.update({f"val_{name}": value for name, value in self._evaluate(jax, exp.model, val_data, loss_fn).items()})
         progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=metrics)
+        return self._finish_training_behavior_epoch(jax, exp, epoch, metrics)
+
+    def _finish_training_behavior_epoch(self, jax, exp, epoch, metrics):
+        """Run saved completed-epoch behavior; ordinary Training has none."""
+
+        del jax, exp, epoch, metrics
+        return False
 
     def _evaluate(self, jax, model, data, loss_fn):
         """Evaluate snapshot candidates without retaining model mutable state or RNG."""
@@ -1091,4 +1133,197 @@ class Training(TrainFunction):
         return {} if not examples_total else {"loss": total / examples_total}
 
 
-__all__ = ["Model", "Optimizer", "Training", "TrainFunction", "pure_training_transition"]
+class EarlyStoppingTraining(Training):
+    """Train JAX with recoverable completed-epoch early stopping.
+
+    Args:
+        monitor: Completed-epoch metric name. Initial JAX training supports
+            ``"loss"`` and ``"val_loss"``.
+        patience: Complete non-improving epochs tolerated before stopping.
+        mode: ``"min"`` for decreasing metrics or ``"max"`` for increasing.
+        min_delta: Required nonnegative absolute improvement.
+        restore_best_weights: Restore best parameters and mutable model state;
+            optimizer slots and model RNG remain at the stopping epoch.
+        **kwargs: Arguments accepted by :class:`Training`.
+
+    Raises:
+        TypeError: If configuration types are invalid.
+        ValueError: If configuration, validation data, or completed monitor facts
+            are invalid or missing.
+
+    Side Effects:
+        Retains decision facts and a bounded best Model-state tree as
+        TrainFunction-owned state. Optional restoration occurs once before the
+        final Experiment graph checkpoint.
+    """
+
+    def __init__(
+        self,
+        *,
+        monitor: str = "val_loss",
+        patience: int = 3,
+        mode: str = "min",
+        min_delta: float = 0.0,
+        restore_best_weights: bool = True,
+        **kwargs,
+    ):
+        monitor, patience, mode, min_delta, restore_best_weights = (
+            _validate_early_stopping_config(
+                monitor=monitor,
+                patience=patience,
+                mode=mode,
+                min_delta=min_delta,
+                restore_best_weights=restore_best_weights,
+            )
+        )
+        if monitor not in ("loss", "val_loss"):
+            raise ValueError(
+                "Experimental JAX early stopping supports only 'loss' and 'val_loss'."
+            )
+        super().__init__(**kwargs)
+        self.monitor = monitor
+        self.patience = patience
+        self.mode = mode
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+        self.early_stopping = _EarlyStoppingState()
+        self._pending_best_model_payload = None
+
+    def __call__(self, exp, *, callbacks=()):
+        """Run or resume one retained early-stopping invocation.
+
+        Args:
+            exp: Experiment providing JAX Model, Datasets, and TrainState.
+            callbacks: Truthful post-update DRYML safe-point callbacks.
+
+        Returns:
+            Per-batch losses accepted before the full or shortened target.
+
+        Raises:
+            TypeError: If callbacks or native inputs violate Training contracts.
+            ValueError: If recovery, Dataset, or completed monitor facts are
+                invalid.
+
+        Side Effects:
+            Updates Model, Optimizer, Experiment, and this TrainFunction's saved
+            continuation, and may restore best parameters/mutable state while
+            retaining the stopping-epoch RNG.
+        """
+
+        fresh = exp.state.target_epoch is None
+        if fresh:
+            self.early_stopping.reset()
+            self._pending_best_model_payload = None
+        elif self._pending_best_model_payload is not None:
+            self.early_stopping.best_model_state = _restore_tree_payload(
+                self._pending_best_model_payload,
+                (exp.model.parameters, exp.model.mutable_state),
+            )
+            self._pending_best_model_payload = None
+        if self.monitor.startswith("val_") and exp.val_data is None:
+            raise ValueError(
+                f"Early-stopping monitor {self.monitor!r} requires validation data."
+            )
+        return super().__call__(exp, callbacks=callbacks)
+
+    def _finish_training_behavior_epoch(self, jax, exp, epoch, metrics):
+        def capture():
+            snapshot = jax.tree_util.tree_map(
+                lambda value: jax.numpy.array(value, copy=True),
+                (exp.model.parameters, exp.model.mutable_state),
+            )
+            _synchronize_tree(snapshot, jax)
+            return snapshot
+
+        def restore(snapshot):
+            parameters, mutable_state = snapshot
+            exp.model._validate_candidate_state(
+                parameters, mutable_state, exp.model.rng,
+            )
+            exp.model._install_candidate_state(
+                parameters, mutable_state, exp.model.rng,
+            )
+
+        return _update_early_stopping(
+            self.early_stopping,
+            epoch=epoch,
+            metrics=metrics,
+            monitor=self.monitor,
+            patience=self.patience,
+            mode=self.mode,
+            min_delta=self.min_delta,
+            capture_best=capture,
+            restore_best=restore,
+            restore_best_weights=self.restore_best_weights,
+        )
+
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
+        """Persist decision metadata and the optional best Model-state tree.
+
+        Args:
+            dest_dir: Empty Store-owned local-state directory.
+            codec: Opaque selected codec, accepted for hook compatibility.
+
+        Side Effects:
+            Writes metadata and a versioned host-array tree inside ``dest_dir``.
+        """
+
+        super().save_state_to_dir_imp(dest_dir, codec=codec)
+        payload = self.early_stopping.to_payload()
+        best_model_state = payload.pop("best_model_state")
+        payload["has_best_model_state"] = (
+            best_model_state is not None or self._pending_best_model_payload is not None
+        )
+        pickle_save(payload, os.path.join(dest_dir, "early-stopping.pkl"))
+        if best_model_state is not None:
+            write_tree_state(dest_dir, "early-stopping-best-model", best_model_state)
+        elif self._pending_best_model_payload is not None:
+            _write_tree_payload(
+                dest_dir,
+                "early-stopping-best-model",
+                self._pending_best_model_payload,
+            )
+
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
+        """Validate metadata and defer best-state topology binding to invocation.
+
+        Args:
+            src_dir: Store-owned directory containing continuation payloads.
+            codec: Opaque selected codec, accepted for hook compatibility.
+
+        Raises:
+            ValueError: If metadata or host-array envelopes are malformed.
+
+        Side Effects:
+            Replaces decision facts and retains a validated in-memory payload for
+            cross-owner topology validation when the Model is next admitted.
+        """
+
+        continuation = read_tree_state(
+            src_dir,
+            "train-function-state",
+            self.continuation,
+        )
+        payload = pickle_load(os.path.join(src_dir, "early-stopping.pkl"))
+        if type(payload) is not dict or type(payload.get("has_best_model_state")) is not bool:
+            raise ValueError("Malformed JAX early-stopping continuation state.")
+        has_best_model_state = payload.pop("has_best_model_state")
+        payload["best_model_state"] = None
+        early_stopping = _EarlyStoppingState.from_payload(payload)
+        pending_best_model_payload = (
+            _read_tree_payload(src_dir, "early-stopping-best-model")
+            if has_best_model_state else None
+        )
+        self.continuation = continuation
+        self.early_stopping = early_stopping
+        self._pending_best_model_payload = pending_best_model_payload
+
+
+__all__ = [
+    "EarlyStoppingTraining",
+    "Model",
+    "Optimizer",
+    "Training",
+    "TrainFunction",
+    "pure_training_transition",
+]

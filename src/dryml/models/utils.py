@@ -247,6 +247,7 @@ def record_train_update(
     callbacks=(),
     examples: int | None = None,
     complete_epoch: bool = False,
+    epoch_metrics: dict[str, float] | None = None,
 ) -> None:
     """Retain one successful update before invoking process-local safe points.
 
@@ -260,6 +261,8 @@ def record_train_update(
             reports them.  When omitted, derive them from ``batch``.
         complete_epoch: Whether this completed update exhausted its logical
             epoch and must normalize state before safe-point callbacks.
+        epoch_metrics: Finite completed-epoch metrics to retain before callbacks
+            when ``complete_epoch`` is true.
 
     Raises:
         TypeError: If callbacks are not callable.
@@ -281,7 +284,9 @@ def record_train_update(
             raise ValueError("A batched training update must expose a leading example dimension.") from None
     exp.state.record_update(examples=examples, loss=float(loss))
     if complete_epoch:
-        exp.state.finish_epoch(postlude_pending=True)
+        exp.state.finish_epoch(postlude_pending=True, metrics=epoch_metrics)
+    elif epoch_metrics is not None:
+        raise ValueError("epoch_metrics require a completed epoch update.")
     for callback in callbacks:
         callback()
 

@@ -1294,11 +1294,149 @@ def test_keras_early_stopping_completes_a_shortened_target():
 
     exp.train_fn(exp)
 
-    assert 0 < exp.state.epoch < 5
+    assert exp.state.epoch == 2
     assert exp.state.target_epoch is None
+    assert exp.train_fn.early_stopping.best_epoch == 0
+    assert exp.train_fn.early_stopping.accepted_target == 2
     previous_steps = exp.state.step
     exp.train_fn(exp)
     assert exp.state.step > previous_steps
+
+
+def test_keras_early_stopping_does_not_accept_unrelated_native_stop():
+    from dryml.models.tf import BasicEarlyStoppingTraining, Loss, Model, Optimizer
+
+    class StopAfterFirstEpoch(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            del epoch, logs
+            self.model.stop_training = True
+
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.zeros((2, 1), dtype=np.float32),
+    )), 1)
+    trainer = BasicEarlyStoppingTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError),
+        epochs=5,
+        monitor="loss",
+        patience=5,
+        verbose=0,
+    )
+    trainer.callbacks = (StopAfterFirstEpoch(),)
+    exp = Experiment(Model(ZeroKerasModel), trainer, train_data=data)
+
+    with pytest.raises(ValueError, match="ended before"):
+        trainer(exp)
+
+    assert exp.state.epoch == 1
+    assert exp.state.target_epoch == 5
+    assert trainer.early_stopping.accepted_target is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"monitor": ""}, ValueError),
+        ({"monitor": "accuracy"}, ValueError),
+        ({"patience": True}, TypeError),
+        ({"patience": -1}, ValueError),
+        ({"mode": "auto"}, ValueError),
+        ({"min_delta": -1.0}, ValueError),
+        ({"min_delta": float("nan")}, ValueError),
+    ],
+)
+def test_keras_early_stopping_rejects_invalid_configuration(kwargs, error):
+    from dryml.models.tf import BasicEarlyStoppingTraining
+
+    with pytest.raises(error):
+        BasicEarlyStoppingTraining(epochs=3, verbose=0, **kwargs)
+
+
+def test_keras_early_stopping_restores_model_but_not_optimizer_state():
+    from dryml.models.tf import BasicEarlyStoppingTraining, Loss, Model, Optimizer
+
+    observed = {}
+
+    class ControlledValidation(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            logs["val_loss"] = (1.0, 2.0)[epoch]
+            observed[epoch] = [value.copy() for value in exp.model.obj.get_weights()]
+
+    data = Batch(ArrayDataset((
+        np.ones((2, 1), dtype=np.float32),
+        np.zeros((2, 1), dtype=np.float32),
+    )), 1)
+    optimizer = Optimizer(tf.keras.optimizers.Adam, learning_rate=0.1)
+    trainer = BasicEarlyStoppingTraining(
+        optimizer=optimizer,
+        loss=Loss(tf.keras.losses.MeanSquaredError),
+        epochs=5,
+        monitor="val_loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+    )
+    trainer.callbacks = (ControlledValidation(),)
+    exp = Experiment(Model(TinyKerasModel), trainer, train_data=data, val_data=data)
+
+    trainer(exp)
+
+    for actual, expected in zip(exp.model.obj.get_weights(), observed[0]):
+        np.testing.assert_allclose(actual, expected)
+    assert int(optimizer.obj.iterations.numpy()) == 4
+    assert trainer.early_stopping.restored is True
+
+
+def test_keras_managed_early_stopping_resumes_validation_and_returns_terminal_state(tmp_path):
+    from dryml.models.tf import BasicEarlyStoppingTraining, Loss, Model, Optimizer
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    optimizer = Optimizer(tf.keras.optimizers.Adam, learning_rate=0.0, repo=repo)
+    trainer = BasicEarlyStoppingTraining(
+        optimizer=optimizer,
+        loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+        epochs=5,
+        monitor="val_loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(
+        Model(ZeroKerasModel, repo=repo),
+        trainer,
+        train_data=data,
+        val_data=data,
+        checkpoint_every_steps=2,
+        repo=repo,
+    )
+    failures = []
+
+    def interrupt_first_epoch(obj, context):
+        del context
+        if obj.state.step == 2 and not failures:
+            failures.append(obj.state.step)
+            raise RuntimeError("first epoch checkpoint")
+
+    with pytest.raises(RuntimeError, match="first epoch checkpoint"):
+        exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[interrupt_first_epoch]))
+    assert (exp.state.step, exp.state.pending_epoch_postlude) == (2, 0)
+
+    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    status = exp.train.status(state_repo=repo)
+    loaded = repo.load_state_ref(final, reuse_live="never")
+
+    assert failures == [2]
+    assert final == status.final_state_ref == exp.last_state_ref
+    assert (loaded.state.epoch, loaded.state.step, loaded.state.target_epoch) == (2, 4, None)
+    assert loaded.train_fn.early_stopping.accepted_target == 2
+    assert loaded.train_fn.early_stopping.restored is True
+    assert int(loaded.train_fn.optimizer.obj.iterations.numpy()) == 4
 
 
 def test_keras_unknown_finite_stream_completes_without_callbacks_and_rejects_safe_points():

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import weakref
+import math
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
@@ -11,11 +12,16 @@ from dryml.core.object import Serializable
 from dryml.core.backend import Backend
 from dryml.core.repo import manage_repo
 from dryml.core.tensor_spec import Dynamic, TensorSpec, batch_spec_tree, iter_specs, map_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
-from dryml.core.utils.general import maybe_call_method, validate_class
+from dryml.core.utils.general import maybe_call_method, pickle_load, pickle_save, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress, metric_value
+from dryml.models.train_spec import (
+    _EarlyStoppingState,
+    _update_early_stopping,
+    _validate_early_stopping_config,
+)
 from dryml.models.utils import (
     finite_dataset_len,
     record_train_update,
@@ -72,6 +78,20 @@ def _normalize_list(value):
     if isinstance(value, (tuple, list)):
         return tuple(value)
     return (value,)
+
+
+def _finite_metric_logs(logs) -> dict[str, float]:
+    """Return finite scalar native logs suitable for retained postlude state."""
+
+    result = {}
+    for name, value in (logs or {}).items():
+        try:
+            scalar = float(metric_value(value))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(scalar):
+            result[str(name)] = scalar
+    return result
 
 
 def _collect_trainable_parameters(target, *, repo):
@@ -439,34 +459,37 @@ def _keras_accounting_callback(
 
     class AccountingCallback(tf.keras.callbacks.Callback):
         def on_train_batch_end(self, batch, logs=None):
-            del logs
             if not bool(reporter.has_completed_step.numpy()):
                 raise RuntimeError("DRYML Keras accounting did not receive a completed train step.")
             physical_batch = batch_offset + batch
+            complete_epoch = (
+                steps_per_epoch is not None
+                and physical_batch + 1 == steps_per_epoch
+            )
             record_train_update(
                 exp,
                 None,
                 float(metric_value(reporter.completed_loss)),
                 batched=True,
                 examples=int(metric_value(reporter.completed_examples)),
-                complete_epoch=(
-                    steps_per_epoch is not None
-                    and physical_batch + 1 == steps_per_epoch
-                ),
+                complete_epoch=complete_epoch,
+                epoch_metrics=_finite_metric_logs(logs) if complete_epoch else None,
                 callbacks=callbacks,
             )
 
         def on_epoch_end(self, epoch, logs=None):
-            del logs
             # Unknown finite streams reveal exhaustion only here. Retain the
             # postlude before later native callbacks can fail.
             if steps_per_epoch is None and exp.state.epoch == epoch:
-                exp.state.finish_epoch(postlude_pending=True)
+                exp.state.finish_epoch(
+                    postlude_pending=True,
+                    metrics=_finite_metric_logs(logs),
+                )
 
     return AccountingCallback()
 
 
-def _keras_postlude_callback(tf, exp):
+def _keras_postlude_callback(tf, exp, finish_behavior_epoch=None):
     """Clear a retained finite-epoch postlude after Keras completes it."""
 
     class PostludeCallback(tf.keras.callbacks.Callback):
@@ -490,8 +513,14 @@ def _keras_postlude_callback(tf, exp):
                 exp.state.finish_epoch(postlude_pending=True)
 
         def on_epoch_end(self, epoch, logs=None):
-            del logs
             if exp.state.pending_epoch_postlude == epoch:
+                if finish_behavior_epoch is not None:
+                    stopped = finish_behavior_epoch(
+                        epoch,
+                        {**(exp.state.pending_epoch_metrics or {}), **_finite_metric_logs(logs)},
+                    )
+                    if stopped:
+                        self.model.stop_training = True
                 exp.state.finish_epoch_postlude(epoch)
 
     return PostludeCallback()
@@ -505,12 +534,13 @@ def _resume_keras_postlude(
     validation_data,
     validation_steps,
     steps_per_epoch,
-) -> None:
+    finish_behavior_epoch=None,
+) -> bool:
     """Complete only the bounded Keras postlude that needs no native replay."""
 
     epoch = exp.state.pending_epoch_postlude
     if epoch is None:
-        return
+        return False
     phase = exp.state.pending_epoch_postlude_phase
     if native_callbacks:
         raise ValueError(
@@ -518,25 +548,39 @@ def _resume_keras_postlude(
         )
     if phase == "start":
         if validation_data is None:
+            stopped = False if finish_behavior_epoch is None else finish_behavior_epoch(
+                epoch, exp.state.pending_epoch_metrics or {},
+            )
             exp.state.finish_epoch_postlude(epoch)
-            return
+            return stopped
         exp.state.advance_epoch_postlude(epoch, "validation")
         phase = "validation"
     if phase == "validation":
         if validation_data is not None:
-            training_model.evaluate(
+            validation_metrics = training_model.evaluate(
                 validation_data,
                 steps=validation_steps,
                 verbose=0,
                 return_dict=True,
             )
-        exp.state.advance_epoch_postlude(epoch, "epoch_end")
+            metrics = dict(exp.state.pending_epoch_metrics or {})
+            metrics.update({
+                f"val_{name}": value
+                for name, value in _finite_metric_logs(validation_metrics).items()
+            })
+        else:
+            metrics = dict(exp.state.pending_epoch_metrics or {})
+        exp.state.advance_epoch_postlude(epoch, "epoch_end", metrics=metrics)
         phase = "epoch_end"
     if phase == "epoch_end":
+        stopped = False if finish_behavior_epoch is None else finish_behavior_epoch(
+            epoch, exp.state.pending_epoch_metrics or {},
+        )
         exp.state.finish_epoch_postlude(epoch)
-        return
+        return stopped
     if phase is not None:
         raise ValueError("Keras cannot truthfully replay an unknown native postlude phase.")
+    return False
 
 
 class Wrapper(Serializable):
@@ -996,10 +1040,14 @@ class BasicTraining(TrainFunction):
         fit_kwargs = dict(self.fit_kwargs)
         _require_dataset_owned_keras_fit_inputs(self.fit_args, fit_kwargs)
         native_callbacks = _freeze_native_keras_callbacks(tf, self._callbacks(tf), fit_kwargs)
-        if callbacks and (native_callbacks or exp.val_data is not None):
+        if callbacks and (
+            native_callbacks
+            or (exp.val_data is not None and not self._supports_managed_validation())
+        ):
             raise ValueError(
                 "Keras DRYML safe-point recovery does not support native callbacks or validation."
             )
+        self._validate_training_behavior_data(exp)
         compile_kwargs = self._compile_kwargs(exp)
         _require_supported_keras_accounting(compile_kwargs, fit_kwargs)
         _require_supported_keras_execution(compile_kwargs, _unwrap_backend_obj(self._optimizer(exp)))
@@ -1063,6 +1111,10 @@ class BasicTraining(TrainFunction):
         fresh_target = exp.state.target_epoch is None
         initial_step = exp.state.step
         target_epoch = exp.state.begin_invocation(self.epochs)
+        self._begin_training_behavior(fresh=fresh_target)
+        finish_behavior_epoch = lambda epoch, metrics: self._finish_training_behavior_epoch(
+            exp, epoch, metrics
+        )
 
         def fit_segment(dataset, *, initial_epoch, epochs, batch_offset, segment_steps):
             segment_kwargs = dict(fit_kwargs)
@@ -1082,20 +1134,27 @@ class BasicTraining(TrainFunction):
                 validation_data=ds_val,
                 initial_epoch=initial_epoch,
                 epochs=epochs,
-                callbacks=[accounting, *native_callbacks, _keras_postlude_callback(tf, exp)],
+                callbacks=[
+                    accounting,
+                    *native_callbacks,
+                    _keras_postlude_callback(tf, exp, finish_behavior_epoch),
+                ],
                 **segment_kwargs,
             )
 
         try:
-            _resume_keras_postlude(
+            stopped = _resume_keras_postlude(
                 exp,
                 training_model,
                 native_callbacks,
                 validation_data=ds_val,
                 validation_steps=fit_kwargs.get("validation_steps"),
                 steps_per_epoch=steps_per_epoch,
+                finish_behavior_epoch=finish_behavior_epoch,
             )
-            if target_epoch <= start_epoch and exp.state.pending_epoch_postlude is None:
+            if stopped:
+                history = None
+            elif target_epoch <= start_epoch and exp.state.pending_epoch_postlude is None:
                 history = None
             elif exp.state.next_batch:
                 if steps_per_epoch is None:
@@ -1120,6 +1179,7 @@ class BasicTraining(TrainFunction):
                         validation_data=ds_val,
                         validation_steps=fit_kwargs.get("validation_steps"),
                         steps_per_epoch=steps_per_epoch,
+                        finish_behavior_epoch=finish_behavior_epoch,
                     )
                     history = None
                 if exp.state.epoch < target_epoch:
@@ -1170,11 +1230,14 @@ class BasicTraining(TrainFunction):
             not self._accept_shortened_completion() or exp.state.epoch == start_epoch
         ):
             if fresh_target:
-                exp.state.abandon_new_invocation(
-                    target_epoch,
-                    initial_epoch=start_epoch,
-                    initial_step=initial_step,
-                )
+                try:
+                    exp.state.abandon_new_invocation(
+                        target_epoch,
+                        initial_epoch=start_epoch,
+                        initial_step=initial_step,
+                    )
+                except ValueError:
+                    pass
             raise ValueError("Keras training ended before its retained invocation target.")
         exp.state.finish_invocation(
             target_epoch,
@@ -1266,6 +1329,27 @@ class BasicTraining(TrainFunction):
     def _accept_shortened_completion(self) -> bool:
         """Return whether this trainer treats Keras's normal early stop as success."""
 
+        return False
+
+    def _supports_managed_validation(self) -> bool:
+        """Return whether saved behavior can replay Keras validation postludes."""
+
+        return False
+
+    def _validate_training_behavior_data(self, exp) -> None:
+        """Validate saved behavior against Experiment data before native work."""
+
+        del exp
+
+    def _begin_training_behavior(self, *, fresh: bool) -> None:
+        """Prepare saved behavior for a fresh or resumed invocation."""
+
+        del fresh
+
+    def _finish_training_behavior_epoch(self, exp, epoch, metrics) -> bool:
+        """Run saved completed-epoch behavior; ordinary BasicTraining has none."""
+
+        del exp, epoch, metrics
         return False
 
     def _callbacks(self, tf):
@@ -1542,23 +1626,30 @@ class Training(BasicTraining):
         return results
 
 
-class BasicEarlyStoppingTraining(BasicTraining):
-    """Fit Keras with built-in EarlyStopping and accepted short-target completion.
+class BasicEarlyStoppingTraining(BasicTraining, Serializable):
+    """Fit Keras with recoverable completed-epoch early stopping.
 
     Args:
-        patience: Completed non-improving epochs tolerated by Keras.
-        monitor: Keras history metric used by EarlyStopping.
-        restore_best_weights: Whether Keras restores its best observed weights.
+        patience: Complete non-improving epochs tolerated before stopping.
+        monitor: Completed Keras epoch metric, such as ``"loss"`` or
+            ``"val_loss"``.
+        mode: ``"min"`` for decreasing metrics or ``"max"`` for increasing.
+        min_delta: Required nonnegative absolute improvement.
+        restore_best_weights: Restore only Keras Model weights and buffers from
+            the best completed epoch. Optimizer state remains at the stop epoch.
         *args: Positional arguments accepted by :class:`BasicTraining`.
         **kwargs: Keyword arguments accepted by :class:`BasicTraining`.
 
     Raises:
-        ValueError: If BasicTraining's accounting/recovery contract is violated.
+        TypeError: If configuration types are invalid.
+        ValueError: If configuration, data, completed metrics, or BasicTraining's
+            accounting/recovery contract is invalid.
 
     Side Effects:
-        Installs one Keras EarlyStopping callback. A normal completed-epoch early
-        stop clears the retained invocation target rather than reporting a failed
-        incomplete invocation.
+        Retains monitor, wait, best epoch/metric/Model state, and the accepted
+        shortened target as this TrainFunction's state. The DRYML-owned Keras
+        postlude adapter restores the best Model state at most once before the
+        final Experiment checkpoint; arbitrary native callback replay is unchanged.
     """
 
     def __init__(
@@ -1566,29 +1657,102 @@ class BasicEarlyStoppingTraining(BasicTraining):
         *args,
         patience: int = 3,
         monitor: str = "val_loss",
+        mode: str = "min",
+        min_delta: float = 0.0,
         restore_best_weights: bool = True,
         **kwargs,
     ):
+        monitor, patience, mode, min_delta, restore_best_weights = (
+            _validate_early_stopping_config(
+                monitor=monitor,
+                patience=patience,
+                mode=mode,
+                min_delta=min_delta,
+                restore_best_weights=restore_best_weights,
+            )
+        )
         super().__init__(*args, **kwargs)
         self.patience = patience
         self.monitor = monitor
+        self.mode = mode
+        self.min_delta = min_delta
         self.restore_best_weights = restore_best_weights
+        self.early_stopping = _EarlyStoppingState()
 
     def _callbacks(self, tf):
-        callbacks = super()._callbacks(tf)
-        callbacks.append(
-            tf.keras.callbacks.EarlyStopping(
-                patience=self.patience,
-                monitor=self.monitor,
-                restore_best_weights=self.restore_best_weights,
-            )
-        )
-        return callbacks
+        """Return only user-authored native callbacks; behavior is DRYML-owned."""
+
+        return super()._callbacks(tf)
 
     def _accept_shortened_completion(self) -> bool:
-        """Accept Keras's normal completed-epoch early-stop result."""
+        """Accept this saved behavior's completed-epoch shortened target."""
+
+        return self.early_stopping.accepted_target is not None
+
+    def _supports_managed_validation(self) -> bool:
+        """Allow only this DRYML-owned behavior through managed validation."""
 
         return True
+
+    def _validate_training_behavior_data(self, exp) -> None:
+        if self.monitor.startswith("val_") and exp.val_data is None:
+            raise ValueError(
+                f"Early-stopping monitor {self.monitor!r} requires validation data."
+            )
+
+    def _begin_training_behavior(self, *, fresh: bool) -> None:
+        if fresh:
+            self.early_stopping.reset()
+
+    def _finish_training_behavior_epoch(self, exp, epoch, metrics) -> bool:
+        return _update_early_stopping(
+            self.early_stopping,
+            epoch=epoch,
+            metrics=metrics,
+            monitor=self.monitor,
+            patience=self.patience,
+            mode=self.mode,
+            min_delta=self.min_delta,
+            capture_best=lambda: [value.copy() for value in exp.model.obj.get_weights()],
+            restore_best=exp.model.obj.set_weights,
+            restore_best_weights=self.restore_best_weights,
+        )
+
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
+        """Persist the retained decision and detached best Keras Model state.
+
+        Args:
+            dest_dir: Empty Store-owned local-state directory.
+            codec: Opaque selected codec, accepted for hook compatibility.
+
+        Side Effects:
+            Writes one trusted continuation payload inside ``dest_dir``.
+        """
+
+        del codec
+        pickle_save(
+            self.early_stopping.to_payload(),
+            os.path.join(dest_dir, "early-stopping.pkl"),
+        )
+
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
+        """Validate and restore this TrainFunction's saved continuation.
+
+        Args:
+            src_dir: Store-owned directory containing the continuation payload.
+            codec: Opaque selected codec, accepted for hook compatibility.
+
+        Raises:
+            ValueError: If retained decision facts are malformed.
+
+        Side Effects:
+            Replaces ``early_stopping`` only after payload decoding succeeds.
+        """
+
+        del codec
+        self.early_stopping = _EarlyStoppingState.from_payload(
+            pickle_load(os.path.join(src_dir, "early-stopping.pkl"))
+        )
 
 
 ModelWrapper = Model

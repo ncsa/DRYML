@@ -671,3 +671,247 @@ def test_torch_unknown_stream_retains_validation_metrics_across_progress_retry(m
     trainer(exp)
     assert evaluations == ["validation"]
     assert Progress.received == [retained_metrics, retained_metrics]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"monitor": ""}, ValueError),
+        ({"monitor": "accuracy"}, ValueError),
+        ({"patience": True}, TypeError),
+        ({"patience": -1}, ValueError),
+        ({"mode": "auto"}, ValueError),
+        ({"min_delta": -1.0}, ValueError),
+        ({"min_delta": float("nan")}, ValueError),
+    ],
+)
+def test_torch_early_stopping_rejects_invalid_configuration(kwargs, error):
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    model = Model(torch.nn.Linear, 1, 1)
+    optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.0)
+    with pytest.raises(error):
+        EarlyStoppingTraining(
+            optimizer=optimizer,
+            loss_cls=torch.nn.MSELoss,
+            epochs=3,
+            verbose=0,
+            **kwargs,
+        )
+
+
+def test_torch_early_stopping_accepts_shortened_target_and_retains_decision():
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    )), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        mode="min",
+        min_delta=0.0,
+        restore_best_weights=False,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data)
+
+    trainer(exp)
+
+    assert exp.state.epoch == 2
+    assert exp.state.target_epoch is None
+    assert trainer.early_stopping.best_epoch == 0
+    assert trainer.early_stopping.wait == 1
+    assert trainer.early_stopping.accepted_target == 2
+
+
+def test_torch_early_stopping_completes_full_target_before_patience():
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    )), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss,
+        epochs=2,
+        monitor="loss",
+        patience=2,
+        restore_best_weights=False,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data)
+
+    trainer(exp)
+
+    assert exp.state.epoch == 2
+    assert exp.state.target_epoch is None
+    assert trainer.early_stopping.accepted_target is None
+
+
+@pytest.mark.parametrize(
+    ("validation_metrics", "match"),
+    [({}, "missing"), ({"loss": float("nan")}, "finite")],
+)
+def test_torch_early_stopping_rejects_missing_or_nonfinite_monitor(
+    monkeypatch, validation_metrics, match,
+):
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    data = Batch(ArrayDataset((
+        np.zeros((1, 1), dtype=np.float32),
+        np.ones((1, 1), dtype=np.float32),
+    )), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss,
+        epochs=2,
+        monitor="val_loss",
+        patience=0,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data, val_data=data)
+    monkeypatch.setattr(trainer, "_evaluate", lambda *args, **kwargs: validation_metrics)
+
+    with pytest.raises(ValueError, match=match):
+        trainer(exp)
+
+    assert exp.state.step == 1
+    assert exp.state.target_epoch == 2
+
+
+def test_torch_early_stopping_restores_only_best_model_state(monkeypatch):
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    data = Batch(ArrayDataset((
+        np.ones((2, 1), dtype=np.float32),
+        np.zeros((2, 1), dtype=np.float32),
+    )), 2)
+    model = Model(torch.nn.Linear, 1, 1)
+    optimizer = Optimizer(torch.optim.Adam, target=model, lr=0.1)
+    trainer = EarlyStoppingTraining(
+        optimizer=optimizer,
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="val_loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data, val_data=data)
+    validation = iter((1.0, 2.0))
+    monkeypatch.setattr(
+        trainer,
+        "_evaluate",
+        lambda *args, **kwargs: {"loss": next(validation)},
+    )
+    observed = {}
+    original = trainer._finish_training_behavior_epoch
+
+    def finish(exp, epoch, metrics):
+        observed[epoch] = {
+            name: value.detach().clone() for name, value in model.obj.state_dict().items()
+        }
+        return original(exp, epoch, metrics)
+
+    monkeypatch.setattr(trainer, "_finish_training_behavior_epoch", finish)
+
+    trainer(exp)
+
+    torch.testing.assert_close(model.obj.state_dict(), observed[0])
+    assert exp.state.epoch == 2
+    assert next(iter(optimizer.obj.state.values()))["step"].item() == 2
+    assert trainer.early_stopping.restored is True
+
+
+def test_torch_early_stopping_postlude_resume_retains_one_decision(monkeypatch, tmp_path):
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+    import dryml.models.torch.base as torch_base
+
+    class Progress:
+        attempts = 0
+
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def update(self, *args, **kwargs):
+            del args, kwargs
+
+        def epoch_end(self, *args, **kwargs):
+            del args, kwargs
+            type(self).attempts += 1
+            if type(self).attempts == 2:
+                raise RuntimeError("progress postlude")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(torch_base, "TrainingProgress", Progress)
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    )), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data)
+
+    with pytest.raises(RuntimeError, match="progress postlude"):
+        trainer(exp)
+    assert trainer.early_stopping.wait == 1
+    assert exp.state.pending_epoch_postlude == 1
+
+    repo = Repo(stores=tmp_path)
+    checkpoint = repo.save_object(exp, deep_capture=True)
+    resumed = repo.load_state_ref(checkpoint, reuse_live="never")
+    resumed.train_fn(resumed)
+
+    assert resumed.train_fn.early_stopping.wait == 1
+    assert resumed.state.target_epoch is None
+
+
+def test_torch_managed_early_stopping_returns_exact_terminal_state(tmp_path):
+    """Managed completion associates the shortened mixed-point graph itself."""
+
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    )), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data)
+
+    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    status = exp.train.status(state_repo=repo)
+    restored = repo.load_state_ref(final, reuse_live="never")
+
+    assert final == status.final_state_ref == exp.last_state_ref
+    assert (restored.state.epoch, restored.state.step, restored.state.target_epoch) == (2, 4, None)
+    assert restored.train_fn.early_stopping.accepted_target == 2
+    assert restored.train_fn.early_stopping.restored is True

@@ -182,6 +182,16 @@ def _restore_tree_payload(payload, template):
     return jax.tree_util.tree_unflatten(treedef, restored_leaves)
 
 
+def _write_tree_payload(dest_dir: str, name: str, payload) -> None:
+    """Rewrite one already validated in-memory tree payload without a runtime."""
+
+    envelope, payloads = payload
+    directory = Path(dest_dir)
+    _write_json(directory / f"{name}.json", envelope)
+    for alias, data in payloads.items():
+        np.save(directory / f"{name}-{alias}.npy", data, allow_pickle=False)
+
+
 def write_owner_envelope(dest_dir: str, name: str, **fields) -> None:
     """Write small non-array local owner metadata beside a tree payload.
 

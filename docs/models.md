@@ -126,9 +126,10 @@ relabeled as an example count.
 
 ### Retained Accounting
 
-`TrainState` retains `examples_seen`, a weighted loss numerator/denominator,
+`TrainState` retains `examples_seen`, a weighted observation-loss window, a
+separate recovery-stable weighted epoch-loss accumulator,
 the next unprocessed batch position, an invocation target epoch, a bounded
-pending epoch-postlude fact, and an immutable pending safe-point observation
+pending epoch-postlude fact with finite completed-epoch metrics, and an immutable pending safe-point observation
 alongside model/optimizer progress. Supplied
 TensorFlow and Torch trainers advance these facts only after a successful
 optimizer update, so failed updates and evaluation do not add exposure. Repeated
@@ -154,15 +155,16 @@ deterministic prepared data and skips `next_batch` without reapplying completed
 updates. An update completing an epoch is normalized to the next epoch/batch-zero
 position before its callbacks. Explicit TensorFlow and Torch retain validation
 results before progress, so a progress failure does not repeat validation. Keras
-safe-point recovery is deliberately narrower: a DRYML safe-point callback cannot
-be combined with native Keras callbacks or validation, because their generic
-event/log replay cannot be truthful. Ordinary uninterrupted Keras callback and
-validation behavior remains native. Keras also requires exactly one optimizer
+safe-point recovery is deliberately narrow: arbitrary native callbacks cannot be
+combined with a DRYML safe-point callback because their generic event/log replay
+cannot be truthful. The dedicated saved early-stopping adapter below supports its
+own validation postlude without broadening that callback guarantee. Ordinary
+uninterrupted Keras callback and validation behavior remains native. Keras also requires exactly one optimizer
 update per batch callback (`steps_per_execution=1`, no gradient accumulation)
 and accounts for static regularizers and dynamic `add_loss` objectives in the
 exact differentiated scalar before advancing retained state. Setup
-failures that retain no update clear their new target, while Keras EarlyStopping
-completes its accepted shortened target. sklearn's one-shot trainer accepts the
+failures that retain no update clear their new target, while supported saved
+early-stopping trainers complete an accepted shortened target. sklearn's one-shot trainer accepts the
 common callback keyword but rejects intermediate safe points before fitting
 because it has no per-update boundary.
 
@@ -197,6 +199,48 @@ unweighted losses are supported. Unknown-but-finite Keras streams may complete
 normally without DRYML safe-point callbacks; callbacks require a declared finite
 deterministic batch count, and infinite streams require an explicit finite bound
 before training starts.
+
+### Managed Early Stopping
+
+Keras `BasicEarlyStoppingTraining` and Torch/JAX `EarlyStoppingTraining` are saved
+specialized training behaviors, not invocation telemetry callbacks. All three
+accept `monitor`, nonnegative exact-integer `patience`, `mode="min"` or
+`mode="max"`, finite nonnegative `min_delta`, and `restore_best_weights`.
+`min_delta` is an absolute threshold and equality is not improvement. The first
+completed epoch establishes the best value; each later non-improving completed
+epoch increments `wait`, and training stops when `wait > patience`. Thus
+`patience=0` stops after the first completed non-improving epoch.
+
+The monitor is read only from a truthful completed-epoch postlude. The supported
+training monitor is `loss`; validation monitors use a nonempty `val_` prefix,
+including `val_loss`, and require a validation Dataset.
+A validation monitor without validation data, a missing completed metric, a
+nonfinite value, or invalid configuration fails explicitly rather than silently
+shortening training. Arbitrary `validation_freq` scheduling remains deferred and
+is not claimed by this integration.
+
+The TrainFunction checkpoint retains the best metric, wait count, best completed
+epoch, last processed postlude, and accepted shortened target. When restoration is
+enabled, it also retains a bounded best Model snapshot. A restored pending
+validation/decision postlude reuses its completed
+metrics and processes that epoch idempotently, without repeating an optimizer
+update or incrementing `wait` twice. A genuinely new invocation resets these
+invocation facts.
+
+With `restore_best_weights=False`, the stopping epoch's Model and Optimizer state
+remain installed. With it enabled, DRYML restores only Model parameters and
+Model-owned mutable weights/buffers from the best completed epoch, exactly once.
+Optimizer slots and progression remain at the stopping epoch; JAX Model RNG also
+remains at the stopping epoch. This is intentionally a mixed-point graph, not a
+full training rewind. `Experiment.train` publishes a new terminal checkpoint
+after optional restoration and returns that exact StateRef; managed completion
+and history associate the same reference. Publication, association, or history
+failure propagates and does not report a terminal receipt.
+
+Keras uses a DRYML-owned epoch adapter for this behavior, so managed safe points
+and its supported validation postlude no longer reject
+`BasicEarlyStoppingTraining`. This does not make arbitrary saved native Keras
+callbacks replayable. Invocation telemetry remains a separate concern.
 
 ### Dataset-Owned Training Input
 
@@ -414,8 +458,10 @@ progress state before it propagates. Resume reopens the same logical Dataset epo
 and skips only accepted yielded batches; a seed-aware `GeneratorDataset` under
 `Take` therefore retains its selected epoch seed while resuming. Validation is
 snapshot-only: candidate mutable state and RNG are always discarded. JAX Training
-does not yet support trainer metrics, early stopping, invocation telemetry, or
-arbitrary native callbacks; those capabilities are not implied by this interface.
+does not yet support general trainer metrics, invocation telemetry, or arbitrary
+native callbacks. Its saved `EarlyStoppingTraining` specialization supports only
+completed training/validation loss facts under the managed contract above; no
+broader callback or metric API is implied.
 
 Every JAX owner writes a versioned host-array envelope and validates its complete
 runtime topology, path structure, shared-leaf topology, dtype, shape, typed-key

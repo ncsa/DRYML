@@ -15,6 +15,11 @@ from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress, metric_value
+from dryml.models.train_spec import (
+    _EarlyStoppingState,
+    _update_early_stopping,
+    _validate_early_stopping_config,
+)
 from dryml.models.utils import (
     finite_dataset_len,
     record_train_update,
@@ -575,10 +580,12 @@ class Training(TrainFunction):
         progress = TrainingProgress(total=total_steps, verbose=self.verbose, desc="Torch training")
 
         try:
-            self._finish_pending_epoch(
+            stopped = self._finish_pending_epoch(
                 torch, exp, prepared_val, loss_fn, metrics, device, progress, target_epoch
             )
             for epoch in range(start_epoch, target_epoch):
+                if stopped:
+                    break
                 for metric in metrics:
                     _reset_metric(metric)
                 metric_totals = {}
@@ -610,16 +617,26 @@ class Training(TrainFunction):
                             metric_counts[name] = metric_counts.get(name, 0) + 1
 
                         loss_float = float(metric_value(loss_value))
+                        complete_epoch = (
+                            steps_per_epoch is not None
+                            and exp.state.next_batch + 1 == steps_per_epoch
+                        )
+                        completed_metrics = None
+                        if complete_epoch:
+                            completed_metrics = {
+                                "loss": (epoch_loss + loss_float) / (epoch_steps + 1)
+                            }
+                            completed_metrics.update(_metric_results(metrics))
+                            for name, total in metric_totals.items():
+                                completed_metrics.setdefault(name, total / metric_counts[name])
                         record_train_update(
                             exp,
                             x,
                             loss_float,
                             batched=True,
                             examples=examples,
-                            complete_epoch=(
-                                steps_per_epoch is not None
-                                and exp.state.next_batch + 1 == steps_per_epoch
-                            ),
+                            complete_epoch=complete_epoch,
+                            epoch_metrics=completed_metrics,
                             callbacks=callbacks,
                         )
                         losses.append(loss_float)
@@ -644,7 +661,7 @@ class Training(TrainFunction):
                     for name, total in metric_totals.items():
                         epoch_metrics.setdefault(name, total / metric_counts[name])
 
-                self._finish_epoch(
+                stopped = self._finish_epoch(
                     torch,
                     exp,
                     epoch,
@@ -671,7 +688,12 @@ class Training(TrainFunction):
             progress.close()
             exp.model.prep_eval()
 
-        if steps == 0 and target_epoch > start_epoch and exp.state.epoch < target_epoch:
+        if (
+            steps == 0
+            and target_epoch > start_epoch
+            and exp.state.epoch < target_epoch
+            and not stopped
+        ):
             if fresh_target:
                 exp.state.abandon_new_invocation(
                     target_epoch,
@@ -679,9 +701,9 @@ class Training(TrainFunction):
                     initial_step=initial_step,
                 )
             raise ValueError("Cannot train on an empty dataset.")
-        if exp.state.epoch < target_epoch:
+        if exp.state.epoch < target_epoch and not stopped:
             raise ValueError("Torch training ended before its retained invocation target.")
-        exp.state.finish_invocation(target_epoch)
+        exp.state.finish_invocation(target_epoch, accept_shortened=stopped)
 
         return losses
 
@@ -768,7 +790,7 @@ class Training(TrainFunction):
 
         epoch = exp.state.pending_epoch_postlude
         if epoch is None:
-            return
+            return False
         epoch_metrics = dict(exp.state.pending_epoch_metrics or {})
         if exp.state.pending_epoch_postlude_phase == "start":
             if val_data is not None:
@@ -776,8 +798,13 @@ class Training(TrainFunction):
                 epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
             exp.state.advance_epoch_postlude(epoch, "progress", metrics=epoch_metrics)
         if exp.state.pending_epoch_postlude_phase == "progress":
+            stopped = self._finish_training_behavior_epoch(
+                exp, epoch, exp.state.pending_epoch_metrics or epoch_metrics
+            )
             progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
             exp.state.finish_epoch_postlude(epoch)
+            return stopped
+        return False
 
     def _finish_epoch(self, torch, exp, epoch, epoch_metrics, val_data, loss_fn, metrics, device, progress, target_epoch):
         """Complete one Torch epoch postlude without replaying its final update."""
@@ -791,17 +818,28 @@ class Training(TrainFunction):
                     epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
                 exp.state.advance_epoch_postlude(epoch, "progress", metrics=epoch_metrics)
             if exp.state.pending_epoch_postlude_phase == "progress":
+                stopped = self._finish_training_behavior_epoch(
+                    exp, epoch, exp.state.pending_epoch_metrics or epoch_metrics
+                )
                 progress.epoch_end(
                     epoch + 1,
                     epochs=target_epoch,
                     metrics=exp.state.pending_epoch_metrics or epoch_metrics,
                 )
                 exp.state.finish_epoch_postlude(epoch)
-            return
+                return stopped
+            return False
         if val_data is not None:
             val_metrics = self._evaluate(torch, exp.model, val_data, loss_fn, metrics, device=device)
             epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
         progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
+        return self._finish_training_behavior_epoch(exp, epoch, epoch_metrics)
+
+    def _finish_training_behavior_epoch(self, exp, epoch, metrics):
+        """Run saved completed-epoch behavior; ordinary Training has none."""
+
+        del exp, epoch, metrics
+        return False
 
     def _evaluate(self, torch, model, val_data, loss_fn, metrics, *, device):
         for metric in metrics:
@@ -837,6 +875,143 @@ class Training(TrainFunction):
         for name, total in metric_totals.items():
             results.setdefault(name, total / metric_counts[name])
         return results
+
+
+class EarlyStoppingTraining(Training, Serializable):
+    """Train Torch with recoverable completed-epoch early stopping.
+
+    Args:
+        monitor: Completed-epoch metric name, such as ``"loss"`` or
+            ``"val_loss"``.
+        patience: Complete non-improving epochs tolerated before stopping.
+        mode: ``"min"`` for decreasing metrics or ``"max"`` for increasing.
+        min_delta: Required nonnegative absolute improvement.
+        restore_best_weights: Restore only Model parameters and buffers from the
+            best completed epoch. Optimizer state remains at the stopping epoch.
+        **kwargs: Arguments accepted by :class:`Training`.
+
+    Raises:
+        TypeError: If configuration types are invalid.
+        ValueError: If configuration values or a completed monitor value are
+            invalid or missing.
+
+    Side Effects:
+        Retains the decision and a bounded best ``state_dict`` snapshot as this
+        TrainFunction's saved state. Optional restoration occurs once before the
+        terminal Experiment checkpoint.
+    """
+
+    def __init__(
+        self,
+        *,
+        monitor: str = "val_loss",
+        patience: int = 3,
+        mode: str = "min",
+        min_delta: float = 0.0,
+        restore_best_weights: bool = True,
+        **kwargs,
+    ):
+        monitor, patience, mode, min_delta, restore_best_weights = (
+            _validate_early_stopping_config(
+                monitor=monitor,
+                patience=patience,
+                mode=mode,
+                min_delta=min_delta,
+                restore_best_weights=restore_best_weights,
+            )
+        )
+        super().__init__(**kwargs)
+        self.monitor = monitor
+        self.patience = patience
+        self.mode = mode
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+        self.early_stopping = _EarlyStoppingState()
+
+    def __call__(self, exp, *, callbacks=()):
+        """Run or resume one retained early-stopping invocation.
+
+        Args:
+            exp: Experiment providing Torch Model, Datasets, and TrainState.
+            callbacks: Truthful post-update DRYML safe-point callbacks.
+
+        Returns:
+            Per-batch losses accepted before the full or shortened target.
+
+        Raises:
+            TypeError: If callbacks or native inputs violate Training contracts.
+            ValueError: If recovery, Dataset, or completed monitor facts are
+                invalid.
+
+        Side Effects:
+            Updates Model, Optimizer, Experiment, and this TrainFunction's saved
+            continuation, and may restore the best Model state before return.
+        """
+
+        if exp.state.target_epoch is None:
+            self.early_stopping.reset()
+        return super().__call__(exp, callbacks=callbacks)
+
+    def _finish_training_behavior_epoch(self, exp, epoch, metrics):
+        def capture():
+            return {
+                name: value.detach().cpu().clone()
+                for name, value in exp.model.obj.state_dict().items()
+            }
+
+        return _update_early_stopping(
+            self.early_stopping,
+            epoch=epoch,
+            metrics=metrics,
+            monitor=self.monitor,
+            patience=self.patience,
+            mode=self.mode,
+            min_delta=self.min_delta,
+            capture_best=capture,
+            restore_best=exp.model.obj.load_state_dict,
+            restore_best_weights=self.restore_best_weights,
+        )
+
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
+        """Persist the retained decision and detached best Model snapshot.
+
+        Args:
+            dest_dir: Empty Store-owned local-state directory.
+            codec: Opaque selected codec, accepted for hook compatibility.
+
+        Side Effects:
+            Writes one Torch continuation payload inside ``dest_dir``.
+        """
+
+        del codec
+        import torch
+
+        torch.save(
+            self.early_stopping.to_payload(),
+            os.path.join(dest_dir, "early-stopping.pth"),
+        )
+
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
+        """Validate and restore this TrainFunction's saved continuation.
+
+        Args:
+            src_dir: Store-owned directory containing the continuation payload.
+            codec: Opaque selected codec, accepted for hook compatibility.
+
+        Raises:
+            ValueError: If retained decision facts are malformed.
+
+        Side Effects:
+            Replaces ``early_stopping`` only after payload decoding succeeds.
+        """
+
+        del codec
+        import torch
+
+        path = os.path.join(src_dir, "early-stopping.pth")
+        self.early_stopping = _EarlyStoppingState.from_payload(
+            torch.load(path, map_location="cpu", weights_only=False)
+        )
 
 
 class ModelWrapper(Model):
@@ -899,6 +1074,7 @@ class Sequential(Model):
 
 
 __all__ = [
+    "EarlyStoppingTraining",
     "Model",
     "ModelWrapper",
     "Optimizer",
