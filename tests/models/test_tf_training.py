@@ -100,6 +100,122 @@ def test_tf_basic_training_updates_experiment_state():
     assert float(optimizer.obj.learning_rate.numpy()) == pytest.approx(0.01)
 
 
+def test_keras_invocation_telemetry_uses_native_callbacks_after_accounting(tmp_path):
+    """A local Keras callback receives native logs after truthful DRYML hooks."""
+
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.asarray([[0.0], [1.0]], dtype=np.float32),
+        np.asarray([[0.0], [2.0]], dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    trainer = BasicTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0, repo=repo),
+        loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+        epochs=1,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(Model(TinyKerasModel, repo=repo), trainer, train_data=data, repo=repo)
+    events = []
+
+    class Observer(tf.keras.callbacks.Callback):
+        def on_train_batch_end(self, batch, logs=None):
+            events.append(("batch", batch, exp.state.step, logs))
+
+        def on_epoch_end(self, epoch, logs=None):
+            events.append(("epoch", epoch, exp.state.epoch, logs))
+
+        def close(self):
+            events.append(("close",))
+
+    csv_path = tmp_path / "telemetry.csv"
+    final = exp.train(
+        callbacks=[Observer(), tf.keras.callbacks.CSVLogger(str(csv_path))],
+        managed=ManagedConfig(state_repo=repo),
+    )
+
+    batch_events = [event for event in events if event[0] == "batch"]
+    epoch_events = [event for event in events if event[0] == "epoch"]
+    assert [(event[1], event[2]) for event in batch_events] == [(0, 1), (1, 2)]
+    assert len(epoch_events) == 1
+    assert epoch_events[0][1:3] == (0, 1)
+    assert all("loss" in event[3] for event in (*batch_events, *epoch_events))
+    assert events[-1] == ("close",)
+    assert "loss" in csv_path.read_text(encoding="utf-8")
+    assert exp.train.status(state_repo=repo).final_state_ref == final
+
+
+def test_keras_invocation_telemetry_rejects_non_native_callback_before_updates(tmp_path):
+    """Keras does not reinterpret a plain host callable as a native callback."""
+
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.asarray([[0.0]], dtype=np.float32),
+        np.asarray([[0.0]], dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    exp = Experiment(
+        Model(TinyKerasModel, repo=repo),
+        BasicTraining(
+            optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0, repo=repo),
+            loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+            epochs=1,
+            verbose=0,
+            repo=repo,
+        ),
+        train_data=data,
+        repo=repo,
+    )
+
+    with pytest.raises(TypeError, match="Keras telemetry observers"):
+        exp.train(
+            callbacks=[lambda logs: None],
+            managed=ManagedConfig(state_repo=repo),
+        )
+
+    assert exp.state.step == 0
+
+
+def test_keras_invocation_telemetry_rejects_native_early_stopping_before_updates(
+        tmp_path):
+    """Known native behavior controls cannot enter the reporting-only lane."""
+
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.asarray([[0.0]], dtype=np.float32),
+        np.asarray([[0.0]], dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    optimizer = Optimizer(
+        tf.keras.optimizers.SGD, learning_rate=0.0, repo=repo,
+    )
+    exp = Experiment(
+        Model(TinyKerasModel, repo=repo),
+        BasicTraining(
+            optimizer=optimizer,
+            loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+            epochs=2,
+            verbose=0,
+            repo=repo,
+        ),
+        train_data=data,
+        repo=repo,
+    )
+
+    with pytest.raises(ValueError, match="rejects known behavior callback EarlyStopping"):
+        exp.train(
+            callbacks=[tf.keras.callbacks.EarlyStopping()],
+            managed=ManagedConfig(state_repo=repo),
+        )
+
+    assert (exp.state.step, exp.state.phase) == (0, None)
+    assert int(optimizer.obj.iterations.numpy()) == 0
+
+
 def test_tf_basic_training_observes_native_accounting_train_step_devices():
     """The opt-in observer receives real Keras train-step values, not wrapper calls."""
     from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
@@ -1386,6 +1502,83 @@ def test_keras_early_stopping_restores_model_but_not_optimizer_state():
         np.testing.assert_allclose(actual, expected)
     assert int(optimizer.obj.iterations.numpy()) == 4
     assert trainer.early_stopping.restored is True
+
+
+def test_keras_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
+    """A persisted completed Keras stop finalizes without another fit segment."""
+
+    from dryml.models.tf import BasicEarlyStoppingTraining, Loss, Model, Optimizer
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    failed_control = DirStore(tmp_path / "failed-control")
+    resume_control = DirStore(tmp_path / "resume-control")
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    optimizer = Optimizer(tf.keras.optimizers.Adam, learning_rate=0.0, repo=repo)
+    trainer = BasicEarlyStoppingTraining(
+        optimizer=optimizer,
+        loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(
+        Model(ZeroKerasModel, repo=repo),
+        trainer,
+        train_data=data,
+        repo=repo,
+    )
+
+    class FailStoppedEpoch(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            del epoch, logs
+            if trainer.early_stopping.accepted_target is not None:
+                raise RuntimeError("strict stopped epoch")
+
+    with pytest.raises(RuntimeError, match="strict stopped epoch"):
+        exp.train(
+            callbacks=[FailStoppedEpoch()],
+            observer_strict=True,
+            managed=ManagedConfig(
+                state_repo=repo, control_store=failed_control,
+            ),
+        )
+
+    assert (exp.state.epoch, exp.state.step, exp.state.target_epoch) == (2, 4, 5)
+    assert exp.state.pending_epoch_postlude is None
+    assert trainer.early_stopping.accepted_target == 2
+    assert trainer.early_stopping.restored is True
+    stopped_weights = [value.copy() for value in exp.model.obj.get_weights()]
+    stopped_iterations = int(optimizer.obj.iterations.numpy())
+    stopped_optimizer_values = [
+        value.numpy().copy() for value in optimizer.obj.variables
+    ]
+    checkpoint = repo.save_object(exp, deep_capture=True)
+    resumed = repo.load_state_ref(checkpoint, reuse_live="never")
+
+    final = resumed.train(managed=ManagedConfig(
+        state_repo=repo, control_store=resume_control,
+    ))
+    status = resumed.train.status(
+        state_repo=repo, control_store=resume_control,
+    )
+
+    assert final == status.final_state_ref == resumed.last_state_ref
+    assert (resumed.state.epoch, resumed.state.step, resumed.state.target_epoch) == (2, 4, None)
+    assert int(resumed.train_fn.optimizer.obj.iterations.numpy()) == stopped_iterations
+    resumed_optimizer_values = [
+        value.numpy() for value in resumed.train_fn.optimizer.obj.variables
+    ]
+    assert len(resumed_optimizer_values) == len(stopped_optimizer_values)
+    for actual, expected in zip(resumed_optimizer_values, stopped_optimizer_values):
+        np.testing.assert_allclose(actual, expected)
+    for actual, expected in zip(resumed.model.obj.get_weights(), stopped_weights):
+        np.testing.assert_allclose(actual, expected)
 
 
 def test_keras_managed_early_stopping_resumes_validation_and_returns_terminal_state(tmp_path):

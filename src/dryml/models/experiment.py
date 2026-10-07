@@ -4,12 +4,17 @@ import functools
 import inspect
 import math
 import os
+import sys
 import time
+import warnings
+from asyncio import CancelledError as AsyncCancelledError
 from collections import OrderedDict
 from collections.abc import Mapping
+from concurrent.futures import CancelledError as FuturesCancelledError
 
 from dryml.artifacts import Artifact, Value
 from dryml.core import Ref, StateRef, Template
+from dryml.core.factory import FactorySpec
 from dryml.core.object import Serializable
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.managed import (
@@ -26,13 +31,27 @@ from .train_spec import TrainState
 
 
 def _experiment_train_wrapper(target):
-    """Prepend Experiment evaluation without mutating caller managed controls."""
+    """Prepend evaluation and declare Experiment-only telemetry controls."""
+
+    target._declare_invocation_parameters(
+        callbacks="observer_factories",
+        observer_strict="observer_strict",
+    )
 
     @functools.wraps(target)
-    def wrapped(self, *, managed=None):
+    def wrapped(
+        self,
+        *,
+        callbacks=None,
+        observer_strict=False,
+        managed=None,
+    ):
+        observer_configs = _freeze_observer_configs(callbacks)
+        if type(observer_strict) is not bool:
+            raise TypeError("Experiment observer_strict must be an exact bool.")
         config = ManagedConfig() if managed is None else managed
-        callbacks = [] if config.callbacks is None else list(config.callbacks)
-        if len(callbacks) >= 64:
+        managed_callbacks = [] if config.callbacks is None else list(config.callbacks)
+        if len(managed_callbacks) >= 64:
             raise ManagedConfigError(message="Experiment evaluation leaves room for at most 63 caller callbacks")
 
         def evaluate(obj, context):
@@ -44,11 +63,130 @@ def _experiment_train_wrapper(target):
                 state_repo=config.state_repo,
                 control_store=config.control_store,
                 rerun=config.rerun,
-                callbacks=[evaluate, *callbacks],
+                callbacks=[evaluate, *managed_callbacks],
             ),
+            callbacks=observer_configs,
+            observer_strict=observer_strict,
         )
 
     return wrapped
+
+
+def _freeze_observer_configs(callbacks) -> tuple[object, ...]:
+    """Validate and freeze one invocation's bounded telemetry collection."""
+
+    if callbacks is None:
+        return ()
+    if type(callbacks) not in {list, tuple}:
+        raise TypeError("Experiment callbacks must be a list, tuple, or None.")
+    if len(callbacks) > 64:
+        raise ValueError("Experiment callbacks may contain at most 64 entries.")
+    return tuple(callbacks)
+
+
+class _ObserverSession:
+    """Process-local observer instances and bounded delivery diagnostics."""
+
+    def __init__(self, observers: tuple[object, ...], *, strict: bool) -> None:
+        self.observers = observers
+        self.strict = strict
+        self._diagnosed: set[int] = set()
+        self._closed = False
+
+    @classmethod
+    def build(cls, configs: tuple[object, ...], *, strict: bool) -> "_ObserverSession":
+        """Build inert factories after managed and worker admission."""
+
+        observers: list[object] = []
+        try:
+            for config in configs:
+                observers.append(config.build() if isinstance(config, FactorySpec) else config)
+        except BaseException:
+            session = cls(tuple(observers), strict=False)
+            session.close(suppress=True)
+            raise
+        return cls(tuple(observers), strict=strict)
+
+    def require_callables(self, backend: str) -> None:
+        """Require host-callable observers before a plain backend mutates state."""
+
+        if any(not callable(observer) for observer in self.observers):
+            raise TypeError(f"{backend} telemetry observers must be callable.")
+
+    def deliver(self, index: int, event: str, callback) -> None:
+        """Deliver one event under strict or bounded best-effort policy."""
+
+        try:
+            callback()
+        except (AsyncCancelledError, FuturesCancelledError):
+            raise
+        except Exception as error:
+            if self.strict:
+                raise
+            self._diagnose(index, event, error)
+
+    def close(self, *, suppress: bool) -> None:
+        """Close each observer once, preserving any already escaping failure."""
+
+        if self._closed:
+            return
+        self._closed = True
+        interrupt_error = None
+        strict_error = None
+        for index in range(len(self.observers) - 1, -1, -1):
+            close = getattr(self.observers[index], "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except BaseException as error:
+                if suppress:
+                    if isinstance(error, Exception) and not isinstance(
+                            error, (AsyncCancelledError, FuturesCancelledError)):
+                        self._diagnose(index, "close", error)
+                    continue
+                if isinstance(
+                        error, (AsyncCancelledError, FuturesCancelledError),
+                ) or not isinstance(error, Exception):
+                    if interrupt_error is None:
+                        interrupt_error = error
+                elif self.strict:
+                    if strict_error is None:
+                        strict_error = error
+                else:
+                    self._diagnose(index, "close", error)
+        if interrupt_error is not None:
+            raise interrupt_error
+        if strict_error is not None:
+            raise strict_error
+
+    def _diagnose(self, index: int, event: str, error: Exception) -> None:
+        """Warn at most once per observer without exposing exception text."""
+
+        if index in self._diagnosed:
+            return
+        self._diagnosed.add(index)
+        warnings.warn(
+            "Training telemetry observer "
+            f"{index} failed during {event} with {type(error).__name__}; "
+            "continuing under best-effort policy.",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+
+
+def _notify_host_observers(session: _ObserverSession | None, logs: Mapping[str, object]) -> None:
+    """Deliver one plain-loop host log mapping in observer order."""
+
+    if session is None:
+        return
+    event = logs.get("event", "event")
+    for index, observer in enumerate(session.observers):
+        session.deliver(
+            index,
+            str(event),
+            lambda observer=observer: observer(logs),
+        )
 
 
 class Experiment(Serializable):
@@ -123,10 +261,17 @@ class Experiment(Serializable):
 
     @_experiment_train_wrapper
     @managed_operation(resumable=True, return_state_ref=True)
-    def train(self, *, managed) -> None:
+    def train(self, *, callbacks=None, observer_strict=False, managed) -> None:
         """Train and evaluate the exact terminal Experiment checkpoint.
 
         Args:
+            callbacks: ``None`` or at most 64 invocation-local telemetry
+                observers. Local calls accept backend-compatible live instances;
+                core Execute calls require :class:`~dryml.core.FactorySpec`
+                entries constructed in the admitted worker.
+            observer_strict: Exact bool. ``False`` warns once per failing observer
+                and continues; ``True`` propagates ordinary observer failures
+                after already accepted training work remains retained.
             managed: Framework-created managed context selecting checkpoint,
                 recovery, history, and Artifact authority.
 
@@ -135,14 +280,18 @@ class Experiment(Serializable):
             this authored body returns ``None``.
 
         Raises:
-            Exception: Propagates training, checkpoint, Artifact, history, and
-                callback failures without reporting a completed training result.
+            Exception: Propagates training, strict telemetry, checkpoint,
+                Artifact, history, and managed-callback failures without reporting
+                a completed training result.
 
         Side Effects:
             Publishes checkpoint-associated ExperimentData rows and independently
             recoverable Artifact states. A resumed pending observation is repaired
             before any further trainer update.
         """
+        callbacks = _freeze_observer_configs(callbacks)
+        if type(observer_strict) is not bool:
+            raise TypeError("Experiment observer_strict must be an exact bool.")
         self._preflight_artifacts()
         if managed.is_resuming and self.state.pending_observation is not None:
             retained = managed.checkpoint_state_ref
@@ -166,15 +315,36 @@ class Experiment(Serializable):
                 return
         if self.state.is_trained:
             return
-        self.state.phase = TrainState.training
+        if callbacks and not getattr(self.train_fn, "supports_observers", False):
+            raise TypeError(
+                f"{type(self.train_fn).__name__} does not support invocation telemetry observers."
+            )
+        observer_session = _ObserverSession.build(
+            callbacks, strict=observer_strict,
+        )
+        training_started = False
         try:
-            callbacks = (self._checkpoint_bridge(managed),) if getattr(
+            if observer_session.observers:
+                self.train_fn._validate_observer_session(observer_session)
+            self.state.phase = TrainState.training
+            training_started = True
+            safe_point_callbacks = (self._checkpoint_bridge(managed),) if getattr(
                 self.train_fn, "supports_safe_points", True
             ) else ()
-            self.train_fn(self, callbacks=callbacks)
+            if observer_session.observers:
+                self.train_fn(
+                    self,
+                    callbacks=safe_point_callbacks,
+                    observer_session=observer_session,
+                )
+            else:
+                self.train_fn(self, callbacks=safe_point_callbacks)
         except Exception:
-            self.state.phase = TrainState.failed
+            if training_started:
+                self.state.phase = TrainState.failed
             raise
+        finally:
+            observer_session.close(suppress=sys.exc_info()[0] is not None)
         if self.state.phase == TrainState.training:
             self.state.phase = TrainState.trained
         self._stage_checkpoint(managed, terminal=True)

@@ -171,6 +171,17 @@ def _update_early_stopping(
     return stopped
 
 
+def _retained_early_stop_completed(state, train_state) -> bool:
+    """Return whether a saved stop decision completed its normalized epoch."""
+
+    return (
+        state.accepted_target is not None
+        and train_state.target_epoch is not None
+        and train_state.pending_epoch_postlude is None
+        and state.accepted_target == train_state.epoch
+    )
+
+
 @dataclass(slots=True)
 class TrainState:
     """Retained optimizer-progress accounting for one Experiment training state.

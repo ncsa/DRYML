@@ -14,9 +14,11 @@ from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
+from dryml.models.experiment import _notify_host_observers
 from dryml.models.progress import TrainingProgress, metric_value
 from dryml.models.train_spec import (
     _EarlyStoppingState,
+    _retained_early_stop_completed,
     _update_early_stopping,
     _validate_early_stopping_config,
 )
@@ -511,12 +513,22 @@ class Training(TrainFunction):
         "shuffle_buffer_size", "x_path", "y_path",
     )
 
-    def __call__(self, exp, *, callbacks=()):
+    supports_observers = True
+
+    def _validate_observer_session(self, observer_session) -> None:
+        """Require host-callable telemetry before retained training starts."""
+
+        observer_session.require_callables("Torch")
+
+    def __call__(self, exp, *, callbacks=(), observer_session=None):
         """Train one Experiment with the PyTorch optimizer loop.
 
         Args:
             exp: Experiment providing model, data, state, and optional
                 optimizer, loss, and metric capabilities.
+            callbacks: Truthful post-update DRYML safe-point callbacks.
+            observer_session: Private Experiment-owned invocation telemetry
+                session, or ``None``.
 
         Returns:
             Per-batch scalar loss values in training order.
@@ -537,6 +549,8 @@ class Training(TrainFunction):
         import torch
 
         callbacks = validate_training_callbacks(callbacks)
+        if observer_session is not None:
+            observer_session.require_callables("Torch")
         loss_fn = self._make_loss(torch, exp)
         _require_mean_torch_loss(loss_fn)
         self._begin_training_preparation_generation()
@@ -576,6 +590,10 @@ class Training(TrainFunction):
         fresh_target = exp.state.target_epoch is None
         initial_step = exp.state.step
         target_epoch = exp.state.begin_invocation(self.epochs)
+        if self._completed_training_behavior_stop(exp):
+            exp.model.prep_eval()
+            exp.state.finish_invocation(target_epoch, accept_shortened=True)
+            return []
         total_steps = None if steps_per_epoch is None else int(steps_per_epoch) * self.epochs
         progress = TrainingProgress(total=total_steps, verbose=self.verbose, desc="Torch training")
 
@@ -601,6 +619,7 @@ class Training(TrainFunction):
                     cursor.skip(resume_batch)
                 try:
                     for x, y in cursor:
+                        batch_index = exp.state.next_batch
                         examples = train_xy.examples_in((x, y))
                         x = _tree_to_torch(x, torch, device=device)
                         y = _tree_to_torch(y, torch, device=device)
@@ -648,6 +667,14 @@ class Training(TrainFunction):
                         step_metrics.update(batch_metrics)
                         step_metrics.update(_metric_results(metrics))
                         progress.update(1, step_metrics)
+                        _notify_host_observers(observer_session, {
+                            "event": "train_batch_end",
+                            "epoch": epoch,
+                            "batch": batch_index,
+                            "step": exp.state.step,
+                            "examples_seen": exp.state.examples_seen,
+                            **step_metrics,
+                        })
                 finally:
                     cursor.close()
 
@@ -673,6 +700,14 @@ class Training(TrainFunction):
                     progress,
                     target_epoch,
                 )
+                _notify_host_observers(observer_session, {
+                    "event": "epoch_end",
+                    "epoch": epoch,
+                    "step": exp.state.step,
+                    "examples_seen": exp.state.examples_seen,
+                    "stopped": stopped,
+                    **epoch_metrics,
+                })
         except BaseException:
             if fresh_target:
                 try:
@@ -841,6 +876,12 @@ class Training(TrainFunction):
         del exp, epoch, metrics
         return False
 
+    def _completed_training_behavior_stop(self, exp) -> bool:
+        """Return whether saved behavior already completed a shortened target."""
+
+        del exp
+        return False
+
     def _evaluate(self, torch, model, val_data, loss_fn, metrics, *, device):
         for metric in metrics:
             _reset_metric(metric)
@@ -928,12 +969,14 @@ class EarlyStoppingTraining(Training, Serializable):
         self.restore_best_weights = restore_best_weights
         self.early_stopping = _EarlyStoppingState()
 
-    def __call__(self, exp, *, callbacks=()):
+    def __call__(self, exp, *, callbacks=(), observer_session=None):
         """Run or resume one retained early-stopping invocation.
 
         Args:
             exp: Experiment providing Torch Model, Datasets, and TrainState.
             callbacks: Truthful post-update DRYML safe-point callbacks.
+            observer_session: Private Experiment-owned invocation telemetry
+                session, or ``None``.
 
         Returns:
             Per-batch losses accepted before the full or shortened target.
@@ -950,7 +993,9 @@ class EarlyStoppingTraining(Training, Serializable):
 
         if exp.state.target_epoch is None:
             self.early_stopping.reset()
-        return super().__call__(exp, callbacks=callbacks)
+        return super().__call__(
+            exp, callbacks=callbacks, observer_session=observer_session,
+        )
 
     def _finish_training_behavior_epoch(self, exp, epoch, metrics):
         def capture():
@@ -971,6 +1016,11 @@ class EarlyStoppingTraining(Training, Serializable):
             restore_best=exp.model.obj.load_state_dict,
             restore_best_weights=self.restore_best_weights,
         )
+
+    def _completed_training_behavior_stop(self, exp) -> bool:
+        """Recognize a retained stop after its normalized postlude completed."""
+
+        return _retained_early_stop_completed(self.early_stopping, exp.state)
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         """Persist the retained decision and detached best Model snapshot.

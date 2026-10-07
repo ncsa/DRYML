@@ -19,6 +19,7 @@ from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress, metric_value
 from dryml.models.train_spec import (
     _EarlyStoppingState,
+    _retained_early_stop_completed,
     _update_early_stopping,
     _validate_early_stopping_config,
 )
@@ -92,6 +93,89 @@ def _finite_metric_logs(logs) -> dict[str, float]:
         if math.isfinite(scalar):
             result[str(name)] = scalar
     return result
+
+
+def _keras_telemetry_callbacks(tf, observer_session):
+    """Wrap invocation-local Keras callbacks with bounded failure handling."""
+
+    if observer_session is None:
+        return ()
+    callback_type = tf.keras.callbacks.Callback
+    if any(not isinstance(observer, callback_type) for observer in observer_session.observers):
+        raise TypeError("Keras telemetry observers must be tf.keras.callbacks.Callback instances.")
+    for observer in observer_session.observers:
+        if _is_known_keras_behavior_callback(tf, observer):
+            raise ValueError(
+                "Keras invocation telemetry rejects known behavior callback "
+                f"{type(observer).__name__}; use a saved training behavior such "
+                "as BasicEarlyStoppingTraining instead."
+            )
+
+    class TelemetryCallback(callback_type):
+        def __init__(self, observer, index):
+            super().__init__()
+            self._observer = observer
+            self._index = index
+
+        def _deliver(self, name, *args, **kwargs):
+            method = getattr(self._observer, name)
+            observer_session.deliver(
+                self._index,
+                name,
+                lambda: method(*args, **kwargs),
+            )
+
+        def set_model(self, model):
+            super().set_model(model)
+            self._deliver("set_model", model)
+
+        def set_params(self, params):
+            super().set_params(params)
+            self._deliver("set_params", params)
+
+    def forward(name):
+        def method(self, *args, **kwargs):
+            self._deliver(name, *args, **kwargs)
+
+        method.__name__ = name
+        return method
+
+    for name in (
+        "on_train_begin", "on_train_end", "on_test_begin", "on_test_end",
+        "on_predict_begin", "on_predict_end", "on_epoch_begin", "on_epoch_end",
+        "on_train_batch_begin", "on_train_batch_end", "on_test_batch_begin",
+        "on_test_batch_end", "on_predict_batch_begin", "on_predict_batch_end",
+        "on_batch_begin", "on_batch_end",
+    ):
+        setattr(TelemetryCallback, name, forward(name))
+
+    return tuple(
+        TelemetryCallback(observer, index)
+        for index, observer in enumerate(observer_session.observers)
+    )
+
+
+def _is_known_keras_behavior_callback(tf, observer) -> bool:
+    """Classify closed built-in callback families that can alter training."""
+
+    names = (
+        "BackupAndRestore",
+        "EarlyStopping",
+        "LearningRateScheduler",
+        "ModelCheckpoint",
+        "ReduceLROnPlateau",
+        "SwapEMAWeights",
+        "TerminateOnNaN",
+    )
+    callback_types = tuple(
+        callback_type
+        for name in names
+        if isinstance(
+            callback_type := getattr(tf.keras.callbacks, name, None),
+            type,
+        )
+    )
+    return isinstance(observer, callback_types)
 
 
 def _collect_trainable_parameters(target, *, repo):
@@ -1033,10 +1117,43 @@ class BasicTraining(TrainFunction):
         "shuffle_buffer_size", "x_path", "y_path",
     )
 
-    def __call__(self, exp, *, callbacks=()):
+    supports_observers = True
+
+    def _validate_observer_session(self, observer_session) -> None:
+        """Reject non-reporting native callbacks before retained training starts."""
+
+        import tensorflow as tf
+
+        _keras_telemetry_callbacks(tf, observer_session)
+
+    def __call__(self, exp, *, callbacks=(), observer_session=None):
+        """Run or resume one native Keras training invocation.
+
+        Args:
+            exp: Experiment providing Keras Model, Dataset, and retained state.
+            callbacks: Truthful post-update DRYML safe-point callbacks.
+            observer_session: Private Experiment-owned invocation telemetry
+                session containing native Keras callbacks, or ``None``.
+
+        Returns:
+            Keras History for the last native segment, or ``None`` when recovery
+            or zero work required no new segment.
+
+        Raises:
+            TypeError: If telemetry observers are not native Keras callbacks.
+            ValueError: If Dataset, accounting, callback-recovery, or retained
+                invocation contracts are incompatible.
+
+        Side Effects:
+            Trains Model/Optimizer state, advances retained Experiment progress,
+            invokes DRYML safe points, and reports native events after DRYML
+            accounting/behavior hooks. It does not retain telemetry observers.
+        """
+
         import tensorflow as tf
 
         callbacks = validate_training_callbacks(callbacks)
+        telemetry_callbacks = _keras_telemetry_callbacks(tf, observer_session)
         fit_kwargs = dict(self.fit_kwargs)
         _require_dataset_owned_keras_fit_inputs(self.fit_args, fit_kwargs)
         native_callbacks = _freeze_native_keras_callbacks(tf, self._callbacks(tf), fit_kwargs)
@@ -1048,6 +1165,7 @@ class BasicTraining(TrainFunction):
                 "Keras DRYML safe-point recovery does not support native callbacks or validation."
             )
         self._validate_training_behavior_data(exp)
+        completed_behavior_stop = self._completed_training_behavior_stop(exp)
         compile_kwargs = self._compile_kwargs(exp)
         _require_supported_keras_accounting(compile_kwargs, fit_kwargs)
         _require_supported_keras_execution(compile_kwargs, _unwrap_backend_obj(self._optimizer(exp)))
@@ -1079,12 +1197,26 @@ class BasicTraining(TrainFunction):
         if compile_kwargs:
             training_model.compile(**compile_kwargs)
             optimizer = self._optimizer(exp)
+            if completed_behavior_stop:
+                training_model(
+                    _keras_inputs_from_spec(tf, train_xy.spec[0]),
+                    training=False,
+                )
+                build = getattr(_unwrap_backend_obj(optimizer), "build", None)
+                if callable(build):
+                    build(training_model.trainable_variables)
             if hasattr(optimizer, "restore_pending"):
                 optimizer.restore_pending()
 
         exp.model.prep_train()
         if hasattr(exp.model, "restore_pending"):
             exp.model.restore_pending()
+        if completed_behavior_stop:
+            exp.model.prep_eval()
+            exp.state.finish_invocation(
+                exp.state.target_epoch, accept_shortened=True,
+            )
+            return None
         fit_kwargs.setdefault("verbose", self.verbose)
         if "steps_per_epoch" not in fit_kwargs:
             steps_per_epoch = finite_dataset_len(train_data)
@@ -1138,6 +1270,7 @@ class BasicTraining(TrainFunction):
                     accounting,
                     *native_callbacks,
                     _keras_postlude_callback(tf, exp, finish_behavior_epoch),
+                    *telemetry_callbacks,
                 ],
                 **segment_kwargs,
             )
@@ -1329,6 +1462,12 @@ class BasicTraining(TrainFunction):
     def _accept_shortened_completion(self) -> bool:
         """Return whether this trainer treats Keras's normal early stop as success."""
 
+        return False
+
+    def _completed_training_behavior_stop(self, exp) -> bool:
+        """Return whether saved behavior already completed a shortened target."""
+
+        del exp
         return False
 
     def _supports_managed_validation(self) -> bool:
@@ -1688,6 +1827,11 @@ class BasicEarlyStoppingTraining(BasicTraining, Serializable):
         """Accept this saved behavior's completed-epoch shortened target."""
 
         return self.early_stopping.accepted_target is not None
+
+    def _completed_training_behavior_stop(self, exp) -> bool:
+        """Recognize a retained stop after its normalized postlude completed."""
+
+        return _retained_early_stop_completed(self.early_stopping, exp.state)
 
     def _supports_managed_validation(self) -> bool:
         """Allow only this DRYML-owned behavior through managed validation."""

@@ -242,6 +242,63 @@ and its supported validation postlude no longer reject
 `BasicEarlyStoppingTraining`. This does not make arbitrary saved native Keras
 callbacks replayable. Invocation telemetry remains a separate concern.
 
+### Invocation Telemetry
+
+`Experiment.train(callbacks=None, observer_strict=False, managed=None)` accepts a
+bounded collection of reporting-only observers for that invocation. This is a
+separate lane from `ManagedConfig.callbacks`: managed callbacks run strictly after
+a durable checkpoint has been published and associated, while training telemetry
+observes native training events and is not a checkpoint, Artifact, history row, or
+completion authority.
+
+Keras `BasicTraining` and `BasicEarlyStoppingTraining` accept local
+`tf.keras.callbacks.Callback` instances and deliver the ordinary native callback
+methods with Keras's native log mappings. DRYML accounting and saved behavior hooks
+run before invocation telemetry at their truthful native boundaries. Native
+callbacks saved on a Keras trainer remain behavior-capable configuration and still
+have the existing managed-replay restrictions; they are not silently reclassified
+as recoverable telemetry. Callers must supply reporting-only invocation callbacks.
+DRYML rejects known built-in behavior controls, including Keras early stopping,
+learning-rate scheduling, termination, checkpoint, backup, and EMA-swap callbacks;
+`BasicEarlyStoppingTraining` remains the supported saved early-stop lane. This
+closed classification is not a semantic sandbox and cannot prove that an arbitrary
+custom callback is reporting-only.
+
+Torch and experimental JAX training use a smaller host-side contract because their
+DRYML-owned loops have no universal native callback protocol. Each observer is a
+callable receiving one mapping. `event` is `train_batch_end` or `epoch_end`;
+accepted-update mappings include zero-based `epoch` and `batch`, retained `step`
+and `examples_seen`, and host scalar `loss`/available metrics. Epoch mappings carry
+the completed epoch position, metrics, and `stopped` decision. Delivery occurs
+outside backward/JIT and only after the accepted update, coordinated owner state,
+DRYML safe-point hooks, and progress reporting are truthful. Pending-postlude
+recovery does not replay a missed external event.
+
+Local calls may supply live backend-compatible instances. Core Execute calls must
+instead supply only `F(...)`/`FactorySpec(...)` entries; the admitted worker builds
+fresh observer instances from that configuration. A live callback/client is
+rejected by Execute capture before worker training. Factory configuration is
+transported for the invocation only and is never inserted into the Experiment or
+TrainFunction definition, checkpoint, early-stopping state, or managed ordinary-
+argument digest. Changing or omitting observers, or changing `observer_strict`, on
+a compatible unfinished invocation therefore retains the same managed attempt and
+accepted update position. Factory values should identify how the worker constructs
+the observer; credentials and live service clients belong in its selected runtime,
+not in the configuration.
+
+An ordinary observer `Exception` emits one bounded `RuntimeWarning` per observer
+and training continues by default. `observer_strict=True` propagates the original
+failure after any already accepted update and checkpoint remain authoritative; it
+does not report terminal completion or roll work back. Interruption and cancellation
+are never downgraded to telemetry warnings. At most 64 observers are accepted, no
+background delivery queue is created, and an observer's optional `close()` is
+called once in reverse construction order after normal completion, managed early
+stop, failure, or interruption. Cleanup never masks an already escaping workload
+failure. External events remain best-effort and nonauthoritative: worker loss can
+drop or duplicate them, and DRYML does not inspect a callback to prove it is
+reporting-only. Mutation, early stopping, scheduling, or other training behavior
+must use a saved behavior integration instead.
+
 ### Dataset-Owned Training Input
 
 Supplied trainers consume one canonical Dataset yielding `(inputs, targets)`.
@@ -458,10 +515,11 @@ progress state before it propagates. Resume reopens the same logical Dataset epo
 and skips only accepted yielded batches; a seed-aware `GeneratorDataset` under
 `Take` therefore retains its selected epoch seed while resuming. Validation is
 snapshot-only: candidate mutable state and RNG are always discarded. JAX Training
-does not yet support general trainer metrics, invocation telemetry, or arbitrary
-native callbacks. Its saved `EarlyStoppingTraining` specialization supports only
-completed training/validation loss facts under the managed contract above; no
-broader callback or metric API is implied.
+does not yet support general trainer metrics or arbitrary native callbacks. Its
+invocation telemetry is limited to the host-side mapping contract above. Its
+saved `EarlyStoppingTraining` specialization supports only completed
+training/validation loss facts under the managed contract above; no broader
+callback or metric API is implied.
 
 Every JAX owner writes a versioned host-array envelope and validates its complete
 runtime topology, path structure, shared-leaf topology, dtype, shape, typed-key

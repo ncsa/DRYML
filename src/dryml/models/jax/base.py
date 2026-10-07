@@ -20,9 +20,11 @@ from dryml.core.utils.stable_hash import stable_hash_function
 from dryml.methods import ImplementationSelectionError, traits
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
+from dryml.models.experiment import _notify_host_observers
 from dryml.models.progress import TrainingProgress
 from dryml.models.train_spec import (
     _EarlyStoppingState,
+    _retained_early_stop_completed,
     _update_early_stopping,
     _validate_early_stopping_config,
 )
@@ -773,7 +775,14 @@ class Training(TrainFunction):
         self.training_preparation = None
         self.validation_preparation = None
 
-    def __call__(self, exp, *, callbacks=()):
+    supports_observers = True
+
+    def _validate_observer_session(self, observer_session) -> None:
+        """Require host-callable telemetry before retained training starts."""
+
+        observer_session.require_callables("JAX")
+
+    def __call__(self, exp, *, callbacks=(), observer_session=None):
         """Train one Experiment and retain only accepted JAX updates.
 
         Args:
@@ -781,6 +790,8 @@ class Training(TrainFunction):
                 training/validation Datasets, and retained TrainState.
             callbacks: Zero-argument safe-point callbacks invoked after each
                 committed update and any completed-epoch normalization.
+            observer_session: Private Experiment-owned invocation telemetry
+                session, or ``None``.
 
         Returns:
             Scalar accepted training losses in invocation order.
@@ -797,6 +808,8 @@ class Training(TrainFunction):
         """
 
         callbacks = validate_training_callbacks(callbacks)
+        if observer_session is not None:
+            observer_session.require_callables("JAX")
         if not isinstance(exp.model, Model):
             raise TypeError("JAX Training requires an experimental functional or NNX JAX Model.")
         train_data = exp.train_data
@@ -847,6 +860,11 @@ class Training(TrainFunction):
                 "Experimental JAX Training requires Optax; install the optional JAX training dependencies."
             ) from error
         transformation = self.optimizer.bind(exp.model)
+        if self._completed_training_behavior_stop(exp):
+            exp.state.finish_invocation(
+                exp.state.target_epoch, accept_shortened=True,
+            )
+            return []
         from dryml.jax.training_data import iter_training_batches
 
         update = self._native_update(jax, optax, exp.model, transformation, loss_fn)
@@ -875,6 +893,7 @@ class Training(TrainFunction):
                 epoch_steps = 0
                 try:
                     for x, y in cursor:
+                        batch_index = exp.state.next_batch
                         examples = train_data.examples_in((x, y))
                         candidate = update(
                             exp.model.parameters,
@@ -912,6 +931,14 @@ class Training(TrainFunction):
                         epoch_steps += 1
                         steps += 1
                         progress.update(1, {"loss": loss_float})
+                        _notify_host_observers(observer_session, {
+                            "event": "train_batch_end",
+                            "epoch": epoch,
+                            "batch": batch_index,
+                            "step": exp.state.step,
+                            "examples_seen": exp.state.examples_seen,
+                            "loss": loss_float,
+                        })
                 finally:
                     cursor.close()
                 if epoch_steps == 0 and resume_batch == 0:
@@ -920,6 +947,14 @@ class Training(TrainFunction):
                 stopped = self._finish_epoch(
                     jax, exp, epoch, epoch_metrics, prepared_val, loss_fn, progress, target_epoch,
                 )
+                _notify_host_observers(observer_session, {
+                    "event": "epoch_end",
+                    "epoch": epoch,
+                    "step": exp.state.step,
+                    "examples_seen": exp.state.examples_seen,
+                    "stopped": stopped,
+                    **epoch_metrics,
+                })
         except BaseException:
             if fresh_target:
                 try:
@@ -1113,6 +1148,12 @@ class Training(TrainFunction):
         del jax, exp, epoch, metrics
         return False
 
+    def _completed_training_behavior_stop(self, exp) -> bool:
+        """Return whether saved behavior already completed a shortened target."""
+
+        del exp
+        return False
+
     def _evaluate(self, jax, model, data, loss_fn):
         """Evaluate snapshot candidates without retaining model mutable state or RNG."""
 
@@ -1189,12 +1230,14 @@ class EarlyStoppingTraining(Training):
         self.early_stopping = _EarlyStoppingState()
         self._pending_best_model_payload = None
 
-    def __call__(self, exp, *, callbacks=()):
+    def __call__(self, exp, *, callbacks=(), observer_session=None):
         """Run or resume one retained early-stopping invocation.
 
         Args:
             exp: Experiment providing JAX Model, Datasets, and TrainState.
             callbacks: Truthful post-update DRYML safe-point callbacks.
+            observer_session: Private Experiment-owned invocation telemetry
+                session, or ``None``.
 
         Returns:
             Per-batch losses accepted before the full or shortened target.
@@ -1224,7 +1267,9 @@ class EarlyStoppingTraining(Training):
             raise ValueError(
                 f"Early-stopping monitor {self.monitor!r} requires validation data."
             )
-        return super().__call__(exp, callbacks=callbacks)
+        return super().__call__(
+            exp, callbacks=callbacks, observer_session=observer_session,
+        )
 
     def _finish_training_behavior_epoch(self, jax, exp, epoch, metrics):
         def capture():
@@ -1256,6 +1301,11 @@ class EarlyStoppingTraining(Training):
             restore_best=restore,
             restore_best_weights=self.restore_best_weights,
         )
+
+    def _completed_training_behavior_stop(self, exp) -> bool:
+        """Recognize a retained stop after its normalized postlude completed."""
+
+        return _retained_early_stop_completed(self.early_stopping, exp.state)
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         """Persist decision metadata and the optional best Model-state tree.

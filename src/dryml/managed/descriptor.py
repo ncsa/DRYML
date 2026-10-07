@@ -105,6 +105,7 @@ class ManagedOperation:
         self._resumable = resumable
         self._return_state_ref = return_state_ref
         self._store_parameter = store_parameter
+        self._invocation_parameters: dict[str, str] = {}
         self._author_signature = _native_signature(authored)
         parameters = tuple(self._author_signature.parameters.values())
         if not parameters or parameters[0].kind not in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
@@ -217,8 +218,87 @@ class ManagedOperation:
             raise ManagedConfigError(message="managed arguments do not bind") from error
         return BoundArguments(
             (name, value) for name, value in bound.arguments.items()
-            if name not in {self._instance_parameter, "managed", self._store_parameter}
+            if name not in {
+                self._instance_parameter,
+                "managed",
+                self._store_parameter,
+                *self._invocation_parameters,
+            }
         )
+
+    def _declare_invocation_parameters(self, **policies: str) -> None:
+        """Declare private invocation-only controls excluded from resume identity.
+
+        This is a framework-internal seam for narrowly owned controls such as
+        Experiment telemetry. It is intentionally absent from
+        :func:`managed_operation` so ordinary managed declarations cannot exempt
+        behavior-changing arguments from compatibility checks.
+
+        Args:
+            **policies: Keyword-only authored parameter names mapped to closed
+                transport policy names understood by core Execute.
+
+        Raises:
+            ManagedDeclarationError: If a name, policy, or parameter shape is
+                unsupported.
+
+        Side Effects:
+            Records declaration metadata before class binding. It does not bind,
+            digest, transport, or invoke any supplied value.
+        """
+
+        if self._member is not None or self._invocation_parameters:
+            raise ManagedDeclarationError(
+                message="managed invocation parameters must be declared once before class binding"
+            )
+        for name, policy in policies.items():
+            parameter = self._author_signature.parameters.get(name)
+            if (
+                type(name) is not str
+                or policy not in {"observer_factories", "observer_strict"}
+                or parameter is None
+                or parameter.kind is not inspect.Parameter.KEYWORD_ONLY
+                or name in {self._instance_parameter, "managed", self._store_parameter}
+            ):
+                raise ManagedDeclarationError(
+                    message="managed invocation parameter declaration is invalid"
+                )
+        self._invocation_parameters = dict(policies)
+
+    def bind_invocation_parameters(
+        self,
+        instance: object,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> dict[str, object]:
+        """Bind private invocation-only controls without adding resume identity.
+
+        Args:
+            instance: Bound managed receiver.
+            args: Caller positional arguments.
+            kwargs: Caller keyword arguments without the injected context.
+
+        Returns:
+            A fresh parameter mapping in authored order.
+
+        Raises:
+            ManagedConfigError: If the authored signature cannot bind the call.
+
+        Side Effects:
+            None. Values remain invocation-local and are not normalized or
+            digested; an outer execution backend may transport them under their
+            closed declaration policy.
+        """
+
+        try:
+            bound = self._author_signature.bind(instance, *args, managed=None, **kwargs)
+            bound.apply_defaults()
+        except TypeError as error:
+            raise ManagedConfigError(message="managed arguments do not bind") from error
+        return {
+            name: bound.arguments[name]
+            for name in self._invocation_parameters
+        }
 
     def bind_store_parameter(self, instance: object, args: tuple[object, ...],
                              kwargs: dict[str, object]) -> object:
@@ -261,7 +341,10 @@ class ManagedOperation:
             parameters = tuple(
                 parameter for parameter in self._author_signature.parameters.values()
                 if parameter.name not in {
-                    self._instance_parameter, "managed", self._store_parameter,
+                    self._instance_parameter,
+                    "managed",
+                    self._store_parameter,
+                    *self._invocation_parameters,
                 }
             )
 
@@ -272,7 +355,10 @@ class ManagedOperation:
             boundary_target.__annotations__ = {
                 name: annotation for name, annotation in self._target.__annotations__.items()
                 if name not in {
-                    self._instance_parameter, "managed", self._store_parameter,
+                    self._instance_parameter,
+                    "managed",
+                    self._store_parameter,
+                    *self._invocation_parameters,
                 }
             }
             plan = compile_signature(boundary_target, annotation_namespace=self._target.__globals__)
@@ -690,9 +776,12 @@ def _compatible_wrapper_signature(wrapper: types.FunctionType,
 
 def _invoke_target(descriptor: ManagedOperation, instance: object,
                    args: tuple[object, ...], context: object,
-                   kwargs: dict[str, object], store: object = None) -> object:
+                   kwargs: dict[str, object], store: object = None,
+                   invocation_parameters: dict[str, object] | None = None) -> object:
     """Invoke the retained executable chain with any exact one-shot handoff."""
 
+    if invocation_parameters:
+        kwargs = {**kwargs, **invocation_parameters}
     if descriptor.store_parameter is not None:
         kwargs = {**kwargs, descriptor.store_parameter: store}
     if descriptor._function_handoff_owner is None:

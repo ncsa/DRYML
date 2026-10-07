@@ -46,13 +46,19 @@ def _adam_factory():
     return optax.adam(0.1)
 
 
+def _zero_adam_factory():
+    import optax
+
+    return optax.adam(0.0)
+
+
 def _mse(predictions, targets):
     import jax
 
     return jax.numpy.mean((predictions - targets) ** 2)
 
 
-def _experiment(*, restore_best_weights=False):
+def _experiment(*, restore_best_weights=False, optimizer_factory=_zero_sgd_factory):
     from dryml.models.jax import EarlyStoppingTraining, Model, Optimizer
 
     model = Model(
@@ -61,7 +67,7 @@ def _experiment(*, restore_best_weights=False):
         output_spec=TensorSpec("float32", shape=(1,), backend="jax"),
     )
     trainer = EarlyStoppingTraining(
-        optimizer=Optimizer(F(_zero_sgd_factory)),
+        optimizer=Optimizer(F(optimizer_factory)),
         loss=_mse,
         epochs=5,
         monitor="loss",
@@ -105,12 +111,16 @@ def test_jax_early_stopping_rejects_invalid_configuration(kwargs, error):
         )
 
 
-def test_jax_early_stopping_accepts_shortened_target_and_keeps_stop_state():
+def test_jax_early_stopping_accepts_shortened_target_and_keeps_stop_state(tmp_path):
     pytest.importorskip("jax")
     pytest.importorskip("optax")
 
     exp = _experiment()
-    exp.train_fn(exp)
+    events = []
+    exp.train(
+        callbacks=[lambda logs: events.append(dict(logs))],
+        managed=ManagedConfig(state_repo=Repo(DirStore(tmp_path / "store"))),
+    )
 
     assert exp.state.epoch == 2
     assert exp.state.target_epoch is None
@@ -118,6 +128,61 @@ def test_jax_early_stopping_accepts_shortened_target_and_keeps_stop_state():
     assert exp.train_fn.early_stopping.wait == 1
     assert exp.train_fn.early_stopping.accepted_target == 2
     assert exp.state.step == 4
+    assert [
+        event["stopped"] for event in events
+        if event["event"] == "epoch_end"
+    ] == [False, True]
+
+
+def test_jax_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
+    """A persisted completed stop retains JAX slots/RNG while finalizing."""
+
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("optax")
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    failed_control = DirStore(tmp_path / "failed-control")
+    resume_control = DirStore(tmp_path / "resume-control")
+    exp = _experiment(
+        restore_best_weights=True,
+        optimizer_factory=_zero_adam_factory,
+    )
+
+    def fail_stopped_epoch(logs):
+        if logs["event"] == "epoch_end" and logs["stopped"]:
+            raise RuntimeError("strict stopped epoch")
+
+    with pytest.raises(RuntimeError, match="strict stopped epoch"):
+        exp.train(
+            callbacks=[fail_stopped_epoch],
+            observer_strict=True,
+            managed=ManagedConfig(
+                state_repo=repo, control_store=failed_control,
+            ),
+        )
+
+    assert (exp.state.epoch, exp.state.step, exp.state.target_epoch) == (2, 4, 5)
+    assert exp.state.pending_epoch_postlude is None
+    assert exp.train_fn.early_stopping.accepted_target == 2
+    assert exp.train_fn.early_stopping.restored is True
+    stopped_parameters = np.asarray(exp.model.parameters["weight"]).copy()
+    stopped_rng = np.asarray(jax.random.key_data(exp.model.rng)).copy()
+    stopped_optimizer_count = int(np.asarray(exp.train_fn.optimizer.state[0].count))
+    checkpoint = repo.save_object(exp, deep_capture=True)
+    resumed = repo.load_state_ref(checkpoint, reuse_live="never")
+
+    final = resumed.train(managed=ManagedConfig(
+        state_repo=repo, control_store=resume_control,
+    ))
+    status = resumed.train.status(
+        state_repo=repo, control_store=resume_control,
+    )
+
+    assert final == status.final_state_ref == resumed.last_state_ref
+    assert (resumed.state.epoch, resumed.state.step, resumed.state.target_epoch) == (2, 4, None)
+    np.testing.assert_array_equal(resumed.model.parameters["weight"], stopped_parameters)
+    np.testing.assert_array_equal(jax.random.key_data(resumed.model.rng), stopped_rng)
+    assert int(np.asarray(resumed.train_fn.optimizer.state[0].count)) == stopped_optimizer_count
 
 
 def test_jax_early_stopping_progress_retry_does_not_repeat_decision(monkeypatch, tmp_path):

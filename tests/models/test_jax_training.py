@@ -293,6 +293,30 @@ def test_jax_training_learns_and_accounts_for_a_short_final_batch():
     assert float(np.asarray(exp.model.parameters["weight"])[0, 0]) > 0.0
 
 
+def test_jax_invocation_telemetry_receives_host_logs_after_commits(tmp_path):
+    """JAX observers run outside JIT with committed positions and host scalars."""
+
+    pytest.importorskip("jax")
+    pytest.importorskip("optax")
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    exp = _experiment(repo=repo)
+    logs = []
+
+    final = exp.train(
+        callbacks=[lambda values: logs.append(dict(values))],
+        managed=ManagedConfig(state_repo=repo),
+    )
+
+    assert [values["event"] for values in logs] == [
+        "train_batch_end", "train_batch_end", "train_batch_end", "epoch_end",
+    ]
+    assert [values["step"] for values in logs] == [1, 2, 3, 3]
+    assert [values["batch"] for values in logs[:3]] == [0, 1, 2]
+    assert all(type(values["loss"]) is float for values in logs)
+    assert exp.train.status(state_repo=repo).final_state_ref == final
+
+
 def test_jax_training_executes_one_model_apply_per_accepted_update(monkeypatch):
     """The traced transition has no eager preflight apply in addition to an update."""
     pytest.importorskip("jax")

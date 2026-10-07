@@ -3,6 +3,7 @@ import pytest
 import sys
 
 from dryml import F
+from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Batch, Map, Pipe, Project, Select
 from dryml.core import Repo
@@ -63,6 +64,41 @@ def test_torch_basic_training_updates_experiment_state():
     assert optimizer.obj is not None
     assert optimizer.obj.param_groups[0]["lr"] == 0.01
     assert get_default_repo() is None
+
+
+def test_torch_invocation_telemetry_receives_host_logs_after_accounting(tmp_path):
+    """Plain-loop observers see accepted positions and host scalar logs only."""
+
+    from dryml.models.torch import Model, Optimizer, Training
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.array([[0.0], [1.0]], dtype=np.float32),
+        np.array([[0.0], [2.0]], dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    model = Model(torch.nn.Linear, 1, 1, repo=repo)
+    trainer = Training(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.01, repo=repo),
+        loss_cls=torch.nn.MSELoss,
+        epochs=1,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(model, trainer, train_data=data, repo=repo)
+    logs = []
+
+    final = exp.train(
+        callbacks=[lambda values: logs.append(dict(values))],
+        managed=ManagedConfig(state_repo=repo),
+    )
+
+    assert [values["event"] for values in logs] == [
+        "train_batch_end", "train_batch_end", "epoch_end",
+    ]
+    assert [values["step"] for values in logs] == [1, 2, 2]
+    assert [values["batch"] for values in logs[:2]] == [0, 1]
+    assert all(type(values["loss"]) is float for values in logs)
+    assert exp.train.status(state_repo=repo).final_state_ref == final
 
 
 def test_torch_model_and_optimizer_state_ref_round_trip(tmp_path):
@@ -728,6 +764,119 @@ def test_torch_early_stopping_accepts_shortened_target_and_retains_decision():
     assert trainer.early_stopping.best_epoch == 0
     assert trainer.early_stopping.wait == 1
     assert trainer.early_stopping.accepted_target == 2
+
+
+def test_torch_early_stopping_reports_stop_then_closes_telemetry(tmp_path):
+    """Saved stop behavior remains separate from invocation observer cleanup."""
+
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    model = Model(torch.nn.Linear, 1, 1, repo=repo)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0, repo=repo),
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        restore_best_weights=False,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(model, trainer, train_data=data, repo=repo)
+    events = []
+
+    class Observer:
+        def __call__(self, logs):
+            events.append(dict(logs))
+
+        def close(self):
+            events.append("closed")
+
+    exp.train(
+        callbacks=[Observer()],
+        managed=ManagedConfig(state_repo=repo),
+    )
+
+    epoch_events = [
+        event for event in events
+        if isinstance(event, dict) and event["event"] == "epoch_end"
+    ]
+    assert [event["stopped"] for event in epoch_events] == [False, True]
+    assert events[-1] == "closed"
+    assert trainer.early_stopping.accepted_target == 2
+
+
+def test_torch_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
+    """A persisted completed stop finalizes without reopening training data."""
+
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    failed_control = DirStore(tmp_path / "failed-control")
+    resume_control = DirStore(tmp_path / "resume-control")
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    model = Model(torch.nn.Linear, 1, 1, repo=repo)
+    optimizer = Optimizer(torch.optim.Adam, target=model, lr=0.0, repo=repo)
+    trainer = EarlyStoppingTraining(
+        optimizer=optimizer,
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(model, trainer, train_data=data, repo=repo)
+
+    def fail_stopped_epoch(logs):
+        if logs["event"] == "epoch_end" and logs["stopped"]:
+            raise RuntimeError("strict stopped epoch")
+
+    with pytest.raises(RuntimeError, match="strict stopped epoch"):
+        exp.train(
+            callbacks=[fail_stopped_epoch],
+            observer_strict=True,
+            managed=ManagedConfig(
+                state_repo=repo, control_store=failed_control,
+            ),
+        )
+
+    assert (exp.state.epoch, exp.state.step, exp.state.target_epoch) == (2, 4, 5)
+    assert exp.state.pending_epoch_postlude is None
+    assert trainer.early_stopping.accepted_target == 2
+    assert trainer.early_stopping.restored is True
+    stopped_model = {
+        name: value.detach().clone() for name, value in model.obj.state_dict().items()
+    }
+    stopped_optimizer_steps = [
+        int(state["step"].item()) for state in optimizer.obj.state.values()
+    ]
+    checkpoint = repo.save_object(exp, deep_capture=True)
+    resumed = repo.load_state_ref(checkpoint, reuse_live="never")
+
+    final = resumed.train(managed=ManagedConfig(
+        state_repo=repo, control_store=resume_control,
+    ))
+    status = resumed.train.status(
+        state_repo=repo, control_store=resume_control,
+    )
+
+    assert final == status.final_state_ref == resumed.last_state_ref
+    assert (resumed.state.epoch, resumed.state.step, resumed.state.target_epoch) == (2, 4, None)
+    torch.testing.assert_close(resumed.model.obj.state_dict(), stopped_model)
+    assert [
+        int(state["step"].item())
+        for state in resumed.train_fn.optimizer.obj.state.values()
+    ] == stopped_optimizer_steps
 
 
 def test_torch_early_stopping_completes_full_target_before_patience():
