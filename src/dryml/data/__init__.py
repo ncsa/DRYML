@@ -23,6 +23,7 @@ from dryml.data.util import (
     collect_xy,
     collate_xy,
     iter_xy,
+    as_supervised,
 )
 
 
@@ -56,6 +57,7 @@ __all__ = [
     "collect_xy",
     "collate_xy",
     "Collect",
+    "as_supervised",
     "Abs",
     "ArrayMean",
     "ArrayQuantile",

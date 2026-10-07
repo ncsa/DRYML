@@ -15,6 +15,72 @@ def _xy_dataset(dataset, *, x_path=0, y_path=1):
     return Map(dataset, Project(Select(x_path), Select(y_path)))
 
 
+def as_supervised(dataset, inputs, targets=None, *, input_as_target: bool = False):
+    """Return a persisted Dataset graph yielding canonical ``(inputs, targets)`` pairs.
+
+    Args:
+        dataset: Source Dataset with a declared element specification.
+        inputs: One scalar path, :class:`Select`, or nonempty tree of explicit
+            ``Select`` leaves describing model inputs.
+        targets: Matching target selection. It is required unless
+            ``input_as_target`` is true.
+        input_as_target: Reuse the selected input object as the target for an
+            autoencoder-style Dataset without copying or backend conversion.
+
+    Returns:
+        An ordinary :class:`~dryml.data.dataset.Map` Dataset whose values are
+        ``(inputs, targets)`` and whose Method tree is persisted with the graph.
+
+    Raises:
+        TypeError: If ``dataset`` is not a Dataset or a selection tree is malformed.
+        ValueError: If a selection tree is empty or targets conflict with
+            ``input_as_target``.
+
+    Side Effects:
+        None. This helper does not open the Dataset, copy values, select a backend,
+        or add batching.
+    """
+
+    from dryml.data.dataset import Dataset, Map
+
+    if not isinstance(dataset, Dataset):
+        raise TypeError("as_supervised requires a Dataset.")
+    if type(input_as_target) is not bool:
+        raise TypeError("input_as_target must be an exact bool.")
+    input_method = _selection_method(inputs)
+    if input_as_target:
+        if targets is not None:
+            raise ValueError("input_as_target does not accept an explicit target selection.")
+        target_method = input_method
+    else:
+        if targets is None:
+            raise ValueError("as_supervised requires targets unless input_as_target is true.")
+        target_method = _selection_method(targets)
+    return Map(dataset, Project(input_method, target_method), preserves_examples=True)
+
+
+def _selection_method(selection, *, tree_leaf: bool = False):
+    """Build one Project-compatible Method tree while rejecting tuple/list ambiguity."""
+
+    if isinstance(selection, Select):
+        return selection
+    if isinstance(selection, (str, int)):
+        if tree_leaf:
+            raise TypeError("Selection trees require Select.from_path leaves.")
+        return Select.from_path((selection,))
+    if isinstance(selection, dict):
+        if not selection:
+            raise ValueError("Selection trees must not be empty.")
+        return Project({key: _selection_method(branch, tree_leaf=True) for key, branch in selection.items()})
+    if isinstance(selection, (tuple, list)):
+        if not selection:
+            raise ValueError("Selection trees must not be empty.")
+        if any(not isinstance(branch, Select) for branch in selection):
+            raise TypeError("Ambiguous tuple/list selections require Select.from_path leaves.")
+        return Project(type(selection)(_selection_method(branch, tree_leaf=True) for branch in selection))
+    raise TypeError("Selections must be a scalar path, Select, or tree of Select leaves.")
+
+
 def iter_xy(dataset, *, x_path=0, y_path=1):
     yield from _xy_dataset(dataset, x_path=x_path, y_path=y_path)
 

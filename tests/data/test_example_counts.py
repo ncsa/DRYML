@@ -1,12 +1,14 @@
 import subprocess
 import sys
+import json
 
 import numpy as np
 import pytest
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import Dynamic, TensorSpec
-from dryml.data import Batch, Dataset, Take
+from dryml.data import Batch, Chain, Dataset, GeneratorDataset, Map, Repeat, Select, Shuffle, Skip, Take, Unbatch, Zip
+from dryml.methods import Method
 
 
 class DeclaredDataset(Dataset):
@@ -28,6 +30,16 @@ class DeclaredDataset(Dataset):
 
 def _spec(*, batch=None):
     return TensorSpec("float32", shape=(2,), batch=batch, backend="numpy")
+
+
+def dynamic_batches_factory():
+    return iter((np.ones((3, 2), dtype=np.float32), np.ones((2, 2), dtype=np.float32)))
+
+
+def seeded_values_factory(*, seed):
+    generator = np.random.default_rng(seed)
+    while True:
+        yield int(generator.integers(0, 2**31))
 
 
 @pytest.mark.parametrize(
@@ -183,3 +195,158 @@ def test_take_does_not_truncate_values_to_a_descriptive_source_total():
     source = DeclaredDataset((1, 2, 3), _spec(), Cardinality.finite(1))
 
     assert list(Take(source, 3)) == [1, 2, 3]
+
+
+def test_structural_nodes_propagate_proved_example_counts_without_iteration():
+    source = DeclaredDataset(
+        tuple(np.full((2,), value, dtype=np.float32) for value in range(5)),
+        _spec(),
+        Cardinality.finite(5),
+    )
+    batches = Batch(source, 2)
+
+    assert batches.example_cardinality() == Cardinality.finite(5)
+    assert Batch(source, 2, drop_remainder=True).example_cardinality() == Cardinality.finite(4)
+    assert Unbatch(batches).yield_cardinality() == Cardinality.finite(5)
+    assert Unbatch(batches).example_cardinality() == Cardinality.finite(5)
+    assert Take(batches, 2).example_cardinality() == Cardinality.finite(4)
+    assert Skip(Take(batches, 2), 1).example_cardinality() == Cardinality.finite(2)
+    assert Skip(batches, 2).example_cardinality() == Cardinality.finite(1)
+    assert source.opens == 0
+
+
+def test_shuffle_keeps_total_examples_but_invalidates_prefix_facts_without_iteration():
+    source = DeclaredDataset(
+        tuple(np.full((2,), value, dtype=np.float32) for value in range(6)),
+        _spec(),
+        Cardinality.finite(6),
+    )
+    shuffled = Shuffle(Batch(source, 2), 2, seed=4)
+
+    assert shuffled.example_cardinality() == Cardinality.finite(6)
+    assert Take(shuffled, 2).example_cardinality() == Cardinality.UNKNOWN
+    assert source.opens == 0
+
+
+def test_map_requires_explicit_checked_example_preservation_declaration():
+    source = DeclaredDataset(
+        (np.ones((2,), dtype=np.float32),), _spec(), Cardinality.finite(1),
+    )
+
+    assert Map(source, Select()).example_cardinality() == Cardinality.UNKNOWN
+    preserved = Map(source, Select(), preserves_examples=True)
+    assert preserved.example_cardinality() == Cardinality.finite(1)
+    assert [item.tolist() for item in preserved] == [[1.0, 1.0]]
+
+    class DropOne(Method):
+        def __call__(self, value):
+            return value[:-1]
+
+        def infer_output_spec(self, input_spec):
+            return input_spec
+
+    batched = DeclaredDataset(
+        (np.ones((2, 2), dtype=np.float32),), _spec(batch=Dynamic), Cardinality.finite(1),
+    )
+    invalid = Map(batched, DropOne(), preserves_examples=True)
+    with pytest.raises(ValueError, match="preserves_examples"):
+        list(invalid)
+    graph = invalid.method_graph()
+    graph.learn()
+    with pytest.raises(ValueError, match="preserves_examples"):
+        list(graph.iterator())
+
+
+def test_opaque_dynamic_generator_can_declare_its_total_examples_without_reading():
+    dataset = GeneratorDataset(
+        dynamic_batches_factory,
+        cardinality=Cardinality.finite(2),
+        example_count=Cardinality.finite(5),
+        spec=_spec(batch=Dynamic),
+    )
+
+    assert dataset.example_cardinality() == Cardinality.finite(5)
+    assert Take(dataset, 1).example_cardinality() == Cardinality.UNKNOWN
+
+
+def test_generator_example_count_rejects_provable_and_observed_conflicts():
+    declared_conflict = GeneratorDataset(
+        dynamic_batches_factory,
+        cardinality=Cardinality.finite(2),
+        example_count=Cardinality.finite(4),
+        spec=_spec(batch=3),
+    )
+    observed_conflict = GeneratorDataset(
+        dynamic_batches_factory,
+        cardinality=Cardinality.finite(2),
+        example_count=Cardinality.finite(4),
+        spec=_spec(batch=Dynamic),
+    )
+
+    with pytest.raises(ValueError, match="conflicts"):
+        declared_conflict.example_cardinality()
+    with pytest.raises(ValueError, match="observed"):
+        list(observed_conflict)
+
+
+def test_zip_proves_only_aligned_examples_and_an_empty_input_proves_zero():
+    left = DeclaredDataset((np.ones((2,), dtype=np.float32),) * 2, _spec(), Cardinality.finite(2))
+    right = DeclaredDataset((np.ones((2,), dtype=np.float32),) * 3, _spec(), Cardinality.finite(3))
+    unknown = DeclaredDataset((), _spec(), Cardinality.UNKNOWN)
+    empty = DeclaredDataset((), _spec(), Cardinality.finite(0))
+
+    assert Zip(left, right).example_cardinality() == Cardinality.UNKNOWN
+    assert Zip(unknown, empty).yield_cardinality() == Cardinality.finite(0)
+    assert Zip(unknown, empty).example_cardinality() == Cardinality.finite(0)
+
+
+def test_chain_sums_compatible_example_totals():
+    left = DeclaredDataset((np.ones((2,), dtype=np.float32),) * 2, _spec(), Cardinality.finite(2))
+    right = DeclaredDataset((np.ones((2,), dtype=np.float32),) * 3, _spec(), Cardinality.finite(3))
+
+    assert Chain(left, right).example_cardinality() == Cardinality.finite(5)
+
+
+def test_infinite_repeat_of_empty_source_terminates_after_one_acquisition():
+    source = DeclaredDataset((), _spec(), Cardinality.finite(0))
+
+    assert list(Repeat(source)) == []
+    assert source.opens == 1
+
+
+def test_seed_aware_generator_epochs_are_direct_reproducible_and_optionally_fixed():
+    source = GeneratorDataset(
+        seeded_values_factory,
+        cardinality=Cardinality.INFINITE,
+        spec=TensorSpec("int64", shape=()),
+        seed=37,
+        seed_aware=True,
+    )
+
+    epoch_two = [*Take(source, 3, epoch=2)]
+    assert epoch_two == [*Take(source, 3, epoch=2)]
+    repeated = [*Take(Repeat(Take(source, 2)), 4)]
+    fixed = [*Take(Repeat(Take(source, 2, fixed_prefix=True)), 4)]
+    assert repeated[:2] != repeated[2:]
+    assert fixed[:2] == fixed[2:]
+    finite_repeat = [*Repeat(Take(source, 2), 2)]
+    assert finite_repeat[:2] != finite_repeat[2:]
+
+    reopened = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json; from dryml.core.cardinality import Cardinality; "
+            "from dryml.core.tensor_spec import TensorSpec; "
+            "from dryml.data import GeneratorDataset, Take; "
+            "from tests.data.test_example_counts import seeded_values_factory; "
+            "source = GeneratorDataset(seeded_values_factory, cardinality=Cardinality.INFINITE, "
+            "spec=TensorSpec('int64', shape=()), seed=37, seed_aware=True); "
+            "print(json.dumps(list(Take(source, 3, epoch=2))))",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert reopened.returncode == 0, reopened.stderr
+    assert json.loads(reopened.stdout) == epoch_two

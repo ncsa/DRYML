@@ -25,6 +25,7 @@ from dryml.data import (
     Unbatch,
     Zip,
     Chain,
+    as_supervised,
 )
 
 
@@ -740,3 +741,82 @@ def test_chain_merges_specs_and_concatenates_sources():
     assert ds.spec == TensorSpec("int32", shape=(Dynamic,), backend="numpy")
     assert ds.__len__() == Cardinality.finite(3)
     assert [item.tolist() for item in ds] == [[1], [2], [3, 4]]
+
+
+def test_as_supervised_projects_scalar_whole_tree_named_and_autoencoder_targets():
+    source = ListDataset(
+        [{"features": {"left": np.array([1]), "right": np.array([2])}, "label": np.array(3)}],
+        {
+            "features": {
+                "left": TensorSpec("int64", shape=(1,), backend="numpy"),
+                "right": TensorSpec("int64", shape=(1,), backend="numpy"),
+            },
+            "label": TensorSpec("int64", shape=(), backend="numpy"),
+        },
+    )
+
+    scalar = as_supervised(source, "features", "label")
+    named = as_supervised(
+        source,
+        {"left": Select.from_path(("features", "left")), "right": Select.from_path(("features", "right"))},
+        "label",
+    )
+    autoencoder = as_supervised(source, "features", input_as_target=True)
+
+    scalar_value = next(iter(scalar))
+    named_value = next(iter(named))
+    autoencoder_value = next(iter(autoencoder))
+    assert scalar_value[0]["left"].tolist() == [1]
+    assert scalar_value[1].item() == 3
+    assert named_value[0]["left"].tolist() == [1]
+    assert named_value[0]["right"].tolist() == [2]
+    assert autoencoder_value[0] is autoencoder_value[1]
+
+
+def test_as_supervised_rejects_empty_or_ambiguous_selection_trees():
+    source = ListDataset(
+        [{"x": np.array([1]), "y": np.array([2])}],
+        {
+            "x": TensorSpec("int64", shape=(1,), backend="numpy"),
+            "y": TensorSpec("int64", shape=(1,), backend="numpy"),
+        },
+    )
+
+    with pytest.raises(ValueError, match="empty"):
+        as_supervised(source, {}, "y")
+    with pytest.raises(TypeError, match="Ambiguous"):
+        as_supervised(source, ("x", "y"), "y")
+    with pytest.raises(TypeError, match="Select.from_path"):
+        as_supervised(source, {"x": "x"}, "y")
+    with pytest.raises(ValueError, match="requires targets"):
+        as_supervised(source, "x")
+    with pytest.raises(ValueError, match="does not accept"):
+        as_supervised(source, "x", "y", input_as_target=True)
+
+
+def test_as_supervised_nested_and_tuple_selection_trees_survive_save_load(tmp_path):
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+
+    source = ListDataset(
+        [{"feature": {"left": np.array([1]), "right": np.array([2])}, "label": np.array([3])}],
+        {
+            "feature": {
+                "left": TensorSpec("int64", shape=(1,), backend="numpy"),
+                "right": TensorSpec("int64", shape=(1,), backend="numpy"),
+            },
+            "label": TensorSpec("int64", shape=(1,), backend="numpy"),
+        },
+    )
+    projected = as_supervised(
+        source,
+        {"feature": {"left": Select.from_path(("feature", "left"))}},
+        (Select.from_path(("label",)), Select.from_path(("feature", "right"))),
+    )
+    repo = Repo(DirStore(tmp_path / "store"))
+    reference = repo.save_object(projected, deep_capture=True)
+    loaded = repo.load_state_ref(reference, reuse_live="never")
+
+    inputs, targets = next(iter(loaded))
+    assert inputs["feature"]["left"].tolist() == [1]
+    assert [target.tolist() for target in targets] == [[3], [2]]

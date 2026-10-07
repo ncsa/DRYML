@@ -54,6 +54,9 @@ def _iter_dataset_leaves(tree):
 
 
 def _min_cardinality(cardinalities):
+    cardinalities = tuple(cardinalities)
+    if any(cardinality.is_finite and cardinality.require_finite() == 0 for cardinality in cardinalities):
+        return Cardinality.finite(0)
     finite_values = []
     saw_infinite = False
     for cardinality in cardinalities:
@@ -131,6 +134,30 @@ class Zip(Dataset):
             ds.yield_cardinality() for ds in _iter_dataset_leaves(self.sources)
         )
 
+    def example_cardinality(self) -> Cardinality:
+        """Return a total only when every zipped branch is provably aligned.
+
+        Returns:
+            A shared source example cardinality when every branch has the same
+            known yield and example total; zero when any branch is known empty;
+            otherwise ``Cardinality.UNKNOWN``.
+
+        Side Effects:
+            None. This inspects declarations and never opens source iterators.
+        """
+
+        output = self.yield_cardinality()
+        if output.is_finite and output.require_finite() == 0:
+            return Cardinality.finite(0)
+        sources = tuple(_iter_dataset_leaves(self.sources))
+        yields = tuple(ds.yield_cardinality() for ds in sources)
+        examples = tuple(ds.example_cardinality() for ds in sources)
+        if any(value.is_unknown for value in yields) or any(value.is_unknown for value in examples):
+            return Cardinality.UNKNOWN
+        if len(set(yields)) != 1 or len(set(examples)) != 1:
+            return Cardinality.UNKNOWN
+        return examples[0]
+
 
 class Chain(Dataset):
     """Yield all elements from each source dataset in sequence."""
@@ -152,6 +179,40 @@ class Chain(Dataset):
 
     def __len__(self) -> Cardinality:
         return _sum_cardinality(source.yield_cardinality() for source in self.sources)
+
+    def example_cardinality(self) -> Cardinality:
+        """Sum source totals only when their batch representations are compatible.
+
+        Returns:
+            The sum of all known source example totals for uniformly batched or
+            uniformly unbatched sources; otherwise ``Cardinality.UNKNOWN``.
+
+        Side Effects:
+            None. This inspects declarations and never opens source iterators.
+        """
+
+        examples = tuple(source.example_cardinality() for source in self.sources)
+        if any(value.is_unknown for value in examples):
+            return Cardinality.UNKNOWN
+        modes = {_example_mode(source) for source in self.sources}
+        if None in modes or len(modes) != 1:
+            return Cardinality.UNKNOWN
+        return _sum_cardinality(examples)
+
+
+def _example_mode(dataset: Dataset) -> str | None:
+    """Classify one complete TensorSpec tree's top-level example representation."""
+
+    try:
+        from dryml.data.dataset import _spec_tensor_leaves
+
+        leaves = _spec_tensor_leaves(dataset.spec, strict=True)
+    except (TypeError, ValueError):
+        return None
+    if not leaves:
+        return None
+    batched = {leaf.batched for leaf in leaves}
+    return "batched" if batched == {True} else "unbatched" if batched == {False} else None
 
 
 __all__ = ["Chain", "Zip"]

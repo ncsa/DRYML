@@ -383,12 +383,7 @@ class StreamPlan:
     ) -> StreamNode:
         """Expose built-in stream transforms and bounds without opening a source."""
 
-        try:
-            cardinality = dataset.__len__()
-        except NotImplementedError:
-            cardinality = Cardinality.UNKNOWN
-        if not isinstance(cardinality, Cardinality):
-            cardinality = Cardinality.finite(int(cardinality))
+        cardinality = dataset.yield_cardinality()
         return StreamNode(
             name=name,
             inputs=tuple(IteratorPort(spec) for spec in input_specs),
@@ -580,7 +575,12 @@ class _MapIterator(Iterator[Any]):
             self.has_pending = False
         else:
             item = next(self.source)
-        return self.selected(item)
+        result = self.selected(item)
+        if getattr(self.dataset, "preserves_examples", False):
+            source_examples = self.dataset.src.examples_in(item)
+            if self.dataset.examples_in(result) != source_examples:
+                raise ValueError("Map declared preserves_examples but changed an example count.")
+        return result
 
     def _resolve(self) -> None:
         try:

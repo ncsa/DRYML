@@ -192,3 +192,17 @@ def test_same_instance_overlap_is_a_managed_conflict(tmp_path):
     thread.join(10)
     assert not thread.is_alive()
     assert failures == []
+
+
+def test_completed_cache_restores_example_metadata_without_reading_chunks(tmp_path, monkeypatch):
+    """Completed cache count metadata remains usable before a lazy chunk read."""
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    cache = CachedDataset(CountingDataset([np.asarray([1], dtype=np.int32)], Cardinality.finite(1)))
+    state = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
+    restored = repo.load_state_ref(state, reuse_live="never")
+    monkeypatch.setattr(restored, "_iter_payload", lambda payload: (_ for _ in ()).throw(AssertionError("no chunk read")))
+
+    assert restored.example_cardinality() == Cardinality.finite(1)

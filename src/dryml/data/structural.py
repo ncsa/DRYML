@@ -52,6 +52,23 @@ class Batch(Dataset):
             out = (n + self.batch_size - 1) // self.batch_size
         return Cardinality.finite(out)
 
+    def _range_example_cardinality(
+        self, start: int, stop: int | None = None,
+    ) -> Cardinality:
+        """Map batch-yield ranges to the exact contributing source-yield range."""
+
+        outputs = self._range_yield_cardinality(start, stop)
+        if outputs.is_finite and outputs.require_finite() == 0:
+            return Cardinality.finite(0)
+        if outputs.is_unknown:
+            return Cardinality.UNKNOWN
+        source_start = start * self.batch_size
+        if self.drop_remainder:
+            source_stop = None if outputs.is_infinite else source_start + outputs.require_finite() * self.batch_size
+        else:
+            source_stop = None if stop is None else stop * self.batch_size
+        return self.src._range_example_cardinality(source_start, source_stop)
+
     def _next_batch(self, it):
         batch = []
         for _ in range(self.batch_size):
@@ -79,7 +96,14 @@ class Unbatch(Dataset):
             yield from default_split(batch)
 
     def __len__(self) -> Cardinality:
-        return Cardinality.UNKNOWN
+        return self.src.example_cardinality()
+
+    def _range_example_cardinality(
+        self, start: int, stop: int | None = None,
+    ) -> Cardinality:
+        """Return unbatched output facts from this node's proved output range."""
+
+        return self._range_yield_cardinality(start, stop)
 
     def _resolve_split(self):
         """Return the selected split invoker once per qualified graph cursor."""
@@ -90,13 +114,34 @@ class Unbatch(Dataset):
 class Take(Dataset):
     """Yield exactly a requested number of source values or report exhaustion."""
 
-    def __init__(self, src: Dataset, n: int):
+    def __init__(
+        self, src: Dataset, n: int, *, epoch: int = 0, fixed_prefix: bool = False,
+    ):
+        """Require a bounded source prefix, optionally selecting a logical epoch.
+
+        Args:
+            src: Source Dataset.
+            n: Exact nonnegative number of source yields required per traversal.
+            epoch: Exact nonnegative base epoch for a supporting seed-aware source.
+            fixed_prefix: Keep the base epoch during repeated traversals instead of
+                advancing logical epochs.
+
+        Seed-aware selection never changes Take's strict yield count. Opaque
+        sources retain ordinary iteration behavior.
+        """
+
         if type(n) is not int:
             raise TypeError("n must be a nonnegative exact int.")
         if n < 0:
             raise ValueError("n must be non-negative.")
+        if type(epoch) is not int or epoch < 0:
+            raise ValueError("epoch must be a nonnegative exact int.")
+        if type(fixed_prefix) is not bool:
+            raise TypeError("fixed_prefix must be an exact bool.")
         self.src = src
         self.n = n
+        self.epoch = epoch
+        self.fixed_prefix = fixed_prefix
         super().__init__(spec=src.spec)
 
     def __iter__(self):
@@ -112,19 +157,43 @@ class Take(Dataset):
             observed counts. ``Take(0)`` creates no source iterator.
         """
 
-        return _TakeCursor(self.src, self.n)
+        return self.iterator_for_epoch(0)
+
+    def iterator_for_epoch(self, logical_epoch: int) -> DatasetCursor:
+        """Create one strict cursor for a logical repeat epoch without replay."""
+
+        if type(logical_epoch) is not int or logical_epoch < 0:
+            raise ValueError("logical_epoch must be a nonnegative exact int.")
+        epoch = self.epoch if self.fixed_prefix else self.epoch + logical_epoch
+        return _TakeCursor(self.src, self.n, epoch=epoch)
 
     def __len__(self) -> Cardinality:
         return Cardinality.finite(self.n)
+
+    def example_cardinality(self) -> Cardinality:
+        """Return proved examples in this strict requested yield prefix."""
+
+        return self._range_example_cardinality(0, self.n)
+
+    def _range_example_cardinality(
+        self, start: int, stop: int | None = None,
+    ) -> Cardinality:
+        """Delegate bounded output ranges to corresponding source yield ranges."""
+
+        own = self._range_yield_cardinality(start, stop)
+        if own.is_finite and own.require_finite() == 0:
+            return Cardinality.finite(0)
+        return self.src._range_example_cardinality(start, self.n if stop is None else min(stop, self.n))
 
 
 class _TakeCursor(DatasetCursor):
     """Lazy strict Take cursor that closes its source on every terminal path."""
 
-    def __init__(self, src: Dataset, n: int) -> None:
+    def __init__(self, src: Dataset, n: int, *, epoch: int) -> None:
         super().__init__(iter(()))
         self._src = src
         self._n = n
+        self._epoch = epoch
         self._source_cursor: DatasetCursor | None = None
 
     def __next__(self):
@@ -134,7 +203,8 @@ class _TakeCursor(DatasetCursor):
             self.close()
             raise StopIteration
         if self._source_cursor is None:
-            self._source_cursor = self._src.iterator()
+            opener = getattr(self._src, "iterator_for_epoch", None)
+            self._source_cursor = opener(self._epoch) if callable(opener) else self._src.iterator()
         try:
             value = next(self._source_cursor)
         except (StopIteration, DatasetExhaustedError) as error:
@@ -158,6 +228,8 @@ class _TakeCursor(DatasetCursor):
 
 class Skip(Dataset):
     def __init__(self, src: Dataset, n: int):
+        if type(n) is not int:
+            raise TypeError("n must be a nonnegative exact int.")
         if n < 0:
             raise ValueError("n must be non-negative.")
         self.src = src
@@ -174,12 +246,19 @@ class Skip(Dataset):
         yield from it
 
     def __len__(self) -> Cardinality:
-        src_cardinality = self.src.yield_cardinality()
-        if src_cardinality.is_unknown:
-            return Cardinality.UNKNOWN
-        if src_cardinality.is_infinite:
-            return Cardinality.INFINITE
-        return Cardinality.finite(max(0, src_cardinality.require_finite() - self.n))
+        return self.src._range_yield_cardinality(self.n)
+
+    def _range_example_cardinality(
+        self, start: int, stop: int | None = None,
+    ) -> Cardinality:
+        """Delegate output ranges after this node's skipped source prefix."""
+
+        own = self._range_yield_cardinality(start, stop)
+        if own.is_finite and own.require_finite() == 0:
+            return Cardinality.finite(0)
+        return self.src._range_example_cardinality(
+            self.n + start, None if stop is None else self.n + stop,
+        )
 
 
 class Repeat(Dataset):
@@ -192,21 +271,61 @@ class Repeat(Dataset):
 
     def __iter__(self):
         if self.count is None:
+            epoch = 0
             while True:
-                yield from self.src
+                opener = getattr(self.src, "iterator_for_epoch", None)
+                iterator = opener(epoch) if callable(opener) else self.src.iterator()
+                try:
+                    first = next(iterator)
+                except StopIteration:
+                    close = getattr(iterator, "close", None)
+                    if close is not None:
+                        close()
+                    return
+                try:
+                    yield first
+                    yield from iterator
+                finally:
+                    close = getattr(iterator, "close", None)
+                    if close is not None:
+                        close()
+                epoch += 1
         else:
-            for _ in range(self.count):
-                yield from self.src
+            for epoch in range(self.count):
+                opener = getattr(self.src, "iterator_for_epoch", None)
+                iterator = opener(epoch) if callable(opener) else self.src.iterator()
+                try:
+                    yield from iterator
+                finally:
+                    close = getattr(iterator, "close", None)
+                    if close is not None:
+                        close()
 
     def __len__(self) -> Cardinality:
-        if self.count is None:
-            return Cardinality.INFINITE
         src_cardinality = self.src.yield_cardinality()
+        if self.count is None:
+            if src_cardinality.is_finite and src_cardinality.require_finite() == 0:
+                return Cardinality.finite(0)
+            return Cardinality.UNKNOWN if src_cardinality.is_unknown else Cardinality.INFINITE
         if src_cardinality.is_unknown:
             return Cardinality.UNKNOWN
         if src_cardinality.is_infinite:
             return Cardinality.INFINITE if self.count > 0 else Cardinality.finite(0)
         return Cardinality.finite(src_cardinality.require_finite() * self.count)
+
+    def example_cardinality(self) -> Cardinality:
+        """Return multiplied source facts when Repeat's count proves them."""
+
+        source = self.src.example_cardinality()
+        if self.count == 0 or (source.is_finite and source.require_finite() == 0):
+            return Cardinality.finite(0)
+        if self.count is None:
+            return Cardinality.UNKNOWN if source.is_unknown else Cardinality.INFINITE
+        if source.is_unknown:
+            return Cardinality.UNKNOWN
+        if source.is_infinite:
+            return Cardinality.INFINITE
+        return Cardinality.finite(source.require_finite() * self.count)
 
 
 class Shuffle(Dataset):
@@ -241,6 +360,23 @@ class Shuffle(Dataset):
 
     def __len__(self) -> Cardinality:
         return self.src.yield_cardinality()
+
+    def example_cardinality(self) -> Cardinality:
+        """Preserve full membership facts while withholding shuffled prefix facts."""
+
+        return self.src.example_cardinality()
+
+    def _range_example_cardinality(
+        self, start: int, stop: int | None = None,
+    ) -> Cardinality:
+        """Return a fact only for whole shuffled membership or an empty range."""
+
+        yields = self._range_yield_cardinality(start, stop)
+        if yields.is_finite and yields.require_finite() == 0:
+            return Cardinality.finite(0)
+        if start == 0 and stop is None:
+            return self.src.example_cardinality()
+        return Cardinality.UNKNOWN
 
 
 __all__ = ["Batch", "Repeat", "Shuffle", "Skip", "Take", "Unbatch"]

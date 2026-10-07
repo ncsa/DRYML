@@ -27,6 +27,13 @@ Important expectations:
   exact positive example count. Batched leaves must expose non-rank-zero,
   nonempty matching leading dimensions and honor fixed batch declarations;
   coherent unbatched trees count as one example.
+- Dataset composition propagates an example total only when it can prove one:
+  `Batch` retains source examples (and removes a dropped remainder), `Unbatch`
+  turns proved batched examples into yields, and `Take`/`Skip` use declared yield
+  ranges. `Shuffle` retains only full-membership totals, `Zip` requires aligned
+  branch yield and example totals, and `Chain` requires compatible batch
+  semantics. `Map` is unknown by default; pass `preserves_examples=True` only
+  when every result preserves its input count, which is checked at iteration.
 - `peek()` returns one element without permanently consuming the dataset.
 
 These count methods do not open, peek, scan, or otherwise consume a Dataset,
@@ -57,6 +64,10 @@ or files.
 cardinality `n`. It yields exactly `n` values or raises `DatasetExhaustedError`
 after its available prefix; `Take(source, 0)` does not open the source. The
 older `Skip(source, n)` remains forgiving when a source ends before its prefix.
+For declared seed-aware `GeneratorDataset` sources, `Take` also carries an
+optional logical `epoch`; `Repeat(Take(...))` advances selected epochs by default
+without changing its strict yield count. `fixed_prefix=True` intentionally reuses
+one epoch. Opaque generator factories receive no new replay or seed requirement.
 
 ### Prepared Stream Graphs
 
@@ -118,6 +129,12 @@ object and is forwarded only when supplied, so callers can control TFDS
 preparation behavior. Adapter construction imports TFDS and propagates its
 import, split, local filesystem, and download failures; NumPy delivery avoids
 importing DRYML's TensorFlow spec backend.
+
+`GeneratorDataset` accepts an optional explicit `example_count` for opaque
+or dynamically batched sources. It also supports a declared `seed_aware=True`
+factory protocol: a base `seed` and versioned epoch derivation supply a deterministic
+`seed` keyword to `iterator_for_epoch(epoch)`, allowing direct epoch reopening
+without traversing earlier epochs.
 
 The historical modules `dryml.data.tf.dataset` and
 `dryml.data.torch.dataset` are unsupported legacy APIs. They are not current
@@ -266,6 +283,14 @@ Utility functions help with common supervised-learning structures:
 - `collect_xy(dataset)`
 - `collate_xy(dataset)`
 - `Collect`
+
+`as_supervised(dataset, inputs, targets)` builds a persisted ordinary Dataset
+projection yielding `(inputs, targets)`, rather than asking trainers to select
+fields. A scalar path selects one branch (and can retain a nested dictionary);
+named/nested selections use dictionaries of `Select.from_path(...)` leaves.
+Tuple/list selection trees require explicit `Select.from_path` leaves so path and
+output-tree intent cannot be guessed. `input_as_target=True` produces an
+autoencoder-style pair without copies or implicit batching.
 
 These utilities assume an element structure where `x` and `y` can be selected by path.
 

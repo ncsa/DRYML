@@ -336,17 +336,41 @@ class Dataset(Object, Generic[T]):
             it never opens, peeks, or scans a Dataset iterator.
         """
 
-        yields = self.yield_cardinality()
+        return self._range_example_cardinality(0)
+
+    def _range_example_cardinality(
+        self, start: int, stop: int | None = None,
+    ) -> Cardinality:
+        """Return a proved example total for a yield range without iteration.
+
+        Args:
+            start: Exact nonnegative first yield offset.
+            stop: Optional exact nonnegative exclusive yield offset.
+
+        Returns:
+            The exact example cardinality when TensorSpec metadata gives every
+            selected yield a uniform example count; otherwise ``UNKNOWN``.
+
+        Raises:
+            TypeError: If range endpoints or a countable spec declaration are malformed.
+            ValueError: If endpoints are negative/reversed or batches disagree.
+
+        Side Effects:
+            None. This private proof seam only reads declared metadata.
+        """
+
+        yields = self._range_yield_cardinality(start, stop)
         if yields.is_finite and yields.require_finite() == 0:
             return Cardinality.finite(0)
 
-        if self._spec is None:
+        spec = self._spec if hasattr(self, "_spec") else self.spec
+        if spec is None:
             return Cardinality.UNKNOWN
 
-        specs = _spec_tensor_leaves(self._spec)
+        specs = _spec_tensor_leaves(spec)
         if not specs:
             return Cardinality.UNKNOWN
-        _spec_tensor_leaves(self._spec, strict=True)
+        _spec_tensor_leaves(spec, strict=True)
 
         batched = [spec.batch for spec in specs if spec.batched]
         if not batched:
@@ -504,8 +528,13 @@ class _MapCursor(DatasetCursor):
         else:
             item = self._pending
             self._pending = _PENDING
+        result = self._implementation(item)
+        if getattr(self._dataset, "preserves_examples", False):
+            source_examples = self._dataset.src.examples_in(item)
+            if self._dataset.examples_in(result) != source_examples:
+                raise ValueError("Map declared preserves_examples but changed an example count.")
         self._position += 1
-        return self._implementation(item)
+        return result
 
     def skip(self, n: int) -> None:
         """Skip mapped values, delegating only after safe selection and declaration."""
@@ -564,9 +593,27 @@ class Map(Dataset):
 
     _stream_operator = "map"
 
-    def __init__(self, src: Dataset, *methods):
+    def __init__(self, src: Dataset, *methods, preserves_examples: bool = False):
+        """Construct a one-to-one Dataset transform.
+
+        Args:
+            src: Source Dataset supplying one input value per Method invocation.
+            *methods: One Method, or sequential Methods composed into a Pipe.
+            preserves_examples: Declare and validate that every output has the
+                same runtime example count as its input. Defaults to ``False``.
+
+        Raises:
+            TypeError: If ``preserves_examples`` is not an exact bool.
+            ValueError: If no Method is supplied.
+
+        Side Effects:
+            Construction does not open a source; iteration selects Methods lazily.
+        """
+
         if not methods:
             raise ValueError("Map requires at least one Method.")
+        if type(preserves_examples) is not bool:
+            raise TypeError("preserves_examples must be an exact bool.")
 
         if len(methods) == 1:
             method = methods[0]
@@ -576,6 +623,7 @@ class Map(Dataset):
 
         self.src = src
         self.method = method
+        self.preserves_examples = preserves_examples
         super().__init__(spec=method.infer_output_spec(src.spec))
 
     def __iter__(self) -> Iterator:
@@ -596,6 +644,20 @@ class Map(Dataset):
 
     def __len__(self) -> Cardinality:
         return self.src.yield_cardinality()
+
+    def _range_example_cardinality(
+        self, start: int, stop: int | None = None,
+    ) -> Cardinality:
+        """Propagate range facts only for an explicit preserving Map declaration."""
+
+        yields = self._range_yield_cardinality(start, stop)
+        if yields.is_finite and yields.require_finite() == 0:
+            return Cardinality.finite(0)
+        # Older saved Map definitions have no field and deliberately default to
+        # the conservative non-preserving behavior.
+        if not getattr(self, "preserves_examples", False):
+            return Cardinality.UNKNOWN
+        return self.src._range_example_cardinality(start, stop)
 
 
 class StreamDataset(Dataset):

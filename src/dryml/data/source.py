@@ -16,7 +16,7 @@ from dryml.core.tensor_spec import (
 )
 from dryml.core.cardinality import Cardinality
 from dryml.core.utils.recurse import first_leaf, iter_leaves, map_leaves
-from .dataset import Dataset, DatasetCursor, DatasetExhaustedError
+from .dataset import Dataset, DatasetCursor, DatasetExhaustedError, _normalize_cardinality
 
 
 # ----------------------------------------------------------------------
@@ -72,17 +72,34 @@ def _fresh_iterable(factory: Callable[..., Any], *args, **kwargs) -> Iterable[An
 
 
 class GeneratorDataset(SourceDataset):
-    """
-    Dataset backed by a callable that returns a fresh iterator/generator
-    each time it is invoked.
+    """Dataset backed by a callable that returns a fresh iterable on each open.
+
+    Args:
+        gen_factory: Callable producing a fresh iterable. A ``seed_aware`` factory
+            additionally accepts a ``seed`` keyword argument.
+        *factory_args: Positional arguments retained for ``gen_factory``.
+        cardinality: Declared yield cardinality.
+        example_count: Optional explicit total for opaque or dynamic batches.
+        spec: Optional yielded-element specification or inference hint.
+        seed: Base seed for the supported seed-aware source protocol.
+        seed_aware: Enable the versioned per-epoch seed protocol.
+        epoch_seed_version: Version of the stable epoch seed derivation protocol.
+        **factory_kwargs: Keyword arguments retained for ``gen_factory``.
+
+    ``iterator_for_epoch(epoch)`` opens a selected seed-aware epoch directly;
+    ordinary iteration is epoch zero. Explicit example totals are metadata only.
     """
 
     def __init__(
         self,
         gen_factory: Callable[[], Iterable[Any]],
         *factory_args,
-        cardinality: Cardinality =Cardinality.UNKNOWN,
+        cardinality: Cardinality = Cardinality.UNKNOWN,
+        example_count: int | Cardinality | None = None,
         spec: SpecTree|str|int|dict[str,str|int]|None=None,
+        seed: int | None = None,
+        seed_aware: bool = False,
+        epoch_seed_version: int = 1,
         **factory_kwargs
     ):
         super().__init__()
@@ -93,7 +110,21 @@ class GeneratorDataset(SourceDataset):
         self.gen_factory = gen_factory
         self.factory_args = factory_args
         self.factory_kwargs = factory_kwargs
-        self.cardinality = cardinality
+        self.cardinality = _normalize_cardinality(cardinality)
+        self._declared_example_count = (
+            None if example_count is None else _normalize_cardinality(example_count)
+        )
+        if type(seed_aware) is not bool:
+            raise TypeError("seed_aware must be an exact bool.")
+        if seed is not None and type(seed) is not int:
+            raise TypeError("seed must be an exact int or None.")
+        if type(epoch_seed_version) is not int or epoch_seed_version <= 0:
+            raise ValueError("epoch_seed_version must be a positive exact int.")
+        if seed_aware and seed is None:
+            raise ValueError("seed-aware GeneratorDataset requires a base seed.")
+        self.seed = seed
+        self.seed_aware = seed_aware
+        self.epoch_seed_version = epoch_seed_version
         if spec is None:
             self._spec = None
         elif isinstance(spec, SpecHint):
@@ -107,17 +138,80 @@ class GeneratorDataset(SourceDataset):
 
 
     def __iter__(self) -> Iterator[Any]:
-        it = _fresh_iterable(
-            self.gen_factory,
-            *self.factory_args,
-            **self.factory_kwargs)
+        yield from self.iterator_for_epoch(0)
+
+    def iterator_for_epoch(self, epoch: int) -> Iterator[Any]:
+        """Open one selected reproducible epoch without traversing prior epochs.
+
+        Args:
+            epoch: Exact nonnegative logical epoch index.
+
+        Returns:
+            A fresh iterator bounded by finite declared yield cardinality.
+
+        Raises:
+            TypeError: If ``epoch`` is not an exact integer.
+            ValueError: If ``epoch`` is negative.
+
+        Side Effects:
+            Calls the factory once. Seed-aware factories receive a deterministic,
+            versioned ``seed`` keyword; opaque factories retain prior invocation.
+        """
+
+        if type(epoch) is not int:
+            raise TypeError("epoch must be a nonnegative exact int.")
+        if epoch < 0:
+            raise ValueError("epoch must be non-negative.")
+        kwargs = dict(self.factory_kwargs)
+        if self.seed_aware:
+            kwargs["seed"] = _epoch_seed(self.seed, epoch, self.epoch_seed_version)
+        values = _fresh_iterable(self.gen_factory, *self.factory_args, **kwargs)
         if self.cardinality.is_finite:
-            yield from itertools.islice(it, int(self.cardinality))
-        else:
-            yield from it
+            values = itertools.islice(values, int(self.cardinality))
+
+        observed_examples = 0
+        validate_observed = (
+            self._declared_example_count is not None
+            and not self._declared_example_count.is_unknown
+        )
+        for value in values:
+            if validate_observed:
+                try:
+                    observed_examples += self.examples_in(value)
+                except TypeError:
+                    validate_observed = False
+            yield value
+        if validate_observed:
+            observed = Cardinality.finite(observed_examples)
+            if observed != self._declared_example_count:
+                raise ValueError(
+                    "GeneratorDataset observed example count conflicts with its declaration."
+                )
 
     def __len__(self) -> Cardinality:
         return self.cardinality
+
+    def example_cardinality(self) -> Cardinality:
+        """Return an explicit opaque-source total or ordinary spec-derived facts."""
+
+        derived = super().example_cardinality()
+        declared = self._declared_example_count
+        if declared is None or declared.is_unknown:
+            return derived
+        if not derived.is_unknown and derived != declared:
+            raise ValueError(
+                "GeneratorDataset example_count conflicts with its spec and yield cardinality."
+            )
+        return declared
+
+
+def _epoch_seed(base_seed: int, epoch: int, version: int) -> int:
+    """Derive one stable nonnegative seed from a declared protocol version and epoch."""
+
+    import hashlib
+
+    payload = f"dryml-generator-epoch-v{version}:{base_seed}:{epoch}".encode("ascii")
+    return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
 
 
 class ArrayDataset(SourceDataset):
