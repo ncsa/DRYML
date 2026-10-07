@@ -13,7 +13,6 @@ from dryml.core.repo import manage_repo
 from dryml.core.tensor_spec import Dynamic, TensorSpec, batch_spec_tree, iter_specs, map_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
 from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
-from dryml.data import DatasetExhaustedError
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress, metric_value
@@ -25,7 +24,6 @@ from dryml.models.utils import (
     TrainingPreparation,
     validate_training_callbacks,
 )
-from dryml.tf.tensor_spec import output_signature as tf_output_signature
 from dryml.methods import ImplementationSelectionError, MethodError, traits
 
 
@@ -1014,6 +1012,7 @@ class BasicTraining(TrainFunction):
         self.training_preparation = TrainingPreparation.from_specs(
             self, train_xy.spec[0], train_xy.spec[1], "tf"
         )
+        prepared_train = train_xy.prepare()
 
         val_data = None
         val_xy = None
@@ -1024,6 +1023,9 @@ class BasicTraining(TrainFunction):
             self.validation_preparation = TrainingPreparation.from_specs(
                 self, val_xy.spec[0], val_xy.spec[1], "tf"
             )
+            prepared_val = val_xy.prepare()
+        else:
+            prepared_val = None
 
         training_model = self._training_model(tf, exp.model, train_xy.spec[0])
         if compile_kwargs:
@@ -1046,13 +1048,13 @@ class BasicTraining(TrainFunction):
             if validation_steps is not None:
                 fit_kwargs["validation_steps"] = validation_steps
 
-        ds_train = self._tf_dataset(tf, train_xy, self.training_preparation)
+        ds_train = self._tf_dataset(tf, prepared_train, self.training_preparation)
         if fit_kwargs.get("steps_per_epoch") is not None:
             ds_train = ds_train.repeat()
 
         ds_val = None
         if val_xy is not None:
-            ds_val = self._tf_dataset(tf, val_xy, self.validation_preparation)
+            ds_val = self._tf_dataset(tf, prepared_val, self.validation_preparation)
             if fit_kwargs.get("validation_steps") is not None:
                 ds_val = ds_val.repeat()
 
@@ -1136,7 +1138,7 @@ class BasicTraining(TrainFunction):
                     history = None
                     for epoch in range(start_epoch, target_epoch):
                         history = fit_segment(
-                            self._tf_dataset(tf, train_xy, self.training_preparation),
+                            self._tf_dataset(tf, prepared_train, self.training_preparation),
                             initial_epoch=epoch,
                             epochs=epoch + 1,
                             batch_offset=0,
@@ -1240,27 +1242,26 @@ class BasicTraining(TrainFunction):
         return data
 
     def _tf_dataset(self, tf, data, preparation):
-        """Expose explicitly prepared Dataset batches to Keras iteration."""
+        """Expose one once-planned Dataset pipeline to native Keras iteration.
 
-        expected = finite_dataset_len(data)
+        Args:
+            tf: Imported TensorFlow module retained for the established private
+                call shape.
+            data: Prepared Dataset pipeline for this training invocation.
+            preparation: Once-planned retained x/y handoff.
 
-        def prepared_values():
-            cursor = data.iterator()
-            yielded = 0
-            try:
-                for x, y in cursor:
-                    data.examples_in((x, y))
-                    yielded += 1
-                    yield preparation.prepare(x, y)
-            finally:
-                cursor.close()
-            if expected is not None and yielded != expected:
-                raise DatasetExhaustedError(expected, yielded)
+        Returns:
+            A native ``tf.data.Dataset`` preserving the authored batch stream.
 
-        return tf.data.Dataset.from_generator(
-            prepared_values,
-            output_signature=tf_output_signature(preparation.consumer_specs),
-        )
+        Side Effects:
+            The native bridge opens independent DRYML cursors per Keras traversal;
+            it never advances accepted-update or checkpoint state.
+        """
+
+        del tf
+        from dryml.tf.training_data import as_training_dataset
+
+        return as_training_dataset(data, preparation)
 
     def _accept_shortened_completion(self) -> bool:
         """Return whether this trainer treats Keras's normal early stop as success."""
@@ -1309,6 +1310,7 @@ class Training(BasicTraining):
         self.training_preparation = TrainingPreparation.from_specs(
             self, train_xy.spec[0], train_xy.spec[1], "tf"
         )
+        prepared_train = train_xy.prepare()
 
         val_xy = None
         self.validation_preparation = None
@@ -1318,6 +1320,9 @@ class Training(BasicTraining):
             self.validation_preparation = TrainingPreparation.from_specs(
                 self, val_xy.spec[0], val_xy.spec[1], "tf"
             )
+            prepared_val = val_xy.prepare()
+        else:
+            prepared_val = None
 
         optimizer_wrapper = self._optimizer(exp)
         optimizer = self._make_optimizer(tf, exp)
@@ -1336,7 +1341,7 @@ class Training(BasicTraining):
         try:
             exp.model.prep_train()
             self._finish_pending_epoch(
-                tf, exp, val_xy, loss_fn, metrics, progress, target_epoch
+                tf, exp, prepared_val, loss_fn, metrics, progress, target_epoch
             )
             for epoch in range(start_epoch, target_epoch):
                 for metric in metrics:
@@ -1344,16 +1349,15 @@ class Training(BasicTraining):
                 epoch_loss = 0.0
                 epoch_steps = 0
 
-                cursor = train_xy.iterator()
+                from dryml.tf.training_data import iter_training_batches
+
+                cursor = iter_training_batches(prepared_train, self.training_preparation)
                 resume_batch = exp.state.next_batch if epoch == start_epoch else 0
                 if resume_batch:
                     cursor.skip(resume_batch)
                 try:
                     for x, y in cursor:
                         examples = train_xy.examples_in((x, y))
-                        # The once-planned U6 handoff executes before this native
-                        # differentiation scope begins.
-                        x, y = self.training_preparation.prepare(x, y)
 
                         with tf.GradientTape() as tape:
                             y_pred = exp.model(x)
@@ -1417,7 +1421,7 @@ class Training(BasicTraining):
                     exp,
                     epoch,
                     epoch_metrics,
-                    val_xy,
+                    prepared_val,
                     loss_fn,
                     metrics,
                     progress,
@@ -1471,7 +1475,7 @@ class Training(BasicTraining):
     def _metric_objects(self, exp):
         return [_unwrap_backend_obj(metric) for metric in self._metrics(exp)]
 
-    def _finish_pending_epoch(self, tf, exp, val_xy, loss_fn, metrics, progress, target_epoch):
+    def _finish_pending_epoch(self, tf, exp, val_data, loss_fn, metrics, progress, target_epoch):
         """Run the validation/progress postlude retained after a final callback."""
 
         epoch = exp.state.pending_epoch_postlude
@@ -1479,23 +1483,23 @@ class Training(BasicTraining):
             return
         epoch_metrics = dict(exp.state.pending_epoch_metrics or {})
         if exp.state.pending_epoch_postlude_phase == "start":
-            if val_xy is not None:
-                val_metrics = self._evaluate(tf, exp.model, val_xy, loss_fn, metrics)
+            if val_data is not None:
+                val_metrics = self._evaluate(tf, exp.model, val_data, loss_fn, metrics)
                 epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
             exp.state.advance_epoch_postlude(epoch, "progress", metrics=epoch_metrics)
         if exp.state.pending_epoch_postlude_phase == "progress":
             progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
             exp.state.finish_epoch_postlude(epoch)
 
-    def _finish_epoch(self, tf, exp, epoch, epoch_metrics, val_xy, loss_fn, metrics, progress, target_epoch):
+    def _finish_epoch(self, tf, exp, epoch, epoch_metrics, val_data, loss_fn, metrics, progress, target_epoch):
         """Complete one explicit-loop epoch without replaying its final update."""
 
         if exp.state.epoch == epoch:
             exp.state.finish_epoch(postlude_pending=True)
         if exp.state.pending_epoch_postlude == epoch:
             if exp.state.pending_epoch_postlude_phase == "start":
-                if val_xy is not None:
-                    val_metrics = self._evaluate(tf, exp.model, val_xy, loss_fn, metrics)
+                if val_data is not None:
+                    val_metrics = self._evaluate(tf, exp.model, val_data, loss_fn, metrics)
                     epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
                 exp.state.advance_epoch_postlude(epoch, "progress", metrics=epoch_metrics)
             if exp.state.pending_epoch_postlude_phase == "progress":
@@ -1506,24 +1510,29 @@ class Training(BasicTraining):
                 )
                 exp.state.finish_epoch_postlude(epoch)
             return
-        if val_xy is not None:
-            val_metrics = self._evaluate(tf, exp.model, val_xy, loss_fn, metrics)
+        if val_data is not None:
+            val_metrics = self._evaluate(tf, exp.model, val_data, loss_fn, metrics)
             epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
         progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
 
-    def _evaluate(self, tf, model, val_xy, loss_fn, metrics):
+    def _evaluate(self, tf, model, val_data, loss_fn, metrics):
         for metric in metrics:
             _reset_metric(metric)
         total_loss = 0.0
         steps = 0
-        for x, y in val_xy:
-            x, y = self.validation_preparation.prepare(x, y)
-            y_pred = model(x)
-            loss_value = tf.reduce_mean(loss_fn(y, y_pred))
-            total_loss += float(metric_value(loss_value))
-            steps += 1
-            for metric in metrics:
-                _update_metric(metric, y, y_pred)
+        from dryml.tf.training_data import iter_training_batches
+
+        cursor = iter_training_batches(val_data, self.validation_preparation)
+        try:
+            for x, y in cursor:
+                y_pred = model(x)
+                loss_value = tf.reduce_mean(loss_fn(y, y_pred))
+                total_loss += float(metric_value(loss_value))
+                steps += 1
+                for metric in metrics:
+                    _update_metric(metric, y, y_pred)
+        finally:
+            cursor.close()
 
         if steps == 0:
             return {}

@@ -235,6 +235,13 @@ cursor and unknown-spec discovery buffer. Planning never opens a source; first
 value discovery happens only in the owning graph cursor and retains at most one
 prefetched value per occurrence.
 
+`Dataset.prepare()` keeps this graph plan as a dependency-light native-training
+input carrier. It reports whether qualified `"stream"` execution or documented
+`"eager"` fallback ran, but neither level owns accepted training progress. Every
+native consumer cursor reopens the plan independently; a consumer prefetch or
+read-ahead can only advance that private cursor and cannot advance a successful
+update position or checkpoint association.
+
 Dense handoffs preserve mapping/tuple/list structure and exact representable
 bool or fixed-width numeric dtype, shape, values, and batch meaning through an
 owned writable contiguous host copy. They normalize read-only, transposed, and

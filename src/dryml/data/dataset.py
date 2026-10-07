@@ -247,6 +247,27 @@ class Dataset(Object, Generic[T]):
 
         return MethodGraph(self, stream_plan=StreamPlan(self))
 
+    def prepare(self):
+        """Plan this Dataset once for native training-data delivery.
+
+        Returns:
+            A dependency-light :class:`dryml.data.native.PreparedDataset` that
+            reports whether qualified stream execution or eager fallback applies.
+
+        Raises:
+            ImplementationSelectionError: If a qualified Method cannot select a
+            declared local implementation. Unqualified Dataset operators instead
+            retain documented eager iteration.
+
+        Side Effects:
+            Records qualified local stream selections without opening or consuming
+            a source. Each later prepared cursor owns an independent traversal.
+        """
+
+        from dryml.data.native import PreparedDataset
+
+        return PreparedDataset(self)
+
     def peek(self) -> T:
         """
         Return one element from the dataset without mutating long-term dataset

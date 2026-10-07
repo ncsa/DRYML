@@ -178,6 +178,16 @@ edge contract. No per-yield route selection, implicit
 cross-backend generator conversion, or Dataset execution inside a tape/backward
 body is supported.
 
+TensorFlow `BasicTraining` supplies Keras a native `tf.data.Dataset` built from
+that once-prepared Dataset plan. It never applies another batch or shuffle and
+only repeats when Keras requires a known finite `steps_per_epoch`; exact source
+exhaustion remains visible rather than being masked by repetition. Explicit
+TensorFlow and Torch loops consume closeable native prepared-batch cursors, and
+Torch exposes an `IterableDataset`/single-process DataLoader bridge for native
+wrappers that require one. In all cases adapter reads, including native
+read-ahead, do not advance retained progress: post-update trainer hooks own that
+state.
+
 Keras retained loss is the scalar objective differentiated for each accepted
 completed update, including built-in regularizers and dynamic `add_loss`
 contributions reported by nested layers. To keep its example-weighted aggregation

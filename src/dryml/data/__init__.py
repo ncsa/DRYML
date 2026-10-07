@@ -1,4 +1,5 @@
 from dryml.data.dataset import Dataset, DatasetCursor, DatasetExhaustedError, Map, StreamDataset
+from dryml.data.native import NativeTrainingCursor, PreparedDataset
 from dryml.data.source import ArrayDataset, GeneratorDataset, NpyFileDataset, TFDSAdapter, TorchDatasetAdapter
 from dryml.data.combine import Chain, Zip
 from dryml.data.methods import ArgMax, Cast, Flatten, Pipe, Project, Scale, Select
@@ -32,6 +33,8 @@ __all__ = [
     "Dataset",
     "DatasetCursor",
     "DatasetExhaustedError",
+    "PreparedDataset",
+    "NativeTrainingCursor",
     "GeneratorDataset",
     "ArrayDataset",
     "NpyFileDataset",

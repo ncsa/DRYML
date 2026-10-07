@@ -542,6 +542,7 @@ class Training(TrainFunction):
         self.training_preparation = TrainingPreparation.from_specs(
             self, train_xy.spec[0], train_xy.spec[1], "torch"
         )
+        prepared_train = train_xy.prepare()
 
         val_xy = None
         self.validation_preparation = None
@@ -552,6 +553,9 @@ class Training(TrainFunction):
             self.validation_preparation = TrainingPreparation.from_specs(
                 self, val_xy.spec[0], val_xy.spec[1], "torch"
             )
+            prepared_val = val_xy.prepare()
+        else:
+            prepared_val = None
 
         device = _resolve_device(torch)
         if hasattr(exp.model, "to_device"):
@@ -572,7 +576,7 @@ class Training(TrainFunction):
 
         try:
             self._finish_pending_epoch(
-                torch, exp, val_xy, loss_fn, metrics, device, progress, target_epoch
+                torch, exp, prepared_val, loss_fn, metrics, device, progress, target_epoch
             )
             for epoch in range(start_epoch, target_epoch):
                 for metric in metrics:
@@ -582,16 +586,15 @@ class Training(TrainFunction):
                 epoch_loss = 0.0
                 epoch_steps = 0
 
-                cursor = train_xy.iterator()
+                from dryml.torch.training_data import iter_training_batches
+
+                cursor = iter_training_batches(prepared_train, self.training_preparation)
                 resume_batch = exp.state.next_batch if epoch == start_epoch else 0
                 if resume_batch:
                     cursor.skip(resume_batch)
                 try:
                     for x, y in cursor:
                         examples = train_xy.examples_in((x, y))
-                        # The once-planned U6 handoff completes before native
-                        # forward/backward work; only device placement remains.
-                        x, y = self.training_preparation.prepare(x, y)
                         x = _tree_to_torch(x, torch, device=device)
                         y = _tree_to_torch(y, torch, device=device)
 
@@ -646,7 +649,7 @@ class Training(TrainFunction):
                     exp,
                     epoch,
                     epoch_metrics,
-                    val_xy,
+                    prepared_val,
                     loss_fn,
                     metrics,
                     device,
@@ -760,7 +763,7 @@ class Training(TrainFunction):
                 out[_metric_name(metric)] = float(metric_value(value))
         return out
 
-    def _finish_pending_epoch(self, torch, exp, val_xy, loss_fn, metrics, device, progress, target_epoch):
+    def _finish_pending_epoch(self, torch, exp, val_data, loss_fn, metrics, device, progress, target_epoch):
         """Run a retained validation/progress postlude before later updates."""
 
         epoch = exp.state.pending_epoch_postlude
@@ -768,23 +771,23 @@ class Training(TrainFunction):
             return
         epoch_metrics = dict(exp.state.pending_epoch_metrics or {})
         if exp.state.pending_epoch_postlude_phase == "start":
-            if val_xy is not None:
-                val_metrics = self._evaluate(torch, exp.model, val_xy, loss_fn, metrics, device=device)
+            if val_data is not None:
+                val_metrics = self._evaluate(torch, exp.model, val_data, loss_fn, metrics, device=device)
                 epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
             exp.state.advance_epoch_postlude(epoch, "progress", metrics=epoch_metrics)
         if exp.state.pending_epoch_postlude_phase == "progress":
             progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
             exp.state.finish_epoch_postlude(epoch)
 
-    def _finish_epoch(self, torch, exp, epoch, epoch_metrics, val_xy, loss_fn, metrics, device, progress, target_epoch):
+    def _finish_epoch(self, torch, exp, epoch, epoch_metrics, val_data, loss_fn, metrics, device, progress, target_epoch):
         """Complete one Torch epoch postlude without replaying its final update."""
 
         if exp.state.epoch == epoch:
             exp.state.finish_epoch(postlude_pending=True)
         if exp.state.pending_epoch_postlude == epoch:
             if exp.state.pending_epoch_postlude_phase == "start":
-                if val_xy is not None:
-                    val_metrics = self._evaluate(torch, exp.model, val_xy, loss_fn, metrics, device=device)
+                if val_data is not None:
+                    val_metrics = self._evaluate(torch, exp.model, val_data, loss_fn, metrics, device=device)
                     epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
                 exp.state.advance_epoch_postlude(epoch, "progress", metrics=epoch_metrics)
             if exp.state.pending_epoch_postlude_phase == "progress":
@@ -795,31 +798,36 @@ class Training(TrainFunction):
                 )
                 exp.state.finish_epoch_postlude(epoch)
             return
-        if val_xy is not None:
-            val_metrics = self._evaluate(torch, exp.model, val_xy, loss_fn, metrics, device=device)
+        if val_data is not None:
+            val_metrics = self._evaluate(torch, exp.model, val_data, loss_fn, metrics, device=device)
             epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
         progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
 
-    def _evaluate(self, torch, model, val_xy, loss_fn, metrics, *, device):
+    def _evaluate(self, torch, model, val_data, loss_fn, metrics, *, device):
         for metric in metrics:
             _reset_metric(metric)
         metric_totals = {}
         metric_counts = {}
         total_loss = 0.0
         steps = 0
-        with torch.no_grad():
-            for x, y in val_xy:
-                x, y = self.validation_preparation.prepare(x, y)
-                x = _tree_to_torch(x, torch, device=device)
-                y = _tree_to_torch(y, torch, device=device)
-                y_pred = model(x)
-                loss_value = loss_fn(y_pred, y)
-                total_loss += float(metric_value(loss_value))
-                steps += 1
-                batch_metrics = self._update_metrics(metrics, y_pred, y)
-                for name, value in batch_metrics.items():
-                    metric_totals[name] = metric_totals.get(name, 0.0) + value
-                    metric_counts[name] = metric_counts.get(name, 0) + 1
+        from dryml.torch.training_data import iter_training_batches
+
+        cursor = iter_training_batches(val_data, self.validation_preparation)
+        try:
+            with torch.no_grad():
+                for x, y in cursor:
+                    x = _tree_to_torch(x, torch, device=device)
+                    y = _tree_to_torch(y, torch, device=device)
+                    y_pred = model(x)
+                    loss_value = loss_fn(y_pred, y)
+                    total_loss += float(metric_value(loss_value))
+                    steps += 1
+                    batch_metrics = self._update_metrics(metrics, y_pred, y)
+                    for name, value in batch_metrics.items():
+                        metric_totals[name] = metric_totals.get(name, 0.0) + value
+                        metric_counts[name] = metric_counts.get(name, 0) + 1
+        finally:
+            cursor.close()
 
         if steps == 0:
             return {}

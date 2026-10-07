@@ -108,6 +108,43 @@ for order, short batches, cardinality, and cursor cleanup. Zip and Chain retain
 the Python fallback unless compatible source-native composition is explicitly
 provided by all inputs.
 
+### Native Training Inputs
+
+`dataset.prepare()` returns a dependency-light `PreparedDataset` for one native
+training invocation. Construction plans the qualified Dataset/Method graph once
+without opening a source. Its `execution_level` is `"stream"` when that qualified
+plan runs and `"eager"` when an unqualified operator retains ordinary eager
+Dataset iteration. Selection failures in qualified operators still fail during
+preparation; eager fallback is only for unqualified Dataset operators.
+
+`PreparedDataset.iterator()` opens an independent closeable cursor each time.
+`training_batches(preparation)` applies one already selected x/y handoff per
+authored batch and returns a closeable cursor. It preserves the x/y tree, dtype,
+shape, batch axis, batch order, and short final batch. It checks finite declared
+yield counts at exhaustion and raises `DatasetExhaustedError` for a short source.
+Closing, conversion failure, source failure, or exhaustion closes the owned
+cursor. Reads never advance accepted-update progress, exposure, or checkpoint
+state; successful trainer updates remain their sole owners.
+
+Backend plugins deliberately remain separate from the generic seam:
+
+- `dryml.tf.training_data.as_training_dataset(prepared, preparation)` produces
+  a native `tf.data.Dataset` without a second batch, shuffle, or repeat. Each
+  native traversal reopens a DRYML cursor.
+- `dryml.torch.training_data.as_training_dataset(prepared, preparation)` returns
+  a native `IterableDataset`. `as_data_loader(dataset)` is available only for
+  wrappers that require a loader; it fixes `num_workers=0` and `batch_size=None`
+  so it neither duplicates a source nor adds a hidden batch axis. Explicit
+  loops may use `iter_training_batches` directly.
+- `dryml.jax.training_data.iter_training_batches(prepared, preparation)` returns
+  a closeable iterator of JAX-native batches. It does not introduce JAX training
+  state or compilation.
+
+Importing `dryml.data.native` or any training-data plugin imports neither its
+heavy framework nor the unsupported historical `dryml.data.tf` and
+`dryml.data.torch` wrappers. Framework imports occur only when a native adapter
+is requested or a retained handoff executes.
+
 ## Source Datasets
 
 Common source dataset classes:
