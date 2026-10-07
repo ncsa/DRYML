@@ -107,6 +107,17 @@ def test_torch_native_parameter_counts_cover_shared_frozen_and_lazy_models():
         parameter_counts(torch.nn.LazyLinear(2))
 
 
+def test_jax_native_parameter_counts_exclude_non_parameter_state():
+    """The JAX helper accepts only the declared parameter tree."""
+    if os.environ.get("JAX_PLATFORMS") != "cpu":
+        pytest.skip("JAX native measurement runs in the dedicated CPU qualification environment.")
+    jax = pytest.importorskip("jax")
+    from dryml.jax.measurements import parameter_counts
+
+    parameter = jax.numpy.zeros((2, 3))
+    assert parameter_counts({"shared": parameter}, {"shared": parameter}) == ParameterCounts(6, 6)
+
+
 def test_composite_measurement_unions_trainable_paths_for_shared_torch_parameter():
     from dryml.models import AutoEncoder
     from dryml.models.torch import Model

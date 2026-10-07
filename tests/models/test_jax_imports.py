@@ -46,6 +46,28 @@ print(json.dumps(sorted(
     assert json.loads(result.stdout) == []
 
 
+def test_jax_model_facade_import_defers_native_frameworks() -> None:
+    """Importing the experimental model API alone does not import JAX/Flax/Optax."""
+
+    environment = dict(os.environ)
+    source_path = str(ROOT / "src")
+    environment["PYTHONPATH"] = source_path + os.pathsep + environment.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, sys; import dryml.models.jax; print(json.dumps(sorted("
+            "name for name in ('jax', 'jaxlib', 'flax', 'optax') if name in sys.modules)))",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(result.stdout) == []
+
+
 def test_selected_jax_training_stack_exposes_nnx_and_optax() -> None:
     """Require the qualification environment to expose the selected JAX stack.
 

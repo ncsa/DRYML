@@ -162,7 +162,7 @@ def model_parameter_counts(model, *, repo=None) -> ParameterCounts:
     """
 
     backend = getattr(model, "native_backend", None)
-    if backend in {"tf", "torch"}:
+    if backend in {"tf", "torch", "jax"}:
         _, parameters, trainables = _model_parameter_set(model)
         return parameter_counts_from_parameters(parameters, trainables)
     if backend is not None:
@@ -195,8 +195,16 @@ def model_parameter_counts(model, *, repo=None) -> ParameterCounts:
 
 def _model_parameter_set(model):
     backend = getattr(model, "native_backend", None)
-    if backend not in {"tf", "torch"}:
+    if backend not in {"tf", "torch", "jax"}:
         return None
+    if backend == "jax":
+        from dryml.jax.measurements import parameter_sets
+
+        parameters = getattr(model, "parameters", ())
+        effective = getattr(model, "trainable_parameters", None)
+        trainables = effective("jax") if callable(effective) else parameters
+        parameters, trainables = parameter_sets(parameters, trainables)
+        return backend, parameters, trainables
     parameters, trainables = _backend_parameter_set(backend, getattr(model, "obj", model))
     effective = getattr(model, "trainable_parameters", None)
     if callable(effective):

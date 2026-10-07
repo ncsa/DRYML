@@ -21,7 +21,7 @@ Important public types:
 - `model_parameter_counts`
 - `parameter_counts_from_parameters`
 
-Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBoost, and other frameworks.
+Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBoost, and other frameworks. The JAX/Flax NNX/Optax APIs described below are **experimental** and may change based on use.
 
 ## Model As Method
 
@@ -332,6 +332,59 @@ Examples include:
 - XGBoost model wrappers
 
 Backend wrappers should keep external runtime state in object state and keep stable configuration in definitions.
+
+### Experimental JAX Models
+
+`dryml.models.jax.Model` is an **experimental** functional wrapper. Its
+constructor records separate explicit `F(...)`/`FactorySpec` `init_fn` and
+`apply_fn`, authored initializer arguments/keywords, an exact integer `seed`,
+and an explicit `output_spec`; constructor spelling may change in a future
+release. After JAX runtime admission, the initializer receives a distinct
+initialization key followed by the authored arguments and returns exactly
+`(parameters, mutable_state)`. The retained model RNG is split from that key.
+The apply function receives `(parameters, mutable_state, rng_state, input_tree,
+training_bool)` and returns exactly `(predictions, candidate_mutable_state,
+candidate_next_rng)`. It does not update parameters or optimizer slots.
+
+Public raw, selected-batched, selected-element, `Map`, and same-backend
+`AutoEncoder` calls return only predictions. They evaluate a state snapshot and
+discard candidate mutable/RNG changes, including after a failure or retry.
+DRYML never runs a fabricated forward call to infer the explicit output
+specification. Functional state supports plain dict/list/tuple trees of
+`jax.Array` leaves; malformed candidate topology, dtype, shape, or typed-key
+continuations fail before installation. `trainable_mask` is retained definition
+configuration and is reapplied to restored current parameters, so frozen/shared
+parameter measurement excludes mutable state, RNG, and optimizer slots.
+
+`dryml.models.jax.Optimizer` is also **experimental**. Its constructor records
+only an Optax `F(...)` recipe and does not import Optax, create a transformation,
+or allocate slots. The training-facing `bind(model)` seam reconstructs the recipe and
+initializes slots on first training use against current model parameters. It
+retains factory identity and parameter-template evidence, rejects incompatible
+later binding before update, and restores slots only after the matching model
+template is bound. Live transformations are never persisted. Inference-only
+Model construction and loading therefore do not require Optax. Experimental
+`TrainFunction` owns only behavior-continuation state; concrete `Training`
+supplies the loop. `pure_training_transition(...)` returns candidates without
+installing them so a future loop can coordinate owners at its eager commit
+boundary.
+
+`dryml.models.jax.NNXModel` (also `FlaxModel`) is the first-class experimental
+Flax NNX adapter sharing that candidate seam. Its explicit module factory and
+authored dimensions/configuration are rebuilt during load, must not provide the
+reserved `rngs` keyword, and receive wrapper-owned `nnx.Rngs` only after runtime
+admission. It partitions `Param` variables from remaining mutable/module-RNG
+state, not a live NNX GraphDef or device object. The separate external model RNG
+is split away from construction and remains distinct from module RNG streams.
+Public prediction clones module state and discards candidate BatchNorm, dropout,
+and external-RNG changes rather than mutating authoritative state.
+
+Every JAX owner writes a versioned host-array envelope and validates its complete
+runtime topology, path structure, shared-leaf topology, dtype, shape, typed-key
+implementation, and factory identity before installation. Parameters alone are
+counted by `Model.parameter_counts()` and `dryml.jax.measurements`. A failed
+graph restore is invalidated by the normal Store restore boundary and must be
+loaded again as a fresh exact graph.
 
 ## Sequential Layer Factories
 
