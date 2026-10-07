@@ -147,6 +147,12 @@ print(dataset.spec)
 
 Models can infer output specs. When model output specs are unbatched but inputs are batched, DRYML can propagate the batch dimension onto the output spec.
 
+Dataset-owned native training keeps the authored `(inputs, targets)` spec tree.
+`Batch` supplies batch metadata before preparation, and each trainer retains the
+selected backend-specific consumer specs in `TrainingPreparation`. TensorFlow,
+Torch, and experimental JAX adapters preserve the same semantic dtype, shape,
+structure, and batch meaning; they do not infer trainer-owned batch controls.
+
 ## Common Pitfalls
 
 - Do not include the batch dimension in `shape`; use `batch` instead.

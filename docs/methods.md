@@ -242,6 +242,11 @@ native consumer cursor reopens the plan independently; a consumer prefetch or
 read-ahead can only advance that private cursor and cannot advance a successful
 update position or checkpoint association.
 
+Native trainers retain their selected input and target consumer specs plus any
+dense conversion edges in an inspectable `TrainingPreparation`. TensorFlow,
+Torch, and experimental JAX therefore share the same Method-owned preparation
+authority without importing one another during planning.
+
 Dense handoffs preserve mapping/tuple/list structure and exact representable
 bool or fixed-width numeric dtype, shape, values, and batch meaning through an
 owned writable contiguous host copy. They normalize read-only, transposed, and

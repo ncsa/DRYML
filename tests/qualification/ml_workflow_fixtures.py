@@ -23,10 +23,11 @@ from dryml.locking import LockError, interprocess_lock
 
 
 MANIFEST_FORMAT = "dryml-ml-workflow-fixtures"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 BASELINE_PATH = Path(__file__).with_name("ml_workflow_baseline.json")
 REQUIRED_ENVIRONMENT_KEYS = (
-    "python", "dryml", "pandas", "pyarrow", "tensorflow", "tensorflow_datasets", "torch",
+    "python", "dryml", "flax", "jax", "jaxlib", "optax", "pandas", "pyarrow",
+    "tensorflow", "tensorflow_datasets", "torch",
 )
 _MINIMUM_PYARROW = (25, 0, 1)
 
@@ -109,7 +110,7 @@ def load_baseline(path: str | Path = BASELINE_PATH) -> dict[str, object]:
         "batch_size", "checkpoint_every_steps", "cpu_budget_seconds",
         "cpu_peak_rss_bytes", "case_store_budget_bytes",
     }
-    if set(value) != required or value.get("format") != "dryml-ml-workflow-baseline" or value.get("version") != 1:
+    if set(value) != required or value.get("format") != "dryml-ml-workflow-baseline" or value.get("version") != 2:
         raise FixtureManifestError("ML workflow baseline format is unsupported.")
     if not all(isinstance(value[key], dict) for key in ("mnist", "w1", "w2", "w3", "initialization")):
         raise FixtureManifestError("ML workflow baseline nested schema is malformed.")
@@ -136,6 +137,10 @@ def installed_environment() -> dict[str, str]:
     distributions = {
         "python": None,
         "dryml": "dryml",
+        "flax": "flax",
+        "jax": "jax",
+        "jaxlib": "jaxlib",
+        "optax": "optax",
         "pandas": "pandas",
         "pyarrow": "pyarrow",
         "tensorflow": "tensorflow",

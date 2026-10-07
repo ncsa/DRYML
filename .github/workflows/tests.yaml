@@ -180,7 +180,6 @@ jobs:
 
   jax-training-qualification:
     name: JAX training qualification (${{ matrix.install }}, Python 3.12)
-    if: github.event_name == 'workflow_dispatch' && (inputs.suite == 'exhaustive' || inputs.suite == 'coverage')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -240,7 +239,15 @@ jobs:
           JAX_PLATFORMS: cpu
           DRYML_TEST_BOOTSTRAP_CONTEXTS: "1"
         run: |
-          ./tests.sh tests/jax/test_jax_install.py tests/models/test_jax_imports.py --no-cov -x
+          ./tests.sh \
+            tests/jax/test_jax_install.py \
+            tests/models/test_jax_imports.py \
+            tests/models/test_dataset_training_integration.py::test_jax_trainer_consumes_authored_dataset_batches \
+            tests/models/test_dataset_training_integration.py::test_jax_qualification_model_runs_on_authored_dataset_batches \
+            tests/models/test_dataset_training_integration.py::test_jax_managed_local_publishes_exact_history_and_independent_owner_state \
+            tests/models/test_dataset_training_integration.py::test_jax_managed_subprocess_restores_exact_graph \
+            tests/models/test_jax_training.py::test_jax_training_updates_first_class_flax_nnx_model \
+            --no-cov -x
 
   ray-integration:
     name: Existing Ray integration (Ubuntu, Python 3.12)

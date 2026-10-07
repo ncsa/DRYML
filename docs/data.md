@@ -68,6 +68,8 @@ For declared seed-aware `GeneratorDataset` sources, `Take` also carries an
 optional logical `epoch`; `Repeat(Take(...))` advances selected epochs by default
 without changing its strict yield count. `fixed_prefix=True` intentionally reuses
 one epoch. Opaque generator factories receive no new replay or seed requirement.
+A completed `CachedDataset` instead persists one selected realization: repeating
+that cache replays its stored values and does not advance the source's epoch seed.
 
 ### Prepared Stream Graphs
 
@@ -97,7 +99,7 @@ unknown-spec discovery buffers; it is not teeing, memoization, or deduplication.
 `skip()` has the normal exact cursor contract, and reopening a graph creates a
 fresh traversal rather than serializing an iterator or generator frame.
 
-Prepared Dataset boundaries may retain one dense NumPy/TensorFlow/Torch handoff
+Prepared Dataset boundaries may retain one dense NumPy/TensorFlow/Torch/JAX handoff
 edge when a downstream Method has no direct compatible implementation. The
 adapter is applied while advancing the Dataset cursor, before native model
 forward/loss/backward/tape or compiled work begins. Dataset preprocessing is
@@ -328,6 +330,10 @@ named/nested selections use dictionaries of `Select.from_path(...)` leaves.
 Tuple/list selection trees require explicit `Select.from_path` leaves so path and
 output-tree intent cannot be guessed. `input_as_target=True` produces an
 autoencoder-style pair without copies or implicit batching.
+
+Native trainers consume this authored Dataset as-is. Put `Batch`, `Shuffle`,
+`Take`, and related controls in the Dataset graph before constructing an
+Experiment; trainers do not add hidden batching, selection, or shuffling.
 
 These utilities assume an element structure where `x` and `y` can be selected by path.
 

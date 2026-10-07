@@ -36,6 +36,18 @@ allows Mat arguments to materialize in workers and keeps `Ref[Definition]` data
 symbolic. Dispatch's incomplete-coverage warning now names its bounded diagnostic
 categories and directs callers to `dispatch.explain(...)` for the full report.
 
+Native training input is now owned entirely by the Dataset graph. Maintained
+TensorFlow, Torch, and experimental JAX trainers consume canonical authored
+`(inputs, targets)` batches, retain inspectable `TrainingPreparation` specs and
+handoffs, and reject the retired trainer-owned batching, shuffle, count, and path
+controls. The ML workflow qualification matrix now includes experimental JAX in
+all W1-W3 CPU placements (36 primary cells), binds JAX/Flax/Optax environment
+evidence and a fixed JAX seed, and adds credential-free managed local and Core
+subprocess exact-restoration representatives. The qualification baseline and
+fixture manifest are now schema version 2; existing version 1 authority remains
+untouched and must be replaced by preparation into new empty roots. GPU
+qualification remains the existing TensorFlow/W1 and Torch/W3 pair.
+
 Keras, Torch, and experimental JAX trainers now provide saved, recoverable
 completed-epoch early stopping. The shared monitor/patience/mode/minimum-
 improvement contract retains its best metric, wait count, accepted shortened

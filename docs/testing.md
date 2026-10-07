@@ -144,21 +144,25 @@ a file with a curated `representative_functions` entry is omitted until that
 file's function allowlist is deliberately updated. This intentional selection
 gap is why the exhaustive mode remains available on explicit user request.
 
-The ML workflow qualification representative set retains dependency-light coverage for Method
-preparation/stream handoffs, recursive Experiment identity projection, symbolic
-Definition quotation and history v1 fixtures, TrainState observation persistence,
-Artifact/history association, and closed qualification request construction.
-It does not run TFDS preparation, a real 24-cell CPU/recovery matrix, Ray,
-training, or GPU execution. Those are explicit opt-in qualification gates, not
-routine profile evidence.
+The ML workflow qualification representative set retains dependency-light coverage
+for Method preparation/stream handoffs, recursive Experiment identity projection,
+symbolic Definition quotation and history v1 fixtures, TrainState observation
+persistence, Artifact/history association, closed qualification request
+construction, and credential-free tiny TensorFlow/Torch/JAX Dataset-owned training
+representatives.
+The JAX representatives include exact managed-local and Core subprocess graph
+restoration when the qualified JAX/Flax/Optax stack is installed. The routine
+profile does not run TFDS preparation, the real 36-cell CPU matrix, existing Ray,
+recovery interruption, or GPU execution. Those remain explicit opt-in gates.
 
 The real TFDS NumPy adapter test is `exhaustive_only`. It requires a caller-selected
 `DRYML_ML_QUALIFICATION_TFDS_DATA_DIR` and uses `download=False`; routine selection keeps
 the mocked offline adapter tests while excluding that real reader.
 
 The routine suite has an approximate five-minute feedback goal, not a runtime
-cutoff. A reference selection measured **445.03 seconds (7m25s) wall time** on
-Linux with Python 3.12.13 in `big_env`, with **3,167 passed and 22 skipped**:
+cutoff. Before the Dataset/JAX integration representatives were added, a
+reference selection measured **445.03 seconds (7m25s) wall time** on Linux with
+Python 3.12.13 in `big_env`, with **3,167 passed and 22 skipped**:
 
 ```bash
 ./tests.sh good-enough -q --durations=30 --dryml-timing-summary
@@ -379,15 +383,17 @@ rather than skip. Each job prints the resolved Python, DRYML, and framework
 versions. Workflow configuration is not support evidence until the jobs pass on
 the exact child commit.
 
-The separate manual `JAX training qualification` matrix uses Python 3.12 and
+The separate `JAX training qualification` matrix runs for pushes, pull requests,
+and manually dispatched workflows on Python 3.12. It
 installs `jax_training_test_requirements.txt` for two clean dependency sets:
 the CPU JAX stack alone and the same stack with DRYML's existing `tf` and
 `torch` extras. It pins JAX/JAXlib, Flax (including `flax.nnx`), and Optax,
 requires their imports, and records a CPU backend with CPU devices before
-running the focused JAX import tests. This file is qualification-only: DRYML's
+running focused JAX import, first-class training, Dataset delivery, and managed
+local/subprocess restoration tests. This file is qualification-only: DRYML's
 existing lazy `jax` extra remains unchanged, and Flax/Optax are neither base
-dependencies nor a new package extra. The experimental training API that will
-use them remains responsible for selecting and reporting those dependencies.
+dependencies nor a new package extra. The experimental training API remains
+responsible for selecting and reporting those dependencies.
 
 The separately gated `Existing Ray integration (Ubuntu, Python 3.12)` job uses an
 ephemeral Conda coordinator and a venv derived from that same interpreter. It

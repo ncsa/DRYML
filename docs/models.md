@@ -131,7 +131,7 @@ separate recovery-stable weighted epoch-loss accumulator,
 the next unprocessed batch position, an invocation target epoch, a bounded
 pending epoch-postlude fact with finite completed-epoch metrics, and an immutable pending safe-point observation
 alongside model/optimizer progress. Supplied
-TensorFlow and Torch trainers advance these facts only after a successful
+TensorFlow, Torch, and experimental JAX trainers advance these facts only after a successful
 optimizer update, so failed updates and evaluation do not add exposure. Repeated
 epochs add exposure rather than changing effective Dataset size. The reported
 observation loss is weighted by actual batch examples, including short final
@@ -189,6 +189,10 @@ Torch exposes an `IterableDataset`/single-process DataLoader bridge for native
 wrappers that require one. In all cases adapter reads, including native
 read-ahead, do not advance retained progress: post-update trainer hooks own that
 state.
+
+Experimental JAX training follows the same retained preparation and cardinality
+authority. It consumes the authored batches through a closeable JAX iterator;
+its JITted transition does not own Dataset selection, batching, or progress.
 
 Keras retained loss is the scalar objective differentiated for each accepted
 completed update, including built-in regularizers and dynamic `add_loss`
@@ -309,13 +313,20 @@ require both branches to be explicitly batched; use `Batch(dataset, 1)` when a
 singleton update is intended. They preserve authored selection, order, and batch
 boundaries and validate the actual examples in every accepted batch. sklearn
 materializes either canonical examples or authored batches once for `fit`, records
-one successful-fit transition, and exposes no optimizer safe points.
+one successful-fit transition, and exposes no optimizer safe points. Its retained
+exposure is the number of submitted examples (including the actual size of each
+authored batch), not the number of Dataset yields or optimizer updates.
 
 Trainer constructors no longer accept `batch_size`, `num_examples`, `shuffle`,
 `shuffle_seed`, `shuffle_buffer_size`, `x_path`, or `y_path`. Saved definitions
 containing these retired fields fail during definition projection before source,
 model, optimizer, or Store mutation. Rebuild the trainer and move those controls
 to its Dataset; there is no legacy migration mode.
+
+The retained `training_preparation` exposes the canonical input/target consumer
+specs and selected handoff edges for TensorFlow, Torch, and experimental JAX.
+This is inspection evidence only; accepted updates and checkpoints remain owned
+by `TrainState` and the managed Experiment lifecycle.
 
 ## Experiments
 

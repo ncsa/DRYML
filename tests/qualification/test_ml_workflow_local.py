@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - exercised by Windows CI collection.
 import numpy as np
 import pytest
 
-from dryml.core import Repo
+from dryml.core import Definition, Repo
 from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset, Map
 from dryml.artifacts import CachedDataset
@@ -30,9 +30,10 @@ from tests.qualification.ml_workflow_fixtures import (
     prepare_manifest, verify_codec_equivalence,
 )
 from tests.qualification.ml_workflow_workloads import (
-    QualificationCase, QualificationEvidence, accuracy_formula, build_workload, case_from_manifest, cpu_matrix,
-    mnist_pipeline, mse_formula, native_device_evidence, qualification_case_paths, require_real_qualification,
-    run_local_case, supplemental_tfds_torch_case, w1_label_methods,
+    QualificationCase, QualificationEvidence, _QualificationMetric, accuracy_formula, build_workload, case_from_manifest, cpu_matrix,
+    mnist_pipeline, mse_formula, native_device_evidence, observe_jax_training_tensors,
+    qualification_case_paths, require_real_qualification, run_local_case, supplemental_tfds_torch_case,
+    w1_label_methods,
 )
 
 
@@ -67,6 +68,18 @@ def _authority(tmp_path):
     return path, store, manifest
 
 
+def test_version_one_baseline_is_explicitly_unsupported(tmp_path):
+    """The JAX-expanded v2 baseline never reinterprets persistent v1 authority."""
+
+    value = load_baseline()
+    value["version"] = 1
+    path = tmp_path / "baseline-v1.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    with pytest.raises(FixtureManifestError, match="unsupported"):
+        load_baseline(path)
+
+
 @pytest.mark.parametrize("mutation", ("missing", "malformed", "version", "config", "environment", "extra"))
 def test_manifest_rejects_missing_malformed_version_config_environment_and_extra_fields(tmp_path, mutation):
     """Manifest authority and mandatory environment compatibility fail before Store work."""
@@ -79,7 +92,7 @@ def test_manifest_rejects_missing_malformed_version_config_environment_and_extra
     else:
         value = manifest.to_data()
         if mutation == "version":
-            value["version"] = 2
+            value["version"] = 1
         elif mutation == "config":
             value["baseline"] = {"changed": True}
         elif mutation == "environment":
@@ -196,8 +209,8 @@ def test_workload_graph_is_publicly_inspectable_prepared_and_executable(tmp_path
     assert {"Project", "Select", "ImageNormalize", "Flatten", "Cast"} <= names
     # This is the public prepared iterator-to-consumer boundary, not private Pipe fields.
     first = next(graph.iterator())
-    assert set(first) == {"x", "y"}
-    assert first["x"].dtype == np.dtype("float32") and first["x"].shape == (4,)
+    assert isinstance(first, tuple) and len(first) == 2
+    assert first[0].dtype == np.dtype("float32") and first[0].shape == (4,)
     assert w1_label_methods()["prediction"].__class__.__name__ == "ArgMax"
     torch = pytest.importorskip("torch")
     from dryml import F
@@ -209,13 +222,194 @@ def test_workload_graph_is_publicly_inspectable_prepared_and_executable(tmp_path
     assert next(consumer_graph.iterator()).device.type == "cpu"
     _, _, manifest = _authority(tmp_path)
     matrix = cpu_matrix(manifest)
-    assert len(matrix) == 24
+    assert len(matrix) == 36
     assert all(case.case_kind == "matrix" and not case.tensorflow_mode for case in matrix)
     supplemental = supplemental_tfds_torch_case(manifest)
     assert supplemental.case_id not in {case.case_id for case in matrix}
     assert supplemental.case_kind == "tfds-tensorflow-to-torch"
     assert supplemental.tensorflow_mode
     assert all(case.w3_test_ref == manifest.references.numpy for case in matrix if case.workload == "W3")
+
+
+@pytest.mark.parametrize(
+    ("workload", "artifact_name"),
+    (("W1", "accuracy"), ("W2", "reconstruction_mse"), ("W3", "test_mse")),
+)
+def test_all_workload_artifact_recipes_construct_from_public_dataset_shapes(
+    tmp_path, monkeypatch, workload, artifact_name,
+):
+    """W1-W3 preflight exact Artifact graphs without mutating fixture authority."""
+
+    def snapshot(root):
+        return {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    if workload == "W3":
+        fixture_store = tmp_path / "w3-fixtures"
+        fixture_repo = Repo(DirStore(fixture_store))
+        values = {
+            "x": np.asarray([[1.0]], dtype=np.float32),
+            "y": np.asarray([[2.0]], dtype=np.float32),
+        }
+        first = CachedDataset(
+            ArrayDataset(values, validate_lengths=True), repo=fixture_repo,
+        ).compute(codec="numpy", managed=ManagedConfig(state_repo=fixture_repo))
+        second = CachedDataset(
+            ArrayDataset(values, validate_lengths=False), repo=fixture_repo,
+        ).compute(codec="numpy", managed=ManagedConfig(state_repo=fixture_repo))
+        assert fixture_repo.load_state_ref(first, reuse_live="never").ready
+        manifest = FixtureManifest(
+            fixture_store.resolve(),
+            load_baseline(),
+            FixtureReferences(first, second),
+            _TEST_ENVIRONMENT,
+            TFDSAuthority(tmp_path / "tfds", "mnist", "default", "1.0.0", "0" * 64),
+        )
+    else:
+        _, fixture_store, manifest = _authority(tmp_path)
+    output_store = DirStore(tmp_path / "output")
+    repo = Repo(output_store)
+    control_store = DirStore(tmp_path / "control", query_index="none")
+    managed = ManagedConfig(state_repo=repo, control_store=control_store)
+    case = case_from_manifest(
+        manifest, workload=workload, framework="torch", execution="local",
+    )
+    source = ArrayDataset((
+        np.zeros((4, 28, 28, 1), dtype=np.uint8),
+        np.arange(4, dtype=np.int64),
+    ))
+    monkeypatch.setattr(
+        "tests.qualification.ml_workflow_workloads.initialize_cpu_framework",
+        lambda framework, seed: None,
+    )
+    fixture_before = snapshot(fixture_store)
+
+    experiment = build_workload(
+        repo,
+        case,
+        managed=managed,
+        mnist_source=lambda split, tensorflow_mode: source,
+    )
+    if workload == "W3":
+        assert experiment.test_data == first
+    experiment._preflight_artifacts()
+    model_ref = repo.save(experiment.model, deep_capture=True)
+    x_path, y_path = ((0,), (1,)) if workload in {"W1", "W2"} else ("x", "y")
+    artifact = _QualificationMetric(
+        experiment.test_data,
+        model_ref,
+        metric="accuracy" if workload == "W1" else "mse",
+        x=x_path,
+        y=y_path,
+        fixture_store=os.fspath(fixture_store) if workload == "W3" else None,
+        repo=repo,
+    )
+    result_ref = artifact.compute(
+        store=output_store,
+        managed=managed,
+    )
+    result = repo.load_state_ref(result_ref, reuse_live="never").value()
+
+    assert experiment.artifacts.names == (artifact_name,)
+    assert experiment.train_data.example_cardinality().require_finite() in {4, 4096}
+    assert np.asarray(result).shape == () and np.isfinite(result)
+    assert snapshot(fixture_store) == fixture_before
+    if workload in {"W1", "W2"}:
+        assert output_store.read_state_ref_record(experiment.test_data.digest()) is not None
+        fixture_handle = DirStore.open_existing(fixture_store, query_index="none")
+        try:
+            assert fixture_handle.read_state_ref_record(experiment.test_data.digest()) is None
+        finally:
+            fixture_handle.close()
+
+
+@pytest.mark.parametrize(
+    ("workload", "artifact_name"),
+    (("W1", "accuracy"), ("W2", "reconstruction_mse"), ("W3", "test_mse")),
+)
+def test_all_workload_artifact_definitions_preflight_without_framework_imports(
+    workload, artifact_name,
+):
+    """Every recipe has a concrete Artifact root before native setup begins."""
+
+    from tests.models.test_dataset_training_integration import CountingModel
+
+    if workload in {"W1", "W2"}:
+        x_path, y_path = (0,), (1,)
+    else:
+        x_path, y_path = "x", "y"
+    recipe = Definition(
+        _QualificationMetric,
+        CountingModel(),
+        CountingModel(),
+        metric="accuracy" if workload == "W1" else "mse",
+        x=x_path,
+        y=y_path,
+        fixture_store="/fixture" if workload == "W3" else None,
+    )
+
+    definition = recipe.concretize()
+
+    assert definition.cls is _QualificationMetric
+    assert definition.parameters["metric"] == (
+        "accuracy" if artifact_name == "accuracy" else "mse"
+    )
+    assert definition.parameters["fixture_store"] == (
+        "/fixture" if workload == "W3" else None
+    )
+
+
+def test_workload_cache_uses_selected_control_store(tmp_path, monkeypatch):
+    """W1/W2 cache creation retains the request's distinct control authority."""
+
+    from tests.models.test_dataset_training_integration import CountingModel, CountingTrainer
+    import dryml.artifacts
+
+    _, _, manifest = _authority(tmp_path)
+    repo = Repo(DirStore(tmp_path / "output"))
+    control = DirStore(tmp_path / "control", query_index="none")
+    managed = ManagedConfig(state_repo=repo, control_store=control)
+    captured = {}
+
+    class ObservedCache:
+        def __init__(self, source, *, repo):
+            captured.update(source=source, repo=repo)
+
+        def compute(self, **kwargs):
+            captured.update(kwargs)
+            return None
+
+    monkeypatch.setattr(dryml.artifacts, "CachedDataset", ObservedCache)
+    monkeypatch.setattr(
+        "tests.qualification.ml_workflow_workloads.initialize_cpu_framework",
+        lambda framework, seed: None,
+    )
+    monkeypatch.setattr(
+        "tests.qualification.ml_workflow_workloads._model_and_training",
+        lambda framework, workload, seed: (CountingModel(), CountingTrainer()),
+    )
+    source = ArrayDataset((
+        np.zeros((1, 28, 28, 1), dtype=np.uint8),
+        np.zeros((1,), dtype=np.int64),
+    ))
+    case = case_from_manifest(
+        manifest, workload="W1", framework="torch", execution="managed-local",
+    )
+
+    build_workload(
+        repo,
+        case,
+        managed=managed,
+        mnist_source=lambda split, tensorflow_mode: source,
+    )
+
+    assert captured["repo"] is repo
+    assert captured["store"] is repo.stores[0]
+    assert captured["managed"] is managed
+    assert captured["managed"].control_store is control
 
 
 def test_case_is_closed_and_carries_manifest_environment_seed_and_fixture_identity(tmp_path):
@@ -593,11 +787,11 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     ).expanduser().resolve(strict=False)
     if control_path == manifest.fixture_store or not control_path.is_dir():
         raise FixtureManifestError("Real case control Store must be an existing non-fixture authority.")
-    repo = Repo((DirStore(output_path), DirStore(manifest.fixture_store)))
+    repo = Repo(DirStore(output_path))
     control = DirStore.open_existing(control_path)
     managed = ManagedConfig(state_repo=repo, control_store=control)
     started = time.monotonic()
-    experiment = build_workload(repo, case, mnist_source=source)
+    experiment = build_workload(repo, case, managed=managed, mnist_source=source)
     training_tensors, execution_tensors = [], []
     native_models = tuple(
         model for model in repo.iter_graph(experiment.model, missing="raise", order="post")
@@ -642,6 +836,12 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
         from dryml.models.tf.base import observe_keras_train_step
 
         observer_scope = observe_keras_train_step(observe_tf_train_step)
+    elif case.framework == "jax":
+        observer_scope = observe_jax_training_tensors(
+            experiment.train_fn,
+            training_tensors=training_tensors,
+            execution_tensors=execution_tensors,
+        )
     recovery_evidence = None
     try:
         if recovery is None:
@@ -733,7 +933,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
             # A new Repo guarantees this is a restoration comparison, not a live
             # cache comparison. The outer worker process is already isolated.
             repo.close(flush=False)
-            repo = Repo((DirStore(output_path), DirStore(manifest.fixture_store)))
+            repo = Repo(DirStore(output_path))
             managed = ManagedConfig(state_repo=repo, control_store=control)
             retained = repo.load_state_ref(checkpoint, reuse_live="never", cache="none")
             before = live_facts
@@ -795,18 +995,38 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     model_ref = final.at("model")
     test_ref = final.reference_value_at("test_data")
     model = repo.load_state_ref(model_ref, reuse_live="never")
-    test_data = repo.load_state_ref(test_ref, reuse_live="never")
+    formula_repo = None
+    if case.workload == "W3":
+        formula_repo = Repo(DirStore.open_existing(
+            manifest.fixture_store,
+            query_index="none",
+        ))
+        test_data = formula_repo.load_state_ref(
+            test_ref,
+            reuse_live="never",
+            source_store=formula_repo.stores[0],
+        )
+    else:
+        test_data = repo.load_state_ref(test_ref, reuse_live="never")
     prepare_exact_model_for_formula(model, case)
     predictions, observations = [], []
-    for sample in test_data:
-        prediction = model(sample["x"])
-        if case.accelerator == "gpu":
-            if native_device_evidence(model, training_tensors=(prediction,)) != "gpu:0":
-                raise FixtureManifestError("Exact-loaded formula model did not remain on the selected GPU.")
-        prediction = prediction.detach().cpu() if hasattr(prediction, "detach") else prediction
-        observation = sample["y"].detach().cpu() if hasattr(sample["y"], "detach") else sample["y"]
-        predictions.append(np.asarray(prediction))
-        observations.append(np.asarray(observation))
+    try:
+        for sample in test_data:
+            if isinstance(sample, dict):
+                inputs, targets = sample["x"], sample["y"]
+            else:
+                inputs, targets = sample
+            prediction = model(inputs)
+            if case.accelerator == "gpu":
+                if native_device_evidence(model, training_tensors=(prediction,)) != "gpu:0":
+                    raise FixtureManifestError("Exact-loaded formula model did not remain on the selected GPU.")
+            prediction = prediction.detach().cpu() if hasattr(prediction, "detach") else prediction
+            observation = targets.detach().cpu() if hasattr(targets, "detach") else targets
+            predictions.append(np.asarray(prediction))
+            observations.append(np.asarray(observation))
+    finally:
+        if formula_repo is not None:
+            formula_repo.close(flush=False)
     if case.workload == "W1":
         formula_value = accuracy_formula(np.argmax(np.asarray(predictions), axis=-1), np.asarray(observations))
     else:
