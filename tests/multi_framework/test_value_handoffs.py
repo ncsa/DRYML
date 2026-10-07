@@ -13,9 +13,13 @@ def _value(backend, array):
         return array
     if backend == "tf":
         return pytest.importorskip("tensorflow").convert_to_tensor(array)
+    if backend == "jax":
+        jnp = pytest.importorskip("jax.numpy")
+        return jnp.asarray(np.ascontiguousarray(array))
     # Torch cannot construct negative-stride tensors; use a transposed dense
     # tensor here while NumPy-source directions exercise negative strides.
-    return pytest.importorskip("torch").tensor(np.ascontiguousarray(array)).transpose(0, 1).transpose(0, 1)
+    tensor = pytest.importorskip("torch").tensor(np.ascontiguousarray(array))
+    return tensor.transpose(0, 1).transpose(0, 1) if tensor.ndim > 1 else tensor
 
 
 def _array(value):
@@ -23,13 +27,17 @@ def _array(value):
         return value
     if hasattr(value, "numpy"):
         return value.numpy()
+    if type(value).__module__.startswith(("jax", "jaxlib")):
+        return np.asarray(value)
     return value.detach().cpu().numpy()
 
 
 @pytest.mark.parametrize(
     ("source", "target"),
     (("numpy", "tf"), ("numpy", "torch"), ("tf", "numpy"),
-     ("tf", "torch"), ("torch", "numpy"), ("torch", "tf")),
+     ("tf", "torch"), ("torch", "numpy"), ("torch", "tf"),
+     ("numpy", "jax"), ("jax", "numpy"), ("tf", "jax"),
+     ("jax", "tf"), ("torch", "jax"), ("jax", "torch")),
 )
 def test_dense_cpu_handoffs_preserve_values_dtype_shape_and_owned_storage(source, target):
     """Every supported direct CPU direction copies a strided dense value exactly."""
@@ -47,6 +55,10 @@ def test_dense_cpu_handoffs_preserve_values_dtype_shape_and_owned_storage(source
         assert result.device.type == "cpu"
     elif target == "tf":
         assert "CPU" in result.device
+    elif target == "jax":
+        assert len(result.devices()) == 1
+        assert next(iter(result.devices())).platform == "cpu"
+        assert result.is_fully_addressable
     source_array.setflags(write=True)
     source_array[:] = -1
     np.testing.assert_array_equal(_array(result), np.arange(12, dtype=np.float32).reshape(3, 4)[:, ::-1])
@@ -63,6 +75,30 @@ def test_nested_handoff_preserves_container_types_and_short_dynamic_batch():
     assert isinstance(result, dict) and isinstance(result["y"], tuple)
     np.testing.assert_array_equal(_array(result["x"]), value["x"])
     np.testing.assert_array_equal(_array(result["y"][0]), value["y"][0])
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    (("numpy", "jax"), ("jax", "numpy"), ("tf", "jax"),
+     ("jax", "tf"), ("torch", "jax"), ("jax", "torch")),
+)
+def test_nested_jax_handoffs_preserve_short_dynamic_batches(source, target):
+    """Every JAX edge retains nested structure and one-element dynamic batches."""
+
+    spec = {
+        "x": TensorSpec("int32", shape=(2,), batch=Dynamic, backend=source),
+        "y": (TensorSpec("bool", shape=(), batch=Dynamic, backend=source),),
+    }
+    value = {
+        "x": _value(source, np.array([[1, 2]], dtype=np.int32)),
+        "y": (_value(source, np.array([True])),),
+    }
+
+    result = convert(make_edge(spec, target), value)
+
+    assert isinstance(result, dict) and isinstance(result["y"], tuple)
+    np.testing.assert_array_equal(_array(result["x"]), [[1, 2]])
+    np.testing.assert_array_equal(_array(result["y"][0]), [True])
 
 
 def test_torch_requires_grad_and_object_values_fail_before_crossing():

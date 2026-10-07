@@ -29,6 +29,10 @@ def split_for_spec(spec):
         import tensorflow as tf
 
         return lambda batch: _native_split(batch, tf.unstack)
+    if backend.value == "jax":
+        import jax.numpy as jnp
+
+        return lambda batch: _native_split(batch, jnp.unstack)
     return None
 
 

@@ -196,6 +196,75 @@ def test_gpu_cross_framework_handoffs_reject_before_any_host_copy(monkeypatch, s
     with pytest.raises(TypeError):
         conversion.convert(edge, value)
 
+
+def test_jax_abstract_tracer_and_sparse_values_reject_before_target_execution():
+    """JAX non-concrete values never reach a converted Torch target body."""
+
+    jax = pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
+    from jax.experimental import sparse
+
+    class TorchTarget(Method):
+        calls = 0
+
+        @traits(backend="torch")
+        def torch(self, value):
+            type(self).calls += 1
+            return value
+
+        def infer_output_spec(self, input_spec):
+            return input_spec
+
+    selected = TorchTarget().find_implementation(
+        TensorSpec("float32", shape=(2,), backend="jax")
+    )
+    TorchTarget.calls = 0
+    with pytest.raises(TypeError):
+        selected(jax.ShapeDtypeStruct((2,), jnp.float32))
+    assert TorchTarget.calls == 0
+
+    @jax.jit
+    def traced(value):
+        return selected(value)
+
+    with pytest.raises(TypeError):
+        traced(jnp.ones(2, dtype=jnp.float32))
+    assert TorchTarget.calls == 0
+    with pytest.raises((TypeError, ImplementationSelectionError)):
+        selected(sparse.BCOO.fromdense(jnp.eye(2, dtype=jnp.float32)))
+    assert TorchTarget.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("addressable", "platforms"),
+    ((False, ("cpu",)), (True, ("cpu", "cpu")), (True, ("cuda",))),
+)
+def test_jax_placement_rejection_happens_before_host_materialization(
+    monkeypatch, addressable, platforms,
+):
+    """Non-addressable, multi-device, and non-CPU JAX sources never materialize."""
+
+    import dryml.methods.conversion as conversion
+
+    class SentinelArray:
+        __module__ = "jax.fake"
+
+        is_fully_addressable = addressable
+
+        def devices(self):
+            return {type("Device", (), {"platform": platform})() for platform in platforms}
+
+        def __array__(self, dtype=None):
+            raise AssertionError("conversion attempted host materialization")
+
+    value = SentinelArray()
+    fake_jax = type("Jax", (), {"Array": SentinelArray})()
+    monkeypatch.setattr(conversion, "import_module", lambda _: fake_jax)
+    edge = conversion.make_edge(TensorSpec("float32", shape=(2,), backend="jax"), "numpy")
+
+    with pytest.raises(TypeError):
+        conversion.convert(edge, value)
+
 def _spec_leaves(tree):
     if isinstance(tree, TensorSpec):
         yield tree

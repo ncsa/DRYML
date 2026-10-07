@@ -92,8 +92,9 @@ class Unbatch(Dataset):
         super().__init__(spec=unbatch_spec_tree(src.spec))
 
     def __iter__(self):
+        split = self._resolve_split()
         for batch in self.src:
-            yield from default_split(batch)
+            yield from split(batch)
 
     def __len__(self) -> Cardinality:
         return self.src.example_cardinality()
