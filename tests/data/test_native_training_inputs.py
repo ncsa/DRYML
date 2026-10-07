@@ -12,7 +12,7 @@ import sys
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import Batch, Dataset, Take
+from dryml.data import Batch, Dataset, GeneratorDataset, Skip, Take
 
 
 class TrackingDataset(Dataset):
@@ -48,6 +48,15 @@ def _batches():
     return source, Batch(source, 2)
 
 
+def _seeded_pairs(*, seed):
+    """Yield one epoch-distinct paired scalar stream for logical epoch tests."""
+
+    rng = np.random.default_rng(seed)
+    for _ in range(2):
+        value = np.asarray([rng.integers(1000)], dtype=np.float32)
+        yield value, value
+
+
 def test_prepared_dataset_plans_once_reopens_independent_closeable_cursors():
     """Preparation is inert and each prepared traversal owns a fresh graph cursor."""
     from dryml.data.native import PreparedDataset
@@ -68,16 +77,49 @@ def test_prepared_dataset_plans_once_reopens_independent_closeable_cursors():
     assert sorted(source.closes) == [0, 1]
 
 
-def test_prepared_dataset_reports_eager_fallback_for_unqualified_operator():
-    """Unqualified Dataset operators retain eager iteration rather than failing a bridge."""
+def test_prepared_dataset_streams_strict_take_without_opening_its_child_twice():
+    """A qualified Take keeps its strict cursor inside the prepared graph."""
     from dryml.data.native import PreparedDataset
 
     source, dataset = _batches()
     prepared = PreparedDataset(Take(dataset, 1))
 
-    assert prepared.execution_level == "eager"
+    assert prepared.execution_level == "stream"
     cursor = prepared.iterator()
     assert next(cursor)[0].shape == (2, 1)
+    cursor.close()
+    assert source.closes == [0]
+
+
+def test_prepared_wrapped_take_forwards_logical_epoch_once():
+    """Batch around seed-aware Take selects the requested source epoch on reopen."""
+    from dryml.data.native import PreparedDataset
+
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    source = GeneratorDataset(
+        _seeded_pairs, cardinality=Cardinality.INFINITE, spec=(spec, spec),
+        seed=41, seed_aware=True,
+    )
+    prepared = PreparedDataset(Batch(Take(source, 2), 1))
+
+    first = list(prepared.iterator(epoch=0))
+    second = list(prepared.iterator(epoch=1))
+
+    assert prepared.execution_level == "stream"
+    assert [int(x[0, 0]) for x, _ in first] != [int(x[0, 0]) for x, _ in second]
+
+
+def test_prepared_dataset_retains_eager_fallback_for_unqualified_operator():
+    """An unsupported operator keeps ordinary Dataset iteration semantics."""
+
+    from dryml.data.native import PreparedDataset
+
+    source, dataset = _batches()
+    prepared = PreparedDataset(Skip(dataset, 1))
+
+    assert prepared.execution_level == "eager"
+    cursor = prepared.iterator()
+    assert next(cursor)[0].shape == (1, 1)
     cursor.close()
     assert source.closes == [0]
 

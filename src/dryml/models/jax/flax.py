@@ -5,7 +5,7 @@ from __future__ import annotations
 from dryml.core.factory import FactorySpec
 from dryml.core.utils.stable_hash import stable_hash_function
 
-from .base import Model, _require_factory, _tree_to_jax, _validate_key, _validate_predictions
+from .base import Model, _leaf_aliases, _require_factory, _tree_to_jax, _validate_key, _validate_predictions
 from .state import read_owner_envelope, read_tree_state, write_owner_envelope, write_tree_state
 
 
@@ -78,7 +78,10 @@ class NNXModel(Model):
 
         import jax
 
-        self._trainable_parameters = tuple(jax.tree_util.tree_leaves(self.parameters))
+        leaves = jax.tree_util.tree_leaves(self.parameters)
+        self._parameter_aliases = _leaf_aliases(self.parameters, jax)
+        self._trainable_mask_leaves = None
+        self._trainable_parameters = tuple(leaves)
 
     def _candidate_apply(self, value, *, training: bool):
         """Run NNX on a cloned state and return its validated training candidate."""
@@ -101,6 +104,36 @@ class NNXModel(Model):
         _validate_predictions(predictions, jax)
         next_rng, _ = jax.random.split(self.rng)
         self._validate_candidate_state(candidate_parameters, candidate_mutable, next_rng)
+        return predictions, candidate_mutable, next_rng
+
+    def _training_apply(self, parameters, mutable_state, rng, value):
+        """Apply an NNX state candidate without installing it in this Model.
+
+        Args:
+            parameters: Candidate NNX ``Param`` state being differentiated.
+            mutable_state: Candidate non-parameter NNX state.
+            rng: Candidate external typed JAX key.
+            value: JAX-native prepared feature batch.
+
+        Returns:
+            Predictions, candidate mutable state, and a split next-use external
+            key. The live module remains unchanged.
+
+        Side Effects:
+            Creates an ephemeral merged NNX module suitable for JAX transforms;
+            it never updates the authoritative module or wrapper fields.
+        """
+
+        import jax
+        from flax import nnx
+
+        graphdef, _, _ = nnx.split(self.obj, nnx.Param, nnx.Not(nnx.Param))
+        candidate = nnx.merge(graphdef, parameters, mutable_state)
+        if hasattr(candidate, "train"):
+            candidate.train()
+        predictions = candidate(value)
+        _, _, candidate_mutable = nnx.split(candidate, nnx.Param, nnx.Not(nnx.Param))
+        next_rng, _ = jax.random.split(rng)
         return predictions, candidate_mutable, next_rng
 
     def _validate_candidate_state(self, parameters, mutable_state, rng) -> None:

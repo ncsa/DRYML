@@ -55,6 +55,12 @@ def test_native_trainers_reject_unbatched_canonical_data():
         require_supervised_dataset(dataset, batched=True)
 
 
+def test_native_trainers_reject_non_dataset_without_leaking_attribute_error():
+    """Generic training admission gives callers a stable type failure for arbitrary input."""
+    with pytest.raises(TypeError, match="Dataset"):
+        require_supervised_dataset(object(), batched=True)
+
+
 def test_backend_model_packages_import_without_backend_runtime():
     import dryml.models.tf as tf_models
     import dryml.models.torch as torch_models

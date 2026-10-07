@@ -5,7 +5,7 @@ import numpy as np
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import Chain, Dataset, Map, Pipe, StreamDataset, Zip
+from dryml.data import Chain, Dataset, Map, Pipe, StreamDataset, Take, Zip
 from dryml.methods import IteratorPort, Method, StreamNode, traits
 
 
@@ -301,15 +301,13 @@ def test_graph_cursor_attempts_every_close_when_multiple_cleanups_fail():
     assert right.closes == [0]
 
 
-def test_unsupported_operator_rejects_graph_planning_without_changing_eager_iteration():
-    """Only the initial qualified stream subset receives graph execution semantics."""
-    from dryml.data import Take
-
+def test_take_stream_node_preserves_strict_prefix_and_closes_source():
+    """A planned Take delegates strict counting and source ownership to its cursor."""
     source = TrackingDataset((1, 2))
     graph = Take(source, 1).method_graph()
-    with pytest.raises(NotImplementedError, match="Take"):
-        graph.learn()
-    assert list(Take(source, 1)) == [1]
+    graph.learn()
+    assert list(graph.iterator()) == [1]
+    assert source.closes == [0]
 
 
 def test_custom_stream_dataset_composes_bounded_two_input_variable_output_node():

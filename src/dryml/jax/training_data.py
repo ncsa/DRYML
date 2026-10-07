@@ -5,12 +5,13 @@ from __future__ import annotations
 from dryml.data.native import PreparedDataset
 
 
-def iter_training_batches(data: PreparedDataset, preparation):
+def iter_training_batches(data: PreparedDataset, preparation, *, epoch: int = 0):
     """Return one closeable iterator yielding JAX-native prepared ``(x, y)`` batches.
 
     Args:
         data: Dependency-light prepared Dataset pipeline.
         preparation: Retained x/y handoff prepared for JAX.
+        epoch: Logical Dataset epoch used for a supported seed-aware source.
 
     Returns:
         A closeable cursor whose yielded trees retain authored structure, dtype,
@@ -28,7 +29,7 @@ def iter_training_batches(data: PreparedDataset, preparation):
 
     if not isinstance(data, PreparedDataset):
         raise TypeError("JAX training input requires a PreparedDataset.")
-    return data.training_batches(preparation)
+    return data.training_batches(preparation, epoch=epoch)
 
 
 __all__ = ["iter_training_batches"]

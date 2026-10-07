@@ -146,9 +146,22 @@ class Experiment(Serializable):
         self._preflight_artifacts()
         if managed.is_resuming and self.state.pending_observation is not None:
             retained = managed.checkpoint_state_ref
-            replayed = managed.checkpoint()
-            if replayed != retained:
-                raise RuntimeError("Experiment checkpoint replay changed its retained StateRef.")
+            row_key = self._occurrence_key(
+                self.state.pending_observation_attempt_id,
+                self.state.pending_observation.sequence,
+            )
+            history = ExperimentData.get_or_create(
+                retained.object_projection(), repo=managed.state_repo,
+            )
+            completed = history._rows.get(row_key)
+            if (
+                completed is None
+                or completed["evaluation_status"] != "completed"
+                or completed["facts"]["state_ref"] != retained
+            ):
+                replayed = managed.checkpoint()
+                if replayed != retained:
+                    raise RuntimeError("Experiment checkpoint replay changed its retained StateRef.")
             if self.state.pending_observation_terminal:
                 return
         if self.state.is_trained:
@@ -212,6 +225,8 @@ class Experiment(Serializable):
         row_key = self._occurrence_key(self.state.pending_observation_attempt_id, observation.sequence)
         names, recipes = self._artifact_recipes()
         history = ExperimentData.get_or_create(checkpoint.object_projection(), repo=context.state_repo)
+        existing = history._rows.get(row_key)
+        already_completed = existing is not None and existing["evaluation_status"] == "completed"
         try:
             parameters = model_parameter_counts(self.model, repo=context.state_repo)
         except (MeasurementUnavailableError, TypeError):
@@ -228,6 +243,10 @@ class Experiment(Serializable):
             row_key=row_key,
             prev_row_key=self.state.pending_observation_prev_row_key,
         )
+        if already_completed:
+            # add_row above revalidated every immutable checkpoint fact. A caller
+            # callback can fail after publication, so an exact replay is complete.
+            return
         history.publish(repo=context.state_repo)
         _experiment_boundary("pending_row_published")
         row = history._rows[row_key]

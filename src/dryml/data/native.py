@@ -42,8 +42,12 @@ class PreparedDataset:
         else:
             self.execution_level = "stream"
 
-    def iterator(self):
+    def iterator(self, *, epoch: int = 0):
         """Open one independent closeable traversal at the prepared execution level.
+
+        Args:
+            epoch: Logical Dataset epoch. A nonzero epoch selects a supporting
+                seed-aware source directly without traversing earlier epochs.
 
         Returns:
             A graph cursor for qualified pipelines or the Dataset's ordinary
@@ -58,16 +62,22 @@ class PreparedDataset:
             remains reusable and holds neither cursor position nor source handles.
         """
 
+        if type(epoch) is not int or epoch < 0:
+            raise ValueError("epoch must be a nonnegative exact int.")
         if self.execution_level == "stream":
-            return self.graph.iterator()
+            return self.graph.iterator(epoch=epoch)
+        opener = getattr(self.dataset, "iterator_for_epoch", None)
+        if epoch and callable(opener):
+            return opener(epoch)
         return self.dataset.iterator()
 
-    def training_batches(self, preparation) -> "NativeTrainingCursor":
+    def training_batches(self, preparation, *, epoch: int = 0) -> "NativeTrainingCursor":
         """Open one closeable native-training batch cursor.
 
         Args:
             preparation: A once-planned object exposing ``prepare(x, y)`` for the
                 native consumer's retained x/y conversion edges.
+            epoch: Logical Dataset epoch for a supporting seed-aware source.
 
         Returns:
             A cursor yielding prepared ``(x, y)`` batches in authored Dataset
@@ -83,7 +93,7 @@ class PreparedDataset:
 
         if not callable(getattr(preparation, "prepare", None)):
             raise TypeError("Native training data requires a prepared x/y handoff.")
-        return NativeTrainingCursor(self, preparation)
+        return NativeTrainingCursor(self, preparation, epoch=epoch)
 
 
 class NativeTrainingCursor(Iterator[tuple[Any, Any]]):
@@ -99,9 +109,12 @@ class NativeTrainingCursor(Iterator[tuple[Any, Any]]):
     not advance accepted-update, exposure, or checkpoint state.
     """
 
-    def __init__(self, dataset: PreparedDataset, preparation) -> None:
+    def __init__(self, dataset: PreparedDataset, preparation, *, epoch: int = 0) -> None:
         self._dataset = dataset
         self._preparation = preparation
+        if type(epoch) is not int or epoch < 0:
+            raise ValueError("epoch must be a nonnegative exact int.")
+        self._epoch = epoch
         self._cursor = None
         cardinality = dataset.dataset.yield_cardinality()
         self._expected = cardinality.require_finite() if cardinality.is_finite else None
@@ -119,7 +132,7 @@ class NativeTrainingCursor(Iterator[tuple[Any, Any]]):
         if self._closed:
             raise StopIteration
         if self._cursor is None:
-            self._cursor = self._dataset.iterator()
+            self._cursor = self._dataset.iterator(epoch=self._epoch)
         try:
             value = next(self._cursor)
         except StopIteration as error:
@@ -165,7 +178,7 @@ class NativeTrainingCursor(Iterator[tuple[Any, Any]]):
                 raise DatasetExhaustedError(n, 0)
             return
         if self._cursor is None:
-            self._cursor = self._dataset.iterator()
+            self._cursor = self._dataset.iterator(epoch=self._epoch)
         try:
             self._cursor.skip(n)
         except BaseException as error:

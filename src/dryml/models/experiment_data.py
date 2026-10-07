@@ -173,13 +173,57 @@ def _decode_ref(value: object, *, nullable: bool = False) -> StateRef | None:
 
 
 def _reference_to_json(value: object) -> dict[str, object]:
-    """Encode a strict StateRef.to_data tree without relying on JSON inference."""
+    """Encode a strict StateRef.to_data tree without relying on JSON inference.
 
+    Definition-compatible factory and source specifications occur in Experiment
+    StateRefs for managed native trainers, so their inert construction shape is
+    represented explicitly rather than falling back to presentation formatting.
+    """
+
+    from dryml.core.factory import FactorySpec
     from dryml.core.freeze import FrozenNDArray
-    from dryml.core.symbol import ImportRef
+    from dryml.core.symbol import ImportRef, SourceSpec
+    from dryml.core.tensor_spec import Dim, TensorSpec
 
     if isinstance(value, ImportRef):
         return {"type": "import_ref", "module": value.module, "qualname": value.qualname}
+    if isinstance(value, SourceSpec):
+        return {
+            "type": "source_spec",
+            "kind": value.kind,
+            "source": value.source,
+            "name": value.name,
+            "imports": {
+                name: _reference_to_json(reference)
+                for name, reference in (value.imports or {}).items()
+            },
+        }
+    if isinstance(value, FactorySpec):
+        return {
+            "type": "factory_spec",
+            "target": _reference_to_json(value.target),
+            "args": [_reference_to_json(item) for item in value.args],
+            "kwargs": {
+                key: _reference_to_json(item) for key, item in value.kwargs.items()
+            },
+        }
+    if isinstance(value, TensorSpec):
+        def encode_dim(dimension):
+            return "dynamic" if isinstance(dimension, Dim) else dimension
+
+        return {
+            "type": "tensor_spec",
+            "dtype": str(value.dtype),
+            "shape": None if value.shape is None else [encode_dim(item) for item in value.shape],
+            "batch": encode_dim(value.batch) if value.batch is not None else None,
+            "backend": None if value.backend is None else value.backend.value,
+            "layout": value.layout.value,
+            "axis_names": None if value.axis_names is None else list(value.axis_names),
+            "batch_axis_name": value.batch_axis_name,
+            "ragged_rank": value.ragged_rank,
+            "row_splits_dtype": None if value.row_splits_dtype is None else str(value.row_splits_dtype),
+            "sparse_format": value.sparse_format,
+        }
     if value is None:
         return {"type": "null"}
     if type(value) is bool:
@@ -201,6 +245,8 @@ def _reference_to_json(value: object) -> dict[str, object]:
         }
     if isinstance(value, list):
         return {"type": "list", "items": [_reference_to_json(item) for item in value]}
+    if isinstance(value, tuple):
+        return {"type": "tuple", "items": [_reference_to_json(item) for item in value]}
     if isinstance(value, Mapping):
         if not all(type(key) is str for key in value):
             raise ExperimentDataError("StateRef record has a non-string JSON mapping key.")
@@ -216,8 +262,10 @@ def _reference_to_json(value: object) -> dict[str, object]:
 def _reference_from_json(value: object) -> object:
     """Rebuild the exact StateRef.to_data tree before strict reference decoding."""
 
+    from dryml.core.factory import FactorySpec
     from dryml.core.freeze import FrozenNDArray
-    from dryml.core.symbol import ImportRef
+    from dryml.core.symbol import ImportRef, SourceSpec
+    from dryml.core.tensor_spec import Dynamic, TensorSpec
 
     if not isinstance(value, Mapping) or not isinstance(value.get("type"), str):
         raise ExperimentDataError("StateRef record is not a closed JSON value tree.")
@@ -232,11 +280,74 @@ def _reference_from_json(value: object) -> object:
         return value["value"]
     if tag == "int" and set(value) == {"type", "value"}:
         return _decode_cell({"tag": "int", "value": value["value"]})
+    if tag in {"list", "tuple"} and set(value) == {"type", "items"}:
+        if not isinstance(value["items"], list):
+            raise ExperimentDataError("StateRef sequence record has invalid items.")
+        items = [_reference_from_json(item) for item in value["items"]]
+        return items if tag == "list" else tuple(items)
     if tag == "import_ref" and set(value) == {"type", "module", "qualname"}:
         try:
             return ImportRef(value["module"], value["qualname"])
         except (binascii.Error, TypeError, ValueError) as error:
             raise ExperimentDataError("StateRef record has an invalid import reference.") from error
+    if tag == "source_spec" and set(value) == {"type", "kind", "source", "name", "imports"}:
+        if not isinstance(value["imports"], Mapping):
+            raise ExperimentDataError("Source StateRef record has invalid imports.")
+        try:
+            imports = {
+                name: _reference_from_json(reference)
+                for name, reference in value["imports"].items()
+            }
+            if not all(type(name) is str and isinstance(reference, ImportRef) for name, reference in imports.items()):
+                raise ValueError("invalid imports")
+            return SourceSpec(value["kind"], value["source"], value["name"], imports)
+        except (TypeError, ValueError) as error:
+            raise ExperimentDataError("StateRef record has an invalid source specification.") from error
+    if tag == "factory_spec" and set(value) == {"type", "target", "args", "kwargs"}:
+        if not isinstance(value["args"], list) or not isinstance(value["kwargs"], Mapping):
+            raise ExperimentDataError("Factory StateRef record has invalid fields.")
+        try:
+            target = _reference_from_json(value["target"])
+            args = [_reference_from_json(item) for item in value["args"]]
+            kwargs = {
+                key: _reference_from_json(item) for key, item in value["kwargs"].items()
+            }
+            if not all(type(key) is str for key in kwargs):
+                raise ValueError("invalid keyword")
+            return FactorySpec(target, *args, **kwargs)
+        except (TypeError, ValueError) as error:
+            raise ExperimentDataError("StateRef record has an invalid factory specification.") from error
+    if tag == "tensor_spec" and set(value) == {
+        "type", "dtype", "shape", "batch", "backend", "layout", "axis_names",
+        "batch_axis_name", "ragged_rank", "row_splits_dtype", "sparse_format",
+    }:
+        def decode_dim(dimension):
+            if dimension == "dynamic":
+                return Dynamic
+            if type(dimension) is int:
+                return dimension
+            raise ValueError("invalid dimension")
+
+        try:
+            shape = value["shape"]
+            if shape is not None:
+                if not isinstance(shape, list):
+                    raise ValueError("invalid shape")
+                shape = tuple(decode_dim(item) for item in shape)
+            batch = value["batch"]
+            if batch is not None:
+                batch = decode_dim(batch)
+            axis_names = value["axis_names"]
+            if axis_names is not None and not isinstance(axis_names, list):
+                raise ValueError("invalid axis names")
+            return TensorSpec(
+                value["dtype"], shape=shape, batch=batch, backend=value["backend"],
+                layout=value["layout"], axis_names=axis_names,
+                batch_axis_name=value["batch_axis_name"], ragged_rank=value["ragged_rank"],
+                row_splits_dtype=value["row_splits_dtype"], sparse_format=value["sparse_format"],
+            )
+        except (TypeError, ValueError) as error:
+            raise ExperimentDataError("StateRef record has an invalid tensor specification.") from error
     if tag == "frozen_ndarray" and set(value) == {"type", "dtype", "shape", "bytes"}:
         if type(value["dtype"]) is not str or not isinstance(value["shape"], list) or type(value["bytes"]) is not str:
             raise ExperimentDataError("Frozen array StateRef record has invalid fields.")

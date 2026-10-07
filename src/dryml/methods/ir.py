@@ -183,8 +183,12 @@ class MethodGraph:
             return
         self._owner().eager()
 
-    def iterator(self):
+    def iterator(self, *, epoch: int = 0):
         """Open one isolated cursor for a prepared Dataset iterator-port graph.
+
+        Args:
+            epoch: Logical Dataset epoch forwarded to qualified stream boundaries
+                that own epoch selection, such as ``Take``.
 
         Raises:
             NotImplementedError: If this is an element-only Method graph.
@@ -197,7 +201,7 @@ class MethodGraph:
 
         if self._stream_plan is None:
             raise NotImplementedError("MethodGraph iterator execution requires Dataset iterator ports.")
-        return self._stream_plan.iterator()
+        return self._stream_plan.iterator(epoch=epoch)
 
     def _owner(self):
         owner = self._owner_ref()

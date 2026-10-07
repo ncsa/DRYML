@@ -115,6 +115,8 @@ class Unbatch(Dataset):
 class Take(Dataset):
     """Yield exactly a requested number of source values or report exhaustion."""
 
+    _stream_operator = "take"
+
     def __init__(
         self, src: Dataset, n: int, *, epoch: int = 0, fixed_prefix: bool = False,
     ):

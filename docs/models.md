@@ -142,7 +142,7 @@ Its named persistence state rejects unknown fields and validates finite loss
 facts, exact nonnegative counters, lifecycle enums, pending-postlude coherence,
 and pending-observation type before installing restored progress. Historical
 three-slot `(epoch, step, phase)` payloads remain supported with zero/`None`
-defaults for U8 fields.
+defaults for later lifecycle fields.
 
 TensorFlow `fit`, explicit TensorFlow loops, and Torch loops validate all DRYML
 callbacks before training work and invoke them only after this retained state is
@@ -353,8 +353,13 @@ DRYML never runs a fabricated forward call to infer the explicit output
 specification. Functional state supports plain dict/list/tuple trees of
 `jax.Array` leaves; malformed candidate topology, dtype, shape, or typed-key
 continuations fail before installation. `trainable_mask` is retained definition
-configuration and is reapplied to restored current parameters, so frozen/shared
-parameter measurement excludes mutable state, RNG, and optimizer slots.
+configuration and is reapplied to restored current parameters. Training preserves
+every false-mask parameter leaf exactly after the Optax candidate, including a
+parameter-dependent transformation such as decoupled weight decay. Functional
+models with shared parameter leaves are supported for inference, measurement, and
+persistence, but are rejected before optimizer binding because this experimental
+trainer does not claim shared-gradient semantics. Parameter measurement excludes
+mutable state, RNG, and optimizer slots.
 
 `dryml.models.jax.Optimizer` is also **experimental**. Its constructor records
 only an Optax `F(...)` recipe and does not import Optax, create a transformation,
@@ -378,6 +383,39 @@ state, not a live NNX GraphDef or device object. The separate external model RNG
 is split away from construction and remains distinct from module RNG streams.
 Public prediction clones module state and discards candidate BatchNorm, dropout,
 and external-RNG changes rather than mutating authoritative state.
+
+`dryml.models.jax.Training` is the matching **experimental** Dataset-owned
+trainer for functional `Model` and `NNXModel`. Construct it with an experimental
+`Optimizer`, a definition-compatible scalar mean-loss callable (or an `F(...)`
+factory returning one), and a nonnegative epoch count. It accepts no selection,
+batching, shuffle, path, or trainer-owned data controls: its Experiment must
+provide canonical explicitly batched `(inputs, targets)` Datasets. The trainer
+plans its JAX handoffs once, then consumes the closeable JAX-native prepared
+iterator without applying another batch or shuffle. Finite sources retain short
+final batches and account their actual example count; infinite sources require an
+authored finite bound. Unknown finite sources are supported only without DRYML
+safe-point callbacks.
+
+Zero requested epochs validate the Experiment's declared Dataset/callback inputs
+and complete the retained invocation lifecycle without preparing or opening a
+source, applying a model, importing/binding Optax, allocating slots, or updating
+owners. Prepared `Batch`, `Map`, and `Unbatch` pipelines forward their logical
+epoch to an enclosed seed-aware `Take(...)` boundary; `Take` retains strict
+exhaustion, fixed-prefix, and zero-acquisition behavior. Ordinary non-epoch-aware
+Dataset pipelines retain their normal fresh traversal per epoch.
+
+Training computes a pure JITted parameter-only gradient/Optax candidate, waits
+for its arrays, validates model parameters, mutable state, RNG, and optimizer
+slots, then eagerly installs all owner state and TrainState accounting together.
+Callbacks and managed checkpoints run only after that accepted transition, so a
+callback/publication failure retains the truthful update. An interruption during
+the bounded transition repairs the prior Model, Optimizer, TrainFunction, and
+progress state before it propagates. Resume reopens the same logical Dataset epoch
+and skips only accepted yielded batches; a seed-aware `GeneratorDataset` under
+`Take` therefore retains its selected epoch seed while resuming. Validation is
+snapshot-only: candidate mutable state and RNG are always discarded. JAX Training
+does not yet support trainer metrics, early stopping, invocation telemetry, or
+arbitrary native callbacks; those capabilities are not implied by this interface.
 
 Every JAX owner writes a versioned host-array envelope and validates its complete
 runtime topology, path structure, shared-leaf topology, dtype, shape, typed-key

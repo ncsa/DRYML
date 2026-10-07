@@ -168,11 +168,15 @@ def require_supervised_dataset(dataset, *, batched: bool) -> None:
         Dataset operators, open a cursor, or alter selection/order/batching.
     """
 
+    from dryml.data import Dataset
+
     if dataset is None:
         raise ValueError("Experiment has no train_data.")
+    if not isinstance(dataset, Dataset):
+        raise TypeError("Training data must be a Dataset.")
     try:
         inputs, targets = dataset.spec
-    except (TypeError, ValueError) as error:
+    except (AttributeError, TypeError, ValueError) as error:
         raise ValueError(
             "Training data must be a canonical Dataset yielding (inputs, targets); "
             "use data.as_supervised(...)."
