@@ -7,8 +7,6 @@ imports pandas only when callers request tabular analysis.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import copy
 import json
 import math
@@ -22,17 +20,24 @@ from uuid import uuid4
 from dryml.core import ObjectRef, Ref, StateRef
 from dryml.core.cardinality import Cardinality, CardinalityKind
 from dryml.core.object import Serializable
+from dryml.core.reference_json import (
+    ReferenceJSONCodecError,
+    _decode_legacy_reference_json,
+    _encode_legacy_reference_json,
+    decode_reference_json,
+    encode_reference_json,
+)
 from dryml.core.repo import RepoLoadError, RepoSaveError
 from dryml.core.store.records import StateAliasRecord
 from dryml.core.store.store import StoreAliasConflictError, StoreAuthorityError
 
 
 _FORMAT = "dryml-experiment-data"
-_VERSION = 2
-_READABLE_VERSIONS = frozenset((1, 2))
+_VERSION = 3
+_READABLE_VERSIONS = frozenset((1, 2, 3))
 _FILENAME = "experiment_data.json"
-# Retain the established alias so v1 histories migrate in place when their next
-# immutable v2 snapshot becomes current.
+# Retain the established alias so legacy histories migrate in place when their
+# next immutable current-version snapshot becomes current.
 _ALIAS = "experiment_data_current_v1"
 _MAX_BYTES = 64 * 1024 * 1024
 _MAX_ROWS = 100_000
@@ -158,10 +163,19 @@ def _decode_cell(value: object) -> object:
     raise ExperimentDataError(f"Unsupported or malformed scalar tag {tag!r}.")
 
 
-def _encode_ref(value: StateRef) -> dict[str, object]:
+def _encode_reference(value: StateRef, *, version: int) -> dict[str, object]:
     if not isinstance(value, StateRef):
         raise ExperimentDataError("History reference values must be exact StateRefs.")
-    return {"tag": "state_ref", "value": _reference_to_json(value.to_data())}
+    try:
+        if version >= 3:
+            return encode_reference_json(value)
+        return _encode_legacy_reference_json(value, version=version)
+    except ReferenceJSONCodecError as error:
+        raise ExperimentDataError("History StateRef cannot be encoded as portable JSON.") from error
+
+
+def _encode_ref(value: StateRef, *, version: int = _VERSION) -> dict[str, object]:
+    return {"tag": "state_ref", "value": _encode_reference(value, version=version)}
 
 
 def _decode_ref(
@@ -172,296 +186,18 @@ def _decode_ref(
     if not isinstance(value, Mapping) or set(value) != {"tag", "value"} or value["tag"] != "state_ref":
         raise ExperimentDataError("History references require an exact state_ref record.")
     try:
-        return StateRef.from_data(_reference_from_json(value["value"], version=version))
-    except (TypeError, ValueError) as error:
+        reference = (
+            decode_reference_json(value["value"])
+            if version >= 3
+            else _decode_legacy_reference_json(
+                value["value"], kind="state_ref", version=version,
+            )
+        )
+        if not isinstance(reference, StateRef):
+            raise ReferenceJSONCodecError("History reference is not a StateRef.")
+        return reference
+    except ReferenceJSONCodecError as error:
         raise ExperimentDataError("History reference record is malformed.") from error
-
-
-def _reference_to_json(value: object) -> dict[str, object]:
-    """Encode a strict StateRef.to_data tree without relying on JSON inference.
-
-    Definition-compatible factory and source specifications occur in Experiment
-    StateRefs for managed native trainers, so their inert construction shape is
-    represented explicitly rather than falling back to presentation formatting.
-    """
-
-    from dryml.core.factory import FactorySpec
-    from dryml.core.freeze import FrozenDict, FrozenList, FrozenNDArray, FrozenSet, FrozenTuple
-    from dryml.core.symbol import ImportRef, SourceSpec
-    from dryml.core.tensor_spec import Dim, TensorSpec
-
-    if isinstance(value, ImportRef):
-        return {"type": "import_ref", "module": value.module, "qualname": value.qualname}
-    if isinstance(value, SourceSpec):
-        return {
-            "type": "source_spec",
-            "kind": value.kind,
-            "source": value.source,
-            "name": value.name,
-            "imports": {
-                name: _reference_to_json(reference)
-                for name, reference in (value.imports or {}).items()
-            },
-        }
-    if isinstance(value, FactorySpec):
-        return {
-            "type": "factory_spec",
-            "target": _reference_to_json(value.target),
-            "args": [_reference_to_json(item) for item in value.args],
-            "kwargs": {
-                key: _reference_to_json(item) for key, item in value.kwargs.items()
-            },
-        }
-    if isinstance(value, TensorSpec):
-        def encode_dim(dimension):
-            return "dynamic" if isinstance(dimension, Dim) else dimension
-
-        return {
-            "type": "tensor_spec",
-            "dtype": str(value.dtype),
-            "shape": None if value.shape is None else [encode_dim(item) for item in value.shape],
-            "batch": encode_dim(value.batch) if value.batch is not None else None,
-            "backend": None if value.backend is None else value.backend.value,
-            "layout": value.layout.value,
-            "axis_names": None if value.axis_names is None else list(value.axis_names),
-            "batch_axis_name": value.batch_axis_name,
-            "ragged_rank": value.ragged_rank,
-            "row_splits_dtype": None if value.row_splits_dtype is None else str(value.row_splits_dtype),
-            "sparse_format": value.sparse_format,
-        }
-    if isinstance(value, Cardinality):
-        if value.kind is CardinalityKind.FINITE:
-            if type(value.value) is not int or value.value < 0:
-                raise ExperimentDataError("StateRef record has an invalid cardinality.")
-            kind, encoded = "finite", str(value.value)
-        elif value.kind is CardinalityKind.INFINITE:
-            kind, encoded = "infinite", None
-        elif value.kind is CardinalityKind.UNKNOWN:
-            kind, encoded = "unknown", None
-        else:
-            raise ExperimentDataError("StateRef record has an invalid cardinality.")
-        return {
-            "type": "cardinality",
-            "kind": kind,
-            "value": encoded,
-        }
-    if value is None:
-        return {"type": "null"}
-    if type(value) is bool:
-        return {"type": "bool", "value": value}
-    if type(value) is int:
-        return {"type": "int", "value": str(value)}
-    if type(value) is float and math.isfinite(value):
-        return {"type": "float", "value": value}
-    if type(value) is str:
-        return {"type": "str", "value": value}
-    if isinstance(value, FrozenNDArray):
-        if value.dtype.hasobject or value.dtype.fields is not None:
-            raise ExperimentDataError("StateRef records cannot encode object or structured frozen arrays.")
-        return {
-            "type": "frozen_ndarray",
-            "dtype": value.dtype.str,
-            "shape": list(value.shape),
-            "bytes": base64.b64encode(value.tobytes(order="C")).decode("ascii"),
-        }
-    if isinstance(value, FrozenList):
-        return {"type": "frozen_list", "items": [_reference_to_json(item) for item in value]}
-    if isinstance(value, FrozenTuple):
-        return {"type": "frozen_tuple", "items": [_reference_to_json(item) for item in value]}
-    if isinstance(value, FrozenSet):
-        items = [_reference_to_json(item) for item in value]
-        items.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
-        return {"type": "frozen_set", "items": items}
-    if isinstance(value, FrozenDict):
-        return {
-            "type": "frozen_dict",
-            "items": [[key, _reference_to_json(item)] for key, item in value.items()],
-        }
-    if isinstance(value, frozenset):
-        items = [_reference_to_json(item) for item in value]
-        items.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
-        return {"type": "frozenset", "items": items}
-    if isinstance(value, list):
-        return {"type": "list", "items": [_reference_to_json(item) for item in value]}
-    if isinstance(value, tuple):
-        return {"type": "tuple", "items": [_reference_to_json(item) for item in value]}
-    if isinstance(value, Mapping):
-        if not all(type(key) is str for key in value):
-            raise ExperimentDataError("StateRef record has a non-string JSON mapping key.")
-        return {
-            "type": "dict",
-            "items": [[key, _reference_to_json(item)] for key, item in value.items()],
-        }
-    raise ExperimentDataError(
-        f"StateRef.to_data() contains unsupported non-JSON value {type(value).__name__}."
-    )
-
-
-def _reference_from_json(value: object, *, version: int = _VERSION) -> object:
-    """Rebuild the exact StateRef.to_data tree before strict reference decoding."""
-
-    from dryml.core.factory import FactorySpec
-    from dryml.core.freeze import FrozenDict, FrozenList, FrozenNDArray, FrozenSet, FrozenTuple
-    from dryml.core.symbol import ImportRef, SourceSpec
-    from dryml.core.tensor_spec import Dynamic, TensorSpec
-
-    if version not in _READABLE_VERSIONS:
-        raise ExperimentDataError("Unsupported ExperimentData reference version.")
-    if not isinstance(value, Mapping) or not isinstance(value.get("type"), str):
-        raise ExperimentDataError("StateRef record is not a closed JSON value tree.")
-    tag = value["type"]
-    if version == 1 and tag not in {
-            "null", "bool", "str", "float", "int", "list", "tuple",
-            "import_ref", "source_spec", "factory_spec", "tensor_spec",
-            "frozen_ndarray", "dict",
-    }:
-        raise ExperimentDataError(f"StateRef record tag {tag!r} is not valid in v1.")
-    if tag == "null" and set(value) == {"type"}:
-        return None
-    if tag == "bool" and set(value) == {"type", "value"} and type(value["value"]) is bool:
-        return value["value"]
-    if tag == "str" and set(value) == {"type", "value"} and type(value["value"]) is str:
-        return value["value"]
-    if tag == "float" and set(value) == {"type", "value"} and type(value["value"]) is float and math.isfinite(value["value"]):
-        return value["value"]
-    if tag == "int" and set(value) == {"type", "value"}:
-        return _decode_cell({"tag": "int", "value": value["value"]})
-    if tag == "cardinality" and set(value) == {"type", "kind", "value"}:
-        kind = value["kind"]
-        encoded = value["value"]
-        if kind == "finite" and type(encoded) is str:
-            count = _decode_cell({"tag": "int", "value": encoded})
-            if count >= 0:
-                return Cardinality.finite(count)
-        elif kind == "infinite" and encoded is None:
-            return Cardinality.INFINITE
-        elif kind == "unknown" and encoded is None:
-            return Cardinality.UNKNOWN
-        raise ExperimentDataError("StateRef record has an invalid cardinality.")
-    if tag in {"list", "tuple"} and set(value) == {"type", "items"}:
-        if not isinstance(value["items"], list):
-            raise ExperimentDataError("StateRef sequence record has invalid items.")
-        items = [_reference_from_json(item, version=version) for item in value["items"]]
-        return items if tag == "list" else tuple(items)
-    if tag in {"frozen_list", "frozen_tuple", "frozen_set", "frozenset"} and set(value) == {"type", "items"}:
-        if not isinstance(value["items"], list):
-            raise ExperimentDataError("Frozen StateRef sequence record has invalid items.")
-        items = [_reference_from_json(item, version=version) for item in value["items"]]
-        if tag == "frozen_list":
-            return FrozenList(items)
-        if tag == "frozen_tuple":
-            return FrozenTuple(items)
-        if tag == "frozen_set":
-            return FrozenSet(items)
-        return frozenset(items)
-    if tag == "frozen_dict" and set(value) == {"type", "items"}:
-        if not isinstance(value["items"], list):
-            raise ExperimentDataError("Frozen StateRef mapping record has invalid items.")
-        pairs = []
-        for entry in value["items"]:
-            if not isinstance(entry, list) or len(entry) != 2 or type(entry[0]) is not str:
-                raise ExperimentDataError("Frozen StateRef mapping entry is malformed.")
-            pairs.append((entry[0], _reference_from_json(entry[1], version=version)))
-        if len({key for key, _ in pairs}) != len(pairs):
-            raise ExperimentDataError("Frozen StateRef mapping repeats a key.")
-        return FrozenDict(pairs)
-    if tag == "import_ref" and set(value) == {"type", "module", "qualname"}:
-        try:
-            return ImportRef(value["module"], value["qualname"])
-        except (binascii.Error, TypeError, ValueError) as error:
-            raise ExperimentDataError("StateRef record has an invalid import reference.") from error
-    if tag == "source_spec" and set(value) == {"type", "kind", "source", "name", "imports"}:
-        if not isinstance(value["imports"], Mapping):
-            raise ExperimentDataError("Source StateRef record has invalid imports.")
-        try:
-            imports = {
-                name: _reference_from_json(reference, version=version)
-                for name, reference in value["imports"].items()
-            }
-            if not all(type(name) is str and isinstance(reference, ImportRef) for name, reference in imports.items()):
-                raise ValueError("invalid imports")
-            return SourceSpec(value["kind"], value["source"], value["name"], imports)
-        except (TypeError, ValueError) as error:
-            raise ExperimentDataError("StateRef record has an invalid source specification.") from error
-    if tag == "factory_spec" and set(value) == {"type", "target", "args", "kwargs"}:
-        if not isinstance(value["args"], list) or not isinstance(value["kwargs"], Mapping):
-            raise ExperimentDataError("Factory StateRef record has invalid fields.")
-        try:
-            target = _reference_from_json(value["target"], version=version)
-            args = tuple(
-                _reference_from_json(item, version=version) for item in value["args"]
-            )
-            kwargs = FrozenDict(
-                (key, _reference_from_json(item, version=version))
-                for key, item in value["kwargs"].items()
-            )
-            if not all(type(key) is str for key in kwargs):
-                raise ValueError("invalid keyword")
-            if version == 1:
-                return FactorySpec(target, *args, **dict(kwargs.items()))
-            return FactorySpec._from_symbolic_parts(target, args, kwargs)
-        except (TypeError, ValueError) as error:
-            raise ExperimentDataError("StateRef record has an invalid factory specification.") from error
-    if tag == "tensor_spec" and set(value) == {
-        "type", "dtype", "shape", "batch", "backend", "layout", "axis_names",
-        "batch_axis_name", "ragged_rank", "row_splits_dtype", "sparse_format",
-    }:
-        def decode_dim(dimension):
-            if dimension == "dynamic":
-                return Dynamic
-            if type(dimension) is int:
-                return dimension
-            raise ValueError("invalid dimension")
-
-        try:
-            shape = value["shape"]
-            if shape is not None:
-                if not isinstance(shape, list):
-                    raise ValueError("invalid shape")
-                shape = tuple(decode_dim(item) for item in shape)
-            batch = value["batch"]
-            if batch is not None:
-                batch = decode_dim(batch)
-            axis_names = value["axis_names"]
-            if axis_names is not None and not isinstance(axis_names, list):
-                raise ValueError("invalid axis names")
-            return TensorSpec(
-                value["dtype"], shape=shape, batch=batch, backend=value["backend"],
-                layout=value["layout"], axis_names=axis_names,
-                batch_axis_name=value["batch_axis_name"], ragged_rank=value["ragged_rank"],
-                row_splits_dtype=value["row_splits_dtype"], sparse_format=value["sparse_format"],
-            )
-        except (TypeError, ValueError) as error:
-            raise ExperimentDataError("StateRef record has an invalid tensor specification.") from error
-    if tag == "frozen_ndarray" and set(value) == {"type", "dtype", "shape", "bytes"}:
-        if type(value["dtype"]) is not str or not isinstance(value["shape"], list) or type(value["bytes"]) is not str:
-            raise ExperimentDataError("Frozen array StateRef record has invalid fields.")
-        if any(type(size) is not int or size < 0 for size in value["shape"]):
-            raise ExperimentDataError("Frozen array StateRef shape is invalid.")
-        try:
-            import numpy as np
-
-            dtype = np.dtype(value["dtype"])
-            raw = base64.b64decode(value["bytes"], validate=True)
-            if dtype.hasobject or dtype.fields is not None or dtype.str != value["dtype"]:
-                raise ValueError("unsupported dtype")
-            size = math.prod(value["shape"])
-            if size * dtype.itemsize != len(raw):
-                raise ValueError("byte length")
-            array = np.frombuffer(raw, dtype=dtype).reshape(tuple(value["shape"]))
-        except (TypeError, ValueError) as error:
-            raise ExperimentDataError("Frozen array StateRef record is malformed.") from error
-        return FrozenNDArray.from_array(array)
-    if tag == "list" and set(value) == {"type", "items"} and isinstance(value["items"], list):
-        return [_reference_from_json(item, version=version) for item in value["items"]]
-    if tag == "dict" and set(value) == {"type", "items"} and isinstance(value["items"], list):
-        result = {}
-        for item in value["items"]:
-            if not isinstance(item, list) or len(item) != 2 or type(item[0]) is not str or item[0] in result:
-                raise ExperimentDataError("StateRef record has an invalid mapping entry.")
-            result[item[0]] = _reference_from_json(item[1], version=version)
-        return result
-    raise ExperimentDataError("StateRef record has an unknown JSON value tag.")
 
 
 def _mapping(value: object, expected: tuple[str, ...], what: str) -> tuple[tuple[str, StateRef], ...]:
@@ -1070,7 +806,9 @@ class ExperimentData(Serializable):
             and left["expected_artifacts"] == right["expected_artifacts"]
         )
 
-    def _payload(self):
+    def _payload(self, *, version: int = _VERSION):
+        if type(version) is not int or version not in _READABLE_VERSIONS:
+            raise ExperimentDataError("Unsupported ExperimentData payload version.")
         columns = [
             {"name": name, "kind": kind}
             for name, kind in _COLUMN_KINDS.items()
@@ -1079,9 +817,9 @@ class ExperimentData(Serializable):
         for row in self._rows.values():
             facts = row["facts"]
             encoded_facts = {
-                name: _encode_ref(facts[name]) if name == "state_ref"
+                name: _encode_ref(facts[name], version=version) if name == "state_ref"
                 else (None if name == "prev_state_ref" and facts[name] is None
-                      else _encode_ref(facts[name]) if name == "prev_state_ref"
+                      else _encode_ref(facts[name], version=version) if name == "prev_state_ref"
                       else _encode_cell(facts[name]))
                 for name in _FACT_NAMES
             }
@@ -1089,11 +827,11 @@ class ExperimentData(Serializable):
                 "facts": encoded_facts,
                 "expected_artifacts": list(row["expected_artifacts"]),
                 "artifact_inputs": [
-                    {"name": name, "state_ref": _reference_to_json(reference.to_data())}
+                    {"name": name, "state_ref": _encode_reference(reference, version=version)}
                     for name, reference in row["artifact_inputs"]
                 ],
                 "eval_artifacts": [
-                    {"name": name, "state_ref": _reference_to_json(reference.to_data())}
+                    {"name": name, "state_ref": _encode_reference(reference, version=version)}
                     for name, reference in row["eval_artifacts"]
                 ],
                 "evaluation_status": row["evaluation_status"],
@@ -1103,14 +841,14 @@ class ExperimentData(Serializable):
                     for name, value in row["scalars"].items()
                 ],
             })
-        return {"format": _FORMAT, "version": _VERSION, "columns": columns, "rows": rows}
+        return {"format": _FORMAT, "version": version, "columns": columns, "rows": rows}
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
-        """Write the closed, schema-controlled v2 JSON history payload.
+        """Write the closed, schema-controlled v3 JSON history payload.
 
         Args:
             dest_dir: Framework-provided empty payload directory.
-            codec: Accepted Object state-codec marker; v2 payload semantics are
+            codec: Accepted Object state-codec marker; v3 payload semantics are
                 fixed independently of this marker.
 
         Raises:
@@ -1127,7 +865,7 @@ class ExperimentData(Serializable):
         Path(dest_dir, _FILENAME).write_bytes(raw)
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
-        """Decode and validate a v1 or v2 history before replacing local rows.
+        """Decode and validate a v1, v2, or v3 history before replacing local rows.
 
         Args:
             src_dir: Framework payload directory containing ``experiment_data.json``.
@@ -1240,10 +978,16 @@ class ExperimentData(Serializable):
                 raise ExperimentDataError(f"{what} entries require exactly name and state_ref.")
             name = _name(entry["name"], "Artifact name")
             try:
-                reference = StateRef.from_data(
-                    _reference_from_json(entry["state_ref"], version=version)
+                reference = (
+                    decode_reference_json(entry["state_ref"])
+                    if version >= 3
+                    else _decode_legacy_reference_json(
+                        entry["state_ref"], kind="state_ref", version=version,
+                    )
                 )
-            except (TypeError, ValueError) as error:
+                if not isinstance(reference, StateRef):
+                    raise ReferenceJSONCodecError("Artifact reference is not a StateRef.")
+            except ReferenceJSONCodecError as error:
                 raise ExperimentDataError(f"{what} contains a malformed StateRef.") from error
             result.append((name, reference))
         names = tuple(name for name, _ in result)

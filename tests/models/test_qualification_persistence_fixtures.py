@@ -71,7 +71,7 @@ def test_experiment_data_v1_fixture_round_trips_actual_reader_input_without_payl
     assert restored._columns[-1] == "missing_metric"
     migrated = json.loads((tmp_path / "experiment_data.json").read_text(encoding="ascii"))
     assert payload["version"] == 1
-    assert migrated["version"] == 2
+    assert migrated["version"] == 3
 
 
 def test_value_receipt_fixture_round_trips_actual_value_reader_input(tmp_path):

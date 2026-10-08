@@ -392,8 +392,9 @@ one default-policy projected `Experiment` `ObjectRef`. Its constructor accepts o
 that non-materializing `Ref[ObjectRef]` subject; it does not own an Experiment,
 model, or Dataset payload. Exact checkpoint and Artifact `StateRef` values remain
 in rows, so reading history never restores those referenced payloads.
-The closed reference codec also retains supported frozen dense constructor arrays
-losslessly, without opening the referenced checkpoint payload.
+Embedded references use core's closed `dryml-reference-json` codec, which retains
+supported canonical Definition values and frozen dense constructor arrays
+losslessly without opening the referenced checkpoint payload.
 
 `ExperimentData.find(experiment, repo=..., store=...)` returns a fresh current
 history object or `None` only when the subject has no history identity. Corrupt,

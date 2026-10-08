@@ -109,10 +109,9 @@ def main(destination: Path | str | None = None) -> None:
         row_key="v1:fixture:1",
         prev_row_key="v1:fixture:0",
     )
-    payload = history._payload()
     # This generator intentionally preserves a source-controlled v1 reader
     # vector even after the production writer advances.
-    payload["version"] = 1
+    payload = history._payload(version=1)
     # v1 represents an omitted scalar cell with a declared-but-absent column.
     payload["columns"].append({"name": "missing_metric", "kind": "scalar"})
     history_path = output / "experiment_data.json"

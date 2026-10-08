@@ -13,6 +13,13 @@ fully bound parameters, and stateful-role bits. `ObjectRef` records add canonica
 primary ObjectId paths. `StateRef` records add exactly matching state-hash paths.
 Private graph node tokens and Store locations are never durable identity.
 
+Core owns the portable `dryml-reference-json` v1 envelope for embedding exact
+`ObjectRef` and `StateRef` authority in closed JSON formats. It tags canonical
+Definition atoms, frozen containers, symbols, factories, tensor specifications,
+and reference identity without loading Objects or state. Store authority records
+continue to use their separate trusted dill frame; `StateRef.to_data()` alone is
+a token-neutral Python record and is not promised to be JSON-compatible.
+
 DirStore format v3 publishes a `store-format.record`, digest-sharded
 DefinitionRecords, explicit `stored-roots/` membership records, declarations,
 claims, aliases, lineage/current-metadata records, and complete snapshot
@@ -115,14 +122,13 @@ Store records.
 ## Workflow Records
 
 `ExperimentData` persists its authoritative `experiment_data.json` as the closed
-`dryml-experiment-data` v2 format. It stores declared column kinds, ordered row
+`dryml-experiment-data` v3 format. It stores declared column kinds, ordered row
 facts, exact `ObjectRef`/`StateRef` values, artifact-reference mappings, and
 status cells without opening an Experiment, checkpoint, Dataset, or Artifact
-payload. V2 adds explicit inert `SourceSpec`, `FactorySpec`, `TensorSpec`,
-`Cardinality`, tuple, and frozen-container records needed by native model and
-Dataset definitions. The reader retains the closed v1 grammar. An existing v1
-history migrates under its established current-history alias when its next
-immutable v2 snapshot publishes.
+payload. V3 delegates every embedded exact reference to core's versioned
+`dryml-reference-json` envelope. The reader retains the closed v1 and v2 value
+grammars, and an existing history migrates under its established current-history
+alias when its next immutable v3 snapshot publishes.
 Pandas is only a lazy inspection dependency; it is not part of this format or a
 reader requirement.
 
