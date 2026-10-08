@@ -219,7 +219,7 @@ def test_jax_abstract_tracer_and_sparse_values_reject_before_target_execution():
         TensorSpec("float32", shape=(2,), backend="jax")
     )
     TorchTarget.calls = 0
-    with pytest.raises(TypeError):
+    with pytest.raises(ImplementationSelectionError, match="conflict"):
         selected(jax.ShapeDtypeStruct((2,), jnp.float32))
     assert TorchTarget.calls == 0
 
@@ -227,7 +227,7 @@ def test_jax_abstract_tracer_and_sparse_values_reject_before_target_execution():
     def traced(value):
         return selected(value)
 
-    with pytest.raises(TypeError):
+    with pytest.raises(ImplementationSelectionError, match="conflict"):
         traced(jnp.ones(2, dtype=jnp.float32))
     assert TorchTarget.calls == 0
     with pytest.raises((TypeError, ImplementationSelectionError)):
