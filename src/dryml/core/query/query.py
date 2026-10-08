@@ -104,11 +104,16 @@ def _query_match(
             )
         return False
 
-    if isinstance(selector, (QuotedDef, SelectorSpec)):
-        if not isinstance(target, (QuotedDef, SelectorSpec, Selector, Definition)):
+    quoted_types = (QuotedDef, SelectorSpec)
+    quoted_match_types = (QuotedDef, SelectorSpec, Selector, Definition)
+    if isinstance(selector, quoted_types) or isinstance(target, quoted_types):
+        if (
+                not isinstance(selector, quoted_match_types)
+                or not isinstance(target, quoted_match_types)):
             return False
         sel_value = (
-            selector.value if isinstance(selector, QuotedDef) else selector.selector
+            selector.value if isinstance(selector, QuotedDef)
+            else selector.selector if isinstance(selector, SelectorSpec) else selector
         )
         tgt_value = (
             target.value
