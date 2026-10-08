@@ -653,8 +653,8 @@ def test_regression_factories_keep_native_batches_until_terminal_result(tmp_path
 
 
 @pytest.mark.parametrize("backend", ("torch", "tf"))
-def test_regression_factories_align_numpy_targets_with_model_backend(tmp_path, backend):
-    """Metric evaluation explicitly hands NumPy targets to the prediction backend."""
+def test_regression_factories_host_normalize_model_predictions(tmp_path, backend):
+    """Metric evaluation reduces native model predictions with NumPy targets on host."""
 
     require_optional_backend(backend)
     from dryml.metrics import regressor_mse
@@ -670,6 +670,76 @@ def test_regression_factories_align_numpy_targets_with_model_backend(tmp_path, b
     fold.compute(managed=ManagedConfig(state_repo=DirStore(tmp_path / backend)))
 
     assert fold.value() == pytest.approx(10 / 3)
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_evaluation_alignment_copies_native_pairs_to_independent_host_arrays(backend):
+    """The explicit evaluation boundary normalizes both pair leaves to NumPy."""
+
+    require_optional_backend(backend)
+    from dryml.metrics.reductions import _AlignEvaluationTarget
+
+    __import__(f"dryml.{backend}")
+    if backend == "torch":
+        import torch
+
+        prediction = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    else:
+        import tensorflow as tf
+
+        prediction = tf.constant([1.0, 2.0], dtype=tf.float64)
+    target = np.asarray([1.0, 3.0], dtype=np.float64)
+    input_spec = {
+        "prediction": TensorSpec("float64", shape=(2,), backend=backend),
+        "target": TensorSpec("float64", shape=(2,), backend="numpy"),
+    }
+
+    aligned = _AlignEvaluationTarget().find_implementation(input_spec)({
+        "prediction": prediction,
+        "target": target,
+    })
+
+    assert isinstance(aligned["prediction"], np.ndarray)
+    assert isinstance(aligned["target"], np.ndarray)
+    assert not np.shares_memory(aligned["target"], target)
+    np.testing.assert_array_equal(aligned["prediction"], [1.0, 2.0])
+    np.testing.assert_array_equal(aligned["target"], [1.0, 3.0])
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_evaluation_alignment_copies_accelerator_predictions_to_host(backend):
+    """A concrete accelerator prediction crosses the terminal metric boundary."""
+
+    require_optional_backend(backend)
+    from dryml.metrics.reductions import _AlignEvaluationTarget
+
+    __import__(f"dryml.{backend}")
+    if backend == "torch":
+        import torch
+
+        if not torch.cuda.is_available():
+            pytest.skip("Torch CUDA device is unavailable")
+        prediction = torch.tensor([1.0, 2.0], dtype=torch.float64, device="cuda:0")
+    else:
+        import tensorflow as tf
+
+        devices = tf.config.list_logical_devices("GPU")
+        if not devices:
+            pytest.skip("TensorFlow GPU device is unavailable")
+        with tf.device(devices[0].name):
+            prediction = tf.constant([1.0, 2.0], dtype=tf.float64)
+    input_spec = {
+        "prediction": TensorSpec("float64", shape=(2,), backend=backend),
+        "target": TensorSpec("float64", shape=(2,), backend="numpy"),
+    }
+
+    aligned = _AlignEvaluationTarget().find_implementation(input_spec)({
+        "prediction": prediction,
+        "target": np.asarray([1.0, 3.0], dtype=np.float64),
+    })
+
+    assert isinstance(aligned["prediction"], np.ndarray)
+    np.testing.assert_array_equal(aligned["prediction"], [1.0, 2.0])
 
 
 def test_declared_confusion_group_produces_all_results_from_one_stream(tmp_path):

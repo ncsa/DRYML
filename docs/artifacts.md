@@ -163,10 +163,12 @@ shape/dtype fail before a successor state or terminal payload is installed.
 concrete definition before supplying it to Fold. No Dataset is traversed, model
 is loaded, state is selected, or input is saved during factory construction.
 Before arithmetic or label reduction, the graph performs one explicit dense
-handoff of the selected target to the prediction backend and device. This covers
-host-backed cached evaluation data with Torch, TensorFlow, or JAX models without
-weakening ordinary mixed-backend Method rejection; unsupported dtype, layout,
-device, or inexact conversion still fails before metric state changes.
+host handoff of both predictions and targets to independent NumPy storage. This
+copies accelerator predictions only after model inference, keeps Fold reduction
+carry checkpoint-safe, and covers cached evaluation data with Torch, TensorFlow,
+or single-device JAX models without weakening ordinary mixed-backend Method
+rejection. Unsupported dtype, layout, abstract/sharded value, or inexact
+conversion still fails before metric state changes.
 Their mean denominator is the selected global or coordinate population, so an
 uneven final batch has the same meaning as individual observations.
 
