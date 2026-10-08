@@ -9,12 +9,12 @@ import pytest
 
 import dryml.environments as envs
 from dryml.core import (
-    LineageMetadata, MetadataConflictError, Object, Repo, SaveRouting, Selector, Serializable,
-    load_state_ref,
+    Definition, LineageMetadata, MetadataConflictError, Object, Repo, SaveRouting,
+    Selector, Serializable, load_state_ref,
 )
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
-from dryml.core.utils.graph.path import GraphPath
+from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
 class EvidenceValue(Serializable):
@@ -131,6 +131,45 @@ def test_exact_load_selectors_choose_root_and_routed_child_authority(tmp_path):
     )
 
     assert loaded.child.value == 3
+
+
+def test_exact_load_accepts_projected_authority_from_enclosing_closure(tmp_path):
+    """A closure snapshot can restore an exact descendant projection directly."""
+
+    store = DirStore(tmp_path / "store")
+    writer = Repo(store)
+    state = writer.save_object(
+        EvidenceRoot(EvidenceValue(3, repo=writer), repo=writer),
+        deep_capture=True,
+    )
+    child_state = state.at(next(iter(state.object.objects)))
+
+    assert store.read_state_ref_record(child_state.digest()) is None
+    loaded = Repo(store).load_state_ref(child_state, reuse_live="never")
+
+    assert loaded.value == 3
+    container = Repo(store).load_or_build(
+        Definition(EvidenceRoot, child_state), cache="none",
+    )
+    assert container.child.value == 3
+
+
+def test_exact_load_accepts_stateless_projection_from_enclosing_closure(tmp_path):
+    """Enclosing authority can select a stateless branch around saved state."""
+
+    store = DirStore(tmp_path / "store")
+    writer = Repo(store)
+    branch = StatelessEvidenceRoot(EvidenceValue(4, repo=writer), repo=writer)
+    state = writer.save_object(
+        EvidenceRoot(branch, repo=writer), deep_capture=True,
+    )
+    branch_state = state.at(GraphPath((Parameter("child"),)))
+
+    assert branch_state.object_id is None
+    assert store.read_state_ref_record(branch_state.digest()) is None
+    loaded = Repo(store).load_state_ref(branch_state, reuse_live="never")
+
+    assert loaded.value.value == 4
 
 
 def test_exact_load_rejects_conflicting_selected_child_lineage_before_hooks(tmp_path, monkeypatch):

@@ -4658,15 +4658,16 @@ class Repo:
         """Exactly restore one authoritative StateRef after complete preflight.
 
         Args:
-            state_ref: Immutable StateRef record that must be byte-equivalent to
-                current authority in a connected Store.
+            state_ref: Immutable StateRef that must have byte-equivalent direct
+                snapshot authority or enclosing closure authority in a connected
+                Store.
             reuse_live: ``"matching"`` reuses one matching live checkpoint,
                 ``"greedy"`` restores one unique candidate in place, and
                 ``"never"`` always builds fresh.
             cache: Cache tier populated only after the complete realization has
                 succeeded.
-            source_store: Optional connected Store selecting complete root
-                snapshot evidence.
+            source_store: Optional connected Store selecting complete direct or
+                enclosing root snapshot evidence.
             source_stores: Optional exact StateRef-to-connected-Store mapping
                 selecting independently routed child snapshot evidence. Every key
                 must be a StateRef in the exact closure and cannot select a root

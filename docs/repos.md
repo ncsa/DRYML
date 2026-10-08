@@ -107,6 +107,14 @@ later index, name, or commit boundary fails.
 `Repo.load(cdef)` and `load_object(cdef)` construct structural Objects and do not
 infer state. `Repo.load_or_build()` may create missing structure.
 
+`Repo.load_state_ref()` accepts either a directly published complete snapshot or
+an exact descendant projection retained by a complete enclosing closure snapshot.
+For an enclosing projection, exact-load preflight validates the projected
+definition, ObjectIds, state hashes, lineage, and enclosing snapshot-local payload
+paths before construction. Loading a projection does not synthesize or require an
+independent child snapshot directory; per-object routed descendants still use
+their independently published child authority.
+
 ## Query V3
 
 `Repo.query()` creates one unevaluated identity universe over connected Store
