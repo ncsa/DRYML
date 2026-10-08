@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dryml.artifacts import Artifact, ArtifactRecoveryError, Value
+from dryml.artifacts import Artifact, ArtifactRecoveryError, CachedDataset, Value
 from dryml.core import AutoRef, Definition, Par, Ref, Repo, StateRef, definition_mode, selector_mode
 from dryml.data import ArrayDataset, Map, as_supervised
 from dryml.core.object import Pickleable
@@ -451,6 +451,33 @@ def test_test_data_materializes_a_stateless_definition_for_artifact_binding(tmp_
 
     assert projected.states == {}
     assert SavedTestDataValue.calls == [projected]
+
+
+def test_test_data_rebases_nested_stateful_runtime_projection(tmp_path):
+    """A materialized Dataset exposes its saved source below the Experiment root."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    cached = CachedDataset(ArrayDataset({
+        "cart": np.asarray([[1.0, 2.0, 3.0]]),
+    }, repo=repo))
+    source = cached.compute(
+        codec="numpy", managed=ManagedConfig(state_repo=repo),
+    )
+    test_data = as_supervised(source, "cart", input_as_target=True)
+    exp = Experiment(
+        CounterModel(), TerminalOnly(), test_data=test_data, repo=repo,
+    )
+
+    assert exp.test_data.graph_at(
+        GraphPath((Parameter("src"),))
+    ) is exp.test_data.src
+    assert exp.graph_at(GraphPath((
+        Parameter("test_data"), Parameter("src"),
+    ))) is exp.test_data.src
+
+    final = exp.train(managed=ManagedConfig(state_repo=repo))
+
+    assert final.at(GraphPath((Parameter("test_data"), Parameter("src")))) == source
 
 
 def test_missing_test_data_recipe_fails_before_training_or_checkpoint_mutation(tmp_path):

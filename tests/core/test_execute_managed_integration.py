@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from dryml import F
+from dryml.artifacts import CachedDataset
 from dryml.core import Definition, Executor as CoreExecutor
 from dryml.core import Mat, Object, Repo, StateRef, function, signatures
 from dryml.core.execute import CoreExecutionError, CoreOptions
@@ -16,6 +17,8 @@ from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
 from dryml.core.store.store import Store
+from dryml.core.utils.graph.path import GraphPath, Parameter
+from dryml.data import ArrayDataset, as_supervised
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.managed import ManagedConfig, managed_operation
 from dryml.models import Experiment, TrainFunction
@@ -215,6 +218,13 @@ def _materialize_worker_target(value: Mat[Object]) -> str:
     """Force worker-side Mat delivery only after Execute has accepted the call."""
 
     return type(value).__name__
+
+
+@function
+def _train_materialized_experiment(value: Mat[Object]) -> StateRef:
+    """Train one materialized Experiment and return its managed terminal state."""
+
+    return value.train()
 
 
 @pytest.mark.usefixtures("fixed_snapshot_environment")
@@ -529,6 +539,42 @@ def test_execute_builds_experiment_telemetry_factory_in_worker(
     ]
     restored = repo.load_state_ref(result, reuse_live="never")
     assert (restored.model.value, restored.state.step) == (1, 1)
+
+
+def test_execute_saves_experiment_with_nested_cached_test_data(tmp_path) -> None:
+    """Worker terminal capture retains a materialized test Dataset's saved source."""
+
+    import numpy as np
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    cached = CachedDataset(ArrayDataset({
+        "cart": np.asarray([[1.0, 2.0, 3.0]]),
+    }, repo=repo))
+    source = cached.compute(
+        codec="numpy", managed=ManagedConfig(state_repo=repo),
+    )
+    experiment = Definition(
+        Experiment,
+        Definition(WorkerTelemetryModel),
+        Definition(WorkerTelemetryTrainer),
+        test_data=as_supervised(source, "cart", input_as_target=True),
+    )
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(
+        SubProcessConfig(spool_directory=spool),
+        core=CoreOptions(repo=repo, return_objects=False),
+    )
+    try:
+        future = executor.submit(_train_materialized_experiment, experiment)
+        final = future.result(timeout=30)
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=10)
+
+    assert final.at(GraphPath((
+        Parameter("test_data"), Parameter("src"),
+    ))) == source
 
 
 def test_execute_rejects_live_experiment_telemetry_before_training(tmp_path) -> None:
