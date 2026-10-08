@@ -5,17 +5,30 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core import Repo, Serializable
+from dryml.core import Repo, Serializable, StateRef
+from dryml.core.cardinality import Cardinality
 from dryml.core.factory import FactorySpec
 from dryml.core.freeze import FrozenDict, FrozenList, FrozenSet
 from dryml.core.symbol import SourceSpec
 from dryml.core.tensor_spec import TensorSpec
+from dryml.data import GeneratorDataset
 from dryml.models import ExperimentData, ExperimentDataError
 from dryml.models.experiment_data import _reference_from_json, _reference_to_json
 
 
 class CodecSubject(Serializable):
     """Reference-only checkpoint fixture for history payload tests."""
+
+
+class CardinalityCodecSubject(Serializable):
+    """Checkpoint fixture with cardinality retained in a nested Dataset definition."""
+
+    def __init__(self, cardinality):
+        self.dataset = GeneratorDataset(_empty_values, cardinality=cardinality)
+
+
+def _empty_values():
+    return iter(())
 
 
 def _row(tmp_path):
@@ -79,6 +92,63 @@ def test_v2_factory_reference_codec_preserves_frozen_identity_and_v1_stays_close
     ) == legacy_factory
     with pytest.raises(ExperimentDataError, match="not valid in v1"):
         _reference_from_json({"type": "frozen_list", "items": []}, version=1)
+
+
+@pytest.mark.parametrize(
+    "cardinality",
+    (
+        Cardinality.finite(0), Cardinality.finite(12),
+        Cardinality.INFINITE, Cardinality.UNKNOWN,
+    ),
+)
+def test_v2_reference_codec_round_trips_cardinality(cardinality):
+    """V2 preserves all Cardinality variants while v1 remains closed."""
+
+    encoded = _reference_to_json(cardinality)
+
+    assert _reference_from_json(encoded, version=2) == cardinality
+    with pytest.raises(ExperimentDataError, match="not valid in v1"):
+        _reference_from_json(encoded, version=1)
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    (
+        {"type": "cardinality", "kind": "finite", "value": "01"},
+        {"type": "cardinality", "kind": "finite", "value": "-1"},
+        {"type": "cardinality", "kind": "infinite", "value": "0"},
+        {"type": "cardinality", "kind": "other", "value": None},
+    ),
+)
+def test_v2_reference_codec_rejects_malformed_cardinality(encoded):
+    """Cardinality records admit only canonical values for their declared kind."""
+
+    with pytest.raises(ExperimentDataError, match="cardinality|canonical"):
+        _reference_from_json(encoded, version=2)
+
+
+def test_history_round_trips_state_ref_with_nested_generator_cardinality(tmp_path):
+    """History persists checkpoints whose Dataset definition is explicitly infinite."""
+
+    repo = Repo(tmp_path / "store")
+    checkpoint = repo.save_object(
+        CardinalityCodecSubject(Cardinality.INFINITE), deep_capture=True,
+    )
+    history = ExperimentData.get_or_create(checkpoint.object_projection(), repo=repo)
+    history.add_row(
+        expected_artifacts=(), state_ref=checkpoint, prev_state_ref=None,
+        time=0, examples_seen=0,
+    )
+    payload = tmp_path / "payload"
+    payload.mkdir()
+
+    history.save_state_to_dir_imp(payload, codec="pkl")
+    restored = ExperimentData(checkpoint.object_projection())
+    restored.restore_state_from_dir_imp(payload, codec="pkl")
+
+    assert isinstance(restored.data.iloc[0].state_ref, StateRef)
+    assert restored.data.iloc[0].state_ref == checkpoint
+    repo.close(flush=False)
 
 
 def test_codec_rejects_unknown_status_and_incomplete_completed_row(tmp_path):

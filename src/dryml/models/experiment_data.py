@@ -229,6 +229,22 @@ def _reference_to_json(value: object) -> dict[str, object]:
             "row_splits_dtype": None if value.row_splits_dtype is None else str(value.row_splits_dtype),
             "sparse_format": value.sparse_format,
         }
+    if isinstance(value, Cardinality):
+        if value.kind is CardinalityKind.FINITE:
+            if type(value.value) is not int or value.value < 0:
+                raise ExperimentDataError("StateRef record has an invalid cardinality.")
+            kind, encoded = "finite", str(value.value)
+        elif value.kind is CardinalityKind.INFINITE:
+            kind, encoded = "infinite", None
+        elif value.kind is CardinalityKind.UNKNOWN:
+            kind, encoded = "unknown", None
+        else:
+            raise ExperimentDataError("StateRef record has an invalid cardinality.")
+        return {
+            "type": "cardinality",
+            "kind": kind,
+            "value": encoded,
+        }
     if value is None:
         return {"type": "null"}
     if type(value) is bool:
@@ -310,6 +326,18 @@ def _reference_from_json(value: object, *, version: int = _VERSION) -> object:
         return value["value"]
     if tag == "int" and set(value) == {"type", "value"}:
         return _decode_cell({"tag": "int", "value": value["value"]})
+    if tag == "cardinality" and set(value) == {"type", "kind", "value"}:
+        kind = value["kind"]
+        encoded = value["value"]
+        if kind == "finite" and type(encoded) is str:
+            count = _decode_cell({"tag": "int", "value": encoded})
+            if count >= 0:
+                return Cardinality.finite(count)
+        elif kind == "infinite" and encoded is None:
+            return Cardinality.INFINITE
+        elif kind == "unknown" and encoded is None:
+            return Cardinality.UNKNOWN
+        raise ExperimentDataError("StateRef record has an invalid cardinality.")
     if tag in {"list", "tuple"} and set(value) == {"type", "items"}:
         if not isinstance(value["items"], list):
             raise ExperimentDataError("StateRef sequence record has invalid items.")
