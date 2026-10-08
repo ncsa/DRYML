@@ -208,19 +208,23 @@ def _absolute(path: str | Path) -> Path:
 
 
 def _reference_to_json(value: object) -> dict[str, object]:
-    """Encode a StateRef through DRYML's closed reference grammar."""
+    """Encode StateRef data through the manifest's legacy v2 grammar."""
 
-    from dryml.models.experiment_data import _reference_to_json as encode
+    from dryml.core.reference_json import _encode_legacy_reference_json
 
-    return encode(value)
+    return _encode_legacy_reference_json(
+        StateRef.from_data(value), version=MANIFEST_VERSION,
+    )
 
 
 def _reference_from_json(value: object) -> object:
-    """Decode a closed reference JSON tree before StateRef validation."""
+    """Decode the manifest's legacy v2 StateRef tree to ordinary data."""
 
-    from dryml.models.experiment_data import _reference_from_json as decode
+    from dryml.core.reference_json import _decode_legacy_reference_json
 
-    return decode(value)
+    return _decode_legacy_reference_json(
+        value, kind="state_ref", version=MANIFEST_VERSION,
+    ).to_data()
 
 
 @dataclass(frozen=True, slots=True)
