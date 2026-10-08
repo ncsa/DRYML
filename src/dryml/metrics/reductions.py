@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from functools import wraps
 from inspect import signature
 from typing import Any, Literal, TypeAlias
@@ -11,16 +12,19 @@ import numpy as np
 
 from dryml.artifacts import Fold, mean
 from dryml.core import AutoRef, ConcreteDefinition, Definition, Par, Ref, function
+from dryml.core.backend import Backend
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
-from dryml.core.tensor_spec import SpecTree, TensorSpec
+from dryml.core.tensor_spec import BatchMode, SpecTree, TensorSpec
 from dryml.data import Abs, Diff, Map, Pipe, Project, Select, Squared
 from dryml.data.reduction_methods import (
     MeanFinalize, MeanInitial, MeanUpdate, Path, ReductionMode, _MAX_INT64,
     _backend, _cast_float64, _dtype_name,
     _path, _reshape, _scalar, _where, _zeros,
 )
-from dryml.methods import Accumulator, Method
+from dryml.methods import Accumulator, ImplementationSelectionError, Method
+from dryml.methods.conversion import backend_spec, convert, make_edge
+from dryml.methods.signature import spec_node
 
 
 Label: TypeAlias = int | str
@@ -117,6 +121,145 @@ def _validate_known_f1_controls(average: object, positive_index: object) -> None
         raise ValueError("positive_index is valid only for binary F1.")
 
 
+def _evaluation_pair_specs(input_spec: SpecTree) -> tuple[TensorSpec, TensorSpec]:
+    """Return the prediction and target leaves from one metric evaluation spec."""
+
+    if not isinstance(input_spec, Mapping) or tuple(input_spec) != (
+            "prediction", "target"):
+        raise TypeError("Metric evaluation requires prediction and target fields.")
+    prediction, target = input_spec["prediction"], input_spec["target"]
+    if not isinstance(prediction, TensorSpec) or not isinstance(target, TensorSpec):
+        raise TypeError("Metric evaluation prediction and target must be TensorSpecs.")
+    if prediction.backend is None or target.backend is None:
+        raise ValueError("Metric evaluation requires declared prediction and target backends.")
+    if prediction.batched != target.batched:
+        raise ValueError("Metric evaluation prediction and target batch modes differ.")
+    return prediction, target
+
+
+def _place_target_with_prediction(target: object, prediction: object, backend: Backend) -> object:
+    """Move an already backend-aligned target to the prediction's native device."""
+
+    if backend is Backend.numpy:
+        return target
+    if backend is Backend.torch:
+        return target.to(device=prediction.device)
+    if backend is Backend.tf:
+        import tensorflow as tf
+
+        device = getattr(prediction, "device", "")
+        if not device:
+            return target
+        with tf.device(device):
+            return tf.identity(target)
+    if backend is Backend.jax:
+        import jax
+
+        devices = prediction.devices()
+        if len(devices) != 1:
+            raise TypeError("Metric evaluation requires one concrete JAX prediction device.")
+        return jax.device_put(target, next(iter(devices)))
+    raise TypeError("Metric evaluation selected an unsupported prediction backend.")
+
+
+class _AlignEvaluationTarget(Method):
+    """Align one metric target with its prediction through an explicit handoff."""
+
+    def __call__(self, item):
+        """Reject direct use that bypasses the spec-planned metric handoff."""
+
+        raise RuntimeError("Metric target alignment requires selected specification evidence.")
+
+    def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
+        """Declare the target on the prediction backend without changing values."""
+
+        prediction, target = _evaluation_pair_specs(input_spec)
+        aligned = (
+            target
+            if target.backend == prediction.backend
+            else backend_spec(target, prediction.backend)
+        )
+        return {"prediction": prediction, "target": aligned}
+
+    def find_implementation(
+            self, input_spec=None, *additional_input_specs, backend=None,
+            batch_mode=None, output_spec=None):
+        """Plan one target-only conversion despite the mixed input pair."""
+
+        return self._select_alignment(
+            input_spec, additional_input_specs, backend=backend,
+            batch_mode=batch_mode, output_spec=output_spec, prepare=False,
+        )
+
+    def _prepare_implementation(self, input_spec, *, backend, batch_mode):
+        """Plan the same explicit handoff during Method graph preparation."""
+
+        return self._select_alignment(
+            input_spec, (), backend=backend, batch_mode=batch_mode,
+            output_spec=None, prepare=True,
+        )
+
+    def _select_alignment(
+            self, input_spec, additional_input_specs, *, backend, batch_mode,
+            output_spec, prepare):
+        """Select a generic carrier while retaining per-port conversion facts."""
+
+        if additional_input_specs or input_spec is None:
+            raise ImplementationSelectionError("conflict")
+        try:
+            prediction, target = _evaluation_pair_specs(input_spec)
+            prediction_backend = prediction.backend
+            prediction_batch = (
+                BatchMode.batched if prediction.batched else BatchMode.element
+            )
+            required_backend = None if backend is None else Backend(backend)
+            required_batch = None if batch_mode is None else BatchMode(batch_mode)
+            if (
+                    prediction_backend is None
+                    or required_backend not in (None, prediction_backend)
+                    or required_batch not in (None, prediction_batch)):
+                raise ValueError("Metric evaluation selection facts conflict.")
+            edge = (
+                None
+                if target.backend == prediction_backend
+                else make_edge(target, prediction_backend)
+            )
+            aligned_spec = self.infer_output_spec(input_spec)
+            selected_output = aligned_spec if output_spec is None else output_spec
+            input_node = spec_node(input_spec)
+            output_node = spec_node(selected_output)
+        except (TypeError, ValueError) as error:
+            raise ImplementationSelectionError("conflict") from error
+
+        implementation = (
+            super()._prepare_implementation(
+                None, backend=prediction_backend, batch_mode=prediction_batch,
+            )
+            if prepare
+            else super().find_implementation(
+                None, backend=prediction_backend, batch_mode=prediction_batch,
+            )
+        )
+
+        def invoke(item):
+            prediction_value = item["prediction"]
+            target_value = item["target"]
+            if edge is not None:
+                target_value = convert(edge, target_value)
+            target_value = _place_target_with_prediction(
+                target_value, prediction_value, prediction_backend,
+            )
+            return {"prediction": prediction_value, "target": target_value}
+
+        return replace(
+            implementation,
+            _input_specs=(input_node,),
+            _output_spec=output_node,
+            _invoker=invoke,
+            conversion_edge=edge,
+        )
+
+
 def _symbolic_evaluation_source(
         test_ds: object,
         model: object,
@@ -133,7 +276,10 @@ def _symbolic_evaluation_source(
     target = Select.defn(y) if target_labels is None else Pipe.defn(
         Select.defn(y), target_labels,
     )
-    return Map.defn(test_ds, Project.defn(prediction=prediction, target=target))
+    evaluation = Map.defn(
+        test_ds, Project.defn(prediction=prediction, target=target),
+    )
+    return Map.defn(evaluation, _AlignEvaluationTarget.defn())
 
 
 def _symbolic_metric_definition(name: str, arguments: Mapping[str, object]) -> Definition:

@@ -162,6 +162,11 @@ shape/dtype fail before a successor state or terminal payload is installed.
 `Project`, `Select`, `Pipe`, `Diff`, and `Abs` or `Squared` graph as a complete
 concrete definition before supplying it to Fold. No Dataset is traversed, model
 is loaded, state is selected, or input is saved during factory construction.
+Before arithmetic or label reduction, the graph performs one explicit dense
+handoff of the selected target to the prediction backend and device. This covers
+host-backed cached evaluation data with Torch, TensorFlow, or JAX models without
+weakening ordinary mixed-backend Method rejection; unsupported dtype, layout,
+device, or inexact conversion still fails before metric state changes.
 Their mean denominator is the selected global or coordinate population, so an
 uneven final batch has the same meaning as individual observations.
 

@@ -255,10 +255,12 @@ population/draw metadata and int64 wrap fail before arithmetic or sampling.
 
 The evaluation factories in `dryml.metrics` build their source projections from
 these Data Methods: `Project(prediction=Pipe(Select(x), model),
-target=Select(y))`, followed by `Diff` and either `Abs` or `Squared` for
-regression. Classification factories require caller-supplied label Methods;
-`ArgMax` remains an explicit conversion rather than an implicit classifier
-policy.
+target=Select(y))`, followed by an explicit target-to-prediction backend/device
+handoff, then `Diff` and either `Abs` or `Squared` for regression. Classification
+factories use the same handoff and require caller-supplied label Methods;
+`ArgMax` remains an explicit label conversion rather than an implicit classifier
+policy. The handoff is limited to the existing exact dense host conversion
+contract and does not make general mixed-backend Method inputs valid.
 
 `Fold` retains its Dataset through `Ref[AutoRef]`. The declaration, its CDef, and
 an exact completed Fold state retain the selected reference rather than an owned

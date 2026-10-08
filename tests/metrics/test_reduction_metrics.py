@@ -10,7 +10,7 @@ from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
 from dryml.data import Dataset, Map, Pipe, Project, Select
 from dryml.managed import ManagedConfig
-from dryml.methods import AccumulatorGroup, Method
+from dryml.methods import AccumulatorGroup, Method, traits
 from dryml.models import Model
 from tests.fixtures import require_optional_backend
 
@@ -67,6 +67,32 @@ class IdentityModel(Model):
         """Return the already-decoded input label or scalar prediction."""
 
         type(self).calls += 1
+        return value
+
+
+class TorchIdentityModel(Model):
+    """Torch model whose selected implementation returns converted inputs."""
+
+    def __init__(self):
+        super().__init__(output_spec=TensorSpec("float64", shape=(), backend="torch"))
+
+    @traits(backend="torch")
+    def torch(self, value):
+        """Return a Torch input after the selected handoff."""
+
+        return value
+
+
+class TensorFlowIdentityModel(Model):
+    """TensorFlow model whose selected implementation returns converted inputs."""
+
+    def __init__(self):
+        super().__init__(output_spec=TensorSpec("float64", shape=(), backend="tf"))
+
+    @traits(backend="tf")
+    def tf(self, value):
+        """Return a TensorFlow input after the selected handoff."""
+
         return value
 
 
@@ -624,6 +650,26 @@ def test_regression_factories_keep_native_batches_until_terminal_result(tmp_path
     assert mse.value() == pytest.approx(10 / 3)
     assert NativeEvaluationDataset.iterations == 2
     assert IdentityModel.calls == 4
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_regression_factories_align_numpy_targets_with_model_backend(tmp_path, backend):
+    """Metric evaluation explicitly hands NumPy targets to the prediction backend."""
+
+    require_optional_backend(backend)
+    from dryml.metrics import regressor_mse
+
+    __import__(f"dryml.{backend}")
+    source = EvaluationDataset((
+        {"x": [1.0, 5.0], "y": [2.0, 2.0]},
+        {"x": [3.0], "y": [3.0]},
+    ))
+    model = TorchIdentityModel() if backend == "torch" else TensorFlowIdentityModel()
+    fold = regressor_mse(source, model, mode="global")
+
+    fold.compute(managed=ManagedConfig(state_repo=DirStore(tmp_path / backend)))
+
+    assert fold.value() == pytest.approx(10 / 3)
 
 
 def test_declared_confusion_group_produces_all_results_from_one_stream(tmp_path):
