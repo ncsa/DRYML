@@ -4,7 +4,7 @@ import sys
 import numpy as np
 import pytest
 
-from dryml.core import Definition, Mat, Ref
+from dryml.core import Definition, Mat, Par, Ref
 from dryml.core.cardinality import Cardinality
 from dryml.core.backend import Backend
 from dryml.core.tensor_spec import Dynamic, TensorSpec
@@ -797,6 +797,63 @@ def test_as_supervised_authors_definition_native_autoencoder_projection(authorit
     inputs, targets = next(iter(projected.build()))
     assert inputs is targets
     assert inputs.tolist() == [1, 2]
+
+
+@pytest.mark.parametrize("test_authority", ("concrete", "state"))
+def test_as_supervised_parameter_sources_bind_inside_modular_experiments(tmp_path, test_authority):
+    """Dataset placeholders compose before their sources are supplied or built."""
+
+    from dryml.models import Experiment
+    from dryml.metrics import regressor_mae
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+
+    source = Definition(
+        ListDataset,
+        [{"cart": np.array([1, 2])}],
+        {"cart": TensorSpec("int64", shape=(2,), backend="numpy")},
+    ).concretize()
+    repo = Repo(DirStore(tmp_path / "store"))
+    test_source = source if test_authority == "concrete" else repo.save_object(source.build(repo=repo))
+    template = Experiment.defn(
+        model=None,
+        train_fn=None,
+        train_data=as_supervised(Par("train_ds"), "cart", input_as_target=True),
+        test_data=as_supervised(Par("test_ds"), "cart", input_as_target=True),
+        artifacts={"mae": regressor_mae(
+            Par("this.test_data"), Par("this.model"), x=0, y=1, mode="global",
+        )},
+    )
+
+    assert {"train_ds", "test_ds"} <= set(template.names)
+    bound = template.sub(train_ds=source, test_ds=test_source)
+    direct = Experiment.defn(
+        model=None,
+        train_fn=None,
+        train_data=as_supervised(source, "cart", input_as_target=True),
+        test_data=as_supervised(test_source, "cart", input_as_target=True),
+        artifacts=template.artifacts,
+    )
+    assert bound.concretize(repo=repo) == direct.concretize(repo=repo)
+    inputs, targets = next(iter(bound.train_data.build()))
+    assert inputs is targets
+    assert inputs.tolist() == [1, 2]
+    test_inputs, test_targets = next(iter(bound.test_data.build(repo=repo)))
+    assert test_inputs is test_targets
+    assert test_inputs.tolist() == [1, 2]
+
+
+def test_as_supervised_accepts_wrapped_parameters_but_rejects_non_dataset_values():
+    """Ref/Mat source placeholders remain inert and invalid literal inputs fail."""
+
+    for value in (Par("data"), Ref(Par("data")), Mat(Par("data"))):
+        projected = as_supervised(value, "cart", input_as_target=True)
+        assert isinstance(projected, Definition)
+        assert projected.names == ("data",)
+
+    for value in (object(), {"source": Par("data")}, [Par("data")]):
+        with pytest.raises(TypeError, match="Dataset or Dataset reference"):
+            as_supervised(value, "cart", input_as_target=True)
 
 
 def test_as_supervised_rejects_empty_or_ambiguous_selection_trees():

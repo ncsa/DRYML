@@ -11,11 +11,12 @@ from typing import Any, Literal, TypeAlias
 import numpy as np
 
 from dryml.artifacts import Fold, mean
-from dryml.core import AutoRef, ConcreteDefinition, Definition, Par, Ref, function
+from dryml.core import AutoRef, ConcreteDefinition, Definition, Ref, function
 from dryml.core.backend import Backend
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
 from dryml.core.tensor_spec import BatchMode, SpecTree, TensorSpec
+from dryml.core.template import Expr, _contains_template_value
 from dryml.data import Abs, Diff, Map, Pipe, Project, Select, Squared
 from dryml.data.reduction_methods import (
     MeanFinalize, MeanInitial, MeanUpdate, Path, ReductionMode, _MAX_INT64,
@@ -29,22 +30,6 @@ from dryml.methods.signature import spec_node
 
 Label: TypeAlias = int | str
 F1Average: TypeAlias = Literal["binary", "micro", "macro", "weighted", "none"]
-
-
-def _contains_template_value(value: object) -> bool:
-    """Return whether supported metric input structure contains symbolic values."""
-
-    if isinstance(value, (Definition, Par)):
-        return True
-    if isinstance(value, Mapping):
-        return any(
-            _contains_template_value(item)
-            for pair in value.items()
-            for item in pair
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_template_value(item) for item in value)
-    return False
 
 
 def _metric_factory(target):
@@ -73,7 +58,7 @@ def _metric_factory(target):
 def _validate_known_metric_arguments(name: str, arguments: Mapping[str, object]) -> None:
     """Validate literal metric controls while retaining symbolic dependencies."""
 
-    if "mode" in arguments and not isinstance(arguments["mode"], Par):
+    if "mode" in arguments and not isinstance(arguments["mode"], Expr):
         mode = arguments["mode"]
         if mode not in ("global", "coordinate"):
             raise ValueError("mode must be 'global' or 'coordinate'.")
@@ -88,7 +73,7 @@ def _validate_known_metric_arguments(name: str, arguments: Mapping[str, object])
 def _validate_known_classes(classes: object) -> None:
     """Reject fixed class-domain errors while allowing symbolic tuple members."""
 
-    if isinstance(classes, Par):
+    if isinstance(classes, Expr):
         return
     if not isinstance(classes, tuple) or not classes:
         _classes(classes)
@@ -106,8 +91,8 @@ def _validate_known_classes(classes: object) -> None:
 def _validate_known_f1_controls(average: object, positive_index: object) -> None:
     """Validate F1 facts that do not depend on unresolved direct controls."""
 
-    average_symbolic = isinstance(average, Par)
-    positive_symbolic = isinstance(positive_index, Par)
+    average_symbolic = isinstance(average, Expr)
+    positive_symbolic = isinstance(positive_index, Expr)
     if not average_symbolic and average not in ("binary", "micro", "macro", "weighted", "none"):
         raise ValueError("average must be binary, micro, macro, weighted, or none.")
     if not positive_symbolic and positive_index is not None and (
@@ -336,7 +321,7 @@ def _symbolic_metric_definition(name: str, arguments: Mapping[str, object]) -> D
             positive_index=arguments["positive_index"],
         )
     return Fold.defn(
-        source,
+        DefLink.finalized(EdgeKind.REF, source),
         initial_state=ConfusionInitial.defn(domain),
         accumulator=ConfusionCounts.defn(domain),
         finalize=finalize,
@@ -805,15 +790,19 @@ def regressor_mae(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", 
     """Declare an inert streaming MAE Fold over one model evaluation graph.
 
     Args:
-        test_ds: Non-materializing evaluation Dataset reference.
-        model: Non-materializing model Method reference.
+        test_ds: Non-materializing evaluation Dataset reference, Definition, or
+            Expr placeholder.
+        model: Non-materializing model Method reference, Definition, or Expr
+            placeholder.
         x: Source path selecting model input.
         y: Source path selecting regression target.
         mode: Global or coordinate-wise mean population definition.
 
     Returns:
         An uncomputed Fold using U6's native mean carry, or an inert Definition
-        when any supplied argument contains an active symbolic expression.
+        when any supplied argument contains a Definition or symbolic Expr,
+        including compound expressions. Exact reference inputs alone retain the
+        Fold return form; expression-dependent validation is deferred to binding.
 
     Raises:
         TypeError: If references or paths cannot form the declared Method graph.
@@ -832,15 +821,19 @@ def regressor_mse(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", 
     """Declare an inert streaming MSE Fold over one model evaluation graph.
 
     Args:
-        test_ds: Non-materializing evaluation Dataset reference.
-        model: Non-materializing model Method reference.
+        test_ds: Non-materializing evaluation Dataset reference, Definition, or
+            Expr placeholder.
+        model: Non-materializing model Method reference, Definition, or Expr
+            placeholder.
         x: Source path selecting model input.
         y: Source path selecting regression target.
         mode: Global or coordinate-wise mean population definition.
 
     Returns:
         An uncomputed Fold using U6's native mean carry, or an inert Definition
-        when any supplied argument contains an active symbolic expression.
+        when any supplied argument contains a Definition or symbolic Expr,
+        including compound expressions. Exact reference inputs alone retain the
+        Fold return form; expression-dependent validation is deferred to binding.
 
     Raises:
         TypeError: If references or paths cannot form the declared Method graph.
@@ -875,8 +868,10 @@ def classifier_confusion_matrix(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, c
     """Declare an inert fixed-domain confusion-matrix Fold without label guessing.
 
     Args:
-        test_ds: Non-materializing evaluation Dataset reference.
-        model: Non-materializing model Method reference.
+        test_ds: Non-materializing evaluation Dataset reference, Definition, or
+            Expr placeholder.
+        model: Non-materializing model Method reference, Definition, or Expr
+            placeholder.
         classes: Ordered finite domain of decoded labels.
         prediction_labels: Declared Method converting model output to labels.
         target_labels: Declared Method converting targets to labels.
@@ -885,7 +880,10 @@ def classifier_confusion_matrix(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, c
 
     Returns:
         An uncomputed Fold whose result is a truth-row, prediction-column matrix,
-        or an inert Definition when any supplied argument is symbolic.
+        or an inert Definition when any supplied argument contains a Definition
+        or symbolic Expr, including compound expressions. Exact reference inputs
+        alone retain the Fold form; expression-dependent validation is deferred
+        to binding.
 
     Raises:
         TypeError: If references, labels, or Methods are unsupported.
@@ -903,8 +901,10 @@ def classifier_accuracy(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: 
     """Declare an inert confusion-based accuracy Fold without a second evaluation loop.
 
     Args:
-        test_ds: Non-materializing evaluation Dataset reference.
-        model: Non-materializing model Method reference.
+        test_ds: Non-materializing evaluation Dataset reference, Definition, or
+            Expr placeholder.
+        model: Non-materializing model Method reference, Definition, or Expr
+            placeholder.
         classes: Ordered finite domain of decoded labels.
         prediction_labels: Declared Method converting model output to labels.
         target_labels: Declared Method converting targets to labels.
@@ -913,7 +913,9 @@ def classifier_accuracy(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: 
 
     Returns:
         An uncomputed Fold whose result is native scalar accuracy, or an inert
-        Definition when any supplied argument is symbolic.
+        Definition when any supplied argument contains a Definition or symbolic
+        Expr, including compound expressions. Exact reference inputs alone retain
+        the Fold form; expression-dependent validation is deferred to binding.
 
     Raises:
         TypeError: If references, labels, or Methods are unsupported.
@@ -931,8 +933,10 @@ def classifier_f1(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[
     """Declare an inert confusion-based F1 Fold using explicit label conversion.
 
     Args:
-        test_ds: Non-materializing evaluation Dataset reference.
-        model: Non-materializing model Method reference.
+        test_ds: Non-materializing evaluation Dataset reference, Definition, or
+            Expr placeholder.
+        model: Non-materializing model Method reference, Definition, or Expr
+            placeholder.
         classes: Ordered finite domain of decoded labels.
         prediction_labels: Declared Method converting model output to labels.
         target_labels: Declared Method converting targets to labels.
@@ -943,7 +947,10 @@ def classifier_f1(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[
 
     Returns:
         An uncomputed Fold with scalar or per-class native F1 result semantics,
-        or an inert Definition when any supplied argument is symbolic.
+        or an inert Definition when any supplied argument contains a Definition
+        or symbolic Expr, including compound expressions. Exact reference inputs
+        alone retain the Fold form; expression-dependent validation is deferred
+        to binding.
 
     Raises:
         TypeError: If references, labels, or Methods are unsupported.

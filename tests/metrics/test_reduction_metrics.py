@@ -532,6 +532,32 @@ def test_symbolic_metric_factory_concretizes_to_the_direct_fold_definition(tmp_p
     assert bound.concretize(repo=repo) == direct.definition
 
 
+def test_metric_factories_share_expression_detection_and_bind_compound_controls(tmp_path):
+    """Compound expressions author inert graphs even with concrete source refs."""
+
+    from dryml.core import Definition, Par, Repo
+    from dryml.metrics import classifier_f1, regressor_mae
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    source_ref = repo.save_object(EvaluationDataset(({"x": [1.0], "y": [1.0]},)))
+    model_ref = repo.save_object(IdentityModel())
+    recipe = regressor_mae(source_ref, model_ref, x=Par("index") * 2, mode="global")
+    assert isinstance(recipe, Definition)
+    assert recipe.sub(index=0, traverse_refs=True).concretize(repo=repo) == (
+        regressor_mae(source_ref, model_ref, x=0, mode="global").definition
+    )
+
+    f1 = classifier_f1(
+        source_ref, model_ref, classes=(0, 1),
+        prediction_labels=IdentityLabels(), target_labels=IdentityLabels(),
+        average="binary", positive_index=Par("positive") * 1,
+    )
+    assert isinstance(f1, Definition)
+    assert f1.sub(positive=1).concretize(repo=repo)
+    with pytest.raises(ValueError, match="positive_index"):
+        f1.sub(positive=-1).concretize(repo=repo)
+
+
 def test_classification_factories_use_explicit_labels_and_one_traversal_each(tmp_path):
     """Each factory folds one explicit evaluation stream without implicit decoding."""
 

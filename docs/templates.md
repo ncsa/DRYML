@@ -12,6 +12,10 @@ Use `Definition.sub(...)` for static values. Substitution is immutable and one
 pass: it evaluates expressions made closed by the supplied values, but never
 samples a provider. A `Distribution` is invalid anywhere in Definition-owned
 structure, including nested containers.
+Dataset or model Definition/CDef values supplied through bindings retain their
+construction-value types rather than becoming mappings. Exact ObjectRef/StateRef
+bindings retain their identities, while live Object bindings lower to ObjectRefs
+without materializing or saving their graphs.
 
 ```python
 from dryml.core import Definition, Generator, Par, UniformFromSet

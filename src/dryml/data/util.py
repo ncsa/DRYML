@@ -21,8 +21,10 @@ def as_supervised(dataset, inputs, targets=None, *, input_as_target: bool = Fals
 
     Args:
         dataset: Source Dataset with a declared element specification, or a soft
-            Definition, ConcreteDefinition, ObjectRef, StateRef, or explicit
-            ``Ref(...)``/``Mat(...)`` assertion expected to identify one.
+            Definition, ConcreteDefinition, ObjectRef, StateRef, symbolic Expr
+            (including Par), or explicit ``Ref(...)``/``Mat(...)`` assertion
+            expected to identify one. Expressions stay inert until substituted;
+            the bound source must materialize a Dataset.
         inputs: One scalar path, :class:`Select`, or nonempty tree of explicit
             ``Select`` leaves describing model inputs.
         targets: Matching target selection. It is required unless
@@ -48,16 +50,19 @@ def as_supervised(dataset, inputs, targets=None, *, input_as_target: bool = Fals
         select a backend, or add batching.
     """
 
-    from dryml.core import ConcreteDefinition, DefLink, Definition, ObjectRef, StateRef
+    from dryml.core.links import DefLink
+    from dryml.core.template import _is_definition_value
     from dryml.data.dataset import Dataset, Map
 
-    symbolic_types = (Definition, ConcreteDefinition, ObjectRef, StateRef)
-    symbolic = isinstance(dataset, (*symbolic_types, DefLink))
+    symbolic = isinstance(dataset, DefLink) or _is_definition_value(
+        dataset, include_authority=True,
+    )
     if not isinstance(dataset, Dataset) and not symbolic:
         raise TypeError("as_supervised requires a Dataset or Dataset reference.")
     if isinstance(dataset, DefLink):
         dataset = dataset.target
-        if not isinstance(dataset, (Dataset, *symbolic_types)):
+        if not isinstance(dataset, Dataset) and not _is_definition_value(
+                dataset, include_authority=True):
             raise TypeError("as_supervised received an unsupported Ref/Mat target.")
     if type(input_as_target) is not bool:
         raise TypeError("input_as_target must be an exact bool.")

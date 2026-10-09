@@ -330,7 +330,7 @@ Utility functions help with common supervised-learning structures:
 `as_supervised(dataset, inputs, targets)` builds a persisted ordinary Dataset
 projection yielding `(inputs, targets)`, rather than asking trainers to select
 fields. A live Dataset returns a live `Map`. A soft Definition,
-ConcreteDefinition, ObjectRef, StateRef, or explicit `Ref(...)`/`Mat(...)`
+ConcreteDefinition, ObjectRef, StateRef, symbolic `Expr` (including `Par`), or explicit `Ref(...)`/`Mat(...)`
 assertion returns an inert `Map` Definition without resolving or materializing
 the source; an assertion contributes its retained target to that new materializing
 Dataset graph. A scalar path selects one branch (and can retain a nested
@@ -339,6 +339,28 @@ dictionary); named/nested selections use dictionaries of
 `Select.from_path` leaves so path and output-tree intent cannot be guessed.
 `input_as_target=True` produces an autoencoder-style pair without copies or
 implicit batching.
+
+Dataset placeholders can be supplied before choosing the actual datasets:
+
+```python
+from dryml.core import Par
+from dryml.data import as_supervised
+from dryml.models import Experiment
+
+experiment_template = Experiment.defn(
+    model=model_template,
+    train_fn=training_template,
+    train_data=as_supervised(Par("train_ds"), "cart", input_as_target=True),
+    test_data=as_supervised(Par("test_ds"), "cart", input_as_target=True),
+)
+experiment = experiment_template.sub(train_ds=train_ds, test_ds=test_ds)
+```
+
+This authors an inert graph; it does not inspect a placeholder's specification or
+iterate data. Binding accepts the same source definitions/references as direct
+authoring, including a concrete training definition and saved test `StateRef`.
+The bound source must materialize a Dataset at the normal build boundary. Literal
+selection errors still fail when `as_supervised` is called.
 
 Native trainers consume this authored Dataset as-is. Put `Batch`, `Shuffle`,
 `Take`, and related controls in the Dataset graph before constructing an

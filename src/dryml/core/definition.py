@@ -657,6 +657,9 @@ class Definition(DefInterface, Mapping):
         Returns:
             A new ``Definition`` retaining partial symbolic structure when roots
             remain and evaluating supported closed arithmetic and repetition.
+            Supplied Definition/CDef values retain construction structure and
+            exact references retain their identities; live Object bindings are
+            lowered to ObjectRefs without traversing their graphs.
 
         Raises:
             ParameterizationError: If bindings are invalid, unknown, or contain a
