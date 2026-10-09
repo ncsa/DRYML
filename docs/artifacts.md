@@ -184,8 +184,10 @@ calls continue to return an uncomputed Fold. Invalid known literal controls fail
 while authoring the symbolic call, while checks that depend on unresolved values
 run when the bound Definition is concretized. Symbolic lifting itself constructs
 no helper Method and performs no input work.
-Recognition is shared with core template authoring, including nested containers
-and factory arguments; non-materializing Ref/quotation boundaries remain opaque.
+Recognition and call branching use core `authoring_helper`, including nested
+containers and factory arguments; non-materializing Ref/quotation boundaries
+remain opaque. The metric adapter supplies its own builder and known-argument
+validator and opts into core `function` normalization on the concrete branch only.
 This is not automatic lifting of arbitrary Python functions. Each helper still
 owns its graph recipe and domain validation. A bound classifier recipe carries
 the explicit non-materializing source edge required by Fold just as a regression

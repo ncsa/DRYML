@@ -51,7 +51,7 @@ def test_promoted_package_keeps_the_destination_export_manifest():
     assert core.__all__ == [
         "load_object", "save_object", "load_state_ref", "LiveReusePolicy", "StoreReport", "SavePublication", "SavedSnapshot", "PublicationPhase", "PublicationStatus", "SaveRouting", "StateGraphReservation", "Object", "Serializable",
         "Compute", "Definition", "categorical_definition", "ConcreteDefinition", "DefLink", "Ref", "Mat", "AutoRef",
-        "normalize_args", "normalize_return", "signature_context", "function", "SignatureError",
+        "normalize_args", "normalize_return", "signature_context", "function", "authoring_helper", "SignatureError",
         "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace",
         "REFERENCE_JSON_SCHEMA", "REFERENCE_JSON_VERSION", "ReferenceJSONCodecError",
         "decode_reference_json", "encode_reference_json", "freeze",

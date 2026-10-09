@@ -360,7 +360,9 @@ This authors an inert graph; it does not inspect a placeholder's specification o
 iterate data. Binding accepts the same source definitions/references as direct
 authoring, including a concrete training definition and saved test `StateRef`.
 The bound source must materialize a Dataset at the normal build boundary. Literal
-selection errors still fail when `as_supervised` is called.
+selection errors still fail when `as_supervised` is called. The helper uses core
+`authoring_helper` with an explicit dataset-source predicate and a shared live/inert
+projection recipe; it does not opt into concrete signature normalization.
 
 Native trainers consume this authored Dataset as-is. Put `Batch`, `Shuffle`,
 `Take`, and related controls in the Dataset graph before constructing an

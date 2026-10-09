@@ -5,6 +5,7 @@ Utility functions for data methods
 import inspect
 from typing import Callable
 
+from dryml.core.authoring import authoring_helper
 from dryml.core.tensor_spec import iter_specs
 from dryml.data.collate import default_collate
 from dryml.data.methods import Project, Select
@@ -16,6 +17,26 @@ def _xy_dataset(dataset, *, x_path=0, y_path=1):
     return Map(dataset, Project(Select(x_path), Select(y_path)))
 
 
+def _supervised_should_author(arguments):
+    """Select authoring for a symbolic or exact source, not selection controls."""
+
+    from dryml.core.links import DefLink
+    from dryml.core.template import _is_definition_value
+
+    dataset = arguments["dataset"]
+    return isinstance(dataset, DefLink) or _is_definition_value(dataset, include_authority=True)
+
+
+def _supervised_definition(arguments):
+    """Build a supervised Definition using the helper's shared graph recipe."""
+
+    return _supervised_graph(**arguments, symbolic=True)
+
+
+@authoring_helper(
+    author_definition=_supervised_definition,
+    should_author=_supervised_should_author,
+)
 def as_supervised(dataset, inputs, targets=None, *, input_as_target: bool = False):
     """Return a Dataset graph yielding canonical ``(inputs, targets)`` pairs.
 
@@ -50,13 +71,18 @@ def as_supervised(dataset, inputs, targets=None, *, input_as_target: bool = Fals
         select a backend, or add batching.
     """
 
+    return _supervised_graph(
+        dataset, inputs, targets, input_as_target=input_as_target, symbolic=False,
+    )
+
+
+def _supervised_graph(dataset, inputs, targets, *, input_as_target, symbolic):
+    """Validate and assemble either live or inert supervised projection nodes."""
+
     from dryml.core.links import DefLink
     from dryml.core.template import _is_definition_value
     from dryml.data.dataset import Dataset, Map
 
-    symbolic = isinstance(dataset, DefLink) or _is_definition_value(
-        dataset, include_authority=True,
-    )
     if not isinstance(dataset, Dataset) and not symbolic:
         raise TypeError("as_supervised requires a Dataset or Dataset reference.")
     if isinstance(dataset, DefLink):

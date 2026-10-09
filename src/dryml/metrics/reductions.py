@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-from functools import wraps
-from inspect import signature
+from functools import partial
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
 
 from dryml.artifacts import Fold, mean
-from dryml.core import AutoRef, ConcreteDefinition, Definition, Ref, function
+from dryml.core import AutoRef, ConcreteDefinition, Definition, Ref, authoring_helper
 from dryml.core.backend import Backend
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
@@ -41,18 +40,11 @@ def _metric_factory(target):
     deliberately not a general function-lifting facility.
     """
 
-    concrete = function(target)
-
-    @wraps(target)
-    def wrapped(*args, **kwargs):
-        if _contains_template_value((args, kwargs)):
-            bound = signature(target).bind(*args, **kwargs)
-            bound.apply_defaults()
-            _validate_known_metric_arguments(target.__name__, bound.arguments)
-            return _symbolic_metric_definition(target.__name__, bound.arguments)
-        return concrete(*args, **kwargs)
-
-    return wrapped
+    return authoring_helper(
+        author_definition=partial(_symbolic_metric_definition, target.__name__),
+        validate_known_arguments=partial(_validate_known_metric_arguments, target.__name__),
+        normalize_concrete=True,
+    )(target)
 
 
 def _validate_known_metric_arguments(name: str, arguments: Mapping[str, object]) -> None:

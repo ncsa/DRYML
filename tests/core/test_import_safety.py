@@ -16,7 +16,7 @@ _EXPECTED_CORE_EXPORTS = (
     "StoreReport", "SavePublication", "SavedSnapshot", "PublicationPhase", "PublicationStatus",
     "SaveRouting", "StateGraphReservation", "Object", "Serializable", "Compute", "Definition",
     "categorical_definition", "ConcreteDefinition", "DefLink", "Ref", "Mat", "AutoRef",
-    "normalize_args", "normalize_return", "signature_context", "function", "SignatureError",
+    "normalize_args", "normalize_return", "signature_context", "function", "authoring_helper", "SignatureError",
     "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace",
     "REFERENCE_JSON_SCHEMA", "REFERENCE_JSON_VERSION", "ReferenceJSONCodecError",
     "decode_reference_json", "encode_reference_json",
@@ -52,6 +52,7 @@ _EXPORT_MODULES = {
     **dict.fromkeys(("ConcreteDefinition", "Definition", "categorical_definition", "SKIP_ARGS", "freeze"), "dryml.core.definition"),
     "DefLink": "dryml.core.links",
     **dict.fromkeys(("AutoRef", "Mat", "Ref", "SignatureError", "function", "normalize_args", "normalize_return", "signature_context"), "dryml.core.signatures"),
+    "authoring_helper": "dryml.core.authoring",
     **dict.fromkeys(("ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace"), "dryml.core.reference_values"),
     **dict.fromkeys(("REFERENCE_JSON_SCHEMA", "REFERENCE_JSON_VERSION", "ReferenceJSONCodecError", "decode_reference_json", "encode_reference_json"), "dryml.core.reference_json"),
     **dict.fromkeys(("AnyValue", "Choice", "Exact", "IntRange", "Match", "Missing", "Present", "Satisfies", "SubclassOf"), "dryml.core.params"),
@@ -93,7 +94,7 @@ def _run_import_probe(code: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.parametrize("module_name", ("dryml.core.object", "dryml.core.tensor_spec", "dryml.core.signatures", "dryml.core.template"))
+@pytest.mark.parametrize("module_name", ("dryml.core.object", "dryml.core.tensor_spec", "dryml.core.signatures", "dryml.core.template", "dryml.core.authoring"))
 def test_narrow_core_module_imports_do_not_load_heavy_packages(module_name: str) -> None:
     """Narrow core modules load without persistence, runtime, consumer, or backend imports."""
 
