@@ -165,7 +165,7 @@ def test_known_spec_preparation_rejects_strategy_and_selection_errors_before_bod
     class TorchOnly(Method):
         calls = []
 
-        @traits(backend="torch")
+        @traits(backend="torch", batch_mode="element")
         def torch(self, value):
             type(self).calls.append("torch")
             return value
@@ -184,7 +184,7 @@ def test_known_spec_preparation_rejects_strategy_and_selection_errors_before_bod
             return value
 
     numpy = TensorSpec("float32", shape=(2,), backend="numpy")
-    jax = TensorSpec("float32", shape=(2,), backend="jax")
+    jax = TensorSpec("float32", shape=(2,), batch=3, backend="jax")
     with pytest.raises(ValueError, match="local"):
         TorchOnly().learn(numpy, strategy="remote")
     with pytest.raises(ImplementationSelectionError) as missing:

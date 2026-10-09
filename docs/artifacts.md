@@ -162,6 +162,13 @@ shape/dtype fail before a successor state or terminal payload is installed.
 `Project`, `Select`, `Pipe`, `Diff`, and `Abs` or `Squared` graph as a complete
 concrete definition before supplying it to Fold. No Dataset is traversed, model
 is loaded, state is selected, or input is saved during factory construction.
+Before arithmetic or label reduction, the graph performs one explicit dense
+host handoff of both predictions and targets to independent NumPy storage. This
+copies accelerator predictions only after model inference, keeps Fold reduction
+carry checkpoint-safe, and covers cached evaluation data with Torch, TensorFlow,
+or single-device JAX models without weakening ordinary mixed-backend Method
+rejection. Unsupported dtype, layout, abstract/sharded value, or inexact
+conversion still fails before metric state changes.
 Their mean denominator is the selected global or coordinate population, so an
 uneven final batch has the same meaning as individual observations.
 
@@ -171,11 +178,20 @@ prediction and target label Methods. They never decode logits, probabilities,
 or one-hot values implicitly. A caller can use `ArgMax` or another declared
 Method in the supplied conversion graph when that conversion is intended.
 All five supplied metric helpers return an inert class-rooted `Definition` when
-any supported argument contains a symbolic Definition value or `Par`; concrete-only
+any supported argument contains a Definition or symbolic `Expr`, including `Par`
+and compound arithmetic/repetition expressions; concrete-only
 calls continue to return an uncomputed Fold. Invalid known literal controls fail
 while authoring the symbolic call, while checks that depend on unresolved values
 run when the bound Definition is concretized. Symbolic lifting itself constructs
 no helper Method and performs no input work.
+Recognition and call branching use core `authoring_helper`, including nested
+containers and factory arguments; non-materializing Ref/quotation boundaries
+remain opaque. The metric adapter supplies its own builder and known-argument
+validator and opts into core `function` normalization on the concrete branch only.
+This is not automatic lifting of arbitrary Python functions. Each helper still
+owns its graph recipe and domain validation. A bound classifier recipe carries
+the explicit non-materializing source edge required by Fold just as a regression
+recipe does.
 Incoming `StateRef` inputs remain exact nested references in that declared graph:
 a later model save does not replace the selected snapshot. Factory construction
 never saves an unpersisted source or model. A completed metric Fold can restore

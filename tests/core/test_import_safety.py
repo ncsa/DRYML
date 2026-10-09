@@ -16,9 +16,11 @@ _EXPECTED_CORE_EXPORTS = (
     "StoreReport", "SavePublication", "SavedSnapshot", "PublicationPhase", "PublicationStatus",
     "SaveRouting", "StateGraphReservation", "Object", "Serializable", "Compute", "Definition",
     "categorical_definition", "ConcreteDefinition", "DefLink", "Ref", "Mat", "AutoRef",
-    "normalize_args", "normalize_return", "signature_context", "function", "SignatureError",
+    "normalize_args", "normalize_return", "signature_context", "function", "authoring_helper", "SignatureError",
     "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace",
-    "freeze", "QuotedDef", "SelectorSpec", "Selector",
+    "REFERENCE_JSON_SCHEMA", "REFERENCE_JSON_VERSION", "ReferenceJSONCodecError",
+    "decode_reference_json", "encode_reference_json",
+    "freeze", "QuotedDef", "SelectorSpec", "Selector", "ObjectSelector",
     "selector", "Par", "Expr", "Shared", "Template", "Generator", "GeneratorSelector", "repeat", "Match", "Distribution", "ParameterizationError", "UnresolvedDefinitionError", "ParameterizationLimitError", "UnsupportedGeneratorVerificationError", "Present", "Missing", "AnyValue", "Exact", "Choice",
     "IntRange", "SubclassOf", "Satisfies", "UniformIntRange", "UniformFromSet",
     "SKIP_ARGS", "Repo", "MetadataConflictError", "RepoDefinition", "RepoDefinitionError", "RepoReconstructionError", "configure", "reset_config", "status",
@@ -29,7 +31,7 @@ _EXPECTED_CORE_EXPORTS = (
     "ConcreteDefinitionGraph", "ConcreteDefinitionGraphCycleError",
     "ConcreteDefinitionGraphError", "EdgeKind", "iter_direct_cdef_edges", "Arg",
     "DefinitionPath", "EdgePolicy", "GraphPathError",
-    "Index", "Key", "Kwarg", "Parameter", "IdentityQuery", "IdentitySet",
+    "Index", "Key", "Kwarg", "Parameter", "IdentityQuery", "IdentitySet", "ObjectSelectorSet",
     "Occurrence", "OccurrenceQuery", "OccurrenceSet", "ObjectResultSet", "RelationshipKind", "RelationshipPath",
     "MetadataField", "MetadataPredicate", "field", "QueryCardinalityError", "QueryDomainError",
     "QueryDiagnostic", "QueryError", "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember",
@@ -50,14 +52,16 @@ _EXPORT_MODULES = {
     **dict.fromkeys(("ConcreteDefinition", "Definition", "categorical_definition", "SKIP_ARGS", "freeze"), "dryml.core.definition"),
     "DefLink": "dryml.core.links",
     **dict.fromkeys(("AutoRef", "Mat", "Ref", "SignatureError", "function", "normalize_args", "normalize_return", "signature_context"), "dryml.core.signatures"),
+    "authoring_helper": "dryml.core.authoring",
     **dict.fromkeys(("ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace"), "dryml.core.reference_values"),
+    **dict.fromkeys(("REFERENCE_JSON_SCHEMA", "REFERENCE_JSON_VERSION", "ReferenceJSONCodecError", "decode_reference_json", "encode_reference_json"), "dryml.core.reference_json"),
     **dict.fromkeys(("AnyValue", "Choice", "Exact", "IntRange", "Match", "Missing", "Present", "Satisfies", "SubclassOf"), "dryml.core.params"),
     **dict.fromkeys(("Distribution", "UniformFromSet", "UniformIntRange"), "dryml.core.domains"),
     **dict.fromkeys(("ParameterizationError", "UnresolvedDefinitionError", "ParameterizationLimitError", "UnsupportedGeneratorVerificationError"), "dryml.core.errors"),
     **dict.fromkeys(("Expr", "Par", "Shared", "Template", "repeat"), "dryml.core.template"),
     **dict.fromkeys(("Generator", "GeneratorSelector"), "dryml.core.generator"),
     **dict.fromkeys(("QuotedDef", "SelectorSpec"), "dryml.core.quoted"),
-    **dict.fromkeys(("Selector", "selector"), "dryml.core.selector"),
+    **dict.fromkeys(("Selector", "ObjectSelector", "selector"), "dryml.core.selector"),
     **dict.fromkeys(("Repo", "MetadataConflictError", "load_object", "load_state_ref", "save_object"), "dryml.core.repo"),
     **dict.fromkeys(("RepoDefinition", "RepoDefinitionError", "RepoReconstructionError"), "dryml.core.repo_definition"),
     "LiveReusePolicy": "dryml.core.policies",
@@ -70,7 +74,7 @@ _EXPORT_MODULES = {
     **dict.fromkeys(("configure", "reset_config", "status"), "dryml.core.session"),
     **dict.fromkeys(("ImportRef", "SourceSpec", "resolve_symbol", "symbol_ref"), "dryml.core.symbol"),
     **dict.fromkeys(("CDefEdge", "CDefNode", "CDefOccurrence", "ConcreteDefinitionGraph", "ConcreteDefinitionGraphCycleError", "ConcreteDefinitionGraphError", "EdgeKind", "iter_direct_cdef_edges"), "dryml.core.cdef_graph"),
-    **dict.fromkeys(("Arg", "DefinitionPath", "EdgePolicy", "GraphPathError", "Index", "Key", "Kwarg", "Parameter", "IdentityQuery", "IdentitySet", "Occurrence", "OccurrenceQuery", "OccurrenceSet", "ObjectResultSet", "RelationshipKind", "RelationshipPath", "MetadataField", "MetadataPredicate", "field", "QueryCardinalityError", "QueryDomainError", "QueryError", "QueryDiagnostic", "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember", "SourceEvidence", "intersection", "union"), "dryml.core.query"),
+    **dict.fromkeys(("Arg", "DefinitionPath", "EdgePolicy", "GraphPathError", "Index", "Key", "Kwarg", "Parameter", "IdentityQuery", "IdentitySet", "ObjectSelectorSet", "Occurrence", "OccurrenceQuery", "OccurrenceSet", "ObjectResultSet", "RelationshipKind", "RelationshipPath", "MetadataField", "MetadataPredicate", "field", "QueryCardinalityError", "QueryDomainError", "QueryError", "QueryDiagnostic", "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember", "SourceEvidence", "intersection", "union"), "dryml.core.query"),
     **dict.fromkeys(("CoreExecutionError", "CoreExecutionFuture", "CoreExecutionSnapshot", "CoreOptions", "CoreOutcomeEvidence", "CorePublicationEvidence", "CoreRefreshEvidence", "Executor", "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy", "run", "submit"), "dryml.core.execute"),
     **dict.fromkeys(("SaveAnnotations", "LineageMetadata", "SnapshotCapture", "SnapshotMetadata", "encode_metadata_mapping", "decode_metadata_mapping", "timestamp_to_seconds", "timestamp_from_seconds", "encode_current_annotations", "decode_current_annotations", "encode_lineage_metadata", "decode_lineage_metadata", "encode_snapshot_metadata", "decode_snapshot_metadata", "read_snapshot_metadata", "MetadataScalar", "MetadataValue", "MetadataMapping", "MetadataTarget", "MetadataDiagnostic", "EnvironmentStatus", "RequirementStatus", "EvidenceCoverage"), "dryml.core.metadata"),
 }
@@ -90,7 +94,7 @@ def _run_import_probe(code: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.parametrize("module_name", ("dryml.core.object", "dryml.core.tensor_spec", "dryml.core.signatures", "dryml.core.template"))
+@pytest.mark.parametrize("module_name", ("dryml.core.object", "dryml.core.tensor_spec", "dryml.core.signatures", "dryml.core.template", "dryml.core.authoring"))
 def test_narrow_core_module_imports_do_not_load_heavy_packages(module_name: str) -> None:
     """Narrow core modules load without persistence, runtime, consumer, or backend imports."""
 

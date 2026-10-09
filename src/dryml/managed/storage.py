@@ -393,8 +393,10 @@ def _raise_managed_publication_error(error: BaseException, report) -> None:
         for publication in report.publications
     ) else "not_committed"
     managed = ManagedPublicationError(outcome, "managed state publication was not durable")
-    managed.__cause__ = error
-    raise RepoSaveError("managed state publication failed", report=report) from managed
+    try:
+        raise managed from error
+    except ManagedPublicationError as classified:
+        raise RepoSaveError("managed state publication failed", report=report) from classified
 
 
 def state_ref_for_digest(state_repo: Repo, digest: str) -> StateRef:

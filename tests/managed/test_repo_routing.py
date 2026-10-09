@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 
 import pytest
@@ -249,6 +250,7 @@ def test_zip_commit_failure_has_report_and_never_associates_checkpoint(tmp_path,
     assert any(item.phase == "commit" and item.status == "failed" for item in caught.value.report.publications)
     assert isinstance(caught.value.__cause__, ManagedPublicationError)
     assert isinstance(caught.value.__cause__.__cause__, RepoSaveError)
+    assert "OSError: commit failed" in "".join(traceback.format_exception(caught.value))
     assert value.checkpoint_then_finish.status(
         state_repo=repo, control_store=control,
     ).checkpoint_state_ref is None

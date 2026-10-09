@@ -23,10 +23,11 @@ from dryml.locking import LockError, interprocess_lock
 
 
 MANIFEST_FORMAT = "dryml-ml-workflow-fixtures"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 BASELINE_PATH = Path(__file__).with_name("ml_workflow_baseline.json")
 REQUIRED_ENVIRONMENT_KEYS = (
-    "python", "dryml", "pandas", "pyarrow", "tensorflow", "tensorflow_datasets", "torch",
+    "python", "dryml", "flax", "jax", "jaxlib", "optax", "pandas", "pyarrow",
+    "tensorflow", "tensorflow_datasets", "torch",
 )
 _MINIMUM_PYARROW = (25, 0, 1)
 
@@ -109,7 +110,7 @@ def load_baseline(path: str | Path = BASELINE_PATH) -> dict[str, object]:
         "batch_size", "checkpoint_every_steps", "cpu_budget_seconds",
         "cpu_peak_rss_bytes", "case_store_budget_bytes",
     }
-    if set(value) != required or value.get("format") != "dryml-ml-workflow-baseline" or value.get("version") != 1:
+    if set(value) != required or value.get("format") != "dryml-ml-workflow-baseline" or value.get("version") != 2:
         raise FixtureManifestError("ML workflow baseline format is unsupported.")
     if not all(isinstance(value[key], dict) for key in ("mnist", "w1", "w2", "w3", "initialization")):
         raise FixtureManifestError("ML workflow baseline nested schema is malformed.")
@@ -136,6 +137,10 @@ def installed_environment() -> dict[str, str]:
     distributions = {
         "python": None,
         "dryml": "dryml",
+        "flax": "flax",
+        "jax": "jax",
+        "jaxlib": "jaxlib",
+        "optax": "optax",
         "pandas": "pandas",
         "pyarrow": "pyarrow",
         "tensorflow": "tensorflow",
@@ -203,19 +208,23 @@ def _absolute(path: str | Path) -> Path:
 
 
 def _reference_to_json(value: object) -> dict[str, object]:
-    """Encode a StateRef through DRYML's closed reference grammar."""
+    """Encode StateRef data through the manifest's legacy v2 grammar."""
 
-    from dryml.models.experiment_data import _reference_to_json as encode
+    from dryml.core.reference_json import _encode_legacy_reference_json
 
-    return encode(value)
+    return _encode_legacy_reference_json(
+        StateRef.from_data(value), version=MANIFEST_VERSION,
+    )
 
 
 def _reference_from_json(value: object) -> object:
-    """Decode a closed reference JSON tree before StateRef validation."""
+    """Decode the manifest's legacy v2 StateRef tree to ordinary data."""
 
-    from dryml.models.experiment_data import _reference_from_json as decode
+    from dryml.core.reference_json import _decode_legacy_reference_json
 
-    return decode(value)
+    return _decode_legacy_reference_json(
+        value, kind="state_ref", version=MANIFEST_VERSION,
+    ).to_data()
 
 
 @dataclass(frozen=True, slots=True)

@@ -95,10 +95,13 @@ Backend integrations can convert a `TensorSpec` into framework-specific shapes, 
 
 Prepared local Method graphs use a complete backend field as a declared boundary,
 not as a claim about an arbitrary runtime value. Supported dense CPU NumPy,
-TensorFlow, and Torch handoffs preserve the semantic spec exactly while changing
-that field on the consumer side. GPU transfers, sparse/ragged/quantized tensors,
-object/string/complex/bfloat values, and implicit lossy dtype changes are outside
-this handoff contract.
+TensorFlow, Torch, and JAX handoffs preserve the semantic spec exactly while
+changing that field on the consumer side. JAX handoffs require a concrete,
+fully-addressable, single-device CPU source and explicitly place the target on CPU.
+They reject a dtype JAX would narrow under the active x64 configuration without
+changing that configuration. GPU/multi-device transfers, tracers or abstract JAX
+values, sparse/ragged/quantized tensors, object/string/complex/bfloat values, and
+implicit lossy dtype changes are outside this handoff contract.
 
 ## Equality
 
@@ -143,6 +146,12 @@ print(dataset.spec)
 ```
 
 Models can infer output specs. When model output specs are unbatched but inputs are batched, DRYML can propagate the batch dimension onto the output spec.
+
+Dataset-owned native training keeps the authored `(inputs, targets)` spec tree.
+`Batch` supplies batch metadata before preparation, and each trainer retains the
+selected backend-specific consumer specs in `TrainingPreparation`. TensorFlow,
+Torch, and experimental JAX adapters preserve the same semantic dtype, shape,
+structure, and batch meaning; they do not infer trainer-owned batch controls.
 
 ## Common Pitfalls
 

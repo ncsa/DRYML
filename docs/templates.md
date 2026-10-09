@@ -12,6 +12,10 @@ Use `Definition.sub(...)` for static values. Substitution is immutable and one
 pass: it evaluates expressions made closed by the supplied values, but never
 samples a provider. A `Distribution` is invalid anywhere in Definition-owned
 structure, including nested containers.
+Dataset or model Definition/CDef values supplied through bindings retain their
+construction-value types rather than becoming mappings. Exact ObjectRef/StateRef
+bindings retain their identities, while live Object bindings lower to ObjectRefs
+without materializing or saving their graphs.
 
 ```python
 from dryml.core import Definition, Generator, Par, UniformFromSet
@@ -42,6 +46,57 @@ stored by sorted fully-qualified root name, preserving deterministic RNG draw
 and grid order. Generator construction does not sample, resolve targets,
 construct Objects, or persist providers. `sample()` and `grid()` return only
 resolved Definitions and are all-or-error at their provider boundary.
+
+## Authoring Helpers
+
+`dryml.core.authoring_helper` (also `dryml.authoring_helper`) shares the call
+binding and authoring/concrete branching for graph-producing helpers. A helper
+still supplies its own explicit graph builder; the decorator does not analyze or
+lift an arbitrary Python function body into a Definition.
+
+```python
+from dryml.core import Par, authoring_helper
+from dryml.data import Scale
+
+def scale_definition(arguments):
+    return Scale.defn(arguments["factor"])
+
+@authoring_helper(author_definition=scale_definition)
+def scale_method(factor=1):
+    return Scale(factor)
+
+recipe = scale_method(Par("factor"))
+bound_recipe = recipe.sub(factor=2)
+```
+
+Every call first binds the original Python signature and includes its defaults.
+Policies receive a read-only named argument mapping, with `*args` and `**kwargs`
+represented by their named tuple/dictionary entries. Missing, duplicate, or
+unexpected arguments fail before policies run. These are the supported controls:
+
+| Control | Responsibility |
+| --- | --- |
+| `author_definition` | Required callback returning an inert Definition from the bound mapping. It must not construct or materialize the described graph. |
+| `should_author` | Optional exact-bool predicate on the mapping. The default detects soft Definitions and Expr values through supported containers, factory arguments, and Mat links, while preserving Ref/quotation barriers. Exact references alone do not select authoring. |
+| `validate_known_arguments` | Optional authoring-only validator called before the builder. Reject known literal errors; defer expression-dependent checks to graph binding. |
+| `normalize_concrete` | Exact bool, default false. Opt into core `function` argument/return normalization on the concrete path only. |
+
+The symbolic branch bypasses both the concrete target and its optional signature
+normalization boundary. Concrete calls retain the original call spelling and
+target behavior. The decorated helper preserves its name, documentation, and
+Python signature; workload keywords are never consumed as decorator controls.
+Invalid predicate/builder results fail explicitly, and policy or target failures
+never fall back to the other branch. The mapping is shallowly read-only, not a
+copy or security boundary for its values. All callbacks are trusted and own
+their side effects; the wrapper keeps no per-call mutable state shared between
+invocations.
+
+`as_supervised` uses a source-specific predicate that includes CDef and saved
+reference authority, so those sources return a Map Definition while live Datasets
+return live Maps. Metric helpers use the default detector and enable concrete
+signature normalization, preserving uncomputed Fold returns for concrete-only
+calls. Their domain-specific builders and validation remain in data/metrics;
+core does not import those consumer packages.
 
 ## Receiving Roles
 
@@ -81,6 +136,21 @@ order controls evaluation and checkpoint recovery. Definition and selector
 authoring retain an artifact mapping inertly until later concretization.
 
 ## Exact Support And Persistence
+
+`Definition.loose_selector()` replaces active symbolic expressions with local
+wildcards while retaining known construction structure. It is not a class-only
+selector: fixed nested `ConcreteDefinition` values remain exact definition
+anchors, and fixed `ObjectRef`/`StateRef` values retain their identities. A
+different dataset fork or a changed model initializer can therefore fall outside
+the original template's loose selector. Use a partial `Definition` to constrain
+only the experiment fields of interest, or
+`Definition(Experiment, SKIP_ARGS)` to select all Experiment definitions.
+
+Query counts depend on the selected identity domain. `.cdefs().count()` counts
+distinct definitions, `.state_refs().count()` counts saved snapshots, and
+`.state_refs().object_projection().count()` counts distinct realized object
+graphs across those snapshots. Repeated runs of one definition can create
+multiple object graphs; checkpoints can create multiple states of one object.
 
 `Generator.support_selector()` returns `GeneratorSelector`, which proves exact
 finite support including linked roots, arithmetic, ordering, and construction

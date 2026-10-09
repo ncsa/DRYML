@@ -5,6 +5,8 @@ Utility functions for data methods
 import inspect
 from typing import Callable
 
+from dryml.core.authoring import authoring_helper
+from dryml.core.tensor_spec import iter_specs
 from dryml.data.collate import default_collate
 from dryml.data.methods import Project, Select
 
@@ -13,6 +15,131 @@ def _xy_dataset(dataset, *, x_path=0, y_path=1):
     from dryml.data.dataset import Map
 
     return Map(dataset, Project(Select(x_path), Select(y_path)))
+
+
+def _supervised_should_author(arguments):
+    """Select authoring for a symbolic or exact source, not selection controls."""
+
+    from dryml.core.links import DefLink
+    from dryml.core.template import _is_definition_value
+
+    dataset = arguments["dataset"]
+    return isinstance(dataset, DefLink) or _is_definition_value(dataset, include_authority=True)
+
+
+def _supervised_definition(arguments):
+    """Build a supervised Definition using the helper's shared graph recipe."""
+
+    return _supervised_graph(**arguments, symbolic=True)
+
+
+@authoring_helper(
+    author_definition=_supervised_definition,
+    should_author=_supervised_should_author,
+)
+def as_supervised(dataset, inputs, targets=None, *, input_as_target: bool = False):
+    """Return a Dataset graph yielding canonical ``(inputs, targets)`` pairs.
+
+    Args:
+        dataset: Source Dataset with a declared element specification, or a soft
+            Definition, ConcreteDefinition, ObjectRef, StateRef, symbolic Expr
+            (including Par), or explicit ``Ref(...)``/``Mat(...)`` assertion
+            expected to identify one. Expressions stay inert until substituted;
+            the bound source must materialize a Dataset.
+        inputs: One scalar path, :class:`Select`, or nonempty tree of explicit
+            ``Select`` leaves describing model inputs.
+        targets: Matching target selection. It is required unless
+            ``input_as_target`` is true.
+        input_as_target: Reuse the selected input object as the target for an
+            autoencoder-style Dataset without copying or backend conversion.
+
+    Returns:
+        An ordinary :class:`~dryml.data.dataset.Map` Dataset for a live source,
+        or an inert Map Definition for a symbolic source. Its values are
+        ``(inputs, targets)`` and its Method tree is persisted with the graph.
+
+    Raises:
+        TypeError: If ``dataset`` is not a Dataset or supported Dataset authority,
+            or a selection tree is malformed. A symbolic source that does not
+            materialize a Dataset fails at its normal Definition
+            binding/materialization boundary.
+        ValueError: If a selection tree is empty or targets conflict with
+            ``input_as_target``.
+
+    Side Effects:
+        None. This helper does not open or materialize the Dataset, copy values,
+        select a backend, or add batching.
+    """
+
+    return _supervised_graph(
+        dataset, inputs, targets, input_as_target=input_as_target, symbolic=False,
+    )
+
+
+def _supervised_graph(dataset, inputs, targets, *, input_as_target, symbolic):
+    """Validate and assemble either live or inert supervised projection nodes."""
+
+    from dryml.core.links import DefLink
+    from dryml.core.template import _is_definition_value
+    from dryml.data.dataset import Dataset, Map
+
+    if not isinstance(dataset, Dataset) and not symbolic:
+        raise TypeError("as_supervised requires a Dataset or Dataset reference.")
+    if isinstance(dataset, DefLink):
+        dataset = dataset.target
+        if not isinstance(dataset, Dataset) and not _is_definition_value(
+                dataset, include_authority=True):
+            raise TypeError("as_supervised received an unsupported Ref/Mat target.")
+    if type(input_as_target) is not bool:
+        raise TypeError("input_as_target must be an exact bool.")
+    input_method = _selection_method(inputs, symbolic=symbolic)
+    if input_as_target:
+        if targets is not None:
+            raise ValueError("input_as_target does not accept an explicit target selection.")
+        target_method = input_method
+    else:
+        if targets is None:
+            raise ValueError("as_supervised requires targets unless input_as_target is true.")
+        target_method = _selection_method(targets, symbolic=symbolic)
+    project = (
+        Project.defn(input_method, target_method)
+        if symbolic else Project(input_method, target_method)
+    )
+    if symbolic:
+        return Map.defn(dataset, project, preserves_examples=True)
+    return Map(dataset, project, preserves_examples=True)
+
+
+def _selection_method(
+        selection, *, tree_leaf: bool = False, symbolic: bool = False,
+):
+    """Build one Project-compatible Method tree while rejecting tuple/list ambiguity."""
+
+    if isinstance(selection, Select):
+        return Select.defn(selection.idxs) if symbolic else selection
+    if isinstance(selection, (str, int)):
+        if tree_leaf:
+            raise TypeError("Selection trees require Select.from_path leaves.")
+        return Select.defn(selection) if symbolic else Select.from_path((selection,))
+    if isinstance(selection, dict):
+        if not selection:
+            raise ValueError("Selection trees must not be empty.")
+        branches = {
+            key: _selection_method(branch, tree_leaf=True, symbolic=symbolic)
+            for key, branch in selection.items()
+        }
+        return Project.defn(branches) if symbolic else Project(branches)
+    if isinstance(selection, (tuple, list)):
+        if not selection:
+            raise ValueError("Selection trees must not be empty.")
+        if any(not isinstance(branch, Select) for branch in selection):
+            raise TypeError("Ambiguous tuple/list selections require Select.from_path leaves.")
+        branches = type(selection)(
+            _selection_method(branch, tree_leaf=True, symbolic=symbolic)
+            for branch in selection
+        )
+        return Project.defn(branches) if symbolic else Project(branches)
+    raise TypeError("Selections must be a scalar path, Select, or tree of Select leaves.")
 
 
 def iter_xy(dataset, *, x_path=0, y_path=1):
@@ -35,6 +162,61 @@ def collect_xy(dataset, *, x_path=0, y_path=1):
 def collate_xy(dataset, *, x_path=0, y_path=1, collate=default_collate):
     x_values, y_values = collect_xy(dataset, x_path=x_path, y_path=y_path)
     return collate(x_values), collate(y_values), len(x_values)
+
+
+def materialize_supervised(dataset):
+    """Materialize a canonical supervised Dataset for one-shot consumers.
+
+    Args:
+        dataset: Dataset yielding exactly ``(inputs, targets)`` pairs. It may
+            yield examples directly or authored batches with dynamic final sizes.
+
+    Returns:
+        ``(inputs, targets, examples)`` with authored batches flattened to one
+        dense collection and the exact submitted example count.
+
+    Raises:
+        ValueError: If the Dataset is noncanonical or empty.
+        TypeError: If its values cannot be collated by the declared data backend.
+
+    Side Effects:
+        Opens and closes Dataset cursors. Existing Dataset batching and order are
+        preserved; no trainer policy is applied.
+    """
+
+    if not isinstance(dataset.spec, tuple) or len(dataset.spec) != 2:
+        raise ValueError("Expected a canonical Dataset yielding (inputs, targets).")
+    branches = tuple(tuple(iter_specs(branch)) for branch in dataset.spec)
+    if not all(branches):
+        raise TypeError("Supervised Dataset branches require TensorSpec leaves.")
+    flags = []
+    for branch in branches:
+        values = {spec.batched for spec in branch}
+        if len(values) != 1:
+            raise ValueError("Supervised Dataset branches must be uniformly batched or unbatched.")
+        flags.append(values.pop())
+    if flags[0] != flags[1]:
+        raise ValueError("Supervised Dataset inputs and targets must have matching batching declarations.")
+    examples = 0
+    x_values = []
+    y_values = []
+    cursor = dataset.iterator()
+    try:
+        for value in cursor:
+            examples += dataset.examples_in(value)
+            x, y = value
+            if flags[0]:
+                for index in range(dataset.examples_in(value)):
+                    x_values.append(nested_slice(x, index))
+                    y_values.append(nested_slice(y, index))
+            else:
+                x_values.append(x)
+                y_values.append(y)
+    finally:
+        cursor.close()
+    if not x_values:
+        raise ValueError("Cannot materialize an empty supervised Dataset.")
+    return default_collate(x_values), default_collate(y_values), examples
 
 
 _MISSING = object()

@@ -119,6 +119,18 @@ selected authority during worker decode, so malformed or unavailable authority
 fails before the managed method mutates state. Plain resource descriptors in
 workload code remain inert until that code requests reconstruction.
 
+`Experiment.train(callbacks=..., observer_strict=...)` is a narrow exception to
+ordinary authored-argument identity. Those two declaration-owned values configure
+invocation telemetry, not training behavior, and are excluded from the managed
+argument digest. No other managed argument receives that exemption. Compatible
+resume may therefore change or omit telemetry without `rerun=True`; retained
+updates and the attempt identifier do not change, and external telemetry is not
+replayed. Local callback instances remain process-local. Core Execute accepts only
+`FactorySpec` observer entries for this slot, rejects a live callback/client during
+capture, reconstructs each observer after worker admission, and never embeds it in
+managed control or Object state. See [Models](models.md#invocation-telemetry) for
+backend protocols, strict/default delivery, and cleanup behavior.
+
 Execute reports worker loss, cancellation, and lost delivery through its ordinary
 execution errors. It does not inspect status, reconcile an operation, retry, or
 rerun a managed method automatically. After such an error, reconnect to the
@@ -237,6 +249,14 @@ followed by the normal interruption decision. This is Experiment policy, not a
 generic managed final-hook protocol. A callback failure retains the associated
 checkpoint and any independently published Artifact/history state; it never
 reports overall managed completion.
+
+The `callbacks` above are `ManagedConfig.callbacks`; they are strict durable-
+checkpoint observers receiving `(live_object, context)`. They are unrelated to
+`Experiment.train(callbacks=...)`, whose Keras-native or Torch/JAX host events are
+best-effort by default, have no durable association, and run inside trainer-native
+event ordering after DRYML has retained truthful accounting. A telemetry observer
+cannot replace this managed callback boundary or make external reporting
+recoverable.
 
 Experiment accepts only its direct `Mapping[str, Template] | None` artifact
 mapping. It validates the configured Template-role Definition quotations before it

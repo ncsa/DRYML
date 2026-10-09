@@ -55,11 +55,11 @@ def test_experiment_data_v1_fixture_round_trips_actual_reader_input_without_payl
     encoded_state = payload["rows"][0]["facts"]["state_ref"]
     from dryml.models.experiment_data import _decode_ref
 
-    reference = _decode_ref(encoded_state)
-    history = ExperimentData(reference.object_projection())
+    reference = _decode_ref(encoded_state, version=1)
+    history = ExperimentData(reference.object_projection().reference)
     history.restore_state_from_dir_imp(FIXTURE_ROOT, codec="pkl")
     history.save_state_to_dir_imp(tmp_path, codec="pkl")
-    restored = ExperimentData(reference.object_projection())
+    restored = ExperimentData(reference.object_projection().reference)
     restored.restore_state_from_dir_imp(tmp_path, codec="pkl")
 
     row = restored._rows["v1:fixture:1"]
@@ -69,7 +69,9 @@ def test_experiment_data_v1_fixture_round_trips_actual_reader_input_without_payl
     assert dict(row["eval_artifacts"]) == {"metric": reference}
     assert row["scalars"] == {"explicit_null": None, "integer": 7, "flag": True}
     assert restored._columns[-1] == "missing_metric"
-    assert (tmp_path / "experiment_data.json").read_bytes() == payload_path.read_bytes()
+    migrated = json.loads((tmp_path / "experiment_data.json").read_text(encoding="ascii"))
+    assert payload["version"] == 1
+    assert migrated["version"] == 3
 
 
 def test_value_receipt_fixture_round_trips_actual_value_reader_input(tmp_path):
@@ -103,7 +105,10 @@ def test_train_state_named_state_vector_restores_observation_and_historical_defa
     assert fixture["fixture"] == "dryml-train-state-named-state-vector"
     assert fixture["fixture_version"] == 1
     assert restored.pending_observation.training_loss == 2.0
-    assert restored.__getstate__() == state_data
+    restored_state = restored.__getstate__()
+    assert all(restored_state[name] == value for name, value in state_data.items())
+    assert restored_state["epoch_loss_numerator"] == 0.0
+    assert restored_state["epoch_loss_denominator"] == 0
     assert historical.examples_seen == historical.loss_denominator == 0
 
 

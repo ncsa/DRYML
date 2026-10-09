@@ -1,5 +1,8 @@
-import pytest
+import os
+import subprocess
 import sys
+
+import pytest
 
 jax = pytest.importorskip("jax")
 if not hasattr(jax, "ShapeDtypeStruct"):
@@ -98,3 +101,47 @@ def test_jax_tensor_spec_auto_ingest():
     x = jax.random.uniform(key, shape=(4, 32), dtype=jnp.float32)
     spec = TensorSpec(dtype="float32", shape=(4, 32,))
     assert spec == as_tensor_spec(x)
+
+
+@pytest.mark.parametrize(("x64_enabled", "expect_success"), (("0", False), ("1", True)))
+def test_jax_handoffs_preserve_float64_exactly_without_mutating_global_configuration(
+    x64_enabled, expect_success,
+):
+    """Fresh JAX processes either retain float64 exactly or reject its narrowing."""
+
+    environment = os.environ | {
+        "JAX_ENABLE_X64": x64_enabled,
+        "JAX_PLATFORMS": "cpu",
+    }
+    script = """
+import numpy as np
+from dryml.core import TensorSpec
+from dryml.methods.conversion import convert, make_edge
+
+value = np.array([1.5], dtype=np.float64)
+edge = make_edge(TensorSpec("float64", shape=(1,), backend="numpy"), "jax")
+try:
+    result = convert(edge, value)
+except TypeError:
+    assert not EXPECT_SUCCESS
+else:
+    assert EXPECT_SUCCESS
+    assert np.asarray(result).dtype == np.dtype("float64")
+""".replace("EXPECT_SUCCESS", repr(expect_success))
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script], env=environment, text=True,
+        capture_output=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_generic_conversion_import_does_not_import_jax_in_a_fresh_process():
+    """Planning support keeps the optional JAX endpoint lazy until selected."""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import sys; import dryml.methods.conversion; assert 'jax' not in sys.modules"],
+        env=os.environ | {"JAX_PLATFORMS": "cpu"}, text=True, capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr

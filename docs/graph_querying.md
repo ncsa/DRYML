@@ -27,6 +27,26 @@ results are `IdentitySet` values with deterministic identity ordering. `collect(
 fixes membership before iteration, while `take(n)` is the explicit bounded prefix
 operation and retains visible boundedness on its returned set.
 
+`ObjectRef.object_projection()` and `StateRef.object_projection()` produce an
+`ObjectSelector` for one complete realized graph. Projection preserves ObjectIds,
+CDef topology, and edge roles while replacing every encountered exact reference
+with a nested `ObjectSelector`; StateRef hashes do not participate. Raw ObjectRef
+or StateRef values that a caller explicitly embeds in an ObjectSelector remain
+exact pins. ObjectSelectors are query-only, but their `reference` property exposes
+the corresponding recursively state-weakened ObjectRef when a persistence API
+requires object-association authority.
+
+Use `query.object_projection()` or `identity_set.object_projection()` to collect
+and deduplicate reference members as a fixed `ObjectSelectorSet`. CDef members are
+omitted because they have no realized ObjectIds. This makes multiple checkpoints
+of one realized composite graph count once without merging separately constructed
+graphs:
+
+```python
+runs = repo.query().state_refs().object_projection()
+run_count = runs.count()
+```
+
 `categorical()`, `exact()`, and `restore()` edit the latest selector without
 discarding prior query restrictions. During categorical projection,
 named drops are validated against the original

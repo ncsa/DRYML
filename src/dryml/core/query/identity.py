@@ -456,6 +456,36 @@ class IdentitySet:
 
         return IdentityQuery.from_set(self)
 
+    def object_projection(self) -> "ObjectSelectorSet":
+        """Project captured references to distinct recursive ObjectSelectors.
+
+        Returns:
+            A fixed ObjectSelectorSet. ConcreteDefinition members are omitted
+            because they carry no realized ObjectIds to project. Evidence from
+            references that collapse to one selector is merged.
+
+        Side Effects:
+            None. Projection reads no source and does not mutate authority.
+        """
+
+        from ..reference_values import ObjectRef, StateRef
+
+        entries = {}
+        for value, evidence in self._entries.values():
+            if not isinstance(value, (ObjectRef, StateRef)):
+                continue
+            selector = value.object_projection()
+            existing = entries.get(selector)
+            entries[selector] = (
+                selector,
+                evidence if existing is None else existing[1].merged_with(evidence),
+            )
+        return ObjectSelectorSet._from_entries(
+            entries,
+            bounded=self.bounded,
+            requested_limit=self.requested_limit,
+        )
+
     def union(self, other: "IdentitySet") -> "IdentitySet":
         """Merge fixed identities, evidence, bounds, and prior work provenance.
 
@@ -561,6 +591,128 @@ class IdentitySet:
 
     def __repr__(self) -> str:
         return repr(self.diagnostic())
+
+
+class ObjectSelectorSet:
+    """Fixed distinct object-graph selectors with detached source evidence.
+
+    Args:
+        members: ObjectSelectors, optionally paired with SourceEvidence.
+        bounded: Whether the source identity result was explicitly bounded.
+        requested_limit: Source identity prefix bound when present.
+
+    ObjectSelectorSet is a projected result domain rather than Store authority;
+    it cannot be turned back into an IdentityQuery.
+    """
+
+    __slots__ = ("_entries", "bounded", "requested_limit")
+
+    def __init__(
+        self,
+        members=(),
+        *,
+        bounded: bool = False,
+        requested_limit: int | None = None,
+    ):
+        from ..selector import ObjectSelector
+
+        if type(bounded) is not bool:
+            raise TypeError("ObjectSelectorSet bounded must be an exact bool.")
+        if requested_limit is not None and (
+                type(requested_limit) is not int or requested_limit < 0
+        ):
+            raise ValueError(
+                "ObjectSelectorSet requested_limit must be a non-negative exact int or None."
+            )
+        if requested_limit is not None and not bounded:
+            raise ValueError("ObjectSelectorSet requested_limit requires bounded=True.")
+        entries = {}
+        for member in members:
+            value, evidence = IdentitySet._member_and_evidence(member)
+            if not isinstance(value, ObjectSelector):
+                raise TypeError("ObjectSelectorSet members must be ObjectSelector values.")
+            existing = entries.get(value)
+            entries[value] = (
+                value,
+                evidence if existing is None else existing[1].merged_with(evidence),
+            )
+        self._entries = entries
+        self.bounded = bounded
+        self.requested_limit = requested_limit
+
+    @classmethod
+    def _from_entries(
+        cls, entries, *, bounded: bool, requested_limit: int | None = None,
+    ) -> "ObjectSelectorSet":
+        result = cls((), bounded=bounded, requested_limit=requested_limit)
+        result._entries = entries
+        return result
+
+    def __iter__(self):
+        yield from (
+            self._entries[key][0]
+            for key in sorted(
+                self._entries,
+                key=lambda selector: (
+                    selector.digest(), selector.reference.digest(),
+                ),
+            )
+        )
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __contains__(self, selector: object) -> bool:
+        return selector in self._entries
+
+    def count(self) -> int:
+        """Return the number of distinct projected object graphs."""
+
+        return len(self)
+
+    def collect(self) -> "ObjectSelectorSet":
+        """Return this already fixed selector collection."""
+
+        return self
+
+    def exists(self) -> bool:
+        """Return whether this collection contains a selector."""
+
+        return bool(self)
+
+    def one(self):
+        """Return one selector or raise QueryCardinalityError otherwise."""
+
+        if len(self) != 1:
+            raise QueryCardinalityError(
+                f"Expected exactly one object selector, found {len(self)}."
+            )
+        return next(iter(self))
+
+    def one_or_none(self):
+        """Return zero or one selector while rejecting ambiguity."""
+
+        if len(self) > 1:
+            raise QueryCardinalityError(
+                f"Expected zero or one object selector, found {len(self)}."
+            )
+        return next(iter(self), None)
+
+    def evidence_for(self, selector):
+        """Return merged detached evidence for one projected selector."""
+
+        return self._entries[selector][1]
+
+    def sources(self, selector) -> frozenset[SourceEvidence]:
+        """Return detached sources contributing to one projected selector."""
+
+        return self.evidence_for(selector).sources
+
+    def __repr__(self) -> str:
+        return (
+            f"ObjectSelectorSet(count={len(self)}, bounded={self.bounded}, "
+            f"requested_limit={self.requested_limit!r})"
+        )
 
 
 class OccurrenceSet:

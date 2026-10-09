@@ -277,8 +277,13 @@ class StreamPlan:
             for item in value:
                 cls._eager_value(item, seen)
 
-    def iterator(self) -> "StreamGraphCursor":
+    def iterator(self, *, epoch: int = 0) -> "StreamGraphCursor":
         """Return one isolated pull cursor over this prepared graph.
+
+        Args:
+            epoch: Logical epoch forwarded only to qualified ``Take`` boundaries.
+                Other prepared operators preserve their ordinary traversal
+                semantics around that boundary.
 
         Raises:
             RuntimeError: If :meth:`learn` has not prepared this graph.
@@ -286,7 +291,9 @@ class StreamPlan:
 
         if self._root is None:
             raise RuntimeError("Dataset graph iteration requires graph.learn() first.")
-        return StreamGraphCursor(self._root)
+        if type(epoch) is not int or epoch < 0:
+            raise ValueError("epoch must be a nonnegative exact int.")
+        return StreamGraphCursor(self._root, epoch=epoch)
 
     def _build(self, dataset: object, records: list[object]) -> _StreamOp:
         from .ir import MethodGraphNode, MethodPort
@@ -297,7 +304,7 @@ class StreamPlan:
         kind = type(dataset).__dict__.get("_stream_operator")
         if kind is None:
             kind = "unsupported" if hasattr(dataset, "src") else "source"
-        if kind not in {"source", "map", "batch", "unbatch", "zip", "chain", "custom"}:
+        if kind not in {"source", "map", "batch", "unbatch", "take", "zip", "chain", "custom"}:
             raise NotImplementedError(f"Dataset graph planning does not support {type(dataset).__name__}.")
         spec = getattr(dataset, "spec")
         if kind == "source":
@@ -343,6 +350,18 @@ class StreamPlan:
                 ),
             ))
             return _StreamOp(kind, dataset=dataset, inputs=(child,))
+        if kind == "take":
+            child = self._build(dataset.src, records)
+            records.append(MethodGraphNode(
+                len(records), "method", type(dataset),
+                inputs=(MethodPort("iterator", spec_node(dataset.src.spec)),),
+                outputs=(MethodPort("iterator", spec_node(spec)),),
+                stream_node=self._builtin_node(
+                    "Take", (dataset.src.spec,), spec, dataset,
+                    ("strict_prefix",), 0,
+                ),
+            ))
+            return _StreamOp("take", dataset=dataset, inputs=(child,))
         if kind == "zip":
             leaves = tuple(_iter_dataset_leaves(dataset.sources))
             children = tuple(self._build(source, records) for source in leaves)
@@ -383,12 +402,7 @@ class StreamPlan:
     ) -> StreamNode:
         """Expose built-in stream transforms and bounds without opening a source."""
 
-        try:
-            cardinality = dataset.__len__()
-        except NotImplementedError:
-            cardinality = Cardinality.UNKNOWN
-        if not isinstance(cardinality, Cardinality):
-            cardinality = Cardinality.finite(int(cardinality))
+        cardinality = dataset.yield_cardinality()
         return StreamNode(
             name=name,
             inputs=tuple(IteratorPort(spec) for spec in input_specs),
@@ -409,8 +423,9 @@ class StreamGraphCursor(Iterator[Any]):
     serialize or retain a generator frame for replay.
     """
 
-    def __init__(self, root: _StreamOp) -> None:
+    def __init__(self, root: _StreamOp, *, epoch: int = 0) -> None:
         self._root_op = root
+        self._epoch = epoch
         self._root: Iterator[Any] | None = None
         self._resources: list[object] = []
         self._resource_ids: set[int] = set()
@@ -532,26 +547,35 @@ class StreamGraphCursor(Iterator[Any]):
             self._resources.append(resource)
         return resource
 
-    def _open(self, op: _StreamOp) -> Iterator[Any]:
-        """Open one operation while retaining source/output ownership in this cursor."""
+    def _open(self, op: _StreamOp, *, epoch: int | None = None) -> Iterator[Any]:
+        """Open one operation at an inherited epoch while retaining ownership."""
 
+        if epoch is None:
+            epoch = self._epoch
         if op.kind == "source":
-            return self._own(op.dataset.iterator())
+            opener = getattr(op.dataset, "iterator_for_epoch", None)
+            return self._own(opener(epoch) if callable(opener) else op.dataset.iterator())
         if op.kind == "map":
-            source = self._open(op.inputs[0])
+            source = self._open(op.inputs[0], epoch=epoch)
             return self._own(_MapIterator(source, op.dataset, op.selected))
         if op.kind == "batch":
-            source = self._open(op.inputs[0])
+            source = self._open(op.inputs[0], epoch=epoch)
             return self._own(_BatchIterator(source, op.dataset))
         if op.kind == "unbatch":
-            source = self._open(op.inputs[0])
+            source = self._open(op.inputs[0], epoch=epoch)
             return self._own(_UnbatchIterator(source, op.dataset))
+        if op.kind == "take":
+            if op.dataset.n == 0:
+                return self._own(iter(()))
+            source_epoch = op.dataset.epoch if op.dataset.fixed_prefix else op.dataset.epoch + epoch
+            source = self._open(op.inputs[0], epoch=source_epoch)
+            return self._own(_TakeIterator(source, op.dataset.n))
         if op.kind == "zip":
-            return self._own(_ZipIterator(self, op.inputs, op.tree))
+            return self._own(_ZipIterator(self, op.inputs, op.tree, epoch))
         if op.kind == "chain":
-            return self._own(_ChainIterator(self, op.inputs))
+            return self._own(_ChainIterator(self, op.inputs, epoch))
         if op.kind == "custom":
-            return self._own(_CustomIterator(self, op.inputs, op.node))
+            return self._own(_CustomIterator(self, op.inputs, op.node, epoch))
         raise AssertionError(f"unknown stream operation {op.kind!r}")
 
 
@@ -580,7 +604,12 @@ class _MapIterator(Iterator[Any]):
             self.has_pending = False
         else:
             item = next(self.source)
-        return self.selected(item)
+        result = self.selected(item)
+        if getattr(self.dataset, "preserves_examples", False):
+            source_examples = self.dataset.src.examples_in(item)
+            if self.dataset.examples_in(result) != source_examples:
+                raise ValueError("Map declared preserves_examples but changed an example count.")
+        return result
 
     def _resolve(self) -> None:
         try:
@@ -648,13 +677,38 @@ class _UnbatchIterator(Iterator[Any]):
                 self.pending = iter(self.split(next(self.source)))
 
 
+class _TakeIterator(Iterator[Any]):
+    """Yield one strict prepared prefix without bypassing its child graph."""
+
+    def __init__(self, source: Iterator[Any], count: int) -> None:
+        self.source = source
+        self.count = count
+        self.position = 0
+
+    def __iter__(self) -> "_TakeIterator":
+        return self
+
+    def __next__(self) -> Any:
+        if self.position >= self.count:
+            raise StopIteration
+        try:
+            value = next(self.source)
+        except StopIteration as error:
+            from dryml.data.dataset import DatasetExhaustedError
+
+            raise DatasetExhaustedError(self.count, self.position) from error
+        self.position += 1
+        return value
+
+
 class _ZipIterator(Iterator[Any]):
     """Pull inputs in declared order and stop at the first exhausted position."""
 
-    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...], tree: object) -> None:
+    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...], tree: object, epoch: int) -> None:
         self.cursor = cursor
         self.inputs = inputs
         self.tree = tree
+        self.epoch = epoch
         self.iterators: tuple[Iterator[Any], ...] | None = None
 
     def __iter__(self) -> "_ZipIterator":
@@ -662,7 +716,7 @@ class _ZipIterator(Iterator[Any]):
 
     def __next__(self) -> Any:
         if self.iterators is None:
-            self.iterators = tuple(self.cursor._open(op) for op in self.inputs)
+            self.iterators = tuple(self.cursor._open(op, epoch=self.epoch) for op in self.inputs)
         values = [next(iterator) for iterator in self.iterators]
         value_iter = iter(values)
         return _build_zip_tree(self.tree, value_iter)
@@ -671,9 +725,10 @@ class _ZipIterator(Iterator[Any]):
 class _ChainIterator(Iterator[Any]):
     """Open sources only as their declared predecessors become exhausted."""
 
-    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...]) -> None:
+    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...], epoch: int) -> None:
         self.cursor = cursor
         self.inputs = inputs
+        self.epoch = epoch
         self.index = 0
         self.current: Iterator[Any] | None = None
 
@@ -683,7 +738,7 @@ class _ChainIterator(Iterator[Any]):
     def __next__(self) -> Any:
         while self.index < len(self.inputs):
             if self.current is None:
-                self.current = self.cursor._open(self.inputs[self.index])
+                self.current = self.cursor._open(self.inputs[self.index], epoch=self.epoch)
             try:
                 return next(self.current)
             except StopIteration:
@@ -695,10 +750,11 @@ class _ChainIterator(Iterator[Any]):
 class _CustomIterator(Iterator[Any]):
     """Open one custom output lazily after its ordered inputs are acquired."""
 
-    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...], node: StreamNode) -> None:
+    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...], node: StreamNode, epoch: int) -> None:
         self.cursor = cursor
         self.inputs = inputs
         self.node = node
+        self.epoch = epoch
         self.output: Iterator[Any] | None = None
 
     def __iter__(self) -> "_CustomIterator":
@@ -706,7 +762,7 @@ class _CustomIterator(Iterator[Any]):
 
     def __next__(self) -> Any:
         if self.output is None:
-            inputs = tuple(self.cursor._open(op) for op in self.inputs)
+            inputs = tuple(self.cursor._open(op, epoch=self.epoch) for op in self.inputs)
             self.output = self.cursor._own(self.node.open(*inputs))
         return next(self.output)
 

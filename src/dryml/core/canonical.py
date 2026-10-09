@@ -220,6 +220,7 @@ class NodeKind(Enum):
     QUOTED_DEF = auto()
     SELECTOR_SPEC = auto()
     SELECTOR = auto()
+    OBJECT_SELECTOR = auto()
     PAR = auto()
     EXPR = auto()
     OBJECT = auto()
@@ -235,7 +236,7 @@ def node_kind(x: Any) -> NodeKind:
     from .object import Object
     from .params import Match
     from .quoted import QuotedDef, SelectorSpec
-    from .selector import Selector
+    from .selector import ObjectSelector, Selector
     from .template import Expr
 
     if isinstance(x, type):
@@ -289,6 +290,9 @@ def node_kind(x: Any) -> NodeKind:
 
     if isinstance(x, Selector):
         return NodeKind.SELECTOR
+
+    if isinstance(x, ObjectSelector):
+        return NodeKind.OBJECT_SELECTOR
 
     if isinstance(x, Match):
         return NodeKind.PAR
@@ -1167,7 +1171,7 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
     from .object import Object
     from .params import Match
     from .quoted import QuotedDef, SelectorSpec
-    from .selector import Selector
+    from .selector import ObjectSelector, Selector
     from .template import Expr
 
     if isinstance(value, Distribution):
@@ -1179,7 +1183,7 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
         )
     if isinstance(value, Object):
         return value.definition
-    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, Match, Expr, ObjectRef, StateRef, StateSelectorRef)):
+    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, ObjectSelector, Match, Expr, ObjectRef, StateRef, StateSelectorRef)):
         return value
     kind = node_kind(value)
     if kind is NodeKind.NDARRAY:
@@ -1272,13 +1276,15 @@ def _freeze_concrete_value(value: Any, *, stack: set[int], path: tuple[str | int
         from .definition import ConcreteDefinition
         from .cdef_graph import EdgeKind
         from .quoted import QuotedDef, SelectorSpec
-        from .selector import Selector
+        from .selector import ObjectSelector, Selector
         if not value.is_finalized:
             raise TypeError(
                 f"Unresolved DefLink assertion cannot enter ConcreteDefinition at {_path_label(path)}."
             )
         if isinstance(value.target, Selector):
             raise CannotConcretizeSelectorReference(path, value.target)
+        if isinstance(value.target, ObjectSelector):
+            return value
         if isinstance(value.target, (QuotedDef, SelectorSpec)):
             if value.kind is not EdgeKind.REF:
                 raise TypeError(
@@ -1341,17 +1347,17 @@ def freeze_link_target(value: Any) -> Any:
     from .definition import ConcreteDefinition, Definition
     from .object import Object
     from .quoted import QuotedDef, SelectorSpec
-    from .selector import Selector
+    from .selector import ObjectSelector, Selector
 
     if isinstance(value, Object):
         return value.definition
     if isinstance(value, (
-        Definition, ConcreteDefinition, Selector, QuotedDef, SelectorSpec,
+        Definition, ConcreteDefinition, Selector, ObjectSelector, QuotedDef, SelectorSpec,
         ObjectRef, StateRef, StateSelectorRef,
     )):
         return value
     raise TypeError(
         "DefLink target must be Definition, ConcreteDefinition, Selector, "
-        "QuotedDef, SelectorSpec, ObjectRef, StateRef, StateSelectorRef, or "
+        "ObjectSelector, QuotedDef, SelectorSpec, ObjectRef, StateRef, StateSelectorRef, or "
         f"Object; got {type(value).__name__}."
     )

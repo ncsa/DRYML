@@ -13,6 +13,7 @@ from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedConfig, ManagedRerunRequiredError, managed_operation
 from dryml.models import Experiment, ExperimentData, TrainFunction
 from dryml.models import experiment as experiment_module
+from dryml.models.experiment import _notify_host_observers
 
 
 pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
@@ -88,6 +89,25 @@ class CadencedRecoveryTrainer(TrainFunction):
             exp.state.record_update(examples=1, loss=1.0)
             for callback in callbacks:
                 callback()
+
+
+class TelemetryRecoveryTrainer(TrainFunction):
+    """Two-update trainer whose telemetry is outside retained progress identity."""
+
+    supports_observers = True
+
+    def __call__(self, exp, *, callbacks=(), observer_session=None):
+        """Resume from accepted steps while never replaying observer delivery."""
+
+        while exp.state.step < 2:
+            exp.model.value += 1
+            exp.state.record_update(examples=1, loss=1.0)
+            for callback in callbacks:
+                callback()
+            _notify_host_observers(observer_session, {
+                "event": "train_batch_end",
+                "step": exp.state.step,
+            })
 
 
 class FailOnceValue(Value):
@@ -171,6 +191,41 @@ def test_revisited_checkpoint_occurrences_keep_trajectory_predecessors(tmp_path)
     assert (retried.row_key, retried.time, retried.state_ref, retried.examples_seen) == (
         second.row_key, second.time, second.state_ref, second.examples_seen,
     )
+
+
+def test_changed_telemetry_resumes_same_attempt_without_replaying_update(tmp_path):
+    """Observer configuration is transient while accepted progress stays authoritative."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    exp = Experiment(
+        RecoveryModel(), TelemetryRecoveryTrainer(),
+        checkpoint_every_steps=1, repo=repo,
+    )
+    first_steps = []
+    resumed_steps = []
+
+    def fail(logs):
+        first_steps.append(logs["step"])
+        raise RuntimeError("telemetry failed")
+
+    with pytest.raises(RuntimeError, match="telemetry failed"):
+        exp.train(
+            callbacks=[fail], observer_strict=True,
+            managed=ManagedConfig(state_repo=repo),
+        )
+    interrupted = exp.train.status(state_repo=repo)
+
+    final = exp.train(
+        callbacks=[lambda logs: resumed_steps.append(logs["step"])],
+        managed=ManagedConfig(state_repo=repo),
+    )
+    completed = exp.train.status(state_repo=repo)
+
+    assert interrupted.attempt_id == completed.attempt_id
+    assert first_steps == [1]
+    assert resumed_steps == [2]
+    assert (exp.model.value, exp.state.step) == (2, 2)
+    assert completed.final_state_ref == final
 
 
 def test_failed_second_artifact_reuses_the_same_pending_history_occurrence(tmp_path):

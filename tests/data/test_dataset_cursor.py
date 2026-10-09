@@ -138,6 +138,13 @@ def test_take_raises_after_its_short_prefix(cardinality):
     assert source.closes == [0]
 
 
+def test_private_range_count_clips_only_declared_finite_sources_not_strict_take():
+    source = TrackingDataset([0, 1], cardinality=Cardinality.finite(2))
+
+    assert source._range_yield_cardinality(0, 3) == Cardinality.finite(2)
+    assert Take(source, 3).yield_cardinality() == Cardinality.finite(3)
+
+
 def test_take_closes_an_open_source_cursor_explicitly_and_skip_remains_forgiving():
     source = TrackingDataset([0, 1])
     cursor = Take(source, 2).iterator()

@@ -10,7 +10,7 @@ from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
 from dryml.data import Dataset, Map, Pipe, Project, Select
 from dryml.managed import ManagedConfig
-from dryml.methods import AccumulatorGroup, Method
+from dryml.methods import AccumulatorGroup, Method, traits
 from dryml.models import Model
 from tests.fixtures import require_optional_backend
 
@@ -67,6 +67,32 @@ class IdentityModel(Model):
         """Return the already-decoded input label or scalar prediction."""
 
         type(self).calls += 1
+        return value
+
+
+class TorchIdentityModel(Model):
+    """Torch model whose selected implementation returns converted inputs."""
+
+    def __init__(self):
+        super().__init__(output_spec=TensorSpec("float64", shape=(), backend="torch"))
+
+    @traits(backend="torch")
+    def torch(self, value):
+        """Return a Torch input after the selected handoff."""
+
+        return value
+
+
+class TensorFlowIdentityModel(Model):
+    """TensorFlow model whose selected implementation returns converted inputs."""
+
+    def __init__(self):
+        super().__init__(output_spec=TensorSpec("float64", shape=(), backend="tf"))
+
+    @traits(backend="tf")
+    def tf(self, value):
+        """Return a TensorFlow input after the selected handoff."""
+
         return value
 
 
@@ -506,6 +532,32 @@ def test_symbolic_metric_factory_concretizes_to_the_direct_fold_definition(tmp_p
     assert bound.concretize(repo=repo) == direct.definition
 
 
+def test_metric_factories_share_expression_detection_and_bind_compound_controls(tmp_path):
+    """Compound expressions author inert graphs even with concrete source refs."""
+
+    from dryml.core import Definition, Par, Repo
+    from dryml.metrics import classifier_f1, regressor_mae
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    source_ref = repo.save_object(EvaluationDataset(({"x": [1.0], "y": [1.0]},)))
+    model_ref = repo.save_object(IdentityModel())
+    recipe = regressor_mae(source_ref, model_ref, x=Par("index") * 2, mode="global")
+    assert isinstance(recipe, Definition)
+    assert recipe.sub(index=0, traverse_refs=True).concretize(repo=repo) == (
+        regressor_mae(source_ref, model_ref, x=0, mode="global").definition
+    )
+
+    f1 = classifier_f1(
+        source_ref, model_ref, classes=(0, 1),
+        prediction_labels=IdentityLabels(), target_labels=IdentityLabels(),
+        average="binary", positive_index=Par("positive") * 1,
+    )
+    assert isinstance(f1, Definition)
+    assert f1.sub(positive=1).concretize(repo=repo)
+    with pytest.raises(ValueError, match="positive_index"):
+        f1.sub(positive=-1).concretize(repo=repo)
+
+
 def test_classification_factories_use_explicit_labels_and_one_traversal_each(tmp_path):
     """Each factory folds one explicit evaluation stream without implicit decoding."""
 
@@ -624,6 +676,96 @@ def test_regression_factories_keep_native_batches_until_terminal_result(tmp_path
     assert mse.value() == pytest.approx(10 / 3)
     assert NativeEvaluationDataset.iterations == 2
     assert IdentityModel.calls == 4
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_regression_factories_host_normalize_model_predictions(tmp_path, backend):
+    """Metric evaluation reduces native model predictions with NumPy targets on host."""
+
+    require_optional_backend(backend)
+    from dryml.metrics import regressor_mse
+
+    __import__(f"dryml.{backend}")
+    source = EvaluationDataset((
+        {"x": [1.0, 5.0], "y": [2.0, 2.0]},
+        {"x": [3.0], "y": [3.0]},
+    ))
+    model = TorchIdentityModel() if backend == "torch" else TensorFlowIdentityModel()
+    fold = regressor_mse(source, model, mode="global")
+
+    fold.compute(managed=ManagedConfig(state_repo=DirStore(tmp_path / backend)))
+
+    assert fold.value() == pytest.approx(10 / 3)
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_evaluation_alignment_copies_native_pairs_to_independent_host_arrays(backend):
+    """The explicit evaluation boundary normalizes both pair leaves to NumPy."""
+
+    require_optional_backend(backend)
+    from dryml.metrics.reductions import _AlignEvaluationTarget
+
+    __import__(f"dryml.{backend}")
+    if backend == "torch":
+        import torch
+
+        prediction = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    else:
+        import tensorflow as tf
+
+        prediction = tf.constant([1.0, 2.0], dtype=tf.float64)
+    target = np.asarray([1.0, 3.0], dtype=np.float64)
+    input_spec = {
+        "prediction": TensorSpec("float64", shape=(2,), backend=backend),
+        "target": TensorSpec("float64", shape=(2,), backend="numpy"),
+    }
+
+    aligned = _AlignEvaluationTarget().find_implementation(input_spec)({
+        "prediction": prediction,
+        "target": target,
+    })
+
+    assert isinstance(aligned["prediction"], np.ndarray)
+    assert isinstance(aligned["target"], np.ndarray)
+    assert not np.shares_memory(aligned["target"], target)
+    np.testing.assert_array_equal(aligned["prediction"], [1.0, 2.0])
+    np.testing.assert_array_equal(aligned["target"], [1.0, 3.0])
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_evaluation_alignment_copies_accelerator_predictions_to_host(backend):
+    """A concrete accelerator prediction crosses the terminal metric boundary."""
+
+    require_optional_backend(backend)
+    from dryml.metrics.reductions import _AlignEvaluationTarget
+
+    __import__(f"dryml.{backend}")
+    if backend == "torch":
+        import torch
+
+        if not torch.cuda.is_available():
+            pytest.skip("Torch CUDA device is unavailable")
+        prediction = torch.tensor([1.0, 2.0], dtype=torch.float64, device="cuda:0")
+    else:
+        import tensorflow as tf
+
+        devices = tf.config.list_logical_devices("GPU")
+        if not devices:
+            pytest.skip("TensorFlow GPU device is unavailable")
+        with tf.device(devices[0].name):
+            prediction = tf.constant([1.0, 2.0], dtype=tf.float64)
+    input_spec = {
+        "prediction": TensorSpec("float64", shape=(2,), backend=backend),
+        "target": TensorSpec("float64", shape=(2,), backend="numpy"),
+    }
+
+    aligned = _AlignEvaluationTarget().find_implementation(input_spec)({
+        "prediction": prediction,
+        "target": np.asarray([1.0, 3.0], dtype=np.float64),
+    })
+
+    assert isinstance(aligned["prediction"], np.ndarray)
+    np.testing.assert_array_equal(aligned["prediction"], [1.0, 2.0])
 
 
 def test_declared_confusion_group_produces_all_results_from_one_stream(tmp_path):

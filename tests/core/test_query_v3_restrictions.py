@@ -15,6 +15,7 @@ from dryml.core import (
     Selector,
     Serializable,
     StateRef,
+    Template,
     selector,
 )
 from dryml.core.domains import UniformFromSet
@@ -71,6 +72,20 @@ class V3FactoryOwner(Object):
         self.factory = factory
 
 
+class V3TemplateOwner(Serializable):
+    """Stateful fixture retaining one inert Template-role Definition."""
+
+    def __init__(self, recipe: Template):
+        self.recipe = recipe
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        """Write one deterministic marker for exact-reference query coverage."""
+
+        from pathlib import Path
+
+        Path(dest_dir, "value").write_text("template-owner", encoding="utf-8")
+
+
 class V3Variadic(Object):
     """Selector fixture with semantic var-positional and var-keyword paths."""
 
@@ -99,6 +114,25 @@ def test_v3_structural_and_exact_selection_preserve_fixed_candidate_universe(tmp
     fixed = IdentityQuery.from_set(IdentitySet((first.object,))).sel(Definition(V3Leaf, "second"))
     assert fixed.count() == 0
     assert second.object not in fixed.collect()
+
+
+def test_resolved_definition_matches_equivalent_quoted_template_graph(tmp_path):
+    """Authored Template values match their canonical quoted reference form."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    authored = Definition(
+        V3TemplateOwner,
+        Definition(V3Leaf, "quoted"),
+    )
+    owner = repo.load_or_build(authored)
+    state = repo.save_object(owner)
+    exact = authored.concretize(repo=repo)
+    exact_members = repo.query().sel(exact).collect()
+
+    assert exact.graph_equal(state.definition)
+    assert len(exact_members) == 3
+    assert exact_members.query().sel(authored).count() == 3
+    assert repo.query().sel(authored).count() == 3
 
 
 def test_v3_reference_filters_are_subsets_and_namespace_validation_allocates_no_identity(tmp_path):

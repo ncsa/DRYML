@@ -9,13 +9,11 @@ from dryml.core.tensor_spec import (
     match_input_batch,
 )
 from dryml.core.utils.general import validate_class
-from dryml.data import collate_xy
+from dryml.data import materialize_supervised
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction
 from dryml.models.utils import (
-    advance_train_state,
-    prepare_training_data,
-    validate_num_examples,
+    require_supervised_dataset,
 )
 
 class Wrapper(Pickleable):
@@ -122,31 +120,29 @@ class RegressionModel(Model):
 
 
 class BasicTraining(TrainFunction):
-    """Fit an sklearn-style estimator from an Experiment's train_data."""
+    """Fit an sklearn-style estimator from a canonical Experiment Dataset.
+
+    Dataset selection, ordering, and batching are authored before this trainer.
+    Unbatched and authored-batch pairs are both materialized as one estimator
+    input; a successful fit records one coarse transition rather than optimizer
+    safe points.
+    """
 
     supports_safe_points = False
 
     def __init__(
         self,
         *,
-        x_path=0,
-        y_path=1,
-        num_examples: int | None = None,
-        shuffle: bool = False,
-        shuffle_seed=None,
-        shuffle_buffer_size: int | None = None,
         fit_args=(),
         fit_kwargs=None,
     ):
-        validate_num_examples(num_examples)
-        self.x_path = x_path
-        self.y_path = y_path
-        self.num_examples = num_examples
-        self.shuffle = shuffle
-        self.shuffle_seed = shuffle_seed
-        self.shuffle_buffer_size = shuffle_buffer_size
         self.fit_args = tuple(fit_args)
         self.fit_kwargs = dict(fit_kwargs or {})
+
+    __dryml_retired_constructor_parameters__ = (
+        "batch_size", "num_examples", "shuffle", "shuffle_seed",
+        "shuffle_buffer_size", "x_path", "y_path",
+    )
 
     def __call__(self, exp, *, callbacks=()):
         """Fit the estimator once, rejecting unsupported intermediate safe points.
@@ -172,18 +168,8 @@ class BasicTraining(TrainFunction):
         callbacks = validate_training_callbacks(callbacks)
         if callbacks:
             raise NotImplementedError("sklearn training does not support intermediate safe points.")
-        train_data = prepare_training_data(
-            exp.train_data,
-            num_examples=self.num_examples,
-            shuffle=self.shuffle,
-            shuffle_seed=self.shuffle_seed,
-            shuffle_buffer_size=self.shuffle_buffer_size,
-        )
-        x, y, n = collate_xy(
-            train_data,
-            x_path=self.x_path,
-            y_path=self.y_path,
-        )
+        require_supervised_dataset(exp.train_data, batched=False)
+        x, y, n = materialize_supervised(exp.train_data)
 
         exp.model.prep_train()
         try:
@@ -191,7 +177,8 @@ class BasicTraining(TrainFunction):
         finally:
             exp.model.prep_eval()
 
-        advance_train_state(exp, epochs=1, steps=n)
+        exp.state.record_fit(examples=n)
+        exp.state.finish_epoch()
         return result
 
 

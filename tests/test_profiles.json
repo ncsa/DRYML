@@ -31,6 +31,30 @@
             "test_fixture_manifest_portable_tfds_identity_excludes_local_root"
           ]
         },
+        "tests/models/test_dataset_training_integration.py": {
+          "rationale": "Run credential-free public Dataset cardinality plus tiny JAX/Torch/Keras native delivery and managed local/subprocess JAX representatives.",
+            "functions": [
+              "test_generic_trainer_and_empty_artifacts_use_final_dataset_cardinality",
+              "test_native_trainers_consume_authored_dataset_batches",
+              "test_jax_trainer_consumes_authored_dataset_batches",
+            "test_jax_qualification_model_runs_on_authored_dataset_batches",
+            "test_jax_managed_local_publishes_exact_history_and_independent_owner_state",
+            "test_jax_managed_subprocess_restores_exact_graph"
+          ]
+        },
+        "tests/models/test_jax_imports.py": {
+          "rationale": "Exercise the selected CPU JAX/Flax/Optax stack while retaining lazy generic imports.",
+          "functions": [
+            "test_generic_and_jax_facade_imports_defer_training_dependencies",
+            "test_selected_jax_training_stack_exposes_nnx_and_optax"
+          ]
+        },
+        "tests/models/test_jax_training.py": {
+          "rationale": "Retain one first-class Flax NNX training representative in the routine qualified stack.",
+          "functions": [
+            "test_jax_training_updates_first_class_flax_nnx_model"
+          ]
+        },
         "tests/models/test_qualification_persistence_fixtures.py": {
           "rationale": "Retain source-controlled v1 history/reference and TrainState observation compatibility without pandas analysis or live payloads.",
             "functions": [
@@ -89,14 +113,16 @@
           "rationale": "Retain explicit no-download fixture preparation and fixed-case construction only; real TFDS/training remains opt-in.",
           "functions": [
             "test_preparation_requires_opt_in_and_never_overwrites_authority",
+            "test_all_workload_artifact_definitions_preflight_without_framework_imports",
+            "test_workload_cache_uses_selected_control_store",
             "test_case_is_closed_and_carries_manifest_environment_seed_and_fixture_identity"
           ]
         },
         "tests/qualification/test_ml_workflow_cpu.py": {
-          "rationale": "Retain deterministic 24-cell request enumeration and closed fake worker transport, not the real CPU/recovery gates.",
+          "rationale": "Retain deterministic 36-cell request enumeration and closed fake worker transport, not the real CPU/recovery gates.",
           "functions": [
-            "test_worker_matrix_enumerates_all_24_primary_cells_once_and_excludes_supplement",
-            "test_fake_execute_routes_all_24_requests_without_live_transport_or_framework_import"
+            "test_worker_matrix_enumerates_all_36_primary_cells_once_and_excludes_supplement",
+            "test_fake_execute_routes_all_36_requests_without_live_transport_or_framework_import"
           ]
         },
         "tests/qualification/test_ml_workflow_accelerated.py": {

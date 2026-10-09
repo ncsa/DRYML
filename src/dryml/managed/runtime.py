@@ -61,6 +61,9 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
     config = ManagedConfig() if managed is None else managed
     options = config.snapshot()
     bound = descriptor.bind_arguments(instance, args, kwargs)
+    invocation_parameters = descriptor.bind_invocation_parameters(
+        instance, args, kwargs,
+    )
     store_override = descriptor.bind_store_parameter(instance, args, kwargs)
     operation_id = operation_digest(instance.object_ref, descriptor.member)
     stores = resolve_stores(
@@ -83,6 +86,7 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
             return _invoke_selected(
                 descriptor, instance, arguments_boundary, arguments,
                 operation_id, stores, options, store_override=store_override,
+                invocation_parameters=invocation_parameters,
                 on_raw_result=on_raw_result,
             )
     finally:
@@ -91,7 +95,7 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
 
 def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
                       operation_id, stores, options, *, store_override=None,
-                      on_raw_result=None):
+                      invocation_parameters=None, on_raw_result=None):
     """Execute one already-admitted managed lifecycle against selected Stores."""
 
     state_repo = stores.state_repo
@@ -152,7 +156,7 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
 
                 result = _invoke_target(
                     descriptor, instance, call_args, context, call_kwargs,
-                    store_override,
+                    store_override, invocation_parameters,
                 )
                 context._raise_if_interrupted()
                 if descriptor.return_state_ref:

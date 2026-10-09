@@ -2,6 +2,13 @@
 
 ## 0.3.0b1 (unreleased)
 
+`ObjectRef.object_projection()` and `StateRef.object_projection()` now return a
+recursive query-only `ObjectSelector`. Each encountered exact reference becomes a
+nested selector, while explicitly embedded raw ObjectRef and StateRef values remain
+exact. Query V3 and fixed `IdentitySet` results expose `object_projection()` to
+deduplicate checkpoints into fixed `ObjectSelectorSet` run identities without
+merging separately realized ObjectId graphs.
+
 Symbolic construction now uses `Definition` as its only runtime value. `Par`
 expressions, discovery, static `sub(...)`, remapping, and loose selector
 projection live on Definition; symbolic resolution means only that no active
@@ -35,6 +42,38 @@ instead of degrading their public Mapping view to an ordinary dictionary. This
 allows Mat arguments to materialize in workers and keeps `Ref[Definition]` data
 symbolic. Dispatch's incomplete-coverage warning now names its bounded diagnostic
 categories and directs callers to `dispatch.explain(...)` for the full report.
+
+Native training input is now owned entirely by the Dataset graph. Maintained
+TensorFlow, Torch, and experimental JAX trainers consume canonical authored
+`(inputs, targets)` batches, retain inspectable `TrainingPreparation` specs and
+handoffs, and reject the retired trainer-owned batching, shuffle, count, and path
+controls. The ML workflow qualification matrix now includes experimental JAX in
+all W1-W3 CPU placements (36 primary cells), binds JAX/Flax/Optax environment
+evidence and a fixed JAX seed, and adds credential-free managed local and Core
+subprocess exact-restoration representatives. The qualification baseline and
+fixture manifest are now schema version 2; existing version 1 authority remains
+untouched and must be replaced by preparation into new empty roots. GPU
+qualification remains the existing TensorFlow/W1 and Torch/W3 pair.
+
+Core now owns the versioned `dryml-reference-json` codec for portable exact
+`ObjectRef` and `StateRef` authority. Experiment history writes
+`dryml-experiment-data` v3 and delegates embedded references to that codec, so
+native model and Dataset definitions retain source, factory, tensor-specification,
+canonical dtype, cardinality, and frozen-container identity without a model-owned
+serializer. The reader continues to accept closed v1 and v2 histories and
+migrates them in place on their next immutable publication.
+
+Keras, Torch, and experimental JAX trainers now provide saved, recoverable
+completed-epoch early stopping. The shared monitor/patience/mode/minimum-
+improvement contract retains its best metric, wait count, accepted shortened
+target, and, when restoration is enabled, best Model snapshot across pending-
+postlude recovery. Optional best-weight restoration changes only Model parameters
+and mutable buffers;
+optimizer progression and JAX RNG remain at the stopping epoch. The resulting
+mixed-point Experiment is published as a new exact terminal StateRef. Keras uses
+this dedicated DRYML behavior adapter with managed safe points and supported
+validation, without claiming recovery for arbitrary native callbacks or deferred
+`validation_freq` scheduling.
 
 `CachedDataset`, `CacheCodec`, and `CacheIntegrityError` are now concrete public
 Artifact APIs. Finite dense Dataset trees can be streamed into built-in NumPy,

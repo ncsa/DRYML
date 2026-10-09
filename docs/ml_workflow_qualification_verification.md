@@ -4,7 +4,7 @@ Status: persistent-fixture, local, worker-routing, cross-framework, and GPU
 qualification harnesses are implemented.
 Routine fake-matrix, Core subprocess transport, coordinator sentinel, authority,
 and recovery-schema tests pass; all numerical qualification gates, including the
-24-cell CPU matrix, TFDS TensorFlow-to-Torch delivery, step-64 Torch/W3
+36-cell CPU matrix, TFDS TensorFlow-to-Torch delivery, step-64 Torch/W3
 recovery, TensorFlow/W1 GPU, and Torch/W3 GPU gates remain unrun.
 
 The ML workflow qualification matrix is not part of routine test collection. Real W1-W3
@@ -38,6 +38,7 @@ manifest = prepare_manifest(
     environment={
         "python": "3.12.13", "dryml": "...", "pandas": "...", "pyarrow": "...",
         "tensorflow": "...", "tensorflow_datasets": "...", "torch": "...",
+        "jax": "...", "jaxlib": "...", "flax": "...", "optax": "...",
     },
     allow_download=True,
 )
@@ -89,11 +90,11 @@ retained before interruption, but it is not success evidence. Ordered events mus
 recovery proof. Missing, extra, non-finite, negative, or inconsistent fields fail
 validation.
 
-`cpu_matrix(manifest)` emits exactly the fixed 24 NumPy-delivery requests: W1-W3,
-TensorFlow/Torch, and local/managed-local/subprocess/existing-Ray execution. It
+`cpu_matrix(manifest)` emits exactly the fixed 36 NumPy-delivery requests: W1-W3,
+TensorFlow/Torch/experimental JAX, and local/managed-local/subprocess/existing-Ray execution. It
 does not start a worker. Every W3 request contains the same exact manifest NumPy
 reference. `supplemental_tfds_torch_case(manifest)` is a separately counted W1
-TensorFlow-mode TFDS-to-Torch interoperability gate; it is not a twenty-fifth
+TensorFlow-mode TFDS-to-Torch interoperability gate; it is not a thirty-seventh
 matrix cell and does not change primary Torch delivery.
 
 `test_ml_workflow_accelerated.py` owns exactly three opt-in real gates: the
@@ -120,11 +121,16 @@ case-isolation child, with ordinary and one-CPU/no-GPU session allocation
 respectively. Every managed operation, status lookup, and recovery lookup opens
 and uses the request's explicit control Store rather than the output Store
 default. Both retain the mandatory managed Experiment/Artifact lifecycle.
+Worker managed state Repos contain only the isolated case output Store, and W1/W2
+cache construction uses the request's explicit control Store. W3
+Artifact and independent-formula reads open the manifest-selected fixture Store
+separately with derived indexing disabled; managed ownership, checkpoints,
+history, and results therefore never target shared fixture authority.
 `subprocess` and `ray` requests explicitly carry
 `worker-process-no-session-allocation`; this records session allocation only and
 does not relax the mandatory managed Experiment/Artifact lifecycle. They use Core
-Execute's SubProcess and existing-address Ray backends respectively. A missing Ray address makes only the selected six
-Ray cells `QualificationUnrun`; the other 18 primary requests remain
+Execute's SubProcess and existing-address Ray backends respectively. A missing Ray address makes only the selected nine
+Ray cells `QualificationUnrun`; the other 27 primary requests remain
 constructible. The harness never starts or provisions Ray.
 
 Before a real case creates its case child, spool, or submission, the coordinator
@@ -134,7 +140,7 @@ receipt, definition, and snapshot metadata without restoring or iterating fixtur
 data, validates TFDS content bytes, opens the existing control Store, and rejects
 any output/work/evidence/control/fixture/TFDS overlap. The coordinator runs under
 `RuntimeMode.ORCHESTRATOR` with strict materialization scope and does not import
-TF/Torch/TFDS or restore model/Dataset payloads. It validates every final
+TF/Torch/JAX/Flax/Optax/TFDS or restore model/Dataset payloads. It validates every final
 reference through exact StateRef closure, projection, definition, and selected
 Store metadata; the final Experiment remains that metadata receipt because its
 normal restore can materialize a model edge. The existing narrow result-inspection
@@ -146,9 +152,10 @@ backend/future/request facts, atomically publishes non-replacing final evidence,
 fsyncs its parent directory, and reopens it for exact comparison. Worker
 diagnostics are never final evidence.
 
-Routine fake-executor tests enumerate all 24 unique W1/W2/W3 x TF/Torch x
+Routine fake-executor tests enumerate all 36 unique W1/W2/W3 x TF/Torch/JAX x
 local/managed-local/subprocess/Ray requests, inspect their transport, and prove
-fresh-process reconstruction does not import TensorFlow, Torch, TFDS, or pandas.
+fresh-process reconstruction does not import TensorFlow, Torch, JAX, Flax,
+Optax, TFDS, or pandas.
 The opt-in real CPU and recovery test entries are intentionally `UNRUN` until
 release automation provides prepared U10 authority, isolated output/control roots,
 and, for Ray cells, an existing same-host address. The fixed recovery request
@@ -208,9 +215,9 @@ or substitute synthetic data for release evidence. This harness is not numerical
 qualification evidence and does not complete U10's real gates.
 
 The worker matrix additionally requires an existing
-`DRYML_ML_QUALIFICATION_CONTROL_STORE`. Its six Ray cells require an existing
+`DRYML_ML_QUALIFICATION_CONTROL_STORE`. Its nine Ray cells require an existing
 same-host `DRYML_ML_QUALIFICATION_RAY_ADDRESS`; no address leaves those cells unrun while
-the 18 non-Ray cells remain eligible.
+the 27 non-Ray cells remain eligible.
 
 The accelerated gates additionally require a caller-selected decimal
 `DRYML_ML_QUALIFICATION_GPU_DEVICE`; the harness neither provisions a GPU nor falls back
@@ -272,16 +279,18 @@ static no-executable-opcode check before unpickling. A clean explicit generator
 destination reproduces every committed fixture byte with no missing or extra
 generated file. The TrainState vector is not a portable pickle codec claim.
 
-The final implementation-closeout command also passed in `big_env` on
+Before the Dataset/JAX integration representatives and 36-cell matrix were
+added, the then-final implementation-closeout command passed in `big_env` on
 2026-09-29:
 
 ```bash
 ./tests.sh good-enough --ignore tests/old --ignore tests/dev -x tests
 ```
 
-Its policy-selected phase passed **264 tests** with 64 deselected. Its maintained
-phase passed **3371 tests** with 30 skipped and 966 deselected. Real TFDS
-preparation, the 24-cell CPU matrix, step-64 recovery, TensorFlow-to-Torch
-delivery, Ray, training, and GPU qualification are all `UNRUN`; neither the
-package and deterministic evidence above nor this representative suite is
-release qualification evidence.
+That historical policy-selected phase passed **264 tests** with 64 deselected,
+and its maintained phase passed **3371 tests** with 30 skipped and 966
+deselected. These counts are not evidence for the current routine selection.
+Real TFDS preparation, the 36-cell CPU matrix, step-64 recovery,
+TensorFlow-to-Torch delivery, Ray, real qualification training, and GPU
+qualification are all `UNRUN`; neither the package and deterministic evidence
+above nor the historical representative suite is release qualification evidence.

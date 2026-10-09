@@ -84,9 +84,10 @@ keys, and nested Ref/Mat forms are rejected.
 terminal `Ref` field containing an exact `ObjectRef` or `StateRef`. It may pass
 through preceding materializing graph edges but never crosses a Ref boundary,
 loads state, or accesses Python attributes. `StateRef.at(path)` remains limited to
-materializing subtrees and rejects Ref-only paths. Symbolic artifact bindings use this
-accessor for paths such as `Par("this.test_data")`, preserving the supplied exact
-StateRef instead of selecting a live or floating reference.
+materializing subtrees and rejects Ref-only paths. Symbolic artifact bindings use
+the accessor matching the stored edge: for example, materializing
+`Experiment.test_data` is projected with `StateRef.at(path)`, while terminal
+Ref-held fields retain their exact stored reference value.
 
 A fresh constructor with an explicit Ref/Mat role validates finalized structural
 links against that role before canonicalization can erase their edge authority.

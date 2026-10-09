@@ -1,6 +1,6 @@
 """Local dense host-value handoff planning and execution.
 
-This module records one direct NumPy, TensorFlow, or Torch adapter edge for a
+This module records one direct NumPy, TensorFlow, Torch, or JAX adapter edge for a
 prepared Method boundary.  It is deliberately dependency-light while planning:
 optional frameworks are imported only when a selected adapter converts values.
 """
@@ -17,7 +17,7 @@ from dryml.core.tensor_spec import Layout, SpecTree, TensorSpec, map_spec_tree
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 
 
-_DENSE_BACKENDS = frozenset((Backend.numpy, Backend.tf, Backend.torch))
+_DENSE_BACKENDS = frozenset((Backend.numpy, Backend.tf, Backend.torch, Backend.jax))
 _EXACT_DTYPE_NAMES = frozenset({
     "bool", "int8", "int16", "int32", "int64", "uint8",
     "float16", "float32", "float64",
@@ -118,8 +118,9 @@ def convert(edge: ConversionEdge, value: object) -> object:
         dtype, shape, and batch interpretation.
 
     Raises:
-        TypeError: If values are mixed, sparse/ragged/object/inexact, non-CPU, or
-            otherwise outside the dense host-copy handoff contract.
+        TypeError: If values are mixed, sparse/ragged/object/inexact, abstract,
+            non-CPU, non-addressable, or otherwise outside the dense host-copy
+            handoff contract.
         RuntimeError: If a Torch value requiring gradients would cross a boundary.
     """
 
@@ -180,6 +181,8 @@ def _leaf_backend(value: object) -> Backend | None:
         return Backend.tf
     if module.startswith("torch"):
         return Backend.torch
+    if module.startswith(("jax", "jaxlib")):
+        return Backend.jax
     return None
 
 
@@ -222,6 +225,16 @@ def _host_copy(value: object, backend: Backend | None) -> np.ndarray:
         if value.requires_grad:
             raise RuntimeError("Torch tensors requiring gradients cannot cross a framework boundary.")
         array = value.numpy()
+    elif backend is Backend.jax:
+        jax = import_module("jax")
+        if not isinstance(value, jax.Array):
+            raise TypeError("Only concrete dense JAX arrays support conversion.")
+        if not value.is_fully_addressable:
+            raise TypeError("Only fully addressable JAX arrays support conversion.")
+        devices = value.devices()
+        if len(devices) != 1 or next(iter(devices)).platform != "cpu":
+            raise TypeError("Only single-device CPU JAX arrays support conversion.")
+        array = np.asarray(value)
     else:
         raise TypeError("Unsupported conversion backend.")
     if array.dtype == np.dtype(object) or array.dtype.kind not in "?biufc":
@@ -240,6 +253,19 @@ def _target_copy(array: np.ndarray, backend: Backend) -> object:
             return tf.convert_to_tensor(array)
     if backend is Backend.torch:
         return import_module("torch").tensor(array, device="cpu")
+    if backend is Backend.jax:
+        jax = import_module("jax")
+        if np.dtype(jax.dtypes.canonicalize_dtype(array.dtype)) != array.dtype:
+            raise TypeError("JAX cannot represent this dtype exactly under its current configuration.")
+        cpu_devices = jax.devices("cpu")
+        if not cpu_devices:
+            raise TypeError("JAX has no CPU device for a local conversion target.")
+        result = jax.device_put(array, cpu_devices[0])
+        if not result.is_fully_addressable or len(result.devices()) != 1:
+            raise TypeError("JAX did not create an addressable single-device target.")
+        if next(iter(result.devices())).platform != "cpu":
+            raise TypeError("JAX did not place the conversion target on CPU.")
+        return result
     raise TypeError("Unsupported conversion backend.")
 
 

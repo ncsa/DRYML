@@ -2,10 +2,10 @@ import numpy as np
 import pytest
 
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import ArrayDataset, Batch, collate_xy
+from dryml.data import ArrayDataset, Batch, Take, as_supervised
 from dryml.methods import ImplementationSelectionError
 from dryml.models import AutoEncoder, Model
-from dryml.models.utils import prepare_training_data
+from dryml.models.utils import require_supervised_dataset
 
 
 class CountingIdentityModel(Model):
@@ -35,18 +35,30 @@ class BackendChangingModel(Model):
         return TensorSpec(input_spec.dtype, shape=input_spec.shape, backend=self.backend)
 
 
-def test_prepare_training_data_unbatches_and_takes_examples():
+def test_trainers_require_canonical_authored_batches_without_rewriting_them():
     x = np.array([[0.0], [1.0], [2.0]], dtype=np.float32)
     y = np.array([[1.0], [2.0], [3.0]], dtype=np.float32)
-    ds = Batch(ArrayDataset((x, y)), 2)
+    ds = Batch(Take(as_supervised(ArrayDataset((x, y)), 0, 1), 2), 2)
 
-    train_data = prepare_training_data(ds, num_examples=2)
-    out_x, out_y, n = collate_xy(train_data)
+    require_supervised_dataset(ds, batched=True)
+    out_x, out_y = next(iter(ds))
 
-    assert n == 2
     assert out_x.shape == (2, 1)
     assert out_y.shape == (2, 1)
     np.testing.assert_allclose(out_x[:, 0], np.array([0.0, 1.0], dtype=np.float32))
+
+
+def test_native_trainers_reject_unbatched_canonical_data():
+    dataset = as_supervised(ArrayDataset((np.zeros((1, 1)), np.zeros((1, 1)))), 0, 1)
+
+    with pytest.raises(ValueError, match="explicitly batched"):
+        require_supervised_dataset(dataset, batched=True)
+
+
+def test_native_trainers_reject_non_dataset_without_leaking_attribute_error():
+    """Generic training admission gives callers a stable type failure for arbitrary input."""
+    with pytest.raises(TypeError, match="Dataset"):
+        require_supervised_dataset(object(), batched=True)
 
 
 def test_backend_model_packages_import_without_backend_runtime():

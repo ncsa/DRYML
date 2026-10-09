@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import weakref
+import math
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
@@ -11,22 +12,25 @@ from dryml.core.object import Serializable
 from dryml.core.backend import Backend
 from dryml.core.repo import manage_repo
 from dryml.core.tensor_spec import Dynamic, TensorSpec, batch_spec_tree, iter_specs, map_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
-from dryml.core.utils.general import maybe_call_method, validate_class
+from dryml.core.utils.general import maybe_call_method, pickle_load, pickle_save, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
-from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.progress import TrainingProgress, metric_value
+from dryml.models.train_spec import (
+    _EarlyStoppingState,
+    _retained_early_stop_completed,
+    _update_early_stopping,
+    _validate_early_stopping_config,
+)
 from dryml.models.utils import (
     finite_dataset_len,
-    prepare_training_data,
     record_train_update,
     require_bounded_safe_points,
+    require_supervised_dataset,
     TrainingPreparation,
-    validate_num_examples,
     validate_training_callbacks,
 )
-from dryml.tf.tensor_spec import output_signature as tf_output_signature
 from dryml.methods import ImplementationSelectionError, MethodError, traits
 
 
@@ -75,6 +79,103 @@ def _normalize_list(value):
     if isinstance(value, (tuple, list)):
         return tuple(value)
     return (value,)
+
+
+def _finite_metric_logs(logs) -> dict[str, float]:
+    """Return finite scalar native logs suitable for retained postlude state."""
+
+    result = {}
+    for name, value in (logs or {}).items():
+        try:
+            scalar = float(metric_value(value))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(scalar):
+            result[str(name)] = scalar
+    return result
+
+
+def _keras_telemetry_callbacks(tf, observer_session):
+    """Wrap invocation-local Keras callbacks with bounded failure handling."""
+
+    if observer_session is None:
+        return ()
+    callback_type = tf.keras.callbacks.Callback
+    if any(not isinstance(observer, callback_type) for observer in observer_session.observers):
+        raise TypeError("Keras telemetry observers must be tf.keras.callbacks.Callback instances.")
+    for observer in observer_session.observers:
+        if _is_known_keras_behavior_callback(tf, observer):
+            raise ValueError(
+                "Keras invocation telemetry rejects known behavior callback "
+                f"{type(observer).__name__}; use a saved training behavior such "
+                "as BasicEarlyStoppingTraining instead."
+            )
+
+    class TelemetryCallback(callback_type):
+        def __init__(self, observer, index):
+            super().__init__()
+            self._observer = observer
+            self._index = index
+
+        def _deliver(self, name, *args, **kwargs):
+            method = getattr(self._observer, name)
+            observer_session.deliver(
+                self._index,
+                name,
+                lambda: method(*args, **kwargs),
+            )
+
+        def set_model(self, model):
+            super().set_model(model)
+            self._deliver("set_model", model)
+
+        def set_params(self, params):
+            super().set_params(params)
+            self._deliver("set_params", params)
+
+    def forward(name):
+        def method(self, *args, **kwargs):
+            self._deliver(name, *args, **kwargs)
+
+        method.__name__ = name
+        return method
+
+    for name in (
+        "on_train_begin", "on_train_end", "on_test_begin", "on_test_end",
+        "on_predict_begin", "on_predict_end", "on_epoch_begin", "on_epoch_end",
+        "on_train_batch_begin", "on_train_batch_end", "on_test_batch_begin",
+        "on_test_batch_end", "on_predict_batch_begin", "on_predict_batch_end",
+        "on_batch_begin", "on_batch_end",
+    ):
+        setattr(TelemetryCallback, name, forward(name))
+
+    return tuple(
+        TelemetryCallback(observer, index)
+        for index, observer in enumerate(observer_session.observers)
+    )
+
+
+def _is_known_keras_behavior_callback(tf, observer) -> bool:
+    """Classify closed built-in callback families that can alter training."""
+
+    names = (
+        "BackupAndRestore",
+        "EarlyStopping",
+        "LearningRateScheduler",
+        "ModelCheckpoint",
+        "ReduceLROnPlateau",
+        "SwapEMAWeights",
+        "TerminateOnNaN",
+    )
+    callback_types = tuple(
+        callback_type
+        for name in names
+        if isinstance(
+            callback_type := getattr(tf.keras.callbacks, name, None),
+            type,
+        )
+    )
+    return isinstance(observer, callback_types)
 
 
 def _collect_trainable_parameters(target, *, repo):
@@ -306,6 +407,36 @@ def _freeze_native_keras_callbacks(tf, configured, fit_kwargs) -> tuple:
     return (*freeze(configured, "callbacks"), *freeze(fit_kwargs.pop("callbacks", ()), "fit callbacks"))
 
 
+def _require_dataset_owned_keras_fit_inputs(fit_args, fit_kwargs) -> None:
+    """Reject Keras fit routes that would replace Dataset-owned data policy.
+
+    Args:
+        fit_args: Positional arguments configured for ``keras.Model.fit``.
+        fit_kwargs: Per-invocation copy of Keras fit keyword arguments.
+
+    Raises:
+        ValueError: If inputs, targets, batching, shuffle, or step bounds would
+            compete with the canonical Dataset supplied by the Experiment.
+
+    Side Effects:
+        None. This preflight runs before Dataset iteration, model construction,
+        compilation, optimizer restoration, or TrainState mutation.
+    """
+
+    if fit_args:
+        raise ValueError("Keras fit_args are unsupported; the Experiment Dataset supplies training data.")
+    reserved = {
+        "x", "y", "batch_size", "shuffle", "steps_per_epoch",
+        "validation_data", "validation_batch_size", "validation_steps",
+    }
+    supplied = reserved.intersection(fit_kwargs)
+    if supplied:
+        raise ValueError(
+            "Keras fit options that control Dataset inputs or iteration are unsupported: "
+            f"{sorted(supplied)!r}. Author the Dataset pipeline instead."
+        )
+
+
 def _keras_accounting_model(tf, model):
     """Wrap one Keras model with owned post-update accounting facts."""
 
@@ -412,34 +543,37 @@ def _keras_accounting_callback(
 
     class AccountingCallback(tf.keras.callbacks.Callback):
         def on_train_batch_end(self, batch, logs=None):
-            del logs
             if not bool(reporter.has_completed_step.numpy()):
                 raise RuntimeError("DRYML Keras accounting did not receive a completed train step.")
             physical_batch = batch_offset + batch
+            complete_epoch = (
+                steps_per_epoch is not None
+                and physical_batch + 1 == steps_per_epoch
+            )
             record_train_update(
                 exp,
                 None,
                 float(metric_value(reporter.completed_loss)),
                 batched=True,
                 examples=int(metric_value(reporter.completed_examples)),
-                complete_epoch=(
-                    steps_per_epoch is not None
-                    and physical_batch + 1 == steps_per_epoch
-                ),
+                complete_epoch=complete_epoch,
+                epoch_metrics=_finite_metric_logs(logs) if complete_epoch else None,
                 callbacks=callbacks,
             )
 
         def on_epoch_end(self, epoch, logs=None):
-            del logs
             # Unknown finite streams reveal exhaustion only here. Retain the
             # postlude before later native callbacks can fail.
             if steps_per_epoch is None and exp.state.epoch == epoch:
-                exp.state.finish_epoch(postlude_pending=True)
+                exp.state.finish_epoch(
+                    postlude_pending=True,
+                    metrics=_finite_metric_logs(logs),
+                )
 
     return AccountingCallback()
 
 
-def _keras_postlude_callback(tf, exp):
+def _keras_postlude_callback(tf, exp, finish_behavior_epoch=None):
     """Clear a retained finite-epoch postlude after Keras completes it."""
 
     class PostludeCallback(tf.keras.callbacks.Callback):
@@ -463,8 +597,14 @@ def _keras_postlude_callback(tf, exp):
                 exp.state.finish_epoch(postlude_pending=True)
 
         def on_epoch_end(self, epoch, logs=None):
-            del logs
             if exp.state.pending_epoch_postlude == epoch:
+                if finish_behavior_epoch is not None:
+                    stopped = finish_behavior_epoch(
+                        epoch,
+                        {**(exp.state.pending_epoch_metrics or {}), **_finite_metric_logs(logs)},
+                    )
+                    if stopped:
+                        self.model.stop_training = True
                 exp.state.finish_epoch_postlude(epoch)
 
     return PostludeCallback()
@@ -478,12 +618,13 @@ def _resume_keras_postlude(
     validation_data,
     validation_steps,
     steps_per_epoch,
-) -> None:
+    finish_behavior_epoch=None,
+) -> bool:
     """Complete only the bounded Keras postlude that needs no native replay."""
 
     epoch = exp.state.pending_epoch_postlude
     if epoch is None:
-        return
+        return False
     phase = exp.state.pending_epoch_postlude_phase
     if native_callbacks:
         raise ValueError(
@@ -491,25 +632,39 @@ def _resume_keras_postlude(
         )
     if phase == "start":
         if validation_data is None:
+            stopped = False if finish_behavior_epoch is None else finish_behavior_epoch(
+                epoch, exp.state.pending_epoch_metrics or {},
+            )
             exp.state.finish_epoch_postlude(epoch)
-            return
+            return stopped
         exp.state.advance_epoch_postlude(epoch, "validation")
         phase = "validation"
     if phase == "validation":
         if validation_data is not None:
-            training_model.evaluate(
+            validation_metrics = training_model.evaluate(
                 validation_data,
                 steps=validation_steps,
                 verbose=0,
                 return_dict=True,
             )
-        exp.state.advance_epoch_postlude(epoch, "epoch_end")
+            metrics = dict(exp.state.pending_epoch_metrics or {})
+            metrics.update({
+                f"val_{name}": value
+                for name, value in _finite_metric_logs(validation_metrics).items()
+            })
+        else:
+            metrics = dict(exp.state.pending_epoch_metrics or {})
+        exp.state.advance_epoch_postlude(epoch, "epoch_end", metrics=metrics)
         phase = "epoch_end"
     if phase == "epoch_end":
+        stopped = False if finish_behavior_epoch is None else finish_behavior_epoch(
+            epoch, exp.state.pending_epoch_metrics or {},
+        )
         exp.state.finish_epoch_postlude(epoch)
-        return
+        return stopped
     if phase is not None:
         raise ValueError("Keras cannot truthfully replay an unknown native postlude phase.")
+    return False
 
 
 class Wrapper(Serializable):
@@ -912,16 +1067,9 @@ class BasicTraining(TrainFunction):
         metrics: Optional native Keras metric collection.
         compile_kwargs: Additional Keras compile options.
         epochs: Epochs requested by a fresh invocation.
-        batch_size: Positive trainer batch size, or ``None`` for source batches.
-        x_path: Dataset path selecting model inputs.
-        y_path: Dataset path selecting training targets.
-        num_examples: Optional finite training-source prefix.
-        shuffle: Whether to apply deterministic Dataset shuffling.
-        shuffle_seed: Optional shuffle seed.
-        shuffle_buffer_size: Required finite shuffle buffer for unknown sources.
         callbacks: Native Keras callbacks, invoked after DRYML accounting.
-        fit_args: Positional arguments forwarded to ``keras.Model.fit``.
-        fit_kwargs: Keyword arguments forwarded to ``keras.Model.fit``.
+        fit_args: Must be empty because the Experiment Dataset supplies inputs.
+        fit_kwargs: Keras options excluding Dataset input/iteration controls.
         verbose: Keras fit verbosity.
 
     Raises:
@@ -942,13 +1090,6 @@ class BasicTraining(TrainFunction):
         metrics=(),
         compile_kwargs=None,
         epochs: int = 1,
-        batch_size: int | None = 32,
-        x_path=0,
-        y_path=1,
-        num_examples: int | None = None,
-        shuffle: bool = False,
-        shuffle_seed=None,
-        shuffle_buffer_size: int | None = None,
         callbacks=(),
         fit_args=(),
         fit_kwargs=None,
@@ -956,22 +1097,11 @@ class BasicTraining(TrainFunction):
     ):
         if epochs < 0:
             raise ValueError("epochs must be non-negative.")
-        if batch_size is not None and batch_size <= 0:
-            raise ValueError("batch_size must be positive or None.")
-        validate_num_examples(num_examples)
-
         self.optimizer = optimizer
         self.loss = loss
         self.metrics = _normalize_list(metrics)
         self.compile_kwargs = dict(compile_kwargs or {})
         self.epochs = epochs
-        self.batch_size = batch_size
-        self.x_path = x_path
-        self.y_path = y_path
-        self.num_examples = num_examples
-        self.shuffle = shuffle
-        self.shuffle_seed = shuffle_seed
-        self.shuffle_buffer_size = shuffle_buffer_size
         if callbacks is None:
             self.callbacks = ()
         elif isinstance(callbacks, (tuple, list)):
@@ -982,49 +1112,111 @@ class BasicTraining(TrainFunction):
         self.fit_kwargs = dict(fit_kwargs or {})
         self.verbose = verbose
 
-    def __call__(self, exp, *, callbacks=()):
+    __dryml_retired_constructor_parameters__ = (
+        "batch_size", "num_examples", "shuffle", "shuffle_seed",
+        "shuffle_buffer_size", "x_path", "y_path",
+    )
+
+    supports_observers = True
+
+    def _validate_observer_session(self, observer_session) -> None:
+        """Reject non-reporting native callbacks before retained training starts."""
+
+        import tensorflow as tf
+
+        _keras_telemetry_callbacks(tf, observer_session)
+
+    def __call__(self, exp, *, callbacks=(), observer_session=None):
+        """Run or resume one native Keras training invocation.
+
+        Args:
+            exp: Experiment providing Keras Model, Dataset, and retained state.
+            callbacks: Truthful post-update DRYML safe-point callbacks.
+            observer_session: Private Experiment-owned invocation telemetry
+                session containing native Keras callbacks, or ``None``.
+
+        Returns:
+            Keras History for the last native segment, or ``None`` when recovery
+            or zero work required no new segment.
+
+        Raises:
+            TypeError: If telemetry observers are not native Keras callbacks.
+            ValueError: If Dataset, accounting, callback-recovery, or retained
+                invocation contracts are incompatible.
+
+        Side Effects:
+            Trains Model/Optimizer state, advances retained Experiment progress,
+            invokes DRYML safe points, and reports native events after DRYML
+            accounting/behavior hooks. It does not retain telemetry observers.
+        """
+
         import tensorflow as tf
 
         callbacks = validate_training_callbacks(callbacks)
+        telemetry_callbacks = _keras_telemetry_callbacks(tf, observer_session)
         fit_kwargs = dict(self.fit_kwargs)
+        _require_dataset_owned_keras_fit_inputs(self.fit_args, fit_kwargs)
         native_callbacks = _freeze_native_keras_callbacks(tf, self._callbacks(tf), fit_kwargs)
-        if callbacks and (native_callbacks or exp.val_data is not None):
+        if callbacks and (
+            native_callbacks
+            or (exp.val_data is not None and not self._supports_managed_validation())
+        ):
             raise ValueError(
                 "Keras DRYML safe-point recovery does not support native callbacks or validation."
             )
+        self._validate_training_behavior_data(exp)
+        completed_behavior_stop = self._completed_training_behavior_stop(exp)
         compile_kwargs = self._compile_kwargs(exp)
         _require_supported_keras_accounting(compile_kwargs, fit_kwargs)
         _require_supported_keras_execution(compile_kwargs, _unwrap_backend_obj(self._optimizer(exp)))
         configured_loss = compile_kwargs.get("loss", self._make_loss(tf, exp))
         _require_mean_keras_loss(configured_loss)
         self._begin_training_preparation_generation()
-        train_data = self._prepare_data(exp.train_data, for_training=True)
+        train_data = self._prepare_data(exp.train_data)
         require_bounded_safe_points(train_data, callbacks)
         train_xy = self._xy_data(train_data)
         self.training_preparation = TrainingPreparation.from_specs(
             self, train_xy.spec[0], train_xy.spec[1], "tf"
         )
+        prepared_train = train_xy.prepare()
 
         val_data = None
         val_xy = None
         self.validation_preparation = None
         if exp.val_data is not None:
-            val_data = self._prepare_data(exp.val_data, for_training=False)
+            val_data = self._prepare_data(exp.val_data)
             val_xy = self._xy_data(val_data)
             self.validation_preparation = TrainingPreparation.from_specs(
                 self, val_xy.spec[0], val_xy.spec[1], "tf"
             )
+            prepared_val = val_xy.prepare()
+        else:
+            prepared_val = None
 
         training_model = self._training_model(tf, exp.model, train_xy.spec[0])
         if compile_kwargs:
             training_model.compile(**compile_kwargs)
             optimizer = self._optimizer(exp)
+            if completed_behavior_stop:
+                training_model(
+                    _keras_inputs_from_spec(tf, train_xy.spec[0]),
+                    training=False,
+                )
+                build = getattr(_unwrap_backend_obj(optimizer), "build", None)
+                if callable(build):
+                    build(training_model.trainable_variables)
             if hasattr(optimizer, "restore_pending"):
                 optimizer.restore_pending()
 
         exp.model.prep_train()
         if hasattr(exp.model, "restore_pending"):
             exp.model.restore_pending()
+        if completed_behavior_stop:
+            exp.model.prep_eval()
+            exp.state.finish_invocation(
+                exp.state.target_epoch, accept_shortened=True,
+            )
+            return None
         fit_kwargs.setdefault("verbose", self.verbose)
         if "steps_per_epoch" not in fit_kwargs:
             steps_per_epoch = finite_dataset_len(train_data)
@@ -1036,13 +1228,13 @@ class BasicTraining(TrainFunction):
             if validation_steps is not None:
                 fit_kwargs["validation_steps"] = validation_steps
 
-        ds_train = self._tf_dataset(tf, train_xy, self.training_preparation)
+        ds_train = self._tf_dataset(tf, prepared_train, self.training_preparation)
         if fit_kwargs.get("steps_per_epoch") is not None:
             ds_train = ds_train.repeat()
 
         ds_val = None
         if val_xy is not None:
-            ds_val = self._tf_dataset(tf, val_xy, self.validation_preparation)
+            ds_val = self._tf_dataset(tf, prepared_val, self.validation_preparation)
             if fit_kwargs.get("validation_steps") is not None:
                 ds_val = ds_val.repeat()
 
@@ -1051,6 +1243,10 @@ class BasicTraining(TrainFunction):
         fresh_target = exp.state.target_epoch is None
         initial_step = exp.state.step
         target_epoch = exp.state.begin_invocation(self.epochs)
+        self._begin_training_behavior(fresh=fresh_target)
+        finish_behavior_epoch = lambda epoch, metrics: self._finish_training_behavior_epoch(
+            exp, epoch, metrics
+        )
 
         def fit_segment(dataset, *, initial_epoch, epochs, batch_offset, segment_steps):
             segment_kwargs = dict(fit_kwargs)
@@ -1070,20 +1266,28 @@ class BasicTraining(TrainFunction):
                 validation_data=ds_val,
                 initial_epoch=initial_epoch,
                 epochs=epochs,
-                callbacks=[accounting, *native_callbacks, _keras_postlude_callback(tf, exp)],
+                callbacks=[
+                    accounting,
+                    *native_callbacks,
+                    _keras_postlude_callback(tf, exp, finish_behavior_epoch),
+                    *telemetry_callbacks,
+                ],
                 **segment_kwargs,
             )
 
         try:
-            _resume_keras_postlude(
+            stopped = _resume_keras_postlude(
                 exp,
                 training_model,
                 native_callbacks,
                 validation_data=ds_val,
                 validation_steps=fit_kwargs.get("validation_steps"),
                 steps_per_epoch=steps_per_epoch,
+                finish_behavior_epoch=finish_behavior_epoch,
             )
-            if target_epoch <= start_epoch and exp.state.pending_epoch_postlude is None:
+            if stopped:
+                history = None
+            elif target_epoch <= start_epoch and exp.state.pending_epoch_postlude is None:
                 history = None
             elif exp.state.next_batch:
                 if steps_per_epoch is None:
@@ -1108,6 +1312,7 @@ class BasicTraining(TrainFunction):
                         validation_data=ds_val,
                         validation_steps=fit_kwargs.get("validation_steps"),
                         steps_per_epoch=steps_per_epoch,
+                        finish_behavior_epoch=finish_behavior_epoch,
                     )
                     history = None
                 if exp.state.epoch < target_epoch:
@@ -1126,7 +1331,7 @@ class BasicTraining(TrainFunction):
                     history = None
                     for epoch in range(start_epoch, target_epoch):
                         history = fit_segment(
-                            self._tf_dataset(tf, train_xy, self.training_preparation),
+                            self._tf_dataset(tf, prepared_train, self.training_preparation),
                             initial_epoch=epoch,
                             epochs=epoch + 1,
                             batch_offset=0,
@@ -1158,11 +1363,14 @@ class BasicTraining(TrainFunction):
             not self._accept_shortened_completion() or exp.state.epoch == start_epoch
         ):
             if fresh_target:
-                exp.state.abandon_new_invocation(
-                    target_epoch,
-                    initial_epoch=start_epoch,
-                    initial_step=initial_step,
-                )
+                try:
+                    exp.state.abandon_new_invocation(
+                        target_epoch,
+                        initial_epoch=start_epoch,
+                        initial_step=initial_step,
+                    )
+                except ValueError:
+                    pass
             raise ValueError("Keras training ended before its retained invocation target.")
         exp.state.finish_invocation(
             target_epoch,
@@ -1218,40 +1426,69 @@ class BasicTraining(TrainFunction):
             base = tf.keras.Model(inputs=inputs, outputs=model(inputs))
         return _keras_accounting_model(tf, base)
 
-    def _prepare_data(self, data, *, for_training: bool):
-        data = prepare_training_data(
-            data,
-            num_examples=self.num_examples if for_training else None,
-            shuffle=self.shuffle if for_training else False,
-            shuffle_seed=self.shuffle_seed,
-            shuffle_buffer_size=self.shuffle_buffer_size,
-        )
-        if self.batch_size is not None:
-            data = Batch(data, self.batch_size)
+    def _prepare_data(self, data):
+        """Validate Dataset-owned canonical batches without changing their pipeline."""
+
+        require_supervised_dataset(data, batched=True)
         return data
 
     def _xy_data(self, data):
-        return Map(data, Project(Select(self.x_path), Select(self.y_path)))
+        """Return the already-canonical supervised Dataset unchanged."""
+
+        return data
 
     def _tf_dataset(self, tf, data, preparation):
-        """Expose explicitly prepared Dataset batches to Keras iteration."""
+        """Expose one once-planned Dataset pipeline to native Keras iteration.
 
-        def prepared_values():
-            cursor = data.iterator()
-            try:
-                for x, y in cursor:
-                    yield preparation.prepare(x, y)
-            finally:
-                cursor.close()
+        Args:
+            tf: Imported TensorFlow module retained for the established private
+                call shape.
+            data: Prepared Dataset pipeline for this training invocation.
+            preparation: Once-planned retained x/y handoff.
 
-        return tf.data.Dataset.from_generator(
-            prepared_values,
-            output_signature=tf_output_signature(preparation.consumer_specs),
-        )
+        Returns:
+            A native ``tf.data.Dataset`` preserving the authored batch stream.
+
+        Side Effects:
+            The native bridge opens independent DRYML cursors per Keras traversal;
+            it never advances accepted-update or checkpoint state.
+        """
+
+        del tf
+        from dryml.tf.training_data import as_training_dataset
+
+        return as_training_dataset(data, preparation)
 
     def _accept_shortened_completion(self) -> bool:
         """Return whether this trainer treats Keras's normal early stop as success."""
 
+        return False
+
+    def _completed_training_behavior_stop(self, exp) -> bool:
+        """Return whether saved behavior already completed a shortened target."""
+
+        del exp
+        return False
+
+    def _supports_managed_validation(self) -> bool:
+        """Return whether saved behavior can replay Keras validation postludes."""
+
+        return False
+
+    def _validate_training_behavior_data(self, exp) -> None:
+        """Validate saved behavior against Experiment data before native work."""
+
+        del exp
+
+    def _begin_training_behavior(self, *, fresh: bool) -> None:
+        """Prepare saved behavior for a fresh or resumed invocation."""
+
+        del fresh
+
+    def _finish_training_behavior_epoch(self, exp, epoch, metrics) -> bool:
+        """Run saved completed-epoch behavior; ordinary BasicTraining has none."""
+
+        del exp, epoch, metrics
         return False
 
     def _callbacks(self, tf):
@@ -1290,21 +1527,25 @@ class Training(BasicTraining):
         loss_fn = self._make_loss(tf, exp)
         _require_mean_keras_loss(loss_fn)
         self._begin_training_preparation_generation()
-        train_data = self._prepare_data(exp.train_data, for_training=True)
+        train_data = self._prepare_data(exp.train_data)
         require_bounded_safe_points(train_data, callbacks)
         train_xy = self._xy_data(train_data)
         self.training_preparation = TrainingPreparation.from_specs(
             self, train_xy.spec[0], train_xy.spec[1], "tf"
         )
+        prepared_train = train_xy.prepare()
 
         val_xy = None
         self.validation_preparation = None
         if exp.val_data is not None:
-            val_data = self._prepare_data(exp.val_data, for_training=False)
+            val_data = self._prepare_data(exp.val_data)
             val_xy = self._xy_data(val_data)
             self.validation_preparation = TrainingPreparation.from_specs(
                 self, val_xy.spec[0], val_xy.spec[1], "tf"
             )
+            prepared_val = val_xy.prepare()
+        else:
+            prepared_val = None
 
         optimizer_wrapper = self._optimizer(exp)
         optimizer = self._make_optimizer(tf, exp)
@@ -1323,7 +1564,7 @@ class Training(BasicTraining):
         try:
             exp.model.prep_train()
             self._finish_pending_epoch(
-                tf, exp, val_xy, loss_fn, metrics, progress, target_epoch
+                tf, exp, prepared_val, loss_fn, metrics, progress, target_epoch
             )
             for epoch in range(start_epoch, target_epoch):
                 for metric in metrics:
@@ -1331,15 +1572,15 @@ class Training(BasicTraining):
                 epoch_loss = 0.0
                 epoch_steps = 0
 
-                cursor = train_xy.iterator()
+                from dryml.tf.training_data import iter_training_batches
+
+                cursor = iter_training_batches(prepared_train, self.training_preparation)
                 resume_batch = exp.state.next_batch if epoch == start_epoch else 0
                 if resume_batch:
                     cursor.skip(resume_batch)
                 try:
                     for x, y in cursor:
-                        # The once-planned U6 handoff executes before this native
-                        # differentiation scope begins.
-                        x, y = self.training_preparation.prepare(x, y)
+                        examples = train_xy.examples_in((x, y))
 
                         with tf.GradientTape() as tape:
                             y_pred = exp.model(x)
@@ -1371,7 +1612,8 @@ class Training(BasicTraining):
                             exp,
                             x,
                             loss_float,
-                            batched=self.batch_size is not None,
+                            batched=True,
+                            examples=examples,
                             complete_epoch=(
                                 steps_per_epoch is not None
                                 and exp.state.next_batch + 1 == steps_per_epoch
@@ -1402,7 +1644,7 @@ class Training(BasicTraining):
                     exp,
                     epoch,
                     epoch_metrics,
-                    val_xy,
+                    prepared_val,
                     loss_fn,
                     metrics,
                     progress,
@@ -1456,7 +1698,7 @@ class Training(BasicTraining):
     def _metric_objects(self, exp):
         return [_unwrap_backend_obj(metric) for metric in self._metrics(exp)]
 
-    def _finish_pending_epoch(self, tf, exp, val_xy, loss_fn, metrics, progress, target_epoch):
+    def _finish_pending_epoch(self, tf, exp, val_data, loss_fn, metrics, progress, target_epoch):
         """Run the validation/progress postlude retained after a final callback."""
 
         epoch = exp.state.pending_epoch_postlude
@@ -1464,23 +1706,23 @@ class Training(BasicTraining):
             return
         epoch_metrics = dict(exp.state.pending_epoch_metrics or {})
         if exp.state.pending_epoch_postlude_phase == "start":
-            if val_xy is not None:
-                val_metrics = self._evaluate(tf, exp.model, val_xy, loss_fn, metrics)
+            if val_data is not None:
+                val_metrics = self._evaluate(tf, exp.model, val_data, loss_fn, metrics)
                 epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
             exp.state.advance_epoch_postlude(epoch, "progress", metrics=epoch_metrics)
         if exp.state.pending_epoch_postlude_phase == "progress":
             progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
             exp.state.finish_epoch_postlude(epoch)
 
-    def _finish_epoch(self, tf, exp, epoch, epoch_metrics, val_xy, loss_fn, metrics, progress, target_epoch):
+    def _finish_epoch(self, tf, exp, epoch, epoch_metrics, val_data, loss_fn, metrics, progress, target_epoch):
         """Complete one explicit-loop epoch without replaying its final update."""
 
         if exp.state.epoch == epoch:
             exp.state.finish_epoch(postlude_pending=True)
         if exp.state.pending_epoch_postlude == epoch:
             if exp.state.pending_epoch_postlude_phase == "start":
-                if val_xy is not None:
-                    val_metrics = self._evaluate(tf, exp.model, val_xy, loss_fn, metrics)
+                if val_data is not None:
+                    val_metrics = self._evaluate(tf, exp.model, val_data, loss_fn, metrics)
                     epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
                 exp.state.advance_epoch_postlude(epoch, "progress", metrics=epoch_metrics)
             if exp.state.pending_epoch_postlude_phase == "progress":
@@ -1491,50 +1733,63 @@ class Training(BasicTraining):
                 )
                 exp.state.finish_epoch_postlude(epoch)
             return
-        if val_xy is not None:
-            val_metrics = self._evaluate(tf, exp.model, val_xy, loss_fn, metrics)
+        if val_data is not None:
+            val_metrics = self._evaluate(tf, exp.model, val_data, loss_fn, metrics)
             epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
         progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
 
-    def _evaluate(self, tf, model, val_xy, loss_fn, metrics):
+    def _evaluate(self, tf, model, val_data, loss_fn, metrics):
         for metric in metrics:
             _reset_metric(metric)
         total_loss = 0.0
-        steps = 0
-        for x, y in val_xy:
-            x, y = self.validation_preparation.prepare(x, y)
-            y_pred = model(x)
-            loss_value = tf.reduce_mean(loss_fn(y, y_pred))
-            total_loss += float(metric_value(loss_value))
-            steps += 1
-            for metric in metrics:
-                _update_metric(metric, y, y_pred)
+        total_examples = 0
+        from dryml.tf.training_data import iter_training_batches
 
-        if steps == 0:
+        cursor = iter_training_batches(val_data, self.validation_preparation)
+        try:
+            for x, y in cursor:
+                examples = val_data.dataset.examples_in((x, y))
+                y_pred = model(x)
+                loss_value = tf.reduce_mean(loss_fn(y, y_pred))
+                total_loss += float(metric_value(loss_value)) * examples
+                total_examples += examples
+                for metric in metrics:
+                    _update_metric(metric, y, y_pred)
+        finally:
+            cursor.close()
+
+        if total_examples == 0:
             return {}
 
-        results = {"loss": total_loss / steps}
+        results = {"loss": total_loss / total_examples}
         results.update(_metric_results(metrics))
         return results
 
 
-class BasicEarlyStoppingTraining(BasicTraining):
-    """Fit Keras with built-in EarlyStopping and accepted short-target completion.
+class BasicEarlyStoppingTraining(BasicTraining, Serializable):
+    """Fit Keras with recoverable completed-epoch early stopping.
 
     Args:
-        patience: Completed non-improving epochs tolerated by Keras.
-        monitor: Keras history metric used by EarlyStopping.
-        restore_best_weights: Whether Keras restores its best observed weights.
+        patience: Complete non-improving epochs tolerated before stopping.
+        monitor: Completed Keras epoch metric, such as ``"loss"`` or
+            ``"val_loss"``.
+        mode: ``"min"`` for decreasing metrics or ``"max"`` for increasing.
+        min_delta: Required nonnegative absolute improvement.
+        restore_best_weights: Restore only Keras Model weights and buffers from
+            the best completed epoch. Optimizer state remains at the stop epoch.
         *args: Positional arguments accepted by :class:`BasicTraining`.
         **kwargs: Keyword arguments accepted by :class:`BasicTraining`.
 
     Raises:
-        ValueError: If BasicTraining's accounting/recovery contract is violated.
+        TypeError: If configuration types are invalid.
+        ValueError: If configuration, data, completed metrics, or BasicTraining's
+            accounting/recovery contract is invalid.
 
     Side Effects:
-        Installs one Keras EarlyStopping callback. A normal completed-epoch early
-        stop clears the retained invocation target rather than reporting a failed
-        incomplete invocation.
+        Retains monitor, wait, best epoch/metric/Model state, and the accepted
+        shortened target as this TrainFunction's state. The DRYML-owned Keras
+        postlude adapter restores the best Model state at most once before the
+        final Experiment checkpoint; arbitrary native callback replay is unchanged.
     """
 
     def __init__(
@@ -1542,29 +1797,107 @@ class BasicEarlyStoppingTraining(BasicTraining):
         *args,
         patience: int = 3,
         monitor: str = "val_loss",
+        mode: str = "min",
+        min_delta: float = 0.0,
         restore_best_weights: bool = True,
         **kwargs,
     ):
+        monitor, patience, mode, min_delta, restore_best_weights = (
+            _validate_early_stopping_config(
+                monitor=monitor,
+                patience=patience,
+                mode=mode,
+                min_delta=min_delta,
+                restore_best_weights=restore_best_weights,
+            )
+        )
         super().__init__(*args, **kwargs)
         self.patience = patience
         self.monitor = monitor
+        self.mode = mode
+        self.min_delta = min_delta
         self.restore_best_weights = restore_best_weights
+        self.early_stopping = _EarlyStoppingState()
 
     def _callbacks(self, tf):
-        callbacks = super()._callbacks(tf)
-        callbacks.append(
-            tf.keras.callbacks.EarlyStopping(
-                patience=self.patience,
-                monitor=self.monitor,
-                restore_best_weights=self.restore_best_weights,
-            )
-        )
-        return callbacks
+        """Return only user-authored native callbacks; behavior is DRYML-owned."""
+
+        return super()._callbacks(tf)
 
     def _accept_shortened_completion(self) -> bool:
-        """Accept Keras's normal completed-epoch early-stop result."""
+        """Accept this saved behavior's completed-epoch shortened target."""
+
+        return self.early_stopping.accepted_target is not None
+
+    def _completed_training_behavior_stop(self, exp) -> bool:
+        """Recognize a retained stop after its normalized postlude completed."""
+
+        return _retained_early_stop_completed(self.early_stopping, exp.state)
+
+    def _supports_managed_validation(self) -> bool:
+        """Allow only this DRYML-owned behavior through managed validation."""
 
         return True
+
+    def _validate_training_behavior_data(self, exp) -> None:
+        if self.monitor.startswith("val_") and exp.val_data is None:
+            raise ValueError(
+                f"Early-stopping monitor {self.monitor!r} requires validation data."
+            )
+
+    def _begin_training_behavior(self, *, fresh: bool) -> None:
+        if fresh:
+            self.early_stopping.reset()
+
+    def _finish_training_behavior_epoch(self, exp, epoch, metrics) -> bool:
+        return _update_early_stopping(
+            self.early_stopping,
+            epoch=epoch,
+            metrics=metrics,
+            monitor=self.monitor,
+            patience=self.patience,
+            mode=self.mode,
+            min_delta=self.min_delta,
+            capture_best=lambda: [value.copy() for value in exp.model.obj.get_weights()],
+            restore_best=exp.model.obj.set_weights,
+            restore_best_weights=self.restore_best_weights,
+        )
+
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
+        """Persist the retained decision and detached best Keras Model state.
+
+        Args:
+            dest_dir: Empty Store-owned local-state directory.
+            codec: Opaque selected codec, accepted for hook compatibility.
+
+        Side Effects:
+            Writes one trusted continuation payload inside ``dest_dir``.
+        """
+
+        del codec
+        pickle_save(
+            self.early_stopping.to_payload(),
+            os.path.join(dest_dir, "early-stopping.pkl"),
+        )
+
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
+        """Validate and restore this TrainFunction's saved continuation.
+
+        Args:
+            src_dir: Store-owned directory containing the continuation payload.
+            codec: Opaque selected codec, accepted for hook compatibility.
+
+        Raises:
+            ValueError: If retained decision facts are malformed.
+
+        Side Effects:
+            Replaces ``early_stopping`` only after payload decoding succeeds.
+        """
+
+        del codec
+        self.early_stopping = _EarlyStoppingState.from_payload(
+            pickle_load(os.path.join(src_dir, "early-stopping.pkl"))
+        )
 
 
 ModelWrapper = Model

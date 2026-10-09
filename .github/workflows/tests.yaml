@@ -178,6 +178,86 @@ jobs:
         run: |
           ./tests.sh heavy --ignore tests/old --ignore tests/dev -x
 
+  jax-training-qualification:
+    name: JAX training qualification (${{ matrix.install }}, Python 3.12)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        install: [jax-only, tf-torch]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install JAX training qualification dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r test_requirements.txt -r jax_training_test_requirements.txt
+          if [[ "${{ matrix.install }}" == "tf-torch" ]]; then
+            python -m pip install ".[tf,torch]"
+          else
+            python -m pip install .
+          fi
+
+      - name: Require the CPU JAX training stack and show resolved versions
+        env:
+          JAX_PLATFORMS: cpu
+          QUALIFICATION_INSTALL: ${{ matrix.install }}
+        run: |
+          python - <<'PY'
+          import os
+          import platform
+          from importlib import metadata
+          import jax
+          from flax import nnx
+          import optax
+
+          devices = jax.devices()
+          assert jax.default_backend() == "cpu"
+          assert devices and all(device.platform == "cpu" for device in devices)
+          assert isinstance(nnx.Linear(1, 1, rngs=nnx.Rngs(0)), nnx.Module)
+          assert optax.adam(1e-3) is not None
+          packages = ["dryml", "jax", "jaxlib", "flax", "optax"]
+          if os.environ["QUALIFICATION_INSTALL"] == "tf-torch":
+              import tensorflow
+              import torch
+              packages.extend(("tensorflow", "torch"))
+          print(f"python: {platform.python_version()}")
+          print(f"jax backend: {jax.default_backend()}")
+          print(f"jax devices: {devices}")
+          for package in packages:
+              print(f"{package}: {metadata.version(package)}")
+          PY
+
+      - name: Run TensorFlow and Torch authored-batch representatives
+        if: matrix.install == 'tf-torch'
+        run: |
+          ./tests.sh \
+            tests/models/test_dataset_training_integration.py::test_native_trainers_consume_authored_dataset_batches \
+            tests/models/test_tf_training.py::test_tf_validation_loss_weights_a_short_final_batch_by_examples \
+            tests/models/test_torch_training.py::test_torch_validation_loss_weights_a_short_final_batch_by_examples \
+            --no-cov -x
+
+      - name: Run JAX qualification tests
+        env:
+          JAX_PLATFORMS: cpu
+          DRYML_TEST_BOOTSTRAP_CONTEXTS: "1"
+        run: |
+          ./tests.sh \
+            tests/jax/test_jax_install.py \
+            tests/models/test_jax_imports.py \
+            tests/models/test_dataset_training_integration.py::test_jax_trainer_consumes_authored_dataset_batches \
+            tests/models/test_dataset_training_integration.py::test_jax_qualification_model_runs_on_authored_dataset_batches \
+            tests/models/test_dataset_training_integration.py::test_jax_managed_local_publishes_exact_history_and_independent_owner_state \
+            tests/models/test_dataset_training_integration.py::test_jax_managed_subprocess_restores_exact_graph \
+            tests/models/test_jax_training.py::test_jax_training_updates_first_class_flax_nnx_model \
+            --no-cov -x
+
   ray-integration:
     name: Existing Ray integration (Ubuntu, Python 3.12)
     if: github.event_name == 'workflow_dispatch' && (inputs.suite == 'exhaustive' || inputs.suite == 'coverage')

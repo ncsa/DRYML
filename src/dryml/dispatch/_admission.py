@@ -189,11 +189,10 @@ def _check_discovery(
     # incomplete without making an unconstrained workload incompatible.
     if environment is None and world is None and selection is None:
         return CompatibilityOutcome(True)
-    # Resource inventory can be incomplete on a supported platform even when
-    # an exact interpreter supplies all requested software evidence.
-    if getattr(snapshot, "issues", ()) or (
-        world is not None and not getattr(snapshot, "complete", False)
-    ):
+    # Aggregate discovery can be incomplete in a resource dimension unrelated
+    # to this request. A backend-owned feasible plan below remains affirmative
+    # evidence for the exact requested world.
+    if getattr(snapshot, "issues", ()):
         return CompatibilityOutcome(
             False, ("dispatch.backend_discovery_incomplete",)
         )
@@ -256,6 +255,10 @@ def _check_discovery(
             )
         ):
             return CompatibilityOutcome(True)
+    if not getattr(snapshot, "complete", False):
+        return CompatibilityOutcome(
+            False, ("dispatch.backend_discovery_incomplete",)
+        )
     return CompatibilityOutcome(
         False, ("dispatch.backend_world_incompatible",)
     )

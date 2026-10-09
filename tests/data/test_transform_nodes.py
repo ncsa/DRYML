@@ -4,6 +4,7 @@ import sys
 import numpy as np
 import pytest
 
+from dryml.core import Definition, Mat, Par, Ref
 from dryml.core.cardinality import Cardinality
 from dryml.core.backend import Backend
 from dryml.core.tensor_spec import Dynamic, TensorSpec
@@ -25,6 +26,7 @@ from dryml.data import (
     Unbatch,
     Zip,
     Chain,
+    as_supervised,
 )
 
 
@@ -740,3 +742,193 @@ def test_chain_merges_specs_and_concatenates_sources():
     assert ds.spec == TensorSpec("int32", shape=(Dynamic,), backend="numpy")
     assert ds.__len__() == Cardinality.finite(3)
     assert [item.tolist() for item in ds] == [[1], [2], [3, 4]]
+
+
+def test_as_supervised_projects_scalar_whole_tree_named_and_autoencoder_targets():
+    source = ListDataset(
+        [{"features": {"left": np.array([1]), "right": np.array([2])}, "label": np.array(3)}],
+        {
+            "features": {
+                "left": TensorSpec("int64", shape=(1,), backend="numpy"),
+                "right": TensorSpec("int64", shape=(1,), backend="numpy"),
+            },
+            "label": TensorSpec("int64", shape=(), backend="numpy"),
+        },
+    )
+
+    scalar = as_supervised(source, "features", "label")
+    named = as_supervised(
+        source,
+        {"left": Select.from_path(("features", "left")), "right": Select.from_path(("features", "right"))},
+        "label",
+    )
+    autoencoder = as_supervised(source, "features", input_as_target=True)
+
+    scalar_value = next(iter(scalar))
+    named_value = next(iter(named))
+    autoencoder_value = next(iter(autoencoder))
+    assert scalar_value[0]["left"].tolist() == [1]
+    assert scalar_value[1].item() == 3
+    assert named_value[0]["left"].tolist() == [1]
+    assert named_value[0]["right"].tolist() == [2]
+    assert autoencoder_value[0] is autoencoder_value[1]
+
+
+@pytest.mark.parametrize("authority", ("soft", "concrete", "mat", "ref"))
+def test_as_supervised_authors_definition_native_autoencoder_projection(authority):
+    """Symbolic Dataset sources remain inert until their Map graph is built."""
+
+    source = Definition(
+        ListDataset,
+        [{"cart": np.array([1, 2])}],
+        {"cart": TensorSpec("int64", shape=(2,), backend="numpy")},
+    )
+    if authority == "concrete":
+        source = source.concretize()
+    elif authority == "mat":
+        source = Mat(source)
+    elif authority == "ref":
+        source = Ref(source)
+
+    projected = as_supervised(source, "cart", input_as_target=True)
+
+    assert isinstance(projected, Definition)
+    assert projected.cls is Map
+    inputs, targets = next(iter(projected.build()))
+    assert inputs is targets
+    assert inputs.tolist() == [1, 2]
+
+
+@pytest.mark.parametrize("test_authority", ("concrete", "state"))
+def test_as_supervised_parameter_sources_bind_inside_modular_experiments(tmp_path, test_authority):
+    """Dataset placeholders compose before their sources are supplied or built."""
+
+    from dryml.models import Experiment
+    from dryml.metrics import regressor_mae
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+
+    source = Definition(
+        ListDataset,
+        [{"cart": np.array([1, 2])}],
+        {"cart": TensorSpec("int64", shape=(2,), backend="numpy")},
+    ).concretize()
+    repo = Repo(DirStore(tmp_path / "store"))
+    test_source = source if test_authority == "concrete" else repo.save_object(source.build(repo=repo))
+    template = Experiment.defn(
+        model=None,
+        train_fn=None,
+        train_data=as_supervised(Par("train_ds"), "cart", input_as_target=True),
+        test_data=as_supervised(Par("test_ds"), "cart", input_as_target=True),
+        artifacts={"mae": regressor_mae(
+            Par("this.test_data"), Par("this.model"), x=0, y=1, mode="global",
+        )},
+    )
+
+    assert {"train_ds", "test_ds"} <= set(template.names)
+    bound = template.sub(train_ds=source, test_ds=test_source)
+    direct = Experiment.defn(
+        model=None,
+        train_fn=None,
+        train_data=as_supervised(source, "cart", input_as_target=True),
+        test_data=as_supervised(test_source, "cart", input_as_target=True),
+        artifacts=template.artifacts,
+    )
+    assert bound.concretize(repo=repo) == direct.concretize(repo=repo)
+    inputs, targets = next(iter(bound.train_data.build()))
+    assert inputs is targets
+    assert inputs.tolist() == [1, 2]
+    test_inputs, test_targets = next(iter(bound.test_data.build(repo=repo)))
+    assert test_inputs is test_targets
+    assert test_inputs.tolist() == [1, 2]
+
+
+def test_as_supervised_accepts_wrapped_parameters_but_rejects_non_dataset_values():
+    """Ref/Mat source placeholders remain inert and invalid literal inputs fail."""
+
+    for value in (Par("data"), Ref(Par("data")), Mat(Par("data"))):
+        projected = as_supervised(value, "cart", input_as_target=True)
+        assert isinstance(projected, Definition)
+        assert projected.names == ("data",)
+
+    for value in (object(), {"source": Par("data")}, [Par("data")]):
+        with pytest.raises(TypeError, match="Dataset or Dataset reference"):
+            as_supervised(value, "cart", input_as_target=True)
+
+
+def test_as_supervised_rejects_empty_or_ambiguous_selection_trees():
+    source = ListDataset(
+        [{"x": np.array([1]), "y": np.array([2])}],
+        {
+            "x": TensorSpec("int64", shape=(1,), backend="numpy"),
+            "y": TensorSpec("int64", shape=(1,), backend="numpy"),
+        },
+    )
+
+    with pytest.raises(ValueError, match="empty"):
+        as_supervised(source, {}, "y")
+    with pytest.raises(TypeError, match="Ambiguous"):
+        as_supervised(source, ("x", "y"), "y")
+    with pytest.raises(TypeError, match="Select.from_path"):
+        as_supervised(source, {"x": "x"}, "y")
+    with pytest.raises(ValueError, match="requires targets"):
+        as_supervised(source, "x")
+    with pytest.raises(ValueError, match="does not accept"):
+        as_supervised(source, "x", "y", input_as_target=True)
+    with pytest.raises(TypeError, match="Dataset or Dataset reference"):
+        as_supervised(object(), "x", "y")
+
+
+def test_as_supervised_authors_graph_from_persisted_dataset_references(tmp_path):
+    """ObjectRef and StateRef inputs stay inert until the authored graph is built."""
+
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    source = ListDataset(
+        [{"x": np.array([1]), "y": np.array([2])}],
+        {
+            "x": TensorSpec("int64", shape=(1,), backend="numpy"),
+            "y": TensorSpec("int64", shape=(1,), backend="numpy"),
+        },
+    )
+    state_ref = repo.save_object(source, deep_capture=True)
+
+    for reference in (state_ref.object, state_ref):
+        projected = as_supervised(reference, "x", "y")
+
+        assert isinstance(projected, Definition)
+        assert projected.cls is Map
+
+    inputs, targets = next(iter(as_supervised(state_ref, "x", "y").build(repo=repo)))
+    assert inputs.tolist() == [1]
+    assert targets.tolist() == [2]
+
+
+def test_as_supervised_nested_and_tuple_selection_trees_survive_save_load(tmp_path):
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+
+    source = ListDataset(
+        [{"feature": {"left": np.array([1]), "right": np.array([2])}, "label": np.array([3])}],
+        {
+            "feature": {
+                "left": TensorSpec("int64", shape=(1,), backend="numpy"),
+                "right": TensorSpec("int64", shape=(1,), backend="numpy"),
+            },
+            "label": TensorSpec("int64", shape=(1,), backend="numpy"),
+        },
+    )
+    projected = as_supervised(
+        source,
+        {"feature": {"left": Select.from_path(("feature", "left"))}},
+        (Select.from_path(("label",)), Select.from_path(("feature", "right"))),
+    )
+    repo = Repo(DirStore(tmp_path / "store"))
+    reference = repo.save_object(projected, deep_capture=True)
+    loaded = repo.load_state_ref(reference, reuse_live="never")
+
+    inputs, targets = next(iter(loaded))
+    assert inputs["feature"]["left"].tolist() == [1]
+    assert [target.tolist() for target in targets] == [[3], [2]]

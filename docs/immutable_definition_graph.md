@@ -8,6 +8,14 @@ Raw nested CDefs and `Mat(...)` are materializing edges. `Ref(...)` is non-mater
 
 An `ObjectRef` expands owned materializing topology and records ObjectIds at its canonical primary paths. A `StateRef` adds local-state hashes at exactly those paths. Thus graph topology, durable lineage, and a checkpoint remain distinct values.
 
+An `ObjectSelector` is the query-only object projection of either reference. Its
+projected CDef replaces encountered ObjectRef and StateRef leaves with nested
+ObjectSelectors, preserving graph topology and ObjectIds without state hashes.
+Raw references explicitly placed inside a selector remain exact. Selector-bearing
+CDefs can be hashed and matched but are rejected by the authoritative CDef codec;
+generated selectors retain their separate non-state ObjectRef association through
+`ObjectSelector.reference` when persistence requires authority.
+
 An Artifact Fold's source/model-facing `Ref[AutoRef]` edge is terminal data in this
 graph. Saving or restoring a completed Fold state preserves that selected reference
 but does not make its input an owned snapshot dependency. The Fold's result lives

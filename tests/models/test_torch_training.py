@@ -3,8 +3,9 @@ import pytest
 import sys
 
 from dryml import F
+from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
+from dryml.data import ArgMax, ArrayDataset, Batch, Map, Pipe, Project, Select
 from dryml.core import Repo
 from dryml.managed import ManagedConfig
 from dryml.models import AutoEncoder, Experiment
@@ -41,7 +42,7 @@ def test_torch_basic_training_updates_experiment_state():
     assert get_default_repo() is None
     x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
     y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
-    ds = ArrayDataset((x, y))
+    ds = Batch(ArrayDataset((x, y)), 2)
 
     model = Model(torch.nn.Linear, 1, 1)
     optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.01)
@@ -49,7 +50,6 @@ def test_torch_basic_training_updates_experiment_state():
         optimizer=optimizer,
         loss_cls=torch.nn.MSELoss,
         epochs=2,
-        batch_size=2,
         verbose=0,
     )
     exp = Experiment(model, train_fn, train_data=ds)
@@ -66,13 +66,48 @@ def test_torch_basic_training_updates_experiment_state():
     assert get_default_repo() is None
 
 
+def test_torch_invocation_telemetry_receives_host_logs_after_accounting(tmp_path):
+    """Plain-loop observers see accepted positions and host scalar logs only."""
+
+    from dryml.models.torch import Model, Optimizer, Training
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.array([[0.0], [1.0]], dtype=np.float32),
+        np.array([[0.0], [2.0]], dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    model = Model(torch.nn.Linear, 1, 1, repo=repo)
+    trainer = Training(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.01, repo=repo),
+        loss_cls=torch.nn.MSELoss,
+        epochs=1,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(model, trainer, train_data=data, repo=repo)
+    logs = []
+
+    final = exp.train(
+        callbacks=[lambda values: logs.append(dict(values))],
+        managed=ManagedConfig(state_repo=repo),
+    )
+
+    assert [values["event"] for values in logs] == [
+        "train_batch_end", "train_batch_end", "epoch_end",
+    ]
+    assert [values["step"] for values in logs] == [1, 2, 2]
+    assert [values["batch"] for values in logs[:2]] == [0, 1]
+    assert all(type(values["loss"]) is float for values in logs)
+    assert exp.train.status(state_repo=repo).final_state_ref == final
+
+
 def test_torch_model_and_optimizer_state_ref_round_trip(tmp_path):
     from dryml.models.torch import Model, Optimizer, Training
 
     repo = Repo(stores=tmp_path)
     x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
     y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
-    ds = ArrayDataset((x, y), repo=repo)
+    ds = Batch(ArrayDataset((x, y), repo=repo), 2, repo=repo)
     model = Model(torch.nn.Linear, 1, 1, repo=repo)
     optimizer = Optimizer(
         torch.optim.SGD, target=model, lr=0.01, momentum=0.9, repo=repo
@@ -81,7 +116,6 @@ def test_torch_model_and_optimizer_state_ref_round_trip(tmp_path):
         optimizer=optimizer,
         loss_cls=torch.nn.MSELoss,
         epochs=2,
-        batch_size=2,
         verbose=0,
         repo=repo,
     )
@@ -263,7 +297,7 @@ def test_torch_autoencoder_optimizer_targets_composite_model():
         ],
         dtype=np.float32,
     )
-    ds = ArrayDataset((x, x.copy()))
+    ds = Batch(ArrayDataset((x, x.copy())), 2)
     encoder = Sequential(
         layer_defs=(
             F("Linear", 3, 8),
@@ -284,7 +318,6 @@ def test_torch_autoencoder_optimizer_targets_composite_model():
         optimizer=optimizer,
         loss_cls=torch.nn.MSELoss,
         epochs=2,
-        batch_size=2,
         verbose=0,
     )
     exp = Experiment(model, train_fn, train_data=ds)
@@ -329,11 +362,10 @@ def test_torch_training_restore_skips_completed_batch_and_keeps_exposure(tmp_pat
             optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.01, repo=repo),
             loss_cls=torch.nn.MSELoss,
             epochs=1,
-            batch_size=2,
             verbose=0,
             repo=repo,
         ),
-        train_data=ArrayDataset((x, y), repo=repo),
+        train_data=Batch(ArrayDataset((x, y), repo=repo), 2, repo=repo),
         repo=repo,
     )
 
@@ -366,11 +398,10 @@ def _torch_accounting_experiment(*, repo=None, count=64, batch_size=1, lr=0.01):
             optimizer=Optimizer(torch.optim.SGD, target=model, lr=lr, repo=repo),
             loss_cls=torch.nn.MSELoss,
             epochs=1,
-            batch_size=batch_size,
             verbose=0,
             repo=repo,
         ),
-        train_data=ArrayDataset((x, y), repo=repo),
+        train_data=Batch(ArrayDataset((x, y), repo=repo), batch_size, repo=repo),
         repo=repo,
     )
 
@@ -436,10 +467,9 @@ def test_torch_weighted_loss_uses_actual_short_final_batch_and_normalizes_before
             optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
             loss_cls=torch.nn.MSELoss,
             epochs=1,
-            batch_size=64,
             verbose=0,
         ),
-        train_data=ArrayDataset((x, y)),
+        train_data=Batch(ArrayDataset((x, y)), 64),
     )
     observed = []
 
@@ -459,8 +489,8 @@ def test_torch_callback_and_loss_preflight_leave_training_objects_untouched():
     optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.01)
     exp = Experiment(
         model,
-        Training(optimizer=optimizer, loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0),
-        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+        Training(optimizer=optimizer, loss_cls=torch.nn.MSELoss, epochs=1, verbose=0),
+        train_data=Batch(ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))), 1),
     )
 
     with pytest.raises(TypeError, match="callbacks"):
@@ -474,7 +504,6 @@ def test_torch_callback_and_loss_preflight_leave_training_objects_untouched():
         loss_cls=torch.nn.MSELoss,
         loss_kwargs={"reduction": "sum"},
         epochs=1,
-        batch_size=1,
         verbose=0,
     )
     with pytest.raises(ValueError, match="reduction='mean'"):
@@ -510,10 +539,9 @@ def test_torch_training_prepares_cross_backend_data_before_model_invocation(monk
             optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
             loss_cls=torch.nn.MSELoss,
             epochs=1,
-            batch_size=1,
             verbose=0,
         ),
-        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+        train_data=Batch(ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))), 1),
     )
 
     exp.train_fn(exp)
@@ -533,14 +561,14 @@ def test_torch_training_prepares_tensorflow_data_through_its_retained_method_edg
     model = Model(torch.nn.Linear, 1, 1)
     trainer = Training(
         optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
-        loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0,
+        loss_cls=torch.nn.MSELoss, epochs=1, verbose=0,
     )
     exp = Experiment(
         model, trainer,
-        train_data=GeneratorDataset(
+        train_data=Batch(GeneratorDataset(
             _tiny_tensorflow_pairs, cardinality=Cardinality.finite(2),
             spec=(TensorSpec("float32", shape=(1,), backend="tf"), TensorSpec("float32", shape=(1,), backend="tf")),
-        ),
+        ), 1),
     )
 
     trainer(exp)
@@ -572,9 +600,9 @@ def test_torch_final_callback_resume_runs_one_validation_postlude_without_an_upd
     model = Model(torch.nn.Linear, 1, 1)
     trainer = Training(
         optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
-        loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0,
+        loss_cls=torch.nn.MSELoss, epochs=1, verbose=0,
     )
-    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     exp = Experiment(model, trainer, train_data=data, val_data=data)
     evaluations = []
     monkeypatch.setattr(trainer, "_evaluate", lambda *args, **kwargs: evaluations.append("validation") or {})
@@ -615,11 +643,11 @@ def test_torch_training_plans_cross_backend_handoffs_once(monkeypatch):
     model = Model(torch.nn.Linear, 1, 1)
     trainer = Training(
         optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
-        loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0,
+        loss_cls=torch.nn.MSELoss, epochs=1, verbose=0,
     )
     exp = Experiment(
         model, trainer,
-        train_data=ArrayDataset((np.zeros((3, 1), dtype=np.float32), np.zeros((3, 1), dtype=np.float32))),
+        train_data=Batch(ArrayDataset((np.zeros((3, 1), dtype=np.float32), np.zeros((3, 1), dtype=np.float32))), 1),
     )
 
     trainer(exp)
@@ -662,9 +690,9 @@ def test_torch_unknown_stream_retains_validation_metrics_across_progress_retry(m
     model = Model(torch.nn.Linear, 1, 1)
     trainer = Training(
         optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
-        loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0,
+        loss_cls=torch.nn.MSELoss, epochs=1, verbose=0,
     )
-    data = UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     exp = Experiment(model, trainer, train_data=data, val_data=data)
     evaluations = []
     monkeypatch.setattr(trainer, "_evaluate", lambda *args, **kwargs: evaluations.append("validation") or {"loss": 3.0})
@@ -679,3 +707,400 @@ def test_torch_unknown_stream_retains_validation_metrics_across_progress_retry(m
     trainer(exp)
     assert evaluations == ["validation"]
     assert Progress.received == [retained_metrics, retained_metrics]
+
+
+def test_torch_validation_loss_weights_a_short_final_batch_by_examples(monkeypatch):
+    """Validation loss remains an example mean for uneven authored batches."""
+    from dryml.models.torch import Model, Optimizer, Training
+    import dryml.models.torch.base as torch_base
+
+    class Progress:
+        received = []
+
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def update(self, *args, **kwargs):
+            del args, kwargs
+
+        def epoch_end(self, *args, **kwargs):
+            del args
+            type(self).received.append(kwargs["metrics"])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(torch_base, "TrainingProgress", Progress)
+    model = Model(torch.nn.Linear, 1, 1, bias=False)
+    trainer = Training(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss, epochs=1, verbose=0,
+    )
+    train_data = Batch(ArrayDataset((
+        np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32),
+    )), 1)
+    val_data = Batch(ArrayDataset((
+        np.zeros((3, 1), dtype=np.float32),
+        np.asarray([[0.0], [0.0], [3.0]], dtype=np.float32),
+    )), 2)
+
+    trainer(Experiment(model, trainer, train_data=train_data, val_data=val_data))
+
+    assert Progress.received[0]["val_loss"] == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"monitor": ""}, ValueError),
+        ({"monitor": "accuracy"}, ValueError),
+        ({"patience": True}, TypeError),
+        ({"patience": -1}, ValueError),
+        ({"mode": "auto"}, ValueError),
+        ({"min_delta": -1.0}, ValueError),
+        ({"min_delta": float("nan")}, ValueError),
+    ],
+)
+def test_torch_early_stopping_rejects_invalid_configuration(kwargs, error):
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    model = Model(torch.nn.Linear, 1, 1)
+    optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.0)
+    with pytest.raises(error):
+        EarlyStoppingTraining(
+            optimizer=optimizer,
+            loss_cls=torch.nn.MSELoss,
+            epochs=3,
+            verbose=0,
+            **kwargs,
+        )
+
+
+def test_torch_early_stopping_accepts_shortened_target_and_retains_decision():
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    )), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        mode="min",
+        min_delta=0.0,
+        restore_best_weights=False,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data)
+
+    trainer(exp)
+
+    assert exp.state.epoch == 2
+    assert exp.state.target_epoch is None
+    assert trainer.early_stopping.best_epoch == 0
+    assert trainer.early_stopping.wait == 1
+    assert trainer.early_stopping.accepted_target == 2
+
+
+def test_torch_early_stopping_reports_stop_then_closes_telemetry(tmp_path):
+    """Saved stop behavior remains separate from invocation observer cleanup."""
+
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    model = Model(torch.nn.Linear, 1, 1, repo=repo)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0, repo=repo),
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        restore_best_weights=False,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(model, trainer, train_data=data, repo=repo)
+    events = []
+
+    class Observer:
+        def __call__(self, logs):
+            events.append(dict(logs))
+
+        def close(self):
+            events.append("closed")
+
+    exp.train(
+        callbacks=[Observer()],
+        managed=ManagedConfig(state_repo=repo),
+    )
+
+    epoch_events = [
+        event for event in events
+        if isinstance(event, dict) and event["event"] == "epoch_end"
+    ]
+    assert [event["stopped"] for event in epoch_events] == [False, True]
+    assert events[-1] == "closed"
+    assert trainer.early_stopping.accepted_target == 2
+
+
+def test_torch_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
+    """A persisted completed stop finalizes without reopening training data."""
+
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    failed_control = DirStore(tmp_path / "failed-control")
+    resume_control = DirStore(tmp_path / "resume-control")
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    model = Model(torch.nn.Linear, 1, 1, repo=repo)
+    optimizer = Optimizer(torch.optim.Adam, target=model, lr=0.0, repo=repo)
+    trainer = EarlyStoppingTraining(
+        optimizer=optimizer,
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(model, trainer, train_data=data, repo=repo)
+
+    def fail_stopped_epoch(logs):
+        if logs["event"] == "epoch_end" and logs["stopped"]:
+            raise RuntimeError("strict stopped epoch")
+
+    with pytest.raises(RuntimeError, match="strict stopped epoch"):
+        exp.train(
+            callbacks=[fail_stopped_epoch],
+            observer_strict=True,
+            managed=ManagedConfig(
+                state_repo=repo, control_store=failed_control,
+            ),
+        )
+
+    assert (exp.state.epoch, exp.state.step, exp.state.target_epoch) == (2, 4, 5)
+    assert exp.state.pending_epoch_postlude is None
+    assert trainer.early_stopping.accepted_target == 2
+    assert trainer.early_stopping.restored is True
+    stopped_model = {
+        name: value.detach().clone() for name, value in model.obj.state_dict().items()
+    }
+    stopped_optimizer_steps = [
+        int(state["step"].item()) for state in optimizer.obj.state.values()
+    ]
+    checkpoint = repo.save_object(exp, deep_capture=True)
+    resumed = repo.load_state_ref(checkpoint, reuse_live="never")
+
+    final = resumed.train(managed=ManagedConfig(
+        state_repo=repo, control_store=resume_control,
+    ))
+    status = resumed.train.status(
+        state_repo=repo, control_store=resume_control,
+    )
+
+    assert final == status.final_state_ref == resumed.last_state_ref
+    assert (resumed.state.epoch, resumed.state.step, resumed.state.target_epoch) == (2, 4, None)
+    torch.testing.assert_close(resumed.model.obj.state_dict(), stopped_model)
+    assert [
+        int(state["step"].item())
+        for state in resumed.train_fn.optimizer.obj.state.values()
+    ] == stopped_optimizer_steps
+
+
+def test_torch_early_stopping_completes_full_target_before_patience():
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    )), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss,
+        epochs=2,
+        monitor="loss",
+        patience=2,
+        restore_best_weights=False,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data)
+
+    trainer(exp)
+
+    assert exp.state.epoch == 2
+    assert exp.state.target_epoch is None
+    assert trainer.early_stopping.accepted_target is None
+
+
+@pytest.mark.parametrize(
+    ("validation_metrics", "match"),
+    [({}, "missing"), ({"loss": float("nan")}, "finite")],
+)
+def test_torch_early_stopping_rejects_missing_or_nonfinite_monitor(
+    monkeypatch, validation_metrics, match,
+):
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    data = Batch(ArrayDataset((
+        np.zeros((1, 1), dtype=np.float32),
+        np.ones((1, 1), dtype=np.float32),
+    )), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss,
+        epochs=2,
+        monitor="val_loss",
+        patience=0,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data, val_data=data)
+    monkeypatch.setattr(trainer, "_evaluate", lambda *args, **kwargs: validation_metrics)
+
+    with pytest.raises(ValueError, match=match):
+        trainer(exp)
+
+    assert exp.state.step == 1
+    assert exp.state.target_epoch == 2
+
+
+def test_torch_early_stopping_restores_only_best_model_state(monkeypatch):
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    data = Batch(ArrayDataset((
+        np.ones((2, 1), dtype=np.float32),
+        np.zeros((2, 1), dtype=np.float32),
+    )), 2)
+    model = Model(torch.nn.Linear, 1, 1)
+    optimizer = Optimizer(torch.optim.Adam, target=model, lr=0.1)
+    trainer = EarlyStoppingTraining(
+        optimizer=optimizer,
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="val_loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data, val_data=data)
+    validation = iter((1.0, 2.0))
+    monkeypatch.setattr(
+        trainer,
+        "_evaluate",
+        lambda *args, **kwargs: {"loss": next(validation)},
+    )
+    observed = {}
+    original = trainer._finish_training_behavior_epoch
+
+    def finish(exp, epoch, metrics):
+        observed[epoch] = {
+            name: value.detach().clone() for name, value in model.obj.state_dict().items()
+        }
+        return original(exp, epoch, metrics)
+
+    monkeypatch.setattr(trainer, "_finish_training_behavior_epoch", finish)
+
+    trainer(exp)
+
+    torch.testing.assert_close(model.obj.state_dict(), observed[0])
+    assert exp.state.epoch == 2
+    assert next(iter(optimizer.obj.state.values()))["step"].item() == 2
+    assert trainer.early_stopping.restored is True
+
+
+def test_torch_early_stopping_postlude_resume_retains_one_decision(monkeypatch, tmp_path):
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+    import dryml.models.torch.base as torch_base
+
+    class Progress:
+        attempts = 0
+
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def update(self, *args, **kwargs):
+            del args, kwargs
+
+        def epoch_end(self, *args, **kwargs):
+            del args, kwargs
+            type(self).attempts += 1
+            if type(self).attempts == 2:
+                raise RuntimeError("progress postlude")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(torch_base, "TrainingProgress", Progress)
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    )), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data)
+
+    with pytest.raises(RuntimeError, match="progress postlude"):
+        trainer(exp)
+    assert trainer.early_stopping.wait == 1
+    assert exp.state.pending_epoch_postlude == 1
+
+    repo = Repo(stores=tmp_path)
+    checkpoint = repo.save_object(exp, deep_capture=True)
+    resumed = repo.load_state_ref(checkpoint, reuse_live="never")
+    resumed.train_fn(resumed)
+
+    assert resumed.train_fn.early_stopping.wait == 1
+    assert resumed.state.target_epoch is None
+
+
+def test_torch_managed_early_stopping_returns_exact_terminal_state(tmp_path):
+    """Managed completion associates the shortened mixed-point graph itself."""
+
+    from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    )), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = EarlyStoppingTraining(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+        loss_cls=torch.nn.MSELoss,
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=data)
+
+    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    status = exp.train.status(state_repo=repo)
+    restored = repo.load_state_ref(final, reuse_live="never")
+
+    assert final == status.final_state_ref == exp.last_state_ref
+    assert (restored.state.epoch, restored.state.step, restored.state.target_epoch) == (2, 4, None)
+    assert restored.train_fn.early_stopping.accepted_target == 2
+    assert restored.train_fn.early_stopping.restored is True

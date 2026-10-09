@@ -11,10 +11,183 @@ from .measurements import TrainingObservation
 
 
 @dataclass(slots=True)
+class _EarlyStoppingState:
+    """TrainFunction-owned continuation for one early-stopping invocation."""
+
+    best_metric: float | None = None
+    wait: int = 0
+    best_epoch: int | None = None
+    best_model_state: object | None = None
+    last_epoch: int | None = None
+    stopped_epoch: int | None = None
+    accepted_target: int | None = None
+    restored: bool = False
+
+    def reset(self) -> None:
+        """Clear prior invocation facts before a fresh invocation starts."""
+
+        self.best_metric = None
+        self.wait = 0
+        self.best_epoch = None
+        self.best_model_state = None
+        self.last_epoch = None
+        self.stopped_epoch = None
+        self.accepted_target = None
+        self.restored = False
+
+    def to_payload(self) -> dict[str, object]:
+        """Return a backend-serializable continuation mapping."""
+
+        return {
+            "version": 1,
+            "best_metric": self.best_metric,
+            "wait": self.wait,
+            "best_epoch": self.best_epoch,
+            "best_model_state": self.best_model_state,
+            "last_epoch": self.last_epoch,
+            "stopped_epoch": self.stopped_epoch,
+            "accepted_target": self.accepted_target,
+            "restored": self.restored,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "_EarlyStoppingState":
+        """Validate and rebuild one saved continuation mapping."""
+
+        names = {
+            "version", "best_metric", "wait", "best_epoch", "best_model_state",
+            "last_epoch", "stopped_epoch", "accepted_target", "restored",
+        }
+        if type(payload) is not dict or set(payload) != names or payload["version"] != 1:
+            raise ValueError("Unsupported early-stopping continuation state.")
+        best_metric = payload["best_metric"]
+        if best_metric is not None and (
+            type(best_metric) not in (int, float) or not isfinite(best_metric)
+        ):
+            raise ValueError("Saved early-stopping best metric must be finite or None.")
+        for name in ("wait", "best_epoch", "last_epoch", "stopped_epoch", "accepted_target"):
+            value = payload[name]
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"Saved early-stopping {name} must be nonnegative or None.")
+        if type(payload["wait"]) is not int:
+            raise TypeError("Saved early-stopping wait must be an exact integer.")
+        if type(payload["restored"]) is not bool:
+            raise TypeError("Saved early-stopping restored marker must be an exact bool.")
+        if (best_metric is None) != (payload["best_epoch"] is None):
+            raise ValueError("Saved early-stopping best metric and epoch must agree.")
+        if payload["stopped_epoch"] is None:
+            if payload["accepted_target"] is not None or payload["restored"]:
+                raise ValueError("Saved early-stopping terminal facts require a stop epoch.")
+        elif payload["accepted_target"] != payload["stopped_epoch"] + 1:
+            raise ValueError("Saved early-stopping accepted target is inconsistent.")
+        return cls(
+            best_metric=None if best_metric is None else float(best_metric),
+            wait=payload["wait"],
+            best_epoch=payload["best_epoch"],
+            best_model_state=payload["best_model_state"],
+            last_epoch=payload["last_epoch"],
+            stopped_epoch=payload["stopped_epoch"],
+            accepted_target=payload["accepted_target"],
+            restored=payload["restored"],
+        )
+
+
+def _validate_early_stopping_config(
+    *, monitor: str, patience: int, mode: str, min_delta: float,
+    restore_best_weights: bool,
+) -> tuple[str, int, str, float, bool]:
+    """Validate and normalize the shared saved early-stopping configuration."""
+
+    if type(monitor) is not str or not monitor:
+        raise ValueError("early-stopping monitor must be a nonempty string.")
+    if monitor != "loss" and not (monitor.startswith("val_") and len(monitor) > 4):
+        raise ValueError(
+            "early-stopping monitor must be 'loss' or a validation metric prefixed by 'val_'."
+        )
+    if type(patience) is not int:
+        raise TypeError("early-stopping patience must be an exact integer.")
+    if patience < 0:
+        raise ValueError("early-stopping patience must be nonnegative.")
+    if mode not in ("min", "max"):
+        raise ValueError("early-stopping mode must be 'min' or 'max'.")
+    if type(min_delta) not in (int, float):
+        raise TypeError("early-stopping min_delta must be a finite number.")
+    min_delta = float(min_delta)
+    if not isfinite(min_delta) or min_delta < 0:
+        raise ValueError("early-stopping min_delta must be finite and nonnegative.")
+    if type(restore_best_weights) is not bool:
+        raise TypeError("restore_best_weights must be an exact bool.")
+    return monitor, patience, mode, min_delta, restore_best_weights
+
+
+def _update_early_stopping(
+    state: _EarlyStoppingState,
+    *,
+    epoch: int,
+    metrics: Mapping[str, float],
+    monitor: str,
+    patience: int,
+    mode: str,
+    min_delta: float,
+    capture_best,
+    restore_best,
+    restore_best_weights: bool,
+) -> bool:
+    """Apply one idempotent completed-epoch early-stopping decision."""
+
+    if state.last_epoch == epoch:
+        stopped = state.stopped_epoch == epoch
+    else:
+        if monitor not in metrics:
+            raise ValueError(f"Early-stopping monitor {monitor!r} is missing from completed epoch metrics.")
+        metric = metrics[monitor]
+        if type(metric) not in (int, float) or not isfinite(metric):
+            raise ValueError(f"Early-stopping monitor {monitor!r} must be finite.")
+        metric = float(metric)
+        improved = state.best_metric is None or (
+            metric < state.best_metric - min_delta
+            if mode == "min"
+            else metric > state.best_metric + min_delta
+        )
+        if improved:
+            best_model_state = capture_best() if restore_best_weights else None
+            state.best_metric = metric
+            state.wait = 0
+            state.best_epoch = epoch
+            state.best_model_state = best_model_state
+        else:
+            state.wait += 1
+        state.last_epoch = epoch
+        stopped = not improved and state.wait > patience
+        if stopped:
+            state.stopped_epoch = epoch
+            state.accepted_target = epoch + 1
+
+    if stopped and restore_best_weights and not state.restored:
+        if state.best_model_state is None:
+            raise ValueError("Early stopping has no completed best Model state to restore.")
+        restore_best(state.best_model_state)
+        state.restored = True
+    return stopped
+
+
+def _retained_early_stop_completed(state, train_state) -> bool:
+    """Return whether a saved stop decision completed its normalized epoch."""
+
+    return (
+        state.accepted_target is not None
+        and train_state.target_epoch is not None
+        and train_state.pending_epoch_postlude is None
+        and state.accepted_target == train_state.epoch
+    )
+
+
+@dataclass(slots=True)
 class TrainState:
     """Retained optimizer-progress accounting for one Experiment training state.
 
-    ``examples_seen`` and the loss window advance only after successful optimizer
+    ``examples_seen``, the observation loss window, and the separate weighted
+    completed-epoch loss accumulator advance only after successful optimizer
     updates. ``next_batch`` identifies the next unprocessed batch of ``epoch``;
     this makes a restored deterministic stream resume without reapplying prior
     updates. ``target_epoch`` distinguishes an interrupted invocation from a
@@ -38,6 +211,8 @@ class TrainState:
     examples_seen: int = 0
     loss_numerator: float = 0.0
     loss_denominator: int = 0
+    epoch_loss_numerator: float = 0.0
+    epoch_loss_denominator: int = 0
     next_batch: int = 0
     target_epoch: int | None = None
     pending_epoch_postlude: int | None = None
@@ -76,6 +251,8 @@ class TrainState:
                 and self.examples_seen == other.examples_seen
                 and self.loss_numerator == other.loss_numerator
                 and self.loss_denominator == other.loss_denominator
+                and self.epoch_loss_numerator == other.epoch_loss_numerator
+                and self.epoch_loss_denominator == other.epoch_loss_denominator
                 and self.next_batch == other.next_batch
                 and self.target_epoch == other.target_epoch
                 and self.pending_epoch_postlude == other.pending_epoch_postlude
@@ -180,6 +357,7 @@ class TrainState:
         counter("step")
         counter("examples_seen")
         counter("loss_denominator")
+        counter("epoch_loss_denominator")
         next_batch = counter("next_batch")
         counter("safe_point_sequence")
         target_epoch = counter("target_epoch", nullable=True)
@@ -187,6 +365,9 @@ class TrainState:
         numerator = values["loss_numerator"]
         if type(numerator) not in (int, float) or not isfinite(numerator):
             raise ValueError("TrainState loss_numerator must be finite.")
+        epoch_numerator = values["epoch_loss_numerator"]
+        if type(epoch_numerator) not in (int, float) or not isfinite(epoch_numerator):
+            raise ValueError("TrainState epoch_loss_numerator must be finite.")
         phase = values["phase"]
         if phase is not None and (
             type(phase) is not str
@@ -269,6 +450,32 @@ class TrainState:
         self.examples_seen += examples
         self.loss_numerator += loss * examples
         self.loss_denominator += examples
+        self.epoch_loss_numerator += loss * examples
+        self.epoch_loss_denominator += examples
+        self.next_batch += 1
+
+    def record_fit(self, *, examples: int) -> None:
+        """Retain one successful one-shot fit without claiming update telemetry.
+
+        Args:
+            examples: Exact positive number of submitted training examples.
+
+        Raises:
+            TypeError: If ``examples`` is not an exact integer.
+            ValueError: If ``examples`` is nonpositive.
+
+        Side Effects:
+            Advances the coarse successful-fit transition and exposure count only.
+            It deliberately leaves loss-window and safe-point facts unchanged
+            because a one-shot backend exposes no truthful optimizer boundary.
+        """
+
+        if type(examples) is not int:
+            raise TypeError("examples must be an exact integer.")
+        if examples <= 0:
+            raise ValueError("examples must be positive.")
+        self.step += 1
+        self.examples_seen += examples
         self.next_batch += 1
 
     def begin_invocation(self, epochs: int) -> int:
@@ -373,8 +580,22 @@ class TrainState:
         self.loss_denominator = 0
         return observation
 
-    def finish_epoch(self, *, postlude_pending: bool = False) -> None:
+    def finish_epoch(
+        self,
+        *,
+        postlude_pending: bool = False,
+        metrics: dict[str, float] | None = None,
+    ) -> None:
         """Normalize an exhausted epoch to its next batch-zero position.
+
+        Args:
+            postlude_pending: Whether validation/progress/behavior work remains.
+            metrics: Optional finite completed-epoch metrics retained atomically
+                with the normalized epoch for postlude recovery.
+
+        Raises:
+            ValueError: If metrics are not finite and string-keyed, or metrics
+                are supplied without a retained postlude.
 
         Side Effects:
             Advances ``epoch`` and sets ``next_batch`` to zero. When
@@ -383,12 +604,29 @@ class TrainState:
             change exposure, optimizer-step, or loss-window accounting.
         """
 
+        if metrics is not None:
+            if not postlude_pending:
+                raise ValueError("Completed epoch metrics require a pending postlude.")
+            if type(metrics) is not dict or not all(
+                type(name) is str and type(value) in (int, float) and isfinite(value)
+                for name, value in metrics.items()
+            ):
+                raise ValueError(
+                    "TrainState pending_epoch_metrics must contain finite string-keyed values."
+                )
+            metrics = {name: float(value) for name, value in metrics.items()}
+        if postlude_pending and self.epoch_loss_denominator:
+            metrics = dict(metrics or {})
+            metrics["loss"] = self.epoch_loss_numerator / self.epoch_loss_denominator
         completed_epoch = self.epoch
         self.epoch += 1
         self.next_batch = 0
+        self.epoch_loss_numerator = 0.0
+        self.epoch_loss_denominator = 0
         if postlude_pending:
             self.pending_epoch_postlude = completed_epoch
             self.pending_epoch_postlude_phase = "start"
+            self.pending_epoch_metrics = metrics
 
     def advance_epoch_postlude(
         self, epoch: int, phase: str, *, metrics: dict[str, float] | None = None

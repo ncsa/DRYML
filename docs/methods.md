@@ -219,7 +219,7 @@ declarations include ordered inputs, pure spec/cardinality transforms, pull
 policy, and maximum buffered items. The graph is neither a second cache nor a
 compiler, JIT, fusion, async scheduler, key join, or global optimization API.
 
-For a complete dense NumPy, TensorFlow, or Torch source spec, preparation first
+For a complete dense NumPy, TensorFlow, Torch, or JAX source spec, preparation first
 selects a directly compatible candidate. Only when none exists can it retain one
 direct CPU host-copy handoff to a uniquely most-specific target backend. Each
 `ConversionEdge` exposes producer/consumer specs, adapter name, exact
@@ -235,13 +235,29 @@ cursor and unknown-spec discovery buffer. Planning never opens a source; first
 value discovery happens only in the owning graph cursor and retains at most one
 prefetched value per occurrence.
 
+`Dataset.prepare()` keeps this graph plan as a dependency-light native-training
+input carrier. It reports whether qualified `"stream"` execution or documented
+`"eager"` fallback ran, but neither level owns accepted training progress. Every
+native consumer cursor reopens the plan independently; a consumer prefetch or
+read-ahead can only advance that private cursor and cannot advance a successful
+update position or checkpoint association.
+
+Native trainers retain their selected input and target consumer specs plus any
+dense conversion edges in an inspectable `TrainingPreparation`. TensorFlow,
+Torch, and experimental JAX therefore share the same Method-owned preparation
+authority without importing one another during planning.
+
 Dense handoffs preserve mapping/tuple/list structure and exact representable
 bool or fixed-width numeric dtype, shape, values, and batch meaning through an
 owned writable contiguous host copy. They normalize read-only, transposed, and
-negative-stride source arrays by copying. Object/string/complex/bfloat,
-sparse/ragged/quantized, mixed-backend, non-CPU, and inexact values are rejected
-before the selected target runs. A Torch tensor with `requires_grad=True` cannot
-cross a framework boundary and is never detached implicitly.
+negative-stride source arrays by copying. JAX sources must be concrete,
+fully-addressable, single-device CPU arrays; tracers, abstract values, and sharded
+arrays are rejected. JAX targets are explicitly placed on one CPU device and reject
+a dtype that JAX would narrow under its current x64 setting; DRYML never changes
+that global setting. Object/string/complex/bfloat, sparse/ragged/quantized,
+mixed-backend, non-CPU, and inexact values are rejected before the selected target
+runs. A Torch tensor with `requires_grad=True` cannot cross a framework boundary
+and is never detached implicitly.
 
 Cached calls must exactly match the learned positional and keyword structure,
 dtype, shape, layout, backend, and observable batch facts. Matching calls invoke

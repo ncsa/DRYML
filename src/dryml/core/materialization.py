@@ -414,6 +414,16 @@ class ExactStateLoadPlan:
     lineage_facts_by_reference: Mapping[str, Mapping[Any, Any]]
 
 
+@dataclass(frozen=True, slots=True)
+class _ExactSnapshotSelection:
+    """Validated direct or enclosing Store authority for one exact reference."""
+
+    store: Any
+    authority: Any
+    metadata: Any
+    paths: Mapping[Any, Any]
+
+
 def build_exact_state_load_plan(
         repo, state_ref, *, source_store=None, source_stores=None,
         _defer_payload: bool = False) -> ExactStateLoadPlan:
@@ -422,7 +432,8 @@ def build_exact_state_load_plan(
     Args:
         repo: Repo containing every Store required by the exact closure.
         state_ref: Requested immutable StateRef value.
-        source_store: Optional connected Store selecting root snapshot evidence.
+        source_store: Optional connected Store selecting direct or enclosing root
+            snapshot evidence.
         source_stores: Optional mapping selecting independently routed exact
             StateRef evidence.
 
@@ -441,6 +452,7 @@ def build_exact_state_load_plan(
     from .links import DefLink
     from .store.records import DefinitionRecord
     from .reference_values import ObjectRef, StateRef
+    from .utils.graph.path import GraphPathError, graph_path_sort_key
     from .utils.graph.value import iter_value_edges
 
     if not isinstance(state_ref, StateRef):
@@ -466,8 +478,26 @@ def build_exact_state_load_plan(
     lineage_facts_by_object_id = {}
     lineage_facts_by_reference = {}
 
-    def record_lineages(reference, metadata):
-        facts = dict(metadata.lineages)
+    def selection_lineages(reference, selection):
+        from .metadata import LineageMetadata
+
+        facts = {}
+        for path in dict.fromkeys((GraphPath(), *reference.object.objects)):
+            expected = reference.object if not path else reference.object.at(path)
+            authority_path = selection.paths.get(path)
+            captured = (
+                None if authority_path is None
+                else selection.metadata.lineages.get(authority_path)
+            )
+            facts[path] = (
+                captured
+                if captured is not None and captured.object_ref == expected
+                else LineageMetadata(expected, "unknown", None)
+            )
+        return facts
+
+    def record_lineages(reference, selection):
+        facts = selection_lineages(reference, selection)
         digest = reference.digest()
         previous_facts = lineage_facts_by_reference.get(digest)
         if previous_facts is not None and previous_facts != facts:
@@ -490,9 +520,64 @@ def build_exact_state_load_plan(
                 )
             lineage_facts_by_object_id[object_id] = lineage
 
+    def projection_paths(reference):
+        """Return every materializing subtree path, including imported refs."""
+
+        active = set()
+        paths = set()
+
+        def visit_definition(definition, path):
+            marker = id(definition)
+            if marker in active:
+                return
+            paths.add(path)
+            active.add(marker)
+            try:
+                for edge in iter_value_edges(definition):
+                    visit_value(edge.value, path.child(edge.segment))
+            finally:
+                active.remove(marker)
+
+        def visit_value(value, path):
+            if isinstance(value, ConcreteDefinition):
+                visit_definition(value, path)
+                return
+            if isinstance(value, (ObjectRef, StateRef)):
+                visit_definition(value.definition, path)
+                return
+            if isinstance(value, DefLink):
+                if value.kind is EdgeKind.MATERIALIZE:
+                    visit_value(value.target, path)
+                return
+            for edge in iter_value_edges(value):
+                visit_value(edge.value, path.child(edge.segment))
+
+        visit_definition(reference.definition, GraphPath())
+        return tuple(sorted(paths, key=graph_path_sort_key))
+
+    def direct_selection(store, reference, metadata):
+        paths = {GraphPath(): GraphPath()}
+        paths.update((path, path) for path in reference.states)
+        return _ExactSnapshotSelection(store, reference, metadata, paths)
+
+    def projected_selection(store, authority, metadata, reference, path):
+        authority_by_object = {
+            object_id: state_path
+            for state_path, object_id in authority.object.objects.items()
+        }
+        paths = {GraphPath(): path}
+        for local_path, object_id in reference.object.objects.items():
+            authority_path = authority_by_object.get(object_id)
+            if (
+                    authority_path is None
+                    or authority.states[authority_path] != reference.states[local_path]):
+                return None
+            paths[local_path] = authority_path
+        return _ExactSnapshotSelection(store, authority, metadata, paths)
+
     def select_snapshot(reference, selected=None):
         candidates = (selected,) if selected is not None else repo.stores
-        matches = []
+        direct_matches = []
         for store in candidates:
             try:
                 record = store.read_state_ref_record(reference.digest())
@@ -512,17 +597,70 @@ def build_exact_state_load_plan(
             if metadata is None or metadata.state_ref != reference:
                 missing.append(f"complete snapshot metadata {reference.digest()} in {store!r}")
                 continue
-            matches.append((store, metadata))
-        if not matches:
+            direct_matches.append(direct_selection(store, reference, metadata))
+        if direct_matches:
+            metadata = direct_matches[0].metadata
+            if any(match.metadata != metadata for match in direct_matches[1:]):
+                raise MetadataConflictError("Connected Stores disagree about snapshot evidence.")
+            return direct_matches[0]
+
+        projected_matches = []
+        for store in candidates:
+            try:
+                records = tuple(store.iter_state_ref_records())
+            except Exception as error:
+                missing.append(f"StateRef catalogue in {store!r}: {error}")
+                continue
+            for record in records:
+                authority = record.state_ref
+                if authority == reference:
+                    continue
+                projection_path = None
+                for path in projection_paths(authority):
+                    try:
+                        matches = authority.at(path) == reference
+                    except (GraphPathError, KeyError, ValueError):
+                        continue
+                    if matches:
+                        projection_path = path
+                        break
+                if projection_path is None:
+                    continue
+                try:
+                    metadata = store.read_snapshot_metadata(authority.digest())
+                except Exception as error:
+                    missing.append(
+                        f"enclosing snapshot metadata {authority.digest()} in {store!r}: {error}"
+                    )
+                    continue
+                if metadata is None or metadata.state_ref != authority:
+                    missing.append(
+                        f"complete enclosing snapshot metadata {authority.digest()} in {store!r}"
+                    )
+                    continue
+                match = projected_selection(
+                    store, authority, metadata, reference, projection_path,
+                )
+                if match is not None:
+                    projected_matches.append(match)
+        if not projected_matches:
             if selected is not None:
-                missing.append(f"selected source lacks complete snapshot authority {reference.digest()}")
+                missing.append(
+                    f"selected source lacks complete direct or enclosing snapshot authority {reference.digest()}"
+                )
             else:
-                missing.append(f"authoritative StateRefRecord {reference.digest()}")
+                missing.append(
+                    f"authoritative direct or enclosing StateRefRecord {reference.digest()}"
+                )
             return None
-        metadata = matches[0][1]
-        if any(candidate != metadata for _, candidate in matches[1:]):
-            raise MetadataConflictError("Connected Stores disagree about snapshot evidence.")
-        return matches[0]
+        facts = selection_lineages(reference, projected_matches[0])
+        if any(
+                selection_lineages(reference, match) != facts
+                for match in projected_matches[1:]):
+            raise MetadataConflictError(
+                "Connected Stores disagree about projected snapshot evidence."
+            )
+        return projected_matches[0]
 
     def locate_payload(reference, path, source):
         def open_payload(store, target, target_path):
@@ -542,17 +680,22 @@ def build_exact_state_load_plan(
                 candidate = select_snapshot(projection, selected)
                 if candidate is None:
                     return None
-                selected_store, metadata = candidate
-                record_lineages(projection, metadata)
+                record_lineages(projection, candidate)
                 try:
-                    return selected_store, open_payload(selected_store, projection, GraphPath())
+                    authority_path = candidate.paths[GraphPath()]
+                    return candidate.store, open_payload(
+                        candidate.store, candidate.authority, authority_path,
+                    )
                 except Exception as error:
                     missing.append(
                         f"local state {projection.digest()} at {path!s}: {error}"
                     )
                     return None
         try:
-            return source, open_payload(source, reference, path)
+            authority_path = source.paths[path]
+            return source.store, open_payload(
+                source.store, source.authority, authority_path,
+            )
         except KeyError:
             # A missing local placement can be delegated to a projected child
             # snapshot. Any validation failure below is advertised corruption,
@@ -569,10 +712,12 @@ def build_exact_state_load_plan(
         candidate = select_snapshot(projection, selected)
         if candidate is None:
             return None
-        selected_store, metadata = candidate
-        record_lineages(projection, metadata)
+        record_lineages(projection, candidate)
         try:
-            return selected_store, open_payload(selected_store, projection, GraphPath())
+            authority_path = candidate.paths[GraphPath()]
+            return candidate.store, open_payload(
+                candidate.store, candidate.authority, authority_path,
+            )
         except Exception as error:
             missing.append(f"local state {projection.digest()} at {path!s}: {error}")
             return None
@@ -631,12 +776,11 @@ def build_exact_state_load_plan(
         )
         snapshot = select_snapshot(reference, selected)
         if snapshot is not None:
-            source, metadata = snapshot
-            record_lineages(reference, metadata)
+            record_lineages(reference, snapshot)
         visit_definition_closure(reference.definition)
         for path, state_hash in reference.states.items():
             definition = reference.object.at(path).definition
-            located = None if snapshot is None else locate_payload(reference, path, snapshot[0])
+            located = None if snapshot is None else locate_payload(reference, path, snapshot)
             if located is None:
                 missing.append(f"local state {state_hash} at {path!s}")
             else:

@@ -41,7 +41,8 @@ assert case.w3_test_ref == manifest.references.numpy
 
 This does not open the Store, TFDS, or regenerate a seed-derived dataset. The real
 runner supplies that exact reference as `Experiment.test_data`, then verifies the
-same reference survives checkpoint binding and every repeat. See
+materialized checkpoint projection retains the fixture's object identity through
+every repeat. See
 [ML Workflow Qualification Verification](ml_workflow_qualification_verification.md)
 for fixture preparation,
 fixed gates, and evidence requirements.
@@ -56,13 +57,36 @@ RSS, and output measurements. The harness rejects calls before opt-in and
 preflights the caller-selected Store before runner invocation. The harness does
 not claim an unrun case has qualified numerically.
 
-All 24 primary CPU matrix requests use `TFDSAdapter(..., as_numpy=True)` for
-NumPy delivery, including Torch requests. The separately counted
+All W1/W2 requests in the 36-cell primary CPU matrix use
+`TFDSAdapter(..., as_numpy=True)` for NumPy delivery across TensorFlow, Torch,
+and experimental JAX. Every framework uses the same Dataset-owned batching and
+canonical `(inputs, targets)` boundary; W3 uses the manifest's exact NumPy
+fixture plus `as_supervised(...)` rather than trainer path controls. The
+separately counted
 `supplemental_tfds_torch_case(manifest)` is the only local harness request with
 `tensorflow_mode=True`; it proves TFDS TensorFlow delivery reaches Torch through
 the prepared handoff without caller conversion code. Real MNIST execution always
 constructs `TFDSAdapter` with the manifest's selected `data_dir` and
 `download=False`. An absent, stale, or unrelated local MNIST builder is a
-`QualificationUnrun`, never an implicit download. Qualification Experiments use
-`checkpoint_every_steps=32`; `None` on the public Experiment API means
-terminal-only checkpointing, while terminal evaluation always occurs.
+`QualificationUnrun`, never an implicit download. Each W1/W2 case materializes
+its fixed test slice as a completed NumPy `CachedDataset` in that case's isolated
+output Store, giving checkpoint-bound Artifacts exact stateful evaluation
+authority without modifying shared TFDS or fixture roots. Qualification
+Experiments use `checkpoint_every_steps=32`; `None` on the public Experiment API
+means terminal-only checkpointing, while terminal evaluation always occurs.
+Managed cache, Experiment, history, and Artifact state uses only the isolated
+output Store, while all managed control records use the request's selected
+control Store. W3 metric and independent-formula readers open the manifest-selected
+fixture Store with derived indexing disabled, load its exact StateRef, and close
+that read handle without publishing locks, records, aliases, or derived indexes.
+
+The manifest binds a fixed `jax_seed` and exact `jax`, `jaxlib`, `flax`, and
+`optax` versions in addition to the existing Python, DRYML, pandas, TFDS,
+TensorFlow, Torch, and Parquet evidence. JAX cells remain CPU-only; the two GPU
+gates remain TensorFlow/W1 and Torch/W3.
+
+This expansion is baseline and fixture-manifest schema version 2. Version 1
+authority lacks the JAX seed and dependency evidence and is rejected as
+unsupported rather than reinterpreted. Prepare version 2 authority under new,
+empty manifest and fixture Store roots; preparation never replaces version 1
+files or their authoritative Store contents.

@@ -292,6 +292,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "filesystem",
     "freeze",
     "function",
+    "authoring_helper",
     "load_object",
     "load_state_ref",
     "locking",
@@ -300,6 +301,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "Object",
     "ObjectId",
     "ObjectRef",
+    "ObjectSelector",
     "paths",
     "Repo",
     "save_object",
@@ -653,6 +655,7 @@ import dryml.annotations
 import dryml.environments
 import dryml.formats
 import dryml.jax
+import dryml.models.jax
 import dryml.ray
 import dryml.runtime
 import dryml.session
@@ -669,6 +672,10 @@ assert dryml.env is dryml.environments
 assert dryml.world is dryml.worlds
 assert "requirements" in dryml.__all__
 assert "default" not in dryml.runtime.__all__
+assert set(dryml.models.jax.__all__) == {
+    "EarlyStoppingTraining", "FlaxModel", "JaxStateError", "Model", "NNXModel",
+    "Optimizer", "Training", "TrainFunction", "pure_training_transition",
+}
 for name in ("decorators", "env", "world", "runtime", "merge", "namespaces", "storage"):
     try:
         importlib.import_module(f"dryml.annotations.{name}")
@@ -681,7 +688,7 @@ try:
 except ModuleNotFoundError:
     retired = False
 print(json.dumps({
-    "heavy": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib", "ray") if name in sys.modules),
+    "heavy": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib", "flax", "optax", "ray") if name in sys.modules),
     "retired": retired,
 }))
 """,

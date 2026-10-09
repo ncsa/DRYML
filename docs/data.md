@@ -7,17 +7,42 @@ The DRYML Data API provides reusable, repo-backed dataset objects and dataset tr
 ## Dataset Contract
 
 `Dataset` is an abstract iterable dataset type. Every concrete Dataset subclass
-must implement `__iter__`; `__len__` remains optional because cardinality can be
-unknown. The supported source, mapped, and structural dataset classes implement
-iteration and remain constructible.
+must implement `__iter__`; legacy `__len__` remains optional because cardinality
+can be unknown. The supported source, mapped, and structural dataset classes
+implement iteration and remain constructible.
 
 Important expectations:
 
 - A dataset should be re-iterable.
 - `iter(dataset)` should produce a fresh iterator.
 - `dataset.spec` describes one yielded element.
-- `len(dataset)` should return cardinality when known.
+- `yield_cardinality()` returns the declared number of yielded values as a
+  finite, unknown, or infinite `Cardinality`. It normalizes legacy integer and
+  `Cardinality` `__len__` declarations without opening a cursor.
+- `example_cardinality()` returns an example total only when declared TensorSpec
+  batch metadata proves it. Unbatched values have one example per yield; fixed
+  uniform batches multiply yield cardinality; dynamic batches remain unknown.
+  A zero-yield dataset has zero examples regardless of batch metadata.
+- `examples_in(value)` validates one runtime TensorSpec tree and returns its
+  exact positive example count. Batched leaves must expose non-rank-zero,
+  nonempty matching leading dimensions and honor fixed batch declarations;
+  coherent unbatched trees count as one example.
+- Dataset composition propagates an example total only when it can prove one:
+  `Batch` retains source examples (and removes a dropped remainder), `Unbatch`
+  turns proved batched examples into yields, and `Take`/`Skip` use declared yield
+  ranges. `Shuffle` retains only full-membership totals, `Zip` requires aligned
+  branch yield and example totals, and `Chain` requires compatible batch
+  semantics. `Map` is unknown by default; pass `preserves_examples=True` only
+  when every result preserves its input count, which is checked at iteration.
 - `peek()` returns one element without permanently consuming the dataset.
+
+These count methods do not open, peek, scan, or otherwise consume a Dataset,
+and they import no optional tensor backend. Generic values without a complete
+TensorSpec tree retain normal iteration behavior but have unknown metadata
+example cardinality and cannot be runtime-counted. Yield positions, cursor
+positions, and `Take(source, n)` remain yield-based: `Take` still requests
+exactly `n` source yields and reports exhaustion rather than silently clipping
+to a short source declaration.
 
 `dryml.artifacts.CachedDataset` implements this same contract after completion.
 Its persisted output spec is the codec's actual NumPy-backed `SpecTree`, so
@@ -39,6 +64,12 @@ or files.
 cardinality `n`. It yields exactly `n` values or raises `DatasetExhaustedError`
 after its available prefix; `Take(source, 0)` does not open the source. The
 older `Skip(source, n)` remains forgiving when a source ends before its prefix.
+For declared seed-aware `GeneratorDataset` sources, `Take` also carries an
+optional logical `epoch`; `Repeat(Take(...))` advances selected epochs by default
+without changing its strict yield count. `fixed_prefix=True` intentionally reuses
+one epoch. Opaque generator factories receive no new replay or seed requirement.
+A completed `CachedDataset` instead persists one selected realization: repeating
+that cache replays its stored values and does not advance the source's epoch seed.
 
 ### Prepared Stream Graphs
 
@@ -68,7 +99,7 @@ unknown-spec discovery buffers; it is not teeing, memoization, or deduplication.
 `skip()` has the normal exact cursor contract, and reopening a graph creates a
 fresh traversal rather than serializing an iterator or generator frame.
 
-Prepared Dataset boundaries may retain one dense NumPy/TensorFlow/Torch handoff
+Prepared Dataset boundaries may retain one dense NumPy/TensorFlow/Torch/JAX handoff
 edge when a downstream Method has no direct compatible implementation. The
 adapter is applied while advancing the Dataset cursor, before native model
 forward/loss/backward/tape or compiled work begins. Dataset preprocessing is
@@ -78,6 +109,43 @@ operation once when available; their generic Python fallback remains equivalent
 for order, short batches, cardinality, and cursor cleanup. Zip and Chain retain
 the Python fallback unless compatible source-native composition is explicitly
 provided by all inputs.
+
+### Native Training Inputs
+
+`dataset.prepare()` returns a dependency-light `PreparedDataset` for one native
+training invocation. Construction plans the qualified Dataset/Method graph once
+without opening a source. Its `execution_level` is `"stream"` when that qualified
+plan runs and `"eager"` when an unqualified operator retains ordinary eager
+Dataset iteration. Selection failures in qualified operators still fail during
+preparation; eager fallback is only for unqualified Dataset operators.
+
+`PreparedDataset.iterator()` opens an independent closeable cursor each time.
+`training_batches(preparation)` applies one already selected x/y handoff per
+authored batch and returns a closeable cursor. It preserves the x/y tree, dtype,
+shape, batch axis, batch order, and short final batch. It checks finite declared
+yield counts at exhaustion and raises `DatasetExhaustedError` for a short source.
+Closing, conversion failure, source failure, or exhaustion closes the owned
+cursor. Reads never advance accepted-update progress, exposure, or checkpoint
+state; successful trainer updates remain their sole owners.
+
+Backend plugins deliberately remain separate from the generic seam:
+
+- `dryml.tf.training_data.as_training_dataset(prepared, preparation)` produces
+  a native `tf.data.Dataset` without a second batch, shuffle, or repeat. Each
+  native traversal reopens a DRYML cursor.
+- `dryml.torch.training_data.as_training_dataset(prepared, preparation)` returns
+  a native `IterableDataset`. `as_data_loader(dataset)` is available only for
+  wrappers that require a loader; it fixes `num_workers=0` and `batch_size=None`
+  so it neither duplicates a source nor adds a hidden batch axis. Explicit
+  loops may use `iter_training_batches` directly.
+- `dryml.jax.training_data.iter_training_batches(prepared, preparation)` returns
+  a closeable iterator of JAX-native batches. It does not introduce JAX training
+  state or compilation.
+
+Importing `dryml.data.native` or any training-data plugin imports neither its
+heavy framework nor the unsupported historical `dryml.data.tf` and
+`dryml.data.torch` wrappers. Framework imports occur only when a native adapter
+is requested or a retained handoff executes.
 
 ## Source Datasets
 
@@ -100,6 +168,12 @@ object and is forwarded only when supplied, so callers can control TFDS
 preparation behavior. Adapter construction imports TFDS and propagates its
 import, split, local filesystem, and download failures; NumPy delivery avoids
 importing DRYML's TensorFlow spec backend.
+
+`GeneratorDataset` accepts an optional explicit `example_count` for opaque
+or dynamically batched sources. It also supports a declared `seed_aware=True`
+factory protocol: a base `seed` and versioned epoch derivation supply a deterministic
+`seed` keyword to `iterator_for_epoch(epoch)`, allowing direct epoch reopening
+without traversing earlier epochs.
 
 The historical modules `dryml.data.tf.dataset` and
 `dryml.data.torch.dataset` are unsupported legacy APIs. They are not current
@@ -181,10 +255,14 @@ population/draw metadata and int64 wrap fail before arithmetic or sampling.
 
 The evaluation factories in `dryml.metrics` build their source projections from
 these Data Methods: `Project(prediction=Pipe(Select(x), model),
-target=Select(y))`, followed by `Diff` and either `Abs` or `Squared` for
-regression. Classification factories require caller-supplied label Methods;
-`ArgMax` remains an explicit conversion rather than an implicit classifier
-policy.
+target=Select(y))`, followed by an explicit prediction/target handoff to
+independent host NumPy storage, then `Diff` and either `Abs` or `Squared` for
+regression. Classification factories use the same host boundary and require
+caller-supplied label Methods;
+`ArgMax` remains an explicit label conversion rather than an implicit classifier
+policy. This terminal evaluation policy may copy one concrete accelerator result
+to the host; it does not make general mixed-backend Method inputs or accelerator
+handoffs valid.
 
 `Fold` retains its Dataset through `Ref[AutoRef]`. The declaration, its CDef, and
 an exact completed Fold state retain the selected reference rather than an owned
@@ -248,6 +326,47 @@ Utility functions help with common supervised-learning structures:
 - `collect_xy(dataset)`
 - `collate_xy(dataset)`
 - `Collect`
+
+`as_supervised(dataset, inputs, targets)` builds a persisted ordinary Dataset
+projection yielding `(inputs, targets)`, rather than asking trainers to select
+fields. A live Dataset returns a live `Map`. A soft Definition,
+ConcreteDefinition, ObjectRef, StateRef, symbolic `Expr` (including `Par`), or explicit `Ref(...)`/`Mat(...)`
+assertion returns an inert `Map` Definition without resolving or materializing
+the source; an assertion contributes its retained target to that new materializing
+Dataset graph. A scalar path selects one branch (and can retain a nested
+dictionary); named/nested selections use dictionaries of
+`Select.from_path(...)` leaves. Tuple/list selection trees require explicit
+`Select.from_path` leaves so path and output-tree intent cannot be guessed.
+`input_as_target=True` produces an autoencoder-style pair without copies or
+implicit batching.
+
+Dataset placeholders can be supplied before choosing the actual datasets:
+
+```python
+from dryml.core import Par
+from dryml.data import as_supervised
+from dryml.models import Experiment
+
+experiment_template = Experiment.defn(
+    model=model_template,
+    train_fn=training_template,
+    train_data=as_supervised(Par("train_ds"), "cart", input_as_target=True),
+    test_data=as_supervised(Par("test_ds"), "cart", input_as_target=True),
+)
+experiment = experiment_template.sub(train_ds=train_ds, test_ds=test_ds)
+```
+
+This authors an inert graph; it does not inspect a placeholder's specification or
+iterate data. Binding accepts the same source definitions/references as direct
+authoring, including a concrete training definition and saved test `StateRef`.
+The bound source must materialize a Dataset at the normal build boundary. Literal
+selection errors still fail when `as_supervised` is called. The helper uses core
+`authoring_helper` with an explicit dataset-source predicate and a shared live/inert
+projection recipe; it does not opt into concrete signature normalization.
+
+Native trainers consume this authored Dataset as-is. Put `Batch`, `Shuffle`,
+`Take`, and related controls in the Dataset graph before constructing an
+Experiment; trainers do not add hidden batching, selection, or shuffling.
 
 These utilities assume an element structure where `x` and `y` can be selected by path.
 

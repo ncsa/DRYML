@@ -538,7 +538,7 @@ def test_good_enough_policy_retains_required_boundary_proofs():
             "test_value_receipt_fixture_round_trips_actual_value_reader_input",
         },
         "tests/qualification/test_ml_workflow_cpu.py": {
-            "test_fake_execute_routes_all_24_requests_without_live_transport_or_framework_import",
+            "test_fake_execute_routes_all_36_requests_without_live_transport_or_framework_import",
         },
         "tests/qualification/test_ml_workflow_accelerated.py": {
             "test_missing_gpu_prerequisite_is_unrun_before_worker_launch",

@@ -10,7 +10,7 @@ from dryml.core import Object, Repo
 from dryml.core.query import field
 from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
+from dryml.data import ArgMax, ArrayDataset, Batch, Map, Pipe, Project, Select
 from dryml.managed import ManagedConfig
 from dryml.models import AutoEncoder, Experiment, TrainState
 
@@ -80,12 +80,12 @@ def test_tf_basic_training_updates_experiment_state():
 
     x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
     y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
-    ds = ArrayDataset((x, y))
+    ds = Batch(ArrayDataset((x, y)), 2)
 
     model = Model(TinyKerasModel)
     optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01)
     loss = Loss(tf.keras.losses.MeanSquaredError)
-    train_fn = BasicTraining(optimizer=optimizer, loss=loss, epochs=1, batch_size=2, verbose=0)
+    train_fn = BasicTraining(optimizer=optimizer, loss=loss, epochs=1, verbose=0)
     exp = Experiment(model, train_fn, train_data=ds)
 
     history = train_fn(exp)
@@ -100,6 +100,122 @@ def test_tf_basic_training_updates_experiment_state():
     assert float(optimizer.obj.learning_rate.numpy()) == pytest.approx(0.01)
 
 
+def test_keras_invocation_telemetry_uses_native_callbacks_after_accounting(tmp_path):
+    """A local Keras callback receives native logs after truthful DRYML hooks."""
+
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.asarray([[0.0], [1.0]], dtype=np.float32),
+        np.asarray([[0.0], [2.0]], dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    trainer = BasicTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0, repo=repo),
+        loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+        epochs=1,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(Model(TinyKerasModel, repo=repo), trainer, train_data=data, repo=repo)
+    events = []
+
+    class Observer(tf.keras.callbacks.Callback):
+        def on_train_batch_end(self, batch, logs=None):
+            events.append(("batch", batch, exp.state.step, logs))
+
+        def on_epoch_end(self, epoch, logs=None):
+            events.append(("epoch", epoch, exp.state.epoch, logs))
+
+        def close(self):
+            events.append(("close",))
+
+    csv_path = tmp_path / "telemetry.csv"
+    final = exp.train(
+        callbacks=[Observer(), tf.keras.callbacks.CSVLogger(str(csv_path))],
+        managed=ManagedConfig(state_repo=repo),
+    )
+
+    batch_events = [event for event in events if event[0] == "batch"]
+    epoch_events = [event for event in events if event[0] == "epoch"]
+    assert [(event[1], event[2]) for event in batch_events] == [(0, 1), (1, 2)]
+    assert len(epoch_events) == 1
+    assert epoch_events[0][1:3] == (0, 1)
+    assert all("loss" in event[3] for event in (*batch_events, *epoch_events))
+    assert events[-1] == ("close",)
+    assert "loss" in csv_path.read_text(encoding="utf-8")
+    assert exp.train.status(state_repo=repo).final_state_ref == final
+
+
+def test_keras_invocation_telemetry_rejects_non_native_callback_before_updates(tmp_path):
+    """Keras does not reinterpret a plain host callable as a native callback."""
+
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.asarray([[0.0]], dtype=np.float32),
+        np.asarray([[0.0]], dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    exp = Experiment(
+        Model(TinyKerasModel, repo=repo),
+        BasicTraining(
+            optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0, repo=repo),
+            loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+            epochs=1,
+            verbose=0,
+            repo=repo,
+        ),
+        train_data=data,
+        repo=repo,
+    )
+
+    with pytest.raises(TypeError, match="Keras telemetry observers"):
+        exp.train(
+            callbacks=[lambda logs: None],
+            managed=ManagedConfig(state_repo=repo),
+        )
+
+    assert exp.state.step == 0
+
+
+def test_keras_invocation_telemetry_rejects_native_early_stopping_before_updates(
+        tmp_path):
+    """Known native behavior controls cannot enter the reporting-only lane."""
+
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    repo = Repo(stores=tmp_path)
+    data = Batch(ArrayDataset((
+        np.asarray([[0.0]], dtype=np.float32),
+        np.asarray([[0.0]], dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    optimizer = Optimizer(
+        tf.keras.optimizers.SGD, learning_rate=0.0, repo=repo,
+    )
+    exp = Experiment(
+        Model(TinyKerasModel, repo=repo),
+        BasicTraining(
+            optimizer=optimizer,
+            loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+            epochs=2,
+            verbose=0,
+            repo=repo,
+        ),
+        train_data=data,
+        repo=repo,
+    )
+
+    with pytest.raises(ValueError, match="rejects known behavior callback EarlyStopping"):
+        exp.train(
+            callbacks=[tf.keras.callbacks.EarlyStopping()],
+            managed=ManagedConfig(state_repo=repo),
+        )
+
+    assert (exp.state.step, exp.state.phase) == (0, None)
+    assert int(optimizer.obj.iterations.numpy()) == 0
+
+
 def test_tf_basic_training_observes_native_accounting_train_step_devices():
     """The opt-in observer receives real Keras train-step values, not wrapper calls."""
     from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
@@ -108,14 +224,14 @@ def test_tf_basic_training_observes_native_accounting_train_step_devices():
     observed = []
     trainer = BasicTraining(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
-        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=2, verbose=0,
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, verbose=0,
     )
     exp = Experiment(
         Model(TinyKerasModel), trainer,
-        train_data=ArrayDataset((
+        train_data=Batch(ArrayDataset((
             np.asarray([[0.0], [1.0]], dtype=np.float32),
             np.asarray([[0.0], [2.0]], dtype=np.float32),
-        )),
+        )), 2),
     )
 
     with observe_keras_train_step(lambda **facts: observed.append(facts)):
@@ -140,14 +256,14 @@ def test_tf_managed_experiment_smoke_returns_its_terminal_receipt(tmp_path):
     from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
 
     repo = Repo(DirStore(tmp_path / "store"))
-    dataset = ArrayDataset((
+    dataset = Batch(ArrayDataset((
         np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32),
         np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32),
-    ))
+    )), 2)
     model = Model(TinyKerasModel)
     train_fn = BasicTraining(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01),
-        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=2, verbose=0,
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, verbose=0,
     )
     exp = Experiment(model, train_fn, train_data=dataset, repo=repo)
 
@@ -164,7 +280,7 @@ def test_tf_model_and_optimizer_state_ref_round_trip(tmp_path):
     repo = Repo(stores=tmp_path)
     x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
     y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
-    ds = ArrayDataset((x, y), repo=repo)
+    ds = Batch(ArrayDataset((x, y), repo=repo), 2, repo=repo)
     model = Model(TinyKerasModel, repo=repo)
     optimizer = Optimizer(
         tf.keras.optimizers.SGD,
@@ -176,7 +292,6 @@ def test_tf_model_and_optimizer_state_ref_round_trip(tmp_path):
         optimizer=optimizer,
         loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
         epochs=1,
-        batch_size=2,
         verbose=0,
         repo=repo,
     )
@@ -249,11 +364,10 @@ def test_tf_low_level_training_resumes_model_and_optimizer_state(tmp_path):
             optimizer=optimizer,
             loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
             epochs=1,
-            batch_size=2,
             verbose=0,
             repo=repo,
         ),
-        train_data=ArrayDataset((x, y), repo=repo),
+        train_data=Batch(ArrayDataset((x, y), repo=repo), 2, repo=repo),
         repo=repo,
     )
     exp.train_fn(exp)
@@ -554,7 +668,7 @@ def _autoencoder_data():
         ],
         dtype=np.float32,
     )
-    return ArrayDataset((x, x.copy()))
+    return Batch(ArrayDataset((x, x.copy())), 2)
 
 
 def _autoencoder_model():
@@ -579,7 +693,7 @@ def test_tf_basic_training_builds_keras_adapter_for_autoencoder():
     from dryml.models.tf import BasicTraining, Wrapper
 
     model = _autoencoder_model()
-    train_fn = BasicTraining(epochs=1, batch_size=2, verbose=0)
+    train_fn = BasicTraining(epochs=1, verbose=0)
     exp = Experiment(
         model,
         train_fn,
@@ -602,7 +716,7 @@ def test_tf_basic_training_repeats_finite_dataset_for_multiple_epochs():
     from dryml.models.tf import BasicTraining, Wrapper
 
     model = _autoencoder_model()
-    train_fn = BasicTraining(epochs=2, batch_size=2, verbose=0)
+    train_fn = BasicTraining(epochs=2, verbose=0)
     exp = Experiment(
         model,
         train_fn,
@@ -621,6 +735,36 @@ def test_tf_basic_training_repeats_finite_dataset_for_multiple_epochs():
     assert not any("Your input ran out of data" in str(warning.message) for warning in caught)
 
 
+def test_tf_basic_training_does_not_repeat_a_short_source_to_meet_declared_steps():
+    from dryml.core.cardinality import Cardinality
+    from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
+
+    class ShortSource(ArrayDataset):
+        def __len__(self):
+            return Cardinality.finite(2)
+
+    data = Batch(ShortSource((
+        np.zeros((1, 1), dtype=np.float32),
+        np.zeros((1, 1), dtype=np.float32),
+    )), 1)
+    exp = Experiment(
+        Model(TinyKerasModel),
+        BasicTraining(
+            optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+            loss=Loss(tf.keras.losses.MeanSquaredError),
+            epochs=1,
+            verbose=0,
+        ),
+        train_data=data,
+    )
+
+    with pytest.raises(Exception, match="Requested 2 dataset elements"):
+        exp.train_fn(exp)
+
+    assert exp.state.epoch == 0
+    assert exp.state.step == 1
+
+
 def test_tf_training_gradient_tape_trains_autoencoder():
     from dryml.core.repo import get_default_repo
     from dryml.models.tf import Loss, Optimizer, Training
@@ -631,7 +775,6 @@ def test_tf_training_gradient_tape_trains_autoencoder():
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01),
         loss=Loss(tf.keras.losses.MeanSquaredError),
         epochs=1,
-        batch_size=2,
         verbose=0,
     )
     exp = Experiment(model, train_fn, train_data=_autoencoder_data())
@@ -660,10 +803,9 @@ def test_tf_keras_callbacks_observe_post_update_retained_accounting():
             optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01),
             loss=Loss(tf.keras.losses.MeanSquaredError),
             epochs=1,
-            batch_size=2,
             verbose=0,
         ),
-        train_data=ArrayDataset((x, y)),
+        train_data=Batch(ArrayDataset((x, y)), 2),
     )
     observed = []
 
@@ -685,11 +827,10 @@ def _tf_accounting_experiment(*, repo=None, count=64, batch_size=1, trainer=None
             optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01, repo=repo),
             loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
             epochs=1,
-            batch_size=batch_size,
             verbose=0,
             repo=repo,
         ),
-        train_data=ArrayDataset((x, y), repo=repo),
+        train_data=Batch(ArrayDataset((x, y), repo=repo), batch_size, repo=repo),
         repo=repo,
     )
 
@@ -739,10 +880,9 @@ def test_tf_trainers_accept_a_legacy_exhausted_saved_epoch_without_empty_data_er
                 optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
                 loss=Loss(tf.keras.losses.MeanSquaredError),
                 epochs=1,
-                batch_size=1,
                 verbose=0,
             ),
-            train_data=data,
+            train_data=Batch(data, 1),
         )
         exp.state.next_batch = 2
         exp.state.target_epoch = 1
@@ -767,11 +907,15 @@ def test_keras_resume_later_epoch_and_short_final_batch_keep_target_and_actual_a
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0, repo=repo),
         loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
         epochs=2,
-        batch_size=2,
         verbose=0,
         repo=repo,
     )
-    interrupted = Experiment(Model(ZeroKerasModel, repo=repo), train_fn, train_data=ArrayDataset((x, y), repo=repo), repo=repo)
+    interrupted = Experiment(
+        Model(ZeroKerasModel, repo=repo),
+        train_fn,
+        train_data=Batch(ArrayDataset((x, y), repo=repo), 2, repo=repo),
+        repo=repo,
+    )
     observed = []
 
     def interrupt_in_second_epoch():
@@ -803,10 +947,9 @@ def test_keras_resume_later_epoch_and_short_final_batch_keep_target_and_actual_a
             optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
             loss=Loss(tf.keras.losses.MeanSquaredError),
             epochs=1,
-            batch_size=2,
             verbose=0,
         ),
-        train_data=ArrayDataset((x, y)),
+        train_data=Batch(ArrayDataset((x, y)), 2),
     )
     final_positions = []
     short.train_fn(short, callbacks=(lambda: final_positions.append((short.state.epoch, short.state.next_batch)),))
@@ -824,8 +967,8 @@ def test_keras_preflights_callbacks_and_mean_loss_before_model_or_optimizer_muta
     optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.01)
     exp = Experiment(
         model,
-        BasicTraining(optimizer=optimizer, loss=Loss(tf.keras.losses.MeanSquaredError), batch_size=1, verbose=0),
-        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+        BasicTraining(optimizer=optimizer, loss=Loss(tf.keras.losses.MeanSquaredError), verbose=0),
+        train_data=Batch(ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))), 1),
     )
     optimizer_values = [value.numpy().copy() for value in optimizer.obj.variables]
 
@@ -839,7 +982,6 @@ def test_keras_preflights_callbacks_and_mean_loss_before_model_or_optimizer_muta
     rejecting = BasicTraining(
         optimizer=optimizer,
         loss=Loss(tf.keras.losses.MeanSquaredError, reduction="sum"),
-        batch_size=1,
         verbose=0,
     )
     with pytest.raises(ValueError, match="mean reduction"):
@@ -850,7 +992,6 @@ def test_keras_preflights_callbacks_and_mean_loss_before_model_or_optimizer_muta
     rejecting_loop = Training(
         optimizer=optimizer,
         loss=Loss(tf.keras.losses.MeanSquaredError, reduction="sum"),
-        batch_size=1,
         verbose=0,
     )
     with pytest.raises(ValueError, match="mean reduction"):
@@ -879,13 +1020,12 @@ def test_keras_internal_accounting_precedes_native_callbacks_and_uses_owned_trai
     train_fn = BasicTraining(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
         loss=Loss(tf.keras.losses.MeanSquaredError),
-        batch_size=2,
         verbose=0,
     )
     exp = Experiment(
         Model(ZeroKerasModel),
         train_fn,
-        train_data=ArrayDataset((x, y)),
+        train_data=Batch(ArrayDataset((x, y)), 2),
     )
     train_fn.callbacks = (NativeCallback(exp.state, events),)
 
@@ -924,10 +1064,9 @@ def test_tf_training_prepares_cross_backend_data_before_model_invocation(monkeyp
             optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
             loss=Loss(tf.keras.losses.MeanSquaredError),
             epochs=1,
-            batch_size=1,
             verbose=0,
         ),
-        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+        train_data=Batch(ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))), 1),
     )
 
     exp.train_fn(exp)
@@ -957,9 +1096,9 @@ def test_tf_final_callback_resume_runs_one_validation_postlude_without_an_update
     monkeypatch.setattr(tf_base, "TrainingProgress", Progress)
     trainer = Training(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
-        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=1, verbose=0,
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, verbose=0,
     )
-    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     exp = Experiment(Model(TinyKerasModel), trainer, train_data=data, val_data=data)
     evaluations = []
     monkeypatch.setattr(trainer, "_evaluate", lambda *args: evaluations.append("validation") or {})
@@ -1001,11 +1140,11 @@ def test_keras_rejects_unreplayable_native_callback_safe_point_before_training()
 
     trainer = BasicTraining(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
-        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=1,
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1,
         verbose=0,
     )
     trainer.callbacks = (Native(),)
-    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     exp = Experiment(Model(TinyKerasModel), trainer, train_data=data)
 
     with pytest.raises(ValueError, match="does not support native callbacks"):
@@ -1024,10 +1163,10 @@ def test_keras_rejects_untruthful_objective_weights_before_training_mutation():
         model,
         BasicTraining(
             optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
-            loss=Loss(tf.keras.losses.MeanSquaredError), batch_size=1, verbose=0,
+            loss=Loss(tf.keras.losses.MeanSquaredError), verbose=0,
             fit_kwargs={"class_weight": {0: 1.0}},
         ),
-        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+        train_data=Batch(ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))), 1),
     )
 
     with pytest.raises(ValueError, match="class_weight"):
@@ -1058,10 +1197,9 @@ def test_keras_retains_exact_static_and_dynamic_regularized_objectives():
             BasicTraining(
                 optimizer=optimizer,
                 loss=Loss(tf.keras.losses.MeanSquaredError),
-                batch_size=1,
                 verbose=0,
             ),
-            train_data=ArrayDataset((x, y)),
+            train_data=Batch(ArrayDataset((x, y)), 1),
         )
 
         exp.train_fn(exp)
@@ -1090,14 +1228,14 @@ def test_keras_retains_exact_static_and_dynamic_regularized_objectives():
 def test_keras_rejects_grouped_updates_before_mutation(monkeypatch):
     from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
 
-    data = ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32)))
+    data = Batch(ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))), 1)
     model = Model(TinyKerasModel)
     optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0)
     exp = Experiment(
         model,
         BasicTraining(
             optimizer=optimizer, loss=Loss(tf.keras.losses.MeanSquaredError),
-            compile_kwargs={"steps_per_execution": 2}, batch_size=1, verbose=0,
+            compile_kwargs={"steps_per_execution": 2}, verbose=0,
         ),
         train_data=data,
     )
@@ -1112,7 +1250,7 @@ def test_keras_rejects_grouped_updates_before_mutation(monkeypatch):
     accumulating = Experiment(
         Model(TinyKerasModel),
         BasicTraining(
-            optimizer=accumulation_optimizer, loss=Loss(tf.keras.losses.MeanSquaredError), batch_size=1, verbose=0,
+            optimizer=accumulation_optimizer, loss=Loss(tf.keras.losses.MeanSquaredError), verbose=0,
         ),
         train_data=data,
     )
@@ -1138,14 +1276,13 @@ def test_keras_rejects_dryml_and_native_callback_recovery_before_setup():
     trainer = BasicTraining(
         optimizer=optimizer,
         loss=Loss(tf.keras.losses.MeanSquaredError),
-        batch_size=1,
         verbose=0,
     )
     trainer.fit_kwargs["callbacks"] = [Native()]
     exp = Experiment(
         model,
         trainer,
-        train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))),
+        train_data=Batch(ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))), 1),
     )
 
     with pytest.raises(ValueError, match="does not support native callbacks"):
@@ -1167,13 +1304,12 @@ def test_training_preparation_resets_current_invocation_graph_facts():
     trainer = BasicTraining(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
         loss=Loss(tf.keras.losses.MeanSquaredError),
-        batch_size=1,
         verbose=0,
     )
-    first = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
-    second = ArrayDataset((np.zeros((2, 2), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
-    first_xy = trainer._xy_data(trainer._prepare_data(first, for_training=True))
-    second_xy = trainer._xy_data(trainer._prepare_data(second, for_training=True))
+    first = Batch(ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
+    second = Batch(ArrayDataset((np.zeros((2, 2), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
+    first_xy = trainer._xy_data(trainer._prepare_data(first))
+    second_xy = trainer._xy_data(trainer._prepare_data(second))
 
     trainer._begin_training_preparation_generation()
     training = TrainingPreparation.from_specs(trainer, first_xy.spec[0], first_xy.spec[1], "tf")
@@ -1209,10 +1345,10 @@ def test_keras_zero_epoch_does_not_emit_native_lifecycle_callbacks():
 
     trainer = BasicTraining(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
-        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=0, batch_size=1, verbose=0,
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=0, verbose=0,
     )
     trainer.callbacks = (Native(),)
-    exp = Experiment(Model(TinyKerasModel), trainer, train_data=ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))))
+    exp = Experiment(Model(TinyKerasModel), trainer, train_data=Batch(ArrayDataset((np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32))), 1))
 
     exp.train_fn(exp)
 
@@ -1225,14 +1361,14 @@ def test_tf_setup_failure_and_validation_failure_leave_only_recoverable_targets(
 
     trainer = Training(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
-        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=1, verbose=0,
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, verbose=0,
     )
     exp = Experiment(Model(TinyKerasModel), trainer)
     with pytest.raises(ValueError, match="train_data"):
         exp.train_fn(exp)
     assert exp.state.target_epoch is None
 
-    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     exp.train_data = data
     exp.val_data = data
     original_evaluate = trainer._evaluate
@@ -1261,12 +1397,12 @@ def test_tf_setup_failure_and_validation_failure_leave_only_recoverable_targets(
 def test_keras_early_stopping_completes_a_shortened_target():
     from dryml.models.tf import BasicEarlyStoppingTraining, Loss, Model, Optimizer
 
-    data = ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(ArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     exp = Experiment(
         Model(ZeroKerasModel),
         BasicEarlyStoppingTraining(
             optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
-            loss=Loss(tf.keras.losses.MeanSquaredError), epochs=5, batch_size=1,
+            loss=Loss(tf.keras.losses.MeanSquaredError), epochs=5,
             patience=0, monitor="loss", verbose=0,
         ),
         train_data=data,
@@ -1274,11 +1410,226 @@ def test_keras_early_stopping_completes_a_shortened_target():
 
     exp.train_fn(exp)
 
-    assert 0 < exp.state.epoch < 5
+    assert exp.state.epoch == 2
     assert exp.state.target_epoch is None
+    assert exp.train_fn.early_stopping.best_epoch == 0
+    assert exp.train_fn.early_stopping.accepted_target == 2
     previous_steps = exp.state.step
     exp.train_fn(exp)
     assert exp.state.step > previous_steps
+
+
+def test_keras_early_stopping_does_not_accept_unrelated_native_stop():
+    from dryml.models.tf import BasicEarlyStoppingTraining, Loss, Model, Optimizer
+
+    class StopAfterFirstEpoch(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            del epoch, logs
+            self.model.stop_training = True
+
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.zeros((2, 1), dtype=np.float32),
+    )), 1)
+    trainer = BasicEarlyStoppingTraining(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError),
+        epochs=5,
+        monitor="loss",
+        patience=5,
+        verbose=0,
+    )
+    trainer.callbacks = (StopAfterFirstEpoch(),)
+    exp = Experiment(Model(ZeroKerasModel), trainer, train_data=data)
+
+    with pytest.raises(ValueError, match="ended before"):
+        trainer(exp)
+
+    assert exp.state.epoch == 1
+    assert exp.state.target_epoch == 5
+    assert trainer.early_stopping.accepted_target is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"monitor": ""}, ValueError),
+        ({"monitor": "accuracy"}, ValueError),
+        ({"patience": True}, TypeError),
+        ({"patience": -1}, ValueError),
+        ({"mode": "auto"}, ValueError),
+        ({"min_delta": -1.0}, ValueError),
+        ({"min_delta": float("nan")}, ValueError),
+    ],
+)
+def test_keras_early_stopping_rejects_invalid_configuration(kwargs, error):
+    from dryml.models.tf import BasicEarlyStoppingTraining
+
+    with pytest.raises(error):
+        BasicEarlyStoppingTraining(epochs=3, verbose=0, **kwargs)
+
+
+def test_keras_early_stopping_restores_model_but_not_optimizer_state():
+    from dryml.models.tf import BasicEarlyStoppingTraining, Loss, Model, Optimizer
+
+    observed = {}
+
+    class ControlledValidation(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            logs["val_loss"] = (1.0, 2.0)[epoch]
+            observed[epoch] = [value.copy() for value in exp.model.obj.get_weights()]
+
+    data = Batch(ArrayDataset((
+        np.ones((2, 1), dtype=np.float32),
+        np.zeros((2, 1), dtype=np.float32),
+    )), 1)
+    optimizer = Optimizer(tf.keras.optimizers.Adam, learning_rate=0.1)
+    trainer = BasicEarlyStoppingTraining(
+        optimizer=optimizer,
+        loss=Loss(tf.keras.losses.MeanSquaredError),
+        epochs=5,
+        monitor="val_loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+    )
+    trainer.callbacks = (ControlledValidation(),)
+    exp = Experiment(Model(TinyKerasModel), trainer, train_data=data, val_data=data)
+
+    trainer(exp)
+
+    for actual, expected in zip(exp.model.obj.get_weights(), observed[0]):
+        np.testing.assert_allclose(actual, expected)
+    assert int(optimizer.obj.iterations.numpy()) == 4
+    assert trainer.early_stopping.restored is True
+
+
+def test_keras_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
+    """A persisted completed Keras stop finalizes without another fit segment."""
+
+    from dryml.models.tf import BasicEarlyStoppingTraining, Loss, Model, Optimizer
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    failed_control = DirStore(tmp_path / "failed-control")
+    resume_control = DirStore(tmp_path / "resume-control")
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    optimizer = Optimizer(tf.keras.optimizers.Adam, learning_rate=0.0, repo=repo)
+    trainer = BasicEarlyStoppingTraining(
+        optimizer=optimizer,
+        loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+        epochs=5,
+        monitor="loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(
+        Model(ZeroKerasModel, repo=repo),
+        trainer,
+        train_data=data,
+        repo=repo,
+    )
+
+    class FailStoppedEpoch(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            del epoch, logs
+            if trainer.early_stopping.accepted_target is not None:
+                raise RuntimeError("strict stopped epoch")
+
+    with pytest.raises(RuntimeError, match="strict stopped epoch"):
+        exp.train(
+            callbacks=[FailStoppedEpoch()],
+            observer_strict=True,
+            managed=ManagedConfig(
+                state_repo=repo, control_store=failed_control,
+            ),
+        )
+
+    assert (exp.state.epoch, exp.state.step, exp.state.target_epoch) == (2, 4, 5)
+    assert exp.state.pending_epoch_postlude is None
+    assert trainer.early_stopping.accepted_target == 2
+    assert trainer.early_stopping.restored is True
+    stopped_weights = [value.copy() for value in exp.model.obj.get_weights()]
+    stopped_iterations = int(optimizer.obj.iterations.numpy())
+    stopped_optimizer_values = [
+        value.numpy().copy() for value in optimizer.obj.variables
+    ]
+    checkpoint = repo.save_object(exp, deep_capture=True)
+    resumed = repo.load_state_ref(checkpoint, reuse_live="never")
+
+    final = resumed.train(managed=ManagedConfig(
+        state_repo=repo, control_store=resume_control,
+    ))
+    status = resumed.train.status(
+        state_repo=repo, control_store=resume_control,
+    )
+
+    assert final == status.final_state_ref == resumed.last_state_ref
+    assert (resumed.state.epoch, resumed.state.step, resumed.state.target_epoch) == (2, 4, None)
+    assert int(resumed.train_fn.optimizer.obj.iterations.numpy()) == stopped_iterations
+    resumed_optimizer_values = [
+        value.numpy() for value in resumed.train_fn.optimizer.obj.variables
+    ]
+    assert len(resumed_optimizer_values) == len(stopped_optimizer_values)
+    for actual, expected in zip(resumed_optimizer_values, stopped_optimizer_values):
+        np.testing.assert_allclose(actual, expected)
+    for actual, expected in zip(resumed.model.obj.get_weights(), stopped_weights):
+        np.testing.assert_allclose(actual, expected)
+
+
+def test_keras_managed_early_stopping_resumes_validation_and_returns_terminal_state(tmp_path):
+    from dryml.models.tf import BasicEarlyStoppingTraining, Loss, Model, Optimizer
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    data = Batch(ArrayDataset((
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((2, 1), dtype=np.float32),
+    ), repo=repo), 1, repo=repo)
+    optimizer = Optimizer(tf.keras.optimizers.Adam, learning_rate=0.0, repo=repo)
+    trainer = BasicEarlyStoppingTraining(
+        optimizer=optimizer,
+        loss=Loss(tf.keras.losses.MeanSquaredError, repo=repo),
+        epochs=5,
+        monitor="val_loss",
+        patience=0,
+        restore_best_weights=True,
+        verbose=0,
+        repo=repo,
+    )
+    exp = Experiment(
+        Model(ZeroKerasModel, repo=repo),
+        trainer,
+        train_data=data,
+        val_data=data,
+        checkpoint_every_steps=2,
+        repo=repo,
+    )
+    failures = []
+
+    def interrupt_first_epoch(obj, context):
+        del context
+        if obj.state.step == 2 and not failures:
+            failures.append(obj.state.step)
+            raise RuntimeError("first epoch checkpoint")
+
+    with pytest.raises(RuntimeError, match="first epoch checkpoint"):
+        exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[interrupt_first_epoch]))
+    assert (exp.state.step, exp.state.pending_epoch_postlude) == (2, 0)
+
+    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    status = exp.train.status(state_repo=repo)
+    loaded = repo.load_state_ref(final, reuse_live="never")
+
+    assert failures == [2]
+    assert final == status.final_state_ref == exp.last_state_ref
+    assert (loaded.state.epoch, loaded.state.step, loaded.state.target_epoch) == (2, 4, None)
+    assert loaded.train_fn.early_stopping.accepted_target == 2
+    assert loaded.train_fn.early_stopping.restored is True
+    assert int(loaded.train_fn.optimizer.obj.iterations.numpy()) == 4
 
 
 def test_keras_unknown_finite_stream_completes_without_callbacks_and_rejects_safe_points():
@@ -1288,10 +1639,10 @@ def test_keras_unknown_finite_stream_completes_without_callbacks_and_rejects_saf
         def __len__(self):
             raise NotImplementedError
 
-    data = UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     trainer = BasicTraining(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
-        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=2, batch_size=1, verbose=0,
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=2, verbose=0,
     )
     exp = Experiment(Model(TinyKerasModel), trainer, train_data=data)
 
@@ -1324,12 +1675,12 @@ def test_keras_unknown_stream_retains_validation_postlude_before_failure():
                 raise RuntimeError("validation postlude")
             return self.dense(value)
 
-    data = UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0)
     exp = Experiment(
         Model(ValidationFailsOnce),
         BasicTraining(
-            optimizer=optimizer, loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=1, verbose=0,
+            optimizer=optimizer, loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, verbose=0,
         ),
         train_data=data,
         val_data=data,
@@ -1409,9 +1760,9 @@ def test_tf_unknown_stream_retains_validation_metrics_across_progress_retry(monk
     monkeypatch.setattr(tf_base, "TrainingProgress", Progress)
     trainer = Training(
         optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
-        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=1, verbose=0,
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, verbose=0,
     )
-    data = UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32)))
+    data = Batch(UnknownArrayDataset((np.zeros((2, 1), dtype=np.float32), np.zeros((2, 1), dtype=np.float32))), 1)
     exp = Experiment(Model(TinyKerasModel), trainer, train_data=data, val_data=data)
     evaluations = []
     monkeypatch.setattr(trainer, "_evaluate", lambda *args: evaluations.append("validation") or {"loss": 3.0})
@@ -1426,3 +1777,44 @@ def test_tf_unknown_stream_retains_validation_metrics_across_progress_retry(monk
     exp.train_fn(exp)
     assert evaluations == ["validation"]
     assert Progress.received == [retained_metrics, retained_metrics]
+
+
+def test_tf_validation_loss_weights_a_short_final_batch_by_examples(monkeypatch):
+    """Validation loss remains an example mean for uneven authored batches."""
+    from dryml.models.tf import Loss, Model, Optimizer, Training
+    import dryml.models.tf.base as tf_base
+
+    class Progress:
+        received = []
+
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def update(self, *args, **kwargs):
+            del args, kwargs
+
+        def epoch_end(self, *args, **kwargs):
+            del args
+            type(self).received.append(kwargs["metrics"])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tf_base, "TrainingProgress", Progress)
+    trainer = Training(
+        optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.0),
+        loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, verbose=0,
+    )
+    train_data = Batch(ArrayDataset((
+        np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32),
+    )), 1)
+    val_data = Batch(ArrayDataset((
+        np.zeros((3, 1), dtype=np.float32),
+        np.asarray([[0.0], [0.0], [3.0]], dtype=np.float32),
+    )), 2)
+
+    trainer(Experiment(
+        Model(ZeroKerasModel), trainer, train_data=train_data, val_data=val_data,
+    ))
+
+    assert Progress.received[0]["val_loss"] == pytest.approx(3.0)

@@ -21,7 +21,7 @@ Important public types:
 - `model_parameter_counts`
 - `parameter_counts_from_parameters`
 
-Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBoost, and other frameworks.
+Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBoost, and other frameworks. The JAX/Flax NNX/Optax APIs described below are **experimental** and may change based on use.
 
 ## Model As Method
 
@@ -117,20 +117,21 @@ they do not invoke a forward pass, build/compile a model, start a runtime, or
 save state.
 
 `dryml.models.measurements.dataset_size(dataset)` returns declared effective
-Dataset cardinality after selection/subsetting and unbatching but before trainer
-batching or epoch repetition. It returns `Cardinality.finite(n)`,
+Dataset example cardinality from the final Dataset persisted by an Experiment.
+It returns `Cardinality.finite(n)`,
 `Cardinality.UNKNOWN`, or `Cardinality.INFINITE` without opening a cursor;
-unknown and infinite inputs are never scanned to manufacture a count. Unbatching
-an opaque natively batched source is unknown unless that source explicitly
-declares its example cardinality; its batch count is never reported as examples.
+unknown and infinite inputs are never scanned to manufacture a count. It delegates
+to `Dataset.example_cardinality()`, so an opaque native batch count is never
+relabeled as an example count.
 
 ### Retained Accounting
 
-`TrainState` retains `examples_seen`, a weighted loss numerator/denominator,
+`TrainState` retains `examples_seen`, a weighted observation-loss window, a
+separate recovery-stable weighted epoch-loss accumulator,
 the next unprocessed batch position, an invocation target epoch, a bounded
-pending epoch-postlude fact, and an immutable pending safe-point observation
+pending epoch-postlude fact with finite completed-epoch metrics, and an immutable pending safe-point observation
 alongside model/optimizer progress. Supplied
-TensorFlow and Torch trainers advance these facts only after a successful
+TensorFlow, Torch, and experimental JAX trainers advance these facts only after a successful
 optimizer update, so failed updates and evaluation do not add exposure. Repeated
 epochs add exposure rather than changing effective Dataset size. The reported
 observation loss is weighted by actual batch examples, including short final
@@ -142,7 +143,7 @@ Its named persistence state rejects unknown fields and validates finite loss
 facts, exact nonnegative counters, lifecycle enums, pending-postlude coherence,
 and pending-observation type before installing restored progress. Historical
 three-slot `(epoch, step, phase)` payloads remain supported with zero/`None`
-defaults for U8 fields.
+defaults for later lifecycle fields.
 
 TensorFlow `fit`, explicit TensorFlow loops, and Torch loops validate all DRYML
 callbacks before training work and invoke them only after this retained state is
@@ -154,15 +155,16 @@ deterministic prepared data and skips `next_batch` without reapplying completed
 updates. An update completing an epoch is normalized to the next epoch/batch-zero
 position before its callbacks. Explicit TensorFlow and Torch retain validation
 results before progress, so a progress failure does not repeat validation. Keras
-safe-point recovery is deliberately narrower: a DRYML safe-point callback cannot
-be combined with native Keras callbacks or validation, because their generic
-event/log replay cannot be truthful. Ordinary uninterrupted Keras callback and
-validation behavior remains native. Keras also requires exactly one optimizer
+safe-point recovery is deliberately narrow: arbitrary native callbacks cannot be
+combined with a DRYML safe-point callback because their generic event/log replay
+cannot be truthful. The dedicated saved early-stopping adapter below supports its
+own validation postlude without broadening that callback guarantee. Ordinary
+uninterrupted Keras callback and validation behavior remains native. Keras also requires exactly one optimizer
 update per batch callback (`steps_per_execution=1`, no gradient accumulation)
 and accounts for static regularizers and dynamic `add_loss` objectives in the
 exact differentiated scalar before advancing retained state. Setup
-failures that retain no update clear their new target, while Keras EarlyStopping
-completes its accepted shortened target. sklearn's one-shot trainer accepts the
+failures that retain no update clear their new target, while supported saved
+early-stopping trainers complete an accepted shortened target. sklearn's one-shot trainer accepts the
 common callback keyword but rejects intermediate safe points before fitting
 because it has no per-update boundary.
 
@@ -178,6 +180,20 @@ edge contract. No per-yield route selection, implicit
 cross-backend generator conversion, or Dataset execution inside a tape/backward
 body is supported.
 
+TensorFlow `BasicTraining` supplies Keras a native `tf.data.Dataset` built from
+that once-prepared Dataset plan. It never applies another batch or shuffle and
+only repeats when Keras requires a known finite `steps_per_epoch`; exact source
+exhaustion remains visible rather than being masked by repetition. Explicit
+TensorFlow and Torch loops consume closeable native prepared-batch cursors, and
+Torch exposes an `IterableDataset`/single-process DataLoader bridge for native
+wrappers that require one. In all cases adapter reads, including native
+read-ahead, do not advance retained progress: post-update trainer hooks own that
+state.
+
+Experimental JAX training follows the same retained preparation and cardinality
+authority. It consumes the authored batches through a closeable JAX iterator;
+its JITted transition does not own Dataset selection, batching, or progress.
+
 Keras retained loss is the scalar objective differentiated for each accepted
 completed update, including built-in regularizers and dynamic `add_loss`
 contributions reported by nested layers. To keep its example-weighted aggregation
@@ -187,6 +203,130 @@ unweighted losses are supported. Unknown-but-finite Keras streams may complete
 normally without DRYML safe-point callbacks; callbacks require a declared finite
 deterministic batch count, and infinite streams require an explicit finite bound
 before training starts.
+
+### Managed Early Stopping
+
+Keras `BasicEarlyStoppingTraining` and Torch/JAX `EarlyStoppingTraining` are saved
+specialized training behaviors, not invocation telemetry callbacks. All three
+accept `monitor`, nonnegative exact-integer `patience`, `mode="min"` or
+`mode="max"`, finite nonnegative `min_delta`, and `restore_best_weights`.
+`min_delta` is an absolute threshold and equality is not improvement. The first
+completed epoch establishes the best value; each later non-improving completed
+epoch increments `wait`, and training stops when `wait > patience`. Thus
+`patience=0` stops after the first completed non-improving epoch.
+
+The monitor is read only from a truthful completed-epoch postlude. The supported
+training monitor is `loss`; validation monitors use a nonempty `val_` prefix,
+including `val_loss`, and require a validation Dataset.
+A validation monitor without validation data, a missing completed metric, a
+nonfinite value, or invalid configuration fails explicitly rather than silently
+shortening training. Arbitrary `validation_freq` scheduling remains deferred and
+is not claimed by this integration.
+
+The TrainFunction checkpoint retains the best metric, wait count, best completed
+epoch, last processed postlude, and accepted shortened target. When restoration is
+enabled, it also retains a bounded best Model snapshot. A restored pending
+validation/decision postlude reuses its completed
+metrics and processes that epoch idempotently, without repeating an optimizer
+update or incrementing `wait` twice. A genuinely new invocation resets these
+invocation facts.
+
+With `restore_best_weights=False`, the stopping epoch's Model and Optimizer state
+remain installed. With it enabled, DRYML restores only Model parameters and
+Model-owned mutable weights/buffers from the best completed epoch, exactly once.
+Optimizer slots and progression remain at the stopping epoch; JAX Model RNG also
+remains at the stopping epoch. This is intentionally a mixed-point graph, not a
+full training rewind. `Experiment.train` publishes a new terminal checkpoint
+after optional restoration and returns that exact StateRef; managed completion
+and history associate the same reference. Publication, association, or history
+failure propagates and does not report a terminal receipt.
+
+Keras uses a DRYML-owned epoch adapter for this behavior, so managed safe points
+and its supported validation postlude no longer reject
+`BasicEarlyStoppingTraining`. This does not make arbitrary saved native Keras
+callbacks replayable. Invocation telemetry remains a separate concern.
+
+### Invocation Telemetry
+
+`Experiment.train(callbacks=None, observer_strict=False, managed=None)` accepts a
+bounded collection of reporting-only observers for that invocation. This is a
+separate lane from `ManagedConfig.callbacks`: managed callbacks run strictly after
+a durable checkpoint has been published and associated, while training telemetry
+observes native training events and is not a checkpoint, Artifact, history row, or
+completion authority.
+
+Keras `BasicTraining` and `BasicEarlyStoppingTraining` accept local
+`tf.keras.callbacks.Callback` instances and deliver the ordinary native callback
+methods with Keras's native log mappings. DRYML accounting and saved behavior hooks
+run before invocation telemetry at their truthful native boundaries. Native
+callbacks saved on a Keras trainer remain behavior-capable configuration and still
+have the existing managed-replay restrictions; they are not silently reclassified
+as recoverable telemetry. Callers must supply reporting-only invocation callbacks.
+DRYML rejects known built-in behavior controls, including Keras early stopping,
+learning-rate scheduling, termination, checkpoint, backup, and EMA-swap callbacks;
+`BasicEarlyStoppingTraining` remains the supported saved early-stop lane. This
+closed classification is not a semantic sandbox and cannot prove that an arbitrary
+custom callback is reporting-only.
+
+Torch and experimental JAX training use a smaller host-side contract because their
+DRYML-owned loops have no universal native callback protocol. Each observer is a
+callable receiving one mapping. `event` is `train_batch_end` or `epoch_end`;
+accepted-update mappings include zero-based `epoch` and `batch`, retained `step`
+and `examples_seen`, and host scalar `loss`/available metrics. Epoch mappings carry
+the completed epoch position, metrics, and `stopped` decision. Delivery occurs
+outside backward/JIT and only after the accepted update, coordinated owner state,
+DRYML safe-point hooks, and progress reporting are truthful. Pending-postlude
+recovery does not replay a missed external event.
+
+Local calls may supply live backend-compatible instances. Core Execute calls must
+instead supply only `F(...)`/`FactorySpec(...)` entries; the admitted worker builds
+fresh observer instances from that configuration. A live callback/client is
+rejected by Execute capture before worker training. Factory configuration is
+transported for the invocation only and is never inserted into the Experiment or
+TrainFunction definition, checkpoint, early-stopping state, or managed ordinary-
+argument digest. Changing or omitting observers, or changing `observer_strict`, on
+a compatible unfinished invocation therefore retains the same managed attempt and
+accepted update position. Factory values should identify how the worker constructs
+the observer; credentials and live service clients belong in its selected runtime,
+not in the configuration.
+
+An ordinary observer `Exception` emits one bounded `RuntimeWarning` per observer
+and training continues by default. `observer_strict=True` propagates the original
+failure after any already accepted update and checkpoint remain authoritative; it
+does not report terminal completion or roll work back. Interruption and cancellation
+are never downgraded to telemetry warnings. At most 64 observers are accepted, no
+background delivery queue is created, and an observer's optional `close()` is
+called once in reverse construction order after normal completion, managed early
+stop, failure, or interruption. Cleanup never masks an already escaping workload
+failure. External events remain best-effort and nonauthoritative: worker loss can
+drop or duplicate them, and DRYML does not inspect a callback to prove it is
+reporting-only. Mutation, early stopping, scheduling, or other training behavior
+must use a saved behavior integration instead.
+
+### Dataset-Owned Training Input
+
+Supplied trainers consume one canonical Dataset yielding `(inputs, targets)`.
+Use `dryml.data.as_supervised(...)` to select source fields, and apply `Take`,
+`Shuffle`, `Batch`, `Repeat`, and related operators to that Dataset before
+constructing the Experiment. TensorFlow/Keras, explicit TensorFlow, and Torch
+require both branches to be explicitly batched; use `Batch(dataset, 1)` when a
+singleton update is intended. They preserve authored selection, order, and batch
+boundaries and validate the actual examples in every accepted batch. sklearn
+materializes either canonical examples or authored batches once for `fit`, records
+one successful-fit transition, and exposes no optimizer safe points. Its retained
+exposure is the number of submitted examples (including the actual size of each
+authored batch), not the number of Dataset yields or optimizer updates.
+
+Trainer constructors no longer accept `batch_size`, `num_examples`, `shuffle`,
+`shuffle_seed`, `shuffle_buffer_size`, `x_path`, or `y_path`. Saved definitions
+containing these retired fields fail during definition projection before source,
+model, optimizer, or Store mutation. Rebuild the trainer and move those controls
+to its Dataset; there is no legacy migration mode.
+
+The retained `training_preparation` exposes the canonical input/target consumer
+specs and selected handoff edges for TensorFlow, Torch, and experimental JAX.
+This is inspection evidence only; accepted updates and checkpoints remain owned
+by `TrainState` and the managed Experiment lifecycle.
 
 ## Experiments
 
@@ -219,9 +359,11 @@ order for every training safe point and for the terminal state:
    decided by managed lifecycle handling.
 
 `this.model` and `this.test_data` therefore come from the exact saved Experiment
-checkpoint. `test_data` must be an exact saved Dataset reference; a missing value
-or invalid recipe binding fails rather than falling back to training or validation
-data. Empty Artifact configuration still creates a completed facts-only row.
+checkpoint. `test_data` is a materializing Dataset slot: it accepts deterministic
+stateless definitions as well as saved reference authority, and Artifact recipes
+receive its exact checkpoint projection. A missing value or invalid recipe binding
+fails rather than falling back to training or validation data. Empty Artifact
+configuration still creates a completed facts-only row.
 
 Before changing training phase, model, progress, or checkpoint state,
 `Experiment.train` preflights every inert Artifact recipe. Active roots may only
@@ -250,8 +392,9 @@ one default-policy projected `Experiment` `ObjectRef`. Its constructor accepts o
 that non-materializing `Ref[ObjectRef]` subject; it does not own an Experiment,
 model, or Dataset payload. Exact checkpoint and Artifact `StateRef` values remain
 in rows, so reading history never restores those referenced payloads.
-The closed reference codec also retains supported frozen dense constructor arrays
-losslessly, without opening the referenced checkpoint payload.
+Embedded references use core's closed `dryml-reference-json` codec, which retains
+supported canonical Definition values and frozen dense constructor arrays
+losslessly without opening the referenced checkpoint payload.
 
 `ExperimentData.find(experiment, repo=..., store=...)` returns a fresh current
 history object or `None` only when the subject has no history identity. Corrupt,
@@ -259,7 +402,9 @@ ambiguous, incomplete, or alias-less published authority raises an authority/loa
 error. `get_or_create(...)` selects one writable Store, creates the first empty
 snapshot through the Store-local `experiment_data_current_v1` CAS alias, and may
 recover only one valid empty alias-less initial snapshot. It never chooses an
-arbitrary matching query result.
+arbitrary matching query result. `find(...)`, `get_or_create(...)`, and the private
+definition lookup also accept an `ObjectSelector` and use its explicit `reference`
+association; direct construction remains an authoritative `Ref[ObjectRef]` call.
 
 `add_row(...)` validates an exact checkpoint and optional predecessor projection,
 then returns an opaque row key. Supplying a callback occurrence key makes identical
@@ -304,6 +449,100 @@ Examples include:
 - XGBoost model wrappers
 
 Backend wrappers should keep external runtime state in object state and keep stable configuration in definitions.
+
+### Experimental JAX Models
+
+`dryml.models.jax.Model` is an **experimental** functional wrapper. Its
+constructor records separate explicit `F(...)`/`FactorySpec` `init_fn` and
+`apply_fn`, authored initializer arguments/keywords, an exact integer `seed`,
+and an explicit `output_spec`; constructor spelling may change in a future
+release. After JAX runtime admission, the initializer receives a distinct
+initialization key followed by the authored arguments and returns exactly
+`(parameters, mutable_state)`. The retained model RNG is split from that key.
+The apply function receives `(parameters, mutable_state, rng_state, input_tree,
+training_bool)` and returns exactly `(predictions, candidate_mutable_state,
+candidate_next_rng)`. It does not update parameters or optimizer slots.
+
+Public raw, selected-batched, selected-element, `Map`, and same-backend
+`AutoEncoder` calls return only predictions. They evaluate a state snapshot and
+discard candidate mutable/RNG changes, including after a failure or retry.
+DRYML never runs a fabricated forward call to infer the explicit output
+specification. Functional state supports plain dict/list/tuple trees of
+`jax.Array` leaves; malformed candidate topology, dtype, shape, or typed-key
+continuations fail before installation. `trainable_mask` is retained definition
+configuration and is reapplied to restored current parameters. Training preserves
+every false-mask parameter leaf exactly after the Optax candidate, including a
+parameter-dependent transformation such as decoupled weight decay. Functional
+models with shared parameter leaves are supported for inference, measurement, and
+persistence, but are rejected before optimizer binding because this experimental
+trainer does not claim shared-gradient semantics. Parameter measurement excludes
+mutable state, RNG, and optimizer slots.
+
+`dryml.models.jax.Optimizer` is also **experimental**. Its constructor records
+only an Optax `F(...)` recipe and does not import Optax, create a transformation,
+or allocate slots. The training-facing `bind(model)` seam reconstructs the recipe and
+initializes slots on first training use against current model parameters. It
+retains factory identity and parameter-template evidence, rejects incompatible
+later binding before update, and restores slots only after the matching model
+template is bound. Live transformations are never persisted. Inference-only
+Model construction and loading therefore do not require Optax. Experimental
+`TrainFunction` owns only behavior-continuation state; concrete `Training`
+supplies the loop. `pure_training_transition(...)` returns candidates without
+installing them so a future loop can coordinate owners at its eager commit
+boundary.
+
+`dryml.models.jax.NNXModel` (also `FlaxModel`) is the first-class experimental
+Flax NNX adapter sharing that candidate seam. Its explicit module factory and
+authored dimensions/configuration are rebuilt during load, must not provide the
+reserved `rngs` keyword, and receive wrapper-owned `nnx.Rngs` only after runtime
+admission. It partitions `Param` variables from remaining mutable/module-RNG
+state, not a live NNX GraphDef or device object. The separate external model RNG
+is split away from construction and remains distinct from module RNG streams.
+Public prediction clones module state and discards candidate BatchNorm, dropout,
+and external-RNG changes rather than mutating authoritative state.
+
+`dryml.models.jax.Training` is the matching **experimental** Dataset-owned
+trainer for functional `Model` and `NNXModel`. Construct it with an experimental
+`Optimizer`, a definition-compatible scalar mean-loss callable (or an `F(...)`
+factory returning one), and a nonnegative epoch count. It accepts no selection,
+batching, shuffle, path, or trainer-owned data controls: its Experiment must
+provide canonical explicitly batched `(inputs, targets)` Datasets. The trainer
+plans its JAX handoffs once, then consumes the closeable JAX-native prepared
+iterator without applying another batch or shuffle. Finite sources retain short
+final batches and account their actual example count; infinite sources require an
+authored finite bound. Unknown finite sources are supported only without DRYML
+safe-point callbacks.
+
+Zero requested epochs validate the Experiment's declared Dataset/callback inputs
+and complete the retained invocation lifecycle without preparing or opening a
+source, applying a model, importing/binding Optax, allocating slots, or updating
+owners. Prepared `Batch`, `Map`, and `Unbatch` pipelines forward their logical
+epoch to an enclosed seed-aware `Take(...)` boundary; `Take` retains strict
+exhaustion, fixed-prefix, and zero-acquisition behavior. Ordinary non-epoch-aware
+Dataset pipelines retain their normal fresh traversal per epoch.
+
+Training computes a pure JITted parameter-only gradient/Optax candidate, waits
+for its arrays, validates model parameters, mutable state, RNG, and optimizer
+slots, then eagerly installs all owner state and TrainState accounting together.
+Callbacks and managed checkpoints run only after that accepted transition, so a
+callback/publication failure retains the truthful update. An interruption during
+the bounded transition repairs the prior Model, Optimizer, TrainFunction, and
+progress state before it propagates. Resume reopens the same logical Dataset epoch
+and skips only accepted yielded batches; a seed-aware `GeneratorDataset` under
+`Take` therefore retains its selected epoch seed while resuming. Validation is
+snapshot-only: candidate mutable state and RNG are always discarded. JAX Training
+does not yet support general trainer metrics or arbitrary native callbacks. Its
+invocation telemetry is limited to the host-side mapping contract above. Its
+saved `EarlyStoppingTraining` specialization supports only completed
+training/validation loss facts under the managed contract above; no broader
+callback or metric API is implied.
+
+Every JAX owner writes a versioned host-array envelope and validates its complete
+runtime topology, path structure, shared-leaf topology, dtype, shape, typed-key
+implementation, and factory identity before installation. Parameters alone are
+counted by `Model.parameter_counts()` and `dryml.jax.measurements`. A failed
+graph restore is invalidated by the normal Store restore boundary and must be
+loaded again as a fresh exact graph.
 
 ## Sequential Layer Factories
 
