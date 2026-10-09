@@ -777,10 +777,15 @@ class Definition(DefInterface, Mapping):
 
         Returns:
             A selector that replaces unknown symbolic relationships with local
-            wildcards while preserving known Definition structure.
+            wildcards while preserving known Definition structure. Fixed nested
+            ConcreteDefinitions and exact reference values remain exact anchors;
+            their parameters and identities are not loosened.
 
         Raises:
             ParameterizationError: If the Definition cannot be projected.
+
+        Side Effects:
+            None. Projection does not construct Objects or access Store authority.
         """
 
         from .generator import _loose_selector

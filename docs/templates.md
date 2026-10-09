@@ -82,6 +82,21 @@ authoring retain an artifact mapping inertly until later concretization.
 
 ## Exact Support And Persistence
 
+`Definition.loose_selector()` replaces active symbolic expressions with local
+wildcards while retaining known construction structure. It is not a class-only
+selector: fixed nested `ConcreteDefinition` values remain exact definition
+anchors, and fixed `ObjectRef`/`StateRef` values retain their identities. A
+different dataset fork or a changed model initializer can therefore fall outside
+the original template's loose selector. Use a partial `Definition` to constrain
+only the experiment fields of interest, or
+`Definition(Experiment, SKIP_ARGS)` to select all Experiment definitions.
+
+Query counts depend on the selected identity domain. `.cdefs().count()` counts
+distinct definitions, `.state_refs().count()` counts saved snapshots, and
+`.state_refs().object_projection().count()` counts distinct realized object
+graphs across those snapshots. Repeated runs of one definition can create
+multiple object graphs; checkpoints can create multiple states of one object.
+
 `Generator.support_selector()` returns `GeneratorSelector`, which proves exact
 finite support including linked roots, arithmetic, ordering, and construction
 graph topology. Conservative provider bounds may reject a candidate but never
