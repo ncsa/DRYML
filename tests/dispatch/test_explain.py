@@ -366,6 +366,46 @@ def test_exact_pin_does_not_require_unrequested_resource_evidence(
     assert backend.closed == 1
 
 
+def test_affirmative_world_plan_survives_unrelated_incomplete_resources(
+    monkeypatch, synthetic_environment_record,
+) -> None:
+    """Use a scoped feasible plan despite incomplete aggregate capacity evidence."""
+
+    backend = DiscoveryBackend(synthetic_environment_record)
+    monkeypatch.setattr(
+        "dryml.environments.selection._probe_record",
+        lambda _spec: synthetic_environment_record,
+    )
+    discover = backend.discover
+
+    def incomplete_resources_with_plan(**kwargs):
+        snapshot = discover(**kwargs)
+        snapshot.complete = False
+        snapshot.plans = (
+            SimpleNamespace(
+                environment_key="candidate",
+                report=SimpleNamespace(
+                    issues=(),
+                    environment=None,
+                    world=SimpleNamespace(admission_ok=True),
+                ),
+            ),
+        )
+        return snapshot
+
+    backend.discover = incomplete_resources_with_plan
+    view = dispatch.with_options(
+        backend=DiscoveryConfig(backend=backend),
+        python=CurrentEnvironmentSpec(),
+        world=WorldRequirement({"main": {}}),
+    )
+
+    report = view.explain(lambda: None)
+
+    assert report.eligible
+    assert backend.closed == 1
+
+
 def test_explain_revalidates_target_after_backend_discovery(
     synthetic_environment_record,
 ) -> None:
