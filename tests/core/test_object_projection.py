@@ -2,8 +2,20 @@
 
 import pytest
 
-from dryml.core import Definition, ObjectId, ObjectRef, Ref, StateRef, Template
+from dryml.core import (
+    Definition,
+    IdentitySet,
+    ObjectId,
+    ObjectRef,
+    ObjectSelector,
+    ObjectSelectorSet,
+    Ref,
+    SourceEvidence,
+    StateRef,
+    Template,
+)
 from dryml.core.cdef_graph import EdgeKind
+from dryml.core.cdef_codec import CDefGraphCodecError, encode_cdef_graph
 from dryml.core.links import DefLink
 from dryml.core.object import Serializable
 from dryml.core.symbol import ImportRef
@@ -45,7 +57,7 @@ def _state_ref(value, namespace, state_hash):
 
 
 def test_recursive_object_projection_preserves_ids_roles_sharing_and_codec_meaning():
-    """Projection weakens nested state references without changing graph association data."""
+    """Projection creates recursive selectors without changing graph association data."""
 
     imported = _state_ref("child", "imported", _state_hash("a"))
     recipe = Definition(ProjectionLeaf, {"exact": imported, "width": Par("width")})
@@ -71,21 +83,22 @@ def test_recursive_object_projection_preserves_ids_roles_sharing_and_codec_meani
     referenced = projected.definition.parameters["referenced"]
     opaque_recipe = projected.definition.parameters["recipe"]
 
+    assert isinstance(projected, ObjectSelector)
     assert projected.objects == state.object.objects
     assert root.object_projection().graph_equal(projected.definition)
     assert referenced.kind is EdgeKind.REF
     assert materialized is referenced.target
-    assert isinstance(materialized, ObjectRef)
+    assert isinstance(materialized, ObjectSelector)
     assert opaque_recipe.target.value == recipe
-    assert projected.object_projection() == projected
-    assert ObjectRef.from_data(projected.to_data()) == projected
+    assert ObjectRef.from_data(projected.reference.to_data()) == projected.reference
+    with pytest.raises(CDefGraphCodecError, match="query-only"):
+        encode_cdef_graph(projected.definition)
 
     traversed = state.object_projection(traverse_refs=True)
     traversed_recipe = traversed.definition.parameters["recipe"].target.value
     assert traversed != projected
     projected_exact = traversed_recipe.args[0]["exact"]
-    assert isinstance(projected_exact, ObjectRef)
-    assert not isinstance(projected_exact, StateRef)
+    assert isinstance(projected_exact, ObjectSelector)
 
 
 def test_projection_never_allocates_object_ids_or_resolves_symbols(monkeypatch):
@@ -103,6 +116,65 @@ def test_projection_never_allocates_object_ids_or_resolves_symbols(monkeypatch):
     monkeypatch.setattr(ImportRef, "resolve", fail_resolution)
 
     assert state.object_projection().objects == state.object.objects
+
+
+def test_object_selector_projection_deduplicates_states_and_preserves_exact_pins():
+    """Generated references are selectors while manually embedded references stay exact."""
+
+    child_object = _state_ref("child", "child", _state_hash("a")).object
+    first_child = StateRef(child_object, {GraphPath(): _state_hash("a")})
+    second_child = StateRef(child_object, {GraphPath(): _state_hash("b")})
+    root_id = ObjectId(("run",))
+
+    def checkpoint(child, root_state):
+        definition = Definition(
+            ProjectionCarrier,
+            reference=DefLink.finalized(EdgeKind.REF, child),
+        ).concretize()
+        reference = ObjectRef(definition, {GraphPath(): root_id})
+        return StateRef(reference, {GraphPath(): root_state})
+
+    first = checkpoint(first_child, _state_hash("c"))
+    second = checkpoint(second_child, _state_hash("d"))
+    other_definition = Definition(
+        ProjectionCarrier,
+        reference=DefLink.finalized(EdgeKind.REF, second_child),
+    ).concretize()
+    other = StateRef(
+        ObjectRef(other_definition, {GraphPath(): ObjectId(("other",))}),
+        {GraphPath(): _state_hash("e")},
+    )
+
+    generated = first.object_projection()
+    assert generated == second.object_projection()
+    assert generated.reference == second.object_projection().reference
+    assert generated != other.object_projection()
+    assert generated.matches(first)
+    assert generated.matches(second)
+
+    pinned = ObjectSelector(first.object)
+    assert pinned.matches(first)
+    assert not pinned.matches(second)
+
+    first_source = SourceEvidence.from_source("first")
+    second_source = SourceEvidence.from_source("second")
+    identities = IdentitySet((
+        (first, first_source),
+        (second, second_source),
+        other,
+        first.definition,
+    ))
+    assert identities.query().sel(generated).state_refs().count() == 2
+    assert identities.query().sel(pinned).state_refs().one() == first
+    assert IdentitySet((first.definition, second.definition)).query().sel(
+        first.definition.object_projection()
+    ).count() == 2
+
+    projected = identities.object_projection()
+    assert isinstance(projected, ObjectSelectorSet)
+    assert projected.count() == 2
+    assert projected.sources(generated) == frozenset((first_source, second_source))
+    assert identities.query().object_projection().count() == 2
 
 
 def test_reference_value_at_accepts_only_terminal_ref_data():

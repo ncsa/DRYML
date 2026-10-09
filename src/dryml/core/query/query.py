@@ -61,6 +61,11 @@ def _query_match(
     if isinstance(selector, Selector):
         selector = selector.root
 
+    from ..selector import ObjectSelector
+
+    if isinstance(selector, ObjectSelector):
+        return _object_selector_matches(selector, target)
+
     from ..cdef_graph import EdgeKind
 
     if (
@@ -77,7 +82,11 @@ def _query_match(
         target = target.target
 
     if isinstance(selector, ConcreteDefinition):
-        return isinstance(target, ConcreteDefinition) and cdef_equal(selector, target)
+        return isinstance(target, ConcreteDefinition) and (
+            _object_selector_value_match(selector, target)
+            if _contains_object_selector(selector)
+            else cdef_equal(selector, target)
+        )
 
     from ..factory import FactorySpec
 
@@ -252,6 +261,229 @@ def _query_match(
         )
 
     return _query_match_leaf(selector, target, strict=strict, class_match=class_match)
+
+
+def _object_selector_matches(selector, target) -> bool:
+    """Match one recursive ObjectSelector against detached exact authority."""
+
+    from ..reference_values import ObjectRef, StateRef
+    from ..selector import ObjectSelector
+
+    if not isinstance(selector, ObjectSelector):
+        raise TypeError("Object selector matching requires an ObjectSelector.")
+    if isinstance(target, StateRef):
+        target = target.object
+    if not isinstance(target, ObjectRef) or selector.objects != target.objects:
+        return False
+    return _object_selector_value_match(selector.definition, target.definition)
+
+
+def _object_selector_value_match(selector, target) -> bool:
+    """Match exact graph topology while interpreting ObjectSelector leaves."""
+
+    from ..cdef_identity import cdef_node_key
+    from ..factory import FactorySpec
+    from ..reference_values import ObjectRef, StateRef
+    from ..selector import ObjectSelector
+    from ..template import _BinaryExpr, _RepeatExpr
+
+    selector_nodes: dict[object, object] = {}
+    target_nodes: dict[object, object] = {}
+
+    def match(left, right, left_nodes, right_nodes) -> bool:
+        if isinstance(left, ObjectSelector):
+            return _object_selector_matches(left, right)
+        if isinstance(left, StateRef):
+            return isinstance(right, StateRef) and left == right
+        if isinstance(left, ObjectRef):
+            return isinstance(right, (ObjectRef, StateRef)) and (
+                right.object if isinstance(right, StateRef) else right
+            ) == left
+        if isinstance(left, ConcreteDefinition):
+            if not isinstance(right, ConcreteDefinition):
+                return False
+            left_key, right_key = cdef_node_key(left), cdef_node_key(right)
+            previous_right = left_nodes.get(left_key)
+            previous_left = right_nodes.get(right_key)
+            if previous_right is not None or previous_left is not None:
+                return previous_right == right_key and previous_left == left_key
+            left_nodes[left_key] = right_key
+            right_nodes[right_key] = left_key
+            return (
+                left._stateful_role == right._stateful_role
+                and _query_match_class(
+                    left.cls, right.cls, strict=True, class_match="exact",
+                )
+                and tuple(left.parameters) == tuple(right.parameters)
+                and all(
+                    match(left.parameters[name], right.parameters[name], left_nodes, right_nodes)
+                    for name in left.parameters
+                )
+            )
+        if isinstance(left, DefLink):
+            return (
+                isinstance(right, DefLink)
+                and left.kind is right.kind
+                and match(left.target, right.target, left_nodes, right_nodes)
+            )
+        if isinstance(left, QuotedDef):
+            return isinstance(right, QuotedDef) and match(
+                left.value, right.value, left_nodes, right_nodes,
+            )
+        if isinstance(left, SelectorSpec):
+            return isinstance(right, SelectorSpec) and match(
+                left.selector, right.selector, left_nodes, right_nodes,
+            )
+        if isinstance(left, Selector):
+            return (
+                isinstance(right, Selector)
+                and left.strict == right.strict
+                and left.cls_policy == right.cls_policy
+                and match(left.root, right.root, left_nodes, right_nodes)
+            )
+        if isinstance(left, Definition):
+            if not isinstance(right, Definition) or isinstance(right, ConcreteDefinition):
+                return False
+            if not _query_match_class(left.cls, right.cls, strict=True, class_match="exact"):
+                return False
+            if (left.args is None) != (right.args is None):
+                return False
+            if left.args is not None and (
+                len(left.args) != len(right.args)
+                or not all(
+                    match(a, b, left_nodes, right_nodes)
+                    for a, b in zip(left.args, right.args)
+                )
+            ):
+                return False
+            return tuple(left.kwargs) == tuple(right.kwargs) and all(
+                match(left.kwargs[name], right.kwargs[name], left_nodes, right_nodes)
+                for name in left.kwargs
+            )
+        if isinstance(left, FactorySpec):
+            return (
+                isinstance(right, FactorySpec)
+                and _query_match_leaf(
+                    left.target, right.target, strict=True, class_match="exact",
+                )
+                and len(left.args) == len(right.args)
+                and tuple(left.kwargs) == tuple(right.kwargs)
+                and all(
+                    match(a, b, left_nodes, right_nodes)
+                    for a, b in zip(left.args, right.args)
+                )
+                and all(
+                    match(left.kwargs[name], right.kwargs[name], left_nodes, right_nodes)
+                    for name in left.kwargs
+                )
+            )
+        if isinstance(left, _BinaryExpr):
+            return (
+                isinstance(right, _BinaryExpr)
+                and left.operation == right.operation
+                and match(left.left, right.left, left_nodes, right_nodes)
+                and match(left.right, right.right, left_nodes, right_nodes)
+            )
+        if isinstance(left, _RepeatExpr):
+            return (
+                isinstance(right, _RepeatExpr)
+                and left.shared == right.shared
+                and matching_container_family(left.group, right.group) is not None
+                and len(left.group) == len(right.group)
+                and all(
+                    match(a, b, left_nodes, right_nodes)
+                    for a, b in zip(left.group, right.group)
+                )
+                and match(left.count, right.count, left_nodes, right_nodes)
+            )
+        if isinstance(left, (dict, FrozenDict)):
+            return (
+                isinstance(right, (dict, FrozenDict))
+                and set(left) == set(right)
+                and all(
+                    match(left[key], right[key], left_nodes, right_nodes)
+                    for key in left
+                )
+            )
+        family = matching_container_family(left, right)
+        if family in {"list", "tuple"}:
+            return len(left) == len(right) and all(
+                match(a, b, left_nodes, right_nodes)
+                for a, b in zip(left, right)
+            )
+        if family == "set":
+            left_values, right_values = list(left), list(right)
+            if len(left_values) != len(right_values):
+                return False
+
+            def assign(index, remaining, current_left, current_right):
+                if index == len(left_values):
+                    left_nodes.clear()
+                    left_nodes.update(current_left)
+                    right_nodes.clear()
+                    right_nodes.update(current_right)
+                    return True
+                for position in remaining:
+                    trial_left, trial_right = dict(current_left), dict(current_right)
+                    if match(
+                        left_values[index], right_values[position], trial_left, trial_right,
+                    ) and assign(
+                        index + 1,
+                        tuple(item for item in remaining if item != position),
+                        trial_left,
+                        trial_right,
+                    ):
+                        return True
+                return False
+
+            return assign(
+                0, tuple(range(len(right_values))), dict(left_nodes), dict(right_nodes),
+            )
+        return _query_match_leaf(left, right, strict=True, class_match="exact")
+
+    return match(selector, target, selector_nodes, target_nodes)
+
+
+def _contains_object_selector(value) -> bool:
+    """Return whether a query value contains a generated ObjectSelector leaf."""
+
+    from ..factory import FactorySpec
+    from ..selector import ObjectSelector
+    from ..template import _BinaryExpr, _RepeatExpr
+
+    active: set[int] = set()
+
+    def visit(current) -> bool:
+        if isinstance(current, ObjectSelector):
+            return True
+        if isinstance(current, QuotedDef):
+            return visit(current.value)
+        if isinstance(current, SelectorSpec):
+            return visit(current.selector)
+        if isinstance(current, Selector):
+            return visit(current.root)
+        if isinstance(current, DefLink):
+            values = (current.target,)
+        elif isinstance(current, FactorySpec):
+            values = (*current.args, *current.kwargs.values())
+        elif isinstance(current, _BinaryExpr):
+            values = (current.left, current.right)
+        elif isinstance(current, _RepeatExpr):
+            values = (*current.group, current.count)
+        else:
+            values = tuple(edge.value for edge in iter_value_edges(current))
+        if not values:
+            return False
+        marker = id(current)
+        if marker in active:
+            return False
+        active.add(marker)
+        try:
+            return any(visit(item) for item in values)
+        finally:
+            active.remove(marker)
+
+    return visit(value)
 
 
 def _query_match_factory(
@@ -808,8 +1040,8 @@ class IdentityQuery:
         established meanings.  ``None`` is an immutable no-op.
 
         Args:
-            value: Definition, complete CDef, Selector, GeneratorSelector, exact
-                ObjectRef or StateRef, or ``None``.
+            value: Definition, complete CDef, Selector, ObjectSelector,
+                GeneratorSelector, exact ObjectRef or StateRef, or ``None``.
 
         Returns:
             An immutable query with the selector appended, or this query for
@@ -828,9 +1060,9 @@ class IdentityQuery:
         from ..definition import ConcreteDefinition, Definition
         from ..generator import GeneratorSelector
         from ..reference_values import ObjectRef, StateRef
-        from ..selector import Selector, _contains_state_selector
+        from ..selector import ObjectSelector, Selector, _contains_state_selector
 
-        if not isinstance(value, (Definition, ConcreteDefinition, Selector, GeneratorSelector, ObjectRef, StateRef)):
+        if not isinstance(value, (Definition, ConcreteDefinition, Selector, ObjectSelector, GeneratorSelector, ObjectRef, StateRef)):
             raise TypeError("IdentityQuery.sel requires a Definition, selector, generator, or exact reference.")
         selector_root = (
             value.root if isinstance(value, Selector)
@@ -1443,6 +1675,23 @@ class IdentityQuery:
         """
 
         return self._run_terminal(self._collect_with_capture)
+
+    def object_projection(self):
+        """Collect and deduplicate reference members as ObjectSelectors.
+
+        Returns:
+            A fixed ObjectSelectorSet containing projections of every ObjectRef
+            and StateRef retained by the plan. ConcreteDefinitions are omitted.
+
+        Raises:
+            QueryError: If validation, authority capture, budgets, or required
+                index coverage fails.
+
+        Side Effects:
+            Executes this query under the same authority cuts as ``collect()``.
+        """
+
+        return self.collect().object_projection()
 
     def count(self) -> int:
         """Return the distinct identity count after all validation.
@@ -2243,7 +2492,7 @@ class IdentityQuery:
         from ..definition import ConcreteDefinition, Definition
         from ..generator import GeneratorSelector
         from ..reference_values import ObjectRef, StateRef
-        from ..selector import Selector
+        from ..selector import ObjectSelector, Selector
         from .identity import SourceEvidence
 
         if restriction.kind == "kind":
@@ -2256,6 +2505,8 @@ class IdentityQuery:
             return self._source_evidence(restriction.value) in evidence.sources
         if restriction.kind == "sel":
             selector = restriction.value
+            if isinstance(selector, ObjectSelector):
+                return _object_selector_matches(selector, value)
             if isinstance(selector, ObjectRef):
                 return isinstance(value, (ObjectRef, StateRef)) and (
                     value.object if isinstance(value, StateRef) else value
@@ -2267,13 +2518,18 @@ class IdentityQuery:
                 return self._generator_matches(selector, target, generator_budget)
             if isinstance(selector, Selector):
                 if isinstance(selector.root, ConcreteDefinition):
-                    return selector.root.graph_equal(target)
+                    return _query_match(
+                        selector.root, target, strict=selector.strict,
+                        class_match=selector.cls_policy,
+                    )
                 return _query_match(
                     selector.root, target, strict=selector.strict,
                     class_match=selector.cls_policy,
                 )
             if isinstance(selector, ConcreteDefinition):
-                return isinstance(target, ConcreteDefinition) and selector.graph_equal(target)
+                return _query_match(
+                    selector, target, strict=True, class_match="exact",
+                )
             return isinstance(selector, Definition) and _query_match(
                 selector, target, strict=False, class_match="selector"
             )

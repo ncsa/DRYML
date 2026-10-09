@@ -26,6 +26,12 @@ queries from different producers, preserve source evidence, and deduplicate comp
 typed identities. Result ordering is deterministic by complete identity; it does not
 mean newest, best, or completed.
 
+`object_projection()` is an explicit terminal on `IdentityQuery` and a source-free
+projection on `IdentitySet`. It maps ObjectRef and StateRef members to recursive
+`ObjectSelector` values, omits CDefs, merges evidence for equal projections, and
+returns a fixed `ObjectSelectorSet`. Exact reference selection remains unchanged;
+an ObjectSelector is the separate state-independent graph-selection value.
+
 The producer option `repo.query(weak=...)` controls which cache tiers enter the
 initial universe. It is distinct from `query.cached(scope=..., weak=...)`, which
 only narrows identities already present in that universe.

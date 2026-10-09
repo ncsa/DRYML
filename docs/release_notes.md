@@ -2,6 +2,13 @@
 
 ## 0.3.0b1 (unreleased)
 
+`ObjectRef.object_projection()` and `StateRef.object_projection()` now return a
+recursive query-only `ObjectSelector`. Each encountered exact reference becomes a
+nested selector, while explicitly embedded raw ObjectRef and StateRef values remain
+exact. Query V3 and fixed `IdentitySet` results expose `object_projection()` to
+deduplicate checkpoints into fixed `ObjectSelectorSet` run identities without
+merging separately realized ObjectId graphs.
+
 Symbolic construction now uses `Definition` as its only runtime value. `Par`
 expressions, discovery, static `sub(...)`, remapping, and loose selector
 projection live on Definition; symbolic resolution means only that no active

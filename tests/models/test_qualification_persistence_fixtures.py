@@ -56,10 +56,10 @@ def test_experiment_data_v1_fixture_round_trips_actual_reader_input_without_payl
     from dryml.models.experiment_data import _decode_ref
 
     reference = _decode_ref(encoded_state, version=1)
-    history = ExperimentData(reference.object_projection())
+    history = ExperimentData(reference.object_projection().reference)
     history.restore_state_from_dir_imp(FIXTURE_ROOT, codec="pkl")
     history.save_state_to_dir_imp(tmp_path, codec="pkl")
-    restored = ExperimentData(reference.object_projection())
+    restored = ExperimentData(reference.object_projection().reference)
     restored.restore_state_from_dir_imp(tmp_path, codec="pkl")
 
     row = restored._rows["v1:fixture:1"]

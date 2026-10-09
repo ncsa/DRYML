@@ -47,14 +47,14 @@ def test_codec_round_trip_and_rejected_decode_leave_rows_unchanged(tmp_path):
     payload.mkdir()
     history.save_state_to_dir_imp(payload, codec="pkl")
     assert json.loads(Path(payload, "experiment_data.json").read_text())["version"] == 3
-    restored = ExperimentData(checkpoint.object_projection())
+    restored = ExperimentData(checkpoint.object_projection().reference)
     restored.restore_state_from_dir_imp(payload, codec="pkl")
     assert restored.data.to_dict("records") == history.data.to_dict("records")
 
     Path(payload, "experiment_data.json").write_text(
         json.dumps(history._payload(version=2)), encoding="utf-8",
     )
-    legacy = ExperimentData(checkpoint.object_projection())
+    legacy = ExperimentData(checkpoint.object_projection().reference)
     legacy.restore_state_from_dir_imp(payload, codec="pkl")
     assert legacy.data.to_dict("records") == history.data.to_dict("records")
 
@@ -87,7 +87,7 @@ def test_history_round_trips_state_ref_with_semantic_definition_values(tmp_path)
     payload.mkdir()
 
     history.save_state_to_dir_imp(payload, codec="pkl")
-    restored = ExperimentData(checkpoint.object_projection())
+    restored = ExperimentData(checkpoint.object_projection().reference)
     restored.restore_state_from_dir_imp(payload, codec="pkl")
 
     assert isinstance(restored.data.iloc[0].state_ref, StateRef)
@@ -106,5 +106,5 @@ def test_codec_rejects_unknown_status_and_incomplete_completed_row(tmp_path):
     raw = raw.replace('"evaluation_status":"pending"', '"evaluation_status":"completed"')
     Path(payload, "experiment_data.json").write_text(raw, encoding="utf-8")
     with pytest.raises(ExperimentDataError, match="Completed rows"):
-        ExperimentData(checkpoint.object_projection()).restore_state_from_dir_imp(payload, codec="pkl")
+        ExperimentData(checkpoint.object_projection().reference).restore_state_from_dir_imp(payload, codec="pkl")
     repo.close(flush=False)

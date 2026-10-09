@@ -322,16 +322,17 @@ class ObjectRef:
 
         return _project_object_ref(self, normalize_path(path))
 
-    def object_projection(self, *, traverse_refs: bool = False) -> "ObjectRef":
-        """Return this reference with nested StateRefs weakened to ObjectRefs.
+    def object_projection(self, *, traverse_refs: bool = False) -> "ObjectSelector":
+        """Return a recursive selector for this object graph across states.
 
         Args:
             traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
                 Ref-held exact references are projected regardless of this flag.
 
         Returns:
-            A non-materializing ObjectRef retaining this reference's ObjectIds,
-            graph topology, and edge roles.
+            An ObjectSelector retaining this reference's ObjectIds, graph
+            topology, and edge roles. Every encountered ObjectRef or StateRef is
+            recursively represented by another ObjectSelector.
 
         Raises:
             TypeError: If ``traverse_refs`` is not a bool.
@@ -342,11 +343,24 @@ class ObjectRef:
             not changed, and no Store is consulted.
         """
 
-        from .cdef_codec import object_projection_cdef
+        from .cdef_codec import (
+            object_projection_cdef,
+            _object_reference_projection_cdef,
+        )
+        from .selector import ObjectSelector
 
-        return ObjectRef(
-            object_projection_cdef(self.definition, traverse_refs=traverse_refs),
+        reference = ObjectRef(
+            _object_reference_projection_cdef(
+                self.definition, traverse_refs=traverse_refs,
+            ),
             self.objects,
+        )
+        return ObjectSelector._projected(
+            object_projection_cdef(
+                self.definition, traverse_refs=traverse_refs,
+            ),
+            self.objects,
+            reference,
         )
 
     def _identity_data(self) -> dict[str, Any]:
@@ -486,16 +500,16 @@ class StateRef:
         states = _project_mapping(self.object.definition, self.object.objects, self.states, normalized)
         return StateRef(projected, states)
 
-    def object_projection(self, *, traverse_refs: bool = False) -> ObjectRef:
-        """Return this StateRef's recursive non-state association projection.
+    def object_projection(self, *, traverse_refs: bool = False) -> "ObjectSelector":
+        """Return this StateRef's recursive non-state object selector.
 
         Args:
             traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
                 Ref-held exact references are projected regardless of this flag.
 
         Returns:
-            An ObjectRef retaining every ObjectId and all supported graph roles
-            while recursively removing StateRef selections.
+            An ObjectSelector retaining every ObjectId and all supported graph
+            roles while recursively removing StateRef selections.
 
         Raises:
             TypeError: If ``traverse_refs`` is not a bool.

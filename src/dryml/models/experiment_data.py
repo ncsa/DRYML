@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from dryml.core import ObjectRef, Ref, StateRef
+from dryml.core import ObjectRef, ObjectSelector, Ref, StateRef
 from dryml.core.cardinality import Cardinality, CardinalityKind
 from dryml.core.object import Serializable
 from dryml.core.reference_json import (
@@ -325,8 +325,21 @@ class ExperimentData(Serializable):
         return pd.DataFrame.from_records(records, columns=columns)
 
     @classmethod
-    def _definition(cls, experiment: ObjectRef):
+    def _definition(cls, experiment: ObjectRef | ObjectSelector):
+        experiment = cls._subject_reference(experiment)
         return cls.defn(Ref(experiment)).concretize()
+
+    @staticmethod
+    def _subject_reference(experiment: ObjectRef | ObjectSelector) -> ObjectRef:
+        """Normalize a query selector to persistent Experiment association authority."""
+
+        if isinstance(experiment, ObjectSelector):
+            experiment = experiment.reference
+        if not isinstance(experiment, ObjectRef):
+            raise TypeError(
+                "ExperimentData requires an Experiment ObjectRef or ObjectSelector projection."
+            )
+        return experiment
 
     @classmethod
     def _load_current(cls, experiment: ObjectRef, *, repo, store):
@@ -349,11 +362,11 @@ class ExperimentData(Serializable):
         return loaded, current, cdef
 
     @classmethod
-    def find(cls, experiment: Ref[ObjectRef], *, repo, store=None):
+    def find(cls, experiment: Ref[ObjectRef] | ObjectSelector, *, repo, store=None):
         """Load the Store-current history for one projected Experiment subject.
 
         Args:
-            experiment: Default-policy projected Experiment ObjectRef.
+            experiment: Projected Experiment ObjectRef or ObjectSelector.
             repo: Connected Repo holding declaration and state authority.
             store: Optional selected Store. It is required for ambiguous Store
                 topology and restricts loading to that authority.
@@ -368,15 +381,14 @@ class ExperimentData(Serializable):
             ambiguous. Repo load errors remain explicit.
         """
 
-        if not isinstance(experiment, ObjectRef):
-            raise TypeError("ExperimentData.find requires an Experiment ObjectRef projection.")
+        experiment = cls._subject_reference(experiment)
         if store is None:
             store = repo._selected_writable_physical_store(None, "find ExperimentData")
         loaded, _, _ = cls._load_current(experiment, repo=repo, store=store)
         return loaded
 
     @classmethod
-    def get_or_create(cls, experiment: Ref[ObjectRef], *, repo, store=None):
+    def get_or_create(cls, experiment: Ref[ObjectRef] | ObjectSelector, *, repo, store=None):
         """Return the unique current history, creating or safely recovering it.
 
         A new history uses the U2 declaration claim and absent-alias CAS. Recovery
@@ -384,7 +396,7 @@ class ExperimentData(Serializable):
         ambiguous alias-less history remains an authority error.
 
         Args:
-            experiment: Default-policy projected Experiment ObjectRef.
+            experiment: Projected Experiment ObjectRef or ObjectSelector.
             repo: Connected Repo holding or receiving history authority.
             store: Optional selected writable Store. Omit it only for an
                 unambiguous writable physical Store topology.
@@ -393,7 +405,8 @@ class ExperimentData(Serializable):
             A fresh or newly initialized current ExperimentData object.
 
         Raises:
-            TypeError: If ``experiment`` is not a projected ObjectRef.
+            TypeError: If ``experiment`` is not a projected ObjectRef or
+                ObjectSelector.
             StoreAuthorityError: If initialization evidence is incomplete,
                 populated, malformed, or ambiguous.
             RepoSaveError: If Store selection or initial immutable publication
@@ -404,8 +417,7 @@ class ExperimentData(Serializable):
             CAS-adopt a single recovered initial snapshot in the selected Store.
         """
 
-        if not isinstance(experiment, ObjectRef):
-            raise TypeError("ExperimentData.get_or_create requires an Experiment ObjectRef projection.")
+        experiment = cls._subject_reference(experiment)
         selected = repo._selected_writable_physical_store(store, "create ExperimentData")
         cdef = cls._definition(experiment)
         try:
@@ -689,7 +701,7 @@ class ExperimentData(Serializable):
         self._install_row(key, current)
 
     def _validate_association(self, reference: StateRef, what: str):
-        if reference.object_projection() != self.experiment:
+        if reference.object_projection().reference != self.experiment:
             raise ExperimentDataError(f"{what} does not project to this ExperimentData subject.")
 
     @staticmethod

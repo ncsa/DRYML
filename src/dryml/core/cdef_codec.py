@@ -200,7 +200,7 @@ def copy_cdef_graph(root: ConcreteDefinition) -> ConcreteDefinition:
 
 def object_projection_cdef(
         root: ConcreteDefinition, *, traverse_refs: bool = False) -> ConcreteDefinition:
-    """Recursively weaken StateRefs in a CDef graph to ObjectRefs.
+    """Recursively replace exact references in a CDef graph with ObjectSelectors.
 
     Args:
         root: Exact CDef graph to rewrite without resolving its class authority.
@@ -208,7 +208,8 @@ def object_projection_cdef(
             Ref-held exact references are always rewritten.
 
     Returns:
-        A graph-isomorphic CDef whose supported nested StateRefs are ObjectRefs.
+        A graph-isomorphic query CDef whose supported exact references are
+        ObjectSelectors. Raw references subsequently added by a caller remain exact.
 
     Raises:
         TypeError: If ``root`` is not a CDef or ``traverse_refs`` is not bool.
@@ -219,6 +220,23 @@ def object_projection_cdef(
         Stores, or allocate ObjectIds.
     """
 
+    return _object_projection_cdef(
+        root, traverse_refs=traverse_refs, selector_references=True,
+    )
+
+
+def _object_reference_projection_cdef(
+        root: ConcreteDefinition, *, traverse_refs: bool = False) -> ConcreteDefinition:
+    """Return the authoritative ObjectRef-compatible non-state CDef projection."""
+
+    return _object_projection_cdef(
+        root, traverse_refs=traverse_refs, selector_references=False,
+    )
+
+
+def _object_projection_cdef(
+        root: ConcreteDefinition, *, traverse_refs: bool,
+        selector_references: bool) -> ConcreteDefinition:
     if not isinstance(root, ConcreteDefinition):
         raise TypeError(f"Expected ConcreteDefinition, got {type(root).__name__}.")
     if type(traverse_refs) is not bool:
@@ -232,7 +250,7 @@ def object_projection_cdef(
     memo: dict[int, Any] = {}
     active: set[int] = set()
 
-    def rewrite_reference(ref: ObjectRef) -> ObjectRef:
+    def rewrite_reference(ref: ObjectRef):
         marker = id(ref)
         if marker in memo:
             return memo[marker]
@@ -240,7 +258,21 @@ def object_projection_cdef(
             raise ValueError("Object projection does not support cyclic reference graphs.")
         active.add(marker)
         try:
-            result = ObjectRef(rewrite(ref.definition), ref.objects)
+            definition = rewrite(ref.definition)
+            if selector_references:
+                from .selector import ObjectSelector
+
+                reference = ObjectRef(
+                    _object_reference_projection_cdef(
+                        ref.definition, traverse_refs=traverse_refs,
+                    ),
+                    ref.objects,
+                )
+                result = ObjectSelector._projected(
+                    definition, ref.objects, reference,
+                )
+            else:
+                result = ObjectRef(definition, ref.objects)
             memo[marker] = result
             return result
         finally:
@@ -592,6 +624,12 @@ def _encode_value(
     labels: dict[object, str],
     quotation_budget: _QuotationBudget,
 ) -> dict[str, Any]:
+    from .selector import ObjectSelector
+
+    if isinstance(value, ObjectSelector):
+        raise CDefGraphCodecError(
+            "ObjectSelector values are query-only and cannot enter CDef authority."
+        )
     if isinstance(value, ObjectRef):
         return {"kind": "object_ref", "value": value.to_data()}
     if isinstance(value, StateRef):

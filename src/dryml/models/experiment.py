@@ -303,7 +303,7 @@ class Experiment(Serializable):
                 self.state.pending_observation.sequence,
             )
             history = ExperimentData.get_or_create(
-                retained.object_projection(), repo=managed.state_repo,
+                retained.object_projection().reference, repo=managed.state_repo,
             )
             completed = history._rows.get(row_key)
             if (
@@ -397,7 +397,9 @@ class Experiment(Serializable):
             raise RuntimeError("Experiment evaluation requires an associated pending observation.")
         row_key = self._occurrence_key(self.state.pending_observation_attempt_id, observation.sequence)
         names, recipes = self._artifact_recipes()
-        history = ExperimentData.get_or_create(checkpoint.object_projection(), repo=context.state_repo)
+        history = ExperimentData.get_or_create(
+            checkpoint.object_projection().reference, repo=context.state_repo,
+        )
         existing = history._rows.get(row_key)
         already_completed = existing is not None and existing["evaluation_status"] == "completed"
         try:

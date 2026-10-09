@@ -93,7 +93,7 @@ def main(destination: Path | str | None = None) -> None:
     output = _output_root(destination)
 
     reference = StateRef.from_data(REFERENCE)
-    history = ExperimentData(reference.object_projection())
+    history = ExperimentData(reference.object_projection().reference)
     history.add_row(
         expected_artifacts=("metric",),
         state_ref=reference,

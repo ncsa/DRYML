@@ -402,7 +402,9 @@ ambiguous, incomplete, or alias-less published authority raises an authority/loa
 error. `get_or_create(...)` selects one writable Store, creates the first empty
 snapshot through the Store-local `experiment_data_current_v1` CAS alias, and may
 recover only one valid empty alias-less initial snapshot. It never chooses an
-arbitrary matching query result.
+arbitrary matching query result. `find(...)`, `get_or_create(...)`, and the private
+definition lookup also accept an `ObjectSelector` and use its explicit `reference`
+association; direct construction remains an authoritative `Ref[ObjectRef]` call.
 
 `add_row(...)` validates an exact checkpoint and optional predecessor projection,
 then returns an opaque row key. Supplying a callback occurrence key makes identical

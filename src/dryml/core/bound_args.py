@@ -320,6 +320,7 @@ def _validate_canonical_value(value: Any, path: tuple[str | int, ...]) -> None:
         NodeKind.POD,
         NodeKind.IDENTITY_VALUE,
         NodeKind.REFERENCE_VALUE,
+        NodeKind.OBJECT_SELECTOR,
         NodeKind.FROZEN_NDARRAY,
         NodeKind.CONCRETE_DEFINITION,
         NodeKind.DEFLINK,

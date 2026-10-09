@@ -113,8 +113,9 @@ def _iter_direct_edges_from_value(
         return
     if isinstance(value, DefLink):
         from .reference_values import ObjectRef, StateRef
+        from .selector import ObjectSelector
 
-        if isinstance(value.target, (ObjectRef, StateRef)):
+        if isinstance(value.target, (ObjectRef, StateRef, ObjectSelector)):
             return
         if isinstance(value.target, (QuotedDef, SelectorSpec)):
             if value.kind is not EdgeKind.REF:
