@@ -717,7 +717,6 @@ class Method(Object):
                 additional_input_specs,
                 input_nodes,
                 required_batch,
-                output_node,
             )
         selected = replace(
             implementation,
@@ -732,7 +731,6 @@ class Method(Object):
         additional_input_specs: tuple[SpecTree, ...],
         input_nodes: tuple[MethodCallNode, ...],
         required_batch: BatchMode | None,
-        output_node: MethodCallNode | None,
     ) -> MethodImplementation:
         """Select one direct dense adapter only after direct selection has no candidate.
 
@@ -765,12 +763,7 @@ class Method(Object):
         if len(winners) != 1:
             raise ImplementationSelectionError("ambiguous")
         candidate, edge = winners[0]
-        return replace(
-            candidate,
-            _input_specs=input_nodes,
-            _output_spec=output_node,
-            conversion_edge=edge,
-        )
+        return replace(candidate, conversion_edge=edge)
 
     def _prepare_implementation(
         self,

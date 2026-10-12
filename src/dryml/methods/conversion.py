@@ -117,6 +117,7 @@ def convert(edge: ConversionEdge, value: object) -> object:
         An independent target-backend dense tree with unchanged structure, values,
         dtype, shape, and batch interpretation. Each accepted leaf is extracted
         once into a retained validated host tree before target construction.
+        NumPy destinations reuse that independently owned host tree directly.
 
     Raises:
         TypeError: If values are mixed, sparse/ragged/object/inexact, abstract,
@@ -140,6 +141,8 @@ def convert(edge: ConversionEdge, value: object) -> object:
     source.module
     host = _validate_runtime_tree(value, edge.producer_spec)
     target.module
+    if target is Backend.numpy:
+        return host
     return map_leaves(host, lambda leaf: _target_copy(leaf, target))
 
 
@@ -270,8 +273,6 @@ def _host_copy(value: object, backend: Backend | None) -> np.ndarray:
 
 
 def _target_copy(array: np.ndarray, backend: Backend) -> object:
-    if backend is Backend.numpy:
-        return np.array(array, copy=True, order="C")
     if backend is Backend.tf:
         tf = import_module("tensorflow")
         with tf.device("/CPU:0"):

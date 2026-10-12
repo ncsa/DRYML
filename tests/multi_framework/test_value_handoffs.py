@@ -54,8 +54,20 @@ def test_dense_cpu_handoffs_preserve_values_dtype_shape_and_owned_storage(source
     original_host = conversion._host_copy
     monkeypatch.setattr(conversion, "_host_copy",
                         lambda leaf, backend: (extractions.append(leaf), original_host(leaf, backend))[1])
+    copies = []
+    original_array = np.array
+
+    def array(*args, **kwargs):
+        result = original_array(*args, **kwargs)
+        if kwargs.get("copy") is True:
+            copies.append(result)
+        return result
+
+    monkeypatch.setattr(np, "array", array)
     result = convert(edge, value)
     assert len(extractions) == 1 and extractions[0] is value
+    if target == "numpy":
+        assert len(copies) == 1
 
     np.testing.assert_array_equal(_array(result), source_array)
     assert _array(result).dtype == np.dtype("float32")
