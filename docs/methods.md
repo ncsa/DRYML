@@ -258,6 +258,13 @@ or body error if cleanup also fails. Each reused Dataset occurrence opens its ow
 cursor and unknown-spec discovery buffer. Planning never opens a source; first
 value discovery happens only in the owning graph cursor and retains at most one
 prefetched value per occurrence.
+Ordinary and prepared Map use the same core runtime discovery operation to
+activate a missing adapter for native first-value leaves, including nested trees.
+Existing custom registered detectors are retained. This opt-in is confined to
+cursor execution: `discover_backend`/`discover_backends` remain passive by default,
+and metadata selection and preparation activate no adapter. Native-family hints
+are not validation or conversion admission; selected runtime constraints and
+dense handoff CPU/gradient checks still apply.
 
 Dataset preparation owns its occurrence selections independently of every child
 Method's direct-call mode, signature, default, and preparation. It never calls

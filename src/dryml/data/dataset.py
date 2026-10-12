@@ -473,7 +473,7 @@ class _MapCursor(DatasetCursor):
             except StopIteration:
                 self._resolved = True
                 return
-            backends = self._call(discover_backends, first)
+            backends = self._call(discover_backends, first, activate_native=True)
             if len(backends) != 1:
                 if len(backends) > 1:
                     raise ImplementationSelectionError("conflict")
@@ -545,8 +545,10 @@ class Map(Dataset):
 
     A complete source specification selects the callable before source
     consumption. When backend alone is unknown, the iterator contributes one
-    value at most to complete that constraint. Other selection failures propagate
-    without source consumption.
+    value at most to complete that constraint, activating a concrete native value's
+    missing adapter at this runtime boundary. Discovery retains registered custom
+    detectors and never changes shared Dataset specs. Unavailable dependencies
+    raise ContextError; other selection failures propagate without consumption.
     """
 
     _stream_operator = "map"

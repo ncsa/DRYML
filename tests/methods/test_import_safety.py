@@ -208,3 +208,113 @@ assert model.method_graph().conversion_edges == ()
     path.write_text(script)
     completed = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("backend", ("torch", "jax"))
+@pytest.mark.parametrize("prepared", (False, True))
+def test_fresh_unknown_backend_map_activates_native_discovery(backend, prepared, tmp_path):
+    """Native Model imports leave planning passive; each cursor discovers once."""
+    if importlib.util.find_spec(backend) is None:
+        pytest.skip(f"{backend} is not installed")
+    script = f'''
+import sys
+import numpy as np
+from dryml.core import F, TensorSpec
+from dryml.core.tensor_spec import iter_specs
+from dryml.data import Dataset, Map
+from dryml.methods import ImplementationSelectionError
+import dryml.core.backend as backends
+import dryml.core.signatures as signatures
+import dryml.data.dataset as datasets
+if {backend!r} == 'torch':
+    import torch
+    from dryml.models.torch import Model
+    model = Model(torch.nn.Identity, output_spec={{'x': TensorSpec('float32', shape=(2,)),
+        'y': (TensorSpec('float32', shape=(2,)), [TensorSpec('float32', shape=(2,))])}})
+    def native(value):
+        return torch.full((2,), value, dtype=torch.float32, requires_grad=True)
+    def host(value):
+        return value.detach().cpu().numpy()
+else:
+    import jax
+    from dryml.models.jax import Model
+    def init_factory():
+        return lambda key: ({{}}, {{}})
+    def apply_factory():
+        return lambda parameters, state, rng, value, training: (value, state, rng)
+    model = Model(F(init_factory), F(apply_factory), output_spec={{
+        'x': TensorSpec('float32', shape=(2,)),
+        'y': (TensorSpec('float32', shape=(2,)), [TensorSpec('float32', shape=(2,))])}})
+    def native(value):
+        return jax.device_put(np.full(2, value, dtype=np.float32), jax.devices('cpu')[0])
+    def host(value):
+        return np.asarray(value)
+class Source(Dataset):
+    def __init__(self):
+        super().__init__(spec={{'x': TensorSpec('float32', shape=(2,), backend=None),
+            'y': (TensorSpec('float32', shape=(2,), backend=None),
+                  [TensorSpec('float32', shape=(2,), backend=None)])}})
+        self.opens = self.reads = self.closes = 0
+    def __iter__(self):
+        self.opens += 1
+        try:
+            for index in (1, 2):
+                self.reads += 1
+                yield {{'x': native(index), 'y': (native(index), [native(index)])}}
+        finally:
+            self.closes += 1
+source = Source()
+assert set(backends.backend_testers) == {{backends.Backend.numpy}}
+assert 'dryml.' + {backend!r} not in sys.modules
+original_compile = signatures.compile_signature
+def fail_compile(*args, **kwargs):
+    if kwargs.get('constructor'):
+        return original_compile(*args, **kwargs)
+    raise AssertionError('metadata planning compiled a signature')
+signatures.compile_signature = fail_compile
+try:
+    model.find_implementation(source.spec)
+except ImplementationSelectionError as error:
+    assert error.reason == 'unknown_traits' and error.unknown_traits == ('backend',)
+else:
+    raise AssertionError('unknown producer selected before discovery')
+mapped = Map(source, model)
+graph = mapped.method_graph()
+if {prepared!r}:
+    graph.learn()
+assert source.opens == source.reads == 0
+assert 'dryml.' + {backend!r} not in sys.modules
+signatures.compile_signature = original_compile
+discoveries = []
+original_discover = backends.discover_backends
+def discover(*args, **kwargs):
+    discoveries.append(source.reads)
+    return original_discover(*args, **kwargs)
+backends.discover_backends = datasets.discover_backends = discover
+left = graph.iterator() if {prepared!r} else mapped.iterator()
+right = graph.iterator() if {prepared!r} else mapped.iterator()
+with left, right:
+    for cursor in (left, right):
+        result = next(cursor)
+        np.testing.assert_array_equal(host(result['x']), [1, 1])
+        assert isinstance(result['y'], tuple) and isinstance(result['y'][1], list)
+        if {backend!r} == 'torch':
+            assert result['x'].requires_grad and result['x'].grad_fn is not None
+    assert source.reads == 2 and len(discoveries) == 2
+    for cursor in (left, right):
+        np.testing.assert_array_equal(host(next(cursor)['y'][1][0]), [2, 2])
+        assert list(cursor) == []
+assert discoveries == [1, 2]
+assert (source.opens, source.reads, source.closes) == (2, 4, 2)
+assert all(spec.backend is None for spec in iter_specs(source.spec))
+assert model.call_mode == 'eager' and model.cached_signature is None
+assert 'dryml.' + {backend!r} in sys.modules
+assert not any(name in sys.modules for name in ('tensorflow', 'jax' if {backend!r} == 'torch' else 'torch'))
+'''
+    path = tmp_path / "native_map.py"
+    path.write_text(script)
+    completed = subprocess.run(
+        [sys.executable, "-c", "import native_map"], cwd=tmp_path,
+        capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr

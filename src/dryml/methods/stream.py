@@ -636,7 +636,10 @@ class StreamGraphCursor(_CursorLifecycle, Iterator[Any]):
     it as a context manager around consumer work. ``observed_eof`` records only
     successful root termination, independently of closure; cleanup errors retain
     that evidence. Unexpected non-pull StopIteration is a causal RuntimeError.
-    It does not serialize or retain a generator frame for replay.
+    Backend-unknown Map occurrences discover their first value once through core's
+    runtime discovery, lazily activating a missing native adapter without changing
+    shared Dataset specs. Unavailable dependencies raise ContextError. The cursor
+    does not serialize or retain a generator frame for replay.
     """
 
     def __init__(self, root: _StreamOp, *, epoch: int = 0) -> None:
@@ -747,7 +750,7 @@ class _MapIterator(Iterator[Any]):
                 return
             from dryml.core.backend import discover_backends
 
-            backends = self.cursor._call(discover_backends, item)
+            backends = self.cursor._call(discover_backends, item, activate_native=True)
             if len(backends) != 1:
                 raise ImplementationSelectionError("conflict" if backends else "unknown_traits", () if backends else ("backend",))
             implementation = self.cursor._call(self.dataset.method.find_implementation,

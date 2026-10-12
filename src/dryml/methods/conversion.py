@@ -12,7 +12,7 @@ from importlib import import_module
 
 import numpy as np
 
-from dryml.core.backend import Backend
+from dryml.core.backend import Backend, _native_backend
 from dryml.core.tensor_spec import Layout, SpecTree, TensorSpec, map_spec_tree
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 
@@ -118,6 +118,8 @@ def convert(edge: ConversionEdge, value: object) -> object:
         dtype, shape, and batch interpretation. Each accepted leaf is extracted
         once into a retained validated host tree before target construction.
         NumPy destinations reuse that independently owned host tree directly.
+        Native type-family recognition is shared with core runtime discovery and
+        includes tensor subclasses; it never bypasses dense leaf validation.
 
     Raises:
         TypeError: If values are mixed, sparse/ragged/object/inexact, abstract,
@@ -166,7 +168,7 @@ def _tree_backend_from_spec(spec: SpecTree) -> Backend | None:
 
 def _tree_backend(value: object) -> Backend | None:
     leaves = list(_iter_value_leaves(value))
-    backends = {_leaf_backend(leaf) for leaf in leaves}
+    backends = {_native_backend(leaf) for leaf in leaves}
     if None in backends or len(backends) != 1:
         return None
     return next(iter(backends))
@@ -181,19 +183,6 @@ def _iter_value_leaves(value: object):
             yield from _iter_value_leaves(child)
     else:
         yield value
-
-
-def _leaf_backend(value: object) -> Backend | None:
-    if isinstance(value, np.ndarray):
-        return Backend.numpy
-    module = type(value).__module__
-    if module.startswith("tensorflow"):
-        return Backend.tf
-    if module.startswith("torch"):
-        return Backend.torch
-    if module.startswith(("jax", "jaxlib")):
-        return Backend.jax
-    return None
 
 
 def _validate_runtime_tree(value: object, spec: SpecTree) -> object:

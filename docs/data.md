@@ -231,6 +231,13 @@ alone is unknown, declaration metadata contains only partial inference facts,
 and each occurrence may retain one first value to complete producer-input
 backend facts before conversion planning. Nested Pipe successors receive the
 completed selected outputs. Discovery never changes shared Dataset specs.
+At this runtime-only first-value boundary, core discovery lazily activates a
+missing native TensorFlow/Torch/JAX adapter before consulting its detector; a
+framework plus its DRYML Model import is sufficient, without manually importing
+the adapter plugin. Registered custom detectors remain in use, and nested value
+trees still report mixed backends as a selection conflict. An unavailable native
+dependency raises `ContextError` naming the backend. Discovery does not copy
+values or relax selected-call placement, layout, or gradient validation.
 Selections do not change the Method's eager, learning, or cached state.
 Prepared graphs build output facts bottom-up; captured outputs drive successors,
 example validation, and Batch/Unbatch dispatch without per-yield selection.
