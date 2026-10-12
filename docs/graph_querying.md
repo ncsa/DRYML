@@ -73,11 +73,24 @@ absent source path.
 For a stored-CDef-only query whose Stores have ready SQLite indexes, `take(n)`
 uses graph-complete `(graph digest, encoded root)` keyset pages and a bounded
 cross-Store frontier. The encoded tie key preserves sharing topology and genuine
-digest collisions. Query V3 verifies returned CDefs against direct Store authority,
+digest collisions. Readiness and permitted recovery are resolved before any retained
+reader. Unique Store authority fences are then acquired in sorted domain order;
+non-repairing SQLite transactions recheck dirty tokens, schema/build readiness,
+stored-root guards, and the actual sidecar UUID/generation/file identity. These
+views and fences remain held through current main inspection, all pages, and direct
+candidate verification. Main is checked even before an empty page: a missing or
+malformed main target is an authority error, and a valid main outside direct-root
+coverage requires complete fallback or explicit refusal.
+
+Query V3 verifies returned CDefs against direct Store authority,
 detects unmanaged stored-root sidecar mutation, and otherwise falls back to complete
 authority unless `scan_policy("forbid")` or `require_indexed()` requires a visible
 failure. `refresh(False)` uses this path only when the sidecar is already ready; it
-never initializes or rebuilds derived state.
+never initializes or rebuilds derived state. Failed attempts close every view and
+release every fence before fallback or recovery; frontiers and selective proofs
+are discarded without refunding cumulative verification or IO work. Rebuild cannot
+close another active same-process read view. Per-Store cuts do not promise a global
+federated snapshot, broader V3 acceleration, or indexed exact-miss/count execution.
 
 ## Identity Restrictions
 

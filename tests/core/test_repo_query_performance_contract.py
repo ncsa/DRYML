@@ -4,7 +4,7 @@ from dryml.core import Definition, Object, Repo, Serializable, SKIP_ARGS
 from dryml.core.query import EdgePolicy
 from dryml.core.query.sqlite.index import SQLiteQueryIndexReadView
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
+from dryml.core.store.records import DefinitionRecord, MainRefRecord
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
@@ -161,6 +161,8 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
         second.write_definition_record(DefinitionRecord(value))
     first.rebuild_query_index()
     second.rebuild_query_index()
+    for store in (first, second):
+        store.write_main_ref(MainRefRecord(DefinitionRecord(values[0]).digest))
     monkeypatch.setattr(
         first,
         "iter_definition_records",
@@ -188,7 +190,7 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
         counted,
     )
 
-    result = Repo((first, second)).query().cdefs().stored().require_indexed().take(3)
+    result = Repo((first, second)).query().cdefs().stored().require_indexed().max_verify(3).take(3)
 
     assert tuple(result) == tuple(values[:3])
     assert result.bounded and result.requested_limit == 3
@@ -197,6 +199,7 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
     assert result.diagnostic().cdef_blobs_decoded == 8
     assert pages == 2
     assert rows == 8
+    assert all(len(result.sources(value)) == 2 for value in values[:3])
 
     refined = result.query().sel(values[0]).collect()
     combined = result.union(refined)

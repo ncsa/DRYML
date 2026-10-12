@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -173,6 +175,250 @@ def _generation(path: Path) -> int:
 
 def _save_root_definition(store: DirStore, cdef: ConcreteDefinition) -> None:
     store.write_definition_record(DefinitionRecord(cdef))
+
+
+@pytest.mark.timeout(30)
+def test_u7_readiness_waits_for_build_claim_before_authority_fence(tmp_path, monkeypatch):
+    """A claimed rebuilder can capture while a query waits outside every fence."""
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    root = _cdef("ready")
+    _save_root_definition(store, root)
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    store.mark_query_index_dirty()
+    claimed, preflight = threading.Event(), threading.Event()
+    held = threading.local()
+    errors = []
+    waits = []
+    original_cut = index._capture_authority_cut
+    original_claim = index._build_claim
+    original_fence = store.authority_read_fence
+
+    @contextmanager
+    def fence():
+        with original_fence():
+            held.depth = getattr(held, "depth", 0) + 1
+            try:
+                yield
+            finally:
+                held.depth -= 1
+
+    def capture():
+        if threading.current_thread() is worker:
+            claimed.set()
+            assert preflight.wait(10)
+        return original_cut()
+
+    @contextmanager
+    def claim(**kwargs):
+        if threading.current_thread() is not worker:
+            assert getattr(held, "depth", 0) == 0
+            assert not index._connections._leases
+            waits.append("outside")
+            preflight.set()
+        with original_claim(**kwargs) as acquired:
+            yield acquired
+
+    def rebuild():
+        try:
+            index.rebuild(force=True)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            index._connections.close_current()
+
+    worker = threading.Thread(target=rebuild, daemon=True)
+    monkeypatch.setattr(store, "authority_read_fence", fence)
+    monkeypatch.setattr(index, "_capture_authority_cut", capture)
+    monkeypatch.setattr(index, "_build_claim", claim)
+    worker.start()
+    try:
+        assert claimed.wait(10)
+        assert tuple(store.query().cdefs().stored().take(1)) == (root,)
+    finally:
+        preflight.set()
+        worker.join(10)
+    assert not worker.is_alive() and not errors and waits == ["outside"]
+    assert not index._connections._leases and not index._build_claim_path().exists()
+
+
+@pytest.mark.timeout(30)
+def test_u7_replacement_preserves_active_same_process_reader(tmp_path):
+    """Build-claim cache barriers cannot tear down another leased read view."""
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    root = _cdef("pinned")
+    _save_root_definition(store, root)
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    errors = []
+
+    def rebuild():
+        try:
+            index.rebuild(force=False)  # ready-claim short circuit also closes caches
+            index.rebuild(force=True)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            index._connections.close_current()
+
+    with index.read_view() as view:
+        old = view.index_uuid, view.generation, view.file_identity
+        worker = threading.Thread(target=rebuild, daemon=True)
+        worker.start()
+        try:
+            worker.join(10)
+            assert not worker.is_alive() and not errors
+            assert view._active and view._con.in_transaction
+            assert next(view.iter_stored_identity_cdef_batches(batch_size=1)).cdefs == (root,)
+            assert (view.index_uuid, view.generation, view.file_identity) == old
+        finally:
+            worker.join(10)
+    assert not index._connections._leases
+    with index._retained_read_view() as fresh:
+        assert fresh.generation > old[1]
+        assert fresh.index_uuid != old[0] and fresh.file_identity != old[2]
+        assert next(fresh.iter_stored_identity_cdef_batches(batch_size=1)).cdefs == (root,)
+
+
+@pytest.mark.timeout(30)
+def test_u7_main_writer_waits_through_paging_and_direct_verification(tmp_path, monkeypatch):
+    """A supported main publication cannot change the cut between pages and proof."""
+
+    from dryml.core.query.source import SourceCapture
+    from dryml.core.query.sqlite.index import SQLiteQueryIndexReadView
+    from dryml.core.store.records import MainRefRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    root, main = sorted((_cdef("first"), _cdef("second")), key=lambda value: value.graph_hash(), reverse=True)
+    _save_root_definition(store, root)
+    store.write_definition_record(DefinitionRecord(main), stored_root=False)
+    store.write_main_ref(MainRefRecord(DefinitionRecord(root).digest))
+    store.rebuild_query_index()
+    attempting, done = threading.Event(), threading.Event()
+    errors = []
+    original_page = SQLiteQueryIndexReadView.iter_stored_identity_cdef_batches
+    original_direct = SourceCapture.read_exact_stored_cdef
+    checks = []
+
+    def publish():
+        try:
+            probe = locking_module.FileLock(store._writer_lock_path)
+            acquired = probe.acquire(blocking=False)
+            if acquired:
+                probe.release()
+            checks.append(acquired)
+            attempting.set()
+            store.write_main_ref(MainRefRecord(DefinitionRecord(main).digest))
+            done.set()
+        except BaseException as error:
+            errors.append(error)
+            attempting.set()
+
+    worker = threading.Thread(target=publish, daemon=True)
+
+    def page(view, **kwargs):
+        if not worker.is_alive() and not attempting.is_set():
+            worker.start()
+        assert attempting.wait(10) and not done.is_set()
+        yield from original_page(view, **kwargs)
+
+    def direct(capture, source, target):
+        assert not done.is_set()
+        return original_direct(capture, source, target)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(SQLiteQueryIndexReadView, "iter_stored_identity_cdef_batches", page)
+        scoped.setattr(SourceCapture, "read_exact_stored_cdef", direct)
+        try:
+            assert tuple(store.query().cdefs().stored().refresh(False).require_indexed().take(1)) == (root,)
+        finally:
+            if worker.ident is not None:
+                worker.join(10)
+    assert not worker.is_alive() and not errors and checks == [False] and done.is_set()
+    assert tuple(store.query().cdefs().stored().refresh(False).take(1)) == (main,)
+    assert not store.open_query_index()._connections._leases
+
+
+def test_u7_cancelled_retained_entry_releases_transaction_and_fence(tmp_path, monkeypatch):
+    """Cancellation after BEGIN unwinds both connection lease and authority cut."""
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    _save_root_definition(store, _cdef("cancel"))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+
+    def interrupt(con):
+        assert con.in_transaction and index._connections._leases
+        raise KeyboardInterrupt("retained entry cancelled")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(sqlite_index_module, "_read_generation", interrupt)
+        with pytest.raises(KeyboardInterrupt, match="entry cancelled"):
+            store.query().cdefs().stored().refresh(False).take(1)
+    assert not index._connections._leases
+    assert all(not con.in_transaction for con in index._connections._connections.values())
+    _save_root_definition(store, _cdef("after"))  # a leaked fence would block this writer
+
+
+def test_u7_fork_does_not_inherit_held_manager_lock_or_reader_lease(tmp_path):
+    """The new reader guard remains process-local even if fork overlaps its owner."""
+
+    result = _run_worker(f'''
+import os
+import select
+import signal
+import threading
+
+if not hasattr(os, "fork"):
+    emit({{"skipped": True}})
+else:
+    idx = index({str(tmp_path / "fork.sqlite")!r})
+    idx.initialize_empty()
+    held, release = threading.Event(), threading.Event()
+    def hold():
+        with idx._connections._process_lock():
+            held.set()
+            assert release.wait(8)
+    with idx.read_view() as parent_view:
+        worker = threading.Thread(target=hold, daemon=True)
+        worker.start()
+        assert held.wait(2)
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            try:
+                with idx._retained_read_view() as child_view:
+                    payload = {{"generation": child_view.generation,
+                               "leases": len(idx._connections._leases)}}
+                os.write(write_fd, json.dumps(payload).encode())
+                os._exit(0)
+            except BaseException as error:
+                os.write(write_fd, json.dumps({{"error": repr(error)}}).encode())
+                os._exit(1)
+        os.close(write_fd)
+        ready = False
+        try:
+            ready = bool(select.select([read_fd], [], [], 3)[0])
+            if not ready:
+                os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+            payload = os.read(read_fd, 4096)
+        finally:
+            os.close(read_fd)
+            release.set()
+            worker.join(2)
+        assert ready, "child inherited held manager lock"
+        data = json.loads(payload)
+        data["status"] = status
+        data["parent_active"] = parent_view._active and parent_view._con.in_transaction
+        emit(data)
+''')
+    if result.get("skipped"):
+        pytest.skip("requires os.fork")
+    assert result == {"generation": 0, "leases": 1, "status": 0, "parent_active": True}
 
 
 def test_cross_process_commit_visible_without_reconnect(tmp_path):

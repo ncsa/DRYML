@@ -144,6 +144,24 @@ a file with a curated `representative_functions` entry is omitted until that
 file's function allowlist is deliberately updated. This intentional selection
 gap is why the exhaustive mode remains available on explicit user request.
 
+The Query/Method contract regressions from U1–U7 retain named routine coverage.
+Curated query allowlists include main-only and empty-index completeness, malformed
+authority, policy-preserving derived recovery, retained paging, and cumulative
+failure/fallback accounting. Deterministic bounded thread barriers cover build-claim
+waits outside fences, active same-process reader replacement, main writers, reversed
+Store ordering, and cancellation cleanup. Existing SQLite concurrency cases remain
+routine; the separate 18-case `test_u7_main_completeness_policy_matrix` is
+`exhaustive_only` and remains available to an explicitly requested exhaustive run.
+
+Tiny U1/U4 model and value-handoff regressions have exact medium node pins so the
+heavy model categories cannot silently omit their named routine representatives.
+Four dense CPU directions cover every source/target backend; the full direction and
+nested JAX products retain heavy qualification. These pins do not promote full
+training matrices. Missing optional backends report skips. Collection-only checks
+of explicit affected files with `--dryml-test-profile good-enough
+--dryml-runner-tiers smoke,medium --collect-only` audit selection without running the
+representative gate.
+
 The ML workflow qualification representative set retains dependency-light coverage
 for Method preparation/stream handoffs, recursive Experiment identity projection,
 symbolic Definition quotation and history v1 fixtures, TrainState observation

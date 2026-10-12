@@ -738,3 +738,31 @@ def test_u6_selective_cdef_miss_readmits_complete_inventory(tmp_path):
     assert explanation.store_scan_count == 1
     with pytest.raises(QueryVerifyBudgetExceeded):
         query.max_verify(2).exists()
+
+
+def test_u7_bounded_stage_reuses_existing_complete_cut(tmp_path, monkeypatch):
+    """A later bounded stage must not inspect newer authority than retained facts."""
+
+    from dataclasses import replace
+    from dryml.core.store.records import DefinitionRecord, MainRefRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    root = Definition(ExecutionLeaf, "root").concretize()
+    main = Definition(ExecutionLeaf, "main-only").concretize()
+    store.write_definition_record(DefinitionRecord(root))
+    store.write_definition_record(DefinitionRecord(main), stored_root=False)
+    store.rebuild_query_index()
+    query = store.query().cdefs().stored().refresh(False)
+    bounded = replace(query, take_limit=1)
+
+    def evaluate(capture):
+        assert tuple(query._collect_with_capture(capture)) == (root,)
+        store.write_main_ref(MainRefRecord(DefinitionRecord(main).digest))
+        return bounded._collect_with_capture(capture)
+
+    monkeypatch.setattr(store.open_query_index(), "_retained_read_view",
+                        lambda: pytest.fail("bounded stage reopened an existing complete cut"))
+    result, capture = query.max_verify(2)._run_terminal(evaluate, return_capture=True)
+    assert tuple(result) == (root,)
+    assert capture.verified_count == 2 and capture.store_scan_count == 1
+    assert capture.candidate_rows_read == 0

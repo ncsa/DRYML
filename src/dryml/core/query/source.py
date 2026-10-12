@@ -185,6 +185,54 @@ class SourceCapture:
 
         self._admitted.clear()
 
+    def has_complete_store_cut(self, store: Store) -> bool:
+        """Return whether this terminal already retains complete facts for a Store.
+
+        ``store`` supplies its authority-fence domain. This performs no IO and
+        returns a bool; paged stages must reuse existing complete facts rather
+        than inspecting a newer selective cut.
+        """
+
+        return store.authority_fence_key() in self._facts
+
+    def discard_index_attempt(self, stores: Iterable[Store]) -> None:
+        """Discard abandoned selective proofs without refunding terminal work.
+
+        ``stores`` are the attempted authority domains. Call only after releasing
+        all retained readers/fences. Complete facts and cumulative IO/admission
+        counters remain intact; subsequent inventory uses a fresh complete cut.
+        This performs no Store IO and returns None.
+        """
+
+        self.invalidate_admissions()
+        for store in stores:
+            key = store.authority_fence_key()
+            self._exact_states.pop(key, None)
+            self._exact_stored_cdefs.pop(key, None)
+
+    def inspect_index_main(self, store: Store) -> None:
+        """Validate current main's direct-root completeness inside a held fence.
+
+        ``store`` is a bounded producer whose authority fence the caller retains.
+        Main inspection is coverage IO, not identity admission. Missing/malformed
+        authoritative targets fail visibly; a valid main outside direct-root
+        coverage raises QueryIndexUnavailable for post-release fallback/refusal.
+        No inventory, payload read, or mutation occurs; returns None.
+        """
+
+        from .model import QueryIndexUnavailable
+
+        self._record_cut(store.authority_fence_key())
+        main = store.read_main_ref()
+        if main is None:
+            return
+        record = store.read_definition_record(main.definition_digest)
+        if record is None:
+            raise InventoryCapabilityError("Main-reference authority targets a missing definition record.")
+        if (type(store).read_stored_root_record is Store.read_stored_root_record
+                or store.read_stored_root_record(main.definition_digest) is None):
+            raise QueryIndexUnavailable("Current main-reference authority lacks direct stored-root authority proof.")
+
     def witness_budget(self):
         """Return the shared terminal-local GeneratorSelector witness counter.
 

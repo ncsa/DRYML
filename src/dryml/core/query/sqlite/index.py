@@ -105,7 +105,21 @@ class SQLiteStoreQueryIndex:
     The backend stores graph nodes, local feature postings, direct definition
     edges, and active stored-root membership in a SQLite sidecar. Store object
     files remain authoritative: this index can be rebuilt or reconciled from the
-    owning Store and never owns object state.
+    owning Store and never owns object state. Read views lease cached handles;
+    ordinary entry may repair derived state, while bounded callers use protected
+    non-repairing entry under their retained Store fences.
+
+    Args:
+        source_key: Stable string identifying the owning Store's index domain.
+        path: String or Path for the derived SQLite sidecar.
+        config: Optional SQLite connection, durability, and contention settings.
+        canonical_version: Expected integer canonical query semantics version.
+        store: Optional owning Store supplying rebuild and authority records.
+        dirty_path: Optional string or Path for durable publication dirty tokens.
+
+    Construction records configuration without opening SQLite. Read/mutation
+    operations report QueryIndexError subclasses for readiness, compatibility,
+    contention, or backend failures; rebuild changes only derived files.
     """
 
     def __init__(
@@ -351,18 +365,61 @@ class SQLiteStoreQueryIndex:
 
     @contextmanager
     def read_view(self, *, include_cached: bool = True):
+        """Yield a leased generation-stable view, repairing readiness if needed.
+
+        ``include_cached`` is accepted for backend compatibility. Entry may
+        initialize/rebuild derived state or wait on a build claim; callers must
+        not retain Store authority fences during entry. SQLite/index failures
+        propagate. The transaction and lease release on failure or cancellation.
+        """
+
         self._ensure_ready()
-        con = self._connections.connection(readonly=True)
-        con.execute("BEGIN")
-        view = None
-        try:
-            generation = _read_generation(con)
-            view = SQLiteQueryIndexReadView(con, source_key=self.source_key, generation=generation)
+        with self._leased_read_view() as view:
             yield view
-        finally:
-            if view is not None:
-                view.close()
-            con.execute("ROLLBACK")
+
+    @contextmanager
+    def _retained_read_view(self):
+        """Enter a non-repairing stored-root view inside a retained authority cut.
+
+        Reject dirty tokens, schema/build incompatibility, projection mutation,
+        or a changed sidecar identity before yielding, including empty indexes.
+        Never initialize, rebuild, or wait on a build claim. The transaction's
+        actual UUID/generation and file identity, rather than preflight status,
+        identify this view. All resources release on entry failure/cancellation.
+        """
+
+        if self._is_dirty() or not self.path.exists():
+            raise QueryIndexDirty("The query index is not ready inside the authority cut.")
+        try:
+            with self._leased_read_view(require_ready=True) as view:
+                yield view
+        except require_sqlite().Error as error:
+            raise QueryIndexDirty("The query index could not retain a ready SQLite transaction.") from error
+
+    @contextmanager
+    def _leased_read_view(self, *, require_ready=False):
+        with self._connections._read_lease() as (con, identity):
+            con.execute("BEGIN")
+            view = None
+            try:
+                if require_ready:
+                    validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
+                    _require_clean_stored_root_guard(con)
+                    if self._is_dirty() or identity != self._connections._path_identity():
+                        raise QueryIndexDirty("The query index changed during retained view entry.")
+                generation = _read_generation(con)
+                view = SQLiteQueryIndexReadView(con, source_key=self.source_key, generation=generation)
+                view.index_uuid = con.execute(
+                    "SELECT index_uuid FROM catalog_state WHERE singleton = 1"
+                ).fetchone()[0]
+                view.file_identity = identity
+                yield view
+            finally:
+                try:
+                    if view is not None:
+                        view.close()
+                finally:
+                    con.execute("ROLLBACK")
 
     def refresh(self, policy, *, stats=None) -> None:
         if policy is False:
@@ -1159,6 +1216,13 @@ class SQLiteStoreQueryIndex:
         return None
 
     def close(self) -> None:
+        """Close this process's unleased cached handles, preserving active views.
+
+        Returns None. SQLite close errors propagate and retain the failing handle
+        for recovery. Active leased readers finish their own transaction cleanup;
+        direct unleased handle users must coordinate teardown with this call.
+        """
+
         self._connections.close_all_current_process()
 
     def _ensure_ready(self) -> None:
@@ -1769,7 +1833,20 @@ class SQLiteQueryIndexReadView:
 
     Store-local integer IDs returned by this view are valid only while the view
     is active and only for its captured generation. Callers must resolve IDs to
-    CDefs before leaving the read view.
+    CDefs before leaving the read view. Index-owned contexts lease the underlying
+    handle through cleanup, preventing build-claim teardown from closing an active
+    same-process reader. ``index_uuid`` and ``file_identity`` identify the actual
+    pinned sidecar when supplied by those contexts; ``generation`` is derived
+    SQLite state, not a Store authority generation.
+
+    Args:
+        con: Open SQLite connection with an owner-retained read transaction.
+        source_key: String identifying this Store-local index domain.
+        generation: Integer generation read from this transaction's catalog.
+
+    Methods decode detached CDefs or Store-local IDs and may create temporary
+    planning relations. Invalid/closed views raise QueryIndexError; SQLite IO
+    failures propagate to the owning context, which releases the transaction.
     """
 
     optimizer_policy = SQLiteOptimizerPolicy()

@@ -46,6 +46,33 @@ Existing QueryExplanation fields report admission (`verified_count`), actual
 inventory/completed recovery (`store_scan_count`), and page work independently;
 this correction introduces no new stats schema or persisted format.
 
+Bounded stored-CDef paging requires completeness as well as valid candidates.
+First resolve index handles and policy-permitted recovery outside all retained Store
+fences and SQLite views. Then acquire unique authority-fence domains in stable sorted
+order and enter protected **non-repairing** transactions. Ordinary `read_view()`
+entry is unsuitable inside these fences: readiness may initialize/rebuild or wait
+for a build claim whose owner still needs Store capture.
+
+Inside the retained cut, recheck dirty tokens, schema/build state, the stored-root
+mutation guard, current main, and the transaction's actual UUID/generation/file
+identity. Inspect main before even an empty frontier. A main-only closure definition
+outside direct-root completeness requires complete inventory fallback or indexed-only/
+no-scan refusal; malformed main data or a missing/malformed target remains an
+authoritative failure. Retain views/fences through paging and direct verification.
+On failure, release all of them before fallback/recovery, discard attempt results and
+selective proofs, and retain SourceCapture's cumulative ledger and existing retry
+limits. No main dirty-token expansion, schema change, or global snapshot is implied.
+When a prior terminal stage already captured complete Store facts, bounded stages
+reuse those facts rather than acquiring a newer selective cut or readmitting its
+unchanged domain.
+
+Read views lease existing manager-cached handles through transaction cleanup.
+Build-claim and replacement cache barriers close only unleased connections; they
+never tear down another active same-process reader. Transactions remain pinned to
+their original sidecar; later unleased use detects replacement identity. WAL readers
+may cause an explicit bounded checkpoint/rebuild failure until they release. Direct
+unleased connection users still coordinate teardown themselves.
+
 SQLite connections are process-local. Rebuild and mutation use staged activation so a reader sees a prior complete index or a new complete index. Dirty, absent, corrupt, or incompatible metadata projections trigger authoritative fallback or visible rebuild; dirty state is cleared only for the authority generation that was indexed. Index failure never rewrites snapshot/current authority or silently makes stale rows current. Rebuild notices are visible because scans can be long. Rebuild claim descriptors use `dryml.locking` but retain SQLite's claim creation, stale-eligibility, wait, and cleanup policy. Dirty-token and complete main-file activation use `dryml.filesystem` directly after SQLite closes/checkpoints the applicable WAL and handles; the index does not depend on Store-private native helpers. A persistence failure can follow visible sidecar activation, so recovery reconciles status rather than assuming rollback. Supported behavior assumes local SQLite, filesystem rename/persistence, and locking semantics; distributed filesystems are outside this contract.
 
 `dryml.core.query.sqlite.open_connection(config, *, readonly=False)` is the public standalone connection owner. `config` must be a `SQLiteQueryIndexConfig`, `readonly` must be exactly `bool`, and `config.path` must be present; validation occurs before importing SQLite or creating a parent/database. Invalid argument types raise `TypeError`, while an absent configured path raises actionable `QueryIndexError`. The connection applies the same foreign-key, timeout, trusted-schema, journal, and durability configuration as the query-index connection manager and always closes its connection. Writable opening creates missing parent directories; read-only opening requires an existing database and creates neither the target nor its parent. SQLite open/configuration errors remain SQLite errors, while a missing optional backend is reported as `QueryIndexUnavailable`.

@@ -141,3 +141,89 @@ def test_result_order_is_independent_of_store_order(tmp_path):
     order_b = list(Repo(stores=[DirStore(store2.base_dir), DirStore(store1.base_dir)]).query().cdefs().stored().collect())
 
     assert order_a == order_b
+
+
+@pytest.mark.timeout(30)
+def test_u7_reversed_store_order_acquires_unique_sorted_retained_cuts(tmp_path, monkeypatch):
+    """Concurrent reversed producers share canonical lock order and replica proof."""
+
+    from contextlib import contextmanager
+    from dataclasses import replace
+    import threading
+    from dryml.core import Definition
+    from dryml.core.store.records import DefinitionRecord
+
+    stores = tuple(DirStore(tmp_path / name, query_index="sqlite") for name in ("a", "b"))
+    values = sorted((Definition(MultiLeaf, str(i)).concretize() for i in range(3)),
+                    key=lambda value: value.graph_hash())
+    for store in stores:
+        for value in values:
+            store.write_definition_record(DefinitionRecord(value))
+        store.rebuild_query_index()
+    readiness = threading.Barrier(2, timeout=10)
+    local = threading.local()
+    orders, results, errors = {}, [], []
+
+    for store in stores:
+        key = store.authority_fence_key()
+        original_fence = store.authority_read_fence
+        index = store.open_query_index()
+        original_status = index.status
+
+        @contextmanager
+        def fence(key=key, original=original_fence):
+            held = getattr(local, "held", [])
+            outer = key not in held
+            if outer:
+                assert not held or key > held[-1]
+                orders.setdefault(threading.get_ident(), []).append(key)
+            with original():
+                local.held = [*held, key]
+                try:
+                    yield
+                finally:
+                    local.held = held
+
+        def status(original=original_status):
+            assert not getattr(local, "held", [])
+            result = original()
+            local.ready = getattr(local, "ready", 0) + 1
+            if local.ready == len(stores):
+                readiness.wait()
+            return result
+
+        monkeypatch.setattr(store, "authority_read_fence", fence)
+        monkeypatch.setattr(index, "status", status)
+        monkeypatch.setattr(index, "_ensure_ready", lambda: pytest.fail("repairing entry inside cut"))
+        monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("ready replicas enumerated authority"))
+
+    def query(selected):
+        try:
+            bounded = replace(Repo(selected).query().cdefs().stored().refresh(False).require_indexed().max_verify(1), take_limit=1)
+            results.append(bounded._run_terminal(bounded._collect_with_capture, return_capture=True))
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            for store in stores:
+                store.open_query_index()._connections.close_current()
+
+    duplicate = DirStore(stores[0].base_dir, query_index="sqlite")
+    workers = [threading.Thread(target=query, args=(selected,), daemon=True)
+               for selected in ((stores[0], duplicate, stores[1]), tuple(reversed(stores)))]
+    for worker in workers:
+        worker.start()
+    try:
+        for worker in workers:
+            worker.join(10)
+    finally:
+        readiness.abort()
+        for worker in workers:
+            worker.join(10)
+    assert all(not worker.is_alive() for worker in workers) and not errors
+    assert len(orders) == 2
+    assert all(order == sorted(store.authority_fence_key() for store in stores) for order in orders.values())
+    for result, capture in results:
+        assert tuple(result) == (values[0],) and len(result.sources(values[0])) == 2
+        assert capture.verified_count == 1 and capture.store_scan_count == 0
+        assert capture.candidate_rows_read == capture.cdef_blobs_decoded == 4
+    assert all(not store.open_query_index()._connections._leases for store in stores)

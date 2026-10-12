@@ -2,6 +2,22 @@
 
 ## 0.3.0b1 (unreleased)
 
+Stored-CDef indexed prefixes now inspect current main authority before every answer,
+including empty pages. A closure-only definition made main after a ready index cut
+can no longer disappear: permitted complete inventory fallback returns it, while
+indexed-only/no-scan execution refuses unsupported completeness. Missing or malformed
+main targets remain visible authority errors.
+
+Readiness/recovery occurs outside retained readers, followed by sorted unique Store
+fences and non-repairing SQLite views retained through main inspection, paging, and
+direct verification. In-cut readiness and actual sidecar identity/generation are
+checked before results. Failure releases all readers before fallback/recovery and
+discards attempt proofs without refunding cumulative work. Rebuild cache barriers
+protect active same-process read views. Ready direct-root prefixes retain canonical
+ordering, replica evidence, and zero broad definition enumeration. Store formats,
+SQLite schema, and main dirty-token behavior are unchanged; this adds no global
+federated snapshot or broader V3 acceleration.
+
 Query V3 terminal controls now apply through external stored/alias/metadata
 scopes, algebra, closure, occurrence targets, and owner/target projections.
 Projections inherit controls while remaining existential. Explicit outer

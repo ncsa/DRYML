@@ -24,6 +24,38 @@
             "test_shared_factory_repetition_does_not_tie_backend_instances"
           ]
         },
+        "tests/models/test_jax_models.py": {
+          "rationale": "Retain tiny selected-call and weak-owner regressions from U4; model construction, persistence, and training matrices retain heavy qualification.",
+          "functions": [
+            "test_functional_model_supports_raw_selected_map_and_autoencoder_calls",
+            "test_cached_native_element_adaptation_does_not_retain_model"
+          ]
+        },
+        "tests/models/test_tf_training.py": {
+          "rationale": "Retain the tiny U4 element/batched selected-call boundary; full model/training products remain heavy.",
+          "functions": [
+            "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
+          ]
+        },
+        "tests/models/test_torch_training.py": {
+          "rationale": "Retain U1 causal source cleanup and U4 tiny element/batched selected-call boundaries; full training products remain heavy.",
+          "functions": [
+            "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
+            "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
+          ]
+        },
+        "tests/multi_framework/test_value_handoffs.py": {
+          "rationale": "Retain every new U4 handoff/failure regression with four tier-pinned CPU directions covering all backends; the full direct and nested JAX direction products remain available in heavy/exhaustive qualification.",
+          "functions": [
+            "test_dense_cpu_handoffs_preserve_values_dtype_shape_and_owned_storage",
+            "test_nested_handoff_preserves_container_types_and_short_dynamic_batch",
+            "test_torch_requires_grad_and_object_values_fail_before_crossing",
+            "test_jax_narrowing_rejects_before_target_construction",
+            "test_unknown_runtime_leaf_rejects_before_extraction_or_target_activation",
+            "test_nested_gradient_rejection_preflights_all_leaves_before_extraction",
+            "test_raw_validation_precedes_callback_and_never_replaces_selected_inference"
+          ]
+        },
         "tests/models/test_qualification_contract.py": {
           "rationale": "Retain the fresh-process manifest/case and minimal schema guard only; real TFDS/training qualification remains explicit opt-in.",
           "functions": [
@@ -400,11 +432,12 @@
             "test_u6_operand_policy_conflicts_and_outer_overrides",
             "test_u6_repeated_fixed_bounded_stages_do_not_replace_the_cut",
             "test_u6_selective_state_miss_readmits_complete_inventory",
-            "test_u6_selective_cdef_miss_readmits_complete_inventory"
+            "test_u6_selective_cdef_miss_readmits_complete_inventory",
+            "test_u7_bounded_stage_reuses_existing_complete_cut"
           ]
         },
         "tests/core/test_query_v3_index.py": {
-          "rationale": "Retain corrupt-sidecar recovery, no-historical-rescan publication, indexed budget checks, replica/lookahead/collision counts, and cumulative paging fallback; keep larger schema/recovery and backend parity matrices focused.",
+          "rationale": "Retain U6 budgets and U7 main/empty-page completeness, retained non-repairing cuts, entry failure, derived-only policy recovery, and cumulative fallback; the larger main policy product is exhaustive-only.",
           "functions": [
             "test_corrupt_sidecar_rebuild_preserves_authoritative_record_bytes",
             "test_incremental_v3_publication_does_not_rescan_historical_projection_rows",
@@ -412,7 +445,13 @@
             "test_u6_indexed_take_admissions_replicas_and_ordering_lookahead",
             "test_u6_paging_fallback_readmits_domain_and_retains_expenditure",
             "test_u6_collision_bucket_verified_lookahead_is_charged",
-            "test_u6_disabled_refresh_guards_each_page_transition"
+            "test_u6_disabled_refresh_retains_one_view_through_pages",
+            "test_u7_main_outside_ready_index_requires_complete_fallback",
+            "test_u7_empty_index_inspects_replaced_main_and_missing_target",
+            "test_u7_malformed_main_is_visible_before_empty_page",
+            "test_u7_sidecar_policy_and_derived_only_recovery",
+            "test_u7_entry_readiness_failure_releases_cut_before_inventory",
+            "test_u7_failed_direct_proof_discards_selective_cut_without_refund"
           ]
         },
         "tests/core/test_query_v3_acceptance.py": {
@@ -447,7 +486,8 @@
             "test_same_cdef_in_two_stores_deduplicates_and_tracks_sources",
             "test_equivalent_store_instances_share_physical_identity",
             "test_v3_query_uses_replaced_connected_store_reference",
-            "test_structural_query_is_fresh_while_exact_state_ref_load_restores_state"
+            "test_structural_query_is_fresh_while_exact_state_ref_load_restores_state",
+            "test_u7_reversed_store_order_acquires_unique_sorted_retained_cuts"
           ]
         },
         "tests/core/test_repo_query_performance_contract.py": {

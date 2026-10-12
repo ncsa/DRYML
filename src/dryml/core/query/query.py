@@ -1425,10 +1425,20 @@ class IdentityQuery:
 
         Raises:
             ValueError: If ``limit`` is not a non-negative exact integer.
+            QueryIndexError: If indexed-only paging cannot prove readiness and
+                completeness, including current main authority.
+            QueryWouldScanError: If complete fallback requires a forbidden scan.
+            QueryVerifyBudgetExceeded: If cumulative candidate admissions exceed
+                the terminal's verification budget. Invalid Store authority
+                remains a visible Store error, including before empty pages.
 
         Side Effects:
             Evaluates the query under authority fences. Eligible stored-CDef
-            plans may read derived keyset pages but never mutate authority.
+            plans preflight permitted recovery outside retained readers, then
+            pin non-repairing SQLite views through main inspection, paging, and
+            direct proof. Unsupported completeness releases all cuts before
+            inventory fallback, retaining cumulative work. Recovery changes only
+            derived state. No global federated snapshot is promised.
         """
 
         if type(limit) is not int or limit < 0:
@@ -2174,13 +2184,11 @@ class IdentityQuery:
         )
 
     def _bounded_index_entries(self, capture):
-        """Return a keyset-paged global CDef prefix when every source supports it."""
+        """Preflight outside readers, then retain non-repairing per-Store cuts."""
 
-        import heapq
-
-        from .identity import IdentitySet
+        from contextlib import ExitStack
         from .model import (
-            QueryIndexDirty,
+            QueryIndexError,
             QueryIndexUnavailable,
             QueryStats,
             QueryWouldScanError,
@@ -2189,53 +2197,70 @@ class IdentityQuery:
         stores = self._bounded_index_stores(capture)
         if stores is None:
             return None
-        streams = []
+        if any(capture.has_complete_store_cut(store) for store in stores):
+            return None
+        domains = {}
         for store in stores:
-            if capture.refresh_policy is False or capture.indexed_required or capture.scan_policy_mode == "forbid":
-                status = store.query_index_status()
-                if status.state != "ready":
-                    reason = (
-                        "The query index changed outside managed index publication."
-                        if status.state == "dirty"
-                        else "The query index is not ready."
-                    )
-                    if capture.indexed_required:
-                        raise QueryIndexUnavailable(
-                            f"{reason} Query V3 requires an already-ready index when refresh is disabled."
-                        )
-                    if capture.scan_policy_mode == "forbid":
-                        raise QueryWouldScanError(
-                            f"{reason} Query V3 cannot fall back when scans are forbidden."
-                        )
-                    return None
-            try:
+            domains.setdefault(store.authority_fence_key(), store)
+        indexes = {}
+        try:
+            for key, store in domains.items():
                 index = store.open_query_index()
-            except QueryIndexUnavailable:
-                return None
-            if index is None:
-                return None
+                if index is None or not callable(getattr(index, "_retained_read_view", None)):
+                    raise QueryIndexUnavailable("The query index has no retained stored-root view.")
+                status = index.status()
+                if status.state != "ready":
+                    if capture.refresh_policy is False:
+                        reason = (
+                            "The query index changed outside managed index publication."
+                            if status.state == "dirty" else "The query index is not ready."
+                        )
+                        raise QueryIndexUnavailable(reason)
+                    capture.require_scan()
+                    stats = QueryStats()
+                    index.refresh("auto", stats=stats)
+                    capture.store_scan_count += stats.store_scan_count
+                indexes[key] = index
 
-            def pages(index=index):
+            with ExitStack() as retained:
+                for key in sorted(domains):
+                    retained.enter_context(domains[key].authority_read_fence())
+                views = {
+                    key: retained.enter_context(indexes[key]._retained_read_view())
+                    for key in sorted(domains)
+                }
+                # Main has no dirty token. Check it before consuming any frontier,
+                # even when every indexed page will be empty.
+                for key in sorted(domains):
+                    capture.inspect_index_main(domains[key])
+                return self._retained_index_entries(capture, domains, views)
+        except QueryIndexError as error:
+            capture.discard_index_attempt(domains.values())
+            if capture.indexed_required:
+                raise
+            if capture.scan_policy_mode == "forbid":
+                raise QueryWouldScanError(str(error)) from error
+            return None
+
+    def _retained_index_entries(self, capture, domains, views):
+        """Merge pinned pages and verify candidates while every cut is retained."""
+
+        import heapq
+        from .identity import IdentitySet
+        from .model import QueryIndexUnavailable, QueryStats
+
+        streams = []
+        for key, store in domains.items():
+            def pages(view=views[key]):
                 after = None
                 while True:
                     page_stats = QueryStats()
-                    if index.status().state != "ready":
-                        if capture.refresh_policy is False:
-                            raise QueryIndexDirty("The query index is not ready and refresh is disabled.")
-                        capture.require_scan()
-                        index.refresh("auto", stats=page_stats)
-                        capture.store_scan_count += page_stats.store_scan_count
-                    with index.read_view(include_cached=False) as view:
-                        page = getattr(view, "iter_stored_identity_cdef_batches", None)
-                        if page is None:
-                            return
-                        batch = next(page(
-                            after=after,
-                            # One lookahead row proves the last retained digest
-                            # bucket is complete without fetching another page.
-                            batch_size=self.take_limit + 1,
-                            stats=page_stats,
-                        ), None)
+                    batch = next(view.iter_stored_identity_cdef_batches(
+                        after=after,
+                        # Unverified lookahead completes the retained digest bucket.
+                        batch_size=self.take_limit + 1,
+                        stats=page_stats,
+                    ), None)
                     capture.candidate_rows_read += page_stats.candidate_rows_read
                     capture.cdef_blobs_decoded += page_stats.cdef_blobs_decoded
                     capture.pages_fetched += page_stats.pages_fetched
@@ -2273,16 +2298,9 @@ class IdentityQuery:
                     capture.reserve((value,))
                     direct = capture.read_exact_stored_cdef(store, value)
                     if direct is None:
-                        if capture.indexed_required:
-                            raise QueryIndexUnavailable(
-                                "The derived index candidate lacks direct stored-root authority proof."
-                            )
-                        if capture.scan_policy_mode == "forbid":
-                            raise QueryWouldScanError(
-                                "Verifying the derived index candidate requires an authority scan."
-                            )
-                        capture.invalidate_admissions()
-                        return None
+                        raise QueryIndexUnavailable(
+                            "The derived index candidate lacks direct stored-root authority proof."
+                        )
                     verified.append((direct, self._source_evidence(store)))
                 fixed = IdentitySet(verified)
                 for key in sorted(fixed._entries, key=lambda item: item.sort_key):
@@ -2290,11 +2308,9 @@ class IdentityQuery:
                     if len(selected) == self.take_limit:
                         break
             return selected
-        except QueryIndexDirty:
-            if capture.indexed_required or capture.scan_policy_mode == "forbid":
-                raise
-            capture.invalidate_admissions()
-            return None
+        finally:
+            for _, stream in streams:
+                stream.close()
 
     def _bounded_index_stores(self, capture):
         """Return producer Stores for the narrow paged stored-CDef plan shape."""
