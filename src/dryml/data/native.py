@@ -164,10 +164,7 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
             execute preparation and do not update training progress.
         """
 
-        if type(n) is not int:
-            raise TypeError("skip count must be a nonnegative exact int.")
-        if n < 0:
-            raise ValueError("skip count must be non-negative.")
+        self._validate_skip_count(n)
         if n == 0:
             return
         if self._closed:
