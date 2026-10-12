@@ -113,11 +113,33 @@ without caching during compute, so it does not borrow or mutate a live input cac
 
 Compatible recovery restores the same carry, reselects implementations without
 executing the initializer, opens a fresh independent source cursor, and skips
-exactly `processed_count` yields before continuing. Fold checkpoints actual EOF
+exactly `processed_count` yields before continuing. Fold checkpoints positively
+observed root-output EOF (not cursor closure)
 before running the finalizer; recovery from that state retries finalization and
 publication without loading or traversing the source. Source replay is positional:
 a deterministic source reproduces uninterrupted results, while a stochastic fresh
 cursor may produce a new suffix after the saved prefix position.
+
+New progress is version 2: active progress contains no EOF proof; exhausted
+progress requires `eof="root-output-eof"`. A source, Map, acquisition, body,
+validation, strict-skip, or interruption failure cannot manufacture that proof.
+Cleanup failures preserve the primary workload error. After genuine EOF, cleanup
+failure retains the existing finalize-then-report ordering: the call raises even
+if a complete live Value was installed, and its associated exhausted checkpoint
+can retry finalization without reopening the source.
+
+Compatible version-1 active checkpoints remain resumable. Valid version-1
+exhausted checkpoints load successfully as **ambiguous**, but continuation raises
+`ManagedRerunRequiredError` with `rerun_required`; explicitly call
+`compute(..., managed=ManagedConfig(state_repo=repo, rerun=True))` to traverse
+fresh. Admission occurs in the Fold body after managed running/state restoration,
+before native carry materialization, Method selection/invocation, or source access.
+The failure retains checkpoint association and receiver validity. Saving unchanged
+legacy progress preserves version 1 and cannot bless it as new EOF evidence.
+Malformed/unknown progress still fails restoration. Completed legacy Values remain
+readable; historically completed truncated results cannot be detected or repaired
+automatically. Existing snapshots are immutable. See [Formats](formats.md) for
+the closed grammar and downgrade limitations.
 
 NumPy, Torch CPU, and TensorFlow CPU carry leaves are copied losslessly to tagged
 host arrays only at checkpoint boundaries and restored to the same native backend.

@@ -173,7 +173,8 @@
           "rationale": "Retain direct and real-subprocess Value/Fold publication, fresh lightweight restoration, and honest missing-input rerun failure; caller-supplied Ray remains explicit opt-in evidence.",
           "functions": [
             "test_value_execution_publishes_a_result_only_state_for_a_fresh_reader",
-            "test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader"
+            "test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader",
+            "test_fold_worker_failed_read_repairs_and_returns_exact_completion_receipt"
           ]
         },
         "tests/artifacts/test_fold_resume.py": {
@@ -185,7 +186,13 @@
             "test_fold_store_override_controls_checkpoint_and_final_publication",
             "test_fold_resume_fails_if_fresh_source_exhausts_during_saved_skip",
             "test_fold_resume_crosses_a_fresh_process_without_cursor_transport",
-            "test_fold_resumes_reservoir_and_confusion_carry_without_losing_components"
+            "test_fold_resumes_reservoir_and_confusion_carry_without_losing_components",
+            "test_fold_failed_read_retains_active_authority_before_repaired_resume",
+            "test_fold_frozen_progress_compatible_recovery",
+            "test_fold_legacy_exhausted_admission_preserves_valid_receiver_and_provenance",
+            "test_fold_frozen_progress_roundtrip_and_downgrade_gate",
+            "test_fold_malformed_progress_does_not_partially_install",
+            "test_fold_incompatible_progress_rejected_before_runtime_effects"
           ]
         },
         "tests/artifacts/test_cached_dataset.py": {

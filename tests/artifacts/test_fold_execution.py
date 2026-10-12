@@ -261,3 +261,48 @@ def test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader(tmp_pat
     shutil.rmtree(control_dir)
 
     _assert_fresh_result(state_dir, state, 6.0)
+
+
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+def test_fold_worker_failed_read_repairs_and_returns_exact_completion_receipt(tmp_path):
+    """Real same-host workers retain active authority after failure and resume to 3."""
+
+    source = tmp_path / "input.txt"
+    source.write_text("1\nbroken\n", encoding="utf-8")
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    control = DirStore(tmp_path / "control", query_index="none")
+    fold = _fold(FileDataset(str(source), repo=repo), repo=repo)
+    repo.save_object(fold, deep_capture=True)
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(
+        SubProcessConfig(spool_directory=spool),
+        core=CoreOptions(repo=repo, control_store=control, return_objects=False),
+    )
+    config = ManagedConfig(state_repo=repo, control_store=control)
+    try:
+        failed = executor.submit(fold.compute, kwargs={"checkpoint_every": 1, "managed": config})
+        with pytest.raises(Exception, match="broken"):
+            failed.result(timeout=30)
+        failed.cleanup(timeout=5)
+        status = fold.compute.status(state_repo=repo, control_store=control)
+        assert (status.state, status.final_state_ref) == ("failed", None)
+        saved = repo.load_state_ref(status.checkpoint_state_ref, reuse_live="never")
+        assert saved._fold_progress_version == 2
+        assert saved._fold_progress["state"] == "active"
+        assert saved.processed_count == 1
+        assert not saved.ready
+        source.write_text("1\n2\n", encoding="utf-8")
+        resumed = executor.submit(fold.compute, kwargs={"checkpoint_every": 1, "managed": config})
+        receipt = resumed.result(timeout=30)
+        resumed.cleanup(timeout=5)
+        completed = fold.compute.status(state_repo=repo, control_store=control)
+        assert completed.state == "completed"
+        assert receipt == completed.final_state_ref
+        assert completed.attempt_id == status.attempt_id
+        restored = repo.load_state_ref(receipt, reuse_live="never")
+        assert restored.value() == 3.0
+        assert restored.processed_count == 2
+        assert restored.last_state_ref == receipt
+    finally:
+        executor.close(cancel=True, timeout=10)

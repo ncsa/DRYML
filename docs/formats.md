@@ -93,6 +93,45 @@ Fixture authority is checked out byte-for-byte via `.gitattributes`, without
 line-ending conversion. Git for Windows needs long-path support to check out the
 snapshot directory fixtures; CI enables `core.longpaths` for its Git processes.
 
+## Fold Progress V1 And V2
+
+`fold-progress.pkl` is a trusted pickle envelope with exactly `format`, `version`,
+`processed_count`, and `progress`. Format is `dryml.artifacts.fold-progress`;
+version is the exact integer 1 or 2, and processed count is a nonnegative exact
+integer. `progress=None` represents no remaining continuation (uncomputed or
+completed); a separate `value.pkl` v1 envelope determines result presence.
+
+Non-null progress has positive `count` equal to processed count and the existing
+fields `state`, `carry`, `source_binding`, `source_spec`, `observed_spec`,
+`carry_spec`, `observation_devices`, `program`, `backend_devices`, `operation_id`,
+and `attempt_id`. Specs, tagged lossless host carry, backend/device records, and
+source/program/attempt compatibility checks retain their existing meanings.
+
+| Version/state | Additional fields | Recovery |
+|---|---|---|
+| v1 active | None | Compatible positional resume |
+| v1 exhausted | None | Loadable ambiguous state; explicit fresh managed rerun required |
+| v2 active | None (`eof` forbidden) | Compatible positional resume |
+| v2 exhausted | Exactly `eof="root-output-eof"` | Trusted source-free finalization retry |
+
+Only positive root-output termination authorizes new exhausted progress; closure,
+failure, child EOF, and strict replay shortfall are not evidence. Unknown versions,
+extra/missing fields, invalid EOF tokens, and inconsistent carry/count evidence
+fail restoration before assignment. Valid legacy exhaustion is rejected at Fold
+body admission rather than in restore, so the receiver remains usable for explicit
+rerun. Unchanged restored v1 envelopes save as v1; new checkpoints and completed
+computations write v2. No existing immutable snapshot is rewritten.
+
+`tests/fixtures/fold_progress/` freezes synthetic v1 active/exhausted/completed and
+v2 active/exhausted payload bytes, wrapped in base64 for byte-preserving checkout.
+One manifest records decoded and encoded SHA256 hashes, semantic expectations,
+and identity rebinding for synthetic managed tests. Its independent generation
+recipe never runs in reader assertions. A frozen v1 validator from `ba368afc`
+qualifies v2 rejection at its version gate **before carry restoration**.
+Downgraded readers cannot resume v2 progress. Choosing a retained earlier
+compatible snapshot may replay work; this is neither automatic rollback nor
+repair. Historical completed truncated Values cannot be identified automatically.
+
 ## Symbolic Definition And Generator Selector V1
 
 Quoted symbolic Definition data uses the closed

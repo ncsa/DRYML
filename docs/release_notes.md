@@ -2,6 +2,20 @@
 
 ## 0.3.0b1 (unreleased)
 
+Fold now uses positive root-output EOF rather than cursor closure to authorize
+exhausted checkpoints. Failed traversal cannot become successful truncated
+recovery; consumer errors remain primary over cleanup failures. New progress is
+version 2 with explicit EOF evidence. Compatible legacy active progress resumes;
+valid legacy exhausted progress loads as ambiguous and requires an explicit fresh
+`ManagedConfig(rerun=True)` before carry/Method/source effects. Saving unchanged
+legacy state preserves its provenance. Genuine EOF cleanup/finalization/publication
+failures retain trusted source-free retry and never report completion on failure.
+Existing snapshots and completed legacy Values remain readable and immutable;
+historically completed truncated results cannot be automatically detected/repaired.
+Downgraded readers cannot resume v2 progress; selecting an earlier compatible
+snapshot may replay work and is not automatic rollback or repair. Frozen synthetic
+compatibility fixtures qualify both versions and the old-reader rejection gate.
+
 `ObjectRef.object_projection()` and `StateRef.object_projection()` now return a
 recursive query-only `ObjectSelector`. Each encountered exact reference becomes a
 nested selector, while explicitly embedded raw ObjectRef and StateRef values remain

@@ -294,7 +294,13 @@ recovery Fold applies its saved processed-yield count to a new closeable cursor;
 it never persists or transfers the prior iterator. Exact skipping detects a source
 that now ends before the saved position. Positional continuation assumes a
 re-iterable source but does not claim that a stochastic suffix equals the suffix
-from the interrupted traversal. Saved EOF progress needs no new source cursor.
+from the interrupted traversal. Trusted version-2 root-output EOF progress needs
+no new source cursor. Cursor closure is not EOF: failed acquisition/read/Map,
+consumer validation, interruption, and strict replay shortfall cannot authorize
+exhausted Fold progress, even when cleanup also fails. Compatible version-1 active
+progress still replays position; ambiguous version-1 exhausted progress requires
+an explicit fresh managed rerun before carry/role/source effects. Legacy snapshots
+are not rewritten or silently relabeled as trustworthy EOF.
 CachedDataset applies the same positional meaning to retained cache progress: the
 completed prefix remains exact, while a resumed stochastic source may provide a
 fresh suffix after the saved yield count.

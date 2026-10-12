@@ -139,12 +139,23 @@ managed call to decide recovery.
 
 `Fold.compute(checkpoint_every=1000, store=None)` is resumable. At each positive
 exact cadence it saves processed-yield count and bounded host carry together, and
-it saves an exhausted checkpoint before finalization. Compatible recovery uses the
+it saves an exhausted checkpoint only after positive root-output EOF, before
+finalization. Compatible recovery uses the
 same managed attempt and argument authority, restores state before body entry,
 reselects Method implementations without rerunning the initializer, and skips a
-fresh Dataset cursor to the saved count. Exhausted recovery retries finalization
+fresh Dataset cursor to the saved count. Trusted version-2 exhausted recovery retries finalization
 without loading the source. `store` uses the managed Store-override path, so it
 governs checkpoint and final publication without creating Fold control records.
+
+Version-1 active Fold progress remains compatible. Valid legacy exhausted progress
+restores as ambiguous and is rejected during Fold body resume admission with
+`ManagedRerunRequiredError("rerun_required", ...)` and explicit `rerun=True`
+guidance. Managed has already entered running authority and restored framework
+state; Fold rejects before native carry allocation, role selection/invocation, or
+source acquisition. The ordinary failed transition retains the checkpoint and a
+valid receiver for fresh rerun. Save/load preserves legacy provenance. Restore-hook
+failures for malformed/unknown envelopes retain the normal invalid-graph behavior.
+No automatic migration or repair of historical completed Values occurs.
 
 An incompatible cadence or other authored argument requires `rerun=True` under
 the normal argument-digest rule. A rerun starts a new cursor, count, initializer,
