@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import os
+import weakref
 from dataclasses import fields
 from dataclasses import replace
 
@@ -17,7 +18,7 @@ from dryml.core.object import Serializable
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.core.utils.stable_hash import stable_hash_function
-from dryml.methods import ImplementationSelectionError, traits
+from dryml.methods import ImplementationSelectionError, MethodError, traits
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.experiment import _notify_host_observers
@@ -441,9 +442,11 @@ class Model(BaseModel, Serializable):
 
         Raises:
             ImplementationSelectionError: If the requested traits conflict.
-        """
 
-        import dryml.jax
+        Side Effects:
+            Retains consumer-input adaptation without importing an optional
+            adapter, executing the model, or changing Method preparation state.
+        """
 
         if additional_input_specs:
             raise ImplementationSelectionError("conflict")
@@ -453,19 +456,25 @@ class Model(BaseModel, Serializable):
     def _prepare_implementation(self, input_spec, *, backend, batch_mode):
         """Build a local learning-time JAX selection without global mutation."""
 
-        import dryml.jax
-
         implementation = super()._prepare_implementation(input_spec, backend=backend, batch_mode=batch_mode)
         return self._specialize_implementation(implementation, input_spec)
 
     def _specialize_implementation(self, implementation, input_spec):
+        """Finalize element adaptation from consumer facts before retained conversion."""
         if implementation.name != "element_call" or input_spec is None:
             return implementation
+        from dryml.methods.signature import spec_from_node
+
+        input_spec = spec_from_node(implementation.consumer_input_specs[0])
+        receiver_ref = weakref.ref(self)
 
         def invoke_element(value, *args, **kwargs):
             import jax
 
-            return _unbatch_tree(self._call_raw(_tree_to_jax_batch(value, input_spec, jax), *args, **kwargs))
+            receiver = receiver_ref()
+            if receiver is None:
+                raise MethodError("The selected JAX Model is no longer live.")
+            return _unbatch_tree(receiver._call_raw(_tree_to_jax_batch(value, input_spec, jax), *args, **kwargs))
 
         return replace(implementation, _invoker=invoke_element)
 
@@ -807,7 +816,9 @@ class Training(TrainFunction):
 
         Side Effects:
             Installs synchronized Model/Optimizer/TrainState updates and may run
-            caller callbacks after those updates are truthfully retained.
+            caller callbacks after those updates are truthfully retained. After
+            zero-work admission, resolves the Dataset before x/y handoffs and
+            source acquisition; validation uses captured output specifications.
         """
 
         callbacks = validate_training_callbacks(callbacks)
@@ -839,16 +850,17 @@ class Training(TrainFunction):
         # loss factory or enter native training runtime.
         loss_fn = self._loss_callable()
         self._begin_training_preparation_generation()
-        training_preparation = TrainingPreparation.from_specs(
-            self, train_data.spec[0], train_data.spec[1], "jax",
+        prepared_train = train_data.prepare()
+        training_preparation = TrainingPreparation.from_dataset(
+            self, prepared_train, "jax",
         )
         validation_preparation = None
+        prepared_val = None
         if exp.val_data is not None:
-            validation_preparation = TrainingPreparation.from_specs(
-                self, exp.val_data.spec[0], exp.val_data.spec[1], "jax",
+            prepared_val = exp.val_data.prepare()
+            validation_preparation = TrainingPreparation.from_dataset(
+                self, prepared_val, "jax",
             )
-        prepared_train = train_data.prepare()
-        prepared_val = exp.val_data.prepare() if exp.val_data is not None else None
         self.training_preparation = training_preparation
         self.validation_preparation = validation_preparation
 
@@ -897,7 +909,7 @@ class Training(TrainFunction):
                         cursor.skip(resume_batch)
                     for x, y in cursor:
                         batch_index = exp.state.next_batch
-                        examples = train_data.examples_in((x, y))
+                        examples = prepared_train.examples_in((x, y))
                         candidate = update(
                             exp.model.parameters,
                             exp.model.mutable_state,
@@ -1167,7 +1179,7 @@ class Training(TrainFunction):
             for x, y in cursor:
                 predictions, _, _ = model._candidate_apply(x, training=False)
                 value = loss_fn(predictions, y)
-                examples = data.dataset.examples_in((x, y))
+                examples = data.examples_in((x, y))
                 total += self._validated_loss(value, jax) * examples
                 examples_total += examples
         return {} if not examples_total else {"loss": total / examples_total}

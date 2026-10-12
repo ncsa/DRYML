@@ -1,3 +1,5 @@
+"""Closed backend identifiers, passive discovery, and lazy runtime activation."""
+
 from __future__ import annotations
 
 
@@ -9,6 +11,13 @@ from dryml.core.utils.recurse import iter_leaves
 
 
 class Backend(Enum):
+    """Identify a supported tensor backend without activating its runtime.
+
+    Members name NumPy, TensorFlow, Torch, and JAX. Enum construction rejects
+    unknown spellings with ValueError. The module property lazily activates the
+    existing plugin at runtime and raises ContextError for unavailable optional
+    dependencies; discovery only consults already registered detectors.
+    """
     numpy = "numpy"
     tf = "tf"
     torch = "torch"
@@ -28,11 +37,26 @@ class Backend(Enum):
 
     @property
     def module(self):
+        """Activate this backend's adapter at a runtime boundary.
+
+        Returns:
+            The registered ``dryml.<backend>`` plugin module.
+
+        Raises:
+            ContextError: If the optional dependency is unavailable. Import errors
+            within an installed plugin otherwise propagate.
+
+        Side Effects:
+            Lazily imports the plugin and registers its existing runtime adapters.
+            Passive discovery and metadata planning never call this property.
+        """
         from dryml.context import ContextError
         import importlib
-        if not backend_existence_testers[self]():
+        module = importlib.import_module(f"dryml.{self.value}")
+        tester = backend_existence_testers.get(self)
+        if tester is None or not tester():
             raise ContextError("This backend is not available in this context.")
-        return importlib.import_module(f"dryml.{self.value}")
+        return module
 
     @property
     def dtype(self):

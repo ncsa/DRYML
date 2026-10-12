@@ -70,6 +70,13 @@ Store-owned staging children; no public Store/Repo API, inode-based cache identi
 automatic cross-process synchronization, remote Store transport, cache discovery,
 or public codec plugin system is added.
 
+Fold role preparation selects first, then infers each selected initializer,
+transition, and finalizer output from its actual consumer inputs. Producer
+observation constraints, carry constraints, inferred outputs, and raw-result
+validation remain distinct. Converted initializer/finalizer outputs therefore
+drive the same role facts used by Method graphs and Dataset consumers, without
+ranking alternatives through inference or changing child Method state.
+
 `Fold[T]` is a concrete resumable `Value[T]` for a declared streaming
 `Dataset` reduction. Its constructor accepts a non-materializing `Ref[AutoRef]`
 source plus an initializer `Method`, an `Accumulator`, and an optional finalizer

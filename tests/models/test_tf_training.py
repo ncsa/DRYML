@@ -433,7 +433,7 @@ def test_tf_inference_never_invokes_an_opaque_model_or_changes_mode():
     assert model.obj.trainable is False
 
 
-def test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache():
+def test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache(monkeypatch):
     from dryml.models.tf import Sequential
 
     model = Sequential(layer_defs=(F("Dense", units=2),))
@@ -441,9 +441,15 @@ def test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cac
     batch_spec = TensorSpec("float32", shape=(3,), batch=2, backend="numpy")
     element = model.find_implementation(input_spec=element_spec)
     batched = model.find_implementation(input_spec=batch_spec)
+    import dryml.methods.conversion as conversion
+    crossings = []
+    original_convert = conversion.convert
+    monkeypatch.setattr(conversion, "convert",
+                        lambda edge, value: (crossings.append(edge), original_convert(edge, value))[1])
 
     assert tuple(element(np.zeros((3,), dtype=np.float32)).shape) == (2,)
     assert tuple(batched(np.zeros((2, 3), dtype=np.float32)).shape) == (2, 2)
+    assert crossings == [element.conversion_edge, batched.conversion_edge]
 
     model.learn()
     direct = model(tf.zeros((1, 3), dtype=tf.float32))
@@ -1043,6 +1049,21 @@ def test_tf_training_prepares_cross_backend_data_before_model_invocation(monkeyp
     from dryml.models.utils import TrainingPreparation
 
     events = []
+    from dryml.data import Dataset
+    original_dataset_prepare = Dataset.prepare
+    original_from_specs = TrainingPreparation.from_specs
+
+    def plan_dataset(self):
+        events.append("dataset-plan")
+        return original_dataset_prepare(self)
+
+    def plan_handoff(cls, *args, **kwargs):
+        assert events[-1] == "dataset-plan"
+        events.append("handoff-plan")
+        return original_from_specs(*args, **kwargs)
+
+    monkeypatch.setattr(Dataset, "prepare", plan_dataset)
+    monkeypatch.setattr(TrainingPreparation, "from_specs", classmethod(plan_handoff))
     original_prepare = TrainingPreparation.prepare
 
     def prepared(self, *args, **kwargs):
@@ -1071,7 +1092,7 @@ def test_tf_training_prepares_cross_backend_data_before_model_invocation(monkeyp
 
     exp.train_fn(exp)
 
-    assert events[:2] == ["prepare", "model"]
+    assert events[:4] == ["dataset-plan", "handoff-plan", "prepare", "model"]
 
 
 def test_tf_final_callback_resume_runs_one_validation_postlude_without_an_update(monkeypatch):

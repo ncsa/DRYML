@@ -2,6 +2,21 @@
 
 ## 0.3.0b1 (unreleased)
 
+Selected Method inference now uses converted consumer inputs consistently across
+Pipe/Project/AutoEncoder successors, graph ports, Map metadata, Fold roles, and
+native training inputs. Raw-result validation stays independent of inference
+and candidate ranking. Map resolves metadata during pure constructor selection;
+known selection failures can now surface at construction, while backend-only
+unknown facts remain cursor-local and shared specs remain unchanged. Metadata
+reads and example counting perform no repeated selection or compilation.
+
+Dense CPU handoffs validate and retain one host representation per leaf instead
+of extracting twice, then construct independent target storage. Backend adapters
+activate lazily through the existing runtime boundary, including previously
+unregistered optional endpoints. Native element adaptation retains its crossing,
+native x/y setup consumes prepared Dataset output facts before source acquisition,
+and experimental JAX zero-work admission remains ahead of native setup.
+
 Fold now uses positive root-output EOF rather than cursor closure to authorize
 exhausted checkpoints. Failed traversal cannot become successful truncated
 recovery; consumer errors remain primary over cleanup failures. New progress is

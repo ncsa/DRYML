@@ -115,24 +115,31 @@ def convert(edge: ConversionEdge, value: object) -> object:
 
     Returns:
         An independent target-backend dense tree with unchanged structure, values,
-        dtype, shape, and batch interpretation.
+        dtype, shape, and batch interpretation. Each accepted leaf is extracted
+        once into a retained validated host tree before target construction.
 
     Raises:
         TypeError: If values are mixed, sparse/ragged/object/inexact, abstract,
             non-CPU, non-addressable, or otherwise outside the dense host-copy
             handoff contract.
         RuntimeError: If a Torch value requiring gradients would cross a boundary.
+        ContextError: If a declared optional backend dependency is unavailable.
+
+    Side Effects:
+        Activates declared source/target adapters through Backend.module only at
+        runtime; unsupported source placement/gradients fail before extraction.
     """
 
     source = _tree_backend(value)
     expected = _tree_backend_from_spec(edge.producer_spec)
     target = _tree_backend_from_spec(edge.consumer_spec)
-    if source != expected:
+    if source is not expected:
         raise TypeError("Runtime value backend does not match the planned conversion producer.")
     if source is None or target is None:
         raise TypeError("Conversion edges require complete backend specifications.")
-    _validate_runtime_tree(value, edge.producer_spec)
-    host = map_leaves(value, lambda leaf: _host_copy(leaf, source))
+    source.module
+    host = _validate_runtime_tree(value, edge.producer_spec)
+    target.module
     return map_leaves(host, lambda leaf: _target_copy(leaf, target))
 
 
@@ -186,9 +193,12 @@ def _leaf_backend(value: object) -> Backend | None:
     return None
 
 
-def _validate_runtime_tree(value: object, spec: SpecTree) -> None:
+def _validate_runtime_tree(value: object, spec: SpecTree) -> object:
     try:
-        map_leaf_groups((value, spec), lambda pair: _validate_leaf(*pair))
+        # Preflight the whole tree so a later placement/gradient rejection cannot
+        # extract an earlier accepted leaf. The second pass retains every copy.
+        map_leaf_groups((value, spec), lambda pair: _validate_source_leaf(*pair))
+        return map_leaf_groups((value, spec), lambda pair: _validate_leaf(*pair))
     except (TypeError, ValueError) as error:
         raise TypeError("Runtime conversion value does not match its dense spec tree.") from error
 
@@ -201,21 +211,25 @@ def _validate_leaf(value: object, spec: TensorSpec) -> object:
         raise TypeError("Runtime conversion value has an unsupported dtype or shape.")
     if array.dtype != np.dtype(spec.dtype.np()):
         raise TypeError("Runtime conversion value changes the declared dtype.")
-    return value
+    return array
 
 
-def _host_copy(value: object, backend: Backend | None) -> np.ndarray:
+def _validate_source_leaf(value: object, spec: TensorSpec) -> None:
+    """Admit source type, dense layout, placement, and gradients without extraction."""
+    if not isinstance(spec, TensorSpec) or spec.layout is not Layout.DENSE:
+        raise TypeError("Conversion requires dense TensorSpec leaves.")
+    if spec.dtype.name not in _EXACT_DTYPE_NAMES:
+        raise TypeError("Conversion requires an exactly supported dtype.")
+    backend = spec.backend
     if backend is Backend.numpy:
         if not isinstance(value, np.ndarray):
             raise TypeError("Expected a NumPy dense array for conversion.")
-        array = value
     elif backend is Backend.tf:
         tf = import_module("tensorflow")
         if not tf.is_tensor(value) or isinstance(value, (tf.RaggedTensor, tf.SparseTensor)):
             raise TypeError("Only dense TensorFlow tensors support conversion.")
         if "CPU" not in (getattr(value, "device", "") or "CPU"):
             raise TypeError("Only CPU TensorFlow tensors support conversion.")
-        array = value.numpy()
     elif backend is Backend.torch:
         torch = import_module("torch")
         if not isinstance(value, torch.Tensor) or value.layout is not torch.strided:
@@ -224,16 +238,27 @@ def _host_copy(value: object, backend: Backend | None) -> np.ndarray:
             raise TypeError("Only CPU Torch tensors support conversion.")
         if value.requires_grad:
             raise RuntimeError("Torch tensors requiring gradients cannot cross a framework boundary.")
-        array = value.numpy()
     elif backend is Backend.jax:
         jax = import_module("jax")
-        if not isinstance(value, jax.Array):
+        tracer_type = getattr(getattr(jax, "core", None), "Tracer", ())
+        if isinstance(value, tracer_type) or not isinstance(value, jax.Array):
             raise TypeError("Only concrete dense JAX arrays support conversion.")
         if not value.is_fully_addressable:
             raise TypeError("Only fully addressable JAX arrays support conversion.")
         devices = value.devices()
         if len(devices) != 1 or next(iter(devices)).platform != "cpu":
             raise TypeError("Only single-device CPU JAX arrays support conversion.")
+    else:
+        raise TypeError("Unsupported conversion backend.")
+
+
+def _host_copy(value: object, backend: Backend | None) -> np.ndarray:
+    """Extract one preflight-admitted leaf into independently owned host storage."""
+    if backend is Backend.numpy:
+        array = value
+    elif backend in (Backend.tf, Backend.torch):
+        array = value.numpy()
+    elif backend is Backend.jax:
         array = np.asarray(value)
     else:
         raise TypeError("Unsupported conversion backend.")

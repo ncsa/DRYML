@@ -397,6 +397,7 @@ class _StreamOp:
     selected: object | None = None
     node: StreamNode | None = None
     tree: object | None = None
+    spec: SpecTree | None = None
 
 
 class StreamPlan:
@@ -456,7 +457,7 @@ class StreamPlan:
             raise ValueError(f"Unsupported Method preparation strategy {strategy!r}; only 'local' is available.")
         records: list[object] = []
         root = self._build(self.dataset, records)
-        from .signature import spec_from_node
+        from .signature import spec_from_node, spec_node
 
         root_specs = tuple(
             spec_from_node(node.outputs[0].spec)
@@ -466,7 +467,7 @@ class StreamPlan:
         supplied = (() if input_spec is None else (input_spec, *additional_input_specs))
         if supplied and supplied != root_specs:
             raise ValueError("Dataset graph input specs do not match its declared source specs.")
-        if output_spec is not None and output_spec != getattr(self.dataset, "spec"):
+        if output_spec is not None and spec_node(output_spec) != spec_node(root.spec):
             raise ValueError("Dataset graph output spec does not match its declared output spec.")
         edges = []
         for node in records:
@@ -503,7 +504,8 @@ class StreamPlan:
 
     def _build(self, dataset: object, records: list[object]) -> _StreamOp:
         from .ir import MethodGraphNode, MethodPort
-        from .signature import spec_node
+        from .signature import spec_node, spec_from_node
+        from dryml.core.tensor_spec import batch_spec_tree, unbatch_spec_tree, merge_spec_trees, Dynamic
 
         # Only qualified concrete operators opt in.  Other Dataset subclasses
         # inherit the source marker but must not silently gain stream semantics.
@@ -512,10 +514,10 @@ class StreamPlan:
             kind = "unsupported" if hasattr(dataset, "src") else "source"
         if kind not in {"source", "map", "batch", "unbatch", "take", "zip", "chain", "custom"}:
             raise NotImplementedError(f"Dataset graph planning does not support {type(dataset).__name__}.")
-        spec = getattr(dataset, "spec")
+        spec = spec_from_node(spec_node(getattr(dataset, "spec")))
         if kind == "source":
             records.append(MethodGraphNode(len(records), "source", None, outputs=(MethodPort("iterator", spec_node(spec)),)))
-            return _StreamOp("source", dataset=dataset)
+            return _StreamOp("source", dataset=dataset, spec=spec)
         if kind == "map":
             child = self._build(dataset.src, records)
             selected = None
@@ -523,77 +525,84 @@ class StreamPlan:
                 # A Map is an iterator boundary around an element Method graph.  Keep
                 # the composed occurrences visible through the same local build
                 # used by MethodGraph, without publishing child Method state.
-                selected, element_nodes = dataset.method._prepare_local(dataset.src.spec)
+                selected, element_nodes = dataset.method._prepare_local(child.spec)
                 element_nodes = tuple(node for node in element_nodes if node.kind == "method")
+                spec = spec_from_node(element_nodes[0].outputs[0].spec)
                 records.extend(replace(node, occurrence=len(records)) for node in element_nodes)
             except ImplementationSelectionError as error:
                 if error.reason != "unknown_traits" or error.unknown_traits != ("backend",):
                     raise
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset.method),
-                inputs=(MethodPort("iterator", spec_node(dataset.src.spec)),),
+                inputs=(MethodPort("iterator", spec_node(child.spec)),),
                 outputs=(MethodPort("iterator", spec_node(spec)),),
                 selected=selected,
                 traits=None if selected is None else selected.traits,
-                stream_node=self._builtin_node("Map", (dataset.src.spec,), spec, dataset, ("one_to_one",), 1),
+                stream_node=self._builtin_node("Map", (child.spec,), spec, dataset, ("one_to_one",), 1),
             ))
-            return _StreamOp("map", dataset=dataset, inputs=(child,), selected=selected)
+            return _StreamOp("map", dataset=dataset, inputs=(child,), selected=selected, spec=spec)
         if kind in {"batch", "unbatch"}:
             child = self._build(dataset.src, records)
+            spec = (batch_spec_tree(child.spec, batch=dataset.batch_size if dataset.drop_remainder else Dynamic)
+                    if kind == "batch" else unbatch_spec_tree(child.spec))
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),
-                inputs=(MethodPort("iterator", spec_node(dataset.src.spec)),),
+                inputs=(MethodPort("iterator", spec_node(child.spec)),),
                 outputs=(MethodPort("iterator", spec_node(spec)),),
                 stream_node=self._builtin_node(
                     type(dataset).__name__,
-                    (dataset.src.spec,),
+                    (child.spec,),
                     spec,
                     dataset,
                     ("bounded_group" if kind == "batch" else "one_to_many",),
                     dataset.batch_size if kind == "batch" else 1,
                 ),
             ))
-            return _StreamOp(kind, dataset=dataset, inputs=(child,))
+            return _StreamOp(kind, dataset=dataset, inputs=(child,), spec=spec)
         if kind == "take":
             child = self._build(dataset.src, records)
+            spec = child.spec
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),
-                inputs=(MethodPort("iterator", spec_node(dataset.src.spec)),),
+                inputs=(MethodPort("iterator", spec_node(child.spec)),),
                 outputs=(MethodPort("iterator", spec_node(spec)),),
                 stream_node=self._builtin_node(
-                    "Take", (dataset.src.spec,), spec, dataset,
+                    "Take", (child.spec,), spec, dataset,
                     ("strict_prefix",), 0,
                 ),
             ))
-            return _StreamOp("take", dataset=dataset, inputs=(child,))
+            return _StreamOp("take", dataset=dataset, inputs=(child,), spec=spec)
         if kind == "zip":
             leaves = tuple(_iter_dataset_leaves(dataset.sources))
             children = tuple(self._build(source, records) for source in leaves)
+            spec = _build_zip_tree(dataset.sources, iter(child.spec for child in children))
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),
-                inputs=tuple(MethodPort("iterator", spec_node(source.spec)) for source in leaves),
+                inputs=tuple(MethodPort("iterator", spec_node(child.spec)) for child in children),
                 outputs=(MethodPort("iterator", spec_node(spec)),),
-                stream_node=self._builtin_node("Zip", tuple(source.spec for source in leaves), spec, dataset, ("position_order",) * len(leaves), 0),
+                stream_node=self._builtin_node("Zip", tuple(child.spec for child in children), spec, dataset, ("position_order",) * len(leaves), 0),
             ))
-            return _StreamOp("zip", dataset=dataset, inputs=children, tree=dataset.sources)
+            return _StreamOp("zip", dataset=dataset, inputs=children, tree=dataset.sources, spec=spec)
         if kind == "chain":
             children = tuple(self._build(source, records) for source in dataset.sources)
+            spec = merge_spec_trees([child.spec for child in children])
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),
-                inputs=tuple(MethodPort("iterator", spec_node(source.spec)) for source in dataset.sources),
+                inputs=tuple(MethodPort("iterator", spec_node(child.spec)) for child in children),
                 outputs=(MethodPort("iterator", spec_node(spec)),),
-                stream_node=self._builtin_node("Chain", tuple(source.spec for source in dataset.sources), spec, dataset, ("declaration_order",) * len(dataset.sources), 0),
+                stream_node=self._builtin_node("Chain", tuple(child.spec for child in children), spec, dataset, ("declaration_order",) * len(dataset.sources), 0),
             ))
-            return _StreamOp("chain", dataset=dataset, inputs=children)
+            return _StreamOp("chain", dataset=dataset, inputs=children, spec=spec)
         children = tuple(self._build(source, records) for source in dataset.sources)
         node = dataset.node
+        spec = node.output_spec(tuple(child.spec for child in children))
         records.append(MethodGraphNode(
             len(records), "method", type(node),
-            inputs=tuple(MethodPort("iterator", spec_node(source.spec)) for source in dataset.sources),
+            inputs=tuple(MethodPort("iterator", spec_node(child.spec)) for child in children),
             outputs=(MethodPort("iterator", spec_node(spec)),),
             stream_node=node,
         ))
-        return _StreamOp("custom", dataset=dataset, inputs=children, node=node)
+        return _StreamOp("custom", dataset=dataset, inputs=children, node=node, spec=spec)
 
     @staticmethod
     def _builtin_node(
@@ -665,13 +674,13 @@ class StreamGraphCursor(_CursorLifecycle, Iterator[Any]):
             return self._own(self._call(opener, epoch) if callable(opener) else self._call(op.dataset.iterator))
         if op.kind == "map":
             source = self._open(op.inputs[0], epoch=epoch)
-            return self._own(_MapIterator(self, source, op.dataset, op.selected))
+            return self._own(_MapIterator(self, source, op.dataset, op.selected, op.inputs[0].spec, op.spec))
         if op.kind == "batch":
             source = self._open(op.inputs[0], epoch=epoch)
-            return self._own(_BatchIterator(self, source, op.dataset))
+            return self._own(_BatchIterator(self, source, op.dataset, op.inputs[0].spec))
         if op.kind == "unbatch":
             source = self._open(op.inputs[0], epoch=epoch)
-            return self._own(_UnbatchIterator(self, source, op.dataset))
+            return self._own(_UnbatchIterator(self, source, op.dataset, op.inputs[0].spec))
         if op.kind == "take":
             if op.dataset.n == 0:
                 return self._own(iter(()))
@@ -690,11 +699,14 @@ class StreamGraphCursor(_CursorLifecycle, Iterator[Any]):
 class _MapIterator(Iterator[Any]):
     """One Map output iterator with an occurrence-local discovery buffer."""
 
-    def __init__(self, cursor, source: Iterator[Any], dataset: object, selected: object | None) -> None:
+    def __init__(self, cursor, source: Iterator[Any], dataset: object, selected: object | None,
+                 input_spec, output_spec) -> None:
         self.cursor = cursor
         self.source = source
         self.dataset = dataset
         self.selected = selected
+        self.input_spec = input_spec
+        self.output_spec = output_spec
         self.pending: object | None = None
         self.has_pending = False
         self.resolved = selected is not None
@@ -715,15 +727,15 @@ class _MapIterator(Iterator[Any]):
             item = self.cursor._pull(self.source)
         result = self.cursor._call(self.selected, item)
         if getattr(self.dataset, "preserves_examples", False):
-            source_examples = self.cursor._call(self.dataset.src.examples_in, item)
-            if self.cursor._call(self.dataset.examples_in, result) != source_examples:
+            source_examples = self.cursor._call(self.dataset.src._examples_in_spec, self.input_spec, item)
+            if self.cursor._call(self.dataset._examples_in_spec, self.output_spec, result) != source_examples:
                 raise ValueError("Map declared preserves_examples but changed an example count.")
         return result
 
     def _resolve(self) -> None:
         try:
             implementation = self.cursor._call(
-                self.dataset.method.find_implementation, input_spec=self.dataset.src.spec,
+                self.dataset.method.find_implementation, input_spec=self.input_spec,
             )
         except ImplementationSelectionError as error:
             if error.reason != "unknown_traits" or error.unknown_traits != ("backend",):
@@ -739,23 +751,25 @@ class _MapIterator(Iterator[Any]):
             if len(backends) != 1:
                 raise ImplementationSelectionError("conflict" if backends else "unknown_traits", () if backends else ("backend",))
             implementation = self.cursor._call(self.dataset.method.find_implementation,
-                input_spec=self.dataset.src.spec,
+                input_spec=self.input_spec,
                 backend=next(iter(backends)),
             )
             self.pending = item
             self.has_pending = True
         self.selected = self.cursor._call(implementation.prepared_invoker)
+        self.output_spec = self.cursor._call(implementation.infer_output_spec)
         self.resolved = True
 
 
 class _BatchIterator(Iterator[Any]):
     """One bounded Batch output iterator retaining its collate selection once."""
 
-    def __init__(self, cursor, source: Iterator[Any], dataset: object) -> None:
+    def __init__(self, cursor, source: Iterator[Any], dataset: object, input_spec) -> None:
         self.cursor = cursor
         self.source = source
         self.dataset = dataset
         self.collate = None
+        self.input_spec = input_spec
 
     def __iter__(self) -> "_BatchIterator":
         return self
@@ -770,17 +784,17 @@ class _BatchIterator(Iterator[Any]):
         if not batch or (self.dataset.drop_remainder and len(batch) < self.dataset.batch_size):
             raise StopIteration
         if self.collate is None:
-            self.collate = self.cursor._call(self.dataset._resolve_collate, batch)
+            self.collate = self.cursor._call(self.dataset._resolve_collate, batch, input_spec=self.input_spec)
         return self.cursor._call(self.collate, batch)
 
 
 class _UnbatchIterator(Iterator[Any]):
     """One Unbatch output iterator retaining one selected split implementation."""
 
-    def __init__(self, cursor, source: Iterator[Any], dataset: object) -> None:
+    def __init__(self, cursor, source: Iterator[Any], dataset: object, input_spec) -> None:
         self.cursor = cursor
         self.source = source
-        self.split = cursor._call(dataset._resolve_split)
+        self.split = cursor._call(dataset._resolve_split, input_spec=input_spec)
         self.pending: Iterator[Any] = iter(())
 
     def __iter__(self) -> "_UnbatchIterator":

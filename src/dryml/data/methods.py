@@ -199,6 +199,9 @@ class Project(Method):
 
         if input_spec is None:
             return implementation
+        from dryml.methods.signature import spec_from_node
+
+        input_spec = spec_from_node(implementation.consumer_input_specs[0])
         if derive_spec_batch:
             def select(method):
                 return method.find_implementation(
@@ -226,7 +229,11 @@ class Project(Method):
                 return _map_method_tree(structure, lambda index: prepared[index](x))
             return invoke_project
 
-        return replace(implementation, _children=children, _invoker_factory=prepare_project)
+        def infer_project(children):
+            return _map_method_tree(structure, lambda index: children[index].infer_output_spec())
+
+        return replace(implementation, _children=children, _invoker_factory=prepare_project,
+                       _output_inference=infer_project)
 
 
 class Pipe(Method):
@@ -339,6 +346,9 @@ class Pipe(Method):
 
         if input_spec is None:
             return implementation
+        from dryml.methods.signature import spec_from_node
+
+        input_spec = spec_from_node(implementation.consumer_input_specs[0])
         selected_methods = []
         spec = input_spec
         for index, method in enumerate(self.methods):
@@ -356,9 +366,10 @@ class Pipe(Method):
                     batch_mode=batch_mode,
                 )
             )
-            spec = method.infer_output_spec(spec)
+            spec = selected_methods[-1].infer_output_spec()
         return replace(implementation, _children=tuple(selected_methods),
-                       _invoker_factory=Pipe._prepare_invoker)
+                       _invoker_factory=Pipe._prepare_invoker,
+                       _output_inference=lambda children: children[-1].infer_output_spec())
 
     @staticmethod
     def _prepare_invoker(prepared_methods):

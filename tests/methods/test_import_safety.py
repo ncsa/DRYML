@@ -2,6 +2,8 @@
 
 import subprocess
 import sys
+import importlib.util
+import pytest
 
 _EXPECTED_METHOD_EXPORTS = {
     "Accumulator",
@@ -136,4 +138,73 @@ from dryml.data.dataset import DatasetExhaustedError as established
 assert public is established is DatasetExhaustedError
 """
     completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("backend,dependency", (("torch", "torch"), ("tf", "tensorflow"), ("jax", "jax")))
+def test_fresh_runtime_crossing_activates_adapters_after_passive_planning(backend, dependency, tmp_path):
+    """Installed framework crossings plan inertly then activate both endpoints."""
+    if importlib.util.find_spec(dependency) is None:
+        pytest.skip(f"{dependency} is not installed")
+    script = f'''
+import sys
+import numpy as np
+from dryml.core import TensorSpec
+from dryml.methods import Method, traits
+from dryml.data import Dataset, Map
+from dryml.methods.conversion import convert, make_edge
+class Target(Method):
+    @traits(backend={backend!r})
+    def native(self, value):
+        return value
+    def infer_output_spec(self, spec):
+        return spec
+class Source(Dataset):
+    def __iter__(self):
+        raise AssertionError('planning opened source')
+spec = TensorSpec('float32', shape=(2,), backend='numpy')
+method = Target()
+selected = method.find_implementation(spec)
+mapped = Map(Source(spec=spec), method)
+assert mapped.spec.backend.value == {backend!r}
+method.learn(spec)
+assert not any(name in sys.modules for name in ('torch', 'tensorflow', 'jax'))
+result = method(np.array([1, 2], dtype=np.float32))
+assert {dependency!r} in sys.modules
+assert 'dryml.' + {backend!r} in sys.modules
+restored = convert(make_edge(TensorSpec('float32', shape=(2,), backend={backend!r}), 'numpy'), result)
+np.testing.assert_array_equal(restored, [1, 2])
+'''
+    path = tmp_path / "crossing.py"
+    path.write_text(script)
+    completed = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_fresh_native_learning_activates_declared_adapter_only_at_runtime(tmp_path):
+    """Removing eager registration must preserve native first-call learning."""
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch is not installed")
+    script = '''
+import sys
+from dryml.core import TensorSpec
+import torch
+from dryml.models.torch import Model
+import dryml.methods.conversion as conversion
+model = Model(torch.nn.Identity, output_spec=TensorSpec('float32', shape=(2,)))
+model.find_implementation(TensorSpec('float32', shape=(2,), backend='torch'))
+model.learn()
+assert 'dryml.torch' not in sys.modules
+def fail(*args):
+    raise AssertionError('same-native learning crossed frameworks')
+conversion.convert = fail
+result = model(torch.ones(2))
+assert result.shape == (2,)
+assert model.call_mode == 'cached'
+assert 'dryml.torch' in sys.modules
+assert model.method_graph().conversion_edges == ()
+'''
+    path = tmp_path / "native-learning.py"
+    path.write_text(script)
+    completed = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr

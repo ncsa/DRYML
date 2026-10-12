@@ -136,7 +136,7 @@ def test_functional_constructor_records_initializer_arguments_and_splits_seed():
     assert not np.array_equal(jax.random.key_data(init_key), jax.random.key_data(model.rng))
 
 
-def test_functional_model_supports_raw_selected_map_and_autoencoder_calls():
+def test_functional_model_supports_raw_selected_map_and_autoencoder_calls(monkeypatch):
     """One prediction-only contract supports raw, selected, Map, and AutoEncoder."""
 
     jax = pytest.importorskip("jax")
@@ -155,8 +155,28 @@ def test_functional_model_supports_raw_selected_map_and_autoencoder_calls():
     decoder = _model(width=1, scale=3.0)
     mapped = Map(ArrayDataset(np.asarray([[1.0], [2.0]], dtype=np.float32)), encoder)
     autoencoded = Map(Batch(ArrayDataset(np.asarray([[1.0], [2.0]], dtype=np.float32)), 2), AutoEncoder(encoder, decoder))
+    import dryml.methods.conversion as conversion
+    crossings = []
+    original = conversion.convert
+    monkeypatch.setattr(conversion, "convert",
+                        lambda edge, value: (crossings.append(edge), original(edge, value))[1])
     assert [np.asarray(value).tolist() for value in mapped] == [[2.0], [4.0]]
+    assert len(crossings) == 2
     assert [np.asarray(value).tolist() for value in autoencoded] == [[[6.0], [12.0]]]
+    assert len(crossings) == 3
+
+
+def test_cached_native_element_adaptation_does_not_retain_model():
+    """A finalized JAX element invoker must preserve weak Method ownership."""
+    import gc
+    import weakref
+    pytest.importorskip("jax")
+    model = _model()
+    model.learn(TensorSpec("float32", shape=(2,), backend="jax"))
+    reference = weakref.ref(model)
+    del model
+    gc.collect()
+    assert reference() is None
 
 
 def test_functional_initializer_and_apply_results_are_validated():

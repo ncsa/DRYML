@@ -229,8 +229,9 @@ def complete_backend_constraint(
         A recursively copied constraint whose backend-unknown tensor leaves use
         ``backend``. Known leaf backends remain unchanged.
 
-    This is used only by direct selected-call validation. It neither discovers a
-    backend nor imports optional framework adapters.
+    Selection completes producer-input facts before conversion planning, and
+    selected-call validation retains the completed constraints. This operation
+    neither discovers a backend nor imports optional framework adapters.
     """
 
     if constraint is None or backend is None:

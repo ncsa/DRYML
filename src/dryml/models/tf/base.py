@@ -884,7 +884,8 @@ class Model(BaseModel, Serializable):
                 conflicting, unsupported, or select no unique implementation.
 
         Side Effects:
-            Binds a local selected callable without changing preparation state.
+            Binds local adaptation from converted consumer-input facts, preserving
+            the retained crossing without changing preparation state.
         """
 
         if additional_input_specs:
@@ -912,6 +913,9 @@ class Model(BaseModel, Serializable):
 
         if implementation.name != "element_call" or input_spec is None:
             return implementation
+        from dryml.methods.signature import spec_from_node
+
+        input_spec = spec_from_node(implementation.consumer_input_specs[0])
         receiver_ref = weakref.ref(self)
 
         def invoke_element(x, *args, **kwargs):
@@ -1147,7 +1151,9 @@ class BasicTraining(TrainFunction):
         Side Effects:
             Trains Model/Optimizer state, advances retained Experiment progress,
             invokes DRYML safe points, and reports native events after DRYML
-            accounting/behavior hooks. It does not retain telemetry observers.
+            accounting/behavior hooks. Resolves the Dataset plan before x/y
+            handoffs and source acquisition, using captured output specs for
+            validation. It does not retain telemetry observers.
         """
 
         import tensorflow as tf
@@ -1175,10 +1181,10 @@ class BasicTraining(TrainFunction):
         train_data = self._prepare_data(exp.train_data)
         require_bounded_safe_points(train_data, callbacks)
         train_xy = self._xy_data(train_data)
-        self.training_preparation = TrainingPreparation.from_specs(
-            self, train_xy.spec[0], train_xy.spec[1], "tf"
-        )
         prepared_train = train_xy.prepare()
+        self.training_preparation = TrainingPreparation.from_dataset(
+            self, prepared_train, "tf"
+        )
 
         val_data = None
         val_xy = None
@@ -1186,20 +1192,20 @@ class BasicTraining(TrainFunction):
         if exp.val_data is not None:
             val_data = self._prepare_data(exp.val_data)
             val_xy = self._xy_data(val_data)
-            self.validation_preparation = TrainingPreparation.from_specs(
-                self, val_xy.spec[0], val_xy.spec[1], "tf"
-            )
             prepared_val = val_xy.prepare()
+            self.validation_preparation = TrainingPreparation.from_dataset(
+                self, prepared_val, "tf"
+            )
         else:
             prepared_val = None
 
-        training_model = self._training_model(tf, exp.model, train_xy.spec[0])
+        training_model = self._training_model(tf, exp.model, self.training_preparation.consumer_specs[0])
         if compile_kwargs:
             training_model.compile(**compile_kwargs)
             optimizer = self._optimizer(exp)
             if completed_behavior_stop:
                 training_model(
-                    _keras_inputs_from_spec(tf, train_xy.spec[0]),
+                    _keras_inputs_from_spec(tf, self.training_preparation.consumer_specs[0]),
                     training=False,
                 )
                 build = getattr(_unwrap_backend_obj(optimizer), "build", None)
@@ -1521,8 +1527,9 @@ class Training(BasicTraining):
 
         Side Effects:
             Updates model variables, optimizer state, metrics, progress output,
-            and ``exp.state``. Dataset backend preparation completes before the
-            tape body; graph traversal uses a temporary explicit Repo only for
+            and ``exp.state``. The Dataset plan precedes x/y handoffs and source
+            acquisition; captured output facts drive validation before the tape
+            body. Graph traversal uses a temporary explicit Repo only for
             trainable-variable collection.
         """
         import tensorflow as tf
@@ -1534,20 +1541,20 @@ class Training(BasicTraining):
         train_data = self._prepare_data(exp.train_data)
         require_bounded_safe_points(train_data, callbacks)
         train_xy = self._xy_data(train_data)
-        self.training_preparation = TrainingPreparation.from_specs(
-            self, train_xy.spec[0], train_xy.spec[1], "tf"
-        )
         prepared_train = train_xy.prepare()
+        self.training_preparation = TrainingPreparation.from_dataset(
+            self, prepared_train, "tf"
+        )
 
         val_xy = None
         self.validation_preparation = None
         if exp.val_data is not None:
             val_data = self._prepare_data(exp.val_data)
             val_xy = self._xy_data(val_data)
-            self.validation_preparation = TrainingPreparation.from_specs(
-                self, val_xy.spec[0], val_xy.spec[1], "tf"
-            )
             prepared_val = val_xy.prepare()
+            self.validation_preparation = TrainingPreparation.from_dataset(
+                self, prepared_val, "tf"
+            )
         else:
             prepared_val = None
 
@@ -1584,7 +1591,7 @@ class Training(BasicTraining):
                     if resume_batch:
                         cursor.skip(resume_batch)
                     for x, y in cursor:
-                        examples = train_xy.examples_in((x, y))
+                        examples = prepared_train.examples_in((x, y))
 
                         with tf.GradientTape() as tape:
                             y_pred = exp.model(x)
@@ -1750,7 +1757,7 @@ class Training(BasicTraining):
         cursor = iter_training_batches(val_data, self.validation_preparation)
         with cursor:
             for x, y in cursor:
-                examples = val_data.dataset.examples_in((x, y))
+                examples = val_data.examples_in((x, y))
                 y_pred = model(x)
                 loss_value = tf.reduce_mean(loss_fn(y, y_pred))
                 total_loss += float(metric_value(loss_value)) * examples

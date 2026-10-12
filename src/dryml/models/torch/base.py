@@ -326,14 +326,9 @@ class Model(BaseModel, Serializable):
                 conflicting, unsupported, or select no unique implementation.
 
         Side Effects:
-            Registers the optional Torch tensor adapter, then binds a local
-            selected callable without changing Method preparation state.
+            Binds local consumer-input adaptation without importing or activating
+            Torch adapters, executing a model, or changing preparation state.
         """
-
-        # Selected-call validation must recognize module outputs in a following
-        # Pipe child. This optional backend registration stays in the selected
-        # Torch model path rather than a lightweight package import.
-        import dryml.torch
 
         if additional_input_specs:
             raise ImplementationSelectionError("conflict")
@@ -348,8 +343,6 @@ class Model(BaseModel, Serializable):
     def _prepare_implementation(self, input_spec, *, backend, batch_mode):
         """Build a learning-time selected model call without shared state mutation."""
 
-        import dryml.torch
-
         implementation = super()._prepare_implementation(
             input_spec,
             backend=backend,
@@ -362,6 +355,9 @@ class Model(BaseModel, Serializable):
 
         if implementation.name != "element_call" or input_spec is None:
             return implementation
+        from dryml.methods.signature import spec_from_node
+
+        input_spec = spec_from_node(implementation.consumer_input_specs[0])
         receiver_ref = weakref.ref(self)
 
         def invoke_element(x, *args, **kwargs):
@@ -545,8 +541,9 @@ class Training(TrainFunction):
 
         Side Effects:
             Updates model parameters, optimizer state, metrics, progress output,
-            and ``exp.state``. Dataset backend preparation completes before the
-            native forward/backward body; graph traversal uses a temporary
+            and ``exp.state``. The Dataset plan precedes x/y handoffs and source
+            acquisition; captured output facts drive batch validation before the
+            native forward/backward body. Graph traversal uses a temporary
             explicit Repo only for trainable-parameter collection.
         """
         import torch
@@ -561,10 +558,10 @@ class Training(TrainFunction):
         require_supervised_dataset(train_data, batched=True)
         require_bounded_safe_points(train_data, callbacks)
         train_xy = train_data
-        self.training_preparation = TrainingPreparation.from_specs(
-            self, train_xy.spec[0], train_xy.spec[1], "torch"
-        )
         prepared_train = train_xy.prepare()
+        self.training_preparation = TrainingPreparation.from_dataset(
+            self, prepared_train, "torch"
+        )
 
         val_xy = None
         self.validation_preparation = None
@@ -572,10 +569,10 @@ class Training(TrainFunction):
             val_data = exp.val_data
             require_supervised_dataset(val_data, batched=True)
             val_xy = val_data
-            self.validation_preparation = TrainingPreparation.from_specs(
-                self, val_xy.spec[0], val_xy.spec[1], "torch"
-            )
             prepared_val = val_xy.prepare()
+            self.validation_preparation = TrainingPreparation.from_dataset(
+                self, prepared_val, "torch"
+            )
         else:
             prepared_val = None
 
@@ -623,7 +620,7 @@ class Training(TrainFunction):
                         cursor.skip(resume_batch)
                     for x, y in cursor:
                         batch_index = exp.state.next_batch
-                        examples = train_xy.examples_in((x, y))
+                        examples = prepared_train.examples_in((x, y))
                         x = _tree_to_torch(x, torch, device=device)
                         y = _tree_to_torch(y, torch, device=device)
 
@@ -896,7 +893,7 @@ class Training(TrainFunction):
         with cursor:
             with torch.no_grad():
                 for x, y in cursor:
-                    examples = val_data.dataset.examples_in((x, y))
+                    examples = val_data.examples_in((x, y))
                     x = _tree_to_torch(x, torch, device=device)
                     y = _tree_to_torch(y, torch, device=device)
                     y_pred = model(x)

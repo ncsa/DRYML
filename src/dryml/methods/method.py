@@ -10,7 +10,8 @@ from threading import Lock
 from dryml.annotations import AnnotatedMember, annotations_for_members
 from dryml.core.backend import Backend
 from dryml.core.object import Object, _register_class_transformer
-from dryml.core.tensor_spec import BatchMode, SpecTree
+from dryml.core.tensor_spec import BatchMode, SpecTree, TensorSpec
+from dryml.core.utils.recurse import iter_leaves
 
 from .errors import ImplementationDeclarationError, ImplementationSelectionError, MethodError, PreparedCallMismatchError
 from .implementation import (
@@ -477,17 +478,11 @@ class Method(Object):
         facts = []
 
         def infer(selected):
-            inputs = selected._input_specs
-            from .signature import spec_from_node
-
+            inputs = selected.consumer_input_specs
             try:
-                output = spec_node(selected._receiver.infer_output_spec(
-                    *(spec_from_node(node) for node in inputs),
-                ))
+                output = spec_node(selected.infer_output_spec())
             except NotImplementedError:
                 output = None
-            if selected._output_spec is not None:
-                output = selected._output_spec
             facts.append((selected, inputs, output))
             for child in selected._children:
                 infer(child)
@@ -709,6 +704,11 @@ class Method(Object):
         except TypeError as error:
             raise ImplementationSelectionError("conflict") from error
         direct_candidates = self._compatible(required_backend, required_batch)
+        input_nodes = tuple(complete_backend_constraint(node, required_backend) for node in input_nodes)
+        if input_nodes:
+            from .signature import spec_from_node
+
+            input_spec = spec_from_node(input_nodes[0])
         if direct_candidates:
             implementation = self._select(required_backend, required_batch)
         else:
@@ -721,10 +721,7 @@ class Method(Object):
             )
         selected = replace(
             implementation,
-            _input_specs=tuple(
-                complete_backend_constraint(input_node, required_backend)
-                for input_node in input_nodes
-            ),
+            _input_specs=input_nodes,
             _output_spec=output_node,
         )
         return selected
@@ -768,20 +765,10 @@ class Method(Object):
         if len(winners) != 1:
             raise ImplementationSelectionError("ambiguous")
         candidate, edge = winners[0]
-        from .signature import spec_nodes
-
-        consumer_nodes = spec_nodes(edge.consumer_spec, ())
-        inner = replace(
-            candidate,
-            _input_specs=tuple(
-                complete_backend_constraint(node, candidate.traits.backend)
-                for node in consumer_nodes
-            ),
-            _output_spec=output_node,
-        )
         return replace(
-            inner,
+            candidate,
             _input_specs=input_nodes,
+            _output_spec=output_node,
             conversion_edge=edge,
         )
 
@@ -932,6 +919,8 @@ class Method(Object):
             backend, batch_mode = receiver._runtime_selection_facts(args, kwargs)
         except ValueError as error:
             raise ImplementationSelectionError("conflict") from error
+        if backend is not None and any(not isinstance(value, TensorSpec) for value in iter_leaves((args, kwargs))):
+            backend.module
         effective_batch = batch_mode
         if effective_batch is None and default_batched is not None:
             effective_batch = BatchMode.batched if default_batched else BatchMode.element

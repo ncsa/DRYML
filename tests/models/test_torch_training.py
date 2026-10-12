@@ -252,17 +252,24 @@ def test_torch_inference_never_invokes_an_opaque_model_or_changes_mode():
     assert model.obj.training is True
 
 
-def test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache():
+def test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache(monkeypatch):
     from dryml.models.torch import Sequential
 
     model = Sequential(layer_defs=(F("Linear", 3, 2),))
+    model.prep_eval()
     element_spec = TensorSpec("float32", shape=(3,), backend="numpy")
     batch_spec = TensorSpec("float32", shape=(3,), batch=2, backend="numpy")
     element = model.find_implementation(input_spec=element_spec)
     batched = model.find_implementation(input_spec=batch_spec)
+    import dryml.methods.conversion as conversion
+    crossings = []
+    original_convert = conversion.convert
+    monkeypatch.setattr(conversion, "convert",
+                        lambda edge, value: (crossings.append(edge), original_convert(edge, value))[1])
 
     assert tuple(element(np.zeros((3,), dtype=np.float32)).shape) == (2,)
     assert tuple(batched(np.zeros((2, 3), dtype=np.float32)).shape) == (2, 2)
+    assert crossings == [element.conversion_edge, batched.conversion_edge]
 
     model.learn()
     direct = model(torch.zeros((1, 3), dtype=torch.float32))
@@ -281,6 +288,7 @@ def test_torch_model_map_unbatched_tensor_uses_backend_batch_axis():
         F("Flatten"),
         F("Linear", 12, 2),
     ])
+    model.prep_eval()
     mapped = Map(ds, model)
 
     out = list(mapped)
@@ -300,6 +308,7 @@ def test_torch_model_project_pipe_maps_unbatched_tensors_and_preserves_labels():
         F("Flatten"),
         F("Linear", 12, 2),
     ])
+    model.prep_eval()
     mapped = Map(ds, Project(Pipe(Select(0), model), Select(1)))
 
     out = list(mapped)
@@ -323,6 +332,8 @@ def test_torch_argmax_pipeline_after_model_output():
     classifier = Sequential(layer_defs=[
         F("Linear", 2, 3),
     ])
+    encoder.prep_eval()
+    classifier.prep_eval()
     mapped = Map(ds, Project(Pipe(Select(0), encoder, classifier, ArgMax()), Select(1)))
 
     out = list(mapped)
@@ -565,6 +576,21 @@ def test_torch_training_prepares_cross_backend_data_before_model_invocation(monk
     from dryml.models.utils import TrainingPreparation
 
     events = []
+    from dryml.data import Dataset
+    original_dataset_prepare = Dataset.prepare
+    original_from_specs = TrainingPreparation.from_specs
+
+    def plan_dataset(self):
+        events.append("dataset-plan")
+        return original_dataset_prepare(self)
+
+    def plan_handoff(cls, *args, **kwargs):
+        assert events[-1] == "dataset-plan"
+        events.append("handoff-plan")
+        return original_from_specs(*args, **kwargs)
+
+    monkeypatch.setattr(Dataset, "prepare", plan_dataset)
+    monkeypatch.setattr(TrainingPreparation, "from_specs", classmethod(plan_handoff))
     original_prepare = TrainingPreparation.prepare
 
     def prepared(self, *args, **kwargs):
@@ -593,7 +619,7 @@ def test_torch_training_prepares_cross_backend_data_before_model_invocation(monk
 
     exp.train_fn(exp)
 
-    assert events[:2] == ["prepare", "model"]
+    assert events[:4] == ["dataset-plan", "handoff-plan", "prepare", "model"]
 
 
 def test_torch_training_prepares_tensorflow_data_through_its_retained_method_edge():

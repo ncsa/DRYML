@@ -1,3 +1,5 @@
+"""Native training preparation, Dataset admission, and retained update helpers."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -25,13 +27,44 @@ class TrainingPreparation:
     conversion_edges: tuple[object | None, object | None]
 
     @classmethod
+    def from_dataset(cls, owner, dataset, backend: str) -> "TrainingPreparation":
+        """Plan native x/y handoffs from one already-prepared Dataset.
+
+        Args:
+            owner: TrainFunction retaining this invocation's handoff graph.
+            dataset: PreparedDataset with captured supervised output specs.
+            backend: Native consumer backend for both branches.
+
+        Returns:
+            The retained producer/consumer specs and necessary direct edges.
+
+        Raises:
+            TypeError: If Methods require input discovery, the output
+                is not a pair, or either branch lacks adequate declarations.
+            ValueError: If ``backend`` is not a supported backend spelling.
+
+        Side Effects:
+            Records owner graph facts only after declaration admission succeeds.
+            Opens no source and activates no optional adapter.
+        """
+        from dryml.data.native import PreparedDataset
+
+        if not isinstance(dataset, PreparedDataset):
+            raise TypeError("Native training handoffs require a PreparedDataset.")
+        dataset._require_declared_selection()
+        specs = dataset.spec
+        if not isinstance(specs, tuple) or len(specs) != 2:
+            raise TypeError("Native training requires captured (inputs, targets) specifications.")
+        return cls.from_specs(owner, *specs, backend)
+
+    @classmethod
     def from_specs(cls, owner, x_spec, y_spec, backend: str) -> "TrainingPreparation":
         """Plan supported direct handoffs from declared x/y specs once.
 
         Args:
             owner: TrainFunction Method that owns the inspectable graph facts.
-            x_spec: Complete declared feature tensor-spec tree.
-            y_spec: Complete declared target tensor-spec tree.
+            x_spec: Complete feature tree captured after Dataset preparation.
+            y_spec: Complete target tree captured after Dataset preparation.
             backend: Native consumer backend for both values.
 
         Returns:
@@ -90,15 +123,27 @@ class TrainingPreparation:
 
         Side Effects:
             Imports only adapters selected during planning and copies only values
-            whose retained edge requires a backend handoff.
+            whose retained edge requires a backend handoff. Zero-edge inputs are
+            validated through the existing Method constraint boundary without
+            extraction or replacement, preserving identity and native gradients.
         """
 
         from dryml.methods.conversion import convert
+        from dryml.methods.errors import ImplementationSelectionError
+        from dryml.methods.implementation import _validate_input_specs
+        from dryml.methods.signature import spec_node
 
-        return tuple(
-            value if edge is None else convert(edge, value)
-            for value, edge in zip((x, y), self.conversion_edges)
-        )
+        prepared = []
+        for value, spec, edge in zip((x, y), self.producer_specs, self.conversion_edges):
+            if edge is not None:
+                prepared.append(convert(edge, value))
+            else:
+                try:
+                    _validate_input_specs((spec_node(spec),), (value,))
+                except ImplementationSelectionError as error:
+                    raise TypeError("Runtime training value does not match its producer specification.") from error
+                prepared.append(value)
+        return tuple(prepared)
 
 
 def finite_dataset_len(dataset) -> int | None:

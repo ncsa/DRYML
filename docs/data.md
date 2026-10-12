@@ -218,10 +218,24 @@ dataset = ArrayDataset(
 
 `Map` applies one Method or a pipeline of Methods to each source element. Method
 types and authoring helpers are owned by `dryml.methods`, not `dryml.code`.
-`Map` selects one local callable from a complete source spec before iteration;
-when only the backend is missing, it may inspect one first value to select it.
-That local selection does not change the Method's eager, learning, or cached
-state.
+`Map` resolves declaration metadata during construction through pure selection
+and selected-output inference, retaining it in `_spec`. Its `spec` getter is
+inert. Invalid inference still fails during construction; known missing,
+conflicting, or ambiguous selection can now fail at this same boundary. Missing
+Dataset specs raise without peeking. Construction runs no body, opens no source,
+compiles no selected Method target, and activates no optional adapter. Ordinary
+canonical Object construction still uses its own constructor signature boundary.
+
+Each ordinary/graph cursor retains its own executable selection. When backend
+alone is unknown, declaration metadata contains only partial inference facts,
+and each occurrence may retain one first value to complete producer-input
+backend facts before conversion planning. Nested Pipe successors receive the
+completed selected outputs. Discovery never changes shared Dataset specs.
+Selections do not change the Method's eager, learning, or cached state.
+Prepared graphs build output facts bottom-up; captured outputs drive successors,
+example validation, and Batch/Unbatch dispatch without per-yield selection.
+Native training still requires adequate declared producers before source
+acquisition and does not use first-cursor discovery to repair its declarations.
 
 When a selected Method explicitly declares `iteration_independent`, a Map cursor
 may delegate discarded values to its source cursor without invoking the Method.

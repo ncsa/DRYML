@@ -106,9 +106,15 @@
           ]
         },
         "tests/methods/test_conversion_planning.py": {
-          "rationale": "Retain local handoff planning without executing an optional backend or transfer.",
+          "rationale": "Retain passive selected inference, Fold/AutoEncoder role facts, missing-dependency diagnostics, and one tiny installed-backend successor handoff.",
           "functions": [
-            "test_known_spec_handoff_records_one_immutable_graph_edge_without_body_execution"
+            "test_known_spec_handoff_records_one_immutable_graph_edge_without_body_execution",
+            "test_selected_outputs_use_consumer_inputs_independently_of_raw_constraint",
+            "test_converted_pipe_project_and_map_share_selected_output_facts",
+            "test_missing_runtime_dependency_uses_backend_context_error",
+            "test_autoencoder_completes_outer_backend_hint_before_native_only_children",
+            "test_fold_roles_infer_selected_consumer_outputs_before_invocation",
+            "test_autoencoder_explicit_output_does_not_require_decoder_inference"
           ]
         },
         "tests/qualification/test_ml_workflow_local.py": {

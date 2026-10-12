@@ -176,11 +176,11 @@ def test_elementwise_dataset_resolves_dispatch_once_per_iterator():
     )
 
     ds = Map(src, transform)
-
+    assert transform.dispatch_count == 1
     list(ds)
     list(ds)
 
-    assert transform.dispatch_count == 2
+    assert transform.dispatch_count == 3
 
 
 def test_prepared_map_graph_retains_one_selected_invoker_without_per_yield_discovery():
@@ -193,9 +193,9 @@ def test_prepared_map_graph_retains_one_selected_invoker_without_per_yield_disco
     graph = Map(src, transform).method_graph()
 
     graph.learn()
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
     assert [item.dtype for item in graph.iterator()] == [np.dtype("float32")] * 2
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
 
 
 def test_map_selects_before_consuming_complete_specs():
@@ -206,7 +206,7 @@ def test_map_selects_before_consuming_complete_specs():
     )
 
     assert [item.dtype for item in Map(src, transform)] == [np.dtype("float32")]
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
 
 
 def test_empty_complete_spec_map_selects_without_invoking_a_target():
@@ -214,7 +214,7 @@ def test_empty_complete_spec_map_selects_without_invoking_a_target():
     src = ListDataset([], TensorSpec("int32", shape=(1,), backend="numpy"))
 
     assert list(Map(src, transform)) == []
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
 
 
 def test_map_backend_fallback_reads_only_the_first_value_before_selection():
@@ -234,9 +234,15 @@ def test_map_backend_fallback_reads_only_the_first_value_before_selection():
 
     transform = ObservingCast()
     transform.source = src
-    assert [item.tolist() for item in Map(src, transform)] == [[1.0], [2.0]]
-    assert transform.dispatch_count == 2
-    assert transform.next_counts == [0, 1]
+    successor = CountingCast("float64")
+    mapped = Map(src, Pipe(Pipe(transform), successor))
+    before = (transform.dispatch_count, successor.dispatch_count)
+    assert [item.tolist() for item in mapped] == [[1.0], [2.0]]
+    assert successor.dispatch_count == before[1] + 1
+    assert transform.dispatch_count == before[0] + 2
+    assert transform.next_counts == [0, 0, 1]
+    assert mapped.spec.backend is None
+    assert src.spec.backend is None
 
 
 def test_map_empty_missing_backend_only_checks_exhaustion():
@@ -244,7 +250,7 @@ def test_map_empty_missing_backend_only_checks_exhaustion():
     src = OneShotDataset([], TensorSpec("int32", shape=(1,), backend=None))
 
     assert list(Map(src, transform)) == []
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
     assert src.next_calls == 1
 
 
@@ -407,7 +413,7 @@ def test_map_accepts_multiple_transforms_as_pipe():
 
     assert ds.spec == TensorSpec("float32", shape=(2,), backend="numpy")
     assert [item.dtype for item in out] == [np.dtype("float32"), np.dtype("float32")]
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
 
 
 def test_project_and_pipe_select_children_once_from_structural_specs():
@@ -423,8 +429,8 @@ def test_project_and_pipe_select_children_once_from_structural_specs():
 
     assert [item["right"].dtype for item in projected] == [np.dtype("float32")] * 2
     assert [item.dtype for item in piped] == [np.dtype("float64")] * 2
-    assert first.dispatch_count == 1
-    assert second.dispatch_count == 1
+    assert first.dispatch_count == 2
+    assert second.dispatch_count == 2
 
     argmax = CountingArgMax()
     vector_src = ListDataset(
@@ -432,7 +438,77 @@ def test_project_and_pipe_select_children_once_from_structural_specs():
         TensorSpec("float32", shape=(1, 2), backend="numpy"),
     )
     assert [int(item) for item in Map(vector_src, Pipe(Flatten(), argmax))] == [1]
-    assert argmax.dispatch_count == 1
+    assert argmax.dispatch_count == 2
+
+
+@pytest.mark.parametrize("count", (5, 100))
+@pytest.mark.parametrize("graph_mode", (False, True))
+@pytest.mark.parametrize("native", (False, True))
+def test_map_metadata_and_preserving_counts_do_not_repeat_selection(count, graph_mode, native, monkeypatch):
+    """Inert metadata and example validation never select or compile per yield."""
+    from dryml.core import signatures
+    if native:
+        pytest.importorskip("torch")
+
+    class NativeIdentity(Method):
+        @traits(backend="torch")
+        def torch(self, value):
+            return value
+
+        def infer_output_spec(self, spec):
+            return spec
+
+    transform = CountingCast("float32")
+    source = ListDataset([np.array([i], dtype=np.int32) for i in range(count)],
+                         TensorSpec("int32", shape=(1,), backend="numpy"))
+    methods = (Pipe(transform), Cast("float64"))
+    identity = NativeIdentity() if native else None
+    if native:
+        methods = (identity, *methods)
+    compiled = []
+    original = signatures.compile_signature
+
+    def compile_selected(target, **kwargs):
+        if not isinstance(target, type):
+            compiled.append(target)
+        return original(target, **kwargs)
+
+    monkeypatch.setattr(signatures, "compile_signature", compile_selected)
+    mapped = Map(source, Pipe(*methods), preserves_examples=True)
+    calls = transform.dispatch_count
+    assert compiled == []
+    for _ in range(count):
+        assert mapped.spec.dtype.name == "float64"
+        assert mapped.examples_in(np.ones(1)) == 1
+    assert transform.dispatch_count == calls
+    assert compiled == []
+    graph = mapped.method_graph()
+    if graph_mode:
+        graph.learn()
+        cursor = graph.iterator()
+    else:
+        cursor = mapped.iterator()
+    with cursor:
+        assert str(next(cursor).dtype) in ("float64", "torch.float64")
+        selected_calls, compilation_count = transform.dispatch_count, len(compiled)
+        monkeypatch.setattr(transform, "implementations", lambda: pytest.fail("per-yield selection"))
+        if native:
+            monkeypatch.setattr(identity, "implementations", lambda: pytest.fail("native per-yield selection"))
+        assert len(list(cursor)) == count - 1
+    assert transform.dispatch_count == selected_calls
+    assert len(compiled) == compilation_count == (5 if native else 4)
+
+
+def test_map_constructor_retains_inference_failures_and_missing_specs_without_sources():
+    """Declaration admission remains pure and preserves invalid-inference timing."""
+    source = OneShotDataset([], TensorSpec("float32", shape=(), backend="numpy"))
+    with pytest.raises(ValueError, match="non-scalar"):
+        Map(source, ArgMax())
+    assert source.next_calls == 0
+    missing = OneShotDataset([], None)
+    with pytest.raises(ValueError, match="no known spec"):
+        Map(missing, Cast("float32"))
+    assert missing.next_calls == 0
 
 
 def test_flatten_and_scale_infer_output_spec_and_iteration():

@@ -410,12 +410,11 @@ class Fold(Value[ResultT], Generic[ResultT]):
             once. It does not invoke Methods or change their preparation state.
         """
 
-        initial_spec = self.initial_state.infer_output_spec(observation_spec)
+        initializer = self.initial_state.find_implementation(observation_spec)
+        initial_spec = initializer.infer_output_spec()
         if not is_spec_tree(initial_spec):
             raise ImplementationSelectionError("conflict")
-        initializer = self.initial_state.find_implementation(
-            observation_spec, output_spec=initial_spec,
-        )
+        initializer = replace(initializer, _output_spec=spec_node(initial_spec))
         return initial_spec, initializer.prepared_invoker()
 
     def _select_followups(self, observation_spec: SpecTree, carry_spec: SpecTree):
@@ -440,20 +439,21 @@ class Fold(Value[ResultT], Generic[ResultT]):
             It never invokes a Method or retains the invocation-owned carry.
         """
 
-        next_spec = self.accumulator.infer_output_spec(observation_spec, carry_spec)
+        transition = self.accumulator.find_implementation(
+            observation_spec, carry_spec, output_spec=carry_spec,
+        )
+        next_spec = transition.infer_output_spec()
         if not is_spec_tree(next_spec):
             raise ImplementationSelectionError("conflict")
         if not satisfies(spec_node(carry_spec), spec_node(next_spec)):
             raise ImplementationSelectionError("conflict")
-        transition = self.accumulator.find_implementation(
-            observation_spec, carry_spec, output_spec=carry_spec,
-        )
         if self.finalize is None:
             return transition.prepared_invoker(), None
-        final_spec = self.finalize.infer_output_spec(carry_spec)
+        finalizer = self.finalize.find_implementation(carry_spec)
+        final_spec = finalizer.infer_output_spec()
         if not is_spec_tree(final_spec):
             raise ImplementationSelectionError("conflict")
-        finalizer = self.finalize.find_implementation(carry_spec, output_spec=final_spec)
+        finalizer = replace(finalizer, _output_spec=spec_node(final_spec))
         return transition.prepared_invoker(), finalizer.prepared_invoker()
 
     def _load_source(self, managed: ManagedContext) -> Dataset:

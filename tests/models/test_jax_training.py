@@ -404,7 +404,6 @@ def test_jax_training_mask_preserves_frozen_weight_against_adamw_decay():
 def test_jax_zero_epoch_is_terminal_without_source_or_optimizer_binding(monkeypatch):
     """Zero epochs validate metadata but do not prepare, read, bind, or update native state."""
     pytest.importorskip("jax")
-    pytest.importorskip("optax")
 
     exp = _experiment(epochs=0)
 
@@ -422,7 +421,6 @@ def test_jax_zero_epoch_is_terminal_without_source_or_optimizer_binding(monkeypa
 def test_jax_zero_epoch_does_not_build_the_loss_factory():
     """Zero work completes after Dataset admission without executing caller loss code."""
     pytest.importorskip("jax")
-    pytest.importorskip("optax")
     from dryml.models.jax import Training
 
     exp = _experiment(epochs=0)
@@ -469,7 +467,6 @@ def test_jax_training_rejects_empty_and_infinite_validation_before_binding():
 def test_jax_training_admission_matrix_preserves_preacquisition_boundaries():
     """Declared empty, infinite, unknown-callback, and noncanonical inputs fail early."""
     pytest.importorskip("jax")
-    pytest.importorskip("optax")
 
     spec = TensorSpec("float32", shape=(1,), batch=1, backend="numpy")
 

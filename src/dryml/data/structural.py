@@ -97,11 +97,11 @@ class Batch(Dataset):
                 break
         return batch
 
-    def _resolve_collate(self, first_batch):
+    def _resolve_collate(self, first_batch, *, input_spec=None):
         """Select one declared-backend collator, retaining generic fallback."""
 
         del first_batch
-        return collate_for_spec(self.src.spec) or default_collate
+        return collate_for_spec(self.src.spec if input_spec is None else input_spec) or default_collate
 
 
 class Unbatch(Dataset):
@@ -152,10 +152,10 @@ class Unbatch(Dataset):
 
         return self._range_yield_cardinality(start, stop)
 
-    def _resolve_split(self):
+    def _resolve_split(self, *, input_spec=None):
         """Return the selected split invoker once per qualified graph cursor."""
 
-        return split_for_spec(self.src.spec) or default_split
+        return split_for_spec(self.src.spec if input_spec is None else input_spec) or default_split
 
 
 class Take(Dataset):

@@ -67,6 +67,22 @@ AutoEncoder calls remain native and retain connected gradients. TensorFlow tape
 participation cannot generally be detected, so invoking Dataset preprocessing as
 a differentiable or compiled body is unsupported.
 
+Native element adaptation is finalized using the selected consumer-input tree
+before the retained conversion wraps it. Replacing the element invoker cannot
+drop its handoff or add a second crossing. Same-native composition has no
+conversion edge; AutoEncoder may cross at its outer data boundary but never
+between its native components. Native training prepares the Dataset plan before
+planning x/y handoffs, uses its captured outputs for train/validation specs and
+example counts, and never reselects to correct metadata per batch.
+`TrainingPreparation.from_dataset(owner, prepared, backend)` admits captured
+output facts only after Method inputs are fully declared. Native cursor
+construction enforces the same admission, even if an unresolved Map declares
+known native outputs. Zero-edge inputs still validate their producer constraints
+without copying, changing identity, or breaking gradients. Experimental
+JAX zero-work admission still precedes Dataset preparation and loss/runtime
+setup. Runtime adapter activation remains lazy and does not require a training
+context merely to recognize or convert a concrete CPU JAX value.
+
 ## AutoEncoder
 
 `AutoEncoder` composes an encoder model and decoder model.

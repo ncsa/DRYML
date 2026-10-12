@@ -385,6 +385,12 @@ class Dataset(Object, Generic[T]):
             cursor, runs a model, or imports an optional tensor framework.
         """
 
+        return self._examples_in_spec(self.spec, value)
+
+    @staticmethod
+    def _examples_in_spec(spec, value) -> int:
+        """Count against captured occurrence facts without selecting shared metadata."""
+
         def count(spec, runtime, path: tuple[object, ...]) -> list[int | None]:
             if isinstance(spec, TensorSpec):
                 if not spec.batched:
@@ -414,7 +420,7 @@ class Dataset(Object, Generic[T]):
                 return [item for index in range(len(spec)) for item in count(spec[index], runtime[index], path + (index,))]
             raise TypeError("Dataset example counting requires a TensorSpec tree.")
 
-        counts = count(self.spec, value, ())
+        counts = count(spec, value, ())
         if not counts:
             raise TypeError("Dataset example counting requires at least one TensorSpec leaf.")
         batched = [count for count in counts if count is not None]
@@ -443,6 +449,8 @@ class _MapCursor(DatasetCursor):
         self._implementation = None
         self._pending = _PENDING
         self._resolved = False
+        self._output_spec = dataset.spec
+        self._input_spec = None
 
     def _resolve(self) -> None:
         """Perform Map's existing selection path without invoking a selected target."""
@@ -478,6 +486,10 @@ class _MapCursor(DatasetCursor):
         else:
             self._source_cursor = self._own(self._call(self._dataset.src.iterator))
         self._implementation = self._call(implementation.prepared_invoker)
+        from dryml.methods.signature import spec_from_node
+
+        self._input_spec = spec_from_node(implementation._input_specs[0])
+        self._output_spec = self._call(implementation.infer_output_spec)
         self._resolved = True
 
     def _read(self):
@@ -492,8 +504,8 @@ class _MapCursor(DatasetCursor):
             self._pending = _PENDING
         result = self._call(self._implementation, item)
         if getattr(self._dataset, "preserves_examples", False):
-            source_examples = self._call(self._dataset.src.examples_in, item)
-            if self._call(self._dataset.examples_in, result) != source_examples:
+            source_examples = self._call(self._dataset.src._examples_in_spec, self._input_spec, item)
+            if self._call(self._dataset._examples_in_spec, self._output_spec, result) != source_examples:
                 raise ValueError("Map declared preserves_examples but changed an example count.")
         self._position += 1
         return result
@@ -528,6 +540,8 @@ class Map(Dataset):
 
     Each cursor retains a prepared invoker once after selection; advancing values
     never recompiles the selected signature or changes child Method state.
+    Construction resolves selected output metadata into the existing declaration
+    spec using pure selection/inference; the spec getter never selects again.
 
     A complete source specification selects the callable before source
     consumption. When backend alone is unknown, the iterator contributes one
@@ -548,10 +562,16 @@ class Map(Dataset):
 
         Raises:
             TypeError: If ``preserves_examples`` is not an exact bool.
-            ValueError: If no Method is supplied.
+            ValueError: If no Method is supplied, source specs are missing, or
+                selected output inference rejects declared shape/structure.
+            ImplementationSelectionError: If known constraints select no unique
+                implementation. Backend-only unknown selection is deferred.
 
         Side Effects:
-            Construction does not open a source; iteration selects Methods lazily.
+            Pure selection/inference resolves declaration metadata without opening
+            sources, compiling selected targets, or activating optional adapters. Known
+            selection errors and inference errors propagate during construction;
+            backend-only unknown facts remain partial until cursor-local discovery.
         """
 
         if not methods:
@@ -568,7 +588,15 @@ class Map(Dataset):
         self.src = src
         self.method = method
         self.preserves_examples = preserves_examples
-        super().__init__(spec=method.infer_output_spec(src.spec))
+        try:
+            selected = method.find_implementation(src.spec)
+        except ImplementationSelectionError as error:
+            if error.reason != "unknown_traits" or error.unknown_traits != ("backend",):
+                raise
+            spec = method.infer_output_spec(src.spec)
+        else:
+            spec = selected.infer_output_spec()
+        super().__init__(spec=spec)
 
     def __iter__(self) -> Iterator:
         """Return an independent closeable Map cursor for ordinary iteration."""

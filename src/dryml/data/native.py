@@ -16,6 +16,8 @@ class PreparedDataset:
 
     Attributes:
         dataset: The unchanged source Dataset pipeline.
+        spec: Captured output SpecTree from the prepared plan (or eager fallback
+            declaration), independent of later shared Dataset metadata changes.
         execution_level: ``"stream"`` when the qualified stream graph was
             prepared, or ``"eager"`` when an unqualified operator retains its
             documented ordinary Dataset iteration fallback.
@@ -40,6 +42,60 @@ class PreparedDataset:
             self.execution_level = "eager"
         else:
             self.execution_level = "stream"
+        if self.execution_level == "stream":
+            from dryml.methods.signature import spec_from_node
+
+            self.spec = spec_from_node(self.graph.nodes[-1].outputs[0].spec)
+        else:
+            self.spec = dataset.spec
+
+    def examples_in(self, value) -> int:
+        """Validate/count one value against captured output metadata.
+
+        Args:
+            value: Runtime value with the prepared output structure and batching.
+
+        Returns:
+            Positive example count using Dataset's established validation rules.
+
+        Raises:
+            TypeError, ValueError: If structure, batches, or counts are invalid.
+
+        Side Effects:
+            Reads captured specs only; no selection, inference, or source access.
+        """
+        return self.dataset._examples_in_spec(self.spec, value)
+
+    def _require_declared_selection(self) -> None:
+        """Reject Maps needing cursor-local discovery, including eager wrappers."""
+        from dryml.methods import Method
+
+        for node in self.graph.method_nodes:
+            if (node.method_type is not None and issubclass(node.method_type, Method)
+                    and node.selected is None):
+                raise TypeError("Native training requires complete declared Method inputs before source acquisition.")
+        if self.execution_level == "eager":
+            from dryml.core.utils.recurse import iter_leaves
+            from dryml.data.dataset import Dataset, Map
+            from dryml.methods import ImplementationSelectionError
+
+            visited = set()
+
+            def admit(dataset):
+                if id(dataset) in visited:
+                    return
+                visited.add(id(dataset))
+                if isinstance(dataset, Map):
+                    try:
+                        dataset.method.find_implementation(dataset.src.spec)
+                    except ImplementationSelectionError as error:
+                        raise TypeError("Native training requires complete declared Method inputs before source acquisition.") from error
+                fields = vars(dataset)
+                for source in iter_leaves((fields.get("src"), fields.get("sources", ()))):
+                    if isinstance(source, Dataset):
+                        admit(source)
+
+            admit(self.dataset)
 
     def iterator(self, *, epoch: int = 0):
         """Open one independent closeable traversal at the prepared execution level.
@@ -84,6 +140,7 @@ class PreparedDataset:
 
         Raises:
             TypeError: If ``preparation`` lacks the retained ``prepare`` operation.
+                Also raised when a Map still needs input discovery.
 
         Side Effects:
             Opens no cursor until the returned cursor is advanced. Reading values
@@ -110,10 +167,13 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
     becomes true only after count validation succeeds, even when EOF cleanup
     fails. Use as a context manager around updates to retain consumer failures
     over cleanup errors; non-pull StopIteration is a causal RuntimeError.
+    Unresolved Map selections raise TypeError during cursor construction,
+    before source acquisition, even when output declarations name a native backend.
     """
 
     def __init__(self, dataset: PreparedDataset, preparation, *, epoch: int = 0) -> None:
         super().__init__()
+        dataset._require_declared_selection()
         self._dataset = dataset
         self._preparation = preparation
         if type(epoch) is not int or epoch < 0:
@@ -144,7 +204,7 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
 
     def _prepare(self, value):
         x, y = value
-        self._dataset.dataset.examples_in((x, y))
+        self._dataset.examples_in((x, y))
         return self._preparation.prepare(x, y)
 
     def skip(self, n: int) -> None:

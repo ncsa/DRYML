@@ -117,6 +117,44 @@ class BackendIdentity(Method):
         return input_spec
 
 
+@pytest.mark.parametrize("prepared", (False, True))
+@pytest.mark.parametrize("converted", (False, True))
+@pytest.mark.parametrize("empty", (False, True))
+def test_unknown_backend_nested_pipe_and_successor_map_discover_locally(prepared, converted, empty):
+    """Each occurrence discovers at most one value and never changes declarations."""
+    from dryml.data import Cast
+
+    class TorchIdentity(Method):
+        @traits(backend="torch")
+        def torch(self, value):
+            return value
+
+        def infer_output_spec(self, spec):
+            return spec
+
+    values = () if empty else (np.ones(2, dtype=np.float32), np.full(2, 2, dtype=np.float32))
+    source = TrackingDataset(values, spec=TensorSpec("float32", shape=(2,), backend=None))
+    first = Map(source, TorchIdentity() if converted else Pipe(Cast("float64"), Pipe(Cast("float32"))))
+    successor = Map(first, Pipe(Pipe(Cast("float64")), Cast("float32")))
+    assert source.opens == 0
+    assert source.spec.backend is first.spec.backend is successor.spec.backend is None
+    if converted:
+        pytest.importorskip("torch")
+    for _ in range(2):
+        cursor = _cursor(successor, prepared)
+        assert source.opens == _
+        with cursor:
+            if not empty:
+                result = next(cursor)
+                assert len(source.yields) == 2 * _ + 1
+                np.testing.assert_equal(np.asarray(result) if not converted else result.numpy(), [1, 1])
+                assert len(list(cursor)) == 1
+            else:
+                assert list(cursor) == []
+    assert source.spec.backend is first.spec.backend is successor.spec.backend is None
+    assert sorted(source.closes) == [0, 1]
+
+
 @pytest.mark.parametrize("mode", ("eager", "learning", "first-call", "known-spec"))
 def test_dataset_preparation_and_reset_preserve_shared_child_state(mode):
     """Dataset-owned selections cannot replace independent direct-call state."""

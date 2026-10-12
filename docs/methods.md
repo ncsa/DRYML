@@ -146,6 +146,17 @@ Unconstrained later positional and keyword arguments are forwarded unchanged.
 Calling a selected carrier never discovers candidates or reads/mutates Method
 preparation state.
 
+`MethodImplementation.consumer_input_specs` exposes normalized inputs delivered
+to the selected target after any retained conversion. Its `infer_output_spec()`
+uses those actual consumer inputs, rather than producer constraints or an
+optional raw-result constraint. Inference is pure and never ranks alternatives.
+Pipe threads selected child outputs, Project preserves their exact branch tree,
+and AutoEncoder threads the selected encoder output to its native decoder.
+Graph target-input/output ports expose these selected facts; producer validation
+and raw-result validation remain independently inspectable on the retained
+selection and conversion edge. Arbitrary output backends are never rewritten
+from implementation traits.
+
 Selection and composite specialization are metadata-only: they retain child
 occurrence facts without compiling core signatures, running bodies, opening
 sources, or importing optional backends. Executable preparation compiles each
@@ -285,7 +296,14 @@ authority without importing one another during planning.
 Dense handoffs preserve mapping/tuple/list structure and exact representable
 bool or fixed-width numeric dtype, shape, values, and batch meaning through an
 owned writable contiguous host copy. They normalize read-only, transposed, and
-negative-stride source arrays by copying. JAX sources must be concrete,
+negative-stride source arrays by copying. Each accepted leaf is extracted and
+validated exactly once; target construction reuses that validated host tree.
+Source/destination adapters activate through `Backend.module` only at admitted
+runtime validation/crossing boundaries, including a native Method's declared
+runtime backend before first-call signature normalization. Logical TensorSpec
+values require no runtime adapter. Passive selection, construction, and
+inspection do not require prior plugin registration. Missing dependencies report
+the existing backend `ContextError`. JAX sources must be concrete,
 fully-addressable, single-device CPU arrays; tracers, abstract values, and sharded
 arrays are rejected. JAX targets are explicitly placed on one CPU device and reject
 a dtype that JAX would narrow under its current x64 setting; DRYML never changes
