@@ -1,4 +1,4 @@
-"""Native numerical Method and reservoir-reduction conformance tests."""
+"""CPU-native numerical Method and reservoir-reduction conformance tests."""
 
 from __future__ import annotations
 
@@ -10,6 +10,28 @@ from dryml.core.store.dir import DirStore
 from dryml.data import Dataset
 from dryml.managed import ManagedConfig
 from tests.fixtures import require_optional_backend
+
+
+@pytest.fixture(autouse=True)
+def _cpu_native_execution(request):
+    """Scope TensorFlow CPU qualification without changing GPU visibility.
+
+    The scope covers source creation, carry allocation, transitions, and
+    finalization: CPU inputs alone do not constrain TensorFlow's later ops.
+    Other cases retain their normal execution and optional-import behavior.
+    """
+
+    callspec = getattr(request.node, "callspec", None)
+    if callspec is None or callspec.params.get("backend") != "tf":
+        yield
+        return
+
+    require_optional_backend("tf")
+    import dryml.tf
+    import tensorflow as tf
+
+    with tf.device("/CPU:0"):
+        yield
 
 
 @pytest.mark.parametrize("backend", ("numpy", "torch", "tf"))
