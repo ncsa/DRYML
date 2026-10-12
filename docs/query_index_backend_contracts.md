@@ -73,6 +73,15 @@ their original sidecar; later unleased use detects replacement identity. WAL rea
 may cause an explicit bounded checkpoint/rebuild failure until they release. Direct
 unleased connection users still coordinate teardown themselves.
 
+Read views also belong to their entry process. A forked child must open a fresh
+view; inherited view operations raise `QueryIndexError` before touching the
+parent's SQLite handle. Child closure or natural normal/exceptional unwind of an
+inherited context invalidates only its Python view: it performs no temporary-table
+cleanup or rollback on the inherited handle and removes no parent lease key from
+child bookkeeping. Fresh child views use independent handles and leases. The
+parent view retains its transaction and temporary relations until its own ordinary
+cleanup, including strict owning-process lease removal.
+
 SQLite connections are process-local. Rebuild and mutation use staged activation so a reader sees a prior complete index or a new complete index. Dirty, absent, corrupt, or incompatible metadata projections trigger authoritative fallback or visible rebuild; dirty state is cleared only for the authority generation that was indexed. Index failure never rewrites snapshot/current authority or silently makes stale rows current. Rebuild notices are visible because scans can be long. Rebuild claim descriptors use `dryml.locking` but retain SQLite's claim creation, stale-eligibility, wait, and cleanup policy. Dirty-token and complete main-file activation use `dryml.filesystem` directly after SQLite closes/checkpoints the applicable WAL and handles; the index does not depend on Store-private native helpers. A persistence failure can follow visible sidecar activation, so recovery reconciles status rather than assuming rollback. Supported behavior assumes local SQLite, filesystem rename/persistence, and locking semantics; distributed filesystems are outside this contract.
 
 `dryml.core.query.sqlite.open_connection(config, *, readonly=False)` is the public standalone connection owner. `config` must be a `SQLiteQueryIndexConfig`, `readonly` must be exactly `bool`, and `config.path` must be present; validation occurs before importing SQLite or creating a parent/database. Invalid argument types raise `TypeError`, while an absent configured path raises actionable `QueryIndexError`. The connection applies the same foreign-key, timeout, trusted-schema, journal, and durability configuration as the query-index connection manager and always closes its connection. Writable opening creates missing parent directories; read-only opening requires an existing database and creates neither the target nor its parent. SQLite open/configuration errors remain SQLite errors, while a missing optional backend is reported as `QueryIndexUnavailable`.

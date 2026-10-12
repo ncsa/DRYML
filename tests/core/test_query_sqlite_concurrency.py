@@ -421,6 +421,131 @@ else:
     assert result == {"generation": 0, "leases": 1, "status": 0, "parent_active": True}
 
 
+@pytest.mark.parametrize("entry", ("read_view", "_retained_read_view"))
+@pytest.mark.parametrize("exit_mode", ("normal", "exceptional", "access"))
+def test_forked_read_view_unwinds_without_parent_handle_cleanup(tmp_path, entry, exit_mode):
+    """Natural child unwind preserves its cause, fresh views, and the parent cut."""
+
+    result = _run_worker(f'''
+import os
+import select
+import signal
+from dryml.core.query.model import QueryIndexError
+
+if not hasattr(os, "fork"):
+    emit({{"skipped": True}})
+else:
+    idx = index({str(tmp_path / "inherited.sqlite")!r})
+    root = cdef("parent-root")
+    idx.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+    pid = None
+    payload = {{"error_type": None, "primary_preserved": False}}
+    primary = RuntimeError("child body failed")
+    try:
+        with getattr(idx, {entry!r})() as parent_view:
+            parent_con = parent_view._con
+            parent_ids = parent_view.exact_ids(root)
+            temp = parent_view.create_temp_relation(parent_ids)
+            statements = []
+            parent_con.set_trace_callback(statements.append)
+            read_fd, write_fd = os.pipe()
+            pid = os.fork()
+            if pid == 0:
+                os.close(read_fd)
+                statements.clear()
+                if {exit_mode!r} == "exceptional":
+                    raise primary
+                if {exit_mode!r} == "access":
+                    rejected = []
+                    operations = (
+                        lambda: parent_view.exact_ids(root),
+                        lambda: tuple(parent_view.iter_stored_identity_cdef_batches(batch_size=1)),
+                        parent_view.all_occurrence_snapshot,
+                        parent_view.drop_temp_relations,
+                    )
+                    for operation in operations:
+                        try:
+                            operation()
+                        except QueryIndexError as error:
+                            rejected.append("process" in str(error))
+                        else:
+                            rejected.append(False)
+                    payload["rejected"] = rejected
+                    payload["access_sql"] = list(statements)
+                    with idx._retained_read_view() as fresh:
+                        payload["fresh_inside"] = (
+                            fresh._con is not parent_con
+                            and fresh.exact_ids(root) == parent_ids
+                            and len(idx._connections._leases) == 1
+                        )
+                    payload["fresh_released"] = not idx._connections._leases and not fresh._con.in_transaction
+                    statements.clear()
+                    parent_view.close()
+            else:
+                os.close(write_fd)
+                try:
+                    ready = bool(select.select([read_fd], [], [], 5)[0])
+                    if not ready:
+                        os.kill(pid, signal.SIGKILL)
+                    _, status = os.waitpid(pid, 0)
+                    assert ready, "child did not finish inherited context unwind"
+                    data = json.loads(os.read(read_fd, 4096))
+                    data["status"] = status
+                    data["parent_preserved"] = (
+                        parent_view._active and parent_con.in_transaction
+                        and parent_view.exact_ids(root) == parent_ids
+                        and len(idx._connections._leases) == 1
+                        and parent_con.execute(
+                            "SELECT name FROM sqlite_temp_master WHERE name = ?", (temp,)
+                        ).fetchone() == (temp,)
+                    )
+                finally:
+                    os.close(read_fd)
+    except BaseException as error:
+        if pid != 0:
+            raise
+        payload["error_type"] = type(error).__name__
+        payload["primary_preserved"] = error is primary
+
+    if pid == 0:
+        # This is reached only after the inherited outer with statement unwinds.
+        payload["inherited_sql"] = statements
+        try:
+            with idx.read_view() as fresh:
+                payload["fresh_after"] = (
+                    fresh._con is not parent_con
+                    and fresh.exact_ids(root) == parent_ids
+                    and len(idx._connections._leases) == 1
+                )
+            payload["child_clean"] = not idx._connections._leases and not fresh._con.in_transaction
+        except BaseException as error:
+            payload["fresh_error"] = repr(error)
+        os.write(write_fd, json.dumps(payload).encode())
+        os.close(write_fd)
+        os._exit(0)
+    data["parent_clean"] = not idx._connections._leases and not parent_con.in_transaction
+    data["parent_temp_dropped"] = parent_con.execute(
+        "SELECT name FROM sqlite_temp_master WHERE name = ?", (temp,)
+    ).fetchone() is None
+    with idx.read_view() as fresh:
+        data["parent_reusable"] = fresh._con is parent_con and fresh.exact_ids(root) == parent_ids
+    idx.close()
+    emit(data)
+''', timeout=15)
+    if result.get("skipped"):
+        pytest.skip("requires os.fork")
+    assert result["error_type"] == ("RuntimeError" if exit_mode == "exceptional" else None), result
+    assert result["primary_preserved"] is (exit_mode == "exceptional"), result
+    assert result["inherited_sql"] == [], result
+    assert result["status"] == 0 and result["fresh_after"] and result["child_clean"], result
+    assert result["parent_preserved"] and result["parent_clean"], result
+    assert result["parent_temp_dropped"] and result["parent_reusable"], result
+    if exit_mode == "access":
+        assert result["rejected"] == [True] * 4, result
+        assert result["access_sql"] == [], result
+        assert result["fresh_inside"] and result["fresh_released"], result
+
+
 def test_cross_process_commit_visible_without_reconnect(tmp_path):
     path = tmp_path / "index.sqlite"
     idx = _index(path)

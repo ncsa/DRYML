@@ -1,3 +1,10 @@
+"""Own SQLite handle creation, configuration, and process-local read leases.
+
+Standalone scopes roll back pending work and close their handles; managers cache
+autocommit handles by process/thread/access mode and protect leased readers from
+teardown. Validation and SQLite failures propagate to the connection owner.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -118,6 +125,8 @@ class SQLiteConnectionManager:
     PRAGMAs. If a process forks, the child uses a different PID key and opens
     its own connection instead of reusing the parent's connection object;
     inherited manager locks and read leases are replaced before cache access.
+    Child unwind of an inherited read lease skips parent-key removal; the owning
+    process retains strict removal through transaction cleanup.
     Cached handles are never shared between keys, but disable SQLite's thread
     affinity so a coordinator can close handles after their worker threads end.
 
@@ -238,7 +247,7 @@ class SQLiteConnectionManager:
 
     @contextmanager
     def _read_lease(self):
-        """Protect one cached reader from teardown through transaction cleanup."""
+        """Lease a process-local reader; inherited child unwind leaves it alone."""
 
         key = (os.getpid(), threading.get_ident(), True)
         with self._process_lock():
@@ -250,8 +259,9 @@ class SQLiteConnectionManager:
         try:
             yield con, identity
         finally:
-            with self._process_lock():
-                self._leases.remove(key)
+            if os.getpid() == key[0]:
+                with self._process_lock():
+                    self._leases.remove(key)
 
     def close_current(self) -> None:
         """Close unleased cached handles owned by the current process and thread.

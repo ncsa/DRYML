@@ -1,3 +1,10 @@
+"""Provide derived Store query indexes and process-local SQLite read views.
+
+Store records remain authoritative. Index contexts retain transactions and reader
+leases through cleanup, reject inherited view use, and report readiness or SQLite
+failures to callers; rebuild and mutation affect only derived sidecar state.
+"""
+
 from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
@@ -371,6 +378,9 @@ class SQLiteStoreQueryIndex:
         initialize/rebuild derived state or wait on a build claim; callers must
         not retain Store authority fences during entry. SQLite/index failures
         propagate. The transaction and lease release on failure or cancellation.
+        Views are process-local: inherited child use raises QueryIndexError,
+        and child unwind leaves the parent's SQLite handle untouched. Open a new
+        view in the child for an independent transaction.
         """
 
         self._ensure_ready()
@@ -398,6 +408,7 @@ class SQLiteStoreQueryIndex:
 
     @contextmanager
     def _leased_read_view(self, *, require_ready=False):
+        pid = os.getpid()
         with self._connections._read_lease() as (con, identity):
             con.execute("BEGIN")
             view = None
@@ -419,7 +430,8 @@ class SQLiteStoreQueryIndex:
                     if view is not None:
                         view.close()
                 finally:
-                    con.execute("ROLLBACK")
+                    if os.getpid() == pid:
+                        con.execute("ROLLBACK")
 
     def refresh(self, policy, *, stats=None) -> None:
         if policy is False:
@@ -1838,6 +1850,9 @@ class SQLiteQueryIndexReadView:
     same-process reader. ``index_uuid`` and ``file_identity`` identify the actual
     pinned sidecar when supplied by those contexts; ``generation`` is derived
     SQLite state, not a Store authority generation.
+    Views belong to their creating process. Inherited child operations reject
+    with QueryIndexError; closing an inherited view only invalidates the child's
+    Python view without accessing its parent's SQLite handle.
 
     Args:
         con: Open SQLite connection with an owner-retained read transaction.
@@ -1853,6 +1868,7 @@ class SQLiteQueryIndexReadView:
 
     def __init__(self, con, *, source_key: str, generation: int):
         self._con = con
+        self._pid = os.getpid()
         self.source_key = source_key
         self.generation = generation
         self._active = True
@@ -1862,10 +1878,31 @@ class SQLiteQueryIndexReadView:
         self._relation_plans: dict[str, LoweredQueryPlan] = {}
 
     def close(self) -> None:
-        self.drop_temp_relations()
+        """Invalidate this view, dropping temporary relations only in its owner.
+
+        Returns:
+            None. Repeated closure is harmless.
+
+        Side Effects:
+            Attempts temporary-table cleanup in the creating process, retaining
+            the existing best-effort SQLite-error handling. In a forked child,
+            only the Python view is invalidated; the inherited handle is untouched.
+            Transaction rollback remains the owning index context's responsibility.
+        """
+
+        if os.getpid() == self._pid:
+            self.drop_temp_relations()
         self._active = False
 
+    def _check_process(self) -> None:
+        if os.getpid() != self._pid:
+            raise QueryIndexError(
+                "SQLite query index read view belongs to another process; "
+                "open a new read view in this process."
+            )
+
     def _check_active(self) -> None:
+        self._check_process()
         if not self._active:
             raise QueryIndexError("SQLite query index read view is closed.")
 
@@ -1939,8 +1976,8 @@ class SQLiteQueryIndexReadView:
 
         Raises:
             ValueError: If the page size or cursor is invalid.
-            QueryIndexError: If this read view is closed or its rows fail to
-                decode as complete CDefs.
+            QueryIndexError: If this read view is closed, belongs to another
+                process, or its rows fail to decode as complete CDefs.
 
         Side Effects:
             Reads only the current SQLite transaction and updates ``stats`` when
@@ -2392,6 +2429,20 @@ class SQLiteQueryIndexReadView:
         return name
 
     def drop_temp_relations(self) -> None:
+        """Drop this view's temporary tables in its creating process.
+
+        Returns:
+            None. Individual SQLite cleanup errors remain best-effort.
+
+        Raises:
+            QueryIndexError: If the view was inherited from another process,
+                before accessing SQLite or changing its temporary-table list.
+
+        Side Effects:
+            Removes tracked temporary relations from the owner-retained handle.
+        """
+
+        self._check_process()
         while self._temp_relations:
             name = self._temp_relations.pop()
             try:
@@ -2698,6 +2749,21 @@ class SQLiteQueryIndexReadView:
         return tuple(snapshot.iter_occurrences(max_occurrences=max_occurrences))
 
     def all_occurrence_snapshot(self) -> AllOccurrenceTraversalSnapshot:
+        """Detach the complete occurrence graph from this process-local view.
+
+        Returns:
+            An AllOccurrenceTraversalSnapshot of definitions, stored IDs, and
+            typed outgoing edges for the captured generation.
+
+        Raises:
+            QueryIndexError: If the view is closed or belongs to another process.
+            sqlite3.Error: If reading the retained transaction fails.
+
+        Side Effects:
+            Reads SQLite rows without modifying Store authority.
+        """
+
+        self._check_active()
         outgoing = defaultdict(list)
         for parent_id, path_blob, child_id, edge_kind in self._con.execute(
                 "SELECT parent_def_id, path_blob, child_def_id, edge_kind FROM definition_edges"):
