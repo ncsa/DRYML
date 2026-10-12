@@ -91,7 +91,19 @@ class Select(Method):
 
 
 class Project(Method):
-    """Build a new element structure from one input element using branch Methods."""
+    """Build an element structure from selected branch Method occurrences.
+
+    Branch selection is metadata-only. Executable preparation compiles each
+    occurrence once and retains its invoker without changing child Method state.
+
+    Args:
+        *branches: Positional Method leaves or a supported dict/tuple/list tree.
+        **named_branches: Named Method branches, exclusive of positional branches.
+
+    Raises:
+        ValueError: If branches are empty or positional/named forms are combined.
+        TypeError: If a leaf is not a Method or a mapping key is not a str/int.
+    """
 
     def __init__(self, *branches, **named_branches):
         self.branches = _pack_project_tree(branches, named_branches)
@@ -137,6 +149,9 @@ class Project(Method):
         Raises:
             ImplementationSelectionError: If the Project or any branch cannot be
             uniquely selected from the supplied constraints.
+
+        Side Effects:
+            Retains detached branch facts without compiling or invoking targets.
         """
 
         if additional_input_specs:
@@ -202,18 +217,31 @@ class Project(Method):
             self.branches,
             select,
         )
-        prepared_branches = _map_method_tree(
-            selected_branches,
-            lambda method: method.prepared_invoker(),
-        )
+        children = tuple(_iter_method_leaves(selected_branches))
+        indices = iter(range(len(children)))
+        structure = _map_method_tree(selected_branches, lambda _: next(indices))
 
-        def invoke_project(x):
-            return _map_method_tree(prepared_branches, lambda method: method(x))
+        def prepare_project(prepared):
+            def invoke_project(x):
+                return _map_method_tree(structure, lambda index: prepared[index](x))
+            return invoke_project
 
-        return replace(implementation, _invoker=invoke_project)
+        return replace(implementation, _children=children, _invoker_factory=prepare_project)
 
 
 class Pipe(Method):
+    """Compose unary Methods in order through pure intermediate specifications.
+
+    Args:
+        *methods: Nonempty sequence of child Methods in execution order.
+
+    Selection retains distinct child occurrences without compilation or mutation
+    of child preparation state. Executable preparation retains each invoker once.
+
+    Raises:
+        ValueError: If no child Method is supplied.
+    """
+
     def __init__(self, *methods):
         if not methods:
             raise ValueError("Pipe requires at least one Method.")
@@ -260,6 +288,10 @@ class Pipe(Method):
         Raises:
             ImplementationSelectionError: If the Pipe or any child cannot be
             uniquely selected from the threaded constraints.
+
+        Side Effects:
+            Infers and retains child occurrence facts without compiling signatures
+            or invoking bodies; child direct-call state remains independent.
         """
 
         if additional_input_specs:
@@ -325,7 +357,12 @@ class Pipe(Method):
                 )
             )
             spec = method.infer_output_spec(spec)
-        prepared_methods = tuple(method.prepared_invoker() for method in selected_methods)
+        return replace(implementation, _children=tuple(selected_methods),
+                       _invoker_factory=Pipe._prepare_invoker)
+
+    @staticmethod
+    def _prepare_invoker(prepared_methods):
+        """Capture finalized invokers, never their owner-bearing selected carriers."""
 
         def invoke_pipe(x):
             result = x
@@ -333,7 +370,7 @@ class Pipe(Method):
                 result = method(result)
             return result
 
-        return replace(implementation, _invoker=invoke_pipe)
+        return invoke_pipe
 
 
 class Cast(Method):

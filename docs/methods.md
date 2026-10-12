@@ -146,6 +146,14 @@ Unconstrained later positional and keyword arguments are forwarded unchanged.
 Calling a selected carrier never discovers candidates or reads/mutates Method
 preparation state.
 
+Selection and composite specialization are metadata-only: they retain child
+occurrence facts without compiling core signatures, running bodies, opening
+sources, or importing optional backends. Executable preparation compiles each
+finalized occurrence once. `prepared_invoker()` returns a process-local reusable
+invoker; retained Map, Fold, and group execution uses it throughout the invocation.
+Calling a selected carrier directly remains supported and prepares a fresh
+invocation, without a second global or carrier compilation cache.
+
 ## Accumulators
 
 `Accumulator[ObservationT, StateT]` is an abstract two-input Method for one
@@ -162,6 +170,11 @@ declared structure/names, and retains its child selections for that invocation.
 Reusing a child declaration creates no shared execution state: callers supply
 distinct carry entries. Group inference and selection do not run transition
 targets or change child learning/cached mode.
+
+Prepared groups retain detached collection structure and prepared children,
+not a closure over the group or owner-bearing selected carriers. The framework's
+weak preparation state therefore does not keep discarded groups alive, including
+nested groups. Carry values remain caller-owned and are never cached.
 
 Fold owns invocation and publication around these Methods. Initializer,
 Accumulator, and finalizer declarations are visible in the Fold definition before
@@ -235,6 +248,15 @@ cursor and unknown-spec discovery buffer. Planning never opens a source; first
 value discovery happens only in the owning graph cursor and retains at most one
 prefetched value per occurrence.
 
+Dataset preparation owns its occurrence selections independently of every child
+Method's direct-call mode, signature, default, and preparation. It never calls
+child `learn()` or resets child state. Replacement publishes only a complete
+local plan: a later-branch selection, inference, or compilation failure leaves
+the previous plan and independently running cursors usable. Dataset graph
+`eager()` discards only that plan's selections; already captured cursors continue
+using their invokers. Direct `Method.learn()` retains its distinct clearing
+contract: a failed reprepare leaves learning mode with no old or partial plan.
+
 The protected lifecycle in `methods.stream` is shared with ordinary Dataset and
 native-training cursors. Use a cursor context manager around consumer work to
 close resources deterministically and preserve a consumer failure over cleanup
@@ -294,7 +316,7 @@ reuses the identical live object preserves its local state. Concurrent cached
 reads do not mutate state. Concurrent mode/default mutation of one Method is
 unsupported and requires caller coordination.
 
-`Map` selects a local callable once from a complete source spec. `Project`
+`Map` retains a local invoker once per cursor from a complete source spec. `Project`
 selects each branch, `Pipe` threads pure intermediate specs, and `AutoEncoder`
 selects encoder then decoder from threaded specs. This is local structural
 selection, not global pipeline optimization, adapter insertion, or shared-node

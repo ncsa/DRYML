@@ -91,8 +91,9 @@ class AutoEncoder(Model):
         decoder: Model that transforms the encoded value into the result.
         output_spec: Optional explicit final output specification.
 
-    Selected AutoEncoder calls select each child once from threaded pure specs;
-    they do not change either child's process-local Method preparation state.
+    Metadata selection retains child occurrences from threaded pure specs without
+    compilation. Executable preparation compiles each finalized occurrence once
+    and retains its invoker without changing child Method preparation state.
     """
 
     def __init__(self, encoder: Model, decoder: Model, output_spec=None):
@@ -130,6 +131,10 @@ class AutoEncoder(Model):
         Raises:
             ImplementationSelectionError: If this Model or either child cannot
             be selected from the supplied constraints.
+
+        Side Effects:
+            Retains pure child selection facts without compiling signatures,
+            executing models, importing optional backends, or publishing state.
         """
 
         if additional_input_specs:
@@ -211,19 +216,22 @@ class AutoEncoder(Model):
         decoder = select(self.decoder, encoded_spec, decoder_backend)
         if decoder.conversion_edge is not None:
             raise ImplementationSelectionError("conflict")
-        prepared_encoder = encoder.prepared_invoker()
-        prepared_decoder = decoder.prepared_invoker()
 
-        def invoke_autoencoder(x):
-            if edge is not None:
-                from dryml.methods.conversion import convert
+        def prepare_autoencoder(children):
+            encoder, decoder = children
 
-                x = convert(edge, x)
-            return prepared_decoder(prepared_encoder(x))
+            def invoke_autoencoder(x):
+                if edge is not None:
+                    from dryml.methods.conversion import convert
+
+                    x = convert(edge, x)
+                return decoder(encoder(x))
+            return invoke_autoencoder
 
         return replace(
             implementation,
-            _invoker=invoke_autoencoder,
+            _children=(encoder, decoder),
+            _invoker_factory=prepare_autoencoder,
             conversion_edge=edge or encoder.conversion_edge,
         )
 

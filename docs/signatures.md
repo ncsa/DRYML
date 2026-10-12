@@ -192,6 +192,16 @@ and normalize returns after the terminal-interruption guard and before final
 publication. An unannotated managed structural return now materializes; annotate a
 top-level structural result with `Ref[...]` when it must remain data.
 
+Method selection and composite specialization do not compile signatures.
+Executable preparation compiles each finalized occurrence once, and graph
+inspection and retained Map/Fold/group execution share that invoker. Reuse keeps
+only the signature plan: each call still normalizes fresh Ref/Mat arguments and
+returns, borrows the current caller's controls, and enforces thread, task, and
+context lifetime boundaries. Explicit raw-result constraints are validated
+before callbacks can observe or publish the result, then core return delivery
+runs. Prepared group closures retain detached structure and child invokers so
+global weak preparation state cannot retain their Method owner indirectly.
+
 Core Execute reconstructs a new worker-local plan rather than transporting a
 `SignaturePlan` or `BoundaryPlan`. Its function, Method, and managed integrations
 use their owners' narrow raw-result seam: the owner delivers arguments and invokes

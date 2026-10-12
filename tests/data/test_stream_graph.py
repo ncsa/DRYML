@@ -117,6 +117,67 @@ class BackendIdentity(Method):
         return input_spec
 
 
+@pytest.mark.parametrize("mode", ("eager", "learning", "first-call", "known-spec"))
+def test_dataset_preparation_and_reset_preserve_shared_child_state(mode):
+    """Dataset-owned selections cannot replace independent direct-call state."""
+    child = NumpyIdentity()
+    child.default_batched = False
+    direct = np.ones((2,), dtype=np.float32)
+    if mode == "learning":
+        child.learn()
+    elif mode == "first-call":
+        child.learn()
+        child(direct)
+    elif mode == "known-spec":
+        child.learn(TensorSpec("float32", shape=(2,), backend="numpy"))
+    before = (child.call_mode, child.cached_signature, child.default_batched)
+    source = TrackingDataset((np.int64(1), np.int64(2)))
+    prepared = Map(source, child).prepare()
+    graph = prepared.graph
+    assert (child.call_mode, child.cached_signature, child.default_batched) == before
+    cursor = prepared.iterator()
+    assert next(cursor) == 1
+    other_source = TrackingDataset((np.ones(3, dtype=np.float64),),
+                                   spec=TensorSpec("float64", shape=(3,), backend="numpy"))
+    other = Map(other_source, child).prepare()
+    with other.iterator() as other_cursor:
+        assert next(other_cursor).shape == (3,)
+    other.graph.eager()
+    graph.eager()
+    assert (child.call_mode, child.cached_signature, child.default_batched) == before
+    assert list(cursor) == [2]
+    assert child(direct) is direct
+
+
+def test_later_branch_failed_reprepare_preserves_complete_plan_and_cursors(monkeypatch):
+    """A failed replacement cannot publish a prefix or disturb captured readers."""
+    from dryml.methods import ImplementationSelectionError
+    first, later = NumpyIdentity(), NumpyIdentity()
+    first.learn()
+    direct = np.ones(2, dtype=np.float32)
+    first(direct)
+    before = first.cached_signature
+    graph = Zip(Map(TrackingDataset((np.int64(1), np.int64(2))), first),
+                Map(TrackingDataset((np.int64(3), np.int64(4))), later)).method_graph()
+    graph.learn()
+    nodes = graph.nodes
+    left, right = graph.iterator(), graph.iterator()
+    assert next(left) == next(right) == (1, 3)
+
+    def fail(*args, **kwargs):
+        raise ImplementationSelectionError("no_candidate")
+
+    monkeypatch.setattr(later, "find_implementation", fail)
+    with pytest.raises(ImplementationSelectionError):
+        graph.learn()
+    assert graph.nodes is nodes
+    assert list(left) == list(right) == [(2, 4)]
+    assert list(graph.iterator()) == [(1, 3), (2, 4)]
+    assert first.cached_signature == before
+    assert first(direct) is direct
+    assert later.call_mode == "eager"
+
+
 def _paired_spec(specs):
     return specs[0]
 
@@ -233,7 +294,7 @@ def test_graph_unknown_spec_discovery_buffers_each_reused_occurrence_independent
 
 
 def test_graph_eager_resets_nested_method_selection_for_a_new_backend():
-    """A Map Pipe learned for NumPy is not left cached before Torch planning."""
+    """Resetting a Dataset plan permits another backend without mutating its Pipe."""
 
     torch = pytest.importorskip("torch")
     import dryml.torch
@@ -243,7 +304,7 @@ def test_graph_eager_resets_nested_method_selection_for_a_new_backend():
     pipe = Pipe(selected)
     graph = Map(source, pipe).method_graph()
     graph.learn()
-    assert pipe.call_mode == "cached"
+    assert pipe.call_mode == "eager"
 
     graph.eager()
     assert pipe.call_mode == "eager"
@@ -252,12 +313,12 @@ def test_graph_eager_resets_nested_method_selection_for_a_new_backend():
     graph = Map(torch_source, pipe).method_graph()
     graph.learn()
 
-    assert pipe.call_mode == "cached"
+    assert pipe.call_mode == "eager"
     assert next(graph.iterator()).device.type == "cpu"
 
 
 def test_graph_eager_resets_named_nested_zip_map_methods_for_a_new_backend():
-    """Mapping-backed nested Zip leaves are reset without losing graph inspection."""
+    """Mapping-backed plans reset their own facts without changing nested Methods."""
 
     torch = pytest.importorskip("torch")
     import dryml.torch
@@ -271,7 +332,7 @@ def test_graph_eager_resets_named_nested_zip_map_methods_for_a_new_backend():
     graph = numpy.method_graph()
     graph.learn()
     assert graph.nodes
-    assert first_pipe.call_mode == second_pipe.call_mode == "cached"
+    assert first_pipe.call_mode == second_pipe.call_mode == "eager"
 
     graph.eager()
     assert graph.nodes == ()

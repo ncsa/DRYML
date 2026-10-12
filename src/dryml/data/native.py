@@ -25,6 +25,8 @@ class PreparedDataset:
     can stop, resume from a separately opened cursor, or traverse concurrently
     without sharing source position. This carrier owns no traversal and does not
     update training progress, checkpoint state, or exposure.
+    Preparation and fallback never publish or reset child Method state; failed
+    planning cannot leave partial child selections requiring cleanup.
     """
 
     def __init__(self, dataset) -> None:
@@ -35,9 +37,6 @@ class PreparedDataset:
         except NotImplementedError as error:
             if not str(error).startswith("Dataset graph planning does not support"):
                 raise
-            # A partially built graph can retain selected child Methods. Reset it
-            # before preserving ordinary eager Dataset behavior for this invocation.
-            self.graph.eager()
             self.execution_level = "eager"
         else:
             self.execution_level = "stream"

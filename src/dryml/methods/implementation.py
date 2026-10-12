@@ -172,6 +172,7 @@ class SelectedDescriptorAdapter:
     direct: bool
     invoker: Callable[..., object] | None
     plan: object
+    conversion_edge: object | None = None
 
     @classmethod
     def create(
@@ -182,6 +183,7 @@ class SelectedDescriptorAdapter:
         receiver_type: type,
         direct: bool,
         invoker: Callable[..., object] | None,
+        conversion_edge: object | None = None,
     ) -> "SelectedDescriptorAdapter":
         """Bind and compile a selected target with a lazy core-signature import.
 
@@ -192,6 +194,8 @@ class SelectedDescriptorAdapter:
             receiver_type: Runtime Method type for descriptor binding.
             direct: Whether target invocation establishes a cooperative boundary.
             invoker: Optional Method-local selected callable.
+            conversion_edge: Optional retained input handoff, executed after
+                argument delivery and before target invocation on each fresh call.
 
         Returns:
             A reusable adapter retaining the selected target's compiled signature.
@@ -219,7 +223,8 @@ class SelectedDescriptorAdapter:
         plan = compile_signature(target)
         # Ordinary BoundaryPlan delivery never calls SignaturePlan.target. Replacing
         # the bound target prevents cached plans from retaining their Method key.
-        return cls(name, descriptor, receiver_ref, receiver_type, direct, invoker, replace(plan, target=lambda: None))
+        return cls(name, descriptor, receiver_ref, receiver_type, direct, invoker,
+                   replace(plan, target=lambda: None), conversion_edge)
 
     def prepare(
         self,
@@ -259,13 +264,18 @@ class SelectedDescriptorAdapter:
             SignatureError: If return normalization or ambient delivery fails.
 
         Side Effects:
-            Invokes the selected target once. A materializing return may realize
-            through the caller-owned ambient Repo.
+            Executes any retained input handoff and invokes the selected target
+            once. A materializing return may realize through the caller-owned
+            ambient Repo.
         """
 
         receiver = self.receiver_ref()
         if receiver is None:
             raise MethodError("The selected Method receiver is no longer live.")
+        if self.conversion_edge is not None:
+            from .conversion import convert
+
+            args = (convert(self.conversion_edge, args[0]), *args[1:])
         if self.invoker is not None:
             result = self.invoker(*args, **kwargs)
         elif self.descriptor is not None:
@@ -301,6 +311,9 @@ class PreparedMethodInvoker:
         adapter: Reusable weak-receiver descriptor adapter.
         input_specs: Immutable positional input constraints.
         output_spec: Optional immutable raw-result constraint.
+        conversion_edge: Optional input handoff retained for inspection/runtime.
+        children: Finalized occurrence-local child invokers also exposed in the
+            owning graph; shared declarations still have separate occurrences.
 
     The invoker is process-local and deliberately not a persistence carrier. It
     validates each call against declared dynamic/fixed facts before running the
@@ -314,6 +327,7 @@ class PreparedMethodInvoker:
     input_specs: tuple[MethodCallNode, ...]
     output_spec: MethodCallNode | None
     conversion_edge: object | None = None
+    children: tuple["PreparedMethodInvoker", ...] = ()
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         """Validate and invoke retained selection using logical call arguments."""
@@ -359,6 +373,11 @@ class MethodImplementation:
     before invocation and on every fresh return. A retained output constraint is
     checked against the raw target result before a caller-provided raw-result
     callback can publish it.
+
+    Selection and specialization retain child occurrence facts without compiling
+    signatures or changing child Method state. ``prepared_invoker()`` compiles
+    this finalized occurrence and each child once. Convenience calls prepare a
+    fresh invocation; consumers executing repeatedly retain the returned invoker.
     """
 
     name: str
@@ -371,13 +390,18 @@ class MethodImplementation:
     _output_spec: MethodCallNode | None = field(default=None, repr=False, compare=False)
     _direct: bool = field(default=False, repr=False, compare=False)
     _invoker: Callable[..., object] | None = field(default=None, repr=False, compare=False)
+    _children: tuple["MethodImplementation", ...] = field(default=(), repr=False, compare=False)
+    _invoker_factory: Callable[[tuple[PreparedMethodInvoker, ...]], Callable[..., object]] | None = field(
+        default=None, repr=False, compare=False,
+    )
     conversion_edge: object | None = field(default=None, compare=False)
 
     def selected_adapter(self) -> SelectedDescriptorAdapter:
         """Create a reusable signature adapter for this already-selected carrier.
 
         Returns:
-            An adapter with one bound target-signature plan and a weak receiver.
+            An adapter with one finalized target-signature plan, prepared children,
+            and a weak receiver. This compiles once per occurrence for this build.
 
         Raises:
             ImplementationDeclarationError: If this carrier lacks its Method
@@ -385,37 +409,51 @@ class MethodImplementation:
             SignatureError: If selected target signature activation fails.
         """
 
+        return self.prepared_invoker().adapter
+
+    def _selected_adapter(self, invoker) -> SelectedDescriptorAdapter:
+        """Compile only the finalized target, without retaining its carrier."""
+
         if self._descriptor is None or self._receiver is None or self._receiver_type is None:
             raise ImplementationDeclarationError(
                 f"Method implementation {self.name!r} is not bound to a Method instance."
             )
+        # Composite edge metadata may describe a child's handoff. Its factory
+        # owns conversion placement; applying it here could cross twice.
         return SelectedDescriptorAdapter.create(
             self.name,
             self._descriptor,
             self._receiver,
             self._receiver_type,
             self._direct,
-            self._invoker,
+            invoker,
+            self.conversion_edge if self._invoker_factory is None else None,
         )
 
     def prepared_invoker(self) -> PreparedMethodInvoker:
-        """Return one reusable local invoker retaining this selection's facts.
+        """Compile a complete occurrence tree into reusable local invokers.
 
         Returns:
-            An immutable process-local invoker with a weak Method receiver.
+            An immutable process-local invoker with weak Method receivers and
+            finalized child invokers. No selected carrier or caller context is
+            retained. Repeated builds are independent; there is no global cache.
 
         Raises:
             ImplementationDeclarationError: If the selected declaration cannot
                 be bound. No target body runs during invoker construction.
+            SignatureError: If a finalized occurrence's annotations are invalid.
         """
 
+        children = tuple(child.prepared_invoker() for child in self._children)
+        invoker = self._invoker if self._invoker_factory is None else self._invoker_factory(children)
         return PreparedMethodInvoker(
             self.name,
             self.traits,
-            self.selected_adapter(),
+            self._selected_adapter(invoker),
             self._input_specs,
             self._output_spec,
             self.conversion_edge,
+            children,
         )
 
     def __call__(self, *args: object, **kwargs: object) -> object:

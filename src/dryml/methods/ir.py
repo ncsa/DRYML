@@ -52,8 +52,9 @@ class MethodGraphNode:
         traits: Traits of the selected implementation, when known.
 
     The virtual source node records only supplied specification facts. It never
-    opens a Dataset source. A selected invoker retains a weak receiver and can be
-    inspected for future compilation, but no compiler or executor is provided.
+    opens a Dataset source. A selected invoker retains a weak receiver and its
+    already-compiled core signature; inspection and execution share this exact
+    finalized invoker. The IR supplies no code-generation compiler.
     """
 
     occurrence: int
@@ -160,8 +161,11 @@ class MethodGraph:
                 operator.
 
         Side Effects:
-            Stores immutable occurrence selections in local preparation state. It
-            invokes no candidate body or Dataset source.
+            Stores complete immutable occurrence selections and compiled signature
+            invokers without running bodies or opening sources. Dataset plans do
+            not change child Method state and retain their old complete plan if
+            replacement fails. Direct Method preparation clears its prior state
+            before building, preserving Method.learn failure semantics.
         """
 
         if self._stream_plan is not None:
@@ -175,7 +179,8 @@ class MethodGraph:
         Side Effects:
             Delegates to the owner Method's normal eager reset or clears Dataset
             graph selections. The graph remains inspectable but no longer exposes
-            retained selected invokers.
+            retained selected invokers. Dataset resets leave shared child Methods
+            and independently captured cursors usable.
         """
 
         if self._stream_plan is not None:

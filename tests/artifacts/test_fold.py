@@ -225,6 +225,40 @@ def test_fold_consumes_one_iterator_once_and_reuses_selected_dynamic_batch_carri
     assert accumulator.selections == 1
 
 
+@pytest.mark.parametrize("grouped", (False, True))
+def test_fold_retains_role_invokers_without_per_transition_compilation(tmp_path, monkeypatch, grouped):
+    """Five and one hundred observations add no compilation or role reselection."""
+    from dryml.artifacts import Fold
+    from dryml.core import signatures
+    compiled = []
+    original_compile = signatures.compile_signature
+    original_select = Fold._select_followups
+    monkeypatch.setattr(signatures, "compile_signature",
+                        lambda target, **kw: (compiled.append(target), original_compile(target, **kw))[1])
+
+    def select(self, *specs):
+        transition, finalizer = original_select(self, *specs)
+        def invoke(observation, state):
+            before = len(compiled)
+            result = transition(observation, state)
+            assert len(compiled) == before
+            return result
+        return invoke, finalizer
+
+    monkeypatch.setattr(Fold, "_select_followups", select)
+    for length in (5, 100):
+        child = Adding()
+        source = CountingDataset([np.ones((1, 2), dtype=np.float32)] * length)
+        if grouped:
+            fold = Fold(source, initial_state=MethodGroupInitializer(InitialTotal()),
+                        accumulator=AccumulatorGroup({"left": child, "right": child}))
+        else:
+            fold = _fold(source, accumulator=child)
+        fold.compute(managed=ManagedConfig(state_repo=DirStore(tmp_path / str(length))))
+        assert child.calls == length * (2 if grouped else 1)
+        assert child.selections == (2 if grouped else 1)
+
+
 def test_fold_group_shares_one_stream_and_keeps_independent_branch_carries(tmp_path):
     """A grouped accumulator receives each observation once with separate carry slots."""
 

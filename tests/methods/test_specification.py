@@ -86,13 +86,16 @@ def test_input_spec_constraints_conflicts_and_selected_calls_do_not_touch_prepar
     assert method.cached_signature is None
 
 
-def test_selected_callable_validates_all_positional_specs_and_raw_output_before_callbacks():
+@pytest.mark.parametrize("prepared", (False, True))
+def test_selected_callable_validates_all_positional_specs_and_raw_output_before_callbacks(prepared):
     """Carry and result constraints fail at their selected-call boundaries."""
 
     method = Checked()
     observation = TensorSpec("float32", shape=(3,), batch=Dynamic, backend="numpy")
     carry = TensorSpec("float32", shape=(3,), backend="numpy")
     selected = method.find_implementation(observation, carry, output_spec=carry)
+    if prepared:
+        selected = selected.prepared_invoker()
 
     with pytest.raises(ImplementationSelectionError) as missing:
         selected(np.ones((2, 3), dtype=np.float32))
@@ -110,11 +113,11 @@ def test_selected_callable_validates_all_positional_specs_and_raw_output_before_
 
     callbacks = []
     with pytest.raises(ImplementationSelectionError) as bad_output:
-        selected.invoke_with_raw_result(
-            (np.ones((1, 3), dtype=np.float32), np.ones((3,), dtype=np.float32)),
-            {"option": None},
-            callbacks.append,
-        )
+        args = (np.ones((1, 3), dtype=np.float32), np.ones((3,), dtype=np.float32))
+        if prepared:
+            selected.invoke(args, {"option": None}, on_raw_result=callbacks.append)
+        else:
+            selected.invoke_with_raw_result(args, {"option": None}, callbacks.append)
     assert bad_output.value.reason == "conflict"
     assert method.calls == 1
     assert callbacks == []

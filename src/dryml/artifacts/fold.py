@@ -399,15 +399,15 @@ class Fold(Value[ResultT], Generic[ResultT]):
                 dynamic dimensions but with explicit batch semantics.
 
         Returns:
-            The inferred initializer carry spec and selected initializer carrier.
+            The inferred initializer carry spec and reusable prepared invoker.
 
         Raises:
             ImplementationSelectionError: If any declared role has no compatible
                 implementation under the independent observation/carry contracts.
 
         Side Effects:
-            Performs pure Method inference and local implementation selection only;
-            it does not invoke Methods or change their preparation state.
+            Performs pure inference/selection, then compiles the finalized invoker
+            once. It does not invoke Methods or change their preparation state.
         """
 
         initial_spec = self.initial_state.infer_output_spec(observation_spec)
@@ -416,7 +416,7 @@ class Fold(Value[ResultT], Generic[ResultT]):
         initializer = self.initial_state.find_implementation(
             observation_spec, output_spec=initial_spec,
         )
-        return initial_spec, initializer
+        return initial_spec, initializer.prepared_invoker()
 
     def _select_followups(self, observation_spec: SpecTree, carry_spec: SpecTree):
         """Select fixed-carry transition and finalization carriers after initialization.
@@ -428,15 +428,16 @@ class Fold(Value[ResultT], Generic[ResultT]):
                 runtime carry.
 
         Returns:
-            Selected transition and optional selected finalizer.
+            Prepared transition and optional finalizer invokers, reused for this
+            Fold invocation without per-observation compilation or reselection.
 
         Raises:
             ImplementationSelectionError: If the initialized carry cannot remain
                 fixed under the declared transition/finalizer contracts.
 
         Side Effects:
-            Performs pure inference and local selection only. It never invokes a
-            Method or retains the invocation-owned carry.
+            Performs pure inference/selection and compiles finalized invokers once.
+            It never invokes a Method or retains the invocation-owned carry.
         """
 
         next_spec = self.accumulator.infer_output_spec(observation_spec, carry_spec)
@@ -448,12 +449,12 @@ class Fold(Value[ResultT], Generic[ResultT]):
             observation_spec, carry_spec, output_spec=carry_spec,
         )
         if self.finalize is None:
-            return transition, None
+            return transition.prepared_invoker(), None
         final_spec = self.finalize.infer_output_spec(carry_spec)
         if not is_spec_tree(final_spec):
             raise ImplementationSelectionError("conflict")
         finalizer = self.finalize.find_implementation(carry_spec, output_spec=final_spec)
-        return transition, finalizer
+        return transition.prepared_invoker(), finalizer.prepared_invoker()
 
     def _load_source(self, managed: ManagedContext) -> Dataset:
         """Materialize one retained source reference through selected Repo authority.

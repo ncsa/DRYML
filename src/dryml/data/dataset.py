@@ -477,7 +477,7 @@ class _MapCursor(DatasetCursor):
             self._pending = first
         else:
             self._source_cursor = self._own(self._call(self._dataset.src.iterator))
-        self._implementation = implementation
+        self._implementation = self._call(implementation.prepared_invoker)
         self._resolved = True
 
     def _read(self):
@@ -525,6 +525,9 @@ class _MapCursor(DatasetCursor):
 
 class Map(Dataset):
     """Dataset node that applies one selected Method callable per source element.
+
+    Each cursor retains a prepared invoker once after selection; advancing values
+    never recompiles the selected signature or changes child Method state.
 
     A complete source specification selects the callable before source
     consumption. When backend alone is unknown, the iterator contributes one

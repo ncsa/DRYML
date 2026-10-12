@@ -92,9 +92,11 @@
           ]
         },
         "tests/methods/test_preparation.py": {
-          "rationale": "Retain one known-spec preparation and retained-call validation path without optional backends.",
+          "rationale": "Retain known-spec validation and direct reprepare clearing semantics without optional backends.",
           "functions": [
-            "test_known_spec_learning_selects_without_a_body_and_validates_dynamic_batches"
+            "test_known_spec_learning_selects_without_a_body_and_validates_dynamic_batches",
+            "test_failed_direct_reprepare_clears_old_plan_without_partial_publication",
+            "test_learning_conversion_failure_keeps_published_signature"
           ]
         },
         "tests/methods/test_stream_ir.py": {

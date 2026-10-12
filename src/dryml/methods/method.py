@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import weakref
-from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from threading import Lock
 
@@ -40,10 +39,6 @@ from .traits import METHOD_TRAITS_KEY, Traits
 _DIRECT_CALL_ATTR = "__dryml_method_direct_call__"
 _UNDECLARED = object()
 _ITERATION_INDEPENDENCE: weakref.WeakKeyDictionary[type, object] = weakref.WeakKeyDictionary()
-_PREPARATION_RECORDER: ContextVar[object | None] = ContextVar(
-    "dryml_method_preparation_recorder",
-    default=None,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,8 +369,11 @@ class Method(Object):
             ImplementationSelectionError: If known facts cannot select one target.
 
         Side Effects:
-            Replaces retained process-local preparation facts. Known-spec
-            preparation binds no source and invokes no candidate body.
+            Once strategy and argument admission succeed, clears old local facts
+            before selection; known-spec build failure leaves learning mode
+            without a partial plan. Known-spec preparation then
+            publishes only completed occurrence facts and invokers, without
+            opening sources, invoking bodies, or changing child Method state.
         """
 
         if strategy != "local":
@@ -450,66 +448,7 @@ class Method(Object):
             self.learn(strategy=strategy)
             return
         self._clear_preparation("learning")
-        records: list[MethodGraphNode] = []
-
-        def record(
-            method: Method,
-            implementation: MethodImplementation,
-            input_nodes: tuple[MethodCallNode, ...],
-            inferred_output: MethodCallNode | None,
-        ) -> None:
-            records.append(
-                MethodGraphNode(
-                    occurrence=len(records) + 1,
-                    kind="method",
-                    method_type=type(method),
-                    inputs=tuple(MethodPort("element", node) for node in input_nodes),
-                    outputs=() if inferred_output is None else (MethodPort("element", inferred_output),),
-                    selected=implementation.prepared_invoker(),
-                    traits=implementation.traits,
-                )
-            )
-
-        token = _PREPARATION_RECORDER.set(record)
-        try:
-            implementation = self.find_implementation(
-                input_spec,
-                *additional_input_specs,
-                output_spec=output_spec,
-            )
-        finally:
-            _PREPARATION_RECORDER.reset(token)
-        invoker = implementation.prepared_invoker()
-        input_nodes = spec_nodes(input_spec, additional_input_specs)
-        try:
-            graph_output = spec_node(self.infer_output_spec(input_spec, *additional_input_specs))
-        except NotImplementedError:
-            graph_output = None
-        if output_spec is not None:
-            graph_output = spec_node(output_spec)
-        source = MethodGraphNode(
-            occurrence=0,
-            kind="source",
-            method_type=None,
-            outputs=tuple(MethodPort("element", node) for node in input_nodes),
-        )
-        if records:
-            # Composite selection records its owner before specializing child
-            # occurrences. Replace only that owner's unspecialized invoker.
-            records[0] = replace(records[0], selected=invoker, outputs=()
-                                if graph_output is None else (MethodPort("element", graph_output),))
-        else:
-            records.append(
-                MethodGraphNode(
-                    occurrence=1,
-                    kind="method",
-                    method_type=type(self),
-                    inputs=tuple(MethodPort("element", node) for node in input_nodes),
-                    outputs=() if graph_output is None else (MethodPort("element", graph_output),),
-                    selected=invoker,
-                    traits=implementation.traits,
-                )
-            )
+        invoker, nodes = self._prepare_local(input_spec, additional_input_specs, output_spec)
         state = _state_for(self)
         with _STATE_LOCK:
             state.mode = "cached"
@@ -517,12 +456,71 @@ class Method(Object):
             state.cached = None
             state.prepared = invoker
             state.graph = graph
-            state.graph_nodes = (source, *records)
+            state.graph_nodes = nodes
             state.conversion_edges = tuple(
                 node.selected.conversion_edge
-                for node in records
+                for node in nodes
                 if node.selected is not None and node.selected.conversion_edge is not None
             )
+
+    def _prepare_local(
+        self,
+        input_spec: SpecTree,
+        additional_input_specs: tuple[SpecTree, ...] = (),
+        output_spec: SpecTree | None = None,
+    ) -> tuple[PreparedMethodInvoker, tuple[MethodGraphNode, ...]]:
+        """Build complete occurrence facts and invokers without publishing Method state."""
+
+        implementation = self.find_implementation(
+            input_spec, *additional_input_specs, output_spec=output_spec,
+        )
+        facts = []
+
+        def infer(selected):
+            inputs = selected._input_specs
+            from .signature import spec_from_node
+
+            try:
+                output = spec_node(selected._receiver.infer_output_spec(
+                    *(spec_from_node(node) for node in inputs),
+                ))
+            except NotImplementedError:
+                output = None
+            if selected._output_spec is not None:
+                output = selected._output_spec
+            facts.append((selected, inputs, output))
+            for child in selected._children:
+                infer(child)
+
+        infer(implementation)
+        invoker = implementation.prepared_invoker()
+        records: list[MethodGraphNode] = []
+
+        def record(prepared):
+            selected, input_nodes, inferred_output = facts[len(records)]
+            records.append(
+                MethodGraphNode(
+                    occurrence=len(records) + 1,
+                    kind="method",
+                    method_type=selected._receiver_type,
+                    inputs=tuple(MethodPort("element", node) for node in input_nodes),
+                    outputs=() if inferred_output is None else (MethodPort("element", inferred_output),),
+                    selected=prepared,
+                    traits=selected.traits,
+                )
+            )
+            for child in prepared.children:
+                record(child)
+
+        record(invoker)
+        input_nodes = spec_nodes(input_spec, additional_input_specs)
+        source = MethodGraphNode(
+            occurrence=0,
+            kind="source",
+            method_type=None,
+            outputs=tuple(MethodPort("element", node) for node in input_nodes),
+        )
+        return invoker, (source, *records)
 
     def _graph_nodes_for(self, graph: MethodGraph) -> tuple[MethodGraphNode, ...]:
         """Return graph facts only when this view owns the current preparation."""
@@ -673,8 +671,9 @@ class Method(Object):
                 ``unknown_traits``, or ``conflict`` before target invocation.
 
         Side Effects:
-            Inspects and binds a local callable only. It neither reads nor mutates
-            this Method's eager/learning/cached preparation state.
+            Purely selects and specializes local occurrence facts. It does not
+            compile signatures, invoke bodies, import optional backends, or read
+            or mutate any Method's eager/learning/cached preparation state.
         """
 
         return self._find_implementation(
@@ -728,15 +727,6 @@ class Method(Object):
             ),
             _output_spec=output_node,
         )
-        recorder = _PREPARATION_RECORDER.get()
-        if callable(recorder):
-            inferred_output = output_node
-            if inferred_output is None and input_spec is not None:
-                try:
-                    inferred_output = spec_node(self.infer_output_spec(input_spec, *additional_input_specs))
-                except NotImplementedError:
-                    pass
-            recorder(self, selected, input_nodes, inferred_output)
         return selected
 
     def _select_converted(
@@ -789,17 +779,9 @@ class Method(Object):
             ),
             _output_spec=output_node,
         )
-        prepared = inner.prepared_invoker()
-
-        def invoke_converted(value: object, *args: object, **kwargs: object) -> object:
-            from .conversion import convert
-
-            return prepared(convert(edge, value), *args, **kwargs)
-
         return replace(
             inner,
             _input_specs=input_nodes,
-            _invoker=invoke_converted,
             conversion_edge=edge,
         )
 
