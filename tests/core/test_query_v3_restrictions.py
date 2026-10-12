@@ -150,7 +150,7 @@ def test_v3_reference_filters_are_subsets_and_namespace_validation_allocates_no_
         query.namespace(("bad-part",))
 
 
-def test_v3_exact_state_selection_uses_the_digest_addressed_authority_path(tmp_path, monkeypatch):
+def test_v3_exact_state_exists_uses_the_digest_addressed_positive_authority_path(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     state = _saved(repo, "value")
@@ -158,7 +158,7 @@ def test_v3_exact_state_selection_uses_the_digest_addressed_authority_path(tmp_p
         store, "iter_state_ref_records", lambda: pytest.fail("exact StateRef performed an inventory scan")
     )
 
-    assert IdentityQuery.from_store(store).sel(state).state_refs().one() == state
+    assert IdentityQuery.from_store(store).sel(state).state_refs().exists()
 
 
 def test_v3_object_ref_selector_keeps_its_existing_state_members(tmp_path):
@@ -186,9 +186,12 @@ def test_v3_controls_report_or_reject_required_inventory_scans(tmp_path):
     with pytest.raises(Exception, match="inventory scan"):
         IdentityQuery.from_store(store).scan_policy("forbid").collect()
     exact = IdentityQuery.from_store(store).sel(state).state_refs().scan_policy("forbid")
-    assert exact.explain().fast_path == "exact-state-ref"
-    assert exact.explain(analyze=True).source_cuts == 1
-    assert exact.one() == state
+    assert exact.explain().scan_required
+    assert exact.exists()
+    with pytest.raises(Exception, match="inventory scan"):
+        exact.one()
+    with pytest.raises(Exception, match="inventory scan"):
+        exact.explain(analyze=True)
 
 
 def test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals(
@@ -276,6 +279,8 @@ def test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed(tmp_pat
 
     with pytest.raises(Exception, match="index"):
         IdentityQuery.from_store(store).sel(state).require_indexed().one()
+    with pytest.raises(QueryIndexUnavailable, match="index coverage"):
+        IdentityQuery.from_store(store).sel(state).require_indexed().exists()
 
 
 def test_v3_strict_selector_policy_is_not_dropped(tmp_path):

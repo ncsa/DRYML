@@ -383,6 +383,9 @@ class SQLiteStoreQueryIndex:
         scan the Store. They preflight all authoritative roots, validate a
         complete sibling sidecar while it is `building`, then atomically replace
         the active sidecar. Store roots are never changed by rebuild or recovery.
+        Authority capture shares validated definitions with root-marker and
+        reference projection consumers. Subsequent standalone index validation
+        retains its complete checks rather than a cross-cut authority cache.
 
         Args:
             stats: Optional query statistics updated with the refresh action.
@@ -534,7 +537,7 @@ class SQLiteStoreQueryIndex:
             stats.refresh_action = "sqlite-rebuild"
             stats.result_count = scanned
 
-    def _preflight_store_roots(self) -> tuple[ConcreteDefinition, ...]:
+    def _preflight_store_roots(self, *, facts=None) -> tuple[ConcreteDefinition, ...]:
         """Read and type-check authoritative root membership before rebuild."""
 
         roots: list[ConcreteDefinition] = []
@@ -552,7 +555,11 @@ class SQLiteStoreQueryIndex:
             bucket.append(cdef)
             roots.append(cdef)
 
-        for definition in self.store.authoritative_root_definitions():
+        definitions = (
+            self.store.authoritative_root_definitions()
+            if facts is None else facts._authoritative_root_definitions()
+        )
+        for definition in definitions:
             add(definition)
         return tuple(roots)
 
@@ -576,9 +583,12 @@ class SQLiteStoreQueryIndex:
 
         if self.store is None:
             raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store.")
+        from ..source import SourceCapture
+
         with self.store.authority_read_fence():
-            roots = self._preflight_store_roots()
-            reference_rows = tuple(_reference_authority_rows(self.store))
+            facts = SourceCapture().capture_store(self.store)
+            roots = self._preflight_store_roots(facts=facts)
+            reference_rows = tuple(_reference_authority_rows(self.store, definitions=facts.definitions))
             metadata_rows = tuple(_metadata_authority_rows(self.store))
             dirty_markers = self._dirty_markers()
         return roots, reference_rows, metadata_rows, dirty_markers
@@ -2903,12 +2913,14 @@ def _relative_def_path(stable_hash: str) -> str:
     return f"objects/{stable_hash[:2]}/{stable_hash}/def.pkl"
 
 
-def _reference_authority_rows(store):
+def _reference_authority_rows(store, *, definitions=None):
     """Yield complete derived reference rows from current Store authority.
 
     Each row retains its authority source and canonical owner/path/reference
     identity.  This extraction is intentionally shared by replacement rebuilds
     only; callers must still verify query answers against Store records.
+    ``definitions`` may supply already validated records from the same fenced
+    rebuild cut to avoid decoding that authority a second time.
     """
 
     from ...store.records import DefinitionRecord
@@ -2936,7 +2948,7 @@ def _reference_authority_rows(store):
             alias, value, states,
         )
 
-    for record in store.iter_definition_records():
+    for record in (store.iter_definition_records() if definitions is None else definitions):
         for occurrence in _iter_embedded_reference_occurrences(
             record.definition, owner=record.definition,
         ):

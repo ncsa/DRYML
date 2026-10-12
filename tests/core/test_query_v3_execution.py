@@ -405,27 +405,20 @@ def test_u5_repo_attachment_does_not_enter_an_existing_terminal(tmp_path, monkey
     assert left.union(right).count() == 0
 
 
-def test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut(tmp_path, monkeypatch):
+def test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut(tmp_path):
     first = DirStore(tmp_path / "first")
     second = DirStore(tmp_path / "second")
     repo = Repo((first, second))
     value = ExecutionLeaf("candidate", repo=repo)
     state = repo.save_object(value, store=second)
-    left = IdentityQuery.from_store(first).sel(state).state_refs()
-    right = IdentityQuery.from_store(first).state_refs()
-    original = IdentityQuery._evaluated_entries
-    published = False
-
-    def publish_after_miss(self, capture):
-        nonlocal published
-        result = original(self, capture)
-        if self is left and not published:
-            published = True
-            assert repo.save_object(value, store=first, source_store=second) == state
-        return result
-
-    monkeypatch.setattr(IdentityQuery, "_evaluated_entries", publish_after_miss)
-    assert left.intersection(right).one() == state
+    capture = SourceCapture()
+    capture.active = True
+    assert capture.read_exact_state(first, state) is None
+    assert repo.save_object(value, store=first, source_store=second) == state
+    with pytest.raises(_SourceRecapture) as changed:
+        capture.capture_store(first)
+    assert changed.value.invalidated
+    assert state in capture.capture_store(first).knowledge()
 
 
 def test_v3_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_path):
@@ -494,3 +487,65 @@ def test_v3_repo_exact_mixed_root_authority_retains_both_sources(tmp_path):
     result = IdentityQuery.from_repo(Repo((first, second))).sel(cdef).cdefs().stored().collect()
     assert result.one() == cdef
     assert len(result.sources(cdef)) == 2
+
+
+def test_exact_state_scoped_read_failure_is_visible_before_scalar_stop(tmp_path, monkeypatch,
+                                                                     fixed_snapshot_environment):
+    """A positive replica cannot suppress captured metadata failure in another."""
+
+    from dryml.core.query.model import QueryError
+
+    first = DirStore(tmp_path / "first", query_index="memory")
+    second = DirStore(tmp_path / "second", query_index="memory")
+    repo = Repo((first, second))
+    value = ExecutionLeaf("saved", repo=repo)
+    state = repo.save_object(value, store=first)
+    repo.save_object(value, store=second, source_store=first)
+    monkeypatch.setattr(second, "read_metadata", lambda *_a: (_ for _ in ()).throw(PermissionError("private")))
+    query = repo.query().sel(state).where(field("object", "missing").missing())
+    for terminal in (query.exists, query.one, query.count):
+        with pytest.raises(QueryError, match="metadata read failed"):
+            terminal()
+
+
+def test_empty_candidates_do_not_suppress_external_alias_conflict(tmp_path):
+    """Scoped obligations are normalized even when an earlier filter is empty."""
+
+    from dryml.core import ObjectId, ObjectRef
+    from dryml.core.query.model import QueryError
+    from dryml.core.store.records import ObjectAliasRecord
+    from dryml.core.utils.graph.path import GraphPath
+
+    first = DirStore(tmp_path / "first", query_index="memory")
+    second = DirStore(tmp_path / "second", query_index="memory")
+    for store, name in ((first, "first"), (second, "second")):
+        store.write_object_alias(ObjectAliasRecord("chosen", ObjectRef(
+            Definition(ExecutionStatefulLeaf, name).concretize(), {GraphPath(): ObjectId()},
+        )))
+    query = IdentitySet().query().alias("chosen", scope=Repo((first, second)))
+    with pytest.raises(QueryError, match="alias authority conflicts"):
+        query.exists()
+
+
+def test_algebra_validates_selected_roots_before_operand_filtering(tmp_path):
+    """An empty filtered operand still contributes its authority obligations."""
+
+    from dryml.core import ObjectId, ObjectRef
+    from dryml.core.query.model import QueryError
+    from dryml.core.store.records import DeclarationRecord
+    from dryml.core.utils.graph.path import GraphPath
+
+    first = DirStore(tmp_path / "first", query_index="memory")
+    second = DirStore(tmp_path / "second", query_index="memory")
+    object_id = ObjectId()
+    refs = tuple(ObjectRef(Definition(ExecutionStatefulLeaf, name).concretize(),
+                           {GraphPath(): object_id}) for name in ("first", "second"))
+    first.write_declaration_record(DeclarationRecord(refs[0]))
+    second.write_declaration_record(DeclarationRecord(refs[1]))
+    left = first.query().sel(refs[0]).object_refs()
+    right = second.query().sel(refs[0]).object_refs()
+    for query in (left.union(right), right.union(left), left.intersection(right)):
+        with pytest.raises(QueryError, match="authority conflicts"):
+            query.exists()
+    with pytest.raises(QueryError, match="authority conflicts"):
+        left.stored(scope=second).exists()

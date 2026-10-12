@@ -206,3 +206,48 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
     assert combined.diagnostic().candidate_rows_read == 8
     assert combined.diagnostic().cdef_blobs_decoded == 8
     assert combined.diagnostic().pages_fetched == 2
+
+
+@pytest.mark.parametrize("root_count", (10, 30, 100))
+def test_reference_validation_visits_roots_linearly_per_selected_cut(
+        tmp_path, monkeypatch, root_count):
+    """Candidate filtering does not repeatedly validate the selected root set."""
+
+    from dryml.core import ObjectId, ObjectRef
+    from dryml.core.query import authority, source
+    from dryml.core.store.records import DeclarationRecord
+    from dryml.core.utils.graph.path import GraphPath
+
+    store = DirStore(tmp_path / "store", query_index="memory")
+    for index in range(root_count):
+        store.write_declaration_record(DeclarationRecord(ObjectRef(
+            Definition(PerfParent, index).concretize(),
+            {GraphPath(): ObjectId(("linear",))},
+        )))
+    passes = 0
+    visits = 0
+    original_combination = source.validate_captured_reference_authority
+    original_roots = authority._validate_object_reference_roots
+
+    def combination(facts):
+        nonlocal passes
+        passes += 1
+        return original_combination(facts)
+
+    def roots(values):
+        def counted():
+            nonlocal visits
+            for value in values:
+                visits += 1
+                yield value
+        return original_roots(counted())
+
+    monkeypatch.setattr(source, "validate_captured_reference_authority", combination)
+    monkeypatch.setattr(authority, "_validate_object_reference_roots", roots)
+    query = Repo(store).query().object_refs().stored()
+    assert query.count() == root_count
+    assert passes == 1
+    assert visits == root_count
+    assert query.count() == root_count
+    assert passes == 2
+    assert visits == 2 * root_count

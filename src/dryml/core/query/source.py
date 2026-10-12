@@ -90,6 +90,9 @@ class SourceCapture:
     ``source_cuts`` counts distinct authority-fence domains, while
     ``capture_rounds`` and ``demand_recaptures`` distinguish monotonic metadata
     demand growth from source instability retries owned by later execution work.
+    Complete-combination proofs use sorted unique domains and fresh fact tokens;
+    selective direct reads cannot stand in for complete coverage. Store knowledge,
+    retained lookup roots, topology, and Repo cache tiers remain distinct.
     """
 
     def __init__(self):
@@ -98,7 +101,9 @@ class SourceCapture:
         self._exact_stored_cdefs: dict[str, set[object]] = {}
         self._topologies: dict[int, tuple[Store, ...]] = {}
         self._cache_knowledge: dict[tuple[int, bool], IdentitySet] = {}
+        self._retained_cache_cdefs: dict[tuple[int, bool], tuple] = {}
         self._cut_domains: set[str] = set()
+        self._validated_combinations: set[tuple] = set()
         self.active = False
         self.source_cuts = 0
         self.capture_rounds = 0
@@ -159,7 +164,7 @@ class SourceCapture:
             if cached is not None:
                 self.demand_recaptures += 1
             main = store.read_main_ref()
-            definitions = tuple(store.iter_definition_records())
+            definitions, stored_roots = store._validated_definition_root_inventory()
             definition_by_digest = {record.digest: record.definition for record in definitions}
             if main is not None:
                 main_definition = definition_by_digest.get(main.definition_digest)
@@ -169,7 +174,7 @@ class SourceCapture:
                 main_definition = None
             facts = CapturedStoreFacts.build(
                 definitions=definitions,
-                stored_roots=store.iter_stored_root_records(),
+                stored_roots=stored_roots,
                 declarations=store.iter_declaration_records(),
                 state_refs=store.iter_state_ref_records(),
                 object_aliases=store.iter_object_alias_records(),
@@ -178,17 +183,9 @@ class SourceCapture:
                 source=SourceEvidence.from_source(store.authority_fence_key()),
             )
             if requested_scopes:
-                facts = CapturedStoreFacts.build(
-                    definitions=facts.definitions,
-                    stored_roots=facts.stored_roots,
-                    declarations=facts.declarations,
-                    state_refs=facts.state_refs,
-                    object_aliases=facts.object_aliases,
-                    state_aliases=facts.state_aliases,
-                    main_definition=facts.main_definition,
-                    source=facts.source,
-                    metadata=self._capture_metadata(store, facts, requested_scopes),
-                    metadata_scopes=requested_scopes,
+                facts = facts.with_metadata(
+                    self._capture_metadata(store, facts, requested_scopes),
+                    scopes=requested_scopes,
                 )
         exact = self._exact_states.pop(key, {})
         exact_cdefs = self._exact_stored_cdefs.pop(key, set())
@@ -210,21 +207,37 @@ class SourceCapture:
     def capture_stores(
         self, sources: Iterable[StoreSource | Store], *, metadata_scopes: frozenset[str] = frozenset()
     ) -> tuple[CapturedStoreFacts, ...]:
-        """Capture each selected Store while preserving distinct transaction cuts."""
+        """Capture and validate the complete selected authority combination.
 
-        facts = tuple(
-            self.capture_store(source, metadata_scopes=metadata_scopes)
-            for source in sources
+        Duplicate fence domains share facts. Sorted domain/token keys reuse only
+        successful terminal-local proofs; demand recapture creates new tokens
+        even without authority mutation. Conflicting authoritative ObjectIds raise
+        QueryError before filtering; embedded references are not root authority.
+        Distinct Zip transactions are always distinct domains.
+        """
+
+        selected = {}
+        for source in sources:
+            store = source.store if isinstance(source, StoreSource) else source
+            key = store.authority_fence_key()
+            if key not in selected:
+                selected[key] = self.capture_store(store, metadata_scopes=metadata_scopes)
+        facts = tuple(selected.values())
+        combination = tuple(
+            (key, "complete", selected[key].capture_token) for key in sorted(selected)
         )
-        validate_captured_reference_authority(facts)
+        if combination not in self._validated_combinations:
+            validate_captured_reference_authority(facts)
+            self._validated_combinations.add(combination)
         return facts
 
     def read_exact_state(self, source: StoreSource | Store, target: StateRef) -> StateRef | None:
         """Read one complete exact StateRef without requiring broad inventory.
 
-        The digest-addressed record is independently authoritative for exact
-        saved-state membership. This selective path intentionally does not use
-        the capture registry or any record-family iterator.
+        A digest-addressed positive proves independent saved-state membership
+        for this source only. A miss does not exclude embedded or projected
+        knowledge: callers need complete capture before a negative live answer.
+        This selective proof is separate from complete captured inventory.
         """
 
         store = source.store if isinstance(source, StoreSource) else source
@@ -400,13 +413,16 @@ class SourceCapture:
                     if value is not None:
                         members.append((value, evidence))
                         continue
-                self._require_complete_inventory(store)
-                with store.authority_read_fence():
-                    self._record_cut(key)
-                    for value in store.authoritative_root_definitions():
-                        if exact_cdef is None or value.graph_equal(exact_cdef):
-                            members.append((value, evidence))
-            strong, weak = _retained_lookup_cache_cdefs(repo, weak=source.weak)
+                facts = self.capture_store(store)
+                for value in facts._authoritative_root_definitions():
+                    if exact_cdef is None or value.graph_equal(exact_cdef):
+                        members.append((value, evidence))
+            if exact_cdef is None:
+                self.capture_stores(self.repo_stores(repo))
+            cache_key = id(repo), source.weak
+            if cache_key not in self._retained_cache_cdefs:
+                self._retained_cache_cdefs[cache_key] = _retained_lookup_cache_cdefs(repo, weak=source.weak)
+            strong, weak = self._retained_cache_cdefs[cache_key]
             members.extend(
                 (value, SourceEvidence.from_source(repo))
                 for value in (*strong, *weak)

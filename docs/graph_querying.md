@@ -27,6 +27,23 @@ results are `IdentitySet` values with deterministic identity ordering. `collect(
 fixes membership before iteration, while `take(n)` is the explicit bounded prefix
 operation and retains visible boundedness on its returned set.
 
+Exact live StateRef selection restricts the complete knowledge universe: embedded
+references in definitions, materializing subtree projections, and retained cache
+receipts participate alongside independent snapshots. `collect()` completes the
+contributing-source evidence rather than stopping at a direct snapshot hit.
+Knowledge does not imply independent `.stored()` membership or metadata-holder
+eligibility. An embedded or projected StateRef without its own snapshot remains
+known but is not independently stored.
+
+Only an exact-StateRef `exists()` without alias, stored, metadata, cache-scope, or
+source-evidence restrictions may use a validated direct positive without broad
+inventory. This direct authority proof cannot satisfy `require_indexed()`. A
+direct miss says nothing about embedded knowledge: a negative live
+answer requires complete relevant inventory, or a visible refusal under a no-scan
+policy. Other exact terminals, including analyzed explanations, complete that
+inventory. Scoped scalar terminals validate their selected authority and captured
+read failures before stopping at a positive candidate.
+
 `ObjectRef.object_projection()` and `StateRef.object_projection()` produce an
 `ObjectSelector` for one complete realized graph. Projection preserves ObjectIds,
 CDef topology, and edge roles while replacing every encountered exact reference
@@ -77,6 +94,17 @@ Reference identity restrictions compose in the same plan: `object_id()`,
 Metadata scopes are `object`, `state`, `lineage`, and `snapshot`; terminals retain
 authority validation and report conflicts or malformed records rather than treating
 them as non-matches.
+
+Within one terminal, complete captures share validated definition/root inventory,
+derived knowledge, and independent membership facts. Reference validation uses
+the complete selected authoritative-root combination before filtering, without
+promoting embedded references into independent ObjectId authority. Successful
+combination proofs are reused by sorted unique authority-fence domains and
+terminal-local capture tokens. Replacement facts always have a fresh token,
+including metadata-demand recapture with unchanged authority, and restart dependent
+results. SQLite generations are not Store authority generations. Repo topology,
+cache tiers, full knowledge, and retained root-or-cache lookup remain distinct;
+separate Zip transactions retain separate cuts. Proofs never cross terminals.
 
 ## Relationships
 

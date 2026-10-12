@@ -6,6 +6,25 @@ Indexes preserve V2 CDef graph topology, typed graph paths, ObjectRef IDs, State
 
 Metadata dirty tokens identify an exact object or state target separately from definition tokens. DirStore publishes the applicable durable token under its writer fence before each definition, stored-root, declaration, or query-visible alias authority mutation; an interrupted authority write may therefore leave harmless dirty state, while an idempotent write leaves no new token. Incremental projection holds the Store authority fence through the SQLite write and clears only captured tokens for indexed targets. Unrelated or unscoped tokens require a full rebuild, and tokens published after the captured cut survive for recovery. A save whose derived index remains dirty reports a partial publication failure without discarding the complete snapshot. Legacy unscoped tokens remain valid rebuild requests.
 
+Broad Query V3 capture and SQLite rebuild authority capture consume the Store's
+protected validated definition/root inventory seam. Its compatibility fallback
+returns the existing complete record collections. DirStore validates marker paths
+and targets against the definitions decoded in that same fenced capture, so each
+authoritative DefinitionRecord decodes once during inventory acquisition; SQLite's
+reference projection reuses those records. ZipStore uses the same seam only inside
+its own open extracted transaction. Standalone marker readers and subsequent
+standalone index validation retain their complete checks. Missing or malformed
+markers, targets, main references, aliases, and conflicting authoritative ObjectIds
+remain visible. Capture reads no state payload bytes and never writes authority.
+
+CapturedStoreFacts and SourceCapture own detached identity inventory, independent
+membership, metadata eligibility, and cut-local proof reuse. A complete proof key
+uses sorted unique authority-fence domains and their fresh terminal-local capture
+tokens; selective direct reads are not complete inventory. Metadata-demand growth
+creates a replacement token even if authority is unchanged, invalidating dependent
+proofs/results under the existing bounded retry policy. A SQLite generation is
+derived-index state, not a Store authority generation or cross-terminal proof.
+
 SQLite connections are process-local. Rebuild and mutation use staged activation so a reader sees a prior complete index or a new complete index. Dirty, absent, corrupt, or incompatible metadata projections trigger authoritative fallback or visible rebuild; dirty state is cleared only for the authority generation that was indexed. Index failure never rewrites snapshot/current authority or silently makes stale rows current. Rebuild notices are visible because scans can be long. Rebuild claim descriptors use `dryml.locking` but retain SQLite's claim creation, stale-eligibility, wait, and cleanup policy. Dirty-token and complete main-file activation use `dryml.filesystem` directly after SQLite closes/checkpoints the applicable WAL and handles; the index does not depend on Store-private native helpers. A persistence failure can follow visible sidecar activation, so recovery reconciles status rather than assuming rollback. Supported behavior assumes local SQLite, filesystem rename/persistence, and locking semantics; distributed filesystems are outside this contract.
 
 `dryml.core.query.sqlite.open_connection(config, *, readonly=False)` is the public standalone connection owner. `config` must be a `SQLiteQueryIndexConfig`, `readonly` must be exactly `bool`, and `config.path` must be present; validation occurs before importing SQLite or creating a parent/database. Invalid argument types raise `TypeError`, while an absent configured path raises actionable `QueryIndexError`. The connection applies the same foreign-key, timeout, trusted-schema, journal, and durability configuration as the query-index connection manager and always closes its connection. Writable opening creates missing parent directories; read-only opening requires an existing database and creates neither the target nor its parent. SQLite open/configuration errors remain SQLite errors, while a missing optional backend is reported as `QueryIndexUnavailable`.

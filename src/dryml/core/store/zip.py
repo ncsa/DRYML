@@ -568,6 +568,12 @@ class ZipStore(DirStore):
         self._assert_open()
         return super().iter_stored_root_records()
 
+    def _validated_definition_root_inventory(self):
+        """Read one validated inventory in this open extracted transaction only."""
+
+        self._assert_open()
+        return super()._validated_definition_root_inventory()
+
     def iter_state_ref_records(self):
         """Return validated StateRef records from an open transaction.
 

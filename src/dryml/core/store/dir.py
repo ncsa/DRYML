@@ -634,7 +634,26 @@ class DirStore(Store):
         Raises:
             StoreAuthorityError: If a marker path or DefinitionRecord target is
                 malformed or missing.
+
+        Returns:
+            Complete validated marker records in digest order. Standalone reads
+            validate each target directly; fenced inventory capture reuses its
+            already validated definitions instead. Neither path reads payloads
+            or changes authority.
         """
+        return self._read_stored_root_inventory()
+
+    def _validated_definition_root_inventory(
+        self,
+    ) -> tuple[tuple[DefinitionRecord, ...], tuple[StoredRootRecord, ...]]:
+        """Reuse one complete definition decode pass to validate root targets."""
+
+        definitions = tuple(self.iter_definition_records())
+        return definitions, self._read_stored_root_inventory(
+            {record.digest: record for record in definitions},
+        )
+
+    def _read_stored_root_inventory(self, definitions=None):
         root = Path(self.base_dir, "stored-roots")
         if not root.exists():
             return ()
@@ -645,7 +664,8 @@ class DirStore(Store):
                     record is None
                     or path.name != f"{record.definition_digest}.record"
                     or path.parent.name != record.definition_digest[:2]
-                    or self.read_definition_record(record.definition_digest) is None
+                    or (self.read_definition_record(record.definition_digest)
+                        if definitions is None else definitions.get(record.definition_digest)) is None
             ):
                 raise StoreAuthorityError(
                     f"StoredRootRecord is stored under an invalid digest path: {path!s}."

@@ -7,7 +7,7 @@ The module owns no Repo configuration and never reads a Store after capture.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable
 
 from ..definition import ConcreteDefinition
@@ -17,7 +17,7 @@ from ..store.records import (
     StateRefRecord, StoredRootRecord,
 )
 from ..store.store import StoreAuthorityError
-from .identity import IdentitySet, SourceEvidence, identity_key
+from .identity import IdentityKey, IdentitySet, SourceEvidence, identity_key
 from .model import QueryError
 from .relationships import iter_direct_relationships
 
@@ -29,8 +29,11 @@ IdentityValue = ConcreteDefinition | ObjectRef | StateRef
 class CapturedStoreFacts:
     """One complete detached Store authority cut and its derived identity facts.
 
-    Record tuples are retained for later U3-U6 consumers. Membership and holder
-    checks use those captured values without broad iterator rescans.
+    Record tuples supply complete knowledge, independent membership, metadata
+    eligibility, and validated authoritative ObjectId projections. A fresh
+    ``capture_token`` identifies every replacement, including metadata-only
+    enrichment; it is unrelated to a derived SQLite generation. Knowledge is
+    derived once per fact table without Store reads or authority writes.
     """
 
     definitions: tuple[DefinitionRecord, ...]
@@ -43,6 +46,9 @@ class CapturedStoreFacts:
     source: SourceEvidence
     metadata: tuple[tuple[IdentityKey, str, object], ...] = ()
     metadata_scopes: frozenset[str] = frozenset()
+    capture_token: object = field(init=False, default_factory=object, compare=False, repr=False)
+    _reference_projections: dict = field(default_factory=dict, compare=False, repr=False)
+    _knowledge: IdentitySet | None = field(init=False, default=None, compare=False, repr=False)
     _metadata_index: dict[tuple[IdentityKey, str], object] = field(
         init=False, compare=False, repr=False,
     )
@@ -85,7 +91,15 @@ class CapturedStoreFacts:
         metadata: Iterable[tuple[IdentityKey, str, object]] = (),
         metadata_scopes: frozenset[str] = frozenset(),
     ) -> "CapturedStoreFacts":
-        """Validate cross-record references and create one detached fact table."""
+        """Validate cross-record authority and return a detached fact table.
+
+        Record iterables contain validated definitions, markers, declarations,
+        snapshots, and aliases. ``main_definition`` is the fenced, resolved main
+        target; ``source`` is detached evidence. Optional ``metadata`` triples and
+        ``metadata_scopes`` describe fields read in the same cut. Duplicate
+        digests, missing or incompatible targets, and authoritative ObjectId
+        conflicts raise StoreAuthorityError. No Store access or writes occur.
+        """
 
         definitions = tuple(definitions)
         by_digest = {record.digest: record for record in definitions}
@@ -106,7 +120,7 @@ class CapturedStoreFacts:
                 raise StoreAuthorityError("State alias targets missing or incompatible StateRef authority.")
         declarations = tuple(declarations)
         object_aliases = tuple(object_aliases)
-        _validate_object_reference_roots((
+        projections = _validate_object_reference_roots((
             *(record.object_ref for record in declarations),
             *(record.state_ref.object for record in state_refs),
             *(record.object_ref for record in object_aliases),
@@ -115,12 +129,34 @@ class CapturedStoreFacts:
         return cls(
             definitions, stored_roots, declarations, state_refs,
             object_aliases, state_aliases, main_definition, source,
-            tuple(metadata), metadata_scopes,
+            tuple(metadata), metadata_scopes, projections,
         )
 
-    def knowledge(self) -> IdentitySet:
-        """Return all represented and retained derivable identities in this cut."""
+    def with_metadata(
+        self, metadata: Iterable[tuple[IdentityKey, str, object]], *, scopes: frozenset[str],
+    ) -> "CapturedStoreFacts":
+        """Enrich this cut with detached metadata and a fresh capture token.
 
+        ``metadata`` contains captured identity/scope/value triples; ``scopes``
+        is the complete requested scope set. Returns a new table sharing already
+        validated identity structure. The caller owns fenced reads and failures;
+        this method performs no Store access and never revalidates reference roots.
+        """
+
+        enriched = replace(self, metadata=tuple(metadata), metadata_scopes=scopes)
+        object.__setattr__(enriched, "_knowledge", self._knowledge)
+        return enriched
+
+    def knowledge(self) -> IdentitySet:
+        """Return cached full represented/derivable knowledge as an IdentitySet.
+
+        The first call expands detached direct relationships; later calls reuse
+        that structure and source evidence. It does not read Store records,
+        promote embedded identities to stored authority, or change authority.
+        """
+
+        if self._knowledge is not None:
+            return self._knowledge
         roots: list[IdentityValue] = [record.definition for record in self.definitions]
         roots.extend(record.object_ref for record in self.declarations)
         roots.extend(record.state_ref for record in self.state_refs)
@@ -128,7 +164,9 @@ class CapturedStoreFacts:
         roots.extend(record.object_ref for record in self.state_aliases)
         if self.main_definition is not None:
             roots.append(self.main_definition)
-        return IdentitySet((value, self.source) for value in _derive_identities(roots))
+        known = IdentitySet((value, self.source) for value in _derive_identities(roots))
+        object.__setattr__(self, "_knowledge", known)
+        return known
 
     def is_stored(self, value: IdentityValue) -> bool:
         """Return kind-specific independent stored authority from captured records."""
@@ -196,22 +234,24 @@ def _derive_identities(roots: Iterable[IdentityValue]) -> tuple[IdentityValue, .
 
 def validate_captured_reference_authority(
         facts: Iterable[CapturedStoreFacts]) -> None:
-    """Reject incompatible authoritative ObjectId mappings across Store cuts."""
+    """Validate complete captured ObjectId mappings without revisiting roots.
 
-    roots = []
+    ``facts`` supplies validated Store cuts. Their authoritative projection maps
+    are merged, returning None on success and raising QueryError for incompatible
+    ObjectId mappings. Embedded references never enter these maps independently.
+    This performs no Store access, payload reads, or authority writes.
+    """
+
+    by_object_id = {}
     for item in facts:
-        roots.extend(record.object_ref for record in item.declarations)
-        roots.extend(record.state_ref.object for record in item.state_refs)
-        roots.extend(record.object_ref for record in item.object_aliases)
-        roots.extend(record.object_ref for record in item.state_aliases)
-    try:
-        _validate_object_reference_roots(roots)
-    except StoreAuthorityError:
-        raise QueryError("Query V3 object-reference authority conflicts.") from None
+        for object_id, projected in item._reference_projections.items():
+            previous = by_object_id.setdefault(object_id, projected)
+            if previous != projected:
+                raise QueryError("Query V3 object-reference authority conflicts.")
 
 
-def _validate_object_reference_roots(roots: Iterable[ObjectRef]) -> None:
-    """Validate authoritative projections without promoting embedded references."""
+def _validate_object_reference_roots(roots: Iterable[ObjectRef]) -> dict:
+    """Return validated projections without promoting embedded references."""
 
     by_object_id = {}
     for root in roots:
@@ -222,3 +262,4 @@ def _validate_object_reference_roots(roots: Iterable[ObjectRef]) -> None:
                 raise StoreAuthorityError(
                     "Object-reference authority contains incompatible ObjectId mappings."
                 )
+    return by_object_id

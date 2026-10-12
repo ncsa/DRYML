@@ -286,6 +286,24 @@ class Store(ABC):
     def iter_stored_root_records(self):
         """Yield authoritative stored-root membership records."""
 
+    def _validated_definition_root_inventory(
+        self,
+    ) -> tuple[tuple[DefinitionRecord, ...], tuple[StoredRootRecord, ...]]:
+        """Return validated definition and stored-root record tuples.
+
+        Callers retain the authority read fence for a coherent cut. Backends may
+        reuse decoded definitions when checking marker targets; this compatibility
+        fallback uses the existing complete readers. Missing targets raise
+        StoreAuthorityError. No payloads, indexes, or authority writes are needed.
+        """
+
+        definitions = tuple(self.iter_definition_records())
+        roots = tuple(self.iter_stored_root_records())
+        digests = {record.digest for record in definitions}
+        if any(root.definition_digest not in digests for root in roots):
+            raise StoreAuthorityError("Stored-root membership targets a missing DefinitionRecord.")
+        return definitions, roots
+
     def read_stored_root_record(self, digest: str) -> StoredRootRecord | None:
         """Read and validate one stored-root membership by DefinitionRecord digest.
 
@@ -751,11 +769,17 @@ class Store(ABC):
         Raises:
             StoreAuthorityError: If referenced definition authority is missing
                 or malformed.
+
+        Side Effects:
+            Reads complete definition/root inventory through the protected
+            validated seam, permitting backend-local decode reuse. Standalone
+            readers retain complete authority checks. No payloads, index writes,
+            or authority writes are involved; callers needing a coherent cut
+            retain the Store authority read fence.
         """
 
-        records = {
-            record.digest: record for record in self.iter_definition_records()
-        }
+        inventory, roots = self._validated_definition_root_inventory()
+        records = {record.digest: record for record in inventory}
         definitions = []
         by_hash = {}
 
@@ -766,7 +790,7 @@ class Store(ABC):
             bucket.append(definition)
             definitions.append(definition)
 
-        for root in self.iter_stored_root_records():
+        for root in roots:
             record = records.get(root.definition_digest)
             if record is None:
                 raise StoreAuthorityError(

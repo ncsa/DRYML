@@ -1033,11 +1033,13 @@ class IdentityQuery:
         return cls(members)
 
     def sel(self, value=None) -> "IdentityQuery":
-        """Restrict this fixed universe by one structural or exact selector.
+        """Restrict the complete producer knowledge by a structural or exact selector.
 
         Definitions remain structural even when complete; ConcreteDefinitions,
         exact references, and GeneratorSelector support retain their stricter
-        established meanings.  ``None`` is an immutable no-op.
+        established meanings. Exact live references include embedded identities,
+        materializing projections, and retained cache receipts; they do not imply
+        independent storage or metadata eligibility. ``None`` is a no-op.
 
         Args:
             value: Definition, complete CDef, Selector, ObjectSelector,
@@ -1544,8 +1546,9 @@ class IdentityQuery:
     def explain(self, *, analyze: bool = False, sql: bool = False) -> QueryExplanation:
         """Describe whether this immutable V3 plan requires an authority scan.
 
-        ``sql`` is accepted for interface parity but reports no backend detail:
-        U3 evaluates authoritative detached records rather than a SQL result.
+        ``sql`` is accepted for interface parity but reports no backend detail.
+        Exact live StateRef plans require complete knowledge when analyzed; the
+        selective positive Boolean proof belongs only to eligible ``exists()``.
         ``analyze`` evaluates the plan and includes its final result count.
 
         Args:
@@ -1565,8 +1568,7 @@ class IdentityQuery:
         """
 
         del sql
-        exact = self._exact_state_selector() is not None and not self._metadata_scopes()
-        scan_required = not exact and self._requires_authority_inventory()
+        scan_required = self._requires_authority_scan()
         result_count = None
         source_cuts = capture_rounds = demand_recaptures = 0
         if analyze:
@@ -1580,7 +1582,7 @@ class IdentityQuery:
         return QueryStats(
             refresh_action=(capture.refresh_action if analyze else "none"),
             result_count=result_count,
-            fast_path="exact-state-ref" if exact else None,
+            fast_path=None,
             scan_required=scan_required,
             scan_reason=("V3 identity inventory requires authoritative record enumeration" if scan_required else None),
             candidate_rows_read=(capture.candidate_rows_read if analyze else 0),
@@ -1671,7 +1673,8 @@ class IdentityQuery:
 
         Side Effects:
             Reads source authority and caches under retryable cuts and may refresh
-            derived indexes according to the plan.
+            derived indexes according to the plan. Exact live selection completes
+            relevant contributors, including embedded and retained-cache evidence.
         """
 
         return self._run_terminal(self._collect_with_capture)
@@ -1721,12 +1724,62 @@ class IdentityQuery:
             QueryError: If validation or source/index access fails.
 
         Side Effects:
-            Executes only the source work needed for a conclusive answer.
+            Executes only the source work needed for a conclusive answer. An
+            exact StateRef with no scoped or source-evidence restrictions can use
+            validated direct positive authority unless indexed-only coverage is
+            required. A direct miss needs complete
+            knowledge capture or a visible scan-policy refusal. Scoped conflicts
+            and metadata failures are validated before early stopping.
         """
 
         if self.take_limit == 0:
             return False
-        return self._run_terminal(lambda cut: next(self._iter_terminal_members(cut), None) is not None)
+
+        def evaluate(cut):
+            if self._selective_state_exists(cut):
+                return True
+            return next(self._iter_terminal_members(cut), None) is not None
+
+        return self._run_terminal(evaluate, selective_state=self._can_selective_state_exists())
+
+    def _can_selective_state_exists(self) -> bool:
+        """Keep the direct Boolean proof free of contributor/scope obligations."""
+
+        from .source import RepoSource, StoreSource
+
+        return (
+            isinstance(self.source, (StoreSource, RepoSource))
+            and not self.indexed_required
+            and self._exact_state_selector() is not None
+            and all(item.kind in {
+                "sel", "kind", "object_id", "namespace", "contains", "state_hash",
+            } for item in self.restrictions)
+        )
+
+    def _selective_state_exists(self, capture) -> bool:
+        """Prove a positive only; incomplete or nonmatching reads fall back."""
+
+        from .source import StoreSource
+
+        if not self._can_selective_state_exists():
+            return False
+        target = self._exact_state_selector()
+        stores = (
+            (self.source.store,) if isinstance(self.source, StoreSource)
+            else capture.repo_stores(self.source.repo)
+        )
+        for store in stores:
+            value = capture.read_exact_state(store, target)
+            if value is None:
+                continue
+            if self.max_verify_limit is not None and self.max_verify_limit < 1:
+                raise QueryVerifyBudgetExceeded("Query V3 verification budget exceeded.")
+            evidence = self._source_evidence(store)
+            budget = _GeneratorWitnessBudget(self.max_witness_limit)
+            if all(self._matches(item, value, evidence, capture, budget)
+                   for item in self.restrictions):
+                return True
+        return False
 
     def one(self):
         """Return the sole retained identity.
@@ -1782,7 +1835,7 @@ class IdentityQuery:
     def _append(self, kind, value, scope=None) -> "IdentityQuery":
         return replace(self, restrictions=(*self.restrictions, _V3Restriction(kind, value, scope)))
 
-    def _run_terminal(self, evaluate, *, return_capture=False):
+    def _run_terminal(self, evaluate, *, return_capture=False, selective_state=False):
         """Restart all dependent stages on demand growth or an invalidated cut."""
 
         from .model import QueryError
@@ -1794,14 +1847,7 @@ class IdentityQuery:
                 and self._requires_authority_scan()
                 and not self._can_try_bounded_index()
                 and self._exact_stored_cdef_selector() is None
-                and not (
-                    self._exact_state_selector() is not None
-                    and not self._metadata_scopes()
-                    and not any(
-                        item.kind in {"alias", "stored"}
-                        for item in self.restrictions
-                    )
-                )):
+                and not selective_state):
             raise QueryWouldScanError("Query V3 requires an authoritative inventory scan.")
         refresh_action = self._refresh_derived_indexes()
         capture = SourceCapture()
@@ -2238,12 +2284,30 @@ class IdentityQuery:
         members, _, _ = self._captured_members(capture) if captured is None else captured
         if self.max_verify_limit is not None and len(members) > self.max_verify_limit:
             raise QueryVerifyBudgetExceeded("Query V3 verification budget exceeded.")
+        stores = self._preflight_complete_sources(capture)
+        if stores:
+            capture.capture_stores(stores)
         generator_budget = _GeneratorWitnessBudget(self.max_witness_limit)
         validation_domain = members
         metadata_matches = {}
+        scope_facts = {}
+        exact_cdef = self._exact_stored_cdef_selector()
         for restriction in self.restrictions:
+            if restriction.kind in {"stored", "alias", "metadata"}:
+                from .source import RepoSource, StoreSource
+
+                direct_stored = restriction.kind == "stored" and exact_cdef is not None and (
+                    isinstance(restriction.scope, StoreSource)
+                    and capture.has_exact_stored_cdef(restriction.scope, exact_cdef)
+                    or isinstance(restriction.scope, RepoSource)
+                    and capture.has_exact_stored_cdef_for_repo(restriction.scope.repo, exact_cdef)
+                )
+                if not direct_stored:
+                    scope_facts[id(restriction)] = self._scope_facts(restriction.scope, capture)
+                if restriction.kind == "alias":
+                    self._matches_alias(None, restriction.value, scope_facts[id(restriction)])
             if restriction.kind == "metadata":
-                facts = self._scope_facts(restriction.scope, capture)
+                facts = scope_facts[id(restriction)]
                 metadata_matches[id(restriction)] = {
                     key: self._matches_metadata(entry[0], restriction.value, facts)
                     for key, entry in validation_domain.items()
@@ -2260,6 +2324,7 @@ class IdentityQuery:
                         break
                 elif not self._matches(
                     restriction, entry[0], entry[1], capture, generator_budget,
+                    facts=scope_facts.get(id(restriction), ()),
                 ):
                     break
             else:
@@ -2309,11 +2374,7 @@ class IdentityQuery:
                 self.source.left._requires_authority_scan()
                 or self.source.right._requires_authority_scan()
             )
-        exact_state = self._exact_state_selector()
-        needs_inventory = any(
-            item.kind in {"alias", "stored"} for item in self.restrictions
-        )
-        return exact_state is None or bool(self._metadata_scopes()) or needs_inventory
+        return True
 
     def _captured_members(self, capture=None):
         from .identity import IdentitySet
@@ -2327,10 +2388,6 @@ class IdentityQuery:
 
         capture = SourceCapture() if capture is None else capture
         scopes = self._metadata_scopes()
-        exact_state = self._exact_state_selector()
-        needs_inventory = any(
-            restriction.kind in {"alias", "stored"} for restriction in self.restrictions
-        )
         exact_cdef = self._exact_stored_cdef_selector()
         if isinstance(self.source, StoreSource) and exact_cdef is not None:
             direct = capture.read_exact_stored_cdef(self.source, exact_cdef)
@@ -2366,26 +2423,12 @@ class IdentityQuery:
                 stacklevel=4,
             )
             capture.scan_warning_emitted = True
-        if exact_state is not None and not scopes and not needs_inventory:
-            if isinstance(self.source, StoreSource):
-                state = capture.read_exact_state(self.source, exact_state)
-                members = () if state is None else ((state, self._source_evidence(self.source)),)
-                return IdentitySet(members)._entries, capture, False
-            if isinstance(self.source, RepoSource):
-                with self.source.repo.retain_topology(allow_physical_duplicates=True):
-                    members = [
-                        (state, self._source_evidence(store))
-                        for store in capture.repo_stores(self.source.repo)
-                        if (state := capture.read_exact_state(store, exact_state)) is not None
-                    ]
-                    if exact_state in capture.cache_knowledge(
-                        self.source.repo, weak=self.source.weak,
-                    ):
-                        members.append((exact_state, self._source_evidence(self.source.repo)))
-                return IdentitySet(members)._entries, capture, False
         if isinstance(self.source, IdentitySet):
             result = self.source
         elif isinstance(self.source, _AlgebraSource):
+            stores = self._preflight_complete_sources(capture)
+            if stores:
+                capture.capture_stores(stores)
             left, left_bounded = self.source.left._evaluated_entries(capture)
             right, right_bounded = self.source.right._evaluated_entries(capture)
             if self.source.operation == "union":
@@ -2426,6 +2469,45 @@ class IdentityQuery:
                 "or retained Repo lookup source."
             )
         return dict(result._entries), capture, result.bounded
+
+    def _preflight_complete_sources(self, capture):
+        """Complete broad operand cuts before filtering any selected root set.
+
+        Selective stored-CDef and paged prefixes retain their existing admission
+        paths. Complete knowledge operands share detached facts, including their
+        own metadata demand, so later filtering cannot hide ObjectId conflicts.
+        """
+
+        from .source import RepoSource, StoreSource
+
+        stores = []
+        if isinstance(self.source, _AlgebraSource):
+            stores.extend(self.source.left._preflight_complete_sources(capture))
+            stores.extend(self.source.right._preflight_complete_sources(capture))
+        elif isinstance(self.source, _RelationshipClosure):
+            stores.extend(self.source.input_query._preflight_complete_sources(capture))
+        elif isinstance(self.source, _RelationshipProjection):
+            stores.extend(self.source.occurrence_query.roots._preflight_complete_sources(capture))
+        elif (self.take_limit is None and self._exact_stored_cdef_selector() is None
+              and isinstance(self.source, (StoreSource, RepoSource))):
+            self._captured_members(capture)
+            stores.extend((self.source.store,) if isinstance(self.source, StoreSource)
+                          else capture.repo_stores(self.source.repo))
+        exact_cdef = self._exact_stored_cdef_selector()
+        for restriction in self.restrictions:
+            if restriction.kind not in {"stored", "alias", "metadata"}:
+                continue
+            if restriction.kind == "stored" and exact_cdef is not None and (
+                isinstance(restriction.scope, StoreSource)
+                and capture.has_exact_stored_cdef(restriction.scope, exact_cdef)
+                or isinstance(restriction.scope, RepoSource)
+                and capture.has_exact_stored_cdef_for_repo(restriction.scope.repo, exact_cdef)
+            ):
+                continue
+            self._scope_facts(restriction.scope, capture)
+            stores.extend((restriction.scope.store,) if isinstance(restriction.scope, StoreSource)
+                          else capture.repo_stores(restriction.scope.repo))
+        return tuple(stores)
 
     def _exact_state_selector(self):
         """Return one terminal-selective StateRef filter, if the plan has one."""
@@ -2488,7 +2570,7 @@ class IdentityQuery:
                 return capture.capture_stores(capture.repo_stores(repo), metadata_scopes=scopes)
         raise TypeError("Query V3 authority scope is invalid.")
 
-    def _matches(self, restriction, value, evidence, capture, generator_budget) -> bool:
+    def _matches(self, restriction, value, evidence, capture, generator_budget, *, facts=()) -> bool:
         from ..definition import ConcreteDefinition, Definition
         from ..generator import GeneratorSelector
         from ..reference_values import ObjectRef, StateRef
@@ -2564,15 +2646,15 @@ class IdentityQuery:
                 and capture.has_exact_stored_cdef_for_repo(restriction.scope.repo, value)
             ):
                 return True
-            return any(fact.is_stored(value) for fact in self._scope_facts(restriction.scope, capture))
+            return any(fact.is_stored(value) for fact in facts)
         if restriction.kind == "cached":
             return value in capture.cache_knowledge(
                 restriction.scope.repo, weak=restriction.value,
             )
         if restriction.kind == "alias":
-            return self._matches_alias(value, restriction.value, self._scope_facts(restriction.scope, capture))
+            return self._matches_alias(value, restriction.value, facts)
         if restriction.kind == "metadata":
-            return self._matches_metadata(value, restriction.value, self._scope_facts(restriction.scope, capture))
+            return self._matches_metadata(value, restriction.value, facts)
         raise QueryDomainError("Query V3 restriction is unsupported.")
 
     @staticmethod
