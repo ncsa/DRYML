@@ -22,7 +22,6 @@ from ..params import Match
 from ..quoted import QuotedDef, SelectorSpec
 from ..selector import Selector
 from ..symbol import maybe_symbol_ref, resolve_symbol
-from ..errors import ParameterizationLimitError
 from ..utils.types import is_nonclass_callable
 from .model import (
     ClassMatchPolicy,
@@ -45,17 +44,6 @@ from .utils import cdef_equal
 
 
 _DEFAULT_GENERATOR_WITNESS_LIMIT = 65_536
-
-
-@dataclass(slots=True)
-class _GeneratorWitnessBudget:
-    limit: int | None
-    visited: int = 0
-
-    def consume(self) -> None:
-        self.visited += 1
-        if self.limit is not None and self.visited > self.limit:
-            raise ParameterizationLimitError("generator query witness limit exceeded")
 
 
 def _query_match(
@@ -2549,6 +2537,8 @@ class IdentityQuery:
         Selective stored-CDef and paged prefixes retain their existing admission
         paths. Complete knowledge operands share detached facts, including their
         own metadata demand, so later filtering cannot hide ObjectId conflicts.
+        Bounded inventory and selective fallback cuts participate once complete;
+        a bound alone never excludes already captured producer authority.
         An already materialized producer needs only scope demands and combined
         authority validation, not another member/evidence construction.
         """
@@ -2570,15 +2560,16 @@ class IdentityQuery:
                 capture, producer_captured=producer_captured,
             ))
         elif isinstance(self.source, _RelationshipProjection):
-            stores.extend(self.source.occurrence_query.roots._preflight_complete_sources(
+            stores.extend(self.source.occurrence_query._preflight_complete_sources(
                 capture, producer_captured=producer_captured,
             ))
-        elif (self.take_limit is None and self._exact_stored_cdef_selector() is None
-              and isinstance(self.source, (StoreSource, RepoSource))):
-            if not producer_captured:
+        elif isinstance(self.source, (StoreSource, RepoSource)):
+            producer_stores = ((self.source.store,) if isinstance(self.source, StoreSource)
+                               else capture.repo_stores(self.source.repo))
+            if (not producer_captured and self._exact_stored_cdef_selector() is None
+                    and self._bounded_index_stores(capture) is None):
                 self._captured_members(capture)
-            stores.extend((self.source.store,) if isinstance(self.source, StoreSource)
-                          else capture.repo_stores(self.source.repo))
+            stores.extend(store for store in producer_stores if capture.has_complete_store_cut(store))
         exact_cdef = self._exact_stored_cdef_selector()
         for restriction in self.restrictions:
             if restriction.kind not in {"stored", "alias", "metadata"}:
@@ -2878,7 +2869,7 @@ class _RelationshipProjection:
         from .source import SourceCapture
 
         capture = SourceCapture(self.occurrence_query.roots) if capture is None else capture
-        roots = self.occurrence_query.roots._collect_with_capture(capture)
+        roots = self.occurrence_query._capture_roots(capture)
         members = []
         for value, sources in self.occurrence_query._project(self.projection, roots, capture):
             members.extend((value, source) for source in sources)
@@ -2913,6 +2904,8 @@ class OccurrenceQuery:
     Root terminal controls also govern target verification and external metadata
     scopes. Projections inherit those controls and this plan's depth limit; an
     explicit outer projection override governs the entire nested expression.
+    Complete producer and metadata-scope authority is validated together before
+    filtering, even for empty domains; scope holders do not become candidates.
     """
 
     roots: IdentityQuery
@@ -3186,7 +3179,7 @@ class OccurrenceQuery:
     def _take_with_capture(self, capture, limit):
         from .identity import OccurrenceSet
 
-        roots = self.roots._collect_with_capture(capture)
+        roots = self._capture_roots(capture)
         selected = []
         for occurrence in self._iter_occurrences(capture, roots=roots):
             sources = (
@@ -3243,7 +3236,7 @@ class OccurrenceQuery:
         from .identity import OccurrenceSet
         from .relationships import iter_relationship_occurrences
 
-        roots = self.roots._collect_with_capture(capture)
+        roots = self._capture_roots(capture)
         matches = self._target_matcher(roots, capture)
         if self.fixed is not None:
             members = []
@@ -3401,7 +3394,7 @@ class OccurrenceQuery:
 
         from .relationships import iter_relationship_occurrences
 
-        roots = self.roots._collect_with_capture(capture) if roots is None else roots
+        roots = self._capture_roots(capture) if roots is None else roots
         matches = self._target_matcher(roots, capture)
         if self.fixed is not None:
             yield from self._iter_fixed_occurrences(matches=matches)
@@ -3454,6 +3447,34 @@ class OccurrenceQuery:
                 break
         return occurrences
 
+    def _metadata_query(self):
+        """Declare target scope demand without admitting metadata holders."""
+
+        from .identity import IdentitySet
+
+        query = IdentityQuery.from_set(IdentitySet())
+        for predicate, scope in self.metadata_restrictions:
+            query = query.where(predicate, scope=scope)
+        return query
+
+    def _preflight_complete_sources(self, capture, *, producer_captured=False):
+        """Select complete root and target scope cuts for one authority proof."""
+
+        return (
+            *self.roots._preflight_complete_sources(capture, producer_captured=producer_captured),
+            *self._metadata_query()._preflight_complete_sources(capture),
+        )
+
+    def _capture_roots(self, capture):
+        """Validate selected authority before filtering roots or traversing targets."""
+
+        if self.metadata_restrictions:
+            capture.capture_stores(self._preflight_complete_sources(capture))
+        roots = self.roots._collect_with_capture(capture)
+        if self.metadata_restrictions:
+            capture.capture_stores(self._preflight_complete_sources(capture, producer_captured=True))
+        return roots
+
     def _target_matcher(self, roots, capture):
         """Admit targets and validate metadata under the existing terminal owner."""
 
@@ -3486,9 +3507,7 @@ class OccurrenceQuery:
                 through=self.through_kinds, path=self.path_filter,
                 max_depth=capture.max_depth_limit,
             )
-        query = IdentityQuery.from_set(IdentitySet(candidates))
-        for predicate, scope in self.metadata_restrictions:
-            query = query.where(predicate, scope=scope)
+        query = replace(self._metadata_query(), source=IdentitySet(candidates))
         for selector in ((self.selector,) if self.selector is not None else ()) + self.additional_selectors:
             query = query.sel(selector)
         qualified = {identity_key(value) for value in query._collect_with_capture(capture)}

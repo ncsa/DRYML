@@ -411,7 +411,9 @@
             "test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships",
             "test_u6_projection_disabled_refresh_survives_every_terminal",
             "test_u6_projection_outer_budget_depth_and_witness_controls",
-            "test_u6_occurrence_external_target_scope_cannot_escape_controls"
+            "test_u6_occurrence_external_target_scope_cannot_escape_controls",
+            "test_occurrence_combines_producer_and_external_metadata_authority",
+            "test_occurrence_metadata_preflight_does_not_admit_or_project_scope_holders"
           ]
         },
         "tests/core/test_query_v3_execution.py": {
@@ -424,6 +426,8 @@
             "test_exact_state_scoped_read_failure_is_visible_before_scalar_stop",
             "test_empty_candidates_do_not_suppress_external_alias_conflict",
             "test_algebra_validates_selected_roots_before_operand_filtering",
+            "test_bounded_inventory_combines_external_stored_authority",
+            "test_bounded_fallback_algebra_combines_complete_authority",
             "test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut",
             "test_u6_budget_reserves_broad_domain_before_scalar_verification",
             "test_u6_fixed_repeated_stages_share_admissions_and_outer_controls",

@@ -119,6 +119,12 @@ results. SQLite generations are not Store authority generations. Repo topology,
 cache tiers, full knowledge, and retained root-or-cache lookup remain distinct;
 separate Zip transactions retain separate cuts. Proofs never cross terminals.
 
+Complete inventory-backed bounded operands and selective fallback cuts participate
+in this same combined validation. An explicit prefix cannot hide conflicts against
+external authority scopes or another operand, including an empty filtered operand.
+Selective positive and ready indexed-prefix paths still avoid broad inventory;
+`take(0)` still acquires no sources.
+
 ## Relationships
 
 Relationships begin with an explicitly selected root universe. `roots.nested()`
@@ -147,6 +153,11 @@ target projections remain existential. `max_depth()`, `max_verify()`,
 visible execution bounds and diagnostics across composition. `explain(analyze=True)`
 executes the plan; ordinary explanations report planned source cuts and residual
 work without evaluation.
+
+Direct occurrence terminals and both projections combine complete root-producer
+authority with external target metadata scopes before root or target filtering,
+including empty domains. Metadata holders contribute authority proof only, not
+candidate admissions or additional roots/targets.
 
 `scan_policy("allow")` permits required authoritative inventory scans,
 `scan_policy("warn")` additionally emits one warning per scanning terminal, and

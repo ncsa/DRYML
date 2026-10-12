@@ -469,3 +469,65 @@ def test_u6_occurrence_external_target_scope_cannot_escape_controls(tmp_path, mo
         with pytest.raises(QueryWouldScanError):
             terminal()
         assert scans == []
+
+
+@pytest.mark.parametrize("projection", ("direct", "owners", "targets"))
+@pytest.mark.parametrize("domain", ("positive", "empty-targets", "empty-roots"))
+def test_occurrence_combines_producer_and_external_metadata_authority(tmp_path, projection, domain):
+    """Unrelated root conflicts precede root/target filtering in every terminal."""
+
+    from dryml.core.query.model import QueryError
+    from dryml.core.store.records import DeclarationRecord, DefinitionRecord
+
+    producer = DirStore(tmp_path / "producer", query_index="memory")
+    metadata = DirStore(tmp_path / "metadata", query_index="memory")
+    target = ObjectRef(Definition(V3TraversalLeaf, "target").concretize(), {GraphPath(): ObjectId()})
+    owner = Definition(V3TraversalParent, target).concretize()
+    producer.write_definition_record(DefinitionRecord(owner))
+    metadata.write_declaration_record(DeclarationRecord(target))
+    metadata.write_metadata(target, {"team": "selected"})
+    object_id = ObjectId()
+    for store, name in ((producer, "first"), (metadata, "second")):
+        store.write_declaration_record(DeclarationRecord(ObjectRef(
+            Definition(V3TraversalLeaf, name).concretize(), {GraphPath(): object_id},
+        )))
+    roots = producer.query().cdefs().sel(
+        Definition(V3TraversalParent, None).concretize() if domain == "empty-roots" else owner
+    )
+    query = roots.nested(target).where(
+        field("object", "team").eq("absent" if domain == "empty-targets" else "selected"),
+        scope=Repo(metadata) if domain == "empty-roots" else metadata,
+    )
+    if projection != "direct":
+        query = getattr(query, projection)()
+    for terminal in (query.exists, query.count, query.one, query.one_or_none, query.collect,
+                     lambda: query.take(1)):
+        with pytest.raises(QueryError, match="object-reference authority conflicts"):
+            terminal()
+
+
+def test_occurrence_metadata_preflight_does_not_admit_or_project_scope_holders(tmp_path):
+    """External holder inventory proves authority without widening candidate work."""
+
+    from dryml.core.store.records import DeclarationRecord, DefinitionRecord
+
+    producer = DirStore(tmp_path / "producer", query_index="memory")
+    metadata = DirStore(tmp_path / "metadata", query_index="memory")
+    target = ObjectRef(Definition(V3TraversalLeaf, "target").concretize(), {GraphPath(): ObjectId()})
+    owner = Definition(V3TraversalParent, target).concretize()
+    producer.write_definition_record(DefinitionRecord(owner))
+    metadata.write_declaration_record(DeclarationRecord(target))
+    metadata.write_metadata(target, {"team": "selected"})
+    for name in ("unrelated-a", "unrelated-b"):
+        metadata.write_declaration_record(DeclarationRecord(ObjectRef(
+            Definition(V3TraversalLeaf, name).concretize(), {GraphPath(): ObjectId()},
+        )))
+    query = producer.query().cdefs().sel(owner).max_verify(3).nested(target).where(
+        field("object", "team").eq("selected"), scope=metadata,
+    )
+    assert query.one().target == target
+    assert query.owners().one() == owner
+    result = query.targets().collect()
+    assert result.one() == target
+    assert result.sources(target) == frozenset((IdentityQuery._source_evidence(producer),))
+    assert query.targets().explain(analyze=True).verified_count == 3

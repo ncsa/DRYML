@@ -527,9 +527,12 @@ def test_empty_candidates_do_not_suppress_external_alias_conflict(tmp_path):
         query.exists()
 
 
-def test_algebra_validates_selected_roots_before_operand_filtering(tmp_path):
-    """An empty filtered operand still contributes its authority obligations."""
+@pytest.mark.parametrize("bounded", (False, True))
+@pytest.mark.parametrize("empty", (False, True))
+def test_algebra_validates_selected_roots_before_operand_filtering(tmp_path, bounded, empty):
+    """Positive and empty filtered operands retain their authority obligations."""
 
+    from dataclasses import replace
     from dryml.core import ObjectId, ObjectRef
     from dryml.core.query.model import QueryError
     from dryml.core.store.records import DeclarationRecord
@@ -543,12 +546,65 @@ def test_algebra_validates_selected_roots_before_operand_filtering(tmp_path):
     first.write_declaration_record(DeclarationRecord(refs[0]))
     second.write_declaration_record(DeclarationRecord(refs[1]))
     left = first.query().sel(refs[0]).object_refs()
-    right = second.query().sel(refs[0]).object_refs()
-    for query in (left.union(right), right.union(left), left.intersection(right)):
+    right = second.query().sel(refs[0] if empty else refs[1]).object_refs()
+    if bounded:
+        left, right = (replace(query, take_limit=1) for query in (left, right))
+    for query in (left.union(right), right.union(left), left.intersection(right), right.intersection(left)):
         with pytest.raises(QueryError, match="authority conflicts"):
             query.exists()
     with pytest.raises(QueryError, match="authority conflicts"):
         left.stored(scope=second).exists()
+
+
+@pytest.mark.parametrize("matching", (False, True))
+def test_bounded_inventory_combines_external_stored_authority(tmp_path, monkeypatch, matching):
+    """A bounded positive or empty scope match cannot hide unrelated root conflicts."""
+
+    from dryml.core import ObjectId, ObjectRef
+    from dryml.core.query.model import QueryError
+    from dryml.core.store.records import DeclarationRecord
+    from dryml.core.utils.graph.path import GraphPath
+
+    first = DirStore(tmp_path / "first", query_index="memory")
+    second = DirStore(tmp_path / "second", query_index="memory")
+    target = ObjectRef(Definition(ExecutionStatefulLeaf, "target").concretize(), {GraphPath(): ObjectId()})
+    first.write_declaration_record(DeclarationRecord(target))
+    if matching:
+        second.write_declaration_record(DeclarationRecord(target))
+    object_id = ObjectId()
+    for store, name in ((first, "first"), (second, "second")):
+        store.write_declaration_record(DeclarationRecord(ObjectRef(
+            Definition(ExecutionStatefulLeaf, name).concretize(), {GraphPath(): object_id},
+        )))
+    query = first.query().sel(target).object_refs().stored(scope=second)
+    with pytest.raises(QueryError, match="object-reference authority conflicts"):
+        query.take(1)
+    for store in (first, second):
+        monkeypatch.setattr(store, "_validated_definition_root_inventory",
+                            lambda: pytest.fail("take(0) acquired scoped inventory"))
+    assert query.max_verify(0).take(0).count() == 0
+
+
+def test_bounded_fallback_algebra_combines_complete_authority(tmp_path):
+    """Alias-only bounded domains retain complete authority obligations in algebra."""
+
+    from dataclasses import replace
+    from dryml.core import ObjectId, ObjectRef
+    from dryml.core.query.model import QueryError
+    from dryml.core.store.records import ObjectAliasRecord
+    from dryml.core.utils.graph.path import GraphPath
+
+    stores = tuple(DirStore(tmp_path / name, query_index="sqlite") for name in ("first", "second"))
+    object_id = ObjectId()
+    for store, name in zip(stores, ("first", "second")):
+        store.write_object_alias(ObjectAliasRecord("root", ObjectRef(
+            Definition(ExecutionStatefulLeaf, name).concretize(), {GraphPath(): object_id},
+        )))
+        store.rebuild_query_index()
+    left, right = (replace(store.query().cdefs().stored().refresh(False), take_limit=1) for store in stores)
+    for query in (left.union(right), right.union(left), left.intersection(right), right.intersection(left)):
+        with pytest.raises(QueryError, match="object-reference authority conflicts"):
+            query.collect()
 
 
 def test_u6_budget_reserves_broad_domain_before_scalar_verification(tmp_path, monkeypatch):

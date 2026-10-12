@@ -16,6 +16,7 @@ from typing import Iterable
 
 from ..object import Object
 from ..definition import ConcreteDefinition
+from ..errors import ParameterizationLimitError
 from ..reference_values import ObjectRef, StateRef
 from ..store.records import DefinitionRecord
 from ..store.store import Store, StoreCapabilityError
@@ -26,6 +27,17 @@ from .authority import (
     validate_captured_reference_authority,
 )
 from .identity import IdentitySet, SourceEvidence, identity_key
+
+
+@dataclass(slots=True)
+class _GeneratorWitnessBudget:
+    limit: int | None
+    visited: int = 0
+
+    def consume(self) -> None:
+        self.visited += 1
+        if self.limit is not None and self.visited > self.limit:
+            raise ParameterizationLimitError("generator query witness limit exceeded")
 
 
 class InventoryCapabilityError(StoreCapabilityError):
@@ -242,8 +254,6 @@ class SourceCapture:
         """
 
         if self._witness_budget is None:
-            from .query import _GeneratorWitnessBudget
-
             self._witness_budget = _GeneratorWitnessBudget(self.max_witness_limit)
         return self._witness_budget
 
