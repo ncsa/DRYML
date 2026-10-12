@@ -229,8 +229,15 @@ def test_reference_validation_visits_roots_linearly_per_selected_cut(
         )))
     passes = 0
     visits = 0
+    materializations = 0
     original_combination = source.validate_captured_reference_authority
     original_roots = authority._validate_object_reference_roots
+    original_repo = source.SourceCapture.capture_repo
+
+    def capture_repo(capture, *args, **kwargs):
+        nonlocal materializations
+        materializations += 1
+        return original_repo(capture, *args, **kwargs)
 
     def combination(facts):
         nonlocal passes
@@ -247,10 +254,13 @@ def test_reference_validation_visits_roots_linearly_per_selected_cut(
 
     monkeypatch.setattr(source, "validate_captured_reference_authority", combination)
     monkeypatch.setattr(authority, "_validate_object_reference_roots", roots)
+    monkeypatch.setattr(source.SourceCapture, "capture_repo", capture_repo)
     query = Repo(store).query().object_refs().stored()
     assert query.count() == root_count
     assert passes == 1
     assert visits == root_count
+    assert materializations == 1
     assert query.count() == root_count
     assert passes == 2
     assert visits == 2 * root_count
+    assert materializations == 2

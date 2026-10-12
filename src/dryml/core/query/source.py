@@ -461,20 +461,23 @@ class SourceCapture:
         self._exact_stored_cdefs.setdefault(key, set()).add(identity_key(record.definition))
         return record.definition
 
-    def has_exact_stored_cdef(self, source: StoreSource, value: ConcreteDefinition) -> bool:
+    def has_exact_stored_cdef(self, source: StoreSource | RepoSource, value: ConcreteDefinition) -> bool:
         """Return whether this cut already verified an exact stored root.
 
         Args:
-            source: Store producer for the prior direct read.
+            source: Normalized Store or Repo scope for prior direct reads.
             value: Candidate CDef to check by complete graph identity.
 
         Returns:
             Whether a matching positive marker was verified in this terminal.
+            Repo scopes require a nonempty topology and proof from every Store.
 
         Side Effects:
             None. This does not reread or change Store authority.
         """
 
+        if isinstance(source, RepoSource):
+            return self.has_exact_stored_cdef_for_repo(source.repo, value)
         return identity_key(value) in self._exact_stored_cdefs.get(
             source.store.authority_fence_key(), set(),
         )

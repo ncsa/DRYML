@@ -2376,7 +2376,7 @@ class IdentityQuery:
         if capture.indexed_required and self._requires_authority_inventory():
             raise QueryIndexUnavailable("Query V3 index coverage is not available for this plan.")
         members, _, _ = self._captured_members(capture) if captured is None else captured
-        stores = self._preflight_complete_sources(capture)
+        stores = self._preflight_complete_sources(capture, producer_captured=True)
         if stores:
             capture.capture_stores(stores)
         capture.reserve(entry[0] for entry in members.values())
@@ -2387,13 +2387,8 @@ class IdentityQuery:
         exact_cdef = self._exact_stored_cdef_selector()
         for restriction in self.restrictions:
             if restriction.kind in {"stored", "alias", "metadata"}:
-                from .source import RepoSource, StoreSource
-
                 direct_stored = restriction.kind == "stored" and exact_cdef is not None and (
-                    isinstance(restriction.scope, StoreSource)
-                    and capture.has_exact_stored_cdef(restriction.scope, exact_cdef)
-                    or isinstance(restriction.scope, RepoSource)
-                    and capture.has_exact_stored_cdef_for_repo(restriction.scope.repo, exact_cdef)
+                    capture.has_exact_stored_cdef(restriction.scope, exact_cdef)
                 )
                 if not direct_stored:
                     scope_facts[id(restriction)] = self._scope_facts(restriction.scope, capture)
@@ -2548,12 +2543,14 @@ class IdentityQuery:
             )
         return dict(result._entries), capture, result.bounded
 
-    def _preflight_complete_sources(self, capture):
+    def _preflight_complete_sources(self, capture, *, producer_captured=False):
         """Complete broad operand cuts before filtering any selected root set.
 
         Selective stored-CDef and paged prefixes retain their existing admission
         paths. Complete knowledge operands share detached facts, including their
         own metadata demand, so later filtering cannot hide ObjectId conflicts.
+        An already materialized producer needs only scope demands and combined
+        authority validation, not another member/evidence construction.
         """
 
         from .source import RepoSource, StoreSource
@@ -2562,15 +2559,24 @@ class IdentityQuery:
             return ()
         stores = []
         if isinstance(self.source, _AlgebraSource):
-            stores.extend(self.source.left._preflight_complete_sources(capture))
-            stores.extend(self.source.right._preflight_complete_sources(capture))
+            stores.extend(self.source.left._preflight_complete_sources(
+                capture, producer_captured=producer_captured,
+            ))
+            stores.extend(self.source.right._preflight_complete_sources(
+                capture, producer_captured=producer_captured,
+            ))
         elif isinstance(self.source, _RelationshipClosure):
-            stores.extend(self.source.input_query._preflight_complete_sources(capture))
+            stores.extend(self.source.input_query._preflight_complete_sources(
+                capture, producer_captured=producer_captured,
+            ))
         elif isinstance(self.source, _RelationshipProjection):
-            stores.extend(self.source.occurrence_query.roots._preflight_complete_sources(capture))
+            stores.extend(self.source.occurrence_query.roots._preflight_complete_sources(
+                capture, producer_captured=producer_captured,
+            ))
         elif (self.take_limit is None and self._exact_stored_cdef_selector() is None
               and isinstance(self.source, (StoreSource, RepoSource))):
-            self._captured_members(capture)
+            if not producer_captured:
+                self._captured_members(capture)
             stores.extend((self.source.store,) if isinstance(self.source, StoreSource)
                           else capture.repo_stores(self.source.repo))
         exact_cdef = self._exact_stored_cdef_selector()
@@ -2578,10 +2584,7 @@ class IdentityQuery:
             if restriction.kind not in {"stored", "alias", "metadata"}:
                 continue
             if restriction.kind == "stored" and exact_cdef is not None and (
-                isinstance(restriction.scope, StoreSource)
-                and capture.has_exact_stored_cdef(restriction.scope, exact_cdef)
-                or isinstance(restriction.scope, RepoSource)
-                and capture.has_exact_stored_cdef_for_repo(restriction.scope.repo, exact_cdef)
+                capture.has_exact_stored_cdef(restriction.scope, exact_cdef)
             ):
                 continue
             self._scope_facts(restriction.scope, capture)
@@ -2712,18 +2715,9 @@ class IdentityQuery:
         if restriction.kind == "state_hash":
             return isinstance(value, StateRef) and restriction.value in value.states.values()
         if restriction.kind == "stored":
-            from .source import RepoSource, StoreSource
-
             if (
                 isinstance(value, ConcreteDefinition)
-                and isinstance(restriction.scope, StoreSource)
                 and capture.has_exact_stored_cdef(restriction.scope, value)
-            ):
-                return True
-            if (
-                isinstance(value, ConcreteDefinition)
-                and isinstance(restriction.scope, RepoSource)
-                and capture.has_exact_stored_cdef_for_repo(restriction.scope.repo, value)
             ):
                 return True
             return any(fact.is_stored(value) for fact in facts)
