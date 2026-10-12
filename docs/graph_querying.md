@@ -142,6 +142,44 @@ does not reconcile derived indexes, `refresh("auto")` reconciles stale indexes
 when safe, and `refresh(True)` forces reconciliation before each terminal cut.
 Refresh may replace derived index sidecars but never rewrites Store authority.
 
+These are terminal-owned controls: they apply to producers **and** external
+stored, alias, and metadata scopes, algebra operands, closure, occurrence targets,
+and owner/target projections. A fixed producer is source-free only when its
+restrictions are source-free too. Projections inherit controls without inheriting
+raw occurrence caps. An explicit control on the outer query governs its nested
+execution; algebra construction still rejects incompatible operand policies.
+Warnings precede the first inventory or recovery scan, once per terminal.
+Forced refresh does not permit a recovery scan under forbid or indexed-only
+controls; disabled refresh does not initialize or rebuild a missing/dirty sidecar.
+
+### Verification Admission Budget
+
+`max_verify(n)` bounds cumulative graph-exact detached identity candidates admitted
+to verification by one terminal, rather than filesystem reads, SQL rows, bytes,
+metadata holders, or replica checks. Budget exhaustion raises
+`QueryVerifyBudgetExceeded` before the next candidate/domain is verified.
+
+- Ordinary inventory reserves the **whole detached candidate domain** before
+  restrictions or scalar early stopping. Fixed refinement reserves its fixed
+  domain; reading an external authority scope does not admit all its holders.
+- Exact checks and indexed pages reserve candidates before direct verification,
+  including misses and rejected candidates. Identical replicas and repeated stages
+  share one admission within an unchanged cut. Genuine collision identities are
+  distinct admissions.
+- Ordering-only, unverified lookahead counts fetch/decode work, not admissions.
+  Lookahead verified to complete a collision bucket is charged even if not returned.
+- Replacing a cut, including unchanged metadata-demand recapture or instability
+  retry, discards reusable admissions and charges readmission. Spent terminal work
+  is never refunded. Selective/paged fallback charges its new complete inventory
+  domain in addition to abandoned-attempt expenditure. Existing retry caps remain.
+- `take(0)` acquires no sources and admits nothing. Witness and depth budgets are
+  separate and inherit effective outer controls.
+
+Analyzed explanations report admissions as `verified_count`, inventory/completed
+recovery scans as `store_scan_count`, and page work separately as
+`candidate_rows_read`, `cdef_blobs_decoded`, and `pages_fetched`. Payload-free
+metadata and recovery IO remain scan-controlled work, even without admissions.
+
 Trusted selector resolution may import ordinary Python code when its existing
 semantics require it. That accepted import side effect does not permit query
 operators to construct Objects or execute workloads.

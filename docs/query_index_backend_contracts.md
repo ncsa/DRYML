@@ -25,6 +25,27 @@ creates a replacement token even if authority is unchanged, invalidating depende
 proofs/results under the existing bounded retry policy. A SQLite generation is
 derived-index state, not a Store authority generation or cross-terminal proof.
 
+The terminal-owned SourceCapture also retains effective outer refresh, scan,
+indexed-only, verification, witness, and depth controls for all nested consumers,
+including external restriction and occurrence-target scopes. Authority capture
+and explicit recovery reject prohibited scans before inventory IO; warning mode
+reports the first required scan before it starts. Forced refresh grants no scan
+permission. Owner/target projection preserves controls and existential semantics.
+
+Verification budgeting counts graph-exact detached identity admissions, not
+sidecar rows, decoded blobs, authoritative reads, metadata holders, or replica
+checks. Ordinary/fixed execution reserves its detached domain before restrictions;
+exact and paged execution reserve before direct verification, including rejected
+candidates. Unverified ordering lookahead is fetch/decode work, while verified
+collision-bucket lookahead is admitted. Unchanged-cut stages and replicas share
+charges; distinct collision identities do not. Replacement tokens, demand
+recapture, instability retry, and selective/paged-to-inventory fallback discard
+reusable admissions without refunding cumulative expenditure. The fallback's
+new inventory domain is charged afresh. `take(0)` reads and admits nothing.
+Existing QueryExplanation fields report admission (`verified_count`), actual
+inventory/completed recovery (`store_scan_count`), and page work independently;
+this correction introduces no new stats schema or persisted format.
+
 SQLite connections are process-local. Rebuild and mutation use staged activation so a reader sees a prior complete index or a new complete index. Dirty, absent, corrupt, or incompatible metadata projections trigger authoritative fallback or visible rebuild; dirty state is cleared only for the authority generation that was indexed. Index failure never rewrites snapshot/current authority or silently makes stale rows current. Rebuild notices are visible because scans can be long. Rebuild claim descriptors use `dryml.locking` but retain SQLite's claim creation, stale-eligibility, wait, and cleanup policy. Dirty-token and complete main-file activation use `dryml.filesystem` directly after SQLite closes/checkpoints the applicable WAL and handles; the index does not depend on Store-private native helpers. A persistence failure can follow visible sidecar activation, so recovery reconciles status rather than assuming rollback. Supported behavior assumes local SQLite, filesystem rename/persistence, and locking semantics; distributed filesystems are outside this contract.
 
 `dryml.core.query.sqlite.open_connection(config, *, readonly=False)` is the public standalone connection owner. `config` must be a `SQLiteQueryIndexConfig`, `readonly` must be exactly `bool`, and `config.path` must be present; validation occurs before importing SQLite or creating a parent/database. Invalid argument types raise `TypeError`, while an absent configured path raises actionable `QueryIndexError`. The connection applies the same foreign-key, timeout, trusted-schema, journal, and durability configuration as the query-index connection manager and always closes its connection. Writable opening creates missing parent directories; read-only opening requires an existing database and creates neither the target nor its parent. SQLite open/configuration errors remain SQLite errors, while a missing optional backend is reported as `QueryIndexUnavailable`.

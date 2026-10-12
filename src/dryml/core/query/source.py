@@ -3,6 +3,9 @@
 This layer turns Repo, Store, and fixed members into detached identity evidence
 without publishing a replacement query API. It snapshots Repo topology once per
 capture and groups only identical authority-fence domains.
+The terminal's capture also enforces outer scan/index controls and cumulative
+identity admissions, retaining expenditure across replacement and retry without
+changing authoritative records or introducing cross-terminal proof reuse.
 """
 
 from __future__ import annotations
@@ -93,9 +96,30 @@ class SourceCapture:
     Complete-combination proofs use sorted unique domains and fresh fact tokens;
     selective direct reads cannot stand in for complete coverage. Store knowledge,
     retained lookup roots, topology, and Repo cache tiers remain distinct.
+    Effective outer controls govern every consumer. ``verified_count`` records
+    cumulative identity admissions, while ``store_scan_count`` records inventory
+    and completed recovery scans separately from page fetch/decode counters.
     """
 
-    def __init__(self):
+    def __init__(self, controls=None):
+        """Retain effective terminal policies; standalone captures default to allow.
+
+        ``controls`` is the outer IdentityQuery. Its immutable policy declarations
+        govern every nested consumer of this capture. Admissions are graph-exact,
+        cumulative across replacements, and independent of record/replica IO.
+        """
+
+        self.refresh_policy = getattr(controls, "refresh_policy", "auto")
+        self.scan_policy_mode = getattr(controls, "scan_policy_mode", "allow")
+        self.indexed_required = getattr(controls, "indexed_required", False)
+        self.max_verify_limit = getattr(controls, "max_verify_limit", None)
+        self.max_depth_limit = getattr(controls, "max_depth_limit", None)
+        self.max_witness_limit = getattr(controls, "max_witness_limit", None)
+        self._witness_budget = None
+        self._admitted = set()
+        self.verified_count = 0
+        self.store_scan_count = 0
+        self.scan_warning_emitted = False
         self._facts: dict[str, CapturedStoreFacts] = {}
         self._exact_states: dict[str, dict[str, StateRef | None]] = {}
         self._exact_stored_cdefs: dict[str, set[object]] = {}
@@ -112,6 +136,68 @@ class SourceCapture:
         self.candidate_rows_read = 0
         self.cdef_blobs_decoded = 0
         self.pages_fetched = 0
+
+    def require_scan(self) -> None:
+        """Enforce effective inventory/recovery policy before scan IO.
+
+        Returns None when allowed. Raises QueryIndexUnavailable for indexed-only
+        or QueryWouldScanError for forbidden scans. Warning mode emits at most
+        one RuntimeWarning per terminal, without reading or changing authority.
+        """
+
+        from .model import QueryIndexUnavailable, QueryWouldScanError
+
+        if self.indexed_required:
+            raise QueryIndexUnavailable("Query V3 index coverage requires an authoritative inventory scan.")
+        if self.scan_policy_mode == "forbid":
+            raise QueryWouldScanError("Query V3 requires an authoritative inventory scan.")
+        if self.scan_policy_mode == "warn" and not self.scan_warning_emitted:
+            import warnings
+
+            warnings.warn("Query V3 requires an authoritative inventory scan.", RuntimeWarning, stacklevel=4)
+            self.scan_warning_emitted = True
+
+    def reserve(self, values: Iterable[IdentityValue]) -> None:
+        """Admit a detached candidate domain atomically before its verification.
+
+        Values may repeat across replicas and stages. Budget exhaustion raises
+        QueryVerifyBudgetExceeded before any new candidate is admitted. Replacement
+        cuts clear reusable admissions, never the cumulative spent count.
+        ``values`` supplies detached CDefs/ObjectRefs/StateRefs; unsupported values
+        raise TypeError. Returns None and updates only terminal-local work state,
+        without Store or index IO.
+        """
+
+        from .model import QueryVerifyBudgetExceeded
+
+        new = {identity_key(value) for value in values} - self._admitted
+        if self.max_verify_limit is not None and self.verified_count + len(new) > self.max_verify_limit:
+            raise QueryVerifyBudgetExceeded("Query V3 verification budget exceeded.")
+        self._admitted.update(new)
+        self.verified_count += len(new)
+
+    def invalidate_admissions(self) -> None:
+        """Discard reusable admissions after replacement without refunding work.
+
+        Returns None, retaining cumulative counters and effective controls. This
+        only changes terminal-local state and never reads or changes authority.
+        """
+
+        self._admitted.clear()
+
+    def witness_budget(self):
+        """Return the shared terminal-local GeneratorSelector witness counter.
+
+        Lazily creates the counter with the effective outer witness limit. It
+        performs no source IO; consuming it raises ParameterizationLimitError
+        when the separate witness bound is exceeded.
+        """
+
+        if self._witness_budget is None:
+            from .query import _GeneratorWitnessBudget
+
+            self._witness_budget = _GeneratorWitnessBudget(self.max_witness_limit)
+        return self._witness_budget
 
     def _record_cut(self, key: str) -> None:
         """Account for each fenced read, including selective Store authority."""
@@ -147,7 +233,9 @@ class SourceCapture:
 
         Growing metadata demand replaces earlier facts with a complete new cut;
         V3 predicate evaluation therefore never reads live metadata after its
-        identity inventory was captured.
+        identity inventory was captured. Effective scan/index controls reject
+        prohibited work before inventory IO. Replacement discards reusable
+        admissions without refunding cumulative terminal work.
         """
 
         store = source.store if isinstance(source, StoreSource) else source
@@ -157,9 +245,12 @@ class SourceCapture:
         cached = self._facts.get(key)
         if cached is not None and metadata_scopes <= cached.metadata_scopes:
             return cached
+        selective = cached is None and key in self._cut_domains
+        self.require_scan()
         self._require_complete_inventory(store)
         requested_scopes = metadata_scopes | (cached.metadata_scopes if cached else frozenset())
         with store.authority_read_fence():
+            self.store_scan_count += 1
             self._record_cut(key)
             if cached is not None:
                 self.demand_recaptures += 1
@@ -189,6 +280,8 @@ class SourceCapture:
                 )
         exact = self._exact_states.pop(key, {})
         exact_cdefs = self._exact_stored_cdefs.pop(key, set())
+        if cached is not None or selective:
+            self.invalidate_admissions()
         exact_changed = False
         if exact:
             current_states = {record.digest: record.state_ref for record in facts.state_refs}
@@ -238,6 +331,9 @@ class SourceCapture:
         for this source only. A miss does not exclude embedded or projected
         knowledge: callers need complete capture before a negative live answer.
         This selective proof is separate from complete captured inventory.
+        The target is admitted to the effective verification budget before the
+        direct check, including a miss; replicas share the same identity charge.
+        Budget exhaustion raises QueryVerifyBudgetExceeded before record IO.
         """
 
         store = source.store if isinstance(source, StoreSource) else source
@@ -247,6 +343,7 @@ class SourceCapture:
             raise TypeError("Exact state lookup requires a StateRef.")
         key = store.authority_fence_key()
         digest = target.digest()
+        self.reserve((target,))
         if key in self._facts:
             record = next(
                 (item for item in self._facts[key].state_refs if item.digest == digest), None
@@ -285,6 +382,8 @@ class SourceCapture:
         Raises:
             TypeError: If source or target has an unsupported type.
             InventoryCapabilityError: If direct marker and definition disagree.
+            QueryVerifyBudgetExceeded: Before a new target exceeds the effective
+                cumulative admission budget, without direct record IO.
 
         A missing direct marker is not a negative V3 answer: declarations,
         snapshots, aliases, and main references may establish stored authority,
@@ -298,6 +397,7 @@ class SourceCapture:
             raise TypeError("Exact stored CDef lookup requires a Store and CDef.")
         if type(store).read_stored_root_record is Store.read_stored_root_record:
             return None
+        self.reserve((target,))
         key = store.authority_fence_key()
         if key in self._facts:
             return target if self._facts[key].is_stored(target) else None

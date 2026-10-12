@@ -400,3 +400,72 @@ def test_v3_nested_generator_honors_reference_aware_edge_policies(tmp_path):
     assert roots.nested(selector_value, edges=references).count() == 1
     assert all_occurrences.count() == 3
     assert all_occurrences.through(RelationshipKind.REFERENCE).count() == 2
+
+
+@pytest.mark.parametrize("projection", ("owners", "targets"))
+@pytest.mark.parametrize("sidecar", ("missing", "dirty"))
+def test_u6_projection_disabled_refresh_survives_every_terminal(tmp_path, monkeypatch, projection, sidecar):
+    """Projection inherits disabled refresh with no sidecar mutation."""
+
+    from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+    from dryml.core.store.records import DefinitionRecord
+
+    root, child, *_ = _references()
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.write_definition_record(DefinitionRecord(root))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    if sidecar == "missing":
+        index.close()
+        index.path.unlink()
+    else:
+        store.mark_query_index_dirty()
+    calls = []
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "rebuild", lambda *a, **kw: calls.append("rebuild"))
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "initialize_empty", lambda *a: calls.append("initialize"))
+    query = getattr(store.query().cdefs().stored().refresh(False).nested(child), projection)()
+    for terminal in (query.exists, query.count, query.one, query.one_or_none, query.collect,
+                     lambda: query.take(1), lambda: query.explain(analyze=True)):
+        terminal()
+        assert calls == []
+    assert query.refresh_policy is False
+
+
+def test_u6_projection_outer_budget_depth_and_witness_controls():
+    """Targets, roots, and traversal share the effective outer terminal controls."""
+
+    from dryml.core.errors import ParameterizationLimitError
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    child = Definition(V3TemplateLeaf, 64).concretize()
+    other = Definition(V3TemplateLeaf, 32).concretize()
+    root = Definition(V3TemplateParent, [child, other]).concretize()
+    roots = IdentitySet((root,)).query().max_verify(0).max_depth(0).max_witnesses(1)
+    projected = roots.nested(_v3_template_leaf_selector()).targets()
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        projected.collect()
+    with pytest.raises(RelationshipDepthExceeded):
+        projected.max_verify(3).collect()
+    with pytest.raises(ParameterizationLimitError):
+        projected.max_verify(3).max_depth(None).collect()
+    query = projected.max_verify(3).max_depth(None).max_witnesses(None)
+    assert query.one() == child
+    assert query.explain(analyze=True).verified_count == 3
+    assert roots.closure().max_verify(3).max_depth(None).count() == 3
+
+
+def test_u6_occurrence_external_target_scope_cannot_escape_controls(tmp_path, monkeypatch):
+    """Occurrence targets and both projections guard external metadata IO."""
+
+    from dryml.core.query.model import QueryWouldScanError
+
+    root, child, *_ = _references()
+    store = DirStore(tmp_path / "scope", query_index="memory")
+    scans = []
+    monkeypatch.setattr(store, "_validated_definition_root_inventory", lambda: scans.append(1) or ((), ()))
+    roots = IdentitySet((root,)).query().scan_policy("forbid")
+    occurrence = roots.nested(child).where(field("object").missing(), scope=store)
+    for terminal in (occurrence.exists, occurrence.owners().exists, occurrence.targets().exists):
+        with pytest.raises(QueryWouldScanError):
+            terminal()
+        assert scans == []

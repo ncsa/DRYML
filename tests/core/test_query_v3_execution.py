@@ -549,3 +549,192 @@ def test_algebra_validates_selected_roots_before_operand_filtering(tmp_path):
             query.exists()
     with pytest.raises(QueryError, match="authority conflicts"):
         left.stored(scope=second).exists()
+
+
+def test_u6_budget_reserves_broad_domain_before_scalar_verification(tmp_path, monkeypatch):
+    """Broad exists charges all three detached identities before filtering."""
+
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    store = DirStore(tmp_path / "store", query_index="memory")
+    state = Repo(store).save_object(ExecutionLeaf("member"))
+    query = store.query().state_refs()
+    matches = []
+    original = IdentityQuery._matches
+
+    def matched(self, *args, **kwargs):
+        matches.append(1)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(IdentityQuery, "_matches", matched)
+    for limit in (0, 2):
+        with pytest.raises(QueryVerifyBudgetExceeded):
+            query.max_verify(limit).exists()
+        assert matches == []
+    explanation = query.max_verify(3).explain(analyze=True)
+    assert explanation.verified_count == 3
+    assert explanation.store_scan_count == 1
+    assert query.max_verify(3).sel(state).one() == state
+
+
+def test_u6_fixed_repeated_stages_share_admissions_and_outer_controls(monkeypatch):
+    """Repeated algebra stages share identities; outer policies govern children."""
+
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    values = tuple(Definition(ExecutionLeaf, name).concretize() for name in ("a", "b"))
+    base = IdentitySet(values).query().max_verify(0)
+    combined = base.union(base).max_verify(2)
+    assert combined.explain(analyze=True).verified_count == 2
+    assert combined.count() == 2
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        combined.max_verify(1).exists()
+    assert combined.max_verify(0).take(0).count() == 0
+
+
+def test_u6_exact_paths_reserve_before_direct_verification(tmp_path, monkeypatch):
+    """Exact StateRef and stored-CDef positives cannot bypass zero budgets."""
+
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    store = DirStore(tmp_path / "store", query_index="memory")
+    state = Repo(store).save_object(ExecutionLeaf("member"))
+    queries = (store.query().sel(state), store.query().sel(state.definition).cdefs().stored())
+    reads = []
+    for name in ("read_state_ref_record", "read_stored_root_record"):
+        original = getattr(store, name)
+
+        def read(*args, _original=original, **kwargs):
+            reads.append(1)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(store, name, read)
+    for query in queries:
+        with pytest.raises(QueryVerifyBudgetExceeded):
+            query.max_verify(0).exists()
+        assert reads == []
+        assert query.max_verify(1).exists()
+        reads.clear()
+
+
+@pytest.mark.parametrize("unstable", (False, True))
+def test_u6_recapture_retains_spent_admissions(tmp_path, monkeypatch, unstable):
+    """An unchanged demand replacement and an instability retry both readmit."""
+
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    store = DirStore(tmp_path / "store", query_index="memory")
+    state = Repo(store).save_object(ExecutionLeaf("member"))
+    base = store.query().where(field("object").missing())
+    demanded = base.where(field("lineage", "creation_status").eq("unknown"))
+
+    def terminal(limit):
+        store.write_metadata(state.object, {})
+        replaced = False
+
+        def evaluate(capture):
+            nonlocal replaced
+            result = base._collect_with_capture(capture)
+            if not replaced:
+                replaced = True
+                if unstable:
+                    store.write_metadata(state.object, {"changed": True})
+                capture.capture_store(store, metadata_scopes=frozenset(("object", "lineage")))
+            return demanded._collect_with_capture(capture)
+
+        return base.max_verify(limit)._run_terminal(evaluate, return_capture=True)
+
+    result, capture = terminal(6)
+    assert capture.verified_count == 6
+    assert capture.capture_rounds == 2 and capture.demand_recaptures == 1
+    assert capture.instability_retries == int(unstable)
+    assert capture.store_scan_count == 2
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        terminal(5)
+
+
+def test_u6_operand_policy_conflicts_and_outer_overrides(tmp_path, monkeypatch):
+    """All declared algebra policies must agree; outer replacements govern IO."""
+
+    value = Definition(ExecutionLeaf, "member").concretize()
+    fixed = IdentitySet((value,)).query()
+    for changed in (fixed.refresh(False), fixed.scan_policy("forbid"), fixed.require_indexed(),
+                    fixed.max_verify(1), fixed.max_depth(1), fixed.max_witnesses(1)):
+        with pytest.raises(QueryDomainError, match="conflicting execution policies"):
+            fixed.union(changed)
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    Repo(store).save_object(ExecutionLeaf("member"))
+    index = store.open_query_index()
+    refreshes = []
+    monkeypatch.setattr(index, "refresh", lambda *a, **kw: refreshes.append(1))
+    inner = store.query().refresh(True).scan_policy("forbid")
+    outer = inner.union(inner).refresh(False).scan_policy("allow").max_verify(3)
+    assert outer.count() == 3
+    assert refreshes == []
+    scans = []
+    original = store._validated_definition_root_inventory
+
+    def inventory():
+        scans.append(1)
+        return original()
+
+    monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+    from dryml.core.query.model import QueryWouldScanError
+
+    with pytest.raises(QueryWouldScanError):
+        outer.scan_policy("forbid").exists()
+    assert scans == []
+
+
+def test_u6_repeated_fixed_bounded_stages_do_not_replace_the_cut():
+    """A source-free bounded operand is refinement, not a paging fallback."""
+
+    from dataclasses import replace
+
+    values = tuple(Definition(ExecutionLeaf, str(i)).concretize() for i in range(3))
+    branch = replace(IdentitySet(values).query(), take_limit=1)
+    query = branch.union(branch).max_verify(3)
+    assert query.count() == 1
+    assert query.explain(analyze=True).verified_count == 3
+
+
+def test_u6_selective_state_miss_readmits_complete_inventory(tmp_path):
+    """A direct miss spends one admission before complete embedded knowledge."""
+
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+    from dryml.core.store.records import DefinitionRecord
+
+    origin = DirStore(tmp_path / "origin", query_index="memory")
+    state = Repo(origin).save_object(ExecutionLeaf("embedded"))
+    store = DirStore(tmp_path / "store", query_index="memory")
+    # One definition embeds the StateRef, its ObjectRef, and its definition.
+    owner = Definition(ExecutionLeaf, state).concretize()
+    store.write_definition_record(DefinitionRecord(owner))
+    query = store.query().sel(state)
+    answer, capture = query.max_verify(5)._run_terminal(
+        lambda cut: query._selective_state_exists(cut) or next(query._iter_terminal_members(cut), None) is not None,
+        return_capture=True, selective_state=True,
+    )
+    assert answer and capture.verified_count == 5
+    assert capture.store_scan_count == 1
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        query.max_verify(4).exists()
+
+
+def test_u6_selective_cdef_miss_readmits_complete_inventory(tmp_path):
+    """A missing direct marker cannot refund its abandoned selective admission."""
+
+    from dryml.core import ObjectRef
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+    from dryml.core.store.records import ObjectAliasRecord
+
+    store = DirStore(tmp_path / "store", query_index="memory")
+    value = Definition(ExecutionLeaf, "alias-only").concretize()
+    store.write_object_alias(ObjectAliasRecord("chosen", ObjectRef(value, {})))
+    query = store.query().sel(value).cdefs().stored()
+    explanation = query.max_verify(3).explain(analyze=True)
+    assert explanation.verified_count == 3  # selective CDef, then two knowledge identities
+    assert explanation.store_scan_count == 1
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        query.max_verify(2).exists()

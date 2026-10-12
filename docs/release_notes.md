@@ -2,6 +2,26 @@
 
 ## 0.3.0b1 (unreleased)
 
+Query V3 terminal controls now apply through external stored/alias/metadata
+scopes, algebra, closure, occurrence targets, and owner/target projections.
+Projections inherit controls while remaining existential. Explicit outer
+overrides govern nested execution; incompatible algebra policies still fail at
+composition. Disabled refresh preserves missing/dirty sidecars; forced refresh
+does not authorize forbidden recovery scans. Warnings precede required scans.
+
+Indexed `take()` now enforces the previously omitted verification-budget check.
+Separately, `max_verify` accounting is tightened to cumulative graph-exact identity
+admissions across all terminal stages and retries: ordinary/fixed execution
+reserves the entire detached domain before filtering, while exact/paged checks
+reserve before verification, including rejected candidates. Replicas and repeated
+stages share unchanged-cut charges; collisions remain distinct. Cut replacement,
+unchanged metadata-demand recapture, instability retry, and selective/paged fallback
+readmit candidates without refunding abandoned work. Unverified ordering lookahead
+counts fetch/decode IO only; verified collision lookahead is charged. Metadata and
+recovery IO remain scan work, not identity admissions. Existing explanation fields
+report admission, scan, and page work separately. `take(0)` acquires/verifies
+nothing; witness and depth budgets remain separate. No Store format changes.
+
 Selected Method inference now uses converted consumer inputs consistently across
 Pipe/Project/AutoEncoder successors, graph ports, Map metadata, Fold roles, and
 native training inputs. Raw-result validation stays independent of inference

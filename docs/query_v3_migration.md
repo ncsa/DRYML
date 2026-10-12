@@ -92,6 +92,27 @@ source counts are disclosure-capped, while `candidate_rows_read`,
 `cdef_blobs_decoded`, and `pages_fetched` retain exact keyset-page work through
 fixed-result refinement and algebra.
 
+Controls now survive owner/target projections and govern external stored, alias,
+and metadata scopes as well as nested producers. Algebra operands must agree on
+policies at composition; a later explicit outer override applies throughout the
+expression. `refresh(False)` does not initialize/rebuild missing or dirty sidecars,
+and `refresh(True)` cannot authorize prohibited recovery scans.
+
+`max_verify` has a tightened **cumulative admission** contract. Ordinary inventory
+and fixed refinement reserve the entire detached domain before filtering or
+early-stop terminals; exact/paged paths reserve before direct verification.
+Repeated stages and replicas share unchanged-cut admissions, but collision
+identities are distinct. Cut replacement (including unchanged metadata-demand
+recapture), instability retry, and selective/paging fallback retain spent work and
+charge new admissions. A budget formerly sufficient for each stage separately may
+now fail with `QueryVerifyBudgetExceeded`. This accounting tightening is separate
+from fixing the omitted budget check on indexed `take()`. Unverified ordering
+lookahead counts rows/decodes only; verified collision lookahead is charged.
+Metadata-holder discovery and recovery reads are scan-controlled IO rather than
+identity admissions. `take(0)` reads/admits nothing; witness/depth budgets remain
+separate and inherit controls. Analyzed explanations expose admissions as
+`verified_count` and inventory/completed recovery scans as `store_scan_count`.
+
 Query authority is Store records, not memory or SQLite indexes. Derived indexes may
 accelerate work, but missing, stale, corrupt, or incompatible indexes rebuild, fall
 back visibly, or fail without changing authoritative records. Query V3 does not read

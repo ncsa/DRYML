@@ -767,3 +767,119 @@ def test_v3_partial_factory_pattern_uses_residual_scan_verification():
 
     assert graph is not None and graph.requires_scan
     assert set(result) == {first, second}
+
+
+@pytest.mark.parametrize("restriction", ("stored", "alias", "object", "state", "lineage", "snapshot"))
+@pytest.mark.parametrize("policy", ("forbid", "indexed"))
+def test_u6_fixed_external_scopes_reject_before_inventory(tmp_path, monkeypatch, restriction, policy):
+    """Fixed membership cannot hide required external authority work."""
+
+    from dryml.core.query.model import QueryWouldScanError
+
+    store = DirStore(tmp_path / "scope", query_index="memory")
+    state = _saved(Repo(store), "member")
+    fixed = IdentitySet((state,)).query()
+    if restriction == "stored":
+        query = fixed.stored(scope=store)
+    elif restriction == "alias":
+        query = fixed.alias("chosen", scope=store)
+    else:
+        query = fixed.where(field(restriction).missing(), scope=store)
+    query = query.require_indexed() if policy == "indexed" else query.scan_policy("forbid")
+    assert query.explain().scan_required
+    scans = []
+    original = store._validated_definition_root_inventory
+
+    def inventory():
+        scans.append(1)
+        return original()
+
+    monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+    with pytest.raises(QueryIndexUnavailable if policy == "indexed" else QueryWouldScanError):
+        query.exists()
+    assert scans == []
+
+
+def test_u6_external_scope_warning_precedes_io_once(tmp_path, monkeypatch):
+    """One terminal warning covers both external scopes and recovery scans."""
+
+    import warnings
+
+    store = DirStore(tmp_path / "scope", query_index="memory")
+    state = _saved(Repo(store), "member")
+    original = store._validated_definition_root_inventory
+    scans = []
+    with warnings.catch_warnings(record=True) as observed:
+        warnings.simplefilter("always")
+
+        def inventory():
+            assert len(observed) == 1
+            scans.append(1)
+            return original()
+
+        monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+        query = IdentitySet((state,)).query().stored(scope=store).where(
+            field("state").missing(), scope=store,
+        ).scan_policy("warn")
+        assert query.exists()
+    assert len(observed) == 1 and len(scans) == 1
+
+
+@pytest.mark.parametrize("indexed", (False, True))
+def test_u6_forced_refresh_cannot_authorize_recovery_scan(tmp_path, monkeypatch, indexed):
+    """A missing sidecar is refused before initialization or rebuild IO."""
+
+    from dryml.core.query.model import QueryWouldScanError
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "scope", query_index="sqlite")
+    value = Definition(V3Parent, None).concretize()
+    store.write_definition_record(DefinitionRecord(value))
+    index = store.open_query_index()
+    calls = []
+    monkeypatch.setattr(index, "rebuild", lambda **kw: calls.append("rebuild"))
+    monkeypatch.setattr(index, "initialize_empty", lambda: calls.append("initialize"))
+    query = store.query().cdefs().stored().refresh(True)
+    query = query.require_indexed() if indexed else query.scan_policy("forbid")
+    with pytest.raises(QueryIndexUnavailable if indexed else QueryWouldScanError):
+        query.take(1)
+    assert calls == []
+
+
+def test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities(tmp_path, monkeypatch):
+    """Fixed refinement charges one candidate despite broad holder/recovery IO."""
+
+    store = DirStore(tmp_path / "scope", query_index="sqlite")
+    state = _saved(Repo(store), "member")
+    store.mark_query_index_dirty()
+    reads = []
+    scans = []
+    rebuilds = []
+    original = store.read_snapshot_metadata
+    original_inventory = store._validated_definition_root_inventory
+    index = store.open_query_index()
+    original_rebuild = index.rebuild
+
+    def snapshot(digest):
+        reads.append(digest)
+        return original(digest)
+
+    def inventory():
+        scans.append(1)
+        return original_inventory()
+
+    def rebuild(**kwargs):
+        rebuilds.append(1)
+        return original_rebuild(**kwargs)
+
+    monkeypatch.setattr(store, "read_snapshot_metadata", snapshot)
+    monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+    monkeypatch.setattr(index, "rebuild", rebuild)
+    query = IdentitySet((state,)).query().where(
+        field("snapshot", "saved_at").exists(), scope=store,
+    ).max_verify(1)
+    explanation = query.explain(analyze=True)
+    assert explanation.result_count == 1 and explanation.verified_count == 1
+    assert explanation.store_scan_count == 2  # one recovery, one authority capture
+    assert reads == [state.digest(), state.digest()]
+    assert len(scans) == 2 and len(rebuilds) == 1

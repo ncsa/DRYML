@@ -685,3 +685,132 @@ def test_interrupted_staged_rebuild_preserves_ready_sidecar_and_authority(
     assert store.read_definition_record(second.digest) == second
     assert store.query_index_status().state == "dirty"
     assert not list(index.path.parent.glob(f"{index.path.name}.rebuild-*.tmp*"))
+
+
+def test_u6_indexed_take_admissions_replicas_and_ordering_lookahead(tmp_path, monkeypatch):
+    """Ordering-only lookahead decodes but does not verify; replicas charge once."""
+
+    from dataclasses import replace
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    stores = tuple(DirStore(tmp_path / name, query_index="sqlite") for name in ("a", "b"))
+    values = sorted((Definition(ProjectionLeaf, str(i)).concretize() for i in range(3)),
+                    key=lambda value: value.graph_hash())
+    for store in stores:
+        for value in values:
+            store.write_definition_record(DefinitionRecord(value))
+        store.rebuild_query_index()
+    reads = []
+    original = SourceCapture.read_exact_stored_cdef
+
+    def direct(self, source, target):
+        reads.append(target.graph_hash())
+        return original(self, source, target)
+
+    monkeypatch.setattr(SourceCapture, "read_exact_stored_cdef", direct)
+    query = Repo(stores).query().cdefs().stored().refresh(False).require_indexed()
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        query.max_verify(0).take(1)
+    assert reads == []
+    bounded = replace(query.max_verify(1), take_limit=1)
+    result, capture = bounded._run_terminal(bounded._collect_with_capture, return_capture=True)
+    assert tuple(result) == (values[0],)
+    assert capture.verified_count == 1 and len(reads) == 2
+    assert capture.cdef_blobs_decoded == 4 and capture.candidate_rows_read == 4
+    assert capture.store_scan_count == 0
+    explanation = bounded.explain(analyze=True)
+    assert explanation.verified_count == 1 and explanation.result_count == 1
+    assert explanation.cdef_blobs_decoded == 4 and explanation.store_scan_count == 0
+
+
+def test_u6_paging_fallback_readmits_domain_and_retains_expenditure(tmp_path):
+    """An alias candidate abandons paging proof without refunding its admission."""
+
+    from dataclasses import replace
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    reference = ObjectRef(Definition(ProjectionLeaf, "alias").concretize(), {})
+    store.write_object_alias(ObjectAliasRecord("chosen", reference))
+    store.rebuild_query_index()
+    query = replace(store.query().cdefs().stored().refresh(False), take_limit=1)
+    result, capture = query.max_verify(3)._run_terminal(query._collect_with_capture, return_capture=True)
+    assert result.one() == reference.definition
+    assert capture.verified_count == 3  # paged CDef, then inventory CDef + ObjectRef
+    assert capture.store_scan_count == 1
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        query.max_verify(2).collect()
+
+
+def test_u6_collision_bucket_verified_lookahead_is_charged(tmp_path, monkeypatch):
+    """Distinct graph identities in one digest bucket all need verification."""
+
+    from dataclasses import replace
+    from dryml.core import cdef_codec
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    monkeypatch.setattr(cdef_codec, "cdef_graph_hash", lambda *a, **kw: "a" * 64)
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    shared, separate = _graph_variants()
+    for value in (shared, separate):
+        store.write_definition_record(DefinitionRecord(value))
+    store.rebuild_query_index()
+    query = replace(store.query().cdefs().stored().refresh(False).require_indexed(), take_limit=1)
+    result, capture = query.max_verify(2)._run_terminal(query._collect_with_capture, return_capture=True)
+    assert result.count() == 1
+    assert capture.verified_count == 2
+    reads = []
+    original = SourceCapture.read_exact_stored_cdef
+
+    def direct(self, source, target):
+        reads.append(1)
+        return original(self, source, target)
+
+    monkeypatch.setattr(SourceCapture, "read_exact_stored_cdef", direct)
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        query.max_verify(1).collect()
+    assert len(reads) == 1
+
+
+@pytest.mark.parametrize("policy", ("allow", "forbid", "indexed"))
+def test_u6_disabled_refresh_guards_each_page_transition(tmp_path, monkeypatch, policy):
+    """A later dirty page cannot trigger implicit recovery with disabled refresh."""
+
+    from dryml.core import cdef_codec
+    from dryml.core.query.model import QueryError
+
+    monkeypatch.setattr(cdef_codec, "cdef_graph_hash", lambda *a, **kw: "b" * 64)
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    for name in ("a", "b", "c"):
+        store.write_definition_record(DefinitionRecord(Definition(ProjectionLeaf, name).concretize()))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    original_view = index.read_view
+    original_rebuild = index.rebuild
+    rebuilds = []
+    reads = 0
+
+    @contextmanager
+    def dirty_after_first_page(**kwargs):
+        nonlocal reads
+        with original_view(**kwargs) as view:
+            yield view
+        reads += 1
+        if reads == 1:
+            store.mark_query_index_dirty()
+
+    def rebuild(**kwargs):
+        rebuilds.append(1)
+        return original_rebuild(**kwargs)
+
+    monkeypatch.setattr(index, "read_view", dirty_after_first_page)
+    monkeypatch.setattr(index, "rebuild", rebuild)
+    query = store.query().cdefs().stored().refresh(False)
+    query = query.require_indexed() if policy == "indexed" else query.scan_policy(policy)
+    if policy == "allow":
+        assert query.take(1).count() == 1
+    else:
+        with pytest.raises(QueryError):
+            query.take(1)
+    assert rebuilds == []
+    assert store.query_index_is_dirty()

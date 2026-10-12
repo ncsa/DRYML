@@ -356,27 +356,34 @@
           ]
         },
         "tests/core/test_query_v3_restrictions.py": {
-          "rationale": "Retain typed metadata validation, failed-read disclosure, refresh controls, and exact-selective coverage checks; run the full save-backed restriction matrix in focused verification.",
+          "rationale": "Retain typed metadata failure, external-scope scan refusals, warning/recovery IO, refresh controls, and exact-selective coverage; sample the external scope/policy product by axis and keep its full matrix in focused verification.",
           "functions": [
             "test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals",
             "test_v3_metadata_read_failure_is_not_a_missing_field",
             "test_v3_metadata_keeps_scalar_types_and_validates_every_populated_leaf",
             "test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed",
             "test_v3_exact_state_exists_uses_the_digest_addressed_positive_authority_path",
-            "test_v3_controls_report_or_reject_required_inventory_scans"
+            "test_v3_controls_report_or_reject_required_inventory_scans",
+            "test_u6_fixed_external_scopes_reject_before_inventory",
+            "test_u6_external_scope_warning_precedes_io_once",
+            "test_u6_forced_refresh_cannot_authorize_recovery_scan",
+            "test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities"
           ]
         },
         "tests/core/test_query_v3_traversal.py": {
-          "rationale": "Retain typed state associations, direct existential projections, and bounded evidence with lightweight detached fixtures.",
+          "rationale": "Retain typed associations, existential projections, missing/dirty disabled-refresh behavior across terminals, inherited budgets, external target scopes, and bounded evidence.",
           "functions": [
             "test_v3_closure_uses_typed_associations_and_owned_state_adjacency",
             "test_v3_direct_projections_ignore_raw_caps_without_enumerating_occurrences",
             "test_v3_direct_projection_visits_each_diamond_state_once",
-            "test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships"
+            "test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships",
+            "test_u6_projection_disabled_refresh_survives_every_terminal",
+            "test_u6_projection_outer_budget_depth_and_witness_controls",
+            "test_u6_occurrence_external_target_scope_cannot_escape_controls"
           ]
         },
         "tests/core/test_query_v3_execution.py": {
-          "rationale": "Retain terminal cut-retry failure, collision-free prefix ordering, and zero-limit behavior without the full save-backed algebra matrix.",
+          "rationale": "Retain cut-retry failure, cumulative broad/fixed/exact admissions, demand/retry readmission, outer policy overrides, selective fallback, zero work, and late authority failures without the full save-backed algebra matrix.",
           "functions": [
             "test_u5_repeated_cut_instability_fails_without_a_partial_answer",
             "test_u5_fixed_prefix_does_not_reencode_unique_graph_digests",
@@ -385,15 +392,27 @@
             "test_exact_state_scoped_read_failure_is_visible_before_scalar_stop",
             "test_empty_candidates_do_not_suppress_external_alias_conflict",
             "test_algebra_validates_selected_roots_before_operand_filtering",
-            "test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut"
+            "test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut",
+            "test_u6_budget_reserves_broad_domain_before_scalar_verification",
+            "test_u6_fixed_repeated_stages_share_admissions_and_outer_controls",
+            "test_u6_exact_paths_reserve_before_direct_verification",
+            "test_u6_recapture_retains_spent_admissions",
+            "test_u6_operand_policy_conflicts_and_outer_overrides",
+            "test_u6_repeated_fixed_bounded_stages_do_not_replace_the_cut",
+            "test_u6_selective_state_miss_readmits_complete_inventory",
+            "test_u6_selective_cdef_miss_readmits_complete_inventory"
           ]
         },
         "tests/core/test_query_v3_index.py": {
-          "rationale": "Retain corrupt-sidecar recovery and the no-historical-rescan incremental SQLite coverage invariant in routine runs; keep larger schema/recovery and backend parity matrices focused.",
+          "rationale": "Retain corrupt-sidecar recovery, no-historical-rescan publication, indexed budget checks, replica/lookahead/collision counts, and cumulative paging fallback; keep larger schema/recovery and backend parity matrices focused.",
           "functions": [
             "test_corrupt_sidecar_rebuild_preserves_authoritative_record_bytes",
             "test_incremental_v3_publication_does_not_rescan_historical_projection_rows",
-            "test_clean_incremental_save_does_not_enumerate_historical_references"
+            "test_clean_incremental_save_does_not_enumerate_historical_references",
+            "test_u6_indexed_take_admissions_replicas_and_ordering_lookahead",
+            "test_u6_paging_fallback_readmits_domain_and_retains_expenditure",
+            "test_u6_collision_bucket_verified_lookahead_is_charged",
+            "test_u6_disabled_refresh_guards_each_page_transition"
           ]
         },
         "tests/core/test_query_v3_acceptance.py": {
@@ -684,6 +703,7 @@
         }
       },
       "sampled_functions": {
+        "tests/core/test_query_v3_restrictions.py::test_u6_fixed_external_scopes_reject_before_inventory": "Represent every external authority scope and both scan/index policies; focused verification retains the complete product.",
         "tests/core/test_execute_managed_integration.py::test_managed_decorator_orders_materialize_once_and_publish_one_final_state": "Genuine decorator-order by placement product; every member/order and placement value remains represented.",
         "tests/managed/test_execute_defaults.py::test_managed_default_resolution_uses_invocation_state_and_worker_control": "Genuine nested-state by control-selection product; every value remains represented."
       },
