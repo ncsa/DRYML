@@ -1,9 +1,10 @@
+"""Dataset sources, including lazy ownership of actual factory iterators."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, Callable
-import itertools
 import numpy as np
 
 from dryml.core.tensor_spec import (
@@ -35,24 +36,19 @@ class _IndexedDatasetCursor(DatasetCursor):
         self._length = length
         self._item_at = item_at
 
-    def __next__(self) -> Any:
-        """Fetch the current indexed value and advance this cursor's position."""
-
-        if self._closed or self._position >= self._length:
-            self.close()
+    def _read(self) -> Any:
+        if self._position >= self._length:
             raise StopIteration
-        value = self._item_at(self._position)
+        value = self._call(self._item_at, self._position)
         self._position += 1
         return value
 
-    def skip(self, n: int) -> None:
-        """Advance the private index exactly without reading skipped values."""
+    def _skip(self, n: int) -> None:
+        """Advance the index without reads, leaving cleanup to the shared boundary."""
 
-        self._validate_skip_count(n)
         actual = min(n, self._length - self._position)
         self._position += actual
         if actual != n:
-            self.close()
             raise DatasetExhaustedError(n, actual)
 
 
@@ -71,6 +67,49 @@ def _fresh_iterable(factory: Callable[..., Any], *args, **kwargs) -> Iterable[An
     return candidate
 
 
+class _GeneratorCursor(DatasetCursor):
+    """Retain the actual lazily acquired factory iterator before imposing bounds."""
+
+    def __init__(self, dataset, epoch):
+        super().__init__(iter(()))
+        self._dataset = dataset
+        self._epoch = epoch
+        self._values = None
+        self._observed_examples = 0
+        declaration = dataset._declared_example_count
+        self._validate_observed = declaration is not None and not declaration.is_unknown
+
+    def _validate_end(self):
+        if self._validate_observed:
+            observed = Cardinality.finite(self._observed_examples)
+            if observed != self._dataset._declared_example_count:
+                raise ValueError("GeneratorDataset observed example count conflicts with its declaration.")
+
+    def _read(self):
+        dataset = self._dataset
+        if self._values is None:
+            kwargs = dict(dataset.factory_kwargs)
+            if dataset.seed_aware:
+                kwargs["seed"] = self._call(_epoch_seed, dataset.seed, self._epoch, dataset.epoch_seed_version)
+            values = self._own(self._call(_fresh_iterable, dataset.gen_factory, *dataset.factory_args, **kwargs))
+            self._values = self._own(self._call(iter, values))
+        if dataset.cardinality.is_finite and self._position >= int(dataset.cardinality):
+            self._call(self._validate_end)
+            raise StopIteration
+        try:
+            value = self._pull(self._values)
+        except StopIteration:
+            self._call(self._validate_end)
+            raise
+        if self._validate_observed:
+            try:
+                self._observed_examples += self._call(dataset.examples_in, value)
+            except TypeError:
+                self._validate_observed = False
+        self._position += 1
+        return value
+
+
 class GeneratorDataset(SourceDataset):
     """Dataset backed by a callable that returns a fresh iterable on each open.
 
@@ -87,7 +126,9 @@ class GeneratorDataset(SourceDataset):
         **factory_kwargs: Keyword arguments retained for ``gen_factory``.
 
     ``iterator_for_epoch(epoch)`` opens a selected seed-aware epoch directly;
-    ordinary iteration is epoch zero. Explicit example totals are metadata only.
+    ordinary iteration is epoch zero. Factories are acquired on first advancement;
+    cursors own and close the actual factory iterator on early close, failure,
+    finite cutoff, or natural EOF. Explicit example totals are metadata only.
     """
 
     def __init__(
@@ -138,55 +179,42 @@ class GeneratorDataset(SourceDataset):
 
 
     def __iter__(self) -> Iterator[Any]:
-        yield from self.iterator_for_epoch(0)
+        """Return a lazy owned epoch-zero cursor; no factory runs until a read."""
 
-    def iterator_for_epoch(self, epoch: int) -> Iterator[Any]:
+        return self.iterator_for_epoch(0)
+
+    def iterator(self) -> DatasetCursor[Any]:
+        """Return an independent lazy epoch-zero cursor owning its factory iterator."""
+
+        return self.iterator_for_epoch(0)
+
+    def iterator_for_epoch(self, epoch: int) -> DatasetCursor[Any]:
         """Open one selected reproducible epoch without traversing prior epochs.
 
         Args:
             epoch: Exact nonnegative logical epoch index.
 
         Returns:
-            A fresh iterator bounded by finite declared yield cardinality.
+            A lazy owned cursor bounded by finite declared yield cardinality.
+            Closing before the first read never invokes the factory.
 
         Raises:
             TypeError: If ``epoch`` is not an exact integer.
             ValueError: If ``epoch`` is negative.
+            BaseException: During reading, factory/source/validation or cleanup
+                failure. Non-pull StopIteration becomes a causal RuntimeError.
 
         Side Effects:
-            Calls the factory once. Seed-aware factories receive a deterministic,
-            versioned ``seed`` keyword; opaque factories retain prior invocation.
+            On first read, calls the factory once. Seed-aware factories receive a
+            deterministic, versioned ``seed`` keyword. The cursor closes acquired
+            resources once and retains genuine EOF even if cleanup fails.
         """
 
         if type(epoch) is not int:
             raise TypeError("epoch must be a nonnegative exact int.")
         if epoch < 0:
             raise ValueError("epoch must be non-negative.")
-        kwargs = dict(self.factory_kwargs)
-        if self.seed_aware:
-            kwargs["seed"] = _epoch_seed(self.seed, epoch, self.epoch_seed_version)
-        values = _fresh_iterable(self.gen_factory, *self.factory_args, **kwargs)
-        if self.cardinality.is_finite:
-            values = itertools.islice(values, int(self.cardinality))
-
-        observed_examples = 0
-        validate_observed = (
-            self._declared_example_count is not None
-            and not self._declared_example_count.is_unknown
-        )
-        for value in values:
-            if validate_observed:
-                try:
-                    observed_examples += self.examples_in(value)
-                except TypeError:
-                    validate_observed = False
-            yield value
-        if validate_observed:
-            observed = Cardinality.finite(observed_examples)
-            if observed != self._declared_example_count:
-                raise ValueError(
-                    "GeneratorDataset observed example count conflicts with its declaration."
-                )
+        return _GeneratorCursor(self, epoch)
 
     def __len__(self) -> Cardinality:
         return self.cardinality

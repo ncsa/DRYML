@@ -25,6 +25,8 @@ def iter_training_batches(data: PreparedDataset, preparation, *, epoch: int = 0)
         Opens no source until advancement. The selected preparation may import JAX
         to execute its retained conversion edge, but cursor reads never update
         training progress, exposure, or checkpoint state.
+        Use the cursor as a context manager around updates to preserve consumer
+        failures over cleanup errors; closure alone does not prove output EOF.
     """
 
     if not isinstance(data, PreparedDataset):

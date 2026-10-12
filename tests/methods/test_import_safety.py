@@ -104,3 +104,36 @@ print(json.dumps(sorted(name for name in sys.modules if name in forbidden)))
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "[]"
+
+
+def test_stream_shortfall_stays_below_data_and_data_reexports_same_exception():
+    """Runtime skip/Take errors need no reverse imports and retain Data identity."""
+    script = """
+import sys
+import dryml.methods
+from dryml.methods.stream import DatasetExhaustedError, StreamGraphCursor, _StreamOp, _TakeIterator
+class Source:
+    def iterator(self):
+        return iter((1,))
+cursor = StreamGraphCursor(_StreamOp('source', dataset=Source()))
+try:
+    cursor.skip(2)
+except DatasetExhaustedError as error:
+    assert (error.requested, error.yielded) == (2, 1)
+else:
+    raise AssertionError('skip did not report shortfall')
+cursor = StreamGraphCursor(_StreamOp('source', dataset=Source()))
+try:
+    next(_TakeIterator(cursor, iter(()), 2))
+except DatasetExhaustedError as error:
+    assert (error.requested, error.yielded) == (2, 0)
+else:
+    raise AssertionError('Take did not report shortfall')
+assert not any(name in sys.modules for name in ('dryml.data', 'dryml.artifacts', 'dryml.models', 'dryml.managed'))
+assert not hasattr(dryml.methods, 'DatasetExhaustedError')
+from dryml.data import DatasetExhaustedError as public
+from dryml.data.dataset import DatasetExhaustedError as established
+assert public is established is DatasetExhaustedError
+"""
+    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr

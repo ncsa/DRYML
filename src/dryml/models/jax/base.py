@@ -801,6 +801,9 @@ class Training(TrainFunction):
                 retained recovery facts are incompatible with this loop.
             TypeError: If Model, callbacks, or runtime candidates violate their
                 explicit contracts.
+            BaseException: Source, update, or cleanup failure. An update/consumer
+                failure remains primary when closing its owned traversal also
+                fails; previously accepted updates remain accounted.
 
         Side Effects:
             Installs synchronized Model/Optimizer/TrainState updates and may run
@@ -887,11 +890,11 @@ class Training(TrainFunction):
                 cursor = iter_training_batches(
                     prepared_train, self.training_preparation, epoch=epoch,
                 )
-                if resume_batch:
-                    cursor.skip(resume_batch)
                 epoch_loss = 0.0
                 epoch_steps = 0
-                try:
+                with cursor:
+                    if resume_batch:
+                        cursor.skip(resume_batch)
                     for x, y in cursor:
                         batch_index = exp.state.next_batch
                         examples = train_data.examples_in((x, y))
@@ -939,8 +942,6 @@ class Training(TrainFunction):
                             "examples_seen": exp.state.examples_seen,
                             "loss": loss_float,
                         })
-                finally:
-                    cursor.close()
                 if epoch_steps == 0 and resume_batch == 0:
                     continue
                 epoch_metrics = {"loss": epoch_loss / epoch_steps} if epoch_steps and not resume_batch else {}
@@ -1162,15 +1163,13 @@ class Training(TrainFunction):
         cursor = iter_training_batches(data, self.validation_preparation)
         total = 0.0
         examples_total = 0
-        try:
+        with cursor:
             for x, y in cursor:
                 predictions, _, _ = model._candidate_apply(x, training=False)
                 value = loss_fn(predictions, y)
                 examples = data.dataset.examples_in((x, y))
                 total += self._validated_loss(value, jax) * examples
                 examples_total += examples
-        finally:
-            cursor.close()
         return {} if not examples_total else {"loss": total / examples_total}
 
 

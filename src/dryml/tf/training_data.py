@@ -39,11 +39,8 @@ def as_training_dataset(data: PreparedDataset, preparation):
     def prepared_values():
         """Yield one native traversal while guaranteeing cursor cleanup on cancellation."""
 
-        cursor = data.training_batches(preparation)
-        try:
+        with data.training_batches(preparation) as cursor:
             yield from cursor
-        finally:
-            cursor.close()
 
     return tf.data.Dataset.from_generator(
         prepared_values,
@@ -68,6 +65,8 @@ def iter_training_batches(data: PreparedDataset, preparation):
     Side Effects:
         Opens no source until the cursor is advanced and never changes training
         progress, accepted-update state, or checkpoint association.
+        Use the cursor as a context manager around updates to preserve consumer
+        failures over cleanup errors; closure alone does not prove output EOF.
     """
 
     if not isinstance(data, PreparedDataset):

@@ -1504,6 +1504,7 @@ class Training(BasicTraining):
         Args:
             exp: Experiment providing the model, data, state, and optional
                 optimizer, loss, and metric capabilities.
+            callbacks: Zero-argument safe-point callbacks after accepted updates.
 
         Returns:
             Per-batch scalar loss values in training order.
@@ -1514,6 +1515,9 @@ class Training(BasicTraining):
                 deterministic recovery cannot reach its invocation target.
             TypeError: If supplied DRYML callbacks are invalid.
             KeyError: If the model graph lacks a retained runtime binding.
+            BaseException: Source, update, or cleanup failure. An update/consumer
+                failure remains primary when closing its owned traversal also
+                fails; previously accepted updates remain accounted.
 
         Side Effects:
             Updates model variables, optimizer state, metrics, progress output,
@@ -1576,9 +1580,9 @@ class Training(BasicTraining):
 
                 cursor = iter_training_batches(prepared_train, self.training_preparation)
                 resume_batch = exp.state.next_batch if epoch == start_epoch else 0
-                if resume_batch:
-                    cursor.skip(resume_batch)
-                try:
+                with cursor:
+                    if resume_batch:
+                        cursor.skip(resume_batch)
                     for x, y in cursor:
                         examples = train_xy.examples_in((x, y))
 
@@ -1628,8 +1632,6 @@ class Training(BasicTraining):
                         step_metrics = {"loss": loss_float}
                         step_metrics.update(_metric_results(metrics))
                         progress.update(1, step_metrics)
-                finally:
-                    cursor.close()
 
                 if epoch_steps == 0 and resume_batch == 0:
                     continue
@@ -1746,7 +1748,7 @@ class Training(BasicTraining):
         from dryml.tf.training_data import iter_training_batches
 
         cursor = iter_training_batches(val_data, self.validation_preparation)
-        try:
+        with cursor:
             for x, y in cursor:
                 examples = val_data.dataset.examples_in((x, y))
                 y_pred = model(x)
@@ -1755,8 +1757,6 @@ class Training(BasicTraining):
                 total_examples += examples
                 for metric in metrics:
                     _update_metric(metric, y, y_pred)
-        finally:
-            cursor.close()
 
         if total_examples == 0:
             return {}

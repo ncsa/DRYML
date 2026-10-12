@@ -1,3 +1,5 @@
+"""Structural Dataset operators with explicit child-traversal ownership."""
+
 from __future__ import annotations
 
 from dryml.core.cardinality import Cardinality
@@ -8,6 +10,18 @@ from dryml.data.split import default_split, split_for_spec
 
 
 class Batch(Dataset):
+    """Group source yields into owned, bounded batches.
+
+    Args:
+        src: Dataset supplying unbatched elements.
+        batch_size: Positive number of elements per batch.
+        drop_remainder: Discard the final short batch when true.
+
+    Iteration returns a lazy closeable cursor. Source/collation failures close
+    children while retaining the primary error; non-pull StopIteration is failure.
+    Construction rejects nonpositive sizes with ValueError and opens no source.
+    """
+
     _stream_operator = "batch"
     def __init__(self, src: Dataset, batch_size: int, *, drop_remainder: bool = False):
         if batch_size <= 0:
@@ -21,23 +35,28 @@ class Batch(Dataset):
         super().__init__(spec=batch_spec_tree(src.spec, batch=batch))
 
     def __iter__(self):
-        it = iter(self.src)
-        first_batch = self._next_batch(it)
+        """Return a lazy owned traversal, releasing children on every terminal path."""
+
+        return DatasetCursor._from_generator(self._iterate)
+
+    def _iterate(self, owner):
+        it = owner._own(owner._call(self.src.iterator))
+        first_batch = self._next_batch(it, owner)
         if not first_batch:
             return
         if self.drop_remainder and len(first_batch) < self.batch_size:
             return
 
-        collate = self._resolve_collate(first_batch)
-        yield collate(first_batch)
+        collate = owner._call(self._resolve_collate, first_batch)
+        yield owner._call(collate, first_batch)
 
         while True:
-            batch = self._next_batch(it)
+            batch = self._next_batch(it, owner)
             if not batch:
                 return
             if self.drop_remainder and len(batch) < self.batch_size:
                 return
-            yield collate(batch)
+            yield owner._call(collate, batch)
 
     def __len__(self) -> Cardinality:
         src_cardinality = self.src.yield_cardinality()
@@ -69,11 +88,11 @@ class Batch(Dataset):
             source_stop = None if stop is None else stop * self.batch_size
         return self.src._range_example_cardinality(source_start, source_stop)
 
-    def _next_batch(self, it):
+    def _next_batch(self, it, owner):
         batch = []
         for _ in range(self.batch_size):
             try:
-                batch.append(next(it))
+                batch.append(owner._pull(it))
             except StopIteration:
                 break
         return batch
@@ -86,15 +105,42 @@ class Batch(Dataset):
 
 
 class Unbatch(Dataset):
+    """Split a batched Dataset into an owned traversal of individual elements.
+
+    Args:
+        src: Dataset with a batched element specification.
+
+    Iteration returns a lazy closeable cursor owning its source and split
+    iterators. Source/split/cleanup errors propagate, retaining any primary
+    failure. Construction infers output specs without opening a traversal.
+    """
+
     _stream_operator = "unbatch"
     def __init__(self, src: Dataset):
         self.src = src
         super().__init__(spec=unbatch_spec_tree(src.spec))
 
     def __iter__(self):
-        split = self._resolve_split()
-        for batch in self.src:
-            yield from split(batch)
+        """Return a lazy traversal owning both its source and split iterators."""
+
+        return DatasetCursor._from_generator(self._iterate)
+
+    def _iterate(self, owner):
+        split = owner._call(self._resolve_split)
+        source = owner._own(owner._call(self.src.iterator))
+        while True:
+            try:
+                batch = owner._pull(source)
+            except StopIteration:
+                return
+            values = owner._own(owner._call(iter, owner._call(split, batch)))
+            while True:
+                try:
+                    value = owner._pull(values)
+                except StopIteration:
+                    break
+                yield value
+            owner._release(values)
 
     def __len__(self) -> Cardinality:
         return self.src.example_cardinality()
@@ -113,7 +159,11 @@ class Unbatch(Dataset):
 
 
 class Take(Dataset):
-    """Yield exactly a requested number of source values or report exhaustion."""
+    """Yield exactly a requested number of source values or report exhaustion.
+
+    Each lazy cursor owns its child. Shortfall retains requested/yielded counts,
+    remains primary over cleanup errors, and never certifies root EOF.
+    """
 
     _stream_operator = "take"
 
@@ -199,37 +249,34 @@ class _TakeCursor(DatasetCursor):
         self._epoch = epoch
         self._source_cursor: DatasetCursor | None = None
 
-    def __next__(self):
-        """Return one required source value or raise Take's counted exhaustion error."""
-
-        if self._closed or self._position >= self._n:
-            self.close()
+    def _read(self):
+        if self._position >= self._n:
             raise StopIteration
         if self._source_cursor is None:
-            opener = getattr(self._src, "iterator_for_epoch", None)
-            self._source_cursor = opener(self._epoch) if callable(opener) else self._src.iterator()
+            opener = self._call(getattr, self._src, "iterator_for_epoch", None)
+            self._source_cursor = self._own(
+                self._call(opener, self._epoch) if callable(opener) else self._call(self._src.iterator)
+            )
         try:
-            value = next(self._source_cursor)
+            value = self._pull(self._source_cursor)
         except (StopIteration, DatasetExhaustedError) as error:
-            self.close()
             raise DatasetExhaustedError(self._n, self._position) from error
-        except BaseException:
-            self.close()
-            raise
         self._position += 1
         return value
 
-    def close(self) -> None:
-        """Close this cursor and any lazily acquired source cursor once."""
-
-        if self._closed:
-            return
-        if self._source_cursor is not None:
-            self._source_cursor.close()
-        super().close()
-
 
 class Skip(Dataset):
+    """Discard a forgiving prefix, then yield the remaining owned source values.
+
+    Args:
+        src: Dataset to traverse lazily.
+        n: Exact nonnegative number of yields to discard.
+
+    TypeError/ValueError reject malformed counts. Iteration returns a closeable
+    cursor and propagates source/cleanup failures while retaining primary errors.
+    A source ending within the discarded prefix produces empty output normally.
+    """
+
     def __init__(self, src: Dataset, n: int):
         if type(n) is not int:
             raise TypeError("n must be a nonnegative exact int.")
@@ -240,13 +287,23 @@ class Skip(Dataset):
         super().__init__(spec=src.spec)
 
     def __iter__(self):
-        it = iter(self.src)
+        """Return an owned traversal; a short discarded prefix remains forgiving."""
+
+        return DatasetCursor._from_generator(self._iterate)
+
+    def _iterate(self, owner):
+        it = owner._own(owner._call(self.src.iterator))
         for _ in range(self.n):
             try:
-                next(it)
+                owner._pull(it)
             except StopIteration:
                 return
-        yield from it
+        while True:
+            try:
+                value = owner._pull(it)
+            except StopIteration:
+                return
+            yield value
 
     def __len__(self) -> Cardinality:
         return self.src._range_yield_cardinality(self.n)
@@ -265,6 +322,18 @@ class Skip(Dataset):
 
 
 class Repeat(Dataset):
+    """Reopen an independently owned source traversal for each logical epoch.
+
+    Args:
+        src: Re-iterable Dataset, optionally supporting epoch selection.
+        count: Nonnegative repetition count, or None for unbounded repetition.
+
+    Iteration returns a lazy closeable cursor; empty unbounded sources terminate
+    normally. Each completed epoch releases its resources before reopening the
+    source. Source/cleanup failures propagate and preserve any primary failure.
+    Negative counts raise ValueError without source acquisition.
+    """
+
     def __init__(self, src: Dataset, count: int | None = None):
         if count is not None and count < 0:
             raise ValueError("count must be non-negative or None.")
@@ -273,36 +342,29 @@ class Repeat(Dataset):
         super().__init__(spec=src.spec)
 
     def __iter__(self):
-        if self.count is None:
-            epoch = 0
+        """Return a lazy cursor reopening and releasing one source per epoch."""
+
+        return DatasetCursor._from_generator(self._iterate)
+
+    def _iterate(self, owner):
+        epoch = 0
+        while self.count is None or epoch < self.count:
+            opener = getattr(self.src, "iterator_for_epoch", None)
+            iterator = owner._own(owner._call(opener, epoch) if callable(opener) else owner._call(self.src.iterator))
+            produced = False
             while True:
-                opener = getattr(self.src, "iterator_for_epoch", None)
-                iterator = opener(epoch) if callable(opener) else self.src.iterator()
                 try:
-                    first = next(iterator)
+                    value = owner._pull(iterator)
                 except StopIteration:
-                    close = getattr(iterator, "close", None)
-                    if close is not None:
-                        close()
-                    return
-                try:
-                    yield first
-                    yield from iterator
-                finally:
-                    close = getattr(iterator, "close", None)
-                    if close is not None:
-                        close()
-                epoch += 1
-        else:
-            for epoch in range(self.count):
-                opener = getattr(self.src, "iterator_for_epoch", None)
-                iterator = opener(epoch) if callable(opener) else self.src.iterator()
-                try:
-                    yield from iterator
-                finally:
-                    close = getattr(iterator, "close", None)
-                    if close is not None:
-                        close()
+                    break
+                produced = True
+                yield value
+            epoch += 1
+            if (self.count is None and not produced) or epoch == self.count:
+                return
+            owner._release(iterator)
+            if owner._deferred_cleanup:
+                raise owner._deferred_cleanup.pop(0)
 
     def __len__(self) -> Cardinality:
         src_cardinality = self.src.yield_cardinality()
@@ -332,6 +394,18 @@ class Repeat(Dataset):
 
 
 class Shuffle(Dataset):
+    """Shuffle yields through a bounded buffer while owning the source traversal.
+
+    Args:
+        src: Dataset traversed lazily in authored order before buffering.
+        buffer_size: Positive maximum number of buffered yields.
+        seed: Optional NumPy random-generator seed.
+
+    Iteration returns a closeable cursor; early close/failure releases the source.
+    Source/cleanup errors preserve the primary failure. Construction rejects
+    nonpositive buffers with ValueError and acquires no traversal resources.
+    """
+
     def __init__(self, src: Dataset, buffer_size: int, *, seed=None):
         if buffer_size <= 0:
             raise ValueError("buffer_size must be positive.")
@@ -341,15 +415,20 @@ class Shuffle(Dataset):
         super().__init__(spec=src.spec)
 
     def __iter__(self):
+        """Return a bounded-buffer traversal owning its source until termination."""
+
+        return DatasetCursor._from_generator(self._iterate)
+
+    def _iterate(self, owner):
         import numpy as np
 
         rng = np.random.default_rng(seed=self.seed)
-        it = iter(self.src)
+        it = owner._own(owner._call(self.src.iterator))
         buffer = []
 
         for _ in range(self.buffer_size):
             try:
-                buffer.append(next(it))
+                buffer.append(owner._pull(it))
             except StopIteration:
                 break
 
@@ -357,7 +436,7 @@ class Shuffle(Dataset):
             idx = int(rng.integers(0, len(buffer))) if len(buffer) > 1 else 0
             yield buffer.pop(idx)
             try:
-                buffer.append(next(it))
+                buffer.append(owner._pull(it))
             except StopIteration:
                 pass
 

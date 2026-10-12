@@ -34,11 +34,8 @@ def as_training_dataset(data: PreparedDataset, preparation):
         def __iter__(self):
             """Yield one independent traversal and close it when consumption stops."""
 
-            cursor = data.training_batches(preparation)
-            try:
+            with data.training_batches(preparation) as cursor:
                 yield from cursor
-            finally:
-                cursor.close()
 
     return PreparedIterableDataset()
 
@@ -90,6 +87,8 @@ def iter_training_batches(data: PreparedDataset, preparation):
     Side Effects:
         Opens no source until advancement and never changes retained training
         progress, exposure, or checkpoint association.
+        Use the cursor as a context manager around updates to preserve consumer
+        failures over cleanup errors; closure alone does not prove output EOF.
     """
 
     if not isinstance(data, PreparedDataset):

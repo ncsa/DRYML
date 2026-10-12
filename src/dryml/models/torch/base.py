@@ -539,6 +539,9 @@ class Training(TrainFunction):
                 deterministic recovery cannot reach its invocation target.
             KeyError: If the model graph lacks a retained runtime binding.
             TypeError: If supplied DRYML callbacks are invalid.
+            BaseException: Source, update, or cleanup failure. An update/consumer
+                failure remains primary when closing its owned traversal also
+                fails; previously accepted updates remain accounted.
 
         Side Effects:
             Updates model parameters, optimizer state, metrics, progress output,
@@ -615,9 +618,9 @@ class Training(TrainFunction):
 
                 cursor = iter_training_batches(prepared_train, self.training_preparation)
                 resume_batch = exp.state.next_batch if epoch == start_epoch else 0
-                if resume_batch:
-                    cursor.skip(resume_batch)
-                try:
+                with cursor:
+                    if resume_batch:
+                        cursor.skip(resume_batch)
                     for x, y in cursor:
                         batch_index = exp.state.next_batch
                         examples = train_xy.examples_in((x, y))
@@ -675,8 +678,6 @@ class Training(TrainFunction):
                             "examples_seen": exp.state.examples_seen,
                             **step_metrics,
                         })
-                finally:
-                    cursor.close()
 
                 if epoch_steps == 0 and resume_batch == 0:
                     continue
@@ -892,7 +893,7 @@ class Training(TrainFunction):
         from dryml.torch.training_data import iter_training_batches
 
         cursor = iter_training_batches(val_data, self.validation_preparation)
-        try:
+        with cursor:
             with torch.no_grad():
                 for x, y in cursor:
                     examples = val_data.dataset.examples_in((x, y))
@@ -906,8 +907,6 @@ class Training(TrainFunction):
                     for name, value in batch_metrics.items():
                         metric_totals[name] = metric_totals.get(name, 0.0) + value * examples
                         metric_counts[name] = metric_counts.get(name, 0) + examples
-        finally:
-            cursor.close()
 
         if total_examples == 0:
             return {}

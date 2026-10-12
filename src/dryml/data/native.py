@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from dryml.data.dataset import DatasetExhaustedError
+from dryml.methods.stream import DatasetExhaustedError, _CursorLifecycle
 
 
 class PreparedDataset:
@@ -96,62 +96,57 @@ class PreparedDataset:
         return NativeTrainingCursor(self, preparation, epoch=epoch)
 
 
-class NativeTrainingCursor(Iterator[tuple[Any, Any]]):
+class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
     """Closeable prepared x/y batch cursor whose reads have no progress side effects.
 
     Args:
         dataset: Prepared Dataset that opens this cursor's independent traversal.
         preparation: Retained x/y handoff carrier applied exactly once per yield.
+        epoch: Exact nonnegative logical epoch forwarded to the Dataset traversal.
 
     A finite declared Dataset that exhausts early raises
     :class:`DatasetExhaustedError`; ordinary exhaustion closes the source. Closing
     is idempotent and forwards to the owned Dataset/graph cursor. Adapter reads do
-    not advance accepted-update, exposure, or checkpoint state.
+    not advance accepted-update, exposure, or checkpoint state. ``observed_eof``
+    becomes true only after count validation succeeds, even when EOF cleanup
+    fails. Use as a context manager around updates to retain consumer failures
+    over cleanup errors; non-pull StopIteration is a causal RuntimeError.
     """
 
     def __init__(self, dataset: PreparedDataset, preparation, *, epoch: int = 0) -> None:
+        super().__init__()
         self._dataset = dataset
         self._preparation = preparation
         if type(epoch) is not int or epoch < 0:
             raise ValueError("epoch must be a nonnegative exact int.")
         self._epoch = epoch
         self._cursor = None
-        cardinality = dataset.dataset.yield_cardinality()
+        cardinality = self._call(dataset.dataset.yield_cardinality)
         self._expected = cardinality.require_finite() if cardinality.is_finite else None
         self._yielded = 0
-        self._closed = False
 
     def __iter__(self) -> "NativeTrainingCursor":
         """Return this native batch cursor as its own iterator."""
 
         return self
 
-    def __next__(self) -> tuple[Any, Any]:
-        """Return one prepared batch and close the owned traversal on failure/end."""
-
-        if self._closed:
-            raise StopIteration
+    def _read(self) -> tuple[Any, Any]:
         if self._cursor is None:
-            self._cursor = self._dataset.iterator(epoch=self._epoch)
+            self._cursor = self._own(self._call(self._dataset.iterator, epoch=self._epoch))
         try:
-            value = next(self._cursor)
+            value = self._pull(self._cursor)
         except StopIteration as error:
-            self.close()
             if self._expected is not None and self._yielded != self._expected:
                 raise DatasetExhaustedError(self._expected, self._yielded) from error
             raise
-        except BaseException as error:
-            self._close_after_failure(error)
-            raise
-        try:
-            x, y = value
-            self._dataset.dataset.examples_in((x, y))
-            result = self._preparation.prepare(x, y)
-        except BaseException as error:
-            self._close_after_failure(error)
-            raise
+        result = self._call(self._prepare, value)
         self._yielded += 1
         return result
+
+    def _prepare(self, value):
+        x, y = value
+        self._dataset.dataset.examples_in((x, y))
+        return self._preparation.prepare(x, y)
 
     def skip(self, n: int) -> None:
         """Skip raw authored batches without executing their conversion edges.
@@ -169,43 +164,24 @@ class NativeTrainingCursor(Iterator[tuple[Any, Any]]):
             execute preparation and do not update training progress.
         """
 
-        if self._closed:
-            if type(n) is not int:
-                raise TypeError("skip count must be a nonnegative exact int.")
-            if n < 0:
-                raise ValueError("skip count must be non-negative.")
-            if n:
-                raise DatasetExhaustedError(n, 0)
+        if type(n) is not int:
+            raise TypeError("skip count must be a nonnegative exact int.")
+        if n < 0:
+            raise ValueError("skip count must be non-negative.")
+        if n == 0:
             return
-        if self._cursor is None:
-            self._cursor = self._dataset.iterator(epoch=self._epoch)
+        if self._closed:
+            raise DatasetExhaustedError(n, 0)
         try:
-            self._cursor.skip(n)
+            if self._cursor is None:
+                self._cursor = self._own(self._call(self._dataset.iterator, epoch=self._epoch))
+            self._call(self._cursor.skip, n)
         except BaseException as error:
+            if isinstance(error, DatasetExhaustedError):
+                self._yielded += error.yielded
             self._close_after_failure(error)
             raise
         self._yielded += n
-
-    def close(self) -> None:
-        """Close the owned Dataset/graph traversal once."""
-
-        if self._closed:
-            return
-        self._closed = True
-        if self._cursor is not None:
-            self._cursor.close()
-
-    def _close_after_failure(self, primary: BaseException) -> None:
-        """Close after an iteration failure without masking the primary error."""
-
-        if self._closed:
-            return
-        try:
-            self.close()
-        except BaseException as cleanup:
-            add_note = getattr(primary, "add_note", None)
-            if add_note is not None:
-                add_note(f"Native training cursor cleanup also failed: {type(cleanup).__name__}: {cleanup}")
 
 
 __all__ = ["NativeTrainingCursor", "PreparedDataset"]

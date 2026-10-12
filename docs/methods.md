@@ -235,6 +235,19 @@ cursor and unknown-spec discovery buffer. Planning never opens a source; first
 value discovery happens only in the owning graph cursor and retains at most one
 prefetched value per occurrence.
 
+The protected lifecycle in `methods.stream` is shared with ordinary Dataset and
+native-training cursors. Use a cursor context manager around consumer work to
+close resources deterministically and preserve a consumer failure over cleanup
+errors. `observed_eof` records successful root-output termination independently
+of closure; explicit close, interruption, acquisition/operator/validation failure,
+and strict count shortfall never certify EOF. Genuine EOF is recorded before
+cleanup and survives cleanup errors. Non-pull `StopIteration` becomes a causal
+`RuntimeError`, rather than silently truncating a stream. The established
+`DatasetExhaustedError` is defined at this lower boundary and remains re-exported
+by Data with identical fields and exception identity; it is not a Methods-root
+public export. Methods stream execution imports no consumer package to report
+shortfall.
+
 `Dataset.prepare()` keeps this graph plan as a dependency-light native-training
 input carrier. It reports whether qualified `"stream"` execution or documented
 `"eager"` fallback ran, but neither level owns accepted training progress. Every

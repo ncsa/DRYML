@@ -60,6 +60,24 @@ Dataset objects do not retain a shared cursor. Array and NPY-file sources use
 equivalent private indexed advancement, so skipping does not read discarded rows
 or files.
 
+Use `with dataset.iterator() as cursor:` around consumer work. All acquired
+resources get one reverse-order close attempt on EOF, failure, interruption, or
+context exit; a source/operator/consumer error remains primary when cleanup also
+fails. Explicit closure stops later reads but does not prove completion.
+`cursor.observed_eof` is positive root-output termination evidence: only a
+designated iterator pull ending or a successfully satisfied output bound can
+establish it. Strict skip/Take/native count failures never establish it. A skip
+shortfall retains its exact counts and remains primary over cleanup failures;
+invalid counts leave the cursor untouched, and zero is a no-op even after closure.
+Genuine EOF is recorded before cleanup and survives cleanup failure. Unexpected
+`StopIteration` from acquisition, Method execution, validation, or cleanup is
+reported as `RuntimeError` with the original exception as cause.
+
+`GeneratorDataset` factory acquisition remains lazy, including epoch cursors.
+Closing an unread cursor opens nothing. Once opened, the cursor retains and
+closes the actual factory iterator, including at a finite declared cutoff;
+ordinary structural/combine operators explicitly own their child traversals.
+
 `Take(source, n)` requires a nonnegative exact integer and has finite
 cardinality `n`. It yields exactly `n` values or raises `DatasetExhaustedError`
 after its available prefix; `Take(source, 0)` does not open the source. The
@@ -127,6 +145,9 @@ yield counts at exhaustion and raises `DatasetExhaustedError` for a short source
 Closing, conversion failure, source failure, or exhaustion closes the owned
 cursor. Reads never advance accepted-update progress, exposure, or checkpoint
 state; successful trainer updates remain their sole owners.
+Explicit native training and validation loops use the same ownership context,
+so update failures remain primary over source-close failures and accepted-prefix
+accounting is retained.
 
 Backend plugins deliberately remain separate from the generic seam:
 

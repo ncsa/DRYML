@@ -39,6 +39,12 @@ class TrackingDataset(Dataset):
         return Cardinality.finite(len(self.values))
 
 
+class ShortDataset(TrackingDataset):
+    def iterator(self):
+        from dryml.data import DatasetCursor
+        return DatasetCursor(self.resource)
+
+
 def _batches():
     source = TrackingDataset((
         (np.asarray([0.0], dtype=np.float32), np.asarray([0.0], dtype=np.float32)),
@@ -140,6 +146,66 @@ def test_native_training_cursor_closes_on_preparation_failure_without_progress_s
         next(cursor)
 
     assert source.closes == [0]
+    assert cursor.observed_eof is False
+
+
+@pytest.mark.parametrize("expected", (0, 1))
+def test_native_count_validation_precedes_eof_and_cleanup_cannot_mask_shortfall(expected):
+    """Native count failures retain requested/yielded evidence despite cleanup failure."""
+    from dryml.data import DatasetExhaustedError
+    from dryml.data.native import PreparedDataset
+
+    class Resource:
+        closes = 0
+
+        def __next__(self):
+            raise StopIteration
+
+        def close(self):
+            self.closes += 1
+            raise RuntimeError("cleanup failed")
+
+    class Preparation:
+        def prepare(self, x, y):
+            return x, y
+
+    resource = Resource()
+    source = ShortDataset(((None, None),) * expected)
+    source.resource = resource
+    cursor = PreparedDataset(source).training_batches(Preparation())
+    failure = DatasetExhaustedError if expected else RuntimeError
+    with pytest.raises(failure) as error:
+        next(cursor)
+    if expected:
+        assert (error.value.requested, error.value.yielded) == (1, 0)
+    else:
+        assert str(error.value) == "cleanup failed"
+    assert cursor.observed_eof is (expected == 0)
+    assert resource.closes == 1
+
+
+@pytest.mark.parametrize("stage", ("preparation", "validation"))
+def test_native_nonpull_stopiteration_is_causal_failure(stage, monkeypatch):
+    """Validation and conversion StopIteration cannot silently terminate training."""
+    stopped = StopIteration(stage + " stopped")
+
+    class Preparation:
+        def prepare(self, x, y):
+            if stage == "preparation":
+                raise stopped
+            return x, y
+
+    source, dataset = _batches()
+    cursor = dataset.prepare().training_batches(Preparation())
+    if stage == "validation":
+        def validate(value):
+            raise stopped
+        monkeypatch.setattr(dataset, "examples_in", validate)
+    with pytest.raises(RuntimeError) as error:
+        next(cursor)
+    assert error.value.__cause__ is stopped
+    assert source.closes == [0]
+    assert cursor.observed_eof is False
 
 
 def test_training_input_modules_defer_framework_and_legacy_adapter_imports():

@@ -1,10 +1,12 @@
+"""Ordered Dataset combinations with occurrence-local resource ownership."""
+
 from __future__ import annotations
 
 from typing import Any
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import merge_spec_trees
-from dryml.data.dataset import Dataset
+from dryml.data.dataset import Dataset, DatasetCursor
 
 
 def _pack_tree(args: tuple[Any, ...], kwargs: dict[str, Any] | None = None) -> Any:
@@ -91,7 +93,18 @@ def _sum_cardinality(cardinalities):
 
 
 class Zip(Dataset):
-    """Combine one or more datasets in parallel into matching element trees."""
+    """Combine Dataset occurrences in parallel into matching element trees.
+
+    Args:
+        *sources: Positional Dataset leaves or a nested tree of Dataset leaves.
+        **named_sources: Alternative named Dataset branches.
+
+    Iteration returns a lazy closeable cursor, stopping at the shortest input in
+    positional pull order. Each occurrence owns its independent traversal, and
+    partial acquisition failures close all acquired inputs in reverse order.
+    Primary acquisition/read failures survive cleanup errors. Invalid or empty
+    source trees raise TypeError/ValueError without opening a traversal.
+    """
 
     _stream_operator = "zip"
 
@@ -102,13 +115,18 @@ class Zip(Dataset):
         super().__init__(spec=_map_dataset_tree(self.sources, lambda ds: ds.spec))
 
     def __iter__(self):
-        iterators = [iter(ds) for ds in _iter_dataset_leaves(self.sources)]
+        """Return a lazy cursor closing all inputs, including partial acquisition."""
+
+        return DatasetCursor._from_generator(self._iterate)
+
+    def _iterate(self, owner):
+        iterators = [owner._own(owner._call(ds.iterator)) for ds in _iter_dataset_leaves(self.sources)]
 
         while True:
             values = []
             for it in iterators:
                 try:
-                    values.append(next(it))
+                    values.append(owner._pull(it))
                 except StopIteration:
                     return
 
@@ -127,7 +145,7 @@ class Zip(Dataset):
                     return [build(v) for v in tree]
                 raise TypeError(f"Zip expects Dataset leaves, got {type(tree).__name__}.")
 
-            yield build(self.sources)
+            yield owner._call(build, self.sources)
 
     def __len__(self) -> Cardinality:
         return _min_cardinality(
@@ -160,7 +178,16 @@ class Zip(Dataset):
 
 
 class Chain(Dataset):
-    """Yield all elements from each source dataset in sequence."""
+    """Yield all elements from independently owned Dataset sources in sequence.
+
+    Args:
+        *sources: Nonempty ordered Dataset sequence.
+
+    Iteration returns a closeable cursor and defers later acquisition until its
+    predecessors end. Acquisition/read failures close acquired resources without
+    masking the primary error; acquisition StopIteration is causal RuntimeError.
+    Invalid/empty source sequences raise TypeError/ValueError during construction.
+    """
 
     _stream_operator = "chain"
 
@@ -174,8 +201,19 @@ class Chain(Dataset):
         super().__init__(spec=merge_spec_trees([source.spec for source in self.sources]))
 
     def __iter__(self):
+        """Return a lazy traversal owning each source acquired in declaration order."""
+
+        return DatasetCursor._from_generator(self._iterate)
+
+    def _iterate(self, owner):
         for source in self.sources:
-            yield from source
+            iterator = owner._own(owner._call(source.iterator))
+            while True:
+                try:
+                    value = owner._pull(iterator)
+                except StopIteration:
+                    break
+                yield value
 
     def __len__(self) -> Cardinality:
         return _sum_cardinality(source.yield_cardinality() for source in self.sources)

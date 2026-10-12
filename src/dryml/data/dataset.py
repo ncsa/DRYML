@@ -1,3 +1,5 @@
+"""Re-iterable Dataset APIs and owned cursors with independent EOF evidence."""
+
 from __future__ import annotations
 
 from abc import abstractmethod
@@ -10,6 +12,7 @@ from dryml.core.backend import discover_backends
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import Dynamic, SpecTree, TensorSpec
 from dryml.methods import ImplementationSelectionError
+from dryml.methods.stream import DatasetExhaustedError, _CursorLifecycle
 
 
 T = TypeVar("T")
@@ -77,28 +80,7 @@ def _batch_length(value, path: tuple[object, ...]) -> int:
     return length
 
 
-class DatasetExhaustedError(ValueError):
-    """Report that a cursor could not consume a requested number of values.
-
-    Args:
-        requested: Nonnegative number of values the operation was required to
-            consume.
-        yielded: Number of values actually consumed before exhaustion.
-
-    Attributes:
-        requested: The requested number of values.
-        yielded: The number successfully consumed before exhaustion.
-    """
-
-    def __init__(self, requested: int, yielded: int) -> None:
-        self.requested = requested
-        self.yielded = yielded
-        super().__init__(
-            f"Requested {requested} dataset elements, but the source yielded only {yielded}."
-        )
-
-
-class DatasetCursor(Iterator[T], Generic[T]):
+class DatasetCursor(_CursorLifecycle, Iterator[T], Generic[T]):
     """Own one closeable Dataset traversal with a consumed-yield position.
 
     Args:
@@ -106,29 +88,33 @@ class DatasetCursor(Iterator[T], Generic[T]):
 
     ``position`` advances after each source value is consumed, including values
     discarded by :meth:`skip`. Closing is idempotent and forwards to an owned
-    iterator's ``close`` method when it has one. A closed cursor is exhausted.
+    iterator's ``close`` method when it has one. A closed cursor stops yielding,
+    but only ``observed_eof`` proves successful root-output termination. Use a
+    context manager to preserve consumer failures when cleanup also fails.
+    Read failures close the source; cleanup failures propagate without erasing
+    genuine EOF. Non-pull StopIteration becomes RuntimeError with its cause.
     """
 
     def __init__(self, iterator: Iterator[T]) -> None:
-        self._iterator = iterator
+        super().__init__()
+        self._iterator = self._own(iterator)
         self._position = 0
-        self._closed = False
+
+    @classmethod
+    def _from_generator(cls, factory):
+        """Give an ordinary operator generator explicit ownership of child sources."""
+
+        cursor = cls(iter(()))
+        cursor._iterator = cursor._own(cursor._call(factory, cursor))
+        return cursor
 
     def __iter__(self) -> DatasetCursor[T]:
         """Return this cursor as its own iterator."""
 
         return self
 
-    def __next__(self) -> T:
-        """Return the next value and advance position, closing at exhaustion."""
-
-        if self._closed:
-            raise StopIteration
-        try:
-            value = next(self._iterator)
-        except StopIteration:
-            self.close()
-            raise
+    def _read(self) -> T:
+        value = self._pull(self._iterator)
         self._position += 1
         return value
 
@@ -137,47 +123,6 @@ class DatasetCursor(Iterator[T], Generic[T]):
         """Return the number of source yields this cursor has consumed."""
 
         return self._position
-
-    @staticmethod
-    def _validate_skip_count(n: int) -> None:
-        """Reject skip counts that cannot express an exact nonnegative yield count."""
-
-        if type(n) is not int:
-            raise TypeError("skip count must be a nonnegative exact int.")
-        if n < 0:
-            raise ValueError("skip count must be non-negative.")
-
-    def skip(self, n: int) -> None:
-        """Consume exactly ``n`` values or report partial advancement.
-
-        Args:
-            n: Nonnegative exact integer number of yields to discard.
-
-        Raises:
-            TypeError: If ``n`` is not an exact integer.
-            ValueError: If ``n`` is negative.
-            DatasetExhaustedError: If fewer than ``n`` values remain. Its counts
-                describe this call's requested and actual advancement.
-        """
-
-        self._validate_skip_count(n)
-        advanced = 0
-        while advanced < n:
-            try:
-                next(self)
-            except StopIteration as error:
-                raise DatasetExhaustedError(n, advanced) from error
-            advanced += 1
-
-    def close(self) -> None:
-        """Close the owned iterator once; subsequent reads are exhausted."""
-
-        if self._closed:
-            return
-        self._closed = True
-        close = getattr(self._iterator, "close", None)
-        if close is not None:
-            close()
 
 
 class Dataset(Object, Generic[T]):
@@ -219,12 +164,16 @@ class Dataset(Object, Generic[T]):
             A cursor starting at position zero and owning this traversal's
             underlying iterator.
 
+        Raises:
+            BaseException: Source acquisition failure. Unexpected acquisition
+                StopIteration is translated to RuntimeError with its cause.
+
         Side Effects:
             May acquire source-local iteration resources. The Dataset itself does
             not retain cursor position or resource ownership.
         """
 
-        return DatasetCursor(iter(self))
+        return DatasetCursor(_CursorLifecycle._call(iter, self))
 
     def method_graph(self):
         """Return an inert local stream graph for this Dataset pipeline.
@@ -269,17 +218,18 @@ class Dataset(Object, Generic[T]):
         return PreparedDataset(self)
 
     def peek(self) -> T:
+        """Return one fresh element, releasing its traversal before returning.
+
+        Raises:
+            ValueError: If the Dataset is empty.
+            BaseException: Source or cleanup failure; a source failure remains
+                primary when cleanup also fails.
         """
-        Return one element from the dataset without mutating long-term dataset
-        state, assuming the dataset is re-iterable.
-        """
-        it = self.iterator()
-        try:
-            return next(it)
-        except StopIteration as e:
-            raise ValueError("Cannot peek an empty dataset.") from e
-        finally:
-            it.close()
+        with self.iterator() as it:
+            try:
+                return next(it)
+            except StopIteration as e:
+                raise ValueError("Cannot peek an empty dataset.") from e
 
     def yield_cardinality(self) -> Cardinality:
         """Return the declared number of values yielded by this Dataset.
@@ -500,7 +450,7 @@ class _MapCursor(DatasetCursor):
         if self._resolved:
             return
         try:
-            implementation = self._dataset.method.find_implementation(
+            implementation = self._call(self._dataset.method.find_implementation,
                 input_spec=self._dataset.src.spec,
             )
         except ImplementationSelectionError as error:
@@ -509,72 +459,52 @@ class _MapCursor(DatasetCursor):
                 or error.unknown_traits != ("backend",)
             ):
                 raise
-            self._source_cursor = self._dataset.src.iterator()
+            self._source_cursor = self._own(self._call(self._dataset.src.iterator))
             try:
-                first = next(self._source_cursor)
+                first = self._pull(self._source_cursor)
             except StopIteration:
                 self._resolved = True
                 return
-            backends = discover_backends(first)
+            backends = self._call(discover_backends, first)
             if len(backends) != 1:
                 if len(backends) > 1:
                     raise ImplementationSelectionError("conflict")
                 raise error
-            implementation = self._dataset.method.find_implementation(
+            implementation = self._call(self._dataset.method.find_implementation,
                 input_spec=self._dataset.src.spec,
                 backend=next(iter(backends)),
             )
             self._pending = first
         else:
-            self._source_cursor = self._dataset.src.iterator()
+            self._source_cursor = self._own(self._call(self._dataset.src.iterator))
         self._implementation = implementation
         self._resolved = True
 
-    def __next__(self):
-        """Transform one source value using Map's previously resolved local call."""
-
-        if self._closed:
-            raise StopIteration
-        self._resolve()
+    def _read(self):
+        self._call(self._resolve)
         if self._implementation is None:
-            self.close()
             raise StopIteration
         if self._pending is _PENDING:
             assert self._source_cursor is not None
-            try:
-                item = next(self._source_cursor)
-            except StopIteration:
-                self.close()
-                raise
+            item = self._pull(self._source_cursor)
         else:
             item = self._pending
             self._pending = _PENDING
-        result = self._implementation(item)
+        result = self._call(self._implementation, item)
         if getattr(self._dataset, "preserves_examples", False):
-            source_examples = self._dataset.src.examples_in(item)
-            if self._dataset.examples_in(result) != source_examples:
+            source_examples = self._call(self._dataset.src.examples_in, item)
+            if self._call(self._dataset.examples_in, result) != source_examples:
                 raise ValueError("Map declared preserves_examples but changed an example count.")
         self._position += 1
         return result
 
-    def skip(self, n: int) -> None:
-        """Skip mapped values, delegating only after safe selection and declaration."""
+    def _skip(self, n: int) -> None:
+        """Delegate only iteration-independent skips within the shared boundary."""
 
-        self._validate_skip_count(n)
-        if n == 0:
-            return
         self._resolve()
         if not self._dataset.method.iteration_independent:
-            advanced = 0
-            while advanced < n:
-                try:
-                    next(self)
-                except StopIteration as error:
-                    raise DatasetExhaustedError(n, advanced) from error
-                advanced += 1
-            return
+            return super()._skip(n)
         if self._implementation is None:
-            self.close()
             raise DatasetExhaustedError(n, 0)
         advanced = 0
         if self._pending is not _PENDING:
@@ -586,21 +516,11 @@ class _MapCursor(DatasetCursor):
             return
         assert self._source_cursor is not None
         try:
-            self._source_cursor.skip(remaining)
+            self._call(self._source_cursor.skip, remaining)
         except DatasetExhaustedError as error:
             self._position += error.yielded
-            self.close()
             raise DatasetExhaustedError(n, advanced + error.yielded) from error
         self._position += remaining
-
-    def close(self) -> None:
-        """Close the Map traversal and its owned source cursor."""
-
-        if self._closed:
-            return
-        if self._source_cursor is not None:
-            self._source_cursor.close()
-        super().close()
 
 
 class Map(Dataset):

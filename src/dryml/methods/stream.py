@@ -17,6 +17,256 @@ from dryml.core.tensor_spec import SpecTree
 from .errors import ImplementationSelectionError
 
 
+class DatasetExhaustedError(ValueError):
+    """Report a strict yield-count shortfall without changing exception identity.
+
+    Args:
+        requested: Nonnegative number of values required by the operation.
+        yielded: Number actually consumed before exhaustion.
+
+    Attributes:
+        requested: Required yield count.
+        yielded: Successfully consumed yield count.
+
+    Data re-exports this lower-layer exception; it is not a Methods-root export.
+    """
+
+    def __init__(self, requested: int, yielded: int) -> None:
+        self.requested = requested
+        self.yielded = yielded
+        super().__init__(
+            f"Requested {requested} dataset elements, but the source yielded only {yielded}."
+        )
+
+
+class _CursorLifecycle:
+    """Own resources and positive output-termination evidence for one traversal.
+
+    Subclasses implement ``_read`` using designated ``_pull`` calls for iterator
+    exhaustion and ``_call`` for acquisition, operators, and validation. Strict
+    skip shares the failure boundary; consumers may specialize ``_skip`` without
+    certifying EOF or closing resources. Persistence policy remains with consumers.
+    """
+
+    def __init__(self) -> None:
+        self._resources: list[object] = []
+        self._resource_ids: set[int] = set()
+        self._deferred_cleanup: list[BaseException] = []
+        self._closed = False
+        self._cleanup_done = False
+        self._cleanup_deferred = False
+        self._observed_eof = False
+
+    @property
+    def observed_eof(self) -> bool:
+        """Return positive root-output EOF evidence, independent of closure.
+
+        True only after a designated output pull ends or a strict output bound is
+        satisfied and subsequently observed. Cleanup failures do not erase this
+        evidence. Explicit close, interruption, and failures never create it.
+        """
+
+        return self._observed_eof
+
+    def __iter__(self):
+        """Return this traversal's iterator without acquiring a resource."""
+
+        return self
+
+    def __next__(self):
+        """Read one output, closing on EOF/failure while preserving primary errors."""
+
+        if self._closed:
+            raise StopIteration
+        try:
+            value = self._read()
+        except StopIteration:
+            self._observed_eof = True
+            if self._cleanup_deferred:
+                self._closed = True
+            else:
+                self.close()
+            raise
+        except BaseException as error:
+            self._close_after_failure(error)
+            raise
+        return value
+
+    @staticmethod
+    def _validate_skip_count(n: int) -> None:
+        """Reject counts that cannot express an exact nonnegative yield count."""
+
+        if type(n) is not int:
+            raise TypeError("skip count must be a nonnegative exact int.")
+        if n < 0:
+            raise ValueError("skip count must be non-negative.")
+
+    def skip(self, n: int) -> None:
+        """Consume exactly ``n`` outputs or report this call's partial advancement.
+
+        Args:
+            n: Nonnegative exact integer number of yields to discard.
+
+        Returns:
+            None after advancing exactly ``n`` outputs; zero is always a no-op.
+
+        Raises:
+            TypeError: If ``n`` is not an exact integer.
+            ValueError: If ``n`` is negative.
+            DatasetExhaustedError: If fewer than ``n`` outputs remain, including
+                on a closed cursor. Counts describe requested and actual advances.
+            BaseException: Acquisition, read, or operator failure.
+
+        Invalid counts do not advance or close the cursor. Real failures close
+        owned resources while keeping the primary error over cleanup failures.
+        Shortfall never creates root EOF evidence or erases already observed EOF.
+        """
+
+        self._validate_skip_count(n)
+        if n == 0:
+            return
+        if self._closed:
+            raise DatasetExhaustedError(n, 0)
+        try:
+            self._call(self._skip, n)
+        except BaseException as error:
+            self._close_after_failure(error)
+            raise
+
+    def _skip(self, n: int) -> None:
+        """Read a strict prefix before applying root termination/cleanup policy."""
+
+        advanced = 0
+        while advanced < n:
+            try:
+                self._read()
+            except StopIteration as error:
+                raise DatasetExhaustedError(n, advanced) from error
+            advanced += 1
+
+    def __enter__(self):
+        """Enter an ownership boundary; acquisition remains lazy."""
+
+        return self
+
+    def __exit__(self, exc_type, error, traceback):
+        """Close on exit, retaining consumer failures and interruption as primary.
+
+        Cleanup alone is reported normally. Unexpected consumer StopIteration is
+        translated to RuntimeError with the original exception as its cause.
+        """
+
+        if error is None:
+            self.close()
+        elif isinstance(error, StopIteration):
+            failure = RuntimeError("Unexpected StopIteration in cursor consumer.")
+            self._close_after_failure(failure)
+            raise failure from error
+        else:
+            self._close_after_failure(error)
+        return False
+
+    @staticmethod
+    def _call(function, *args, **kwargs):
+        """Call a non-pull operation without mistaking StopIteration for EOF."""
+
+        try:
+            return function(*args, **kwargs)
+        except StopIteration as error:
+            raise RuntimeError("Unexpected StopIteration outside an iterator pull.") from error
+
+    def _pull(self, iterator):
+        """Pull an iterator, deferring known EOF cleanup errors to root policy.
+
+        A child may have proved EOF before cleanup failed. The parent must first
+        validate its own strict bound; only then can it certify its root EOF.
+        """
+
+        try:
+            return next(iterator)
+        except StopIteration:
+            raise
+        except BaseException as error:
+            if isinstance(iterator, _CursorLifecycle) and iterator.observed_eof:
+                self._deferred_cleanup.append(error)
+                raise StopIteration from error
+            raise
+
+    def _own(self, resource):
+        """Retain an acquired resource for exactly one reverse-order close attempt."""
+
+        if id(resource) not in self._resource_ids:
+            if isinstance(resource, _CursorLifecycle):
+                # The parent owns cleanup ordering across sibling cursors. Child
+                # termination records evidence but cannot close ahead of them.
+                resource._cleanup_deferred = True
+            self._resource_ids.add(id(resource))
+            self._resources.append(resource)
+        return resource
+
+    def _release(self, resource) -> None:
+        """Close and forget a finished child, bounding repeated-epoch ownership."""
+
+        try:
+            close = self._call(getattr, resource, "close", None)
+            if close is not None:
+                self._call(close)
+        finally:
+            self._resources = [item for item in self._resources if item is not resource]
+            self._resource_ids.discard(id(resource))
+
+    def close(self) -> None:
+        """Close acquired resources once in reverse order, without proving EOF.
+
+        Raises:
+            BaseException: First cleanup failure after every resource gets an
+                attempt. Unexpected cleanup StopIteration becomes RuntimeError
+                with the original cause. Further failures are exception notes.
+        """
+
+        if self._cleanup_done:
+            return
+        self._closed = True
+        self._cleanup_done = True
+        errors = self._close_resources()
+        if errors:
+            primary, *additional = errors
+            self._annotate_cleanup(primary, additional)
+            raise primary
+
+    def _close_after_failure(self, primary: BaseException) -> None:
+        """Close after failure without replacing the primary diagnostic."""
+
+        if self._cleanup_done:
+            return
+        self._closed = True
+        if self._cleanup_deferred:
+            return
+        self._cleanup_done = True
+        self._annotate_cleanup(primary, self._close_resources())
+
+    @staticmethod
+    def _annotate_cleanup(primary: BaseException, errors: list[BaseException]) -> None:
+        add_note = getattr(primary, "add_note", None)
+        if errors and add_note is not None:
+            add_note(
+                "Cursor cleanup also failed: "
+                + "; ".join(f"{type(error).__name__}: {error}" for error in errors)
+            )
+
+    def _close_resources(self) -> list[BaseException]:
+        errors = self._deferred_cleanup
+        self._deferred_cleanup = []
+        for resource in reversed(self._resources):
+            try:
+                close = self._call(getattr, resource, "close", None)
+                if close is not None:
+                    self._call(close)
+            except BaseException as error:
+                errors.append(error)
+        return errors
+
+
 @dataclass(frozen=True, slots=True)
 class IteratorPort:
     """One ordered iterator port carrying a specification for each yielded value.
@@ -415,22 +665,23 @@ class StreamPlan:
         )
 
 
-class StreamGraphCursor(Iterator[Any]):
+class StreamGraphCursor(_CursorLifecycle, Iterator[Any]):
     """Own one local graph traversal and all resources acquired for it.
 
     The cursor acquires lazily, closes resources once in reverse acquisition order,
-    and preserves a body/acquisition failure if cleanup also fails.  It does not
-    serialize or retain a generator frame for replay.
+    and preserves a body/acquisition/consumer failure if cleanup also fails. Use
+    it as a context manager around consumer work. ``observed_eof`` records only
+    successful root termination, independently of closure; cleanup errors retain
+    that evidence. Unexpected non-pull StopIteration is a causal RuntimeError.
+    It does not serialize or retain a generator frame for replay.
     """
 
     def __init__(self, root: _StreamOp, *, epoch: int = 0) -> None:
+        super().__init__()
         self._root_op = root
         self._epoch = epoch
         self._root: Iterator[Any] | None = None
-        self._resources: list[object] = []
-        self._resource_ids: set[int] = set()
         self._position = 0
-        self._closed = False
 
     def __iter__(self) -> "StreamGraphCursor":
         """Return this cursor as its own iterator."""
@@ -443,109 +694,12 @@ class StreamGraphCursor(Iterator[Any]):
 
         return self._position
 
-    def __next__(self) -> Any:
-        """Pull one graph output and close all acquired resources at termination."""
-
-        if self._closed:
-            raise StopIteration
-        try:
-            if self._root is None:
-                self._root = self._open(self._root_op)
-            value = next(self._root)
-        except StopIteration:
-            self.close()
-            raise
-        except BaseException as error:
-            self._close_after_failure(error)
-            raise
+    def _read(self) -> Any:
+        if self._root is None:
+            self._root = self._call(self._open, self._root_op)
+        value = self._pull(self._root)
         self._position += 1
         return value
-
-    def skip(self, n: int) -> None:
-        """Consume exactly ``n`` graph outputs or report partial advancement.
-
-        Args:
-            n: Nonnegative exact integer count.
-
-        Raises:
-            TypeError: If ``n`` is not an exact integer.
-            ValueError: If ``n`` is negative.
-            DatasetExhaustedError: If the graph ends before ``n`` outputs.
-        """
-
-        from dryml.data.dataset import DatasetExhaustedError
-
-        if type(n) is not int:
-            raise TypeError("skip count must be a nonnegative exact int.")
-        if n < 0:
-            raise ValueError("skip count must be non-negative.")
-        advanced = 0
-        while advanced < n:
-            try:
-                next(self)
-            except StopIteration as error:
-                raise DatasetExhaustedError(n, advanced) from error
-            advanced += 1
-
-    def close(self) -> None:
-        """Close every acquired resource once in reverse acquisition order.
-
-        Raises:
-            BaseException: The first reverse-acquisition cleanup failure. All
-                resources are still given one close attempt; on runtimes that
-                support exception notes, later failures are attached to the first.
-        """
-
-        if self._closed:
-            return
-        self._closed = True
-        errors = self._close_resources()
-        if errors:
-            primary, *additional = errors
-            self._annotate_cleanup(primary, additional)
-            raise primary
-
-    def _close_after_failure(self, primary: BaseException) -> None:
-        """Close after a primary failure without allowing cleanup to mask it."""
-
-        if self._closed:
-            return
-        self._closed = True
-        errors = self._close_resources()
-        self._annotate_cleanup(primary, errors)
-
-    @staticmethod
-    def _annotate_cleanup(primary: BaseException, errors: list[BaseException]) -> None:
-        """Attach secondary cleanup diagnostics when the runtime supports notes."""
-
-        add_note = getattr(primary, "add_note", None)
-        if errors and add_note is not None:
-            add_note(
-                "Stream graph cleanup also failed: "
-                + "; ".join(f"{type(error).__name__}: {error}" for error in errors)
-            )
-
-    def _close_resources(self) -> list[BaseException]:
-        """Close acquired resources in reverse order and collect every failure."""
-
-        errors: list[BaseException] = []
-        for resource in reversed(self._resources):
-            close = getattr(resource, "close", None)
-            if close is None:
-                continue
-            try:
-                close()
-            except BaseException as error:
-                errors.append(error)
-        return errors
-
-    def _own(self, resource: Iterator[Any]) -> Iterator[Any]:
-        """Record one newly acquired owned iterator exactly once."""
-
-        if id(resource) not in self._resource_ids:
-            self._resource_ids.add(id(resource))
-            self._resources.append(resource)
-        return resource
 
     def _open(self, op: _StreamOp, *, epoch: int | None = None) -> Iterator[Any]:
         """Open one operation at an inherited epoch while retaining ownership."""
@@ -554,22 +708,22 @@ class StreamGraphCursor(Iterator[Any]):
             epoch = self._epoch
         if op.kind == "source":
             opener = getattr(op.dataset, "iterator_for_epoch", None)
-            return self._own(opener(epoch) if callable(opener) else op.dataset.iterator())
+            return self._own(self._call(opener, epoch) if callable(opener) else self._call(op.dataset.iterator))
         if op.kind == "map":
             source = self._open(op.inputs[0], epoch=epoch)
-            return self._own(_MapIterator(source, op.dataset, op.selected))
+            return self._own(_MapIterator(self, source, op.dataset, op.selected))
         if op.kind == "batch":
             source = self._open(op.inputs[0], epoch=epoch)
-            return self._own(_BatchIterator(source, op.dataset))
+            return self._own(_BatchIterator(self, source, op.dataset))
         if op.kind == "unbatch":
             source = self._open(op.inputs[0], epoch=epoch)
-            return self._own(_UnbatchIterator(source, op.dataset))
+            return self._own(_UnbatchIterator(self, source, op.dataset))
         if op.kind == "take":
             if op.dataset.n == 0:
                 return self._own(iter(()))
             source_epoch = op.dataset.epoch if op.dataset.fixed_prefix else op.dataset.epoch + epoch
             source = self._open(op.inputs[0], epoch=source_epoch)
-            return self._own(_TakeIterator(source, op.dataset.n))
+            return self._own(_TakeIterator(self, source, op.dataset.n))
         if op.kind == "zip":
             return self._own(_ZipIterator(self, op.inputs, op.tree, epoch))
         if op.kind == "chain":
@@ -582,7 +736,8 @@ class StreamGraphCursor(Iterator[Any]):
 class _MapIterator(Iterator[Any]):
     """One Map output iterator with an occurrence-local discovery buffer."""
 
-    def __init__(self, source: Iterator[Any], dataset: object, selected: object | None) -> None:
+    def __init__(self, cursor, source: Iterator[Any], dataset: object, selected: object | None) -> None:
+        self.cursor = cursor
         self.source = source
         self.dataset = dataset
         self.selected = selected
@@ -595,7 +750,7 @@ class _MapIterator(Iterator[Any]):
 
     def __next__(self) -> Any:
         if not self.resolved:
-            self._resolve()
+            self.cursor._call(self._resolve)
         if self.selected is None:
             raise StopIteration
         if self.has_pending:
@@ -603,40 +758,47 @@ class _MapIterator(Iterator[Any]):
             self.pending = None
             self.has_pending = False
         else:
-            item = next(self.source)
-        result = self.selected(item)
+            item = self.cursor._pull(self.source)
+        result = self.cursor._call(self.selected, item)
         if getattr(self.dataset, "preserves_examples", False):
-            source_examples = self.dataset.src.examples_in(item)
-            if self.dataset.examples_in(result) != source_examples:
+            source_examples = self.cursor._call(self.dataset.src.examples_in, item)
+            if self.cursor._call(self.dataset.examples_in, result) != source_examples:
                 raise ValueError("Map declared preserves_examples but changed an example count.")
         return result
 
     def _resolve(self) -> None:
         try:
-            selected = self.dataset.method.find_implementation(input_spec=self.dataset.src.spec).prepared_invoker()
+            implementation = self.cursor._call(
+                self.dataset.method.find_implementation, input_spec=self.dataset.src.spec,
+            )
         except ImplementationSelectionError as error:
             if error.reason != "unknown_traits" or error.unknown_traits != ("backend",):
                 raise
-            item = next(self.source)
+            try:
+                item = self.cursor._pull(self.source)
+            except StopIteration:
+                self.resolved = True
+                return
             from dryml.core.backend import discover_backends
 
-            backends = discover_backends(item)
+            backends = self.cursor._call(discover_backends, item)
             if len(backends) != 1:
                 raise ImplementationSelectionError("conflict" if backends else "unknown_traits", () if backends else ("backend",))
-            selected = self.dataset.method.find_implementation(
+            implementation = self.cursor._call(self.dataset.method.find_implementation,
                 input_spec=self.dataset.src.spec,
                 backend=next(iter(backends)),
-            ).prepared_invoker()
+            )
             self.pending = item
             self.has_pending = True
-        self.selected = selected
+        self.selected = self.cursor._call(implementation.prepared_invoker)
         self.resolved = True
 
 
 class _BatchIterator(Iterator[Any]):
     """One bounded Batch output iterator retaining its collate selection once."""
 
-    def __init__(self, source: Iterator[Any], dataset: object) -> None:
+    def __init__(self, cursor, source: Iterator[Any], dataset: object) -> None:
+        self.cursor = cursor
         self.source = source
         self.dataset = dataset
         self.collate = None
@@ -648,22 +810,23 @@ class _BatchIterator(Iterator[Any]):
         batch = []
         for _ in range(self.dataset.batch_size):
             try:
-                batch.append(next(self.source))
+                batch.append(self.cursor._pull(self.source))
             except StopIteration:
                 break
         if not batch or (self.dataset.drop_remainder and len(batch) < self.dataset.batch_size):
             raise StopIteration
         if self.collate is None:
-            self.collate = self.dataset._resolve_collate(batch)
-        return self.collate(batch)
+            self.collate = self.cursor._call(self.dataset._resolve_collate, batch)
+        return self.cursor._call(self.collate, batch)
 
 
 class _UnbatchIterator(Iterator[Any]):
     """One Unbatch output iterator retaining one selected split implementation."""
 
-    def __init__(self, source: Iterator[Any], dataset: object) -> None:
+    def __init__(self, cursor, source: Iterator[Any], dataset: object) -> None:
+        self.cursor = cursor
         self.source = source
-        self.split = dataset._resolve_split()
+        self.split = cursor._call(dataset._resolve_split)
         self.pending: Iterator[Any] = iter(())
 
     def __iter__(self) -> "_UnbatchIterator":
@@ -672,15 +835,18 @@ class _UnbatchIterator(Iterator[Any]):
     def __next__(self) -> Any:
         while True:
             try:
-                return next(self.pending)
+                return self.cursor._pull(self.pending)
             except StopIteration:
-                self.pending = iter(self.split(next(self.source)))
+                value = self.cursor._pull(self.source)
+                self.cursor._release(self.pending)
+                self.pending = self.cursor._own(self.cursor._call(iter, self.cursor._call(self.split, value)))
 
 
 class _TakeIterator(Iterator[Any]):
     """Yield one strict prepared prefix without bypassing its child graph."""
 
-    def __init__(self, source: Iterator[Any], count: int) -> None:
+    def __init__(self, cursor, source: Iterator[Any], count: int) -> None:
+        self.cursor = cursor
         self.source = source
         self.count = count
         self.position = 0
@@ -692,10 +858,8 @@ class _TakeIterator(Iterator[Any]):
         if self.position >= self.count:
             raise StopIteration
         try:
-            value = next(self.source)
-        except StopIteration as error:
-            from dryml.data.dataset import DatasetExhaustedError
-
+            value = self.cursor._pull(self.source)
+        except (StopIteration, DatasetExhaustedError) as error:
             raise DatasetExhaustedError(self.count, self.position) from error
         self.position += 1
         return value
@@ -716,10 +880,10 @@ class _ZipIterator(Iterator[Any]):
 
     def __next__(self) -> Any:
         if self.iterators is None:
-            self.iterators = tuple(self.cursor._open(op, epoch=self.epoch) for op in self.inputs)
-        values = [next(iterator) for iterator in self.iterators]
+            self.iterators = tuple(self.cursor._call(self.cursor._open, op, epoch=self.epoch) for op in self.inputs)
+        values = [self.cursor._pull(iterator) for iterator in self.iterators]
         value_iter = iter(values)
-        return _build_zip_tree(self.tree, value_iter)
+        return self.cursor._call(_build_zip_tree, self.tree, value_iter)
 
 
 class _ChainIterator(Iterator[Any]):
@@ -738,9 +902,9 @@ class _ChainIterator(Iterator[Any]):
     def __next__(self) -> Any:
         while self.index < len(self.inputs):
             if self.current is None:
-                self.current = self.cursor._open(self.inputs[self.index], epoch=self.epoch)
+                self.current = self.cursor._call(self.cursor._open, self.inputs[self.index], epoch=self.epoch)
             try:
-                return next(self.current)
+                return self.cursor._pull(self.current)
             except StopIteration:
                 self.current = None
                 self.index += 1
@@ -762,9 +926,9 @@ class _CustomIterator(Iterator[Any]):
 
     def __next__(self) -> Any:
         if self.output is None:
-            inputs = tuple(self.cursor._open(op, epoch=self.epoch) for op in self.inputs)
-            self.output = self.cursor._own(self.node.open(*inputs))
-        return next(self.output)
+            inputs = tuple(self.cursor._call(self.cursor._open, op, epoch=self.epoch) for op in self.inputs)
+            self.output = self.cursor._own(self.cursor._call(self.node.open, *inputs))
+        return self.cursor._pull(self.output)
 
 
 def _iter_dataset_leaves(tree: object):
