@@ -378,7 +378,7 @@
           ]
         },
         "tests/core/test_repo_query_refresh.py": {
-          "rationale": "Retain U2 one-shot lineage, partial/publication failure, compatible completion and overrides alongside U3 target, demand, admission, topology and ownership contracts.",
+          "rationale": "Retain U2 one-shot lineage including common-base independent requests, partial/publication failure, compatible completion and overrides alongside U3 target, optional-absence exact-positive admission, demand, topology and ownership contracts.",
           "functions": [
             "test_u2_shared_branches_fresh_request_and_direct_construction",
             "test_u2_disjoint_algebra_scope_extension_and_outer_overrides",
@@ -396,6 +396,7 @@
             "test_u3_demand_consumer_rejects_conflicting_repo_presentations",
             "test_u3_foreign_persisted_target_refuses_before_any_target_maintenance",
             "test_u3_optional_absence_and_explicit_configured_unavailability",
+            "test_u3_optional_absence_exact_positive_scan_controls",
             "test_u3_warning_precedes_ready_validation_once",
             "test_u3_always_repeats_ready_validation_and_inert_paths_do_nothing",
             "test_u3_ready_explicit_scan_admission_precedes_backend_io",
@@ -780,6 +781,7 @@
         }
       },
       "sampled_functions": {
+        "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings": "Represent common versus separate base sources, union/intersection, both operand orders, and pending/completed requests; retain common-base cases while focused verification covers the full product.",
         "tests/core/test_repo_query_refresh.py::test_u3_conflicting_presentations_refuse_before_maintenance": "Represent every destination/settings/source/dirty/authority conflict and both direct and Repo presentation boundaries; focused verification retains the complete product.",
         "tests/core/test_query_v3_restrictions.py::test_u6_fixed_external_scopes_reject_before_inventory": "Represent every external authority scope and both scan/index policies; focused verification retains the complete product.",
         "tests/core/test_execute_managed_integration.py::test_managed_decorator_orders_materialize_once_and_publish_one_final_state": "Genuine decorator-order by placement product; every member/order and placement value remains represented.",
@@ -805,6 +807,8 @@
         "tests/runtime/test_publication_concurrency.py": "Runtime publication concurrency proof."
       },
       "must_run": {
+        "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings[True-False-union-True]": "Pin completed independent requests from one shared base so sibling scopes cannot repeat maintenance.",
+        "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings[True-True-intersection-True]": "Pin the shared-base completed intersection in reversed order alongside marginal pending and separate-base coverage.",
         "tests/core/test_execute_managed_integration.py::test_managed_decorator_orders_materialize_once_and_publish_one_final_state[subprocess-operation_afm-written_order0]": "Keep the real managed worker boundary even if parameter collection order changes.",
         "tests/managed/test_execute_defaults.py::test_managed_default_resolution_uses_invocation_state_and_worker_control[both-True]": "Pin the nested state-plus-control interaction in addition to marginal axis coverage."
       },

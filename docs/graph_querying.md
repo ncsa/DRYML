@@ -182,7 +182,11 @@ repair may replace derived sidecars but never rewrites Store authority. Direct
 backend `refresh(True)` and `refresh("always")` likewise perform one independent
 cycle per call. Construction, ordinary `explain()`, and identity/occurrence
 `take(0)` perform no maintenance or source acquisition. Explicit backend failures
-propagate; absent optional backends create no maintenance target.
+propagate; absent optional backends create no maintenance target and trigger
+neither maintenance scan admission nor a warning. A direct exact positive can
+therefore run without an inventory scan under `"forbid"` or `"warn"` even with
+`True` or `"always"`. When the target
+becomes available, its explicit cycle still requires scan admission before work.
 Memory and disabled Store policies have no persistent refresh obligation.
 
 ```python
@@ -194,6 +198,8 @@ universe.refresh(True).count()   # fresh request over the effective expression
 
 Algebra preserves each operand's producer/scope bindings: combining independently
 completed A and B universes does not refresh A for B's request or B for A's request.
+This also holds for independent requests derived from one reusable base query:
+sharing the base's source does not attach either request to its sibling's scopes.
 A newly attached external authority scope C extends the expression's inherited
 requests. In the absence of an older in-flight attempt, pending obligations for C
 coalesce into one cycle. Empty filtered results retain scope obligations; even an

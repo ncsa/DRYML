@@ -7,6 +7,7 @@ Auto recovery belongs only to actual index consumers; explicit cycles precede
 fresh evaluation cuts, with started maintenance work charged even on failure.
 True intent is a process-local shared one-shot request; bindings preserve operand
 lineage while requests retain only compatible completion and attempt outcomes.
+Absent optional indexes create neither maintenance scan obligations nor completion.
 Terminals expose authority, budget, and cardinality failures rather than partial
 answers. Evaluation may read records and refresh permitted derived indexes but
 never constructs Objects, reads state payloads, or changes Store authority.
@@ -1071,8 +1072,10 @@ class IdentityQuery:
     QueryIndexIncompatible before maintenance, configured explicit unavailability
     raises QueryIndexUnavailable, and scan controls apply even to ready validation.
     True creates a process-local request shared by ordinary derivatives and shallow
-    copies. Algebra preserves operand-local bindings; new external scopes extend
-    them. Explicit refresh overrides replace intent without changing originals.
+    copies. Algebra preserves operand-local bindings, even for independent requests
+    derived from the same source; new external scopes extend them. Absent optional
+    targets require no maintenance scan and receive no completion credit. Explicit
+    refresh overrides replace intent without changing originals.
     Same-request callers single-flight, observing their joined attempt's outcome;
     failed/interrupted targets remain retryable and successful targets survive later
     maintenance or evaluation failure. Self-reentry raises QueryIndexBusy; interrupted
@@ -1671,6 +1674,8 @@ class IdentityQuery:
         callers observe that exact attempt's outcome, including failure followed
         by another caller's successful retry. Failure/interruption leaves targets
         retryable; partial success and later evaluation failure retain completion.
+        Absent optional targets require no maintenance scan or completion credit;
+        if later available, they still require admission for their pending cycle.
 
         Args:
             policy: Exact bool or the strings ``"auto"`` and ``"always"``.
@@ -2122,8 +2127,9 @@ class IdentityQuery:
         if self.take_limit != 0:
             capture.index_presentations = self._index_presentations(capture, occurrence=occurrence)
             if capture.refresh_policy is True or capture.refresh_policy == "always":
+                # Configured SQLite can be refused before IO; optional targets must resolve first.
                 if any(
-                    getattr(item.store, "query_index_policy", None) not in {"memory", "none"}
+                    getattr(item.store, "query_index_policy", None) == "sqlite"
                     and (capture.refresh_policy == "always" or any(
                         not request.completed_domain(item.store.authority_fence_key())
                         for request in item.requests
@@ -2136,7 +2142,7 @@ class IdentityQuery:
                     ))) for target in capture.resolve_index_targets(explicit=True)
                 )
                 # Freeze and check every applicable pair before any target cycles.
-                pending = False
+                pending = capture.refresh_policy == "always" and bool(obligations)
                 for target, requests in obligations:
                     for request in requests:
                         with request._process_lock():
@@ -2175,28 +2181,31 @@ class IdentityQuery:
         presentations = []
 
         bindings = self._refresh_bindings if self.refresh_policy is True else ()
+        active_bindings = set(bindings)
 
-        def bound(scope, *, producer=False):
-            return tuple(binding.request for binding in bindings if (
+        def bound(scope, local_bindings, *, producer=False):
+            return tuple(binding.request for binding in local_bindings if (
                 binding.producer is producer and (
                     binding.scope is scope or (not producer and _same_v3_scope(binding.scope, scope))
                 )
             ))
 
-        def add(producer, scope, covering=()):
+        def add(producer, scope, covering=(), local_bindings=()):
             if isinstance(scope, StoreSource):
                 stores = (scope.store,)
             elif isinstance(scope, (RepoSource, RetainedRepoLookupSource)):
                 stores = capture.repo_stores(scope.repo)
             else:
                 return
-            requests = tuple(dict.fromkeys((*covering, *bound(scope))))
+            requests = tuple(dict.fromkeys((*covering, *bound(scope, local_bindings))))
             presentations.extend(_IndexPresentation(producer, scope, store, requests) for store in stores)
 
         def visit(query, covering=()):
             source = query.source
-            covering = tuple(dict.fromkeys((*covering, *bound(source, producer=True))))
-            add(query, source, covering)
+            local_bindings = tuple(binding for binding in query._refresh_bindings if binding in active_bindings)
+            # Ancestor producer overrides cover descendants; sibling bindings do not.
+            covering = tuple(dict.fromkeys((*covering, *bound(source, local_bindings, producer=True))))
+            add(query, source, covering, local_bindings)
             if isinstance(source, _RelationshipClosure):
                 visit(source.input_query, covering)
             elif isinstance(source, _RelationshipProjection):
@@ -2205,7 +2214,7 @@ class IdentityQuery:
                 visit(source.left, covering)
                 visit(source.right, covering)
             for scope in query._external_authority_scopes():
-                add(query, scope, covering)
+                add(query, scope, covering, local_bindings)
 
         visit(self)
         if occurrence is not None:

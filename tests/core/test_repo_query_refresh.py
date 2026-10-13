@@ -176,20 +176,54 @@ def test_u2_optional_late_target_empty_store_and_completed_configuration_check(t
         query.count()
 
 
-def test_u2_same_producer_operands_preserve_external_scope_bindings(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shared_base", (False, True))
+@pytest.mark.parametrize("operation", ("union", "intersection"))
+@pytest.mark.parametrize("reverse", (False, True))
+@pytest.mark.parametrize("completed", (False, True))
+def test_u2_same_producer_operands_preserve_external_scope_bindings(
+        tmp_path, monkeypatch, shared_base, operation, reverse, completed):
     """Sharing a producer does not reopen the other operand's completed scope."""
-    a, b, c = (_ready_store(tmp_path / name) for name in ("a", "b", "c"))
-    calls = _count_cycles(monkeypatch, a, b, c)
-    left = a.query().refresh(True).stored(scope=b)
-    right = a.query().refresh(True).stored(scope=c)
-    left.count()
-    right.count()
+    a, b, c, d = (_ready_store(tmp_path / name) for name in ("a", "b", "c", "d"))
+    calls = _count_cycles(monkeypatch, a, b, c, d)
+    base = a.query()
+    left = base.refresh(True).stored(scope=b)
+    right = (base if shared_base else a.query()).refresh(True).stored(scope=c)
+    left_request, right_request = (query._refresh_bindings[0].request for query in (left, right))
+    first, second = (right, left) if reverse else (left, right)
+    combined = getattr(first, operation)(second)
+    if completed:
+        left.count()
+        right.count()
+    else:
+        assert combined.count() == 1
+        assert len(calls) == 3 and {store for store, _ in calls} == {a, b, c}
+    assert left_request.completed_domain(b.authority_fence_key())
+    assert not left_request.completed_domain(c.authority_fence_key())
+    assert right_request.completed_domain(c.authority_fence_key())
+    assert not right_request.completed_domain(b.authority_fence_key())
     calls.clear()
-    left.union(right).count()
+    b.mark_query_index_dirty()
+    c.mark_query_index_dirty()
+    for query in (combined, combined.closure(), combined.nested(),
+                  combined.nested().owners(), combined.nested().targets()):
+        query.count()
     assert calls == []
-    base = a.query().refresh(True)
-    base.union(base.cdefs()).count()
-    base.count()
+    assert b.query_index_is_dirty() and c.query_index_is_dirty()
+    combined.refresh(True).count()
+    assert len(calls) == 3 and {store for store, _ in calls} == {a, b, c}
+    assert all(policy is True for _, policy in calls)
+    assert not b.query_index_is_dirty() and not c.query_index_is_dirty()
+    calls.clear()
+    combined.stored(scope=d).count()
+    assert calls == [(d, True)]
+    assert left_request.completed_domain(d.authority_fence_key())
+    assert right_request.completed_domain(d.authority_fence_key())
+    assert not left_request.completed_domain(c.authority_fence_key())
+    assert not right_request.completed_domain(b.authority_fence_key())
+    calls.clear()
+    shared = base.refresh(True)
+    shared.union(shared.cdefs()).count()
+    shared.count()
     assert calls == [(a, True)]
 
 
@@ -350,6 +384,58 @@ def test_u3_optional_absence_and_explicit_configured_unavailability(tmp_path, mo
             configured.query().refresh(policy).count()
 
 
+@pytest.mark.parametrize("policy", (True, "always"))
+@pytest.mark.parametrize("scan_policy", ("forbid", "warn"))
+def test_u3_optional_absence_exact_positive_scan_controls(tmp_path, monkeypatch, policy, scan_policy):
+    """Absent optional targets need no scan or credit; late ready targets still do."""
+    import warnings
+    import dryml.core.store.dir as dir_module
+    from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+
+    store = DirStore(tmp_path / "optional", query_index="auto")
+    root = Definition(RefreshLeaf, "root").concretize()
+    store.write_definition_record(DefinitionRecord(root))
+    query = store.query().sel(root).cdefs().stored().refresh(policy).scan_policy(scan_policy)
+    request = query._refresh_bindings[0].request if policy is True else None
+    with monkeypatch.context() as scoped:
+        scoped.setattr(dir_module, "sqlite_available", lambda: False)
+        scoped.setattr(store, "_validated_definition_root_inventory",
+                       lambda: pytest.fail("optional exact positive acquired inventory"))
+        scoped.setattr(store, "iter_definition_records",
+                       lambda: pytest.fail("optional exact positive enumerated definitions"))
+        scoped.setattr(SQLiteStoreQueryIndex, "refresh",
+                       lambda *a, **kw: pytest.fail("absent optional target cycled"))
+        with warnings.catch_warnings(record=True) as observed:
+            warnings.simplefilter("always")
+            assert query.exists()
+            explanation = query.explain(analyze=True)
+        assert observed == []
+        assert explanation.store_scan_count == 0 and explanation.refresh_action == "none"
+        assert store._query_index_instance is None
+        if request is not None:
+            assert request.completed == request.in_flight == {}
+
+    store.rebuild_query_index()
+    calls = _count_cycles(monkeypatch, store)
+    index = store.open_query_index()
+    with pytest.raises(QueryWouldScanError):
+        query.scan_policy("forbid").exists()
+    assert calls == []
+    if request is not None:
+        assert request.completed == request.in_flight == {}
+    with pytest.warns(RuntimeWarning, match="inventory scan") as observed:
+        assert query.scan_policy("warn").exists()
+    assert len(observed) == 1 and calls == [(store, policy)]
+    calls.clear()
+    if policy is True:
+        assert query.scan_policy("forbid").exists()
+    else:
+        with pytest.raises(QueryWouldScanError):
+            query.scan_policy("forbid").exists()
+    assert calls == []
+    assert not index._connections._leases and not index._build_claim_path().exists()
+
+
 def test_u3_warning_precedes_ready_validation_once(tmp_path, monkeypatch):
     import warnings
 
@@ -388,11 +474,14 @@ def test_u3_always_repeats_ready_validation_and_inert_paths_do_nothing(tmp_path,
 def test_u3_ready_explicit_scan_admission_precedes_backend_io(tmp_path, monkeypatch):
     store = _ready_store(tmp_path / "store")
     monkeypatch.setattr(store, "open_query_index", lambda: pytest.fail("prohibited work opened backend"))
-    query = store.query().refresh(True)
-    with pytest.raises(QueryWouldScanError):
-        query.scan_policy("forbid").count()
-    with pytest.raises(QueryIndexUnavailable):
-        query.require_indexed().take(1)
+    root = Definition(RefreshLeaf, "root").concretize()
+    for policy in (True, "always"):
+        for query in (store.query().refresh(policy),
+                      store.query().sel(root).cdefs().stored().refresh(policy)):
+            with pytest.raises(QueryWouldScanError):
+                query.scan_policy("forbid").exists()
+            with pytest.raises(QueryIndexUnavailable):
+                query.require_indexed().take(1)
     for invalid in (0, 1, None, [], {}, "invalid"):
         with pytest.raises(ValueError):
             query.refresh(invalid)
