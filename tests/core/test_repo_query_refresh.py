@@ -56,6 +56,185 @@ def _ready_store(path, *, destination=None):
     return store
 
 
+def _count_cycles(monkeypatch, *stores):
+    calls = []
+    for store in stores:
+        index = store.open_query_index()
+        original = index.refresh
+
+        def refresh(policy, *, stats=None, _original=original, _store=store):
+            calls.append((_store, policy))
+            return _original(policy, stats=stats)
+
+        monkeypatch.setattr(index, "refresh", refresh)
+    return calls
+
+
+def test_u2_shared_branches_fresh_request_and_direct_construction(tmp_path, monkeypatch):
+    from copy import copy
+    from dryml.core.query.query import IdentityQuery
+
+    store = _ready_store(tmp_path / "store")
+    calls = _count_cycles(monkeypatch, store)
+    base = store.query().refresh(True)
+    assert base.explain().refresh_action == "none"
+    assert base.take(0).count() == base.nested().take(0).count() == 0
+    assert calls == []
+    first = base.cdefs().explain(analyze=True)
+    second = copy(base).stored().explain(analyze=True)
+    assert first.refresh_action == "validate" and first.store_scan_count == 2
+    assert second.refresh is True and second.refresh_action == "reused"
+    assert second.store_scan_count == 1 and len(calls) == 1
+    base.refresh(True).count()
+    assert len(calls) == 2
+    direct = IdentityQuery(base.source, refresh_policy=True)
+    direct.count()
+    direct.cdefs().count()
+    assert len(calls) == 3
+    assert base == copy(base)
+    assert base == base.refresh(True)  # ephemeral state is not plan value
+
+
+def test_u2_disjoint_algebra_scope_extension_and_outer_overrides(tmp_path, monkeypatch):
+    from dryml.core.query import field
+    from dryml.core.query.model import QueryDomainError
+
+    a, b, c = (_ready_store(tmp_path / name) for name in ("a", "b", "c"))
+    calls = _count_cycles(monkeypatch, a, b, c)
+    left, right = a.query().refresh(True), b.query().refresh(True)
+    left.count()
+    right.count()
+    for query in (left.union(right), right.intersection(left)):
+        assert query.explain(analyze=True).refresh_action == "reused"
+    assert calls == [(a, True), (b, True)]
+    extended = left.union(right).where(field("object").missing(), scope=c)
+    assert extended.count() == 0
+    assert calls == [(a, True), (b, True), (c, True)]
+    extended.refresh(True).count()
+    assert calls[3:] == [(a, True), (b, True), (c, True)]
+    left.count()
+    right.count()
+    assert len(calls) == 6
+    pending = a.query().refresh(True)
+    for policy in (False, "auto", "always"):
+        outer = pending.union(pending).refresh(policy)
+        outer.count()
+        outer.count()
+    assert calls[6:] == [(a, "always"), (a, "always")]
+    pending.count()
+    assert calls[-1] == (a, True)
+    with pytest.raises(QueryDomainError):
+        left.union(right.refresh(False))
+
+
+def test_u2_partial_failure_retries_only_unresolved_and_keeps_evaluation_completion(tmp_path, monkeypatch):
+    from dryml.core.query.model import QueryCardinalityError, QueryVerifyBudgetExceeded
+
+    a, b = (_ready_store(tmp_path / name) for name in ("a", "b"))
+    calls = _count_cycles(monkeypatch, a, b)
+    query = a.query().union(b.query()).refresh(True)
+    primary = PermissionError("injected maintenance failure")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(b.open_query_index(), "refresh", lambda *a, **kw: (_ for _ in ()).throw(primary))
+        with pytest.raises(PermissionError) as error:
+            query.count()
+        assert error.value is primary
+    assert calls == [(a, True)]
+    query.count()
+    assert calls == [(a, True), (b, True)]
+    query.max_verify(0).take(0)
+    fresh = query.refresh(True)
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        fresh.max_verify(0).count()
+    before = len(calls)
+    fresh.count()
+    assert len(calls) == before
+    empty = fresh.object_refs().refresh(True)
+    with pytest.raises(QueryCardinalityError):
+        empty.one()
+    before = len(calls)
+    assert empty.count() == 0 and len(calls) == before
+
+
+def test_u2_optional_late_target_empty_store_and_completed_configuration_check(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "empty", query_index="auto")
+    query = store.query().refresh(True)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(store, "open_query_index", lambda: None)
+        assert query.explain(analyze=True).refresh_action == "none"
+    store.rebuild_query_index()
+    calls = _count_cycles(monkeypatch, store)
+    assert query.explain(analyze=True).refresh_action == "validate"
+    assert query.explain(analyze=True).refresh_action == "reused" and len(calls) == 1
+    index = store.open_query_index()
+    index.config = replace(index.config, busy_timeout=9)
+    with pytest.raises(QueryIndexIncompatible):
+        query.count()
+
+
+def test_u2_same_producer_operands_preserve_external_scope_bindings(tmp_path, monkeypatch):
+    """Sharing a producer does not reopen the other operand's completed scope."""
+    a, b, c = (_ready_store(tmp_path / name) for name in ("a", "b", "c"))
+    calls = _count_cycles(monkeypatch, a, b, c)
+    left = a.query().refresh(True).stored(scope=b)
+    right = a.query().refresh(True).stored(scope=c)
+    left.count()
+    right.count()
+    calls.clear()
+    left.union(right).count()
+    assert calls == []
+    base = a.query().refresh(True)
+    base.union(base.cdefs()).count()
+    base.count()
+    assert calls == [(a, True)]
+
+
+def test_u2_completed_descriptor_is_rechecked_after_consistent_reconfiguration(tmp_path, monkeypatch):
+    store = _ready_store(tmp_path / "store")
+    query = store.query().refresh(True)
+    query.count()
+    index = store.open_query_index()
+    config = replace(index.config, busy_timeout=9)
+    store._query_index_config = index.config = index._connections.config = config
+    monkeypatch.setattr(index, "refresh", lambda *a, **kw: pytest.fail("changed completed descriptor refreshed"))
+    with pytest.raises(QueryIndexIncompatible, match="within a request"):
+        query.count()
+
+
+def test_u2_publication_failure_is_retryable_and_demand_recovery_outranks_reuse(tmp_path, monkeypatch):
+    from dryml.core.query.model import QueryIndexError
+
+    store = _ready_store(tmp_path / "store")
+    index = store.open_query_index()
+    query = store.query().refresh(True)
+    store.mark_query_index_dirty()
+    captures = []
+    original_init = SourceCapture.__init__
+
+    def retain(capture, *args, **kwargs):
+        original_init(capture, *args, **kwargs)
+        if args and args[0] is query:
+            captures.append(capture)
+
+    monkeypatch.setattr(SourceCapture, "__init__", retain)
+    primary = QueryIndexError("acknowledgement failed")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(index, "_clear_dirty", lambda *a, **kw: (_ for _ in ()).throw(primary))
+        with pytest.raises(QueryIndexError) as error:
+            query.count()
+        assert error.value is primary
+    assert captures[-1].store_scan_count == 1 and captures[-1].refresh_action == "rebuild"
+    assert index.path.exists() and store.query_index_is_dirty()
+    assert not index._connections._leases and not index._build_claim_path().exists()
+    assert query.explain(analyze=True).refresh_action == "rebuild"
+    assert query.explain(analyze=True).refresh_action == "reused"
+    store.mark_query_index_dirty()
+    bounded = replace(query.cdefs().stored(), take_limit=1)
+    explanation = bounded.explain(analyze=True)
+    assert explanation.refresh is True and explanation.refresh_action == "rebuild"
+    assert explanation.store_scan_count == 1 and not store.query_index_is_dirty()
+
+
 def test_u3_equivalent_destinations_coalesce_in_both_store_repo_orders(tmp_path, monkeypatch):
     """Physical destination, not traversal order or handle spelling, owns a cycle."""
     destination = tmp_path / "custom.sqlite"
@@ -310,7 +489,7 @@ def test_u3_topology_attachment_after_retention_waits_until_next_terminal(tmp_pa
         thread.join(15)
     assert not thread.is_alive() and errors == []
     assert outcomes[0].store_scan_count == 4
-    assert query.explain(analyze=True).store_scan_count == 6
+    assert query.explain(analyze=True).store_scan_count == 4  # only C pending, then three fresh cuts
 
 
 def test_u3_explicit_recapture_keeps_cycle_and_cumulative_ledger(tmp_path, monkeypatch):
@@ -341,7 +520,7 @@ def test_u3_explicit_recapture_keeps_cycle_and_cumulative_ledger(tmp_path, monke
     assert capture.demand_recaptures == 1 and capture.refresh_action == "validate"
     with pytest.raises(QueryVerifyBudgetExceeded):
         query.max_verify(1)._run_terminal(evaluate)
-    assert cycles == [True, True]
+    assert cycles == [True]  # later evaluation failure cannot reopen maintenance
 
 
 def test_u3_target_resolution_retains_operand_and_scope_associations(tmp_path, monkeypatch):

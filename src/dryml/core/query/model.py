@@ -16,8 +16,10 @@ from .path import DefinitionPath
 RefreshPolicy = Literal[False, "auto", True, "always"]
 """Disable maintenance, demand readiness recovery, or request explicit cycles.
 
-Query True and always currently reconcile each participating terminal; direct
-backend calls independently perform one cycle. False still reads fresh authority,
+Query True creates a lazy one-shot request shared by ordinary derivatives; always
+reconciles each participating terminal. Direct backend calls independently perform
+one cycle. Completed True uses auto demand behavior, not reused authority facts.
+False still reads fresh authority,
 and auto leaves unconsumed indexes untouched. Invalid Query policy values raise
 ValueError before IO. Policy declaration itself performs no work.
 """
@@ -201,7 +203,13 @@ class QueryIndexCorrupt(QueryIndexError):
 
 
 class QueryIndexBusy(QueryIndexError):
-    pass
+    """Report retryable index contention or same-thread refresh self-reentry.
+
+    Accepts ordinary Exception message arguments and performs no IO. Query
+    terminals raise this before waiting on their own in-flight request; callers
+    must leave the owning cycle and retry through a later terminal. Backend build
+    claims retain their existing contention behavior.
+    """
 
 
 class QueryIndexDirty(QueryIndexError):
@@ -719,10 +727,13 @@ class QueryExplanation:
     """Detached query policy, chosen actions, work counters, and result diagnostics.
 
     ``refresh`` is the declared policy; V3 ``refresh_action`` aggregates actual
-    none, validate, or rebuild work (rebuild takes precedence), including demand
-    recovery. Backend-specific reports retain their own phase names.
+    actions by precedence rebuild > validate > waited > reused > none, including
+    demand recovery. Waited reports joined attempt completion; reused is prior
+    compatible request completion, not new reconciliation or authority evidence.
+    Backend-specific reports retain their own phase names.
     ``store_scan_count`` counts started inventories, including maintenance and
     failed/retried scans, independently of identity-verification admissions.
+    Request waiters never receive owner inventory charges.
     Remaining fields describe candidate, graph, page, and source-plan work.
     Construction records supplied values without IO or retained backend resources.
     """

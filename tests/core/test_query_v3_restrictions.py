@@ -220,6 +220,34 @@ def test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals(
     assert calls == [True]
 
 
+def test_u2_completed_prefix_admission_and_fresh_authority(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from dryml.core.query.model import QueryWouldScanError
+    from dryml.core.store.records import DefinitionRecord
+    from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    root = Definition(V3Parent, None).concretize()
+    store.write_definition_record(DefinitionRecord(root))
+    store.rebuild_query_index()
+    base = store.query().refresh(True)
+    base.count()
+    prefix = replace(base.cdefs().stored().require_indexed(), take_limit=1)
+    explanation = prefix.explain(analyze=True)
+    assert explanation.refresh is True and explanation.refresh_action == "reused"
+    assert explanation.store_scan_count == 0 and prefix.one() == root
+    pending = base.refresh(True).cdefs().stored()
+    with pytest.raises(QueryWouldScanError):
+        pending.scan_policy("forbid").take(1)
+    with pytest.raises(QueryIndexUnavailable):
+        pending.require_indexed().take(1)
+    other = Definition(V3Parent, "later").concretize()
+    DirStore(store.base_dir, query_index="sqlite").write_definition_record(DefinitionRecord(other))
+    monkeypatch.setattr(store.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("unused dirty index refreshed"))
+    assert base.cdefs().count() == 2
+    assert store.query_index_is_dirty()
+
+
 @pytest.mark.parametrize("value", (0, 1, None, [], "invalid"))
 def test_v3_refresh_rejects_values_outside_its_exact_policy_domain(value):
     with pytest.raises(ValueError, match="refresh policy"):

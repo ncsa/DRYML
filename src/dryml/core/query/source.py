@@ -6,6 +6,8 @@ capture and groups only identical authority-fence domains.
 The terminal's capture also enforces outer scan/index controls and cumulative
 identity admissions, retaining expenditure across replacement and retry without
 changing authoritative records or introducing cross-terminal proof reuse.
+Retained presentations associate opaque Query-owned requests with accepted targets;
+this layer owns neither request synchronization nor cross-terminal completion.
 """
 
 from __future__ import annotations
@@ -107,6 +109,7 @@ class _IndexPresentation:
     producer: object
     scope: object
     store: Store
+    requests: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,16 +304,36 @@ class SourceCapture:
 
         ``stats`` is a backend QueryStats for one call. Returns None and adds its
         started inventory count without identity admissions. Actions aggregate as
-        rebuild over validate over none; no completion is inferred from a report.
+        rebuild over validate over waited over reused over none; no completion is
+        inferred from a report, and waiters never receive owner inventory counts.
         Call in finally, after releasing backend resources. No Store IO occurs.
         """
 
         self.store_scan_count += stats.store_scan_count
         action = stats.refresh_action
         if action == "sqlite-rebuild":
-            self.refresh_action = "rebuild"
-        elif action == "sqlite-validate" and self.refresh_action == "none":
-            self.refresh_action = "validate"
+            self.record_refresh_action("rebuild")
+        elif action == "sqlite-validate":
+            self.record_refresh_action("validate")
+
+    def record_refresh_action(self, action: str) -> None:
+        """Merge one actual maintenance/join/reuse action without charging IO.
+
+        Args:
+            action: One of none, reused, waited, validate, or rebuild.
+
+        Returns:
+            None; updates only this terminal's diagnostic action by precedence.
+
+        Raises:
+            ValueError: For an unsupported action.
+
+        Side Effects:
+            No Store reads, synchronization waits, or authority changes.
+        """
+        precedence = ("none", "reused", "waited", "validate", "rebuild")
+        if precedence.index(action) > precedence.index(self.refresh_action):
+            self.refresh_action = action
 
     def require_scan(self) -> None:
         """Enforce effective inventory/recovery policy before scan IO.

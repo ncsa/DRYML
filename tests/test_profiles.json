@@ -378,8 +378,15 @@
           ]
         },
         "tests/core/test_repo_query_refresh.py": {
-          "rationale": "Retain U3 normalized target coalescing, visible configuration and ownership refusals, independent domains, demand-only maintenance, explicit admission, inertness, failure accounting, retained topology, and inherited Repo refusal before owner locks.",
+          "rationale": "Retain U2 one-shot lineage, partial/publication failure, compatible completion and overrides alongside U3 target, demand, admission, topology and ownership contracts.",
           "functions": [
+            "test_u2_shared_branches_fresh_request_and_direct_construction",
+            "test_u2_disjoint_algebra_scope_extension_and_outer_overrides",
+            "test_u2_partial_failure_retries_only_unresolved_and_keeps_evaluation_completion",
+            "test_u2_optional_late_target_empty_store_and_completed_configuration_check",
+            "test_u2_same_producer_operands_preserve_external_scope_bindings",
+            "test_u2_completed_descriptor_is_rechecked_after_consistent_reconfiguration",
+            "test_u2_publication_failure_is_retryable_and_demand_recovery_outranks_reuse",
             "test_v3_query_observes_committed_external_writes",
             "test_current_process_save_updates_v3_cached_and_stored_membership",
             "test_u3_equivalent_destinations_coalesce_in_both_store_repo_orders",
@@ -404,6 +411,7 @@
         "tests/core/test_query_v3_restrictions.py": {
           "rationale": "Retain typed metadata failure, external-scope scan refusals, warnings, demand-driven auto boundaries, explicit refresh controls, and exact-selective coverage; sample the external scope/policy product by axis and keep its full matrix in focused verification.",
           "functions": [
+            "test_u2_completed_prefix_admission_and_fresh_authority",
             "test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals",
             "test_v3_metadata_read_failure_is_not_a_missing_field",
             "test_v3_metadata_keeps_scalar_types_and_validates_every_populated_leaf",
@@ -419,6 +427,7 @@
         "tests/core/test_query_v3_traversal.py": {
           "rationale": "Retain typed associations, existential projections, missing/dirty disabled-refresh behavior across terminals, inherited budgets, external target scopes, and bounded evidence.",
           "functions": [
+            "test_u2_occurrences_projections_closure_share_and_fixed_results_detach",
             "test_v3_closure_uses_typed_associations_and_owned_state_adjacency",
             "test_v3_direct_projections_ignore_raw_caps_without_enumerating_occurrences",
             "test_v3_direct_projection_visits_each_diamond_state_once",
@@ -433,6 +442,7 @@
         "tests/core/test_query_v3_execution.py": {
           "rationale": "Retain cut-retry failure, cumulative broad/fixed/exact admissions, demand/retry readmission, outer policy overrides, selective fallback, zero work, and late authority failures without the full save-backed algebra matrix.",
           "functions": [
+            "test_u2_completed_request_uses_fresh_scoped_conflict_proof",
             "test_u5_repeated_cut_instability_fails_without_a_partial_answer",
             "test_u5_fixed_prefix_does_not_reencode_unique_graph_digests",
             "test_u5_zero_prefix_validates_without_opening_source_inventory",
@@ -515,6 +525,7 @@
         "tests/core/test_repo_query_performance_contract.py": {
           "rationale": "Retain canonical multi-Store bounded paging with duplicate frontiers and exact work counters in the representative gate.",
           "functions": [
+            "test_u2_completed_exact_positive_has_no_maintenance_inventory",
             "test_v3_multistore_take_uses_only_canonical_index_frontier_pages",
             "test_reference_validation_visits_roots_linearly_per_selected_cut"
           ]

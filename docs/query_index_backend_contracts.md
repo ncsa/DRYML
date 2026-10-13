@@ -158,9 +158,13 @@ obligation, including occurrence metadata scopes, without authority inventory.
 It uses Store-owned lazy openers, never live Repo bulk refresh. The resolver
 retains producer/scope associations and a compatibility descriptor independently
 of request state; optional absence produces no target and no completion evidence.
-Configured unavailability propagates for `True` and `"always"`. Both Query policies
-currently perform one explicit cycle per participating terminal; shared one-shot
-request state is not yet implemented.
+Configured unavailability propagates for `True` and `"always"`. Query True owns a
+process-local one-shot request shared by ordinary derivatives/shallow copies;
+always performs a cycle per participating terminal. Operand-local bindings survive
+algebra; newly attached scopes extend inherited requests, while explicit outer
+overrides replace them. Fixed result refinements are detached. Requests retain only
+synchronization, attempt outcomes, and compatible completed target identities, never
+facts, captures, proofs, results, or readers. Compatibility is rechecked on reuse.
 
 SQLite targets coalesce by normalized actual connection-manager destination only
 after backend/configuration/path agreement and every visible presentation's
@@ -179,19 +183,40 @@ Authority-only broad/exact/metadata paths leave unused sidecars untouched, even
 when dirty. Actual bounded consumers resolve/preflight their indexes before any
 retained fence or reader and recover only consumed non-ready targets. `False`
 never maintains derived state; it uses ready views or authority fallback/refusal.
-Pending explicit cycles require scan/indexed-only admission before backend IO,
+Pending explicit cycles require scan/indexed-only admission before claiming or
+joining an attempt, including ready validation. Completed True uses auto demand
+behavior; otherwise-supported indexed prefixes can reuse it without a new scan.
+Explicit admission precedes backend IO,
 even if ready. Warning mode warns once before the first inventory. Construction,
 ordinary explanation, and identity/occurrence zero prefixes acquire nothing.
 
 Each terminal retains cumulative admissions and started inventory work through
 failure, fallback, and recapture. Backend scan counters merge in `finally`, including
-interruption. Query `refresh_action` aggregates actual `none`, `validate`, or
-`rebuild` (rebuild takes precedence); demand recovery reports its actual phase.
+interruption. Query `refresh_action` aggregates actual actions by precedence
+`rebuild > validate > waited > reused > none`; demand recovery reports its phase,
+and waiters receive no owner inventory charges.
 Strict successful backend refresh is maintenance evidence; a report's normal
 return or `validated` field is not. No authority proofs or readers cross terminals.
 Repo owns the inherited-topology guard: it rejects a different PID before acquiring
 its configuration lock. Query never resets another owner's locks or caches; a
 fresh child Repo remains usable.
+
+Request coordination freezes terminal obligations, acquires all applicable request
+locks in deterministic order, and claims no pending pair while an older applicable
+attempt flies. It releases locks before observing those exact outcomes, rechecks
+after successful joins, and owns at most one new cohort per target. Only claimed
+pairs receive success credit. Failure or owner BaseException notifies waiters and
+leaves pairs retryable; partial target success survives later failure. Joined old
+failure is never replaced by a later retry's success. Owner exceptions remain
+original. Published attempt outcomes are immutable; later owner interruption does
+not reverse completion, and unwind repeats notification if publication crossed an
+interruption before waking waiters. Unpublished interrupted-owner outcomes become
+actionable QueryIndexError for waiters. Same-thread
+self-reentry raises QueryIndexBusy; waiter interruption detaches only that waiter.
+Maintenance precedes separate fresh evaluation cuts and cannot lend authority proof.
+Request locks/completion reset by PID before child acquisition, retaining derivative
+sharing but no parent completion. Existing Store/import/SQLite lifecycle limits
+remain; no new query transport or deepcopy contract is introduced.
 
 ## Reference-Aware Containment
 

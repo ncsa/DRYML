@@ -97,10 +97,34 @@ and metadata scopes as well as nested producers. Algebra operands must agree on
 policies at composition; a later explicit outer override applies throughout the
 expression. `refresh(False)` does not initialize/rebuild missing or dirty sidecars,
 and explicit `refresh(True)` / `refresh("always")` cannot authorize prohibited
-scans, including ready-index validation. Both explicit policies currently perform
-one cycle per participating terminal; `"always"` is the explicit repeated-cycle
-spelling. Ready cycles validate without forcing replacement. Shared one-shot Query
-request state is not yet implemented; direct backend calls are always independent.
+scans, including ready-index validation or joining an in-flight cycle. Query
+`refresh(True)` is now **one-shot**, shared by ordinary derivatives and shallow
+copies. A second explicit `refresh(True)` creates a new request. Use
+`refresh("always")` to retain repeated per-terminal cadence. Ready cycles validate
+without forcing replacement, so `"always"` does not reproduce the old unconditional
+rebuild behavior; use `rebuild_query_index()` when unconditional replacement is
+required. Direct backend calls remain independently repeatable one-cycle operations.
+
+Combining completed disjoint universes preserves operand-local bindings and adds no
+cross-operand cycles. New external scopes extend inherited requests, coalescing
+pending obligations at a target when no older attempt is in flight. An outer True
+creates one new request over the whole expression; False/auto/always suppress
+inherited one-shot intent on that expression without changing originals. Closure,
+occurrences, and both projections share lineage; refinements of fixed IdentitySet
+and OccurrenceSet results are detached. Empty results retain source/scope obligations,
+empty available Stores participate, and optional absent targets remain pending.
+
+Concurrent same-request callers join exact attempt outcomes, then recheck pending
+pairs before owning at most one new cohort cycle per target. A request created after
+admission receives no earlier attempt's credit. Joined failure remains failure even
+after a fast successful retry. Failed/interrupted targets are retryable in later
+terminals; partial target success and later evaluation/budget/cardinality failure do
+not undo completion. Owners retain original exceptions; waiters get actionable
+QueryIndexError on owner failure/interruption. Waiter interruption does not cancel
+an owner; same-thread self-reentry raises QueryIndexBusy. Completed requests use
+auto demand behavior and fresh terminal authority rather than cached facts/proofs.
+Otherwise-supported completed indexed prefixes may retain forbid/indexed-only
+controls; pending callers cannot join scan work to bypass admission.
 
 Auto refresh is now demand-driven. Broad authority and metadata queries no longer
 clean unused dirty sidecars as an incidental side effect. Use an explicit cycle
@@ -118,6 +142,10 @@ domain raise `QueryIndexIncompatible`; select one destination consistently acros
 clients. There is no global destination registry. Repo topology is retained once
 per terminal, so later attachments participate next time. Forked children must
 open a fresh Repo: inherited topology raises `RuntimeError` before its owner lock.
+Request synchronization resets before child acquisition and shared derivatives
+remain shared/pending there. Direct Store-backed execution keeps existing Store,
+import, and SQLite lifecycle rules. There is no new query serialization or deepcopy
+portability contract and no global refresh cache or cross-terminal authority proof.
 
 `max_verify` has a tightened **cumulative admission** contract. Ordinary inventory
 and fixed refinement reserve the entire detached domain before filtering or
@@ -134,8 +162,9 @@ identity admissions. `take(0)` reads/admits nothing; witness/depth budgets remai
 separate and inherit controls. Analyzed explanations expose admissions as
 `verified_count` and started inventory/maintenance scans as `store_scan_count`,
 including failed recovery, fallback, and recapture. `refresh_action` reports actual
-`none`, `validate`, or `rebuild`, with rebuild taking precedence across targets;
-the declared `refresh` policy is reported separately.
+`rebuild > validate > waited > reused > none` by precedence across targets;
+waiters receive no owner scan charges and reuse is not new reconciliation.
+The declared `refresh` policy is reported separately.
 
 Query authority is Store records, not memory or SQLite indexes. Derived indexes may
 accelerate work, but missing, stale, corrupt, or incompatible indexes rebuild, fall

@@ -99,12 +99,13 @@ def _worker_env() -> dict[str, str]:
 def _run_worker(code: str, *, timeout: float = 10.0) -> dict:
     proc = subprocess.run(
         [sys.executable, "-c", _COMMON_WORKER_CODE + code],
-        check=True,
+        check=False,
         text=True,
         capture_output=True,
         timeout=timeout,
         env=_worker_env(),
     )
+    assert proc.returncode == 0, proc.stderr
     lines = [line for line in proc.stdout.splitlines() if line.strip()]
     return json.loads(lines[-1]) if lines else {}
 
@@ -175,6 +176,439 @@ def _generation(path: Path) -> int:
 
 def _save_root_definition(store: DirStore, cdef: ConcreteDefinition) -> None:
     store.write_definition_record(DefinitionRecord(cdef))
+
+
+def _request_store(path):
+    store = DirStore(path, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store.write_definition_record(DefinitionRecord(_cdef("request-root")))
+    store.rebuild_query_index()
+    return store
+
+
+def _query_thread(query, store, outcomes, *, name=None):
+    def run():
+        try:
+            outcomes.append(query.explain(analyze=True))
+        except BaseException as error:
+            outcomes.append(error)
+        finally:
+            store.open_query_index()._connections.close_current()
+
+    thread = threading.Thread(target=run, daemon=True, name=name)
+    thread.start()
+    return thread
+
+
+@pytest.mark.timeout(40)
+def test_u2_single_flight_waits_outside_resources_and_rejects_pending_admission(tmp_path, monkeypatch):
+    import dryml.core.query.query as query_module
+    from dryml.core.query.model import QueryIndexUnavailable, QueryWouldScanError
+
+    store = _request_store(tmp_path / "store")
+    index = store.open_query_index()
+    query = store.query().refresh(True)
+    entered, release, joined = threading.Event(), threading.Event(), threading.Event()
+    calls, owner, waiter = [], [], []
+    original = index.refresh
+    wait = query_module._RefreshAttempt.wait
+
+    def refresh(policy, *, stats=None):
+        calls.append(policy)
+        entered.set()
+        assert release.wait(15)
+        return original(policy, stats=stats)
+
+    def observe(attempt):
+        request = query._refresh_bindings[0].request
+        assert request._process_lock().acquire(blocking=False)
+        request._process_lock().release()
+        probe = locking_module.FileLock(store._writer_lock_path)
+        assert probe.acquire(blocking=False)
+        probe.release()
+        assert not index._connections._leases
+        joined.set()
+        return wait(attempt)
+
+    monkeypatch.setattr(index, "refresh", refresh)
+    monkeypatch.setattr(query_module._RefreshAttempt, "wait", observe)
+    first = _query_thread(query, store, owner)
+    second = None
+    try:
+        assert entered.wait(10)
+        with pytest.raises(QueryWouldScanError):
+            query.cdefs().stored().scan_policy("forbid").take(1)
+        with pytest.raises(QueryIndexUnavailable):
+            query.cdefs().stored().require_indexed().take(1)
+        assert not joined.is_set()
+        second = _query_thread(query.cdefs(), store, waiter)
+        assert joined.wait(10)
+    finally:
+        release.set()
+        first.join(15)
+        if second is not None:
+            second.join(15)
+    assert not first.is_alive() and second is not None and not second.is_alive()
+    assert calls == [True]
+    assert owner[0].refresh_action == "validate" and owner[0].store_scan_count == 2
+    assert waiter[0].refresh_action == "waited" and waiter[0].store_scan_count == 1
+    assert not index._connections._leases
+
+
+@pytest.mark.timeout(40)
+@pytest.mark.parametrize("interrupted", (False, True))
+def test_u2_old_waiter_observes_failed_attempt_after_fast_retry(tmp_path, monkeypatch, interrupted):
+    import dryml.core.query.query as query_module
+
+    store = _request_store(tmp_path / "store")
+    query = store.query().refresh(True)
+    index = store.open_query_index()
+    primary = KeyboardInterrupt("owner interrupted") if interrupted else PermissionError("owner failed")
+    entered, fail, joined, observe = (threading.Event() for _ in range(4))
+    original = index.refresh
+    wait = query_module._RefreshAttempt.wait
+    calls, owner, waiter = [], [], []
+
+    def refresh(policy, *, stats=None):
+        calls.append(policy)
+        if len(calls) == 1:
+            entered.set()
+            assert fail.wait(15)
+            stats.store_scan_count += 1
+            stats.refresh_action = "sqlite-validate"
+            raise primary
+        return original(policy, stats=stats)
+
+    def delayed(attempt):
+        joined.set()
+        assert observe.wait(15)
+        return wait(attempt)
+
+    monkeypatch.setattr(index, "refresh", refresh)
+    monkeypatch.setattr(query_module._RefreshAttempt, "wait", delayed)
+    first = _query_thread(query, store, owner)
+    second = None
+    try:
+        assert entered.wait(10)
+        second = _query_thread(query, store, waiter)
+        assert joined.wait(10)
+        fail.set()
+        first.join(10)
+        assert owner == [primary]
+        assert query.explain(analyze=True).refresh_action == "validate"
+        assert calls == [True, True]
+    finally:
+        fail.set()
+        observe.set()
+        first.join(15)
+        if second is not None:
+            second.join(15)
+    assert second is not None and not second.is_alive()
+    assert len(waiter) == 1 and isinstance(waiter[0], QueryIndexError)
+    assert ("interrupted" if interrupted else "failed") in str(waiter[0])
+    assert query.explain(analyze=True).refresh_action == "reused"
+
+
+@pytest.mark.timeout(40)
+def test_u2_waiter_interruption_detaches_and_self_reentry_refuses(tmp_path, monkeypatch):
+    store = _request_store(tmp_path / "store")
+    query = store.query().refresh(True)
+    index = store.open_query_index()
+    original = index.refresh
+    entered, release = threading.Event(), threading.Event()
+    owner, waiter, reentered = [], [], []
+
+    def refresh(policy, *, stats=None):
+        with pytest.raises(QueryIndexBusy, match="reentr"):
+            query.count()
+        reentered.append(True)
+        entered.set()
+        assert release.wait(15)
+        return original(policy, stats=stats)
+
+    def interrupt(timeout=None):
+        raise KeyboardInterrupt("waiter detached")
+
+    monkeypatch.setattr(index, "refresh", refresh)
+    first = _query_thread(query, store, owner)
+    second = None
+    try:
+        assert entered.wait(10)
+        request = query._refresh_bindings[0].request
+        with request._process_lock():
+            attempt = next(iter(request.in_flight.values()))[1]
+        monkeypatch.setattr(attempt.condition, "wait", interrupt)
+        second = _query_thread(query, store, waiter)
+        second.join(10)
+        assert len(waiter) == 1 and isinstance(waiter[0], KeyboardInterrupt)
+        assert attempt.condition.acquire(blocking=False)
+        attempt.condition.release()
+        assert first.is_alive()
+    finally:
+        release.set()
+        first.join(15)
+        if second is not None:
+            second.join(15)
+    assert reentered == [True] and owner[0].refresh_action == "validate"
+    assert query.explain(analyze=True).refresh_action == "reused"
+
+
+@pytest.mark.timeout(50)
+def test_u2_multiple_flights_reversed_cohorts_and_late_request(tmp_path, monkeypatch):
+    """Join every old attempt, then co-credit only one newly owned pending cohort."""
+    import dryml.core.query.query as query_module
+
+    store = _request_store(tmp_path / "store")
+    a, b = store.query().refresh(True), store.query().refresh(True)
+    index = store.open_query_index()
+    original = index.refresh
+    entered = [threading.Event(), threading.Event()]
+    release = [threading.Event(), threading.Event()]
+    joined = threading.Condition()
+    observations, calls, outcomes = [], [], [[], [], [], []]
+    wait = query_module._RefreshAttempt.wait
+
+    def refresh(policy, *, stats=None):
+        position = len(calls)
+        calls.append(policy)
+        if position < 2:
+            entered[position].set()
+            assert release[position].wait(20)
+        return original(policy, stats=stats)
+
+    def observe(attempt):
+        with joined:
+            observations.append(attempt)
+            joined.notify_all()
+        return wait(attempt)
+
+    monkeypatch.setattr(index, "refresh", refresh)
+    monkeypatch.setattr(query_module._RefreshAttempt, "wait", observe)
+    threads = [_query_thread(a, store, outcomes[0])]
+    try:
+        assert entered[0].wait(10)
+        threads.append(_query_thread(b, store, outcomes[1]))
+        assert entered[1].wait(10)
+        fresh = store.query().refresh(True)  # created after both old admissions
+        forward, reverse = a.union(b).union(fresh), fresh.union(b).union(a)
+        threads.extend((_query_thread(forward, store, outcomes[2]), _query_thread(reverse, store, outcomes[3])))
+        with joined:
+            assert joined.wait_for(lambda: len(observations) >= 2, timeout=10)
+        assert observations[0] is observations[1]
+        first_position = 0 if observations[0].owner == threads[0].ident else 1
+        assert observations[0].owner == threads[first_position].ident
+        assert calls == [True, True]  # no claiming fresh while either older pair flies
+        release[first_position].set()
+        with joined:
+            assert joined.wait_for(lambda: len(observations) >= 3, timeout=10)
+        assert calls == [True, True]
+        release[1 - first_position].set()
+    finally:
+        for event in release:
+            event.set()
+        for thread in threads:
+            thread.join(20)
+    assert all(not thread.is_alive() for thread in threads)
+    assert all(len(items) == 1 and not isinstance(items[0], BaseException) for items in outcomes), outcomes
+    assert calls == [True, True, True]
+    assert fresh.explain(analyze=True).refresh_action == "reused"
+
+
+@pytest.mark.timeout(50)
+def test_u2_successful_joins_recheck_later_cohort_before_claiming_remainder(tmp_path, monkeypatch):
+    import dryml.core.query.query as query_module
+
+    store = _request_store(tmp_path / "store")
+    a, b, c = (store.query().refresh(True) for _ in range(3))
+    entered, release = [threading.Event() for _ in range(2)], [threading.Event() for _ in range(2)]
+    joined_a, resumed_a, joined_b = threading.Event(), threading.Event(), threading.Event()
+    proceed = threading.Event()
+    original = store.open_query_index().refresh
+    wait = query_module._RefreshAttempt.wait
+    calls, outcomes, frozen_attempts = [], [[], [], []], []
+
+    def refresh(policy, *, stats=None):
+        position = len(calls)
+        calls.append(policy)
+        if position < 2:
+            entered[position].set()
+            assert release[position].wait(20)
+        return original(policy, stats=stats)
+
+    def observe(attempt):
+        if threading.current_thread().name != "frozen-obligations":
+            return wait(attempt)
+        frozen_attempts.append(attempt)
+        if len(frozen_attempts) == 1:
+            joined_a.set()
+            wait(attempt)
+            resumed_a.set()
+            assert proceed.wait(20)
+        else:
+            joined_b.set()
+            return wait(attempt)
+
+    monkeypatch.setattr(store.open_query_index(), "refresh", refresh)
+    monkeypatch.setattr(query_module._RefreshAttempt, "wait", observe)
+    threads = [_query_thread(a, store, outcomes[0])]
+    try:
+        assert entered[0].wait(10)
+        threads.append(_query_thread(a.union(b).union(c), store, outcomes[1], name="frozen-obligations"))
+        assert joined_a.wait(10)
+        threads.append(_query_thread(a.union(b), store, outcomes[2]))
+        release[0].set()
+        assert resumed_a.wait(10) and entered[1].wait(10)
+        proceed.set()
+        assert joined_b.wait(10)
+        assert calls == [True, True]
+        release[1].set()
+    finally:
+        proceed.set()
+        for event in release:
+            event.set()
+        for thread in threads:
+            thread.join(20)
+    assert all(not thread.is_alive() for thread in threads)
+    assert all(len(items) == 1 and not isinstance(items[0], BaseException) for items in outcomes), outcomes
+    assert len(frozen_attempts) == 2 and frozen_attempts[0] is not frozen_attempts[1]
+    assert calls == [True, True, True]
+    assert outcomes[1][0].store_scan_count == 2  # owned C cycle + fresh evaluation only
+
+
+@pytest.mark.timeout(40)
+def test_u2_owner_baseexception_notifies_all_blocked_waiters(tmp_path, monkeypatch):
+    import dryml.core.query.query as query_module
+
+    store = _request_store(tmp_path / "store")
+    query = store.query().refresh(True)
+    entered, release = threading.Event(), threading.Event()
+    joined = threading.Condition()
+    observations, outcomes = [], [[], [], []]
+    wait = query_module._RefreshAttempt.wait
+    primary = SystemExit("injected owner unwind")
+    original = store.open_query_index().refresh
+
+    def refresh(policy, *, stats=None):
+        entered.set()
+        assert release.wait(15)
+        raise primary
+
+    def observe(attempt):
+        with joined:
+            observations.append(attempt)
+            joined.notify_all()
+        return wait(attempt)
+
+    monkeypatch.setattr(store.open_query_index(), "refresh", refresh)
+    monkeypatch.setattr(query_module._RefreshAttempt, "wait", observe)
+    threads = [_query_thread(query, store, outcomes[0])]
+    try:
+        assert entered.wait(10)
+        threads.extend(_query_thread(query, store, outcomes[position]) for position in (1, 2))
+        with joined:
+            assert joined.wait_for(lambda: len(observations) == 2, timeout=10)
+        assert observations[0] is observations[1]
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(15)
+    assert all(not thread.is_alive() for thread in threads)
+    assert outcomes[0] == [primary]
+    assert all(len(items) == 1 and isinstance(items[0], QueryIndexError)
+               and "interrupted" in str(items[0]) for items in outcomes[1:])
+    monkeypatch.setattr(store.open_query_index(), "refresh", original)
+    assert query.explain(analyze=True).refresh_action == "validate"
+
+
+def test_u2_published_attempt_outcome_survives_later_owner_interruption(tmp_path, monkeypatch):
+    """Once success is published it cannot become a different joined outcome."""
+    import dryml.core.query.query as query_module
+
+    store = _request_store(tmp_path / "store")
+    query = store.query().refresh(True)
+    finish = query_module._RefreshAttempt.finish
+    published = []
+
+    def interrupt_after_publication(attempt, failure):
+        finish(attempt, failure)
+        if failure is None:
+            published.append(attempt)
+            raise KeyboardInterrupt("owner interrupted after published completion")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(query_module._RefreshAttempt, "finish", interrupt_after_publication)
+        with pytest.raises(KeyboardInterrupt):
+            query.count()
+    assert len(published) == 1
+    observed = []
+
+    def observe():
+        try:
+            observed.append(published[0].wait())
+        except BaseException as error:
+            observed.append(error)
+
+    waiter = threading.Thread(target=observe, daemon=True)
+    waiter.start()
+    waiter.join(10)
+    assert not waiter.is_alive() and observed == [None]
+    assert query.explain(analyze=True).refresh_action == "reused"
+
+
+def test_u2_fork_resets_held_request_lock_and_preserves_derivative_sharing(tmp_path):
+    result = _run_worker(f'''
+import os
+import select
+import signal
+import threading
+if not hasattr(os, "fork"):
+    emit({{"skipped": True}})
+else:
+    store = DirStore({str(tmp_path / "request-fork")!r}, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store.write_definition_record(__import__("dryml.core.store.records", fromlist=["DefinitionRecord"]).DefinitionRecord(cdef("root")))
+    store.rebuild_query_index()
+    query = store.query().refresh(True)
+    derived = query.cdefs()
+    query.count()
+    derived.explain(analyze=True)  # preload the exercised selector path before fork
+    request = query._refresh_bindings[0].request
+    held, release = threading.Event(), threading.Event()
+    def hold():
+        with request._process_lock():
+            held.set()
+            assert release.wait(8)
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    assert held.wait(2)
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            first = derived.explain(analyze=True)
+            second = query.explain(analyze=True)
+            os.write(write_fd, json.dumps([first.refresh_action, second.refresh_action]).encode())
+            os._exit(0)
+        except BaseException as error:
+            os.write(write_fd, repr(error).encode())
+            os._exit(1)
+    os.close(write_fd)
+    try:
+        ready = bool(select.select([read_fd], [], [], 5)[0])
+        if not ready:
+            os.kill(pid, signal.SIGKILL)
+        _, status = os.waitpid(pid, 0)
+        payload = os.read(read_fd, 4096).decode()
+    finally:
+        os.close(read_fd)
+        release.set()
+        thread.join(2)
+    assert ready and status == 0, payload
+    emit({{"ready": ready, "status": status, "actions": json.loads(payload),
+           "parent": query.explain(analyze=True).refresh_action}})
+''', timeout=20)
+    if result.get("skipped"):
+        pytest.skip("requires fork")
+    assert result == {"ready": True, "status": 0, "actions": ["validate", "reused"], "parent": "reused"}
 
 
 @pytest.mark.timeout(30)

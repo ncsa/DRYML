@@ -79,6 +79,45 @@ def _references():
     return root, child, state, object_ref, state.at(child_path), object_ref.at(child_path), child_path
 
 
+def test_u2_occurrences_projections_closure_share_and_fixed_results_detach(tmp_path, monkeypatch):
+    from dryml.core.store.records import DefinitionRecord
+    from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+
+    root, child, *_ = _references()
+    producer, scope = (DirStore(tmp_path / name, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+                       for name in ("producer", "scope"))
+    producer.write_definition_record(DefinitionRecord(root))
+    calls = []
+    for store in (producer, scope):
+        store.rebuild_query_index()
+        original = store.open_query_index().refresh
+
+        def refresh(policy, *, stats=None, _original=original, _store=store):
+            calls.append(_store)
+            return _original(policy, stats=stats)
+
+        monkeypatch.setattr(store.open_query_index(), "refresh", refresh)
+    roots = producer.query().sel(root).refresh(True)
+    nested = roots.nested(child)
+    fixed_occurrences = nested.collect()
+    assert calls == [producer]
+    fixed_identities = roots.closure().collect()
+    assert nested.owners().one() == root and nested.targets().one() == child
+    assert calls == [producer]
+    assert fixed_occurrences.query().count() == 1
+    assert fixed_identities.query().count() == 2
+    assert fixed_occurrences.query().where(field("object").missing(), scope=scope).count() == 0
+    assert fixed_identities.query().stored(scope=scope).count() == 0
+    assert calls == [producer]  # result evidence cannot carry live refresh intent
+    scoped = nested.where(field("object").missing(), scope=scope)
+    assert scoped.count() == 0
+    assert calls == [producer, scope]
+    assert scoped.owners().count() == scoped.targets().count() == 0
+    assert calls == [producer, scope]
+    assert scoped.targets().refresh(True).count() == 0
+    assert calls == [producer, scope, producer, scope]
+
+
 def test_v3_closure_uses_typed_associations_and_owned_state_adjacency():
     root, child, state, object_ref, child_state, child_object, _ = _references()
     query = IdentityQuery.from_set(IdentitySet((state,)))

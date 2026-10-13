@@ -5,6 +5,8 @@ effective controls, detached authority, and cumulative verification admissions.
 Terminals retain every producer/scope presentation before destination coalescing.
 Auto recovery belongs only to actual index consumers; explicit cycles precede
 fresh evaluation cuts, with started maintenance work charged even on failure.
+True intent is a process-local shared one-shot request; bindings preserve operand
+lineage while requests retain only compatible completion and attempt outcomes.
 Terminals expose authority, budget, and cardinality failures rather than partial
 answers. Evaluation may read records and refresh permitted derived indexes but
 never constructs Objects, reads state payloads, or changes Store authority.
@@ -12,8 +14,11 @@ never constructs Objects, reads state payloads, or changes Store authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from contextlib import ExitStack
+from dataclasses import dataclass, field, replace
 from functools import cmp_to_key
+import os
+import threading
 from typing import Any
 
 from ..canonical import matching_container_family
@@ -47,6 +52,146 @@ from .utils import cdef_equal
 
 
 _DEFAULT_GENERATOR_WITNESS_LIMIT = 65_536
+
+
+class _RefreshAttempt:
+    """One cohort's process-local outcome, retained exactly by its joined callers."""
+
+    def __init__(self):
+        self.owner = threading.get_ident()
+        self.condition = threading.Condition()
+        self.done = False
+        self.failure = None
+
+    def finish(self, failure):
+        with self.condition:
+            if not self.done:
+                self.failure = failure
+                self.done = True
+            self.condition.notify_all()
+
+    def wait(self):
+        from .model import QueryIndexBusy, QueryIndexError
+
+        if self.owner == threading.get_ident():
+            raise QueryIndexBusy("Query refresh reentrancy into its own in-flight request.")
+        with self.condition:
+            self.condition.wait_for(lambda: self.done)
+            if self.failure is not None:
+                raise QueryIndexError(
+                    f"Joined query refresh owner {self.failure}; retry in a later terminal."
+                ) from None
+
+
+class _RefreshRequest:
+    """Ephemeral synchronization and compatible target completion, never facts."""
+
+    def __init__(self):
+        self._pid = os.getpid()
+        self._lock = threading.Lock()
+        self.completed = {}
+        self.in_flight = {}
+
+    def _process_lock(self):
+        pid = os.getpid()
+        if self._pid != pid:
+            self._lock = threading.Lock()
+            self.completed = {}
+            self.in_flight = {}
+            self._pid = pid
+        return self._lock
+
+    def completed_domain(self, domain):
+        """Avoid opening pending targets under prohibited scans; not a reuse proof."""
+        with self._process_lock():
+            return any(item.authority_domain == domain for item in self.completed.values())
+
+    def check(self, descriptor):
+        """Check under the request lock, including exact in-flight compatibility."""
+        from .model import QueryIndexIncompatible
+
+        previous = self.completed.get(descriptor.destination)
+        flight = self.in_flight.get(descriptor.destination)
+        if previous is None and flight is not None:
+            previous = flight[0]
+        if previous is not None and previous != descriptor:
+            raise QueryIndexIncompatible("Query refresh target compatibility changed within a request.")
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _RefreshBinding:
+    """Bind intent to an immutable producer expression or authority scope."""
+
+    request: _RefreshRequest
+    scope: object
+    producer: bool = False
+
+
+def _refresh_target(target, requests, capture):
+    """Join exact older outcomes, then own at most one remaining pending cohort."""
+    descriptor = target.descriptor
+    destination = descriptor.destination
+    requests = tuple(sorted(set(requests), key=id))
+    owned = None
+    claimed = ()
+    try:
+        while True:
+            with ExitStack() as locks:
+                for request in requests:
+                    locks.enter_context(request._process_lock())
+                    request.check(descriptor)
+                pending = tuple(request for request in requests if destination not in request.completed)
+                if not pending:
+                    capture.record_refresh_action("reused")
+                    return
+                flights = tuple(dict.fromkeys(
+                    request.in_flight[destination][1] for request in pending
+                    if destination in request.in_flight
+                ))
+                if any(attempt.owner == threading.get_ident() for attempt in flights):
+                    from .model import QueryIndexBusy
+
+                    raise QueryIndexBusy("Query refresh reentrancy into its own in-flight request.")
+                if not flights:
+                    owned = _RefreshAttempt()
+                    claimed = pending
+                    for request in claimed:
+                        request.in_flight[destination] = (descriptor, owned)
+            if flights:
+                for attempt in flights:
+                    attempt.wait()
+                capture.record_refresh_action("waited")
+                continue
+            stats = QueryStats()
+            try:
+                target.index.refresh(True, stats=stats)
+            finally:
+                capture.merge_maintenance_stats(stats)
+            with ExitStack() as locks:
+                for request in claimed:
+                    locks.enter_context(request._process_lock())
+                for request in claimed:
+                    request.completed[destination] = descriptor
+                    del request.in_flight[destination]
+                owned.finish(None)
+            break
+    except BaseException as error:
+        if owned is not None:
+            with ExitStack() as locks:
+                for request in claimed:
+                    locks.enter_context(request._process_lock())
+                with owned.condition:
+                    published = owned.done
+                if not published:
+                    for request in claimed:
+                        request.completed.pop(destination, None)
+                        if request.in_flight.get(destination, (None, None))[1] is owned:
+                            del request.in_flight[destination]
+                # Published outcomes are immutable; repeat notification in case
+                # interruption crossed publication but preceded notify_all.
+                # Never retain exceptions/tracebacks that could retain cuts.
+                owned.finish("failed" if isinstance(error, Exception) else "interrupted")
+        raise
 
 
 def _query_match(
@@ -921,10 +1066,19 @@ class IdentityQuery:
     declare compatible policies before composition; a later explicit override
     governs the whole expression. SourceCapture retains cumulative admission work
     across cut replacement and retry, separately from scan and page IO.
-    Explicit True/always cycles precede fresh evaluation; auto recovers only actual
+    Pending True/always cycles precede fresh evaluation; auto recovers only actual
     index consumers. Conflicting visible destination ownership/configuration raises
     QueryIndexIncompatible before maintenance, configured explicit unavailability
     raises QueryIndexUnavailable, and scan controls apply even to ready validation.
+    True creates a process-local request shared by ordinary derivatives and shallow
+    copies. Algebra preserves operand-local bindings; new external scopes extend
+    them. Explicit refresh overrides replace intent without changing originals.
+    Same-request callers single-flight, observing their joined attempt's outcome;
+    failed/interrupted targets remain retryable and successful targets survive later
+    maintenance or evaluation failure. Self-reentry raises QueryIndexBusy; interrupted
+    owners preserve their exception while waiters receive actionable QueryIndexError.
+    Requests contain no facts/readers/results, reset to pending after fork before
+    acquiring inherited synchronization, and provide no serialization/deepcopy contract.
 
     Attributes:
         source: Producer or fixed membership that supplies the initial universe.
@@ -932,7 +1086,8 @@ class IdentityQuery:
         default_scope: Optional unambiguous authority scope for later operations.
         max_witness_limit: Optional exact GeneratorSelector verification bound.
         refresh_policy: False disables maintenance; auto recovers consumed indexes;
-            True and always explicitly reconcile participating terminal targets.
+            True reconciles each target once per shared request; always reconciles
+            each participating terminal. Completed True uses auto demand behavior.
         scan_policy_mode: Authority-inventory scan policy.
         max_verify_limit: Optional cumulative detached identity admission bound.
         max_depth_limit: Optional later relationship traversal depth bound.
@@ -950,6 +1105,29 @@ class IdentityQuery:
     max_depth_limit: int | None = None
     indexed_required: bool = False
     take_limit: int | None = None
+    _refresh_bindings: tuple[_RefreshBinding, ...] | None = field(
+        default=None, compare=False, repr=False,
+    )
+
+    def __post_init__(self):
+        """Validate declared cadence and establish lazy direct-construction intent.
+
+        No source IO occurs. Invalid refresh values raise ValueError. Private
+        process-local bindings are shared by immutable derivation, excluded from
+        value comparison, and retain no evaluation evidence or backend readers.
+        """
+        policy = self.refresh_policy
+        if type(policy) is not bool and not (isinstance(policy, str) and policy in {"auto", "always"}):
+            raise ValueError("refresh policy must be False, 'auto', True, or 'always'.")
+        if self._refresh_bindings is None:
+            bindings = ()
+            if policy is True:
+                request = _RefreshRequest()
+                bindings = (
+                    _RefreshBinding(request, self.source, producer=True),
+                    *(_RefreshBinding(request, scope) for scope in self._external_authority_scopes()),
+                )
+            object.__setattr__(self, "_refresh_bindings", bindings)
 
     @classmethod
     def from_store(cls, store) -> "IdentityQuery":
@@ -1027,7 +1205,8 @@ class IdentityQuery:
             members: Detached :class:`IdentitySet` membership and evidence.
 
         Returns:
-            A query restricted to the supplied fixed identities.
+            A query restricted to the supplied fixed identities, detached from any
+            live refresh request that produced their evidence.
 
         Raises:
             TypeError: If ``members`` is not an IdentitySet.
@@ -1105,9 +1284,10 @@ class IdentityQuery:
     def closure(self, edges=None) -> "IdentityQuery":
         """Expand retained identities through literal directed relationships.
 
-        The returned plan inherits controls; explicit outer overrides govern the
-        input stage and traversal. New identities consume the shared admission
-        budget, while depth and Generator witness budgets remain separate.
+        The returned plan inherits controls and shared refresh lineage; explicit
+        outer overrides govern the input stage and traversal. New identities
+        consume the shared admission budget, while depth and Generator witness
+        budgets remain separate.
 
         Args:
             edges: An immutable :class:`EdgePolicy`; omitted selects every
@@ -1147,7 +1327,7 @@ class IdentityQuery:
 
         Returns:
             An immutable occurrence query retaining root identities, typed paths,
-            and exact target identities.
+            and exact target identities, sharing this root's refresh request.
 
         Raises:
             TypeError: If the selector or policy is unsupported.
@@ -1259,7 +1439,8 @@ class IdentityQuery:
             scope: Store or Repo authority, defaulting to the producer scope.
 
         Returns:
-            An immutable alias restriction.
+            An immutable alias restriction extending inherited refresh requests
+            to a newly attached authority scope.
 
         Raises:
             ValueError: If ``value`` is not a non-empty string.
@@ -1281,7 +1462,8 @@ class IdentityQuery:
             scope: Store or Repo authority, defaulting to the producer scope.
 
         Returns:
-            An immutable stored-membership restriction.
+            An immutable stored-membership restriction extending inherited
+            refresh requests to a newly attached authority scope.
 
         Raises:
             QueryDomainError: If no unambiguous scope is available.
@@ -1330,7 +1512,8 @@ class IdentityQuery:
             scope: Store or Repo authority, defaulting to the producer scope.
 
         Returns:
-            An immutable metadata restriction.
+            An immutable metadata restriction extending inherited refresh
+            requests to a newly attached authority scope.
 
         Raises:
             TypeError: If the predicate or scope is unsupported.
@@ -1369,6 +1552,8 @@ class IdentityQuery:
         The result keeps a default authority scope only when both operand plans
         name the same Store or Repo object.  Different producers therefore
         compose without choosing authority by source order.
+        Operand-local refresh bindings are preserved without rebinding either
+        request to the other's existing producer or external authority scopes.
 
         Args:
             other: Identity query or fixed IdentitySet to combine.
@@ -1392,6 +1577,8 @@ class IdentityQuery:
         Matching identities retain the evidence supplied by both operands.  As
         with :meth:`union`, an ambiguous authority default is deliberately
         removed rather than selected from operand order.
+        Refresh requests retain operand-local producer/scope bindings; completed
+        disjoint operands do not acquire cross-operand maintenance obligations.
 
         Args:
             other: Identity query or fixed IdentitySet to combine.
@@ -1469,22 +1656,34 @@ class IdentityQuery:
 
         ``False`` leaves derived indexes untouched. ``"auto"`` recovers only
         indexes consumed by the selected execution path, leaving unused dirty
-        indexes alone. ``True`` and ``"always"`` explicitly reconcile each
-        applicable target before each participating terminal's fresh authority
-        cut. Ready validation does not force replacement. Authoritative Store
+        indexes alone. ``True`` creates a fresh lazy one-shot request covering the
+        effective expression. Ordinary derivatives/shallow copies share it; each
+        compatible target completes once and later execution uses auto demand
+        behavior. ``"always"`` reconciles every participating terminal. All explicit
+        overrides replace inherited obligations on this expression, preserving
+        originals. Ready validation does not force replacement. Authoritative Store
         records are never rewritten. Construction, ordinary explain, and zero
         prefixes remain inert.
         This effective outer policy includes external scopes and projections;
         forced refresh cannot authorize a scan forbidden by scan/index controls.
+        Pending callers require admission before owning or joining work. Joined
+        callers observe that exact attempt's outcome, including failure followed
+        by another caller's successful retry. Failure/interruption leaves targets
+        retryable; partial success and later evaluation failure retain completion.
 
         Args:
             policy: Exact bool or the strings ``"auto"`` and ``"always"``.
 
         Returns:
-            An immutable query carrying the selected refresh policy.
+            An immutable query carrying the selected policy and, for True, a new
+            process-local request without authority evidence or backend readers.
 
         Raises:
             ValueError: If ``policy`` is outside the exact policy domain.
+            QueryIndexBusy: At a terminal, for same-thread request self-reentry.
+            QueryIndexError: At a terminal, for a joined failed/interrupted owner;
+                the original owner retains its original exception. Scan/index
+                admission, backend and authority failures remain visible.
 
         Side Effects:
             None until a terminal executes. Terminal evaluation may open,
@@ -1493,7 +1692,7 @@ class IdentityQuery:
 
         if type(policy) is not bool and not (isinstance(policy, str) and policy in {"auto", "always"}):
             raise ValueError("refresh policy must be False, 'auto', True, or 'always'.")
-        return replace(self, refresh_policy=policy)
+        return replace(self, refresh_policy=policy, _refresh_bindings=None)
 
     def scan_policy(self, policy: str) -> "IdentityQuery":
         """Return a plan controlling required authoritative inventory scans.
@@ -1599,8 +1798,9 @@ class IdentityQuery:
         ``analyze`` evaluates the plan and includes its final result count.
         ``verified_count`` reports cumulative identity admissions;
         ``store_scan_count`` reports started inventories, including failed/retried
-        maintenance and fallback. ``refresh_action`` is actual none, validate, or
-        rebuild work, independent of the declared refresh policy.
+        maintenance and fallback. ``refresh_action`` reports actual work with
+        precedence rebuild > validate > waited > reused > none, independently of
+        declared cadence. Waiters are not charged their owner's inventories.
         Page row/decode counts remain separate, including unverified lookahead.
 
         Args:
@@ -1888,7 +2088,20 @@ class IdentityQuery:
         raise TypeError("IdentityQuery requires an explicit terminal.")
 
     def _append(self, kind, value, scope=None) -> "IdentityQuery":
-        return replace(self, restrictions=(*self.restrictions, _V3Restriction(kind, value, scope)))
+        query = self._with_refresh_scope(scope) if kind in {"stored", "alias", "metadata"} else self
+        return replace(query, restrictions=(*self.restrictions, _V3Restriction(kind, value, scope)))
+
+    def _with_refresh_scope(self, scope):
+        """Attach a newly declared authority scope without widening producer bindings."""
+        if self.refresh_policy is not True or scope is None:
+            return self
+        bindings = list(self._refresh_bindings)
+        for request in dict.fromkeys(binding.request for binding in bindings):
+            if not any(binding.request is request and (
+                binding.scope is scope or _same_v3_scope(binding.scope, scope)
+            ) for binding in bindings):
+                bindings.append(_RefreshBinding(request, scope))
+        return replace(self, _refresh_bindings=tuple(bindings))
 
     def _run_terminal(self, evaluate, *, return_capture=False, selective_state=False, occurrence=None):
         """Restart all dependent stages on demand growth or an invalidated cut."""
@@ -1910,15 +2123,38 @@ class IdentityQuery:
         if self.take_limit != 0:
             capture.index_presentations = self._index_presentations(capture, occurrence=occurrence)
             if capture.refresh_policy is True or capture.refresh_policy == "always":
-                if any(getattr(item.store, "query_index_policy", None) not in {"memory", "none"}
-                       for item in capture.index_presentations):
+                if any(
+                    getattr(item.store, "query_index_policy", None) not in {"memory", "none"}
+                    and (capture.refresh_policy == "always" or any(
+                        not request.completed_domain(item.store.authority_fence_key())
+                        for request in item.requests
+                    )) for item in capture.index_presentations
+                ):
                     capture.require_scan()
-                for target in capture.resolve_index_targets(explicit=True):
-                    stats = QueryStats()
-                    try:
-                        target.index.refresh(capture.refresh_policy, stats=stats)
-                    finally:
-                        capture.merge_maintenance_stats(stats)
+                obligations = tuple(
+                    (target, tuple(dict.fromkeys(
+                        request for item in target.presentations for request in item.requests
+                    ))) for target in capture.resolve_index_targets(explicit=True)
+                )
+                # Freeze and check every applicable pair before any target cycles.
+                pending = False
+                for target, requests in obligations:
+                    for request in requests:
+                        with request._process_lock():
+                            request.check(target.descriptor)
+                            pending |= target.descriptor.destination not in request.completed
+                if pending:
+                    capture.require_scan()
+                for target, requests in obligations:
+                    if capture.refresh_policy is True:
+                        _refresh_target(target, requests, capture)
+                    else:
+                        stats = QueryStats()
+                        try:
+                            target.index.refresh("always", stats=stats)
+                        finally:
+                            capture.merge_maintenance_stats(stats)
+                capture.refresh_policy = "auto"
         capture.active = True
         while True:
             try:
@@ -1939,32 +2175,43 @@ class IdentityQuery:
 
         presentations = []
 
-        def add(producer, scope):
+        bindings = self._refresh_bindings if self.refresh_policy is True else ()
+
+        def bound(scope, *, producer=False):
+            return tuple(binding.request for binding in bindings if (
+                binding.producer is producer and (
+                    binding.scope is scope or (not producer and _same_v3_scope(binding.scope, scope))
+                )
+            ))
+
+        def add(producer, scope, covering=()):
             if isinstance(scope, StoreSource):
                 stores = (scope.store,)
             elif isinstance(scope, (RepoSource, RetainedRepoLookupSource)):
                 stores = capture.repo_stores(scope.repo)
             else:
                 return
-            presentations.extend(_IndexPresentation(producer, scope, store) for store in stores)
+            requests = tuple(dict.fromkeys((*covering, *bound(scope))))
+            presentations.extend(_IndexPresentation(producer, scope, store, requests) for store in stores)
 
-        def visit(query):
+        def visit(query, covering=()):
             source = query.source
-            add(query, source)
+            covering = tuple(dict.fromkeys((*covering, *bound(source, producer=True))))
+            add(query, source, covering)
             if isinstance(source, _RelationshipClosure):
-                visit(source.input_query)
+                visit(source.input_query, covering)
             elif isinstance(source, _RelationshipProjection):
-                visit(source.occurrence_query.roots)
+                visit(source.occurrence_query.roots, covering)
             elif isinstance(source, _AlgebraSource):
-                visit(source.left)
-                visit(source.right)
+                visit(source.left, covering)
+                visit(source.right, covering)
             for scope in query._external_authority_scopes():
-                add(query, scope)
+                add(query, scope, covering)
 
         visit(self)
         if occurrence is not None:
             for _, scope in occurrence.metadata_restrictions:
-                add(occurrence, scope)
+                add(occurrence, scope, tuple(dict.fromkeys(binding.request for binding in bindings)))
         return tuple(presentations)
 
     def _combine(self, other: "IdentityQuery", operation: str) -> "IdentityQuery":
@@ -1997,6 +2244,7 @@ class IdentityQuery:
             max_verify_limit=self.max_verify_limit,
             max_depth_limit=self.max_depth_limit,
             indexed_required=self.indexed_required,
+            _refresh_bindings=(*self._refresh_bindings, *other._refresh_bindings),
         )
 
     def _bound_scope(self, scope):
@@ -2879,6 +3127,11 @@ class OccurrenceQuery:
     explicit outer projection override governs the entire nested expression.
     Complete producer and metadata-scope authority is validated together before
     filtering, even for empty domains; scope holders do not become candidates.
+    Root refresh lineage is shared by raw terminals and both projections; a new
+    target metadata scope extends inherited requests without reopening existing
+    targets. Fixed OccurrenceSet refinements are detached from live requests.
+    Maintenance failures, self-reentry, and owner/waiter interruption follow the
+    IdentityQuery lifecycle before separate fresh evaluation cuts.
     """
 
     roots: IdentityQuery
@@ -2901,7 +3154,8 @@ class OccurrenceQuery:
             occurrences: Detached :class:`OccurrenceSet` membership and evidence.
 
         Returns:
-            A query restricted to the supplied fixed occurrences.
+            A query restricted to supplied fixed occurrences, with no inherited
+            live refresh request from evidence or provenance.
 
         Raises:
             TypeError: If ``occurrences`` is not an OccurrenceSet.
@@ -2985,7 +3239,8 @@ class OccurrenceQuery:
             scope: Store or Repo authority; defaults only for a live producer.
 
         Returns:
-            An immutable target-restricted occurrence query.
+            An immutable target-restricted occurrence query extending root refresh
+            lineage to the selected metadata scope, without source acquisition.
 
         Raises:
             QueryDomainError: If a fixed source has no explicit authority scope.
@@ -3001,7 +3256,8 @@ class OccurrenceQuery:
         if selected is None:
             raise QueryDomainError("Fixed occurrences require an explicit scope for metadata.")
         return replace(
-            self, metadata_restrictions=(*self.metadata_restrictions, (_require_predicate(predicate), selected)),
+            self, roots=self.roots._with_refresh_scope(selected),
+            metadata_restrictions=(*self.metadata_restrictions, (_require_predicate(predicate), selected)),
         )
 
     def cdefs(self) -> "OccurrenceQuery":
@@ -3315,7 +3571,7 @@ class OccurrenceQuery:
         return occurrences[0] if occurrences else None
 
     def owners(self) -> IdentityQuery:
-        """Return an existential owner IdentityQuery inheriting root controls.
+        """Return an existential owner IdentityQuery inheriting root controls and lineage.
 
         Raw occurrence caps do not bound this projection. Explicit controls on
         the returned query govern all nested execution; capture/budget/authority
@@ -3328,7 +3584,7 @@ class OccurrenceQuery:
         )
 
     def targets(self) -> IdentityQuery:
-        """Return an existential target IdentityQuery inheriting root controls.
+        """Return an existential target IdentityQuery inheriting root controls and lineage.
 
         Raw occurrence caps do not bound this projection. Explicit controls on
         the returned query govern roots and targets; terminal failures are not

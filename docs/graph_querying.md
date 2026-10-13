@@ -168,14 +168,54 @@ inventory, direct exact positives, and external metadata scopes leave unused dir
 sidecars untouched. A bounded stored-CDef index consumer preflights recovery outside
 retained Store fences and SQLite readers, then enters non-repairing views.
 
-`refresh(True)` and `refresh("always")` currently request one explicit cycle per
-applicable destination per participating terminal, before fresh evaluation cuts.
+`refresh(True)` creates a lazy **one-shot request**. Ordinary restrictions,
+closure, raw occurrences, owner/target projections, and shallow copies share that
+request; each applicable compatible destination completes it once, before a fresh
+evaluation cut. A later terminal uses demand-driven auto behavior and obtains new
+facts and proofs. Completion stores no inventory, result, reader, or authority proof.
+Call `refresh(True)` again to create a fresh request; use `refresh("always")` for
+one explicit cycle per applicable destination at every participating terminal.
 An already correct ready sidecar is substantively validated without replacement;
 repair may replace derived sidecars but never rewrites Store authority. Direct
 backend `refresh(True)` and `refresh("always")` likewise perform one independent
 cycle per call. Construction, ordinary `explain()`, and identity/occurrence
 `take(0)` perform no maintenance or source acquisition. Explicit backend failures
 propagate; absent optional backends create no maintenance target.
+
+```python
+universe = repo.query().refresh(True)
+universe.cdefs().count()          # fulfills this request's current targets
+universe.state_refs().collect()  # fresh evaluation, no repeat explicit cycle
+universe.refresh(True).count()   # fresh request over the effective expression
+```
+
+Algebra preserves each operand's producer/scope bindings: combining independently
+completed A and B universes does not refresh A for B's request or B for A's request.
+A newly attached external authority scope C extends the expression's inherited
+requests. In the absence of an older in-flight attempt, pending obligations for C
+coalesce into one cycle. Empty filtered results retain scope obligations; even an
+empty Store participates when its persistent target is available. Optional absent
+targets receive no credit and participate when later available. New Repo attachments
+introduce only their pending targets from the next terminal's retained topology.
+An outer `refresh(True)` replaces inherited bindings with a new request covering
+the whole expression. Outer `False`, `"auto"`, and `"always"` suppress inherited
+one-shot obligations without changing original plans. Algebra still rejects
+incompatible declared controls before an override. `IdentitySet.query()` and
+`OccurrenceSet.query()` refine fixed results without inheriting live requests.
+
+Same-request concurrent terminals single-flight each target. A terminal freezes its
+applicable obligations, joins every encountered older attempt outside Store fences,
+SQLite readers, and request locks, then rechecks pending pairs. It owns at most one
+new cohort cycle per target and credits only pairs claimed by that cohort. Fresh
+requests receive no historical credit. A joined failed attempt fails that terminal
+even if a later retry already succeeded. Failed/interrupted targets remain retryable;
+successful targets survive later target failure and evaluation/cardinality/budget
+failure. Published attempt outcomes are immutable: interruption after publication
+can fail the owner terminal without reversing completion or a joined outcome.
+Owner exceptions propagate unchanged; interrupted-owner waiters receive
+actionable `QueryIndexError`. Waiter interruption detaches without cancelling the
+owner. Same-thread self-reentry raises `QueryIndexBusy` promptly. Independent
+universes have no global single-flight guarantee.
 
 Target resolution uses the terminal's first retained Repo topology, including all
 producer and external-scope presentations before coalescing normalized configured
@@ -188,6 +228,10 @@ a terminal-local check, not a cross-client or cross-process destination registry
 A Store attached after topology retention joins the next terminal. Inherited Repo
 topology after fork raises `RuntimeError` before the parent-process configuration
 lock; open a fresh Repo in the child. Query does not reset Repo-owned locks.
+Request synchronization resets by PID before acquisition; inherited derivatives
+share pending child request state. Direct Store execution remains subject to existing
+Store, import, and SQLite lifecycle rules and uses fresh views. Requests are ephemeral
+and process-local; there is no new serialization, transport, or deepcopy contract.
 
 These are terminal-owned controls: they apply to producers **and** external
 stored, alias, and metadata scopes, algebra operands, closure, occurrence targets,
@@ -196,8 +240,10 @@ restrictions are source-free too. Projections inherit controls without inheritin
 raw occurrence caps. An explicit control on the outer query governs its nested
 execution; algebra construction still rejects incompatible operand policies.
 Warnings precede the first inventory or recovery scan, once per terminal.
-Explicit cycles require scan admission even on ready sidecars, before backend IO;
-they cannot bypass forbid or indexed-only controls. Disabled refresh does not
+Pending explicit cycles require scan admission even on ready sidecars, before
+claiming or joining work; waiters cannot bypass forbid or indexed-only controls.
+Completed requests can use otherwise-supported indexed prefixes under those
+controls, with normal readiness and authority checks. Disabled refresh does not
 initialize or rebuild a missing/dirty sidecar.
 
 ### Verification Admission Budget
@@ -228,8 +274,10 @@ and maintenance scans (including failed work, fallback, and recapture) as
 `store_scan_count`, and page work separately as
 `candidate_rows_read`, `cdef_blobs_decoded`, and `pages_fetched`. Payload-free
 metadata and recovery IO remain scan-controlled work, even without admissions.
-`refresh_action` reports actual `none`, `validate`, or `rebuild` work rather than
-echoing the declared policy; rebuild takes precedence across multiple targets.
+`refresh_action` reports actual actions rather than echoing the declared policy,
+with precedence `rebuild > validate > waited > reused > none`. `waited` means
+successful joining; `reused` means prior compatible request completion, not new
+maintenance. Waiters never receive their owner's inventory charges.
 Demand recovery reports its action too. Failed backend calls merge started work
 during cleanup; retries never refund the terminal's cumulative ledger.
 

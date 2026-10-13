@@ -58,6 +58,22 @@ def test_equivalent_broad_v3_workload_captures_each_query_cut_once(tmp_path):
     assert counting.hydrate_count == 2
 
 
+def test_u2_completed_exact_positive_has_no_maintenance_inventory(tmp_path, monkeypatch):
+    from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    root = Definition(PerfLeaf, "root").concretize()
+    store.write_definition_record(DefinitionRecord(root))
+    store.rebuild_query_index()
+    counting = CountingStore(store)
+    query = counting.query().refresh(True)
+    query.count()
+    counting.hydrate_count = counting.definition_read_count = 0
+    monkeypatch.setattr(counting.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("completed request refreshed"))
+    assert query.sel(root).cdefs().stored().exists()
+    assert counting.hydrate_count == 0 and counting.definition_read_count == 2
+
+
 def test_v3_broad_query_does_not_restore_payloads(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)

@@ -527,6 +527,28 @@ def test_empty_candidates_do_not_suppress_external_alias_conflict(tmp_path):
         query.exists()
 
 
+def test_u2_completed_request_uses_fresh_scoped_conflict_proof(tmp_path, monkeypatch):
+    from dryml.core import ObjectId, ObjectRef
+    from dryml.core.query.model import QueryError
+    from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+    from dryml.core.store.records import DeclarationRecord
+    from dryml.core.utils.graph.path import GraphPath
+
+    a, b = (DirStore(tmp_path / name, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+            for name in ("a", "b"))
+    object_id = ObjectId()
+    first = ObjectRef(Definition(ExecutionStatefulLeaf, "first").concretize(), {GraphPath(): object_id})
+    a.write_declaration_record(DeclarationRecord(first))
+    query = a.query().refresh(True).stored(scope=b)
+    assert query.count() == 0
+    second = ObjectRef(Definition(ExecutionStatefulLeaf, "second").concretize(), {GraphPath(): object_id})
+    b.write_declaration_record(DeclarationRecord(second))
+    for store in (a, b):
+        monkeypatch.setattr(store.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("completed scope refreshed"))
+    with pytest.raises(QueryError, match="authority conflicts"):
+        query.exists()
+
+
 @pytest.mark.parametrize("bounded", (False, True))
 @pytest.mark.parametrize("empty", (False, True))
 def test_algebra_validates_selected_roots_before_operand_filtering(tmp_path, bounded, empty):
