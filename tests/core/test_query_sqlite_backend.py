@@ -1,5 +1,6 @@
 import threading
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,7 @@ from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqli
 import dryml.core.query.sqlite.index as sqlite_index_module
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core.query.sqlite.lowering import SQLiteOptimizerPolicy
+from dryml.core.query.sqlite.schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION
 
 
 pytestmark = pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
@@ -133,23 +135,49 @@ def test_failed_explicit_replacement_counts_started_scan(tmp_path, monkeypatch, 
         assert index.status().state == "ready"
 
 
-def test_foreign_destination_owner_is_refused_before_scan(tmp_path, monkeypatch):
-    """A valid Store-owned sidecar cannot be repurposed by an independent owner."""
+@pytest.mark.parametrize("schema_version", (SQLITE_QUERY_INDEX_SCHEMA_VERSION, 7), ids=("current", "known-older"))
+@pytest.mark.parametrize("operation", (True, "always", "auto", "rebuild"))
+def test_foreign_destination_owner_is_refused_before_scan(tmp_path, monkeypatch, schema_version, operation):
+    """Foreign ownership outranks older-version recovery without changing persisted data."""
     from dryml.core.query.model import QueryIndexIncompatible
     from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
 
     path = tmp_path / "shared.sqlite"
-    first = DirStore(tmp_path / "first", query_index=SQLiteQueryIndexConfig(path=path))
-    second = DirStore(tmp_path / "second", query_index=SQLiteQueryIndexConfig(path=path))
+    config = SQLiteQueryIndexConfig(path=path, journal_mode="delete")
+    first, second = (DirStore(tmp_path / name, query_index=config) for name in ("first", "second"))
+    records = tuple(store.write_definition_record(DefinitionRecord(SQLiteLeaf(name).definition))
+                    for store, name in ((first, "first"), (second, "second")))
+    authority_paths = tuple(Path(store._definition_path(record.digest)) for store, record in zip((first, second), records))
+    authority_bytes = tuple(path.read_bytes() for path in authority_paths)
     first.rebuild_query_index()
+    owner = first.open_query_index()
+    owner.close()
+    with require_sqlite().connect(path) as con:
+        con.execute(f"PRAGMA user_version = {schema_version}")
+        assert con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone() == (owner.source_key,)
+    first.mark_query_index_dirty()
     index = second.open_query_index()
-    identity = path.stat().st_ino
+    identity = (path.stat().st_dev, path.stat().st_ino)
+    contents = path.read_bytes()
+    tokens = tuple(backend._dirty_markers() for backend in (owner, index))
+    assert all(tokens)
     monkeypatch.setattr(index, "_capture_authority_cut", lambda: pytest.fail("foreign owner scanned"))
-    for operation in (lambda: index.refresh(True), lambda: index.refresh("auto"), index.rebuild):
-        with pytest.raises(QueryIndexIncompatible, match="owner"):
-            operation()
-    assert path.stat().st_ino == identity
-    assert first.open_query_index().status().state == "ready"
+    stats = QueryStats()
+    with pytest.raises(QueryIndexIncompatible) as error:
+        if operation == "rebuild":
+            index.rebuild(stats=stats)
+        else:
+            index.refresh(operation, stats=stats)
+    assert str(error.value) == "SQLite query-index destination has a foreign Store owner; refusing maintenance."
+    assert stats.store_scan_count == 0
+    assert (path.stat().st_dev, path.stat().st_ino) == identity
+    assert path.read_bytes() == contents
+    assert tuple(backend._dirty_markers() for backend in (owner, index)) == tokens
+    assert tuple(path.read_bytes() for path in authority_paths) == authority_bytes
+    assert not index._connections._leases and not index._build_claim_path().exists()
+    assert all(not con.in_transaction for con in index._connections._connections.values())
+    assert not tuple(path.parent.glob(f"{path.name}.rebuild-*.tmp*"))
 
 
 def test_ready_validation_failure_retains_scan_and_releases_view(tmp_path, monkeypatch):

@@ -19,6 +19,7 @@ from dryml.core.query.model import QueryIndexBusy, QueryIndexError
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core.query.sqlite.index as sqlite_index_module
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core.query.sqlite.schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord
 from dryml.core.symbol import ImportRef
@@ -658,39 +659,87 @@ def test_u2_owner_baseexception_notifies_all_blocked_waiters(tmp_path, monkeypat
     assert query.explain(analyze=True).refresh_action == "validate"
 
 
+@pytest.mark.timeout(40)
 def test_u2_published_attempt_outcome_survives_later_owner_interruption(tmp_path, monkeypatch):
-    """Once success is published it cannot become a different joined outcome."""
-    import dryml.core.query.query as query_module
-
+    """Unwind repeats a lost success notification for an already-blocked terminal."""
     store = _request_store(tmp_path / "store")
     query = store.query().refresh(True)
-    finish = query_module._RefreshAttempt.finish
-    published = []
+    request = query._refresh_bindings[0].request
+    index = store.open_query_index()
+    identity = index._connections._path_identity()
+    generation = index.status().generation
+    validate = index._validate_store_roots
+    entered, release, blocked = (threading.Event() for _ in range(3))
+    primary = KeyboardInterrupt("owner interrupted before success notification")
+    owner, waiting, interruptions, validations = [], [], [], []
 
-    def interrupt_after_publication(attempt, failure):
-        finish(attempt, failure)
-        if failure is None:
-            published.append(attempt)
-            raise KeyboardInterrupt("owner interrupted after published completion")
+    def compare(con, issues, **kwargs):
+        validations.append(True)
+        assert con.in_transaction and index._connections._leases
+        entered.set()
+        assert release.wait(15)
+        return validate(con, issues, **kwargs)
 
-    with monkeypatch.context() as scoped:
-        scoped.setattr(query_module._RefreshAttempt, "finish", interrupt_after_publication)
-        with pytest.raises(KeyboardInterrupt):
-            query.count()
-    assert len(published) == 1
-    observed = []
+    monkeypatch.setattr(index, "_validate_store_roots", compare)
+    first = _query_thread(query, store, owner)
+    second = attempt = notify = None
+    try:
+        assert entered.wait(10), owner
+        with request._process_lock():
+            attempt = next(iter(request.in_flight.values()))[1]
+        wait, notify = attempt.condition.wait, attempt.condition.notify_all
 
-    def observe():
-        try:
-            observed.append(published[0].wait())
-        except BaseException as error:
-            observed.append(error)
+        def observe(timeout=None):
+            assert not attempt.done
+            assert request._process_lock().acquire(blocking=False)
+            request._process_lock().release()
+            assert (os.getpid(), threading.get_ident(), True) not in index._connections._leases
+            # The owner must acquire this same condition after wait releases it.
+            blocked.set()
+            return wait(timeout)
 
-    waiter = threading.Thread(target=observe, daemon=True)
-    waiter.start()
-    waiter.join(10)
-    assert not waiter.is_alive() and observed == [None]
+        def interrupt_notification():
+            assert blocked.is_set() and attempt.done and attempt.failure is None
+            assert not index._connections._leases and not index._build_claim_path().exists()
+            probe = locking_module.FileLock(store._writer_lock_path)
+            assert probe.acquire(blocking=False)
+            probe.release()
+            if not interruptions:
+                interruptions.append(primary)
+                raise primary
+            return notify()
+
+        monkeypatch.setattr(attempt.condition, "wait", observe)
+        monkeypatch.setattr(attempt.condition, "notify_all", interrupt_notification)
+        second = _query_thread(query.cdefs(), store, waiting)
+        assert blocked.wait(10)
+        release.set()
+        first.join(10)
+        assert not first.is_alive() and owner == [primary]
+        second.join(10)
+        assert not second.is_alive(), "published success stranded its already-blocked terminal"
+        assert len(waiting) == 1 and waiting[0].refresh_action == "waited", waiting
+        assert waiting[0].result_count == 1 and waiting[0].store_scan_count == 1
+    finally:
+        release.set()
+        first.join(15)
+        # Release a stranded waiter on regression so a failed test leaves no thread.
+        if second is not None:
+            if second.is_alive() and notify is not None:
+                with attempt.condition:
+                    notify()
+            second.join(15)
+    assert not first.is_alive() and second is not None and not second.is_alive()
+    assert interruptions == [primary] and attempt.done and attempt.failure is None
     assert query.explain(analyze=True).refresh_action == "reused"
+    assert validations == [True] and len(request.completed) == 1 and not request.in_flight
+    assert index._connections._path_identity() == identity and index.status().generation == generation
+    assert not index._connections._leases and not index._build_claim_path().exists()
+    assert all(not con.in_transaction for con in index._connections._connections.values())
+    assert not tuple(index.path.parent.glob(f"{index.path.name}.rebuild-*.tmp*"))
+    probe = locking_module.FileLock(store._writer_lock_path)
+    assert probe.acquire(blocking=False)
+    probe.release()
 
 
 def test_u2_fork_resets_held_request_lock_and_preserves_derivative_sharing(tmp_path):
@@ -1017,13 +1066,19 @@ def test_explicit_validation_holds_authority_fence_through_comparison(tmp_path, 
 
 
 @pytest.mark.timeout(30)
-def test_overlapping_foreign_destination_owner_is_refused_after_claim(tmp_path, monkeypatch):
-    """An owner published after preflight is refused under replacement ownership."""
+@pytest.mark.parametrize("schema_version", (SQLITE_QUERY_INDEX_SCHEMA_VERSION, 7), ids=("current", "known-older"))
+@pytest.mark.parametrize("operation", (True, "always", "auto", "rebuild"))
+def test_overlapping_foreign_destination_owner_is_refused_after_claim(tmp_path, monkeypatch, schema_version, operation):
+    """Post-preflight foreign ownership outranks even known-older recovery under claim."""
     from dryml.core.query.model import QueryIndexIncompatible, QueryStats
 
     path = tmp_path / "shared.sqlite"
     config = SQLiteQueryIndexConfig(path=path, journal_mode="delete")
     first, second = (DirStore(tmp_path / name, query_index=config) for name in ("first", "second"))
+    records = tuple(store.write_definition_record(DefinitionRecord(_cdef(name)))
+                    for store, name in ((first, "first"), (second, "second")))
+    authority_paths = tuple(Path(store._definition_path(record.digest)) for store, record in zip((first, second), records))
+    authority_bytes = tuple(path.read_bytes() for path in authority_paths)
     contender = second.open_query_index()
     preflight, release = threading.Event(), threading.Event()
     original_claim = contender._build_claim
@@ -1040,29 +1095,46 @@ def test_overlapping_foreign_destination_owner_is_refused_after_claim(tmp_path, 
 
     def refresh():
         try:
-            contender.refresh(True, stats=stats)
+            if operation == "rebuild":
+                contender.rebuild(stats=stats)
+            else:
+                contender.refresh(operation, stats=stats)
         except BaseException as error:
             outcomes.append(error)
         finally:
             contender._connections.close_current()
 
     monkeypatch.setattr(contender, "_build_claim", claim)
+    monkeypatch.setattr(contender, "_capture_authority_cut", lambda: pytest.fail("foreign owner scanned"))
     worker = threading.Thread(target=refresh, daemon=True)
     worker.start()
     try:
         assert preflight.wait(10)
         first.rebuild_query_index()
-        identity = path.stat().st_ino
+        owner = first.open_query_index()
+        owner.close()
+        with require_sqlite().connect(path) as con:
+            con.execute(f"PRAGMA user_version = {schema_version}")
+            assert con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone() == (owner.source_key,)
+        first.mark_query_index_dirty()
+        identity = (path.stat().st_dev, path.stat().st_ino)
+        contents = path.read_bytes()
+        tokens = tuple(backend._dirty_markers() for backend in (owner, contender))
+        assert all(tokens)
     finally:
         release.set()
         worker.join(10)
     assert not worker.is_alive()
     assert len(outcomes) == 1 and isinstance(outcomes[0], QueryIndexIncompatible)
-    assert "owner" in str(outcomes[0])
+    assert str(outcomes[0]) == "SQLite query-index destination has a foreign Store owner; refusing maintenance."
     assert stats.store_scan_count == 0
-    assert path.stat().st_ino == identity
-    assert first.open_query_index().status().state == "ready"
-    assert not contender._build_claim_path().exists()
+    assert (path.stat().st_dev, path.stat().st_ino) == identity
+    assert path.read_bytes() == contents
+    assert tuple(backend._dirty_markers() for backend in (owner, contender)) == tokens
+    assert tuple(path.read_bytes() for path in authority_paths) == authority_bytes
+    assert not contender._connections._leases and not contender._build_claim_path().exists()
+    assert all(not con.in_transaction for con in contender._connections._connections.values())
+    assert not tuple(path.parent.glob(f"{path.name}.rebuild-*.tmp*"))
 
 
 def test_fresh_forked_manager_resets_held_class_registry_lock(tmp_path):
