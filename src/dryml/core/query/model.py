@@ -1,3 +1,9 @@
+"""Query policy types, detached reports, identities, and execution counters.
+
+Backend refresh policies describe one call; Query owns any shared cadence.
+Reports record performed work and issues, not reusable Store authority proofs.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -7,7 +13,8 @@ from ..cdef_graph import EdgeKind
 from .path import DefinitionPath
 
 
-RefreshPolicy = Literal[False, "auto", True]
+RefreshPolicy = Literal[False, "auto", True, "always"]
+"""Backend policy: disable, recover readiness, or explicitly reconcile each call."""
 ClassMatchPolicy = Literal["selector", "exact"]
 QueryDomain = Literal["stored", "cached", "known", "nested"]
 QueryProjection = Literal["definitions", "owners", "object_refs", "state_refs"]
@@ -270,7 +277,10 @@ class ReconcileReport:
 
     `changed` records whether the index was modified. `validated` captures
     whether the pass performed consistency validation in addition to any
-    rebuild or repair action.
+    rebuild or repair action. It is not a success flag: historical issues survive
+    successful repair, and an error issue may follow visible activation. Generation
+    fields describe the observed validation/activation cut, definitions_scanned
+    counts captured roots, and diagnostics may include started inventory work.
     """
 
     backend: str
@@ -700,6 +710,14 @@ class AllOccurrenceTraversalSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class QueryExplanation:
+    """Detached query policy, chosen actions, work counters, and result diagnostics.
+
+    ``refresh`` is the declared policy; ``refresh_action`` describes actual work.
+    ``store_scan_count`` counts started inventories, including maintenance and
+    failed/retried scans, independently of identity-verification admissions.
+    Remaining fields describe candidate, graph, page, and source-plan work.
+    Construction records supplied values without IO or retained backend resources.
+    """
     domain: str
     refresh: RefreshPolicy
     refresh_action: str = "none"
@@ -822,6 +840,14 @@ class ResultUniverse:
 
 @dataclass(slots=True)
 class QueryStats:
+    """Mutable execution counters optionally supplied to backend lifecycle calls.
+
+    ``store_scan_count`` charges started authority inventories once, including
+    failed validation/rebuild/hydration and retries; it is never refunded.
+    ``refresh_action`` records the actual maintenance phase rather than replacement
+    credit for another owner. Other fields track evaluation/admission/page work.
+    Construction has no IO; callers mutate counters and can detach an explanation.
+    """
     refresh_action: str = "none"
     store_scan_count: int = 0
     universe_size: int | None = None

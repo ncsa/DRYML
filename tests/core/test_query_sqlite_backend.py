@@ -59,6 +59,160 @@ def sqlite_rows(path, sql, params=()):
         con.close()
 
 
+def test_explicit_cycle_validates_ready_index_without_replacement(tmp_path, monkeypatch):
+    """Every direct explicit call validates a fresh cut without replacing ready data."""
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.write_definition_record(DefinitionRecord(SQLiteLeaf("ready").definition))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    before = index.status()
+    identity = index._connections._path_identity()
+    monkeypatch.setattr(index, "_activate_replacement", lambda *a, **kw: pytest.fail("ready cycle replaced sidecar"))
+
+    for policy in (True, True, "always", "always"):
+        stats = QueryStats()
+        index.refresh(policy, stats=stats)
+        assert stats.store_scan_count == 1
+        assert stats.refresh_action == "sqlite-validate"
+        assert index.status().generation == before.generation
+        assert index.status().diagnostics["index_uuid"] == before.diagnostics["index_uuid"]
+        assert index._connections._path_identity() == identity
+        assert not index._connections._leases
+
+
+@pytest.mark.parametrize("phase", ("authority", "staging", "activation", "activation-visible", "acknowledgement"))
+def test_failed_explicit_replacement_counts_started_scan(tmp_path, monkeypatch, phase):
+    """Failure never refunds an inventory, including after visible activation."""
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.write_definition_record(DefinitionRecord(SQLiteLeaf("root").definition))
+    index = store.open_query_index()
+    original_clear = index._clear_dirty
+
+    def fail(*args, **kwargs):
+        raise QueryIndexError("injected " + phase)
+
+    if phase == "authority":
+        monkeypatch.setattr(index, "_preflight_store_roots", fail)
+    elif phase == "staging":
+        monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", fail)
+    elif phase == "activation":
+        monkeypatch.setattr(index, "_activate_replacement", fail)
+    elif phase == "activation-visible":
+        original_activate = index._activate_replacement
+
+        def activate(*args, **kwargs):
+            original_activate(*args, **kwargs)
+            fail()
+
+        monkeypatch.setattr(index, "_activate_replacement", activate)
+    else:
+        monkeypatch.setattr(index, "_clear_dirty", fail)
+    stats = QueryStats()
+    with pytest.raises(QueryIndexError, match="injected"):
+        index.refresh(True, stats=stats)
+    assert stats.store_scan_count == 1
+    assert not index._build_claim_path().exists()
+    assert not index._connections._leases
+    assert not tuple(index.path.parent.glob(f"{index.path.name}.rebuild-*.tmp*"))
+    report = index.reconcile()
+    assert report.action == "rebuild"
+    assert report.changed == (phase in {"acknowledgement", "activation-visible"})
+    assert report.validated == (phase != "authority")
+    assert report.diagnostics["store_scan_count"] == 1
+    assert any("injected " + phase in (issue.detail or "") for issue in report.issues)
+    if phase == "acknowledgement":
+        assert index.path.exists()
+        monkeypatch.setattr(index, "_clear_dirty", original_clear)
+        index.refresh(True)
+        assert index.status().state == "ready"
+
+
+def test_foreign_destination_owner_is_refused_before_scan(tmp_path, monkeypatch):
+    """A valid Store-owned sidecar cannot be repurposed by an independent owner."""
+    from dryml.core.query.model import QueryIndexIncompatible
+    from dryml.core.store.dir import DirStore
+
+    path = tmp_path / "shared.sqlite"
+    first = DirStore(tmp_path / "first", query_index=SQLiteQueryIndexConfig(path=path))
+    second = DirStore(tmp_path / "second", query_index=SQLiteQueryIndexConfig(path=path))
+    first.rebuild_query_index()
+    index = second.open_query_index()
+    identity = path.stat().st_ino
+    monkeypatch.setattr(index, "_capture_authority_cut", lambda: pytest.fail("foreign owner scanned"))
+    for operation in (lambda: index.refresh(True), lambda: index.refresh("auto"), index.rebuild):
+        with pytest.raises(QueryIndexIncompatible, match="owner"):
+            operation()
+    assert path.stat().st_ino == identity
+    assert first.open_query_index().status().state == "ready"
+
+
+def test_ready_validation_failure_retains_scan_and_releases_view(tmp_path, monkeypatch):
+    """Unexpected validation errors raise strictly, without losing started work."""
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    generation = index.status().generation
+
+    def fail(*args):
+        assert index._connections._leases
+        raise QueryIndexError("injected validation failure")
+
+    monkeypatch.setattr(index, "_validate_decodable_rows", fail)
+    stats = QueryStats()
+    with pytest.raises(QueryIndexError, match="injected validation failure"):
+        index.refresh(True, stats=stats)
+    assert stats.store_scan_count == 1
+    assert index.status().generation == generation
+    assert not index._connections._leases
+    report = index.reconcile()
+    assert not report.changed
+    assert report.diagnostics["store_scan_count"] == 1
+    assert any("injected validation failure" in (issue.detail or "") for issue in report.issues)
+
+
+def test_explicit_cycle_preserves_unconditional_rebuild_seam(tmp_path):
+    """Explicit reconciliation preserves identity; direct rebuild always replaces."""
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    first = index.status().diagnostics["index_uuid"]
+    index.refresh(True)
+    assert index.status().diagnostics["index_uuid"] == first
+    store.rebuild_query_index()
+    assert index.status().diagnostics["index_uuid"] != first
+
+
+def test_strict_refresh_raises_unavailability_while_reconcile_reports_it(tmp_path, monkeypatch):
+    """The reporting wrapper also owns failures while obtaining initial status."""
+    from dryml.core.query.model import QueryIndexUnavailable
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.rebuild_query_index()
+    index = store.open_query_index()
+
+    def unavailable():
+        raise QueryIndexUnavailable("injected SQLite absence")
+
+    monkeypatch.setattr(sqlite_index_module, "require_sqlite", unavailable)
+    with pytest.raises(QueryIndexUnavailable, match="injected SQLite absence"):
+        index.refresh(True)
+    report = index.reconcile()
+    assert not report.changed and not report.validated and report.action == "none"
+    assert report.diagnostics["store_scan_count"] == 0
+    assert any("injected SQLite absence" in (issue.detail or "") for issue in report.issues)
+
+
 def test_register_stored_roots_persists_graph_and_is_idempotent(tmp_path):
     index = sqlite_index(tmp_path)
     leaf = SQLiteLeaf("rare")

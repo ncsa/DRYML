@@ -178,6 +178,346 @@ def _save_root_definition(store: DirStore, cdef: ConcreteDefinition) -> None:
 
 
 @pytest.mark.timeout(30)
+def test_explicit_cycle_declined_live_claim_validates_actual_candidate(tmp_path, monkeypatch):
+    """Old ready-looking data under a live builder confers no completion credit."""
+    from dryml.core.query.model import QueryStats
+    from dryml.core.store.records import MainRefRecord
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    root, main = _cdef("root"), _cdef("main")
+    store.write_definition_record(DefinitionRecord(root))
+    store.write_definition_record(DefinitionRecord(main), stored_root=False)
+    store.rebuild_query_index()
+    store.write_main_ref(MainRefRecord(DefinitionRecord(main).digest))
+    index = store.open_query_index()
+    claimed, release = threading.Event(), threading.Event()
+    errors = []
+    original_capture = index._capture_authority_cut
+    original_claim = index._build_claim
+    original_fence = store.authority_read_fence
+    held = threading.local()
+
+    @contextmanager
+    def fence():
+        with original_fence():
+            held.depth = getattr(held, "depth", 0) + 1
+            try:
+                yield
+            finally:
+                held.depth -= 1
+
+    def capture():
+        if threading.current_thread() is worker:
+            claimed.set()
+            assert release.wait(10)
+        return original_capture()
+
+    @contextmanager
+    def claim(**kwargs):
+        if threading.current_thread() is not worker:
+            assert getattr(held, "depth", 0) == 0
+            assert not index._connections._leases
+        with original_claim(**kwargs) as acquired:
+            yield acquired
+
+    def rebuild():
+        try:
+            index.rebuild()
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            index._connections.close_current()
+
+    worker = threading.Thread(target=rebuild, daemon=True)
+    monkeypatch.setattr(store, "authority_read_fence", fence)
+    monkeypatch.setattr(index, "_capture_authority_cut", capture)
+    monkeypatch.setattr(index, "_build_claim", claim)
+    worker.start()
+    try:
+        assert claimed.wait(10)
+        stats = QueryStats()
+        with pytest.raises(QueryIndexBusy, match="diverges"):
+            index.refresh(True, stats=stats)
+        assert stats.store_scan_count == 2
+        assert stats.refresh_action == "sqlite-validate"
+        report = index.reconcile()
+        assert not report.changed and report.action == "validate"
+        assert report.diagnostics["store_scan_count"] == 2
+        assert any("diverges" in (issue.detail or "") for issue in report.issues)
+        assert not index._connections._leases
+    finally:
+        release.set()
+        worker.join(10)
+    assert not worker.is_alive() and not errors
+    assert not index._build_claim_path().exists()
+    index.refresh(True)
+
+
+def test_explicit_cycle_declined_claim_accepts_substantively_valid_candidate(tmp_path, monkeypatch):
+    """A non-owner may succeed by validating, never by claiming a replacement."""
+    from dryml.core.query.model import QueryStats
+    from dryml.core.store.records import MainRefRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    record = store.write_definition_record(DefinitionRecord(_cdef("main")), stored_root=False)
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    store.write_main_ref(MainRefRecord(record.digest))
+    other = SQLiteStoreQueryIndex(source_key=index.source_key, path=index.path,
+                                  config=index.config, store=store, dirty_path=index.dirty_path)
+    original_claim = index._build_claim
+
+    @contextmanager
+    def claim(**kwargs):
+        assert not index._connections._leases
+        with other._build_claim(force=True) as acquired:
+            assert acquired
+            other._rebuild_owned()
+            with original_claim(**kwargs) as ours:
+                assert not ours
+                yield ours
+
+    monkeypatch.setattr(index, "_build_claim", claim)
+    report = index.reconcile()
+    assert not report.changed and report.action == "validate"
+    assert report.generation_after > report.generation_before
+    assert report.diagnostics == {"store_scan_count": 2, "refresh_action": "sqlite-validate"}
+    assert any("roots differ" in issue.message for issue in report.issues)
+    assert not index._connections._leases and not index._build_claim_path().exists()
+    other.close()
+
+
+def test_explicit_cycle_detects_wal_generation_change_in_active_destination(tmp_path, monkeypatch):
+    """The retained transaction alone cannot prove continuity behind a WAL writer."""
+    from dryml.core.query.model import QueryStats
+    from dryml.core.query.sqlite.utils import wal_runtime_is_known_safe
+
+    if not wal_runtime_is_known_safe(require_sqlite().sqlite_version_info):
+        pytest.skip("installed SQLite is not qualified for WAL")
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="wal"))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    original = index._validate_store_roots
+    mutations = []
+
+    def validate(con, issues, **kwargs):
+        original(con, issues, **kwargs)
+        if not mutations:
+            identity = index._connections._path_identity()
+            with require_sqlite().connect(index.path) as writer:
+                writer.execute("UPDATE catalog_state SET generation = generation + 1")
+            assert index._connections._path_identity() == identity
+            mutations.append(1)
+
+    monkeypatch.setattr(index, "_validate_store_roots", validate)
+    stats = QueryStats()
+    index.refresh(True, stats=stats)
+    assert mutations == [1]
+    assert stats.store_scan_count == 2 and stats.refresh_action == "sqlite-rebuild"
+    assert not index._connections._leases
+
+
+def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, monkeypatch):
+    """Replacing a destination during comparison cannot validate the old inode."""
+    from dryml.core.query.model import QueryStats
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    _save_root_definition(store, _cdef("root"))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    other = SQLiteStoreQueryIndex(source_key=index.source_key, path=index.path,
+                                  config=index.config, store=store, dirty_path=index.dirty_path)
+    original = index._validate_store_roots
+    original_claim = index._build_claim
+    replaced = []
+
+    def validate(con, issues, **kwargs):
+        original(con, issues, **kwargs)
+        if not replaced:
+            assert con.in_transaction and index._connections._leases
+            other.rebuild()
+            replaced.append(other.status().diagnostics["index_uuid"])
+
+    @contextmanager
+    def claim(**kwargs):
+        assert not index._connections._leases
+        with original_claim(**kwargs) as acquired:
+            yield acquired
+
+    monkeypatch.setattr(index, "_validate_store_roots", validate)
+    monkeypatch.setattr(index, "_build_claim", claim)
+    stats = QueryStats()
+    index.refresh(True, stats=stats)
+    assert len(replaced) == 1
+    assert stats.store_scan_count == 2 and stats.refresh_action == "sqlite-rebuild"
+    assert index.status().diagnostics["index_uuid"] != replaced[0]
+    assert not index._connections._leases and not index._build_claim_path().exists()
+    other.close()
+
+
+@pytest.mark.timeout(30)
+def test_explicit_validation_holds_authority_fence_through_comparison(tmp_path, monkeypatch):
+    """A main writer cannot cross the validation cut; later authority is not credit."""
+    from dryml.core.store.records import MainRefRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.write_definition_record(DefinitionRecord(_cdef("root")))
+    main = store.write_definition_record(DefinitionRecord(_cdef("main")), stored_root=False)
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    generation = index.status().generation
+    attempted, entered = threading.Event(), threading.Event()
+    original_validate = index._validate_store_roots
+    errors = []
+    checks = []
+
+    def writer():
+        try:
+            probe = locking_module.FileLock(store._writer_lock_path)
+            acquired = probe.acquire(blocking=False)
+            if acquired:
+                probe.release()
+            checks.append(acquired)
+            attempted.set()
+            store.write_main_ref(MainRefRecord(main.digest))
+            entered.set()
+        except BaseException as error:
+            errors.append(error)
+            attempted.set()
+
+    worker = threading.Thread(target=writer, daemon=True)
+
+    def validate(con, issues, **kwargs):
+        worker.start()
+        assert attempted.wait(10)
+        assert not entered.is_set()
+        assert con.in_transaction and index._connections._leases
+        original_validate(con, issues, **kwargs)
+
+    monkeypatch.setattr(index, "_validate_store_roots", validate)
+    try:
+        index.refresh(True)
+    finally:
+        if worker.ident is not None:
+            worker.join(10)
+    assert not worker.is_alive() and not errors and entered.is_set()
+    assert checks == [False]
+    assert index.status().generation == generation
+    assert not index._connections._leases
+    monkeypatch.setattr(index, "_validate_store_roots", original_validate)
+    index.refresh(True)
+    assert index.status().generation > generation
+
+
+@pytest.mark.timeout(30)
+def test_overlapping_foreign_destination_owner_is_refused_after_claim(tmp_path, monkeypatch):
+    """An owner published after preflight is refused under replacement ownership."""
+    from dryml.core.query.model import QueryIndexIncompatible, QueryStats
+
+    path = tmp_path / "shared.sqlite"
+    config = SQLiteQueryIndexConfig(path=path, journal_mode="delete")
+    first, second = (DirStore(tmp_path / name, query_index=config) for name in ("first", "second"))
+    contender = second.open_query_index()
+    preflight, release = threading.Event(), threading.Event()
+    original_claim = contender._build_claim
+    outcomes = []
+    stats = QueryStats()
+
+    @contextmanager
+    def claim(**kwargs):
+        preflight.set()
+        assert release.wait(10)
+        with original_claim(**kwargs) as acquired:
+            assert acquired
+            yield acquired
+
+    def refresh():
+        try:
+            contender.refresh(True, stats=stats)
+        except BaseException as error:
+            outcomes.append(error)
+        finally:
+            contender._connections.close_current()
+
+    monkeypatch.setattr(contender, "_build_claim", claim)
+    worker = threading.Thread(target=refresh, daemon=True)
+    worker.start()
+    try:
+        assert preflight.wait(10)
+        first.rebuild_query_index()
+        identity = path.stat().st_ino
+    finally:
+        release.set()
+        worker.join(10)
+    assert not worker.is_alive()
+    assert len(outcomes) == 1 and isinstance(outcomes[0], QueryIndexIncompatible)
+    assert "owner" in str(outcomes[0])
+    assert stats.store_scan_count == 0
+    assert path.stat().st_ino == identity
+    assert first.open_query_index().status().state == "ready"
+    assert not contender._build_claim_path().exists()
+
+
+def test_fresh_forked_manager_resets_held_class_registry_lock(tmp_path):
+    """Fresh child construction and path barriers never acquire the parent's lock."""
+    result = _run_worker(f'''
+import os
+import select
+import signal
+import threading
+from dryml.core.query.sqlite.connection import SQLiteConnectionManager
+
+if not hasattr(os, "fork"):
+    emit({{"skipped": True}})
+else:
+    idx = index({str(tmp_path / "fork-registry.sqlite")!r})
+    idx.initialize_empty()
+    held, release = threading.Event(), threading.Event()
+    def hold():
+        with SQLiteConnectionManager._instances_lock:
+            held.set()
+            assert release.wait(8)
+    worker = threading.Thread(target=hold, daemon=True)
+    with idx.read_view() as parent_view:
+        worker.start()
+        assert held.wait(2)
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            try:
+                fresh = index({str(tmp_path / "fork-registry.sqlite")!r})
+                with fresh._retained_read_view() as view:
+                    assert view.generation == 0
+                SQLiteConnectionManager._close_current_thread_for_path(fresh.path)
+                with idx._retained_read_view() as view:
+                    assert all(key[0] == os.getpid() for key in idx._connections._connections)
+                os.write(write_fd, b"ok")
+                os._exit(0)
+            except BaseException as error:
+                os.write(write_fd, repr(error).encode())
+                os._exit(1)
+        os.close(write_fd)
+        ready = False
+        try:
+            ready = bool(select.select([read_fd], [], [], 3)[0])
+            if not ready:
+                os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+            payload = os.read(read_fd, 4096).decode()
+        finally:
+            os.close(read_fd)
+            release.set()
+            worker.join(2)
+        emit({{"ready": ready, "status": status, "payload": payload,
+               "parent_active": parent_view._active and parent_view._con.in_transaction}})
+''')
+    if result.get("skipped"):
+        pytest.skip("requires os.fork")
+    assert result == {"ready": True, "status": 0, "payload": "ok", "parent_active": True}
+
+
+@pytest.mark.timeout(30)
 def test_u7_readiness_waits_for_build_claim_before_authority_fence(tmp_path, monkeypatch):
     """A claimed rebuilder can capture while a query waits outside every fence."""
 

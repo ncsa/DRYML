@@ -431,8 +431,11 @@
           ]
         },
         "tests/core/test_query_v3_index.py": {
-          "rationale": "Retain U6 budgets and U7 main/empty-page completeness, retained non-repairing cuts, entry failure, derived-only policy recovery, and cumulative fallback; the larger main policy product is exhaustive-only.",
+          "rationale": "Retain graph-exact explicit reconciliation (including main-only collision ties and malformed authority), U6 budgets and U7 main/empty-page completeness, retained non-repairing cuts, entry failure, derived-only policy recovery, and cumulative fallback; the larger main policy product is exhaustive-only.",
           "functions": [
+            "test_explicit_cycle_repairs_graph_distinct_main_without_dirty_token",
+            "test_explicit_cycle_compares_encoded_collision_ties",
+            "test_explicit_cycle_rejects_malformed_ready_store_authority",
             "test_corrupt_sidecar_rebuild_preserves_authoritative_record_bytes",
             "test_incremental_v3_publication_does_not_rescan_historical_projection_rows",
             "test_clean_incremental_save_does_not_enumerate_historical_references",

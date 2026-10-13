@@ -124,7 +124,8 @@ class SQLiteConnectionManager:
     ``(pid, thread_id, readonly)``, and initialized with DRYML's required
     PRAGMAs. If a process forks, the child uses a different PID key and opens
     its own connection instead of reusing the parent's connection object;
-    inherited manager locks and read leases are replaced before cache access.
+    inherited registry/manager locks, handle bookkeeping, and read leases are
+    replaced before acquisition. No child operation closes a parent's handle.
     Child unwind of an inherited read lease skips parent-key removal; the owning
     process retains strict removal through transaction cleanup.
     Cached handles are never shared between keys, but disable SQLite's thread
@@ -143,6 +144,17 @@ class SQLiteConnectionManager:
 
     _instances = WeakSet()
     _instances_lock = threading.Lock()
+    _instances_pid = os.getpid()
+
+    @classmethod
+    def _registry_lock(cls):
+        """Replace inherited registry synchronization before acquiring it."""
+        pid = os.getpid()
+        if cls._instances_pid != pid:
+            cls._instances_lock = threading.Lock()
+            cls._instances = WeakSet()
+            cls._instances_pid = pid
+        return cls._instances_lock
 
     def __init__(self, config: SQLiteQueryIndexConfig):
         self.config = config
@@ -151,7 +163,7 @@ class SQLiteConnectionManager:
         self._leases = set()
         self._lock = threading.RLock()
         self._lock_pid = os.getpid()
-        with self._instances_lock:
+        with self._registry_lock():
             self._instances.add(self)
 
     @property
@@ -211,8 +223,12 @@ class SQLiteConnectionManager:
         pid = os.getpid()
         if self._lock_pid != pid:
             self._lock = threading.RLock()
+            self._connections = {}
+            self._file_identities = {}
             self._leases = set()
             self._lock_pid = pid
+            with self._registry_lock():
+                self._instances.add(self)
         return self._lock
 
     def _connection(self, *, readonly=False):
@@ -319,7 +335,7 @@ class SQLiteConnectionManager:
         """Close same-thread handles for one canonical index path."""
 
         path_key = os.path.normcase(os.path.abspath(os.fspath(path)))
-        with cls._instances_lock:
+        with cls._registry_lock():
             managers = tuple(cls._instances)
         for manager in managers:
             manager_path = os.path.normcase(

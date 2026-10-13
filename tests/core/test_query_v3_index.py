@@ -92,6 +92,65 @@ def _sqlite_index(tmp_path, *, store=None):
     )
 
 
+def test_explicit_cycle_repairs_graph_distinct_main_without_dirty_token(tmp_path):
+    """An internally complete old index is not graph-exact Store agreement."""
+    from dryml.core.query.model import QueryStats
+
+    shared, separate = _graph_variants()
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.write_definition_record(DefinitionRecord(shared))
+    store.write_definition_record(DefinitionRecord(separate), stored_root=False)
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    generation = index.status().generation
+    store.write_main_ref(MainRefRecord(DefinitionRecord(separate).digest))
+    assert index.status().state == "ready"
+    assert index.v3_projection_coverage().projection_complete
+
+    report = index.reconcile()
+    assert report.changed and report.action == "rebuild"
+    assert report.generation_after > generation
+    assert any("roots differ" in issue.message for issue in report.issues)
+    stats = QueryStats()
+    index.refresh(True, stats=stats)
+    assert stats.store_scan_count == 1 and stats.refresh_action == "sqlite-validate"
+    with index.read_view() as view:
+        roots = next(view.iter_stored_identity_cdef_batches(batch_size=3)).cdefs
+    assert len(roots) == 2
+    assert any(root.graph_equal(separate) for root in roots)
+
+
+def test_explicit_cycle_compares_encoded_collision_ties(tmp_path, monkeypatch):
+    """A graph digest collision cannot hide an omitted graph-distinct root."""
+    from dryml.core import cdef_codec
+
+    monkeypatch.setattr(cdef_codec, "cdef_graph_hash", lambda *a, **kw: "c" * 64)
+    test_explicit_cycle_repairs_graph_distinct_main_without_dirty_token(tmp_path)
+
+
+def test_explicit_cycle_rejects_malformed_ready_store_authority(tmp_path, monkeypatch):
+    """Malformed main authority raises without treating it as sidecar damage."""
+    from dryml.core.query.model import QueryStats
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    record = store.write_definition_record(DefinitionRecord(Definition(ProjectionLeaf, "root").concretize()))
+    store.write_main_ref(MainRefRecord(record.digest))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    generation = index.status().generation
+    Path(store._ref_path("main.record")).write_bytes(b"malformed")
+    monkeypatch.setattr(index, "_activate_replacement", lambda *a, **kw: pytest.fail("malformed authority replaced index"))
+    stats = QueryStats()
+    with pytest.raises(Exception, match="main|Main|record|JSON"):
+        index.refresh(True, stats=stats)
+    assert stats.store_scan_count == 1
+    assert index.status().generation == generation
+    assert not index._connections._leases
+    report = index.reconcile()
+    assert not report.changed and report.issues
+    assert report.diagnostics["store_scan_count"] == 1
+
+
 @pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
 def test_memory_and_sqlite_retain_graph_distinct_projection_roots(tmp_path):
     """Projection rows retain graph topology even when legacy CDefs compare equal."""

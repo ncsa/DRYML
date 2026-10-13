@@ -1,3 +1,9 @@
+"""Own derived SQLite schemas and metadata-only compatibility/owner decisions.
+
+Version inspection never decodes Store or index rows. Valid foreign ownership
+refuses maintenance; known older owned formats can be rebuilt from authority.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -13,7 +19,8 @@ from ..model import CANONICAL_QUERY_SEMANTICS_VERSION, FINGERPRINT_SCHEMA_VERSIO
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
 SQLITE_QUERY_INDEX_SCHEMA_VERSION = 9
-IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported"]
+IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported", "foreign-owned"]
+"""Metadata disposition; foreign-owned destinations must never be repurposed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +294,22 @@ def initialize_schema(con, *, store_key: str, canonical_version: int = CANONICAL
 
 
 def validate_schema(con, *, store_key: str, canonical_version: int = CANONICAL_QUERY_SEMANTICS_VERSION, require_ready: bool = True) -> None:
+    """Require an owned compatible schema on an open SQLite connection.
+
+    Args:
+        con: SQLite connection to inspect without row decoding or mutation.
+        store_key: Expected persisted Store owner identifier.
+        canonical_version: Expected integer query semantics version.
+        require_ready: Also require a ready, clean catalog when True.
+
+    Returns:
+        None on compatibility.
+
+    Raises:
+        QueryIndexIncompatible: For wrong ownership or unsupported metadata.
+        QueryIndexDirty: For non-ready state when readiness is required.
+        sqlite3.Error: If schema metadata cannot be read.
+    """
     application_id = con.execute("PRAGMA application_id").fetchone()[0]
     if application_id != SQLITE_QUERY_INDEX_APPLICATION_ID:
         raise QueryIndexIncompatible("SQLite file is not a DRYML query index.")
@@ -332,8 +355,16 @@ def compatibility_decision(
         actual: Mapping[str, int | str],
         *,
         expected: IndexSemanticVersion) -> IndexCompatibilityDecision:
-    """Classify how to handle persisted query-index version metadata."""
+    """Classify persisted metadata against an expected semantic version bundle.
 
+    Returns compatible, rebuild for known older versions, future-unsupported
+    for malformed/future versions, or foreign-owned for a valid other Store key.
+    Inspection is metadata-only and has no side effects.
+    """
+
+    owner = actual.get("store_key")
+    if isinstance(owner, str) and owner and owner != expected.store_key:
+        return "foreign-owned"
     for key, value in expected.catalog_state().items():
         actual_value = actual.get(key)
         if key == "store_key":
@@ -363,7 +394,10 @@ def stored_compatibility_decision(
 
     Returns:
         ``"compatible"``, ``"rebuild"`` for known older metadata, or
-        ``"future-unsupported"`` for future, missing, or malformed metadata.
+        ``"future-unsupported"`` for future, missing, or malformed metadata,
+        or ``"foreign-owned"`` for a valid different persisted Store owner.
+        Ownership is inspected even for known older versions. No rows are
+        decoded and no SQLite or Store state is changed; SQLite errors propagate.
     """
 
     application_id = con.execute("PRAGMA application_id").fetchone()[0]
@@ -372,9 +406,13 @@ def stored_compatibility_decision(
     user_version = con.execute("PRAGMA user_version").fetchone()[0]
     if type(user_version) is not int or user_version > SQLITE_QUERY_INDEX_SCHEMA_VERSION:
         return "future-unsupported"
+    column_names = [info[1] for info in con.execute("PRAGMA table_info(catalog_state)")]
+    if "store_key" in column_names:
+        owner = con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone()
+        if owner is not None and isinstance(owner[0], str) and owner[0] and owner[0] != store_key:
+            return "foreign-owned"
     if user_version < SQLITE_QUERY_INDEX_SCHEMA_VERSION:
         return "rebuild"
-    column_names = [info[1] for info in con.execute("PRAGMA table_info(catalog_state)")]
     expected = expected_semantic_version(store_key=store_key, canonical_version=canonical_version)
     if not set(expected.catalog_state()) <= set(column_names):
         return "future-unsupported"

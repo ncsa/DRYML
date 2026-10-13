@@ -1,3 +1,9 @@
+"""Own the process-local definition catalog, graph views, and Store hydration.
+
+Catalog replacement is atomic under its lock. Hydration failures propagate while
+preserving old membership and optional counters for inventories already started.
+"""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -457,6 +463,17 @@ class MemoryDefinitionGraphReadView:
 
 
 class DefinitionCatalog:
+    """Own derived in-process graph membership and Store hydration for a Repo.
+
+    Args:
+        repo: Repo supplying Stores, caches, and the associated light index.
+
+    Construction creates empty process-local indexes without IO. Refresh and
+    registration change derived membership under this catalog's lock; hydration
+    failures propagate and staged refresh preserves previous membership. Explicit
+    refresh calls are independent, and optional statistics retain started work.
+    Store authority and persistent SQLite lifecycle remain with their owners.
+    """
     def __init__(self, repo):
         self.repo = repo
         self.lock = RLock()
@@ -563,9 +580,17 @@ class DefinitionCatalog:
             return ids
 
     def refresh(self, policy: RefreshPolicy, *, stats: QueryStats | None = None) -> None:
+        """Hydrate auto's unseen Stores or explicitly rebuild memory membership.
+
+        False does no work. True and always independently rehydrate eligible
+        Stores on every call, then atomically replace this catalog. Optional
+        QueryStats counts started inventories even on failure. Returns None;
+        invalid/unavailable Store hydration raises QueryIndexError, leaving the
+        old catalog intact. Persistent SQLite Stores retain their own lifecycle.
+        """
         if policy is False:
             return
-        if policy is True:
+        if policy is True or policy == "always":
             self._rebuild_from_stores(stats=stats)
             return
 
@@ -858,18 +883,18 @@ class DefinitionCatalog:
     def _hydrate_stores(self, stores, *, stats: QueryStats | None = None) -> None:
         build_repo = _CatalogBuildRepo(self.repo)
         staged = DefinitionCatalog(build_repo)
-        store_scan_count = 0
         for store in stores:
+            if stats is not None:
+                stats.store_scan_count += 1
+                stats.refresh_action = "hydrate"
             sid, cdefs = self._hydrate_store_definitions(store)
             staged.store_by_id.setdefault(sid, store)
             staged.hydrated_stores.add(sid)
             staged.register_stored_roots(cdefs, store)
-            store_scan_count += 1
 
         with self.lock:
             self._merge_staged_locked(staged, light_index=build_repo.light_index)
         if stats is not None:
-            stats.store_scan_count += store_scan_count
             stats.refresh_action = "hydrate"
 
     def _rebuild_from_stores(self, *, stats: QueryStats | None = None) -> None:
@@ -880,19 +905,19 @@ class DefinitionCatalog:
             replacement = DefinitionCatalog(build_repo)
             if cached_cdefs:
                 replacement.register_graph(ConcreteDefinitionGraph.for_query_index_roots(cached_cdefs))
-            store_scan_count = 0
             for store in stores:
                 if self._store_uses_persistent_sqlite(store):
                     continue
                 self._check_memory_hydration_allowed(store, explicit=True)
+                if stats is not None:
+                    stats.store_scan_count += 1
+                    stats.refresh_action = "forced-refresh"
                 sid, cdefs = self._hydrate_store_definitions(store, explicit=True)
                 replacement.store_by_id.setdefault(sid, store)
                 replacement.hydrated_stores.add(sid)
                 replacement.register_stored_roots(cdefs, store)
-                store_scan_count += 1
             self._replace_with_locked(replacement, light_index=build_repo.light_index)
         if stats is not None:
-            stats.store_scan_count += store_scan_count
             stats.refresh_action = "forced-refresh"
 
     def _hydrate_store_definitions(self, store, *, explicit: bool = False) -> tuple[StoreId, tuple[ConcreteDefinition, ...]]:

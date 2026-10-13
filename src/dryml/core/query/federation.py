@@ -27,7 +27,17 @@ class StoreIndexBinding:
 
 
 class RepoQueryIndex:
-    """Coordinate derived-index lifecycle operations across a Repo's Stores."""
+    """Coordinate derived-index lifecycle operations across a Repo's Stores.
+
+    Args:
+        repo: Owning Repo supplying current Store topology.
+        authority_only: Disable persistent index opening for private state-IO views.
+
+    Construction records bindings without opening backends. Lifecycle calls may
+    open/validate/replace derived indexes and propagate operation failures;
+    explicit refresh exposes configured unavailability. Store authority is never
+    changed and this owner retains no cross-call refresh completion state.
+    """
 
     def __init__(self, repo, *, authority_only: bool = False):
         self.repo = repo
@@ -132,7 +142,8 @@ class RepoQueryIndex:
         """Refresh configured persistent indexes under one policy.
 
         Args:
-            policy: ``False``, ``"auto"``, or ``True`` refresh behavior.
+            policy: False, auto, or True/always for one independent explicit
+                backend cycle per call. Query owns any cross-call cadence.
             stats: Optional mutable execution counters passed to each backend.
 
         Returns:
@@ -140,7 +151,8 @@ class RepoQueryIndex:
             ``False`` when no persistent backend was available.
 
         Raises:
-            QueryIndexUnavailable: If forced refresh cannot reach a backend.
+            QueryIndexUnavailable: If explicit refresh cannot reach a backend.
+            QueryIndexError: If a selected backend fails its lifecycle operation.
 
         Side Effects:
             May validate, rebuild, or replace derived sidecars. Store authority
@@ -161,7 +173,7 @@ class RepoQueryIndex:
                     continue
                 refresh(policy, stats=stats)
             except QueryIndexUnavailable:
-                if policy is True:
+                if policy is True or policy == "always":
                     raise
                 continue
             refreshed = True

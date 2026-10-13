@@ -10,7 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import os
@@ -56,7 +56,7 @@ from ..identity import identity_key
 from ..relationships import iter_direct_relationships, relationship_closure
 from ..utils import cdef_equal, chunked, feature_token_equal, stable_hash_from_blob, stable_hash_to_blob
 from . import SQLiteQueryIndexConfig, require_sqlite
-from .connection import SQLiteConnectionManager
+from .connection import SQLiteConnectionManager, _open_connection
 from .schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION, initialize_schema, stored_compatibility_decision, validate_schema
 from .utils import is_sqlite_busy_error, wal_runtime_is_known_safe
 from .lowering import SQLiteOptimizerPolicy, SQLiteRelationCompiler
@@ -68,6 +68,18 @@ _CODEC = QueryIndexCodec()
 _REBUILD_BATCH_SIZE = 500
 _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
+
+
+@dataclass
+class _ReconcileProgress:
+    """Attempt-local phase evidence retained by the reporting wrapper on failure."""
+
+    stats: QueryStats
+    issues: list[ValidationIssue] = field(default_factory=list)
+    definitions_scanned: int = 0
+    validated: bool = False
+    activated: bool = False
+    generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +139,9 @@ class SQLiteStoreQueryIndex:
     Construction records configuration without opening SQLite. Read/mutation
     operations report QueryIndexError subclasses for readiness, compatibility,
     contention, or backend failures; rebuild changes only derived files.
+    Direct explicit refresh calls each reconcile one fresh authority cut; ready
+    validation preserves the sidecar, and repair succeeds only after activation
+    and captured-token acknowledgement. Report-oriented reconcile retains errors.
     """
 
     def __init__(
@@ -288,6 +303,25 @@ class SQLiteStoreQueryIndex:
         )
 
     def validate(self, *, thorough: bool = False) -> ValidationReport:
+        """Inspect derived consistency, returning issues rather than repairing.
+
+        ``thorough=True`` on an owned index retains a Store fence and leased
+        transaction through graph-exact authority comparison and final identity
+        checks. Returns a ValidationReport; failures become error issues. This
+        operation changes neither authority nor the index generation/file.
+        """
+        if thorough and self.store is not None:
+            try:
+                self._assert_sidecar_rebuildable()
+                return self._validate_ready_authority(_ReconcileProgress(QueryStats()))
+            except (QueryIndexDirty, QueryIndexIncompatible) as error:
+                return ValidationReport("sqlite", self.source_key, False, (
+                    ValidationIssue("error", str(error)),
+                ))
+            except Exception as error:
+                return ValidationReport("sqlite", self.source_key, False, (
+                    ValidationIssue("error", "SQLite query index validation failed.", repr(error)),
+                ))
         issues: list[ValidationIssue] = []
         diagnostics = {}
         if self._is_dirty():
@@ -404,6 +438,8 @@ class SQLiteStoreQueryIndex:
             with self._leased_read_view(require_ready=True) as view:
                 yield view
         except require_sqlite().Error as error:
+            if is_sqlite_busy_error(error):
+                raise QueryIndexBusy("SQLite retained transaction is busy; retry.") from error
             raise QueryIndexDirty("The query index could not retain a ready SQLite transaction.") from error
 
     @contextmanager
@@ -434,11 +470,33 @@ class SQLiteStoreQueryIndex:
                         con.execute("ROLLBACK")
 
     def refresh(self, policy, *, stats=None) -> None:
+        """Perform one backend lifecycle call, with no cross-call completion cache.
+
+        Args:
+            policy: False for no work, auto for readiness recovery, or True/always
+                for one strict graph-exact reconciliation cycle on every call.
+            stats: Optional QueryStats retaining started inventories even on error.
+
+        Returns:
+            None after the requested work succeeds. Ready explicit cycles validate
+            without replacing the sidecar; repair requires staged validation,
+            activation and captured-token acknowledgement.
+
+        Raises:
+            QueryIndexError: On authority, compatibility, contention, validation,
+                or publication failure. A foreign-owned destination is refused.
+            QueryIndexUnavailable: If SQLite or Store authority is unavailable.
+
+        Side Effects:
+            May replace derived files and acknowledge captured dirty tokens.
+            Tokens published after the maintenance cut survive.
+        """
         if policy is False:
             return
-        if policy is True:
-            self.rebuild(stats=stats, force=True)
+        if policy is True or policy == "always":
+            self._reconcile_cycle(_ReconcileProgress(stats if stats is not None else QueryStats()))
             return
+        self._assert_sidecar_rebuildable()
         status = self.status()
         if status.state in {"missing", "dirty", "building", "incompatible", "corrupt"}:
             self.rebuild(stats=stats, quarantine_existing=status.state in {"corrupt", "incompatible"}, force=False)
@@ -457,7 +515,8 @@ class SQLiteStoreQueryIndex:
         retains its complete checks rather than a cross-cut authority cache.
 
         Args:
-            stats: Optional query statistics updated with the refresh action.
+            stats: Optional query statistics updated before authority capture,
+                retaining started inventory expenditure even when rebuild fails.
             quarantine_existing: Preserve an incompatible or corrupt previous
                 sidecar after successful replacement when possible.
             force: Acquire the build claim even when another ready index exists.
@@ -466,8 +525,11 @@ class SQLiteStoreQueryIndex:
             QueryIndexError: If authoritative roots are invalid, staging fails,
                 or the replacement sidecar does not validate.
             QueryIndexUnavailable: If SQLite is unavailable.
+            QueryIndexIncompatible: If a valid persisted foreign owner or
+                unsupported future metadata prevents replacement.
         """
 
+        self._assert_sidecar_rebuildable()
         with self._build_claim(force=force) as acquired:
             if not acquired:
                 if stats is not None:
@@ -476,78 +538,129 @@ class SQLiteStoreQueryIndex:
             self._rebuild_owned(stats=stats, quarantine_existing=quarantine_existing)
 
     def reconcile(self) -> ReconcileReport:
-        """Validate this Store index against object files and rebuild if needed.
+        """Report one strict reconciliation attempt against Store authority.
 
-        SQLite v1 uses an exclusive rebuild policy for missing, dirty, corrupt,
-        incompatible, stale, or divergent indexes. Object files remain the source
-        of truth. If Store files are themselves inconsistent, reconciliation
-        reports validation issues and leaves the existing index unmodified.
+        Returns a ReconcileReport retaining historical issues and actual phase
+        outcomes. Ordinary failures become error issues; cancellation propagates.
+        ``validated`` records work performed, not success. ``changed`` records
+        this attempt's visible activation even if acknowledgement later fails.
+        Only derived files/tokens are mutated; Store authority is never rewritten.
+        Use refresh(True) when failure must raise rather than return a report.
         """
-
-        before = self.status()
-        if before.state in {"missing", "dirty", "building", "incompatible", "corrupt"}:
-            return self._reconcile_by_rebuild(before, (), quarantine_existing=before.state in {"corrupt", "incompatible"})
-        report = self.validate(thorough=True)
-        if report.ok:
-            return ReconcileReport(
-                backend=before.backend,
-                store_key=before.store_key,
-                changed=False,
-                action="validate",
-                generation_before=before.generation,
-                generation_after=before.generation,
-                definitions_scanned=(report.row_counts or {}).get("stored_roots", 0),
-                validated=True,
-                issues=report.issues,
-                diagnostics=report.diagnostics,
-            )
-        return self._reconcile_by_rebuild(before, report.issues)
-
-    def _reconcile_by_rebuild(
-            self,
-            before: QueryIndexStatus,
-            issues: tuple[ValidationIssue, ...],
-            *,
-            quarantine_existing: bool = False) -> ReconcileReport:
+        before = None
+        progress = _ReconcileProgress(QueryStats())
         try:
-            force = before.state not in {"missing", "dirty", "building", "incompatible", "corrupt"}
-            self.rebuild(quarantine_existing=quarantine_existing, force=force)
+            before = self.status()
+            self._reconcile_cycle(progress)
         except Exception as exc:
-            return ReconcileReport(
-                backend=before.backend,
-                store_key=before.store_key,
-                changed=False,
-                action="validate",
-                generation_before=before.generation,
-                generation_after=before.generation,
-                validated=True,
-                issues=(*issues, ValidationIssue("error", "SQLite query-index rebuild failed.", repr(exc))),
-            )
-        after = self.status()
+            progress.issues.append(ValidationIssue("error", "SQLite query-index reconciliation failed.", repr(exc)))
         return ReconcileReport(
-            backend=after.backend,
-            store_key=after.store_key,
-            changed=True,
-            action="rebuild",
-            generation_before=before.generation,
-            generation_after=after.generation,
-            definitions_scanned=(after.row_counts or {}).get("stored_roots", 0),
-            validated=True,
-            issues=issues,
-            diagnostics=after.diagnostics,
+            backend="sqlite",
+            store_key=self.source_key,
+            changed=progress.activated,
+            action=("rebuild" if progress.stats.refresh_action == "sqlite-rebuild"
+                    else "validate" if progress.stats.refresh_action == "sqlite-validate"
+                    else "none"),
+            generation_before=None if before is None else before.generation,
+            generation_after=(progress.generation if progress.generation is not None
+                              else None if before is None else before.generation),
+            definitions_scanned=progress.definitions_scanned,
+            validated=progress.validated,
+            issues=tuple(progress.issues),
+            diagnostics={"store_scan_count": progress.stats.store_scan_count,
+                         "refresh_action": progress.stats.refresh_action},
         )
 
-    def _rebuild_owned(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False) -> None:
+    def _reconcile_cycle(self, progress: _ReconcileProgress) -> None:
+        """Validate a stable candidate or own a fully acknowledged replacement."""
+        self._assert_sidecar_rebuildable()
+        before = self.status()
+        if before.state == "ready":
+            try:
+                report = self._validate_ready_authority(progress)
+            except (QueryIndexDirty, QueryIndexCorrupt, QueryIndexIncompatible) as error:
+                progress.issues.append(ValidationIssue("error", "SQLite candidate validation failed.", repr(error)))
+            else:
+                if report.ok:
+                    return
+        # No fence or reader may survive into claim acquisition or waiting.
+        with self._build_claim(force=True) as acquired:
+            self._assert_sidecar_rebuildable()
+            if acquired:
+                self._rebuild_owned(stats=progress.stats, progress=progress,
+                                    quarantine_existing=before.state in {"corrupt", "incompatible"})
+                return
+        try:
+            report = self._validate_ready_authority(progress)
+        except (QueryIndexDirty, QueryIndexCorrupt) as error:
+            raise QueryIndexBusy("Current SQLite candidate is not stable after a declined build claim; retry reconciliation.") from error
+        if not report.ok:
+            raise QueryIndexBusy("Current SQLite candidate still diverges under another build claimant; retry reconciliation.")
+
+    def _validate_ready_authority(self, progress: _ReconcileProgress) -> ValidationReport:
+        """Compare one fenced inventory with a leased non-repairing transaction."""
+        if self.store is None:
+            raise QueryIndexUnavailable("Explicit SQLite reconciliation requires an owning Store.")
+        from ..source import SourceCapture
+
+        with self.store.authority_read_fence(), self._retained_read_view() as view:
+            progress.stats.store_scan_count += 1
+            progress.stats.refresh_action = "sqlite-validate"
+            facts = SourceCapture().capture_store(self.store)
+            roots = self._preflight_store_roots(facts=facts)
+            progress.definitions_scanned += len(roots)
+            progress.validated = True
+            progress.generation = view.generation
+            con = view._con
+            issues: list[ValidationIssue] = []
+            try:
+                _validate_sqlite_integrity(con, issues)
+                self._validate_decodable_rows(con, issues)
+                self._validate_stored_roots(con, issues)
+                self._validate_reference_rows(con, issues)
+                self._validate_metadata_rows(con, issues)
+                self._validate_store_roots(con, issues, roots=roots)
+                if not _v3_projection_is_complete(con):
+                    issues.append(ValidationIssue("error", "Query V3 projection coverage is incomplete."))
+                counts = _row_counts(con)
+                # A WAL writer can advance metadata behind the retained snapshot.
+                # Inspect the active destination without releasing our cut/view.
+                with _open_connection(self.config, readonly=True) as active:
+                    current = active.execute(
+                        "SELECT index_uuid, generation, build_state, dirty, store_key "
+                        "FROM catalog_state WHERE singleton = 1"
+                    ).fetchone()
+                if (current != (view.index_uuid, view.generation, "ready", 0, self.source_key)
+                        or view.file_identity != self._connections._path_identity()
+                        or self._is_dirty()):
+                    raise QueryIndexDirty("SQLite destination changed during reconciliation validation.")
+            except require_sqlite().Error as error:
+                if is_sqlite_busy_error(error):
+                    raise QueryIndexBusy("SQLite reconciliation validation is busy; retry.") from error
+                raise QueryIndexCorrupt("SQLite reconciliation validation failed.") from error
+            finally:
+                progress.issues.extend(issues)
+            return ValidationReport("sqlite", self.source_key,
+                                    not any(issue.severity == "error" for issue in issues),
+                                    tuple(issues), row_counts=counts)
+
+    def _rebuild_owned(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False,
+                       progress: _ReconcileProgress | None = None) -> None:
         if self.store is None or not hasattr(self.store, "iter_definition_records"):
             raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with iter_definition_records().")
         compatibility = self._assert_sidecar_rebuildable()
 
         generation_seed = self._replacement_generation_seed()
+        if stats is not None:
+            stats.store_scan_count += 1
+            stats.refresh_action = "sqlite-rebuild"
         try:
             roots, reference_rows, metadata_rows, dirty_markers = self._capture_authority_cut()
         except Exception:
             self._mark_dirty()
             raise
+        if progress is not None:
+            progress.definitions_scanned += len(roots)
 
         replacement_path = self._replacement_path()
         replacement = SQLiteStoreQueryIndex(
@@ -577,10 +690,13 @@ class SQLiteStoreQueryIndex:
             )
             replacement.close()
             self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
+            if progress is not None:
+                progress.validated = True
             replacement._validate_rebuild_before_ready(roots=roots)
             replacement._set_build_state("ready")
             con = replacement._connections.connection(readonly=False)
             con.execute("PRAGMA optimize")
+            replacement_generation = _read_generation(con)
             replacement.close()
             self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
             SQLiteConnectionManager._close_current_thread_for_path(self.path)
@@ -589,7 +705,13 @@ class SQLiteStoreQueryIndex:
                 label="canonical",
                 allow_corrupt=quarantine_existing,
             )
-            self._activate_replacement(replacement_path, quarantine_existing=quarantine_existing)
+            replacement_identity = replacement._connections._path_identity()
+            try:
+                self._activate_replacement(replacement_path, quarantine_existing=quarantine_existing)
+            finally:
+                if progress is not None and self._connections._path_identity() == replacement_identity:
+                    progress.activated = True
+                    progress.generation = replacement_generation
             self._cleanup_replacement(replacement_path)
         except BaseException:
             try:
@@ -602,7 +724,6 @@ class SQLiteStoreQueryIndex:
             clear_scoped=True,
         )
         if stats is not None:
-            stats.store_scan_count += 1
             stats.refresh_action = "sqlite-rebuild"
             stats.result_count = scanned
 
@@ -850,6 +971,8 @@ class SQLiteStoreQueryIndex:
                 canonical_version=self.canonical_version,
             )
         except Exception as exc:
+            if is_sqlite_busy_error(exc):
+                raise QueryIndexBusy("SQLite compatibility inspection is busy; retry.") from exc
             if _is_sqlite_corrupt_exception(exc):
                 return
             raise QueryIndexError("Could not inspect SQLite query-index compatibility before rebuild.") from exc
@@ -857,6 +980,8 @@ class SQLiteStoreQueryIndex:
             raise QueryIndexIncompatible(
                 "SQLite query-index metadata is future, missing, or malformed; refusing to rebuild over it."
             )
+        if decision == "foreign-owned":
+            raise QueryIndexIncompatible("SQLite query-index destination has a foreign Store owner; refusing maintenance.")
         return decision
 
     def register_stored_roots(self, graph, roots):
@@ -1409,6 +1534,8 @@ class SQLiteStoreQueryIndex:
         self._validate_reference_rows(con, issues)
         self._validate_metadata_rows(con, issues)
         self._validate_store_roots(con, issues, roots=roots)
+        if not _v3_projection_is_complete(con):
+            issues.append(ValidationIssue("error", "Query V3 projection coverage is incomplete."))
         errors = tuple(issue for issue in issues if issue.severity == "error")
         if errors:
             detail = "; ".join(
@@ -1489,12 +1616,14 @@ class SQLiteStoreQueryIndex:
                 issues.append(ValidationIssue("error", "Store root scan failed.", repr(exc)))
                 return
         actual_roots = set()
+        expected_legacy_ids = set()
         for cdef in roots:
             if not isinstance(cdef, ConcreteDefinition):
                 issues.append(ValidationIssue("error", "Store scan yielded non-CDef root.", type(cdef).__name__))
                 continue
-            actual_roots.add(cdef)
+            actual_roots.add((cdef.graph_hash(), _CODEC.encode_cdef(cdef)))
             root_ids = _exact_ids_for_cdef(con, cdef)
+            expected_legacy_ids.update(root_ids)
             if not root_ids:
                 issues.append(ValidationIssue("error", "Store root is missing from SQLite query index.", cdef.stable_hash()))
                 continue
@@ -1504,12 +1633,20 @@ class SQLiteStoreQueryIndex:
             ).fetchone()
             if stored is None:
                 issues.append(ValidationIssue("error", "Store root is indexed but not active as a stored root.", cdef.stable_hash()))
+        if {row[0] for row in con.execute("SELECT def_id FROM stored_roots")} != expected_legacy_ids:
+            issues.append(ValidationIssue("error", "Legacy stored-root membership differs from Store roots."))
         indexed_roots = {
-            _CODEC.decode_cdef(row[0])
+            (row[0], bytes(row[1]))
             for row in con.execute(
-                "SELECT definitions.cdef_blob FROM stored_roots JOIN definitions ON definitions.def_id = stored_roots.def_id"
+                "SELECT root_graph_hash, root_blob FROM v3_stored_root_projection"
             )
         }
+        for graph_hash, blob in indexed_roots:
+            try:
+                if _CODEC.decode_cdef(blob).graph_hash() != graph_hash:
+                    issues.append(ValidationIssue("error", "Stored root graph hash mismatch."))
+            except Exception as error:
+                issues.append(ValidationIssue("error", "Stored root projection failed to decode.", repr(error)))
         if indexed_roots != actual_roots:
             issues.append(ValidationIssue("error", "SQLite stored roots differ from authoritative Store roots."))
 

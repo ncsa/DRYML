@@ -43,7 +43,7 @@ recapture, instability retry, and selective/paged-to-inventory fallback discard
 reusable admissions without refunding cumulative expenditure. The fallback's
 new inventory domain is charged afresh. `take(0)` reads and admits nothing.
 Existing QueryExplanation fields report admission (`verified_count`), actual
-inventory/completed recovery (`store_scan_count`), and page work independently;
+started inventory/recovery (`store_scan_count`), and page work independently;
 this correction introduces no new stats schema or persisted format.
 
 Bounded stored-CDef paging requires completeness as well as valid candidates.
@@ -81,12 +81,74 @@ cleanup or rollback on the inherited handle and removes no parent lease key from
 child bookkeeping. Fresh child views use independent handles and leases. The
 parent view retains its transaction and temporary relations until its own ordinary
 cleanup, including strict owning-process lease removal.
+Manager construction and path-close barriers reset the class registry lock and
+registry by PID before acquisition. Inherited managers reset their instance lock,
+connection/file-identity bookkeeping, and leases before child access; fresh child
+managers and handles are independently usable even when a parent thread held the
+registry or instance lock at fork.
 
 SQLite connections are process-local. Rebuild and mutation use staged activation so a reader sees a prior complete index or a new complete index. Dirty, absent, corrupt, or incompatible metadata projections trigger authoritative fallback or visible rebuild; dirty state is cleared only for the authority generation that was indexed. Index failure never rewrites snapshot/current authority or silently makes stale rows current. Rebuild notices are visible because scans can be long. Rebuild claim descriptors use `dryml.locking` but retain SQLite's claim creation, stale-eligibility, wait, and cleanup policy. Dirty-token and complete main-file activation use `dryml.filesystem` directly after SQLite closes/checkpoints the applicable WAL and handles; the index does not depend on Store-private native helpers. A persistence failure can follow visible sidecar activation, so recovery reconciles status rather than assuming rollback. Supported behavior assumes local SQLite, filesystem rename/persistence, and locking semantics; distributed filesystems are outside this contract.
 
 `dryml.core.query.sqlite.open_connection(config, *, readonly=False)` is the public standalone connection owner. `config` must be a `SQLiteQueryIndexConfig`, `readonly` must be exactly `bool`, and `config.path` must be present; validation occurs before importing SQLite or creating a parent/database. Invalid argument types raise `TypeError`, while an absent configured path raises actionable `QueryIndexError`. The connection applies the same foreign-key, timeout, trusted-schema, journal, and durability configuration as the query-index connection manager and always closes its connection. Writable opening creates missing parent directories; read-only opening requires an existing database and creates neither the target nor its parent. SQLite open/configuration errors remain SQLite errors, while a missing optional backend is reported as `QueryIndexUnavailable`.
 
 The outer `open_connection` context is a handle scope, not a commit scope. Its connection uses standard-library deferred transactions and creator-thread affinity; callers use an inner `with con:` block to commit on successful exit or roll back on exceptional exit. When the outer scope ends, any transaction still open is rolled back rather than committed, then the handle is closed on normal exit, exceptions, and cancellation. Manager-cached index connections retain autocommit mode because index read views and mutations issue explicit `BEGIN`, `BEGIN IMMEDIATE`, `COMMIT`, and `ROLLBACK` statements. Manager cache keys remain process/thread/access-mode local and handles are never returned across keys. Cached handles disable SQLite creator-thread enforcement only so manager teardown can close an inactive worker's handles from a coordinator thread; callers must not race handle use with teardown, and a failed close remains visible and retained for recovery.
+
+## Explicit Backend Reconciliation
+
+`StoreQueryIndex.refresh(policy, *, stats=None)` is a one-call backend seam.
+Direct `True` and `"always"` calls independently perform an explicit cycle every
+time. SQLite performs strict reconciliation, not unconditional replacement:
+a correct ready index retains its UUID, generation, and file identity. `False`
+does no work, while `"auto"` retains readiness recovery. Query owns any shared
+request cadence; the backend stores no cross-call completion state or authority
+proofs. Memory's explicit calls independently rehydrate its catalog, and Repo
+federation propagates configured backend unavailability for both explicit policies.
+`rebuild_query_index()` and direct SQLite `rebuild()` remain unconditional
+replacement seams by default.
+
+A ready explicit SQLite cycle retains one Store authority fence and a leased,
+non-repairing transaction throughout its substantive checks. It captures one
+validated authoritative root inventory, retains integrity/decodability, legacy
+stored-root metadata/membership and internal V3 projection checks, and compares
+the full `(root_graph_hash, encoded root_blob)` set against V3 stored roots.
+This detects main-only additions, structurally equal roots with different sharing
+topology, and digest collisions; neither ordinary CDef equality nor sidecar
+witnesses establish authority agreement. Before releasing the cut it checks the
+active destination's UUID/generation/readiness/owner and file continuity, including
+changes behind a retained WAL snapshot. A successful check proves this maintenance
+cut only, not permanent cleanliness or a reusable query inventory.
+
+Recovery releases the fence and reader before claiming or waiting for replacement.
+Owned replacement completes only after authority preflight, staged validation,
+activation, and successful captured-token acknowledgement. A declined build claim
+does not mean replacement succeeded: the caller substantively validates the actual
+current candidate. Divergence under a live claimant raises retryable
+`QueryIndexBusy` without completion credit or an unbounded repair loop. Authority
+failure, backend unavailability, and interruption propagate through strict refresh;
+an exception after visible activation does not imply rollback. Later dirty tokens
+survive the captured-token acknowledgement.
+
+`reconcile()` wraps the same strict cycle with a `ReconcileReport`. Ordinary errors
+become error issues, while cancellation propagates. Historical validation issues
+remain after successful repair. `validated` means validation work occurred, not
+success, and normal report return is not completion evidence. `changed` reflects
+this caller's actual visible activation, including activation followed by
+acknowledgement failure. Action records the performed phase (validation or owned
+rebuild), including a failed rebuild with no activation; refused maintenance does
+neither. A non-owner's successful validation reports no replacement.
+Report diagnostics expose started `store_scan_count` and actual `refresh_action`.
+Optional `QueryStats` charges each started validation/rebuild inventory once, before
+authority IO can fail; validation, staging, activation, acknowledgement failures and
+candidate retries never refund expenditure. Maintenance scans are IO, not query
+identity-verification admissions.
+
+Valid persisted foreign Store ownership refuses maintenance before scanning and
+again after replacement ownership is obtained. It is not an older compatible
+metadata version. Known older owned metadata and owned corrupt sidecars retain
+derived-only recovery; unsupported future metadata remains refused. One consistently
+configured destination per Store dirty-token domain is supported. Independently
+maintained destinations sharing consumable Store-wide dirty tokens are unsupported;
+this backend seam introduces no global cross-client destination registry.
 
 ## Reference-Aware Containment
 
