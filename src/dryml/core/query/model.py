@@ -14,7 +14,13 @@ from .path import DefinitionPath
 
 
 RefreshPolicy = Literal[False, "auto", True, "always"]
-"""Backend policy: disable, recover readiness, or explicitly reconcile each call."""
+"""Disable maintenance, demand readiness recovery, or request explicit cycles.
+
+Query True and always currently reconcile each participating terminal; direct
+backend calls independently perform one cycle. False still reads fresh authority,
+and auto leaves unconsumed indexes untouched. Invalid Query policy values raise
+ValueError before IO. Policy declaration itself performs no work.
+"""
 ClassMatchPolicy = Literal["selector", "exact"]
 QueryDomain = Literal["stored", "cached", "known", "nested"]
 QueryProjection = Literal["definitions", "owners", "object_refs", "state_refs"]
@@ -712,7 +718,9 @@ class AllOccurrenceTraversalSnapshot:
 class QueryExplanation:
     """Detached query policy, chosen actions, work counters, and result diagnostics.
 
-    ``refresh`` is the declared policy; ``refresh_action`` describes actual work.
+    ``refresh`` is the declared policy; V3 ``refresh_action`` aggregates actual
+    none, validate, or rebuild work (rebuild takes precedence), including demand
+    recovery. Backend-specific reports retain their own phase names.
     ``store_scan_count`` counts started inventories, including maintenance and
     failed/retried scans, independently of identity-verification admissions.
     Remaining fields describe candidate, graph, page, and source-plan work.

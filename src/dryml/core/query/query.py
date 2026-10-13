@@ -2,6 +2,9 @@
 
 Plans declare compatible execution policies; each terminal's SourceCapture owns
 effective controls, detached authority, and cumulative verification admissions.
+Terminals retain every producer/scope presentation before destination coalescing.
+Auto recovery belongs only to actual index consumers; explicit cycles precede
+fresh evaluation cuts, with started maintenance work charged even on failure.
 Terminals expose authority, budget, and cardinality failures rather than partial
 answers. Evaluation may read records and refresh permitted derived indexes but
 never constructs Objects, reads state payloads, or changes Store authority.
@@ -918,13 +921,18 @@ class IdentityQuery:
     declare compatible policies before composition; a later explicit override
     governs the whole expression. SourceCapture retains cumulative admission work
     across cut replacement and retry, separately from scan and page IO.
+    Explicit True/always cycles precede fresh evaluation; auto recovers only actual
+    index consumers. Conflicting visible destination ownership/configuration raises
+    QueryIndexIncompatible before maintenance, configured explicit unavailability
+    raises QueryIndexUnavailable, and scan controls apply even to ready validation.
 
     Attributes:
         source: Producer or fixed membership that supplies the initial universe.
         restrictions: Ordered immutable identity, metadata, and source filters.
         default_scope: Optional unambiguous authority scope for later operations.
         max_witness_limit: Optional exact GeneratorSelector verification bound.
-        refresh_policy: Existing derived-index refresh policy.
+        refresh_policy: False disables maintenance; auto recovers consumed indexes;
+            True and always explicitly reconcile participating terminal targets.
         scan_policy_mode: Authority-inventory scan policy.
         max_verify_limit: Optional cumulative detached identity admission bound.
         max_depth_limit: Optional later relationship traversal depth bound.
@@ -1459,28 +1467,32 @@ class IdentityQuery:
     def refresh(self, policy: RefreshPolicy = "auto") -> "IdentityQuery":
         """Return a plan with the requested derived-index refresh policy.
 
-        ``False`` leaves derived indexes untouched, ``"auto"`` reconciles stale
-        indexes when safe, and ``True`` forces reconciliation before each
-        terminal source cut. Authoritative Store records are never rewritten.
+        ``False`` leaves derived indexes untouched. ``"auto"`` recovers only
+        indexes consumed by the selected execution path, leaving unused dirty
+        indexes alone. ``True`` and ``"always"`` explicitly reconcile each
+        applicable target before each participating terminal's fresh authority
+        cut. Ready validation does not force replacement. Authoritative Store
+        records are never rewritten. Construction, ordinary explain, and zero
+        prefixes remain inert.
         This effective outer policy includes external scopes and projections;
         forced refresh cannot authorize a scan forbidden by scan/index controls.
 
         Args:
-            policy: Exact ``False``, ``"auto"``, or exact ``True`` behavior.
+            policy: Exact bool or the strings ``"auto"`` and ``"always"``.
 
         Returns:
             An immutable query carrying the selected refresh policy.
 
         Raises:
-            ValueError: If ``policy`` is not ``False``, ``"auto"``, or ``True``.
+            ValueError: If ``policy`` is outside the exact policy domain.
 
         Side Effects:
             None until a terminal executes. Terminal evaluation may open,
             validate, rebuild, or replace derived query-index sidecars.
         """
 
-        if policy is not False and policy is not True and policy != "auto":
-            raise ValueError("refresh policy must be False, 'auto', or True.")
+        if type(policy) is not bool and not (isinstance(policy, str) and policy in {"auto", "always"}):
+            raise ValueError("refresh policy must be False, 'auto', True, or 'always'.")
         return replace(self, refresh_policy=policy)
 
     def scan_policy(self, policy: str) -> "IdentityQuery":
@@ -1586,7 +1598,9 @@ class IdentityQuery:
         selective positive Boolean proof belongs only to eligible ``exists()``.
         ``analyze`` evaluates the plan and includes its final result count.
         ``verified_count`` reports cumulative identity admissions;
-        ``store_scan_count`` reports actual inventory/completed recovery scans.
+        ``store_scan_count`` reports started inventories, including failed/retried
+        maintenance and fallback. ``refresh_action`` is actual none, validate, or
+        rebuild work, independent of the declared refresh policy.
         Page row/decode counts remain separate, including unverified lookahead.
 
         Args:
@@ -1893,8 +1907,18 @@ class IdentityQuery:
             capture.require_scan()
         if occurrence is not None:
             capture.max_depth_limit = occurrence.max_depth_limit
-        refresh_action = self._refresh_derived_indexes(capture, occurrence=occurrence)
-        capture.refresh_action = refresh_action
+        if self.take_limit != 0:
+            capture.index_presentations = self._index_presentations(capture, occurrence=occurrence)
+            if capture.refresh_policy is True or capture.refresh_policy == "always":
+                if any(getattr(item.store, "query_index_policy", None) not in {"memory", "none"}
+                       for item in capture.index_presentations):
+                    capture.require_scan()
+                for target in capture.resolve_index_targets(explicit=True):
+                    stats = QueryStats()
+                    try:
+                        target.index.refresh(capture.refresh_policy, stats=stats)
+                    finally:
+                        capture.merge_maintenance_stats(stats)
         capture.active = True
         while True:
             try:
@@ -1907,76 +1931,27 @@ class IdentityQuery:
                     if capture.instability_retries >= 3:
                         raise QueryError("Query V3 source changed during evaluation.") from None
 
-    def _refresh_derived_indexes(self, capture, *, occurrence=None) -> str:
-        """Apply terminal refresh to producers and external scopes before capture."""
+    def _index_presentations(self, capture, *, occurrence=None):
+        """Enumerate producer/scope pairs before any physical or source-key hiding."""
 
-        if self.refresh_policy is False or self.take_limit == 0:
-            return "none"
-        if self.refresh_policy == "auto" and (
-                self._exact_stored_cdef_selector() is not None
-                or (
-                    self._exact_state_selector() is not None
-                    and not self._metadata_scopes()
-                    and not any(
-                        item.kind in {"alias", "stored"}
-                        for item in self.restrictions
-                    )
-                )):
-            return "none"
         from .source import RepoSource, RetainedRepoLookupSource, StoreSource
+        from .source import _IndexPresentation
 
-        seen_repos = set()
-        seen_stores = set()
-        refreshed = False
-        refresh_stats = QueryStats()
+        presentations = []
 
-        def refresh_store(store):
-            nonlocal refreshed
-            key = store.authority_fence_key()
-            if key in seen_stores:
+        def add(producer, scope):
+            if isinstance(scope, StoreSource):
+                stores = (scope.store,)
+            elif isinstance(scope, (RepoSource, RetainedRepoLookupSource)):
+                stores = capture.repo_stores(scope.repo)
+            else:
                 return
-            seen_stores.add(key)
-            if getattr(store, "query_index_policy", None) in {"memory", "none"}:
-                return
-            try:
-                index = store.open_query_index()
-            except QueryIndexUnavailable:
-                if self.refresh_policy is True:
-                    raise
-                return
-            if index is not None:
-                guard_recovery(store)
-                index.refresh(self.refresh_policy, stats=refresh_stats)
-                refreshed = True
-
-        def guard_recovery(store):
-            if self.refresh_policy is True or store.query_index_status().state != "ready":
-                capture.require_scan()
+            presentations.extend(_IndexPresentation(producer, scope, store) for store in stores)
 
         def visit(query):
-            nonlocal refreshed
             source = query.source
-            if isinstance(source, StoreSource):
-                refresh_store(source.store)
-            elif isinstance(source, (RepoSource, RetainedRepoLookupSource)):
-                repo = source.repo
-                if id(repo) not in seen_repos:
-                    seen_repos.add(id(repo))
-                    if any(
-                            getattr(store, "query_index_policy", None)
-                            not in {"memory", "none"}
-                            for store in repo.stores):
-                        for store in capture.repo_stores(repo):
-                            if getattr(store, "query_index_policy", None) not in {"memory", "none"}:
-                                guard_recovery(store)
-                        refreshed = (
-                            repo._query_index.refresh(self.refresh_policy, stats=refresh_stats)
-                            or refreshed
-                        )
-                    seen_stores.update(
-                        store.authority_fence_key() for store in repo.stores
-                    )
-            elif isinstance(source, _RelationshipClosure):
+            add(query, source)
+            if isinstance(source, _RelationshipClosure):
                 visit(source.input_query)
             elif isinstance(source, _RelationshipProjection):
                 visit(source.occurrence_query.roots)
@@ -1984,24 +1959,13 @@ class IdentityQuery:
                 visit(source.left)
                 visit(source.right)
             for scope in query._external_authority_scopes():
-                if isinstance(scope, StoreSource):
-                    refresh_store(scope.store)
-                elif isinstance(scope, RepoSource):
-                    for store in capture.repo_stores(scope.repo):
-                        refresh_store(store)
+                add(query, scope)
 
         visit(self)
         if occurrence is not None:
             for _, scope in occurrence.metadata_restrictions:
-                if isinstance(scope, StoreSource):
-                    refresh_store(scope.store)
-                elif isinstance(scope, RepoSource):
-                    for store in capture.repo_stores(scope.repo):
-                        refresh_store(store)
-        capture.store_scan_count += refresh_stats.store_scan_count
-        if not refreshed:
-            return "none"
-        return "forced" if self.refresh_policy is True else "auto"
+                add(occurrence, scope)
+        return tuple(presentations)
 
     def _combine(self, other: "IdentityQuery", operation: str) -> "IdentityQuery":
         """Validate compatible terminal controls and defer one algebra stage."""
@@ -2177,6 +2141,7 @@ class IdentityQuery:
         from contextlib import ExitStack
         from .model import (
             QueryIndexError,
+            QueryIndexIncompatible,
             QueryIndexUnavailable,
             QueryStats,
             QueryWouldScanError,
@@ -2192,8 +2157,12 @@ class IdentityQuery:
             domains.setdefault(store.authority_fence_key(), store)
         indexes = {}
         try:
+            # Resolve all presentations before choosing one handle per domain.
+            # Configuration/ownership conflicts must not become fallback success.
+            targets = capture.resolve_index_targets()
+            by_store = {id(item.store): target.index for target in targets for item in target.presentations}
             for key, store in domains.items():
-                index = store.open_query_index()
+                index = by_store.get(id(store))
                 if index is None or not callable(getattr(index, "_retained_read_view", None)):
                     raise QueryIndexUnavailable("The query index has no retained stored-root view.")
                 status = index.status()
@@ -2206,8 +2175,10 @@ class IdentityQuery:
                         raise QueryIndexUnavailable(reason)
                     capture.require_scan()
                     stats = QueryStats()
-                    index.refresh("auto", stats=stats)
-                    capture.store_scan_count += stats.store_scan_count
+                    try:
+                        index.refresh("auto", stats=stats)
+                    finally:
+                        capture.merge_maintenance_stats(stats)
                 indexes[key] = index
 
             with ExitStack() as retained:
@@ -2222,6 +2193,8 @@ class IdentityQuery:
                 for key in sorted(domains):
                     capture.inspect_index_main(domains[key])
                 return self._retained_index_entries(capture, domains, views)
+        except QueryIndexIncompatible:
+            raise
         except QueryIndexError as error:
             capture.discard_index_attempt(domains.values())
             if capture.indexed_required:

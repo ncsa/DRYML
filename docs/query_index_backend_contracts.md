@@ -150,6 +150,49 @@ configured destination per Store dirty-token domain is supported. Independently
 maintained destinations sharing consumable Store-wide dirty tokens are unsupported;
 this backend seam introduces no global cross-client destination registry.
 
+## Terminal Target Resolution And Demand Recovery
+
+Query retains Repo Store topology through `SourceCapture.repo_stores()` before
+maintenance. A single presentation traversal records every producer and scoped
+obligation, including occurrence metadata scopes, without authority inventory.
+It uses Store-owned lazy openers, never live Repo bulk refresh. The resolver
+retains producer/scope associations and a compatibility descriptor independently
+of request state; optional absence produces no target and no completion evidence.
+Configured unavailability propagates for `True` and `"always"`. Both Query policies
+currently perform one explicit cycle per participating terminal; shared one-shot
+request state is not yet implemented.
+
+SQLite targets coalesce by normalized actual connection-manager destination only
+after backend/configuration/path agreement and every visible presentation's
+authority domain, source key, dirty-token domain, canonical version, and effective
+settings are checked. Different destinations sharing one dirty-token domain or
+incompatible presentations raise `QueryIndexIncompatible` before any maintenance,
+even inside a Repo where source-key bindings previously hid later handles. Valid
+persisted foreign ownership is inspected for every accepted target before starting
+any cycle; the backend also preserves its U1 ownership checks after replacement
+claim acquisition. Other backends retain instance identity. A consistently chosen
+custom SQLite destination is supported; no cross-process destination registry is
+introduced. Attachments after the retained cut participate next terminal.
+
+`"auto"` performs no terminal-wide sweep or syntax-based special-case refresh.
+Authority-only broad/exact/metadata paths leave unused sidecars untouched, even
+when dirty. Actual bounded consumers resolve/preflight their indexes before any
+retained fence or reader and recover only consumed non-ready targets. `False`
+never maintains derived state; it uses ready views or authority fallback/refusal.
+Pending explicit cycles require scan/indexed-only admission before backend IO,
+even if ready. Warning mode warns once before the first inventory. Construction,
+ordinary explanation, and identity/occurrence zero prefixes acquire nothing.
+
+Each terminal retains cumulative admissions and started inventory work through
+failure, fallback, and recapture. Backend scan counters merge in `finally`, including
+interruption. Query `refresh_action` aggregates actual `none`, `validate`, or
+`rebuild` (rebuild takes precedence); demand recovery reports its actual phase.
+Strict successful backend refresh is maintenance evidence; a report's normal
+return or `validated` field is not. No authority proofs or readers cross terminals.
+Repo owns the inherited-topology guard: it rejects a different PID before acquiring
+its configuration lock. Query never resets another owner's locks or caches; a
+fresh child Repo remains usable.
+
 ## Reference-Aware Containment
 
 Reference-aware nested queries do not add persisted rows, schema versions, or a

@@ -11,9 +11,10 @@ changing authoritative records or introducing cross-terminal proof reuse.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
+from ...paths import local_path_key
 from ..object import Object
 from ..definition import ConcreteDefinition
 from ..errors import ParameterizationLimitError
@@ -99,6 +100,86 @@ class RetainedRepoLookupSource:
             raise TypeError("RetainedRepoLookupSource weak must be an exact bool.")
 
 
+@dataclass(frozen=True, slots=True)
+class _IndexPresentation:
+    """Associate a producer or scoped obligation with its retained Store handle."""
+
+    producer: object
+    scope: object
+    store: Store
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexTargetDescriptor:
+    """Destination identity and compatibility, independent of query evidence."""
+
+    destination: tuple
+    authority_domain: str
+    source_key: str
+    dirty_domain: str | None
+    semantics: tuple
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexTarget:
+    """One compatible backend with every producer/scope presentation retained."""
+
+    descriptor: _IndexTargetDescriptor
+    index: object
+    presentations: tuple[_IndexPresentation, ...]
+
+
+def _index_target_descriptor(store, index):
+    """Validate configuration before coalescing or touching a backend destination."""
+
+    from .model import CANONICAL_QUERY_SEMANTICS_VERSION, QueryIndexIncompatible
+    from .sqlite import SQLiteQueryIndexConfig
+    from .sqlite.index import SQLiteStoreQueryIndex
+
+    authority = store.authority_fence_key()
+    source_key = index.source_key
+    expected_source = getattr(store, "catalog_key", lambda: source_key)()
+    if source_key != expected_source:
+        raise QueryIndexIncompatible("Query index source key disagrees with its Store presentation.")
+    owner = getattr(index, "store", None)
+    if owner is not None and owner.authority_fence_key() != authority:
+        raise QueryIndexIncompatible("Query index authority domain disagrees with its Store presentation.")
+    if not isinstance(index, SQLiteStoreQueryIndex):
+        return _IndexTargetDescriptor(("instance", id(index)), authority, source_key, None, (type(index),))
+
+    def normalized(path):
+        return None if path is None else local_path_key(path)
+
+    destination = normalized(index._connections.path)
+    if normalized(index.path) != destination or normalized(index.config.path) != destination:
+        raise QueryIndexIncompatible("Query index backend, manager, and configuration paths disagree.")
+    if replace(index.config, path=index._connections.config.path) != index._connections.config:
+        raise QueryIndexIncompatible("Query index backend and manager settings disagree.")
+    configured = getattr(store, "_query_index_config", None)
+    default_path = getattr(store, "query_index_path", None)
+    if default_path is not None:
+        expected_path = default_path if configured is None or configured.path is None else configured.path
+        if normalized(expected_path) != destination:
+            raise QueryIndexIncompatible("Query index destination disagrees with its configured Store path.")
+    expected_config = configured
+    if expected_config is None and default_path is not None:
+        expected_config = SQLiteQueryIndexConfig(path=index.config.path)
+    if expected_config is not None and replace(expected_config, path=index.config.path) != index.config:
+        raise QueryIndexIncompatible("Query index settings disagree with its configured Store settings.")
+    if index.canonical_version != CANONICAL_QUERY_SEMANTICS_VERSION:
+        raise QueryIndexIncompatible("Query index canonical semantics disagree with its Store presentation.")
+    dirty = normalized(index.dirty_path)
+    if dirty != normalized(getattr(store, "query_index_dirty_path", index.dirty_path)):
+        raise QueryIndexIncompatible("Query index dirty-token domain disagrees with its Store presentation.")
+    settings = tuple(
+        getattr(index.config, name) for name in index.config.__dataclass_fields__ if name != "path"
+    )
+    return _IndexTargetDescriptor(
+        ("sqlite", destination), authority, source_key, dirty,
+        (type(index), index.canonical_version, *settings),
+    )
+
+
 class SourceCapture:
     """One terminal-local registry of detached Store facts and cache inventory.
 
@@ -110,7 +191,9 @@ class SourceCapture:
     retained lookup roots, topology, and Repo cache tiers remain distinct.
     Effective outer controls govern every consumer. ``verified_count`` records
     cumulative identity admissions, while ``store_scan_count`` records inventory
-    and completed recovery scans separately from page fetch/decode counters.
+    and started maintenance scans separately from page fetch/decode counters.
+    Index presentations preserve retained producer/scope associations; compatible
+    destinations coalesce only when a terminal actually requests index work.
     """
 
     def __init__(self, controls=None):
@@ -131,6 +214,8 @@ class SourceCapture:
         self._admitted = set()
         self.verified_count = 0
         self.store_scan_count = 0
+        self.refresh_action = "none"
+        self.index_presentations: tuple[_IndexPresentation, ...] = ()
         self.scan_warning_emitted = False
         self._facts: dict[str, CapturedStoreFacts] = {}
         self._exact_states: dict[str, dict[str, StateRef | None]] = {}
@@ -148,6 +233,84 @@ class SourceCapture:
         self.candidate_rows_read = 0
         self.cdef_blobs_decoded = 0
         self.pages_fetched = 0
+
+    def resolve_index_targets(self, *, explicit: bool = False) -> tuple[_IndexTarget, ...]:
+        """Open and validate every retained index presentation before maintenance.
+
+        Args:
+            explicit: Surface configured backend unavailability for an explicit
+                cycle. Optional absent backends create no target in either mode.
+
+        Returns:
+            Destination-deduplicated targets retaining all producer/scope pairs.
+
+        Raises:
+            QueryIndexIncompatible: For conflicting destination ownership,
+                settings, path agreement, or multiple destinations sharing one
+                dirty-token domain, including duplicate handles inside a Repo.
+            QueryIndexUnavailable: For explicitly configured backend unavailability.
+
+        Side Effects:
+            Calls Store-owned lazy openers without inventory or maintenance.
+            Inspects persisted SQLite compatibility/ownership through read-only
+            connections after checking all visible descriptors.
+            Re-resolution checks current descriptors; it never revisits live Repo
+            topology or stores cross-terminal completion/authority evidence.
+        """
+
+        from .model import QueryIndexIncompatible, QueryIndexUnavailable
+
+        targets = {}
+        dirty_destinations = {}
+        for presentation in self.index_presentations:
+            store = presentation.store
+            if getattr(store, "query_index_policy", None) in {"memory", "none"}:
+                continue
+            try:
+                index = store.open_query_index()
+            except QueryIndexUnavailable:
+                if explicit:
+                    raise
+                continue
+            if index is None:
+                if explicit and getattr(store, "query_index_policy", None) == "sqlite":
+                    raise QueryIndexUnavailable("The configured query index backend is unavailable.")
+                continue
+            descriptor = _index_target_descriptor(store, index)
+            if descriptor.dirty_domain is not None:
+                previous = dirty_destinations.setdefault(descriptor.dirty_domain, descriptor.destination)
+                if previous != descriptor.destination:
+                    raise QueryIndexIncompatible("Multiple query index destinations share one Store dirty-token domain.")
+            existing = targets.get(descriptor.destination)
+            if existing is not None and existing.descriptor != descriptor:
+                raise QueryIndexIncompatible("Query index destination has incompatible Store presentations.")
+            targets[descriptor.destination] = (
+                _IndexTarget(descriptor, index, (presentation,)) if existing is None
+                else replace(existing, presentations=(*existing.presentations, presentation))
+            )
+        resolved = tuple(targets.values())
+        from .sqlite.index import SQLiteStoreQueryIndex
+
+        for target in resolved:
+            if isinstance(target.index, SQLiteStoreQueryIndex):
+                target.index._assert_sidecar_rebuildable()
+        return resolved
+
+    def merge_maintenance_stats(self, stats) -> None:
+        """Charge started backend work, including failures, to this terminal.
+
+        ``stats`` is a backend QueryStats for one call. Returns None and adds its
+        started inventory count without identity admissions. Actions aggregate as
+        rebuild over validate over none; no completion is inferred from a report.
+        Call in finally, after releasing backend resources. No Store IO occurs.
+        """
+
+        self.store_scan_count += stats.store_scan_count
+        action = stats.refresh_action
+        if action == "sqlite-rebuild":
+            self.refresh_action = "rebuild"
+        elif action == "sqlite-validate" and self.refresh_action == "none":
+            self.refresh_action = "validate"
 
     def require_scan(self) -> None:
         """Enforce effective inventory/recovery policy before scan IO.
@@ -266,7 +429,14 @@ class SourceCapture:
             self.source_cuts += 1
 
     def repo_stores(self, repo) -> tuple[Store, ...]:
-        """Retain the first connected producer topology for this terminal."""
+        """Return the first connected topology retained for this terminal.
+
+        ``repo`` owns topology admission and rejects inherited process handles
+        before its configuration lock. This snapshots handles, not inventory;
+        attachments after this call participate in the next terminal. Returns a
+        tuple of Stores and propagates owner lifecycle/validation errors. Only the
+        brief owner lease and terminal-local registry change; no Store IO occurs.
+        """
 
         key = id(repo)
         if key not in self._topologies:

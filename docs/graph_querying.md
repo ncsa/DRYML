@@ -162,9 +162,32 @@ candidate admissions or additional roots/targets.
 `scan_policy("allow")` permits required authoritative inventory scans,
 `scan_policy("warn")` additionally emits one warning per scanning terminal, and
 `scan_policy("forbid")` rejects the terminal before scanning. `refresh(False)`
-does not reconcile derived indexes, `refresh("auto")` reconciles stale indexes
-when safe, and `refresh(True)` forces reconciliation before each terminal cut.
-Refresh may replace derived index sidecars but never rewrites Store authority.
+does no derived maintenance but still observes fresh authority. `refresh("auto")`
+recovers only indexes actually consumed by the selected path. Broad authority
+inventory, direct exact positives, and external metadata scopes leave unused dirty
+sidecars untouched. A bounded stored-CDef index consumer preflights recovery outside
+retained Store fences and SQLite readers, then enters non-repairing views.
+
+`refresh(True)` and `refresh("always")` currently request one explicit cycle per
+applicable destination per participating terminal, before fresh evaluation cuts.
+An already correct ready sidecar is substantively validated without replacement;
+repair may replace derived sidecars but never rewrites Store authority. Direct
+backend `refresh(True)` and `refresh("always")` likewise perform one independent
+cycle per call. Construction, ordinary `explain()`, and identity/occurrence
+`take(0)` perform no maintenance or source acquisition. Explicit backend failures
+propagate; absent optional backends create no maintenance target.
+
+Target resolution uses the terminal's first retained Repo topology, including all
+producer and external-scope presentations before coalescing normalized configured
+destinations. Authority domain, source key, dirty-token domain, canonical semantics,
+backend settings, and backend/connection/configuration paths must agree; conflicts
+raise `QueryIndexIncompatible` before maintenance. One consistently configured
+custom destination per Store dirty-token domain is supported. Multiple visible
+destinations sharing that domain are rejected, including inside one Repo. This is
+a terminal-local check, not a cross-client or cross-process destination registry.
+A Store attached after topology retention joins the next terminal. Inherited Repo
+topology after fork raises `RuntimeError` before the parent-process configuration
+lock; open a fresh Repo in the child. Query does not reset Repo-owned locks.
 
 These are terminal-owned controls: they apply to producers **and** external
 stored, alias, and metadata scopes, algebra operands, closure, occurrence targets,
@@ -173,8 +196,9 @@ restrictions are source-free too. Projections inherit controls without inheritin
 raw occurrence caps. An explicit control on the outer query governs its nested
 execution; algebra construction still rejects incompatible operand policies.
 Warnings precede the first inventory or recovery scan, once per terminal.
-Forced refresh does not permit a recovery scan under forbid or indexed-only
-controls; disabled refresh does not initialize or rebuild a missing/dirty sidecar.
+Explicit cycles require scan admission even on ready sidecars, before backend IO;
+they cannot bypass forbid or indexed-only controls. Disabled refresh does not
+initialize or rebuild a missing/dirty sidecar.
 
 ### Verification Admission Budget
 
@@ -199,10 +223,15 @@ metadata holders, or replica checks. Budget exhaustion raises
 - `take(0)` acquires no sources and admits nothing. Witness and depth budgets are
   separate and inherit effective outer controls.
 
-Analyzed explanations report admissions as `verified_count`, inventory/completed
-recovery scans as `store_scan_count`, and page work separately as
+Analyzed explanations report admissions as `verified_count`, started inventories
+and maintenance scans (including failed work, fallback, and recapture) as
+`store_scan_count`, and page work separately as
 `candidate_rows_read`, `cdef_blobs_decoded`, and `pages_fetched`. Payload-free
 metadata and recovery IO remain scan-controlled work, even without admissions.
+`refresh_action` reports actual `none`, `validate`, or `rebuild` work rather than
+echoing the declared policy; rebuild takes precedence across multiple targets.
+Demand recovery reports its action too. Failed backend calls merge started work
+during cleanup; retries never refund the terminal's cumulative ledger.
 
 Trusted selector resolution may import ordinary Python code when its existing
 semantics require it. That accepted import side effect does not permit query

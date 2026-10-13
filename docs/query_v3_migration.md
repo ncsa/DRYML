@@ -96,7 +96,28 @@ Controls now survive owner/target projections and govern external stored, alias,
 and metadata scopes as well as nested producers. Algebra operands must agree on
 policies at composition; a later explicit outer override applies throughout the
 expression. `refresh(False)` does not initialize/rebuild missing or dirty sidecars,
-and `refresh(True)` cannot authorize prohibited recovery scans.
+and explicit `refresh(True)` / `refresh("always")` cannot authorize prohibited
+scans, including ready-index validation. Both explicit policies currently perform
+one cycle per participating terminal; `"always"` is the explicit repeated-cycle
+spelling. Ready cycles validate without forcing replacement. Shared one-shot Query
+request state is not yet implemented; direct backend calls are always independent.
+
+Auto refresh is now demand-driven. Broad authority and metadata queries no longer
+clean unused dirty sidecars as an incidental side effect. Use an explicit cycle
+when maintenance itself is required; actual bounded index consumers still recover
+outside retained readers/fences. Authority visibility remains fresh under every
+policy. Ordinary explanation, construction, and identity/occurrence `take(0)`
+remain inert. Optional absent indexes do not become fabricated targets; explicitly
+configured unavailability and explicit maintenance failures surface to the caller.
+
+All visible producer/scope configurations are checked before maintenance, including
+equivalent handles inside a Repo. Equivalent normalized custom destinations
+coalesce only when ownership, dirty-token domain, semantics, and settings agree.
+Conflicting presentations or multiple destinations sharing one Store dirty-token
+domain raise `QueryIndexIncompatible`; select one destination consistently across
+clients. There is no global destination registry. Repo topology is retained once
+per terminal, so later attachments participate next time. Forked children must
+open a fresh Repo: inherited topology raises `RuntimeError` before its owner lock.
 
 `max_verify` has a tightened **cumulative admission** contract. Ordinary inventory
 and fixed refinement reserve the entire detached domain before filtering or
@@ -111,7 +132,10 @@ lookahead counts rows/decodes only; verified collision lookahead is charged.
 Metadata-holder discovery and recovery reads are scan-controlled IO rather than
 identity admissions. `take(0)` reads/admits nothing; witness/depth budgets remain
 separate and inherit controls. Analyzed explanations expose admissions as
-`verified_count` and inventory/completed recovery scans as `store_scan_count`.
+`verified_count` and started inventory/maintenance scans as `store_scan_count`,
+including failed recovery, fallback, and recapture. `refresh_action` reports actual
+`none`, `validate`, or `rebuild`, with rebuild taking precedence across targets;
+the declared `refresh` policy is reported separately.
 
 Query authority is Store records, not memory or SQLite indexes. Derived indexes may
 accelerate work, but missing, stale, corrupt, or incompatible indexes rebuild, fall

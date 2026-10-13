@@ -506,6 +506,8 @@ def test_metadata_rebuild_keeps_overlapping_dirty_token_without_payload_access(
     assert repo.query().where(
         field("object", "project").eq("after")
     ).object_refs().one() == state.object
+    assert index.status().state == "dirty"
+    assert repo.query().cdefs().stored().take(1).one() == state.definition
     assert index.status().state == "ready"
 
 

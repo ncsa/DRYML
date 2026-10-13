@@ -196,28 +196,28 @@ def test_v3_controls_report_or_reject_required_inventory_scans(tmp_path):
 
 def test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals(
         tmp_path, monkeypatch):
-    """Refresh executes once per terminal and warn reports a required scan."""
+    """Authority-only auto skips maintenance; explicit cycles use Store owners."""
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(store)
     _saved(repo, "value")
     calls = []
     monkeypatch.setattr(
-        repo._query_index,
+        store.open_query_index(),
         "refresh",
         lambda policy, **_kwargs: calls.append(policy),
     )
 
     with pytest.warns(RuntimeWarning, match="authoritative inventory scan"):
         assert repo.query().scan_policy("warn").exists()
-    assert calls == ["auto"]
+    assert calls == []
     assert repo.query().refresh(True).exists()
-    assert calls == ["auto", True]
+    assert calls == [True]
     assert repo.query().refresh(False).exists()
-    assert calls == ["auto", True]
+    assert calls == [True]
     with pytest.raises(QueryError, match="inventory scan"):
         repo.query().scan_policy("forbid").exists()
-    assert calls == ["auto", True]
+    assert calls == [True]
 
 
 @pytest.mark.parametrize("value", (0, 1, None, [], "invalid"))
@@ -236,14 +236,14 @@ def test_v3_repo_refresh_reports_only_completed_reconciliation(tmp_path, monkeyp
     store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(store)
     _saved(repo, "value")
-    monkeypatch.setattr(repo._query_index, "refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(store.open_query_index(), "refresh", lambda *_args, **_kwargs: None)
 
     assert repo.query().explain(analyze=True).refresh_action == "none"
 
     def unavailable(*_args, **_kwargs):
         raise QueryIndexUnavailable("synthetic unavailable index")
 
-    monkeypatch.setattr(repo._query_index, "refresh", unavailable)
+    monkeypatch.setattr(store.open_query_index(), "refresh", unavailable)
     with pytest.raises(QueryIndexUnavailable, match="synthetic unavailable index"):
         repo.query().refresh(True).exists()
 
@@ -847,7 +847,7 @@ def test_u6_forced_refresh_cannot_authorize_recovery_scan(tmp_path, monkeypatch,
 
 
 def test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities(tmp_path, monkeypatch):
-    """Fixed refinement charges one candidate despite broad holder/recovery IO."""
+    """Authority-only external metadata leaves dirty unused indexes untouched."""
 
     store = DirStore(tmp_path / "scope", query_index="sqlite")
     state = _saved(Repo(store), "member")
@@ -880,6 +880,8 @@ def test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities(tm
     ).max_verify(1)
     explanation = query.explain(analyze=True)
     assert explanation.result_count == 1 and explanation.verified_count == 1
-    assert explanation.store_scan_count == 2  # one recovery, one authority capture
-    assert reads == [state.digest(), state.digest()]
-    assert len(scans) == 2 and len(rebuilds) == 1
+    assert explanation.store_scan_count == 1
+    assert explanation.refresh_action == "none"
+    assert reads == [state.digest()]
+    assert len(scans) == 1 and rebuilds == []
+    assert store.query_index_is_dirty()

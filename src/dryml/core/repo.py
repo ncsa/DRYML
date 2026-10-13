@@ -1,3 +1,11 @@
+"""Coordinate live objects, Store authority, publication, and query topology.
+
+Repo operations expose authority, lifecycle, and publication failures rather than
+partial success. Topology retention leases connected Store handles without reading
+inventory; inherited-process retention raises RuntimeError before owner locking.
+Forked children construct fresh Repos instead of resetting parent locks or caches.
+"""
+
 from __future__ import annotations
 
 import os
@@ -574,6 +582,8 @@ class Repo:
     unconfigured Repo retains default-Store closure behavior. Save/export context
     snapshots make configuration changes apply to later operations, and close
     rejects while a retained save or managed topology lease needs resources.
+    Topology access through a Repo inherited after fork raises RuntimeError before
+    acquiring its parent-process lock; children must construct a fresh Repo.
     """
     # Trackers
     _num_saves: int
@@ -665,6 +675,7 @@ class Repo:
         self._owner_token_factory = owner_token_factory or (lambda: uuid4().hex)
         self._state_io = _state_io
         self._configuration_lock = RLock()
+        self._configuration_pid = os.getpid()
         self._configuration_version = 0
         self._save_context_leases = 0
         self._topology_leases = 0
@@ -1094,7 +1105,9 @@ class Repo:
             A context manager covering the current connected Store handles.
 
         Raises:
-            RuntimeError: If the Repo is closing or closed.
+            RuntimeError: If the Repo is closing, closed, or inherited from another
+                process. Open a fresh Repo in a forked child; inherited topology
+                is rejected before acquiring the parent-process configuration lock.
 
         Side Effects:
             Prevents Store addition and Repo close until release. Routing and
@@ -1102,6 +1115,8 @@ class Repo:
             connected handle set.
         """
 
+        if self._configuration_pid != os.getpid():
+            raise RuntimeError("Cannot retain Repo topology inherited from another process; open a fresh Repo.")
         with self._configuration_lock:
             if self._closing or self._closed:
                 raise RuntimeError("Cannot retain topology after Repo close begins.")
