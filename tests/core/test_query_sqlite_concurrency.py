@@ -1746,6 +1746,57 @@ emit({{"released": True}})
         assert _collect_worker(proc) == {"released": True}
 
 
+@pytest.mark.parametrize("captured_token", (False, True))
+def test_rebuild_preserves_same_root_token_published_after_capture(tmp_path, monkeypatch, captured_token):
+    """A later publication survives both empty and nonempty acknowledgement cuts."""
+    from dryml.core.query.model import QueryStats
+
+    store = _request_store(tmp_path / "store")
+    index = store.open_query_index()
+    root = _cdef("request-root")
+    if captured_token:
+        store.mark_query_index_dirty(root)
+    captured = set(index._dirty_markers())
+    assert bool(captured) is captured_token
+    original_capture = index._capture_authority_cut
+    original_clear = index._clear_dirty
+    later, errors, acknowledgements = [], [], []
+
+    def publish():
+        try:
+            later.append(Path(store.mark_query_index_dirty(root)))
+        except BaseException as error:
+            errors.append(error)
+
+    def capture():
+        cut = original_capture()
+        assert set(cut[3]) == captured
+        worker = threading.Thread(target=publish, daemon=True)
+        worker.start()
+        worker.join(10)
+        assert not worker.is_alive() and not errors
+        return cut
+
+    def clear(markers, **kwargs):
+        assert index._build_claim_path().exists()
+        assert _stored_root_count(index.path) == 1
+        assert not index._connections._leases
+        acknowledgements.append(set(markers))
+        return original_clear(markers, **kwargs)
+
+    monkeypatch.setattr(index, "_capture_authority_cut", capture)
+    monkeypatch.setattr(index, "_clear_dirty", clear)
+    stats = QueryStats()
+    index.rebuild(stats=stats)
+
+    assert acknowledgements == [captured]
+    assert stats.store_scan_count == 1 and stats.result_count == 1
+    assert len(later) == 1 and set(index._dirty_markers()) == set(later)
+    assert not any(marker.exists() for marker in captured)
+    assert index.status().state == "dirty"
+    assert not index._build_claim_path().exists() and not index._connections._leases
+
+
 def test_root_registration_fails_dirty_while_rebuild_claim_is_active(tmp_path):
     path = tmp_path / "index.sqlite"
     dirty_path = tmp_path / "index.dirty"

@@ -6,6 +6,12 @@ Indexes preserve V2 CDef graph topology, typed graph paths, ObjectRef IDs, State
 
 Metadata dirty tokens identify an exact object or state target separately from definition tokens. DirStore publishes the applicable durable token under its writer fence before each definition, stored-root, declaration, or query-visible alias authority mutation; an interrupted authority write may therefore leave harmless dirty state, while an idempotent write leaves no new token. Incremental projection holds the Store authority fence through the SQLite write and clears only captured tokens for indexed targets. Unrelated or unscoped tokens require a full rebuild, and tokens published after the captured cut survive for recovery. A save whose derived index remains dirty reports a partial publication failure without discarding the complete snapshot. Legacy unscoped tokens remain valid rebuild requests.
 
+Empty dirty-token captures skip cleanup-only closure-node eligibility and root-key
+authority reads. Empty graph/root registration still checks readiness, but does
+not enumerate tokens solely for acknowledgement. Nonempty registration and rebuild
+retain all indexed-content writes, root-row metadata checks, staged validation,
+and publication fencing; only captured covered tokens can be removed.
+
 Broad Query V3 capture and SQLite rebuild authority capture consume the Store's
 protected validated definition/root inventory seam. Its compatibility fallback
 returns the existing complete record collections. DirStore validates marker paths

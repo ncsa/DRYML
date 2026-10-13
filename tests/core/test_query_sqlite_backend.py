@@ -213,6 +213,177 @@ def test_strict_refresh_raises_unavailability_while_reconcile_reports_it(tmp_pat
     assert any("injected SQLite absence" in (issue.detail or "") for issue in report.issues)
 
 
+def test_empty_marker_rebuild_keeps_required_authority_reads(tmp_path, monkeypatch):
+    """A one-root rebuild skips cleanup reads, retaining inventory and validation."""
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    root = SQLiteLeaf("cleanup-count").definition
+    record = store.write_definition_record(DefinitionRecord(root))
+    store.clear_query_index_dirty()
+    index = store.open_query_index()
+    reads = {"inventory": 0, "root-metadata": 0, "cleanup-node": 0, "cleanup-root": 0}
+    phase = "cleanup-node"
+    original_read = store._read_file
+    original_capture = index._capture_authority_cut
+    original_metadata = SQLiteStoreQueryIndex._root_record_metadata
+    original_key = SQLiteStoreQueryIndex._root_marker_key
+    original_validate = SQLiteStoreQueryIndex._validate_rebuild_before_ready
+    validations = []
+
+    def read(path, record_type):
+        value = original_read(path, record_type)
+        if record_type is DefinitionRecord and value is not None:
+            assert value.digest == record.digest
+            reads[phase] += 1
+        return value
+
+    def capture():
+        nonlocal phase
+        phase = "inventory"
+        try:
+            cut = original_capture()
+            assert cut[0] == (root,) and cut[3] == ()
+            return cut
+        finally:
+            phase = "cleanup-node"
+
+    def metadata(backend, cdef):
+        nonlocal phase
+        previous, phase = phase, "root-metadata"
+        try:
+            return original_metadata(backend, cdef)
+        finally:
+            phase = previous
+
+    def key(backend, cdef):
+        nonlocal phase
+        previous, phase = phase, "cleanup-root"
+        try:
+            return original_key(backend, cdef)
+        finally:
+            phase = previous
+
+    def validate(backend, *, roots):
+        assert backend.status().state == "building"
+        validations.append(roots)
+        return original_validate(backend, roots=roots)
+
+    monkeypatch.setattr(store, "_read_file", read)
+    monkeypatch.setattr(index, "_capture_authority_cut", capture)
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_root_record_metadata", metadata)
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_root_marker_key", key)
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", validate)
+    stats = QueryStats()
+    index.rebuild(stats=stats)
+
+    assert validations == [(root,)]
+    assert stats.store_scan_count == 1 and stats.result_count == 1
+    assert reads == {"inventory": 1, "root-metadata": 2, "cleanup-node": 0, "cleanup-root": 0}
+    assert sqlite_rows(index.path, "SELECT storage_hash FROM stored_roots") == [(bytes.fromhex(record.digest),)]
+    assert index.status().state == "ready"
+
+
+@pytest.mark.parametrize("empty", (True, False))
+def test_empty_marker_registration_skips_cleanup_not_readiness(tmp_path, monkeypatch, empty):
+    """Empty registration checks readiness; clean graph writes read only root metadata."""
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.rebuild_query_index()
+    root = SQLiteParent(child=SQLiteLeaf("closure"), name="clean").definition
+    store.write_definition_record(DefinitionRecord(root))
+    store.clear_query_index_dirty()
+    index = store.open_query_index()
+    roots = () if empty else (root,)
+    graph = ConcreteDefinitionGraph.from_roots(roots)
+    original_markers, original_ready = index._dirty_markers, index._ensure_ready
+    original_read, original_metadata = store.read_definition_record, index._root_record_metadata
+    original_key = index._root_marker_key
+    phase = "cleanup"
+    enumerations, reads, keys = [], [], []
+
+    def markers():
+        enumerations.append(phase)
+        result = original_markers()
+        assert result == ()
+        return result
+
+    def ready():
+        nonlocal phase
+        phase = "readiness"
+        try:
+            return original_ready()
+        finally:
+            phase = "cleanup"
+
+    def metadata(cdef):
+        nonlocal phase
+        phase = "root-metadata"
+        try:
+            return original_metadata(cdef)
+        finally:
+            phase = "cleanup"
+
+    def read(digest):
+        reads.append(phase)
+        return original_read(digest)
+
+    def key(cdef):
+        keys.append(cdef)
+        return original_key(cdef)
+
+    monkeypatch.setattr(index, "_dirty_markers", markers)
+    monkeypatch.setattr(index, "_ensure_ready", ready)
+    monkeypatch.setattr(index, "_root_record_metadata", metadata)
+    monkeypatch.setattr(store, "read_definition_record", read)
+    monkeypatch.setattr(index, "_root_marker_key", key)
+    generation = index.status().generation
+    enumerations.clear()
+    result = index.register_stored_roots(graph, roots)
+
+    assert result.changed is not empty
+    assert result.generation == generation + (0 if empty else 1)
+    assert result.definitions_added == (0 if empty else 2)
+    assert result.edges_added == (0 if empty else 1)
+    assert result.roots_added == (0 if empty else 1)
+    assert enumerations == (["readiness"] if empty else ["cleanup"])
+    assert reads == ([] if empty else ["root-metadata"])
+    assert keys == []
+
+
+def test_registration_acknowledges_only_captured_covered_definitions(tmp_path):
+    """Root and direct closure tokens clear without acknowledging other mutations."""
+    from pathlib import Path
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.rebuild_query_index()
+    child = SQLiteLeaf("closure-token").definition
+    root = SQLiteParent(child=child, name="covered-token").definition
+    unrelated = SQLiteLeaf("unrelated-token").definition
+    store.write_definition_record(DefinitionRecord(root))
+    store.write_definition_record(DefinitionRecord(child), stored_root=False)
+    covered = set(store.open_query_index()._dirty_markers())
+    store.write_definition_record(DefinitionRecord(unrelated))
+    unscoped = Path(store.mark_query_index_dirty())
+    index = store.open_query_index()
+    retained = set(index._dirty_markers()) - covered
+    assert len(covered) == 2 and len(retained) == 2 and unscoped in retained
+
+    with store.authority_read_fence():
+        result = index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), (root,))
+
+    assert result.changed and result.definitions_added == 2 and result.roots_added == 1
+    assert not any(marker.exists() for marker in covered)
+    assert set(index._dirty_markers()) == retained
+    assert sqlite_rows(index.path, "SELECT COUNT(*) FROM stored_roots") == [(1,)]
+    assert sqlite_rows(index.path, "SELECT COUNT(*) FROM definitions") == [(2,)]
+
+
 def test_register_stored_roots_persists_graph_and_is_idempotent(tmp_path):
     index = sqlite_index(tmp_path)
     leaf = SQLiteLeaf("rare")

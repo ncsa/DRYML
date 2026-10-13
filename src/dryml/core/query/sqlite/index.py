@@ -3,6 +3,8 @@
 Store records remain authoritative. Index contexts retain transactions and reader
 leases through cleanup, reject inherited view use, and report readiness or SQLite
 failures to callers; rebuild and mutation affect only derived sidecar state.
+Empty dirty-token captures require no cleanup-only authority reads; indexed
+content writes, readiness checks, and staged validation remain required.
 """
 
 from __future__ import annotations
@@ -513,6 +515,8 @@ class SQLiteStoreQueryIndex:
         Authority capture shares validated definitions with root-marker and
         reference projection consumers. Subsequent standalone index validation
         retains its complete checks rather than a cross-cut authority cache.
+        Empty captured dirty-token sets skip cleanup-only authority reads without
+        skipping root-row metadata checks or staged validation.
 
         Args:
             stats: Optional query statistics updated before authority capture,
@@ -978,12 +982,47 @@ class SQLiteStoreQueryIndex:
         return decision
 
     def register_stored_roots(self, graph, roots):
+        """Register query graph content and independently stored root definitions.
+
+        Args:
+            graph: ConcreteDefinitionGraph or supported query graph adapter.
+            roots: Iterable of ConcreteDefinitions to activate as stored roots.
+
+        Returns:
+            IndexWriteResult with generation and changed-row counts. Empty graph
+            and root input performs the existing readiness check only.
+
+        Raises:
+            QueryIndexError: On readiness, authority, contention, or write failure.
+
+        Side Effects:
+            Writes derived rows and acknowledges only captured covered tokens.
+            Empty captures skip cleanup-only node eligibility and root-key reads.
+            The publication caller retains the Store authority fence.
+        """
         return self._register_stored_roots(graph, roots, require_ready=True)
 
     def register_graph(self, graph):
+        """Register graph content without activating independent stored roots.
+
+        ``graph`` is a ConcreteDefinitionGraph or supported query graph adapter.
+        Returns IndexWriteResult; empty input still checks readiness. Writes only
+        derived rows, acknowledging captured eligible closure-node tokens under
+        the caller's Store publication fence. Empty captures need no cleanup-only
+        authority reads. QueryIndexError reports readiness or mutation failure.
+        """
         return self._register_stored_roots(graph, (), require_ready=True)
 
     def activate_stored_roots(self, graph, roots):
+        """Activate root definitions with their graph content in the derived index.
+
+        Accepts a ConcreteDefinitionGraph or supported adapter and an iterable of
+        ConcreteDefinitions. Returns IndexWriteResult; empty input still checks
+        readiness. Under the caller's Store publication fence, writes graph/root
+        rows and acknowledges only captured covered tokens, with no cleanup-only
+        authority reads for empty captures. QueryIndexError reports readiness,
+        authority, contention, or mutation failure.
+        """
         return self._register_stored_roots(graph, roots, require_ready=True)
 
     def register_saved_graph(self, graph, roots, state_refs=()):
@@ -1007,6 +1046,7 @@ class SQLiteStoreQueryIndex:
             a full rebuild rather than being acknowledged by this save. Holds
             the Store authority fence through metadata projection and token
             clearing; ordinary clean saves do not scan older snapshots.
+            Empty captured tokens require no cleanup-only authority reads.
         """
         roots, state_refs = tuple(roots), tuple(state_refs)
         fence = self.store.authority_read_fence() if self.store is not None else nullcontext()
@@ -1041,7 +1081,6 @@ class SQLiteStoreQueryIndex:
             raise QueryIndexBusy(
                 "Cannot register Store roots while a SQLite query-index rebuild is active."
             )
-        dirty_markers = self._dirty_markers()
         roots = _unique_graph_roots(roots)
         graph = as_query_index_graph(graph, roots if roots else graph.roots)
         graph_nodes = graph.nodes()
@@ -1051,6 +1090,7 @@ class SQLiteStoreQueryIndex:
         v3_identities, v3_relationships = _v3_projection_rows(roots)
         if not roots and not graph_nodes and not encoded_edges:
             return IndexWriteResult(generation=self.current_generation(), changed=False)
+        dirty_markers = self._dirty_markers()
         existing_node_ids, missing_nodes = self._preflight_graph_nodes(
             graph_nodes,
             node_hash_blobs,
@@ -1182,7 +1222,7 @@ class SQLiteStoreQueryIndex:
 
         result = self._run_write_transaction(operation)
         indexed_definitions = roots
-        if self.store is not None and hasattr(self.store, "read_stored_root_record"):
+        if dirty_markers and self.store is not None and hasattr(self.store, "read_stored_root_record"):
             from ...store.records import DefinitionRecord as StoreDefinitionRecord
 
             # Only direct definitions can have scoped closure-node tokens;
@@ -1413,8 +1453,11 @@ class SQLiteStoreQueryIndex:
         Side Effects:
             Removes only matching captured tokens. Tokens published concurrently
             after the capture remain visible and keep the index dirty.
+            An empty capture returns without computing cleanup-only root keys.
         """
 
+        if not markers:
+            return
         root_keys = {self._root_marker_key(root) for root in roots}
         for marker in markers:
             try:
