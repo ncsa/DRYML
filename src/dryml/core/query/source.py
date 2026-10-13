@@ -264,6 +264,7 @@ class SourceCapture:
         from .model import QueryIndexIncompatible, QueryIndexUnavailable
 
         targets = {}
+        presentations_by_destination = {}
         dirty_destinations = {}
         for presentation in self.index_presentations:
             store = presentation.store
@@ -287,11 +288,14 @@ class SourceCapture:
             existing = targets.get(descriptor.destination)
             if existing is not None and existing.descriptor != descriptor:
                 raise QueryIndexIncompatible("Query index destination has incompatible Store presentations.")
-            targets[descriptor.destination] = (
-                _IndexTarget(descriptor, index, (presentation,)) if existing is None
-                else replace(existing, presentations=(*existing.presentations, presentation))
-            )
-        resolved = tuple(targets.values())
+            if existing is None:
+                targets[descriptor.destination] = _IndexTarget(descriptor, index, ())
+                presentations_by_destination[descriptor.destination] = []
+            presentations_by_destination[descriptor.destination].append(presentation)
+        resolved = tuple(
+            replace(target, presentations=tuple(presentations_by_destination[destination]))
+            for destination, target in targets.items()
+        )
         from .sqlite.index import SQLiteStoreQueryIndex
 
         for target in resolved:

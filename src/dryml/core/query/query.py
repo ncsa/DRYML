@@ -1690,8 +1690,6 @@ class IdentityQuery:
             validate, rebuild, or replace derived query-index sidecars.
         """
 
-        if type(policy) is not bool and not (isinstance(policy, str) and policy in {"auto", "always"}):
-            raise ValueError("refresh policy must be False, 'auto', True, or 'always'.")
         return replace(self, refresh_policy=policy, _refresh_bindings=None)
 
     def scan_policy(self, policy: str) -> "IdentityQuery":

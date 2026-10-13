@@ -614,14 +614,7 @@ class SQLiteStoreQueryIndex:
             con = view._con
             issues: list[ValidationIssue] = []
             try:
-                _validate_sqlite_integrity(con, issues)
-                self._validate_decodable_rows(con, issues)
-                self._validate_stored_roots(con, issues)
-                self._validate_reference_rows(con, issues)
-                self._validate_metadata_rows(con, issues)
-                self._validate_store_roots(con, issues, roots=roots)
-                if not _v3_projection_is_complete(con):
-                    issues.append(ValidationIssue("error", "Query V3 projection coverage is incomplete."))
+                self._validate_candidate_contents(con, issues, roots=roots)
                 counts = _row_counts(con)
                 # A WAL writer can advance metadata behind the retained snapshot.
                 # Inspect the active destination without releasing our cut/view.
@@ -1528,14 +1521,7 @@ class SQLiteStoreQueryIndex:
         con = self._connections.connection(readonly=True)
         issues: list[ValidationIssue] = []
         validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version, require_ready=False)
-        _validate_sqlite_integrity(con, issues)
-        self._validate_decodable_rows(con, issues)
-        self._validate_stored_roots(con, issues)
-        self._validate_reference_rows(con, issues)
-        self._validate_metadata_rows(con, issues)
-        self._validate_store_roots(con, issues, roots=roots)
-        if not _v3_projection_is_complete(con):
-            issues.append(ValidationIssue("error", "Query V3 projection coverage is incomplete."))
+        self._validate_candidate_contents(con, issues, roots=roots)
         errors = tuple(issue for issue in issues if issue.severity == "error")
         if errors:
             detail = "; ".join(
@@ -1544,6 +1530,17 @@ class SQLiteStoreQueryIndex:
                 for issue in errors[:3]
             )
             raise QueryIndexError(f"SQLite query-index rebuild validation failed before ready: {detail}")
+
+    def _validate_candidate_contents(self, con, issues, *, roots) -> None:
+        """Append substantive candidate issues in the same order for both cuts."""
+        _validate_sqlite_integrity(con, issues)
+        self._validate_decodable_rows(con, issues)
+        self._validate_stored_roots(con, issues)
+        self._validate_reference_rows(con, issues)
+        self._validate_metadata_rows(con, issues)
+        self._validate_store_roots(con, issues, roots=roots)
+        if not _v3_projection_is_complete(con):
+            issues.append(ValidationIssue("error", "Query V3 projection coverage is incomplete."))
 
     def _validate_decodable_rows(self, con, issues: list[ValidationIssue]) -> None:
         for did, cdef_blob in con.execute("SELECT def_id, cdef_blob FROM definitions"):

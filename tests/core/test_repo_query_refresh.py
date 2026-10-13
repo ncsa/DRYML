@@ -134,8 +134,12 @@ def test_u2_partial_failure_retries_only_unresolved_and_keeps_evaluation_complet
     calls = _count_cycles(monkeypatch, a, b)
     query = a.query().union(b.query()).refresh(True)
     primary = PermissionError("injected maintenance failure")
+
+    def fail(*args, **kwargs):
+        raise primary
+
     with monkeypatch.context() as scoped:
-        scoped.setattr(b.open_query_index(), "refresh", lambda *a, **kw: (_ for _ in ()).throw(primary))
+        scoped.setattr(b.open_query_index(), "refresh", fail)
         with pytest.raises(PermissionError) as error:
             query.count()
         assert error.value is primary
@@ -218,8 +222,12 @@ def test_u2_publication_failure_is_retryable_and_demand_recovery_outranks_reuse(
 
     monkeypatch.setattr(SourceCapture, "__init__", retain)
     primary = QueryIndexError("acknowledgement failed")
+
+    def fail(*args, **kwargs):
+        raise primary
+
     with monkeypatch.context() as scoped:
-        scoped.setattr(index, "_clear_dirty", lambda *a, **kw: (_ for _ in ()).throw(primary))
+        scoped.setattr(index, "_clear_dirty", fail)
         with pytest.raises(QueryIndexError) as error:
             query.count()
         assert error.value is primary
