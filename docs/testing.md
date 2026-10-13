@@ -155,6 +155,14 @@ routine; the separate 18-case `test_u7_main_completeness_policy_matrix` is
 
 Tiny U1/U4 model and value-handoff regressions have exact medium node pins so the
 heavy model categories cannot silently omit their named routine representatives.
+The TF/Torch selected-call and accepted-prefix cleanup cases live in
+`tests/models/test_dataset_training_integration.py`, which imports optional backends
+only inside admitted test bodies. Keep backend-neutral generator factories at module
+scope for stable import references, and native layer factories as explicit `F` specs;
+do not pin routine cases inside the eager legacy `test_tf_training.py` or
+`test_torch_training.py` modules. A fresh-process collection guard exercises the
+actual file/tier/profile selection for these owners, checks exact retained node IDs,
+and rejects heavyweight framework import attempts before test execution.
 Four dense CPU directions cover every source/target backend; the full direction and
 nested JAX products retain heavy qualification. These pins do not promote full
 training matrices. Missing optional backends report skips. Collection-only checks

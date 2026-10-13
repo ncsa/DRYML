@@ -31,19 +31,6 @@
             "test_cached_native_element_adaptation_does_not_retain_model"
           ]
         },
-        "tests/models/test_tf_training.py": {
-          "rationale": "Retain the tiny U4 element/batched selected-call boundary; full model/training products remain heavy.",
-          "functions": [
-            "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
-          ]
-        },
-        "tests/models/test_torch_training.py": {
-          "rationale": "Retain U1 causal source cleanup and U4 tiny element/batched selected-call boundaries; full training products remain heavy.",
-          "functions": [
-            "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
-            "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
-          ]
-        },
         "tests/multi_framework/test_value_handoffs.py": {
           "rationale": "Retain every new U4 handoff/failure regression with four tier-pinned CPU directions covering all backends; the full direct and nested JAX direction products remain available in heavy/exhaustive qualification.",
           "functions": [
@@ -64,14 +51,17 @@
           ]
         },
         "tests/models/test_dataset_training_integration.py": {
-          "rationale": "Run credential-free public Dataset cardinality plus tiny JAX/Torch/Keras native delivery and managed local/subprocess JAX representatives.",
+          "rationale": "Run lazy-import Dataset cardinality/native delivery, U1 causal source cleanup, U4 element/batched selected calls, and managed local/subprocess JAX representatives; eager legacy training modules remain heavy.",
             "functions": [
               "test_generic_trainer_and_empty_artifacts_use_final_dataset_cardinality",
               "test_native_trainers_consume_authored_dataset_batches",
               "test_jax_trainer_consumes_authored_dataset_batches",
             "test_jax_qualification_model_runs_on_authored_dataset_batches",
             "test_jax_managed_local_publishes_exact_history_and_independent_owner_state",
-            "test_jax_managed_subprocess_restores_exact_graph"
+            "test_jax_managed_subprocess_restores_exact_graph",
+            "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
+            "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
+            "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
           ]
         },
         "tests/models/test_jax_imports.py": {

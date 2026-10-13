@@ -27,23 +27,6 @@ class EffectfulModule(torch.nn.Module):
         return value
 
 
-class FailingClosePairs:
-    closes = []
-
-    def __init__(self):
-        self.values = iter(((np.array([1.], dtype=np.float32), np.array([2.], dtype=np.float32)),) * 3)
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return next(self.values)
-
-    def close(self):
-        self.closes.append(True)
-        raise RuntimeError("source close failed")
-
-
 def _tiny_tensorflow_pairs():
     """Yield fixed TensorFlow examples for the real cross-backend trainer path."""
     import tensorflow as tf
@@ -81,36 +64,6 @@ def test_torch_basic_training_updates_experiment_state():
     assert optimizer.obj is not None
     assert optimizer.obj.param_groups[0]["lr"] == 0.01
     assert get_default_repo() is None
-
-
-def test_torch_update_failure_survives_source_cleanup_with_accepted_prefix(monkeypatch):
-    """A failed second update keeps the accepted first update and its primary error."""
-    from dryml.data import GeneratorDataset
-    from dryml.models.torch import Model, Optimizer, Training
-
-    FailingClosePairs.closes.clear()
-    spec = TensorSpec("float32", shape=(1,), backend="numpy")
-    dataset = Batch(GeneratorDataset(FailingClosePairs, spec=(spec, spec)), 1)
-    model = Model(torch.nn.Linear, 1, 1)
-    trainer = Training(
-        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.01),
-        loss_cls=torch.nn.MSELoss, verbose=0,
-    )
-    exp = Experiment(model, trainer, train_data=dataset)
-    original = torch.optim.SGD.step
-    calls = []
-
-    def step(optimizer, *args, **kwargs):
-        calls.append(True)
-        if len(calls) == 2:
-            raise ValueError("update failed")
-        return original(optimizer, *args, **kwargs)
-
-    monkeypatch.setattr(torch.optim.SGD, "step", step)
-    with pytest.raises(ValueError, match="update failed"):
-        trainer(exp)
-    assert FailingClosePairs.closes == [True]
-    assert (exp.state.step, exp.state.examples_seen, exp.state.next_batch) == (1, 1, 1)
 
 
 def test_torch_invocation_telemetry_receives_host_logs_after_accounting(tmp_path):
@@ -250,33 +203,6 @@ def test_torch_inference_never_invokes_an_opaque_model_or_changes_mode():
 
     assert model.obj.calls == 0
     assert model.obj.training is True
-
-
-def test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache(monkeypatch):
-    from dryml.models.torch import Sequential
-
-    model = Sequential(layer_defs=(F("Linear", 3, 2),))
-    model.prep_eval()
-    element_spec = TensorSpec("float32", shape=(3,), backend="numpy")
-    batch_spec = TensorSpec("float32", shape=(3,), batch=2, backend="numpy")
-    element = model.find_implementation(input_spec=element_spec)
-    batched = model.find_implementation(input_spec=batch_spec)
-    import dryml.methods.conversion as conversion
-    crossings = []
-    original_convert = conversion.convert
-    monkeypatch.setattr(conversion, "convert",
-                        lambda edge, value: (crossings.append(edge), original_convert(edge, value))[1])
-
-    assert tuple(element(np.zeros((3,), dtype=np.float32)).shape) == (2,)
-    assert tuple(batched(np.zeros((2, 3), dtype=np.float32)).shape) == (2, 2)
-    assert crossings == [element.conversion_edge, batched.conversion_edge]
-
-    model.learn()
-    direct = model(torch.zeros((1, 3), dtype=torch.float32))
-    assert model.call_mode == "cached"
-    assert tuple(model(torch.zeros((1, 3), dtype=torch.float32)).shape) == tuple(direct.shape)
-    model.eager()
-    assert model.call_mode == "eager"
 
 
 def test_torch_model_map_unbatched_tensor_uses_backend_batch_axis():

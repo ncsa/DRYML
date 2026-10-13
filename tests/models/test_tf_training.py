@@ -433,32 +433,6 @@ def test_tf_inference_never_invokes_an_opaque_model_or_changes_mode():
     assert model.obj.trainable is False
 
 
-def test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache(monkeypatch):
-    from dryml.models.tf import Sequential
-
-    model = Sequential(layer_defs=(F("Dense", units=2),))
-    element_spec = TensorSpec("float32", shape=(3,), backend="numpy")
-    batch_spec = TensorSpec("float32", shape=(3,), batch=2, backend="numpy")
-    element = model.find_implementation(input_spec=element_spec)
-    batched = model.find_implementation(input_spec=batch_spec)
-    import dryml.methods.conversion as conversion
-    crossings = []
-    original_convert = conversion.convert
-    monkeypatch.setattr(conversion, "convert",
-                        lambda edge, value: (crossings.append(edge), original_convert(edge, value))[1])
-
-    assert tuple(element(np.zeros((3,), dtype=np.float32)).shape) == (2,)
-    assert tuple(batched(np.zeros((2, 3), dtype=np.float32)).shape) == (2, 2)
-    assert crossings == [element.conversion_edge, batched.conversion_edge]
-
-    model.learn()
-    direct = model(tf.zeros((1, 3), dtype=tf.float32))
-    assert model.call_mode == "cached"
-    assert tuple(model(tf.zeros((1, 3), dtype=tf.float32)).shape) == tuple(direct.shape)
-    model.eager()
-    assert model.call_mode == "eager"
-
-
 def test_tf_cached_element_invoker_does_not_retain_the_model():
     """The weak preparation table releases a model with selected element adaptation."""
 

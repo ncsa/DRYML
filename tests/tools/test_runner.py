@@ -539,3 +539,99 @@ def test_real_profile_is_stable_and_filters_cannot_resample_matrix(tmp_path):
 
     filtered = run(tmp_path / "filtered.json", "-k", "A1 and B1", "-m", "focus")
     assert filtered.returncode == pytest.ExitCode.NO_TESTS_COLLECTED
+
+
+def test_good_enough_collects_native_regressions_without_eager_framework_imports(tmp_path):
+    """Fresh routine collection retains exact native cases without backend activation."""
+    report_path = tmp_path / "native-collection.json"
+    script = r'''
+import importlib.abc
+import json
+from pathlib import Path
+import sys
+
+frameworks = {
+    "tensorflow", "tensorflow_datasets", "keras", "torch", "jax", "jaxlib",
+    "flax", "optax", "ray",
+}
+attempts = []
+
+class RejectFrameworkImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] in frameworks:
+            attempts.append(fullname)
+            raise AssertionError("eager framework collection import: " + fullname)
+
+sys.meta_path.insert(0, RejectFrameworkImports())
+import pytest
+from tests.tools import test_buckets
+
+owners = {
+    "./tests/models/test_dataset_training_integration.py",
+    "./tests/models/test_tf_training.py",
+    "./tests/models/test_torch_training.py",
+}
+selected_files = [
+    path for path in test_buckets.select_profile_files(
+        test_buckets.load_baseline(test_buckets.DEFAULT_BASELINE),
+        {"smoke", "medium"},
+        test_buckets.load_baseline(test_buckets.DEFAULT_PROFILES)["profiles"]["good-enough"],
+    ) if path in owners
+]
+
+class RecordCollection:
+    def pytest_sessionfinish(self, session, exitstatus):
+        Path(sys.argv[1]).write_text(json.dumps({
+            "selected_files": selected_files,
+            "nodeids": [item.nodeid for item in session.items],
+            "tiers": {
+                item.nodeid: [tier for tier in ("smoke", "medium", "heavy")
+                              if item.get_closest_marker("speed_" + tier)]
+                for item in session.items
+            },
+            "framework_import_attempts": attempts,
+            "framework_modules": sorted(
+                name for name in sys.modules if name.split(".", 1)[0] in frameworks
+            ),
+            "exitstatus": int(exitstatus),
+        }, indent=2))
+
+assert selected_files, "routine selector omitted all native regression owners"
+sys.exit(pytest.main([
+    *selected_files, "--collect-only", "-q", "--no-cov",
+    "--import-mode=importlib", "--dryml-runner-tiers=smoke,medium",
+    "--dryml-test-profile=good-enough",
+], plugins=[RecordCollection()]))
+'''
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    env.pop("DRYML_TEST_BOOTSTRAP_CONTEXTS", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(report_path)],
+        cwd=ROOT, env=env, text=True, capture_output=True, check=False, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(report_path.read_text())
+    assert report["exitstatus"] == 0
+    assert report["selected_files"] == ["./tests/models/test_dataset_training_integration.py"]
+    owner = "tests/models/test_dataset_training_integration.py"
+    expected = {
+        f"{owner}::{function}" for function in (
+            "test_generic_trainer_and_empty_artifacts_use_final_dataset_cardinality",
+            "test_native_trainers_consume_authored_dataset_batches[torch]",
+            "test_native_trainers_consume_authored_dataset_batches[tf]",
+            "test_jax_trainer_consumes_authored_dataset_batches",
+            "test_jax_qualification_model_runs_on_authored_dataset_batches[W1]",
+            "test_jax_qualification_model_runs_on_authored_dataset_batches[W3]",
+            "test_jax_managed_local_publishes_exact_history_and_independent_owner_state",
+            "test_jax_managed_subprocess_restores_exact_graph",
+            "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
+            "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
+            "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
+        )
+    }
+    assert len(report["nodeids"]) == len(expected)
+    assert set(report["nodeids"]) == expected
+    assert report["tiers"] == {nodeid: ["medium"] for nodeid in expected}
+    assert report["framework_import_attempts"] == []
+    assert report["framework_modules"] == []

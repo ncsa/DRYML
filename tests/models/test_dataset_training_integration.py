@@ -1,4 +1,4 @@
-"""Credential-free public Dataset training representatives across backends."""
+"""Credential-free Dataset/native regressions with test-body backend imports."""
 
 from __future__ import annotations
 
@@ -16,6 +16,29 @@ from dryml.core.utils.graph.path import GraphPath, Parameter
 from dryml.data import ArrayDataset, Batch, Select, as_supervised
 from dryml.managed import ManagedConfig
 from dryml.models import Experiment, ExperimentData, Model, TrainFunction
+
+
+class FailingClosePairs:
+    """Import-referencable NumPy source recording cleanup before it raises."""
+
+    closes = []
+
+    def __init__(self):
+        """Retain three pairs for an accepted update followed by update failure."""
+        self.values = iter(((np.array([1.], dtype=np.float32), np.array([2.], dtype=np.float32)),) * 3)
+
+    def __iter__(self):
+        """Return this independently positioned source iterator."""
+        return self
+
+    def __next__(self):
+        """Return the next pair, raising StopIteration after all three pairs."""
+        return next(self.values)
+
+    def close(self):
+        """Record one close attempt and raise the secondary cleanup failure."""
+        self.closes.append(True)
+        raise RuntimeError("source close failed")
 
 
 class CountingModel(Model):
@@ -227,6 +250,94 @@ def test_native_trainers_consume_authored_dataset_batches(backend):
     assert data.example_cardinality().require_finite() == 5
     assert (exp.state.step, exp.state.examples_seen) == (3, 5)
     assert exp.train_fn.training_preparation.consumer_specs[0].backend.value == backend
+
+
+def test_torch_update_failure_survives_source_cleanup_with_accepted_prefix(monkeypatch):
+    """A failed second update keeps the accepted first update and its primary error."""
+    torch = pytest.importorskip("torch")
+    from dryml.data import GeneratorDataset
+    from dryml.models.torch import Model, Optimizer, Training
+
+    FailingClosePairs.closes.clear()
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    dataset = Batch(GeneratorDataset(FailingClosePairs, spec=(spec, spec)), 1)
+    model = Model(torch.nn.Linear, 1, 1)
+    trainer = Training(
+        optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.01),
+        loss_cls=torch.nn.MSELoss, verbose=0,
+    )
+    exp = Experiment(model, trainer, train_data=dataset)
+    original = torch.optim.SGD.step
+    calls = []
+
+    def step(optimizer, *args, **kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            raise ValueError("update failed")
+        return original(optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.SGD, "step", step)
+    with pytest.raises(ValueError, match="update failed"):
+        trainer(exp)
+    assert FailingClosePairs.closes == [True]
+    assert (exp.state.step, exp.state.examples_seen, exp.state.next_batch) == (1, 1, 1)
+
+
+def test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache(monkeypatch):
+    """Selected TF calls cross once and retain element/batch and cache semantics."""
+    tf = pytest.importorskip("tensorflow")
+    from dryml.models.tf import Sequential
+
+    model = Sequential(layer_defs=(F("Dense", units=2),))
+    element_spec = TensorSpec("float32", shape=(3,), backend="numpy")
+    batch_spec = TensorSpec("float32", shape=(3,), batch=2, backend="numpy")
+    element = model.find_implementation(input_spec=element_spec)
+    batched = model.find_implementation(input_spec=batch_spec)
+    import dryml.methods.conversion as conversion
+    crossings = []
+    original_convert = conversion.convert
+    monkeypatch.setattr(conversion, "convert",
+                        lambda edge, value: (crossings.append(edge), original_convert(edge, value))[1])
+
+    assert tuple(element(np.zeros((3,), dtype=np.float32)).shape) == (2,)
+    assert tuple(batched(np.zeros((2, 3), dtype=np.float32)).shape) == (2, 2)
+    assert crossings == [element.conversion_edge, batched.conversion_edge]
+
+    model.learn()
+    direct = model(tf.zeros((1, 3), dtype=tf.float32))
+    assert model.call_mode == "cached"
+    assert tuple(model(tf.zeros((1, 3), dtype=tf.float32)).shape) == tuple(direct.shape)
+    model.eager()
+    assert model.call_mode == "eager"
+
+
+def test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache(monkeypatch):
+    """Selected Torch calls cross once and retain element/batch and cache semantics."""
+    torch = pytest.importorskip("torch")
+    from dryml.models.torch import Sequential
+
+    model = Sequential(layer_defs=(F("Linear", 3, 2),))
+    model.prep_eval()
+    element_spec = TensorSpec("float32", shape=(3,), backend="numpy")
+    batch_spec = TensorSpec("float32", shape=(3,), batch=2, backend="numpy")
+    element = model.find_implementation(input_spec=element_spec)
+    batched = model.find_implementation(input_spec=batch_spec)
+    import dryml.methods.conversion as conversion
+    crossings = []
+    original_convert = conversion.convert
+    monkeypatch.setattr(conversion, "convert",
+                        lambda edge, value: (crossings.append(edge), original_convert(edge, value))[1])
+
+    assert tuple(element(np.zeros((3,), dtype=np.float32)).shape) == (2,)
+    assert tuple(batched(np.zeros((2, 3), dtype=np.float32)).shape) == (2, 2)
+    assert crossings == [element.conversion_edge, batched.conversion_edge]
+
+    model.learn()
+    direct = model(torch.zeros((1, 3), dtype=torch.float32))
+    assert model.call_mode == "cached"
+    assert tuple(model(torch.zeros((1, 3), dtype=torch.float32)).shape) == tuple(direct.shape)
+    model.eager()
+    assert model.call_mode == "eager"
 
 
 def test_jax_trainer_consumes_authored_dataset_batches():
