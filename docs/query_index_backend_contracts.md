@@ -35,7 +35,7 @@ The terminal-owned SourceCapture also retains effective outer refresh, scan,
 indexed-only, verification, witness, and depth controls for all nested consumers,
 including external restriction and occurrence-target scopes. Authority capture
 and explicit recovery reject prohibited scans before inventory IO; warning mode
-reports the first required scan before it starts. Forced refresh grants no scan
+reports the first required scan before it starts. Explicit refresh grants no scan
 permission. Owner/target projection preserves controls and existential semantics.
 
 Verification budgeting counts graph-exact detached identity admissions, not
@@ -179,10 +179,12 @@ settings are checked. Different destinations sharing one dirty-token domain or
 incompatible presentations raise `QueryIndexIncompatible` before any maintenance,
 even inside a Repo where source-key bindings previously hid later handles. Valid
 persisted foreign ownership is inspected for every accepted target before starting
-any cycle; the backend also preserves its U1 ownership checks after replacement
+any cycle; the backend also rechecks ownership after replacement
 claim acquisition. Other backends retain instance identity. A consistently chosen
-custom SQLite destination is supported; no cross-process destination registry is
-introduced. Attachments after the retained cut participate next terminal.
+custom SQLite destination is supported. Independently maintained destinations over
+one invalidation domain across clients remain unsupported; the terminal-local guard
+does not globally repair that configuration or introduce a cross-process destination
+registry. Attachments after the retained cut participate next terminal.
 
 `"auto"` performs no terminal-wide sweep or syntax-based special-case refresh.
 Authority-only broad/exact/metadata paths leave unused sidecars untouched, even
@@ -192,8 +194,7 @@ never maintains derived state; it uses ready views or authority fallback/refusal
 Pending explicit cycles require scan/indexed-only admission before claiming or
 joining an attempt, including ready validation. Completed True uses auto demand
 behavior; otherwise-supported indexed prefixes can reuse it without a new scan.
-Explicit admission precedes backend IO,
-even if ready. Warning mode warns once before the first inventory. Construction,
+Warning mode warns once before the first inventory. Construction,
 ordinary explanation, and identity/occurrence zero prefixes acquire nothing.
 
 Each terminal retains cumulative admissions and started inventory work through

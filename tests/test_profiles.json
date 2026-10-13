@@ -409,10 +409,14 @@
           ]
         },
         "tests/core/test_query_v3_restrictions.py": {
-          "rationale": "Retain typed metadata failure, external-scope scan refusals, warnings, demand-driven auto boundaries, explicit refresh controls, and exact-selective coverage; sample the external scope/policy product by axis and keep its full matrix in focused verification.",
+          "rationale": "Retain typed metadata failure, external-scope scan refusals, warnings, exact refresh-policy validation, backend-unavailability consumers, demand-driven auto boundaries, explicit refresh controls, and exact-selective coverage; sample the external scope/policy product by axis and keep its full matrix in focused verification.",
           "functions": [
             "test_u2_completed_prefix_admission_and_fresh_authority",
             "test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals",
+            "test_v3_refresh_rejects_values_outside_its_exact_policy_domain",
+            "test_v3_repo_refresh_reports_only_completed_reconciliation",
+            "test_v3_repo_auto_refresh_tolerates_index_open_unavailability",
+            "test_v3_store_auto_refresh_tolerates_index_open_unavailability",
             "test_v3_metadata_read_failure_is_not_a_missing_field",
             "test_v3_metadata_keeps_scalar_types_and_validates_every_populated_leaf",
             "test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed",

@@ -280,7 +280,29 @@ class DirStore(Store):
         return index
 
     def rebuild_query_index(self) -> ReconcileReport:
-        """Rebuild SQLite solely by scanning validated authoritative DefinitionRecords."""
+        """Request unconditional replacement of the configured SQLite sidecar.
+
+        Scans validated Store authority and uses the backend's default forced
+        build claim, unlike refresh(True)/refresh("always"), which may only
+        validate a correct ready sidecar. Replacement is staged and validated;
+        Store records are never rewritten.
+
+        Returns:
+            ReconcileReport with the rebuild action and observed generations.
+            The backend may decline a build claim; this report alone is not
+            strict reconciliation evidence. Use backend ``refresh(True)`` when
+            successful maintenance must be proven.
+
+        Raises:
+            QueryIndexUnavailable: If no persistent backend is available.
+            QueryIndexError: If authority capture, compatibility, contention,
+                staging, activation, or captured-token acknowledgement fails.
+                Failure after visible activation does not imply rollback.
+
+        Side Effects:
+            An owned rebuild replaces derived index files and acknowledges only
+            captured covered dirty tokens. Later tokens remain for recovery.
+        """
         index = self._open_rebuildable_query_index()
         before = index.status()
         index.rebuild()
@@ -297,7 +319,28 @@ class DirStore(Store):
         )
 
     def reconcile_query_index(self) -> ReconcileReport:
-        """Validate or safely rebuild a missing, stale, or corrupt SQLite sidecar."""
+        """Report one reconciliation of the configured persistent query index.
+
+        A correct ready sidecar is validated against graph-exact Store authority
+        without replacement; missing, divergent, or recoverable damaged derived
+        state is rebuilt. This method retains no cross-call completion state.
+
+        Returns:
+            ReconcileReport with historical issues and actual maintenance phases.
+            Ordinary backend failures become error issues. ``validated`` records
+            validation work, not success; ``changed`` records visible activation,
+            even when acknowledgement fails. Neither implies a successful cycle.
+
+        Raises:
+            QueryIndexUnavailable: If no persistent backend can be opened.
+            QueryIndexError: If opening the configured backend fails.
+            BaseException: Cancellation/interruption propagates rather than
+                returning a successful report.
+
+        Side Effects:
+            May replace derived files and acknowledge captured covered dirty
+            tokens. Store authority and later/unrelated tokens are preserved.
+        """
         return self._open_rebuildable_query_index().reconcile()
 
     def validate_query_index(self, *, thorough: bool = False):

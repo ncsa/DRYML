@@ -159,6 +159,8 @@ authority with external target metadata scopes before root or target filtering,
 including empty domains. Metadata holders contribute authority proof only, not
 candidate admissions or additional roots/targets.
 
+## Refresh Lifecycle And Scan Controls
+
 `scan_policy("allow")` permits required authoritative inventory scans,
 `scan_policy("warn")` additionally emits one warning per scanning terminal, and
 `scan_policy("forbid")` rejects the terminal before scanning. `refresh(False)`
@@ -181,6 +183,7 @@ backend `refresh(True)` and `refresh("always")` likewise perform one independent
 cycle per call. Construction, ordinary `explain()`, and identity/occurrence
 `take(0)` perform no maintenance or source acquisition. Explicit backend failures
 propagate; absent optional backends create no maintenance target.
+Memory and disabled Store policies have no persistent refresh obligation.
 
 ```python
 universe = repo.query().refresh(True)
@@ -212,7 +215,7 @@ even if a later retry already succeeded. Failed/interrupted targets remain retry
 successful targets survive later target failure and evaluation/cardinality/budget
 failure. Published attempt outcomes are immutable: interruption after publication
 can fail the owner terminal without reversing completion or a joined outcome.
-Owner exceptions propagate unchanged; interrupted-owner waiters receive
+Owner exceptions propagate unchanged; failed/interrupted-owner waiters receive
 actionable `QueryIndexError`. Waiter interruption detaches without cancelling the
 owner. Same-thread self-reentry raises `QueryIndexBusy` promptly. Independent
 universes have no global single-flight guarantee.
@@ -225,6 +228,9 @@ raise `QueryIndexIncompatible` before maintenance. One consistently configured
 custom destination per Store dirty-token domain is supported. Multiple visible
 destinations sharing that domain are rejected, including inside one Repo. This is
 a terminal-local check, not a cross-client or cross-process destination registry.
+Independently maintaining multiple destinations for the same invalidation domain
+across clients is unsupported: shared consumable dirty tokens cannot acknowledge
+each destination independently. Configure one destination consistently across clients.
 A Store attached after topology retention joins the next terminal. Inherited Repo
 topology after fork raises `RuntimeError` before the parent-process configuration
 lock; open a fresh Repo in the child. Query does not reset Repo-owned locks.
@@ -233,11 +239,11 @@ share pending child request state. Direct Store execution remains subject to exi
 Store, import, and SQLite lifecycle rules and uses fresh views. Requests are ephemeral
 and process-local; there is no new serialization, transport, or deepcopy contract.
 
-These are terminal-owned controls: they apply to producers **and** external
-stored, alias, and metadata scopes, algebra operands, closure, occurrence targets,
-and owner/target projections. A fixed producer is source-free only when its
-restrictions are source-free too. Projections inherit controls without inheriting
-raw occurrence caps. An explicit control on the outer query governs its nested
+Refresh and scan/index policies are terminal-owned controls: they apply to
+producers **and** external stored, alias, and metadata scopes, algebra operands,
+closure, occurrence targets, and owner/target projections. A fixed producer is
+source-free only when its restrictions are source-free too. Projections inherit
+controls without inheriting raw occurrence caps. An explicit control on the outer query governs its nested
 execution; algebra construction still rejects incompatible operand policies.
 Warnings precede the first inventory or recovery scan, once per terminal.
 Pending explicit cycles require scan admission even on ready sidecars, before

@@ -3666,6 +3666,32 @@ class Repo:
         self._query_catalog.refresh(True)
 
     def refresh_index(self, *, force: bool = True):
+        """Refresh configured persistent indexes and the Repo's memory catalog.
+
+        This is an immediate, repeatable backend operation, not a shared Query
+        one-shot request. Correct ready SQLite sidecars validate without
+        replacement; use the Store's ``rebuild_query_index()`` when replacement
+        is required.
+
+        Args:
+            force: bool selecting one explicit reconciliation cycle per call
+                when True. False requests backend readiness recovery and memory
+                hydration of unseen eligible Stores; unlike Query auto execution,
+                this method explicitly visits configured backends.
+
+        Returns:
+            This Repo after both backend operations return successfully.
+
+        Raises:
+            QueryIndexUnavailable: If an explicit cycle cannot reach a backend.
+            QueryIndexError: If backend reconciliation or memory hydration fails.
+                Earlier successful backend work is not rolled back.
+
+        Side Effects:
+            May read Store inventories, replace derived sidecars, acknowledge
+            captured dirty tokens, and rehydrate the memory catalog. Store
+            authority is never rewritten.
+        """
         self._query_index.refresh(True if force else "auto")
         self._query_catalog.refresh(True if force else "auto")
         return self

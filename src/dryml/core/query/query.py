@@ -1661,11 +1661,12 @@ class IdentityQuery:
         compatible target completes once and later execution uses auto demand
         behavior. ``"always"`` reconciles every participating terminal. All explicit
         overrides replace inherited obligations on this expression, preserving
-        originals. Ready validation does not force replacement. Authoritative Store
+        originals. Ready validation does not force replacement; use the Store's
+        ``rebuild_query_index()`` for unconditional replacement. Authoritative Store
         records are never rewritten. Construction, ordinary explain, and zero
         prefixes remain inert.
         This effective outer policy includes external scopes and projections;
-        forced refresh cannot authorize a scan forbidden by scan/index controls.
+        explicit refresh cannot authorize a scan forbidden by scan/index controls.
         Pending callers require admission before owning or joining work. Joined
         callers observe that exact attempt's outcome, including failure followed
         by another caller's successful retry. Failure/interruption leaves targets

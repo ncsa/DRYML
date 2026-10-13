@@ -519,11 +519,16 @@ class SQLiteStoreQueryIndex:
         skipping root-row metadata checks or staged validation.
 
         Args:
-            stats: Optional query statistics updated before authority capture,
+            stats: QueryStats or None, updated before authority capture,
                 retaining started inventory expenditure even when rebuild fails.
-            quarantine_existing: Preserve an incompatible or corrupt previous
+            quarantine_existing: bool; preserve an incompatible or corrupt previous
                 sidecar after successful replacement when possible.
-            force: Acquire the build claim even when another ready index exists.
+            force: bool; acquire the build claim even when another ready index exists.
+
+        Returns:
+            None after owned replacement and captured-token acknowledgement, or
+            after a declined build claim. A declined claim alone is not strict
+            reconciliation success; use ``refresh(True)`` for that contract.
 
         Raises:
             QueryIndexError: If authoritative roots are invalid, staging fails,
@@ -531,6 +536,10 @@ class SQLiteStoreQueryIndex:
             QueryIndexUnavailable: If SQLite is unavailable.
             QueryIndexIncompatible: If a valid persisted foreign owner or
                 unsupported future metadata prevents replacement.
+
+        Side Effects:
+            May replace derived files and acknowledge captured covered tokens.
+            Later tokens survive. Failure after activation does not imply rollback.
         """
 
         self._assert_sidecar_rebuildable()
@@ -544,12 +553,24 @@ class SQLiteStoreQueryIndex:
     def reconcile(self) -> ReconcileReport:
         """Report one strict reconciliation attempt against Store authority.
 
-        Returns a ReconcileReport retaining historical issues and actual phase
-        outcomes. Ordinary failures become error issues; cancellation propagates.
-        ``validated`` records work performed, not success. ``changed`` records
-        this attempt's visible activation even if acknowledgement later fails.
-        Only derived files/tokens are mutated; Store authority is never rewritten.
-        Use refresh(True) when failure must raise rather than return a report.
+        Ready graph-exact agreement preserves the sidecar; repair requires staged
+        validation, activation, and captured-token acknowledgement. Use
+        ``refresh(True)`` when ordinary failure must raise rather than return a
+        report. Neither method retains cross-call completion state.
+
+        Returns:
+            ReconcileReport retaining historical issues and actual phase outcomes.
+            Ordinary failures become error issues. ``validated`` records work
+            performed, not success; ``changed`` records this attempt's visible
+            activation even if acknowledgement later fails. Normal report return
+            alone is not strict maintenance completion evidence.
+
+        Raises:
+            BaseException: Cancellation/interruption propagates.
+
+        Side Effects:
+            May replace derived files and acknowledge captured covered dirty
+            tokens, preserving Store authority and later/unrelated tokens.
         """
         before = None
         progress = _ReconcileProgress(QueryStats())

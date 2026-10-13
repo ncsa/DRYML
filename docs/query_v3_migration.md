@@ -92,6 +92,17 @@ source counts are disclosure-capped, while `candidate_rows_read`,
 `cdef_blobs_decoded`, and `pages_fetched` retain exact keyset-page work through
 fixed-result refinement and algebra.
 
+## Refresh Lifecycle Migration
+
+| Previous intent | Current API |
+| --- | --- |
+| Refresh once, then reuse branches with fresh authority | Keep one `query.refresh(True)` universe; ordinary derivatives share its request |
+| Repeat explicit maintenance at every terminal | `query.refresh("always")` |
+| Request another cycle after completion | Call `query.refresh(True)` again |
+| Replace a persistent index unconditionally | `store.rebuild_query_index()` |
+| Read current authority without maintaining derived state | `query.refresh(False)` |
+| Recover only indexes consumed by execution | `query.refresh("auto")` (the default) |
+
 Controls now survive owner/target projections and govern external stored, alias,
 and metadata scopes as well as nested producers. Algebra operands must agree on
 policies at composition; a later explicit outer override applies throughout the
@@ -104,6 +115,20 @@ copies. A second explicit `refresh(True)` creates a new request. Use
 without forcing replacement, so `"always"` does not reproduce the old unconditional
 rebuild behavior; use `rebuild_query_index()` when unconditional replacement is
 required. Direct backend calls remain independently repeatable one-cycle operations.
+`Repo.refresh_index(force=True)` likewise requests reconciliation on every call;
+its `force` parameter does not force replacement of a correct ready SQLite sidecar.
+
+```python
+once = repo.query().refresh(True)
+once.cdefs().count()              # explicit cycle, then fresh evaluation
+once.state_refs().collect()       # fresh authority; completed targets use auto
+once.refresh(True).count()        # new one-shot request
+
+repeated = repo.query().refresh("always")
+repeated.count()                  # validates a correct ready sidecar
+repeated.count()                  # validates again; does not force replacement
+store.rebuild_query_index()       # explicit replacement when required
+```
 
 Combining completed disjoint universes preserves operand-local bindings and adds no
 cross-operand cycles. New external scopes extend inherited requests, coalescing
@@ -114,17 +139,14 @@ occurrences, and both projections share lineage; refinements of fixed IdentitySe
 and OccurrenceSet results are detached. Empty results retain source/scope obligations,
 empty available Stores participate, and optional absent targets remain pending.
 
-Concurrent same-request callers join exact attempt outcomes, then recheck pending
-pairs before owning at most one new cohort cycle per target. A request created after
-admission receives no earlier attempt's credit. Joined failure remains failure even
-after a fast successful retry. Failed/interrupted targets are retryable in later
-terminals; partial target success and later evaluation/budget/cardinality failure do
-not undo completion. Owners retain original exceptions; waiters get actionable
-QueryIndexError on owner failure/interruption. Waiter interruption does not cancel
-an owner; same-thread self-reentry raises QueryIndexBusy. Completed requests use
-auto demand behavior and fresh terminal authority rather than cached facts/proofs.
-Otherwise-supported completed indexed prefixes may retain forbid/indexed-only
-controls; pending callers cannot join scan work to bypass admission.
+Same-request callers single-flight each target and observe exact joined outcomes;
+later-created requests receive no historical credit. Failed/interrupted targets
+remain retryable in later terminals, while successful targets survive partial or
+evaluation failure. Owners retain original exceptions; failed/interrupted-owner
+waiters receive `QueryIndexError`. Waiter interruption leaves the owner running,
+and same-thread self-reentry raises `QueryIndexBusy`. Completed requests use fresh
+terminal authority and auto demand behavior, including otherwise-supported indexed
+prefixes under forbid/indexed-only controls.
 
 Auto refresh is now demand-driven. Broad authority and metadata queries no longer
 clean unused dirty sidecars as an incidental side effect. Use an explicit cycle
@@ -134,18 +156,22 @@ policy. Ordinary explanation, construction, and identity/occurrence `take(0)`
 remain inert. Optional absent indexes do not become fabricated targets; explicitly
 configured unavailability and explicit maintenance failures surface to the caller.
 
-All visible producer/scope configurations are checked before maintenance, including
-equivalent handles inside a Repo. Equivalent normalized custom destinations
-coalesce only when ownership, dirty-token domain, semantics, and settings agree.
-Conflicting presentations or multiple destinations sharing one Store dirty-token
-domain raise `QueryIndexIncompatible`; select one destination consistently across
-clients. There is no global destination registry. Repo topology is retained once
-per terminal, so later attachments participate next time. Forked children must
-open a fresh Repo: inherited topology raises `RuntimeError` before its owner lock.
-Request synchronization resets before child acquisition and shared derivatives
-remain shared/pending there. Direct Store-backed execution keeps existing Store,
-import, and SQLite lifecycle rules. There is no new query serialization or deepcopy
-portability contract and no global refresh cache or cross-terminal authority proof.
+Configure one persistent destination consistently per Store dirty-token domain,
+including across clients. Terminal-local checks reject visible conflicting
+destinations, ownership, or settings with `QueryIndexIncompatible`; independently
+maintained destinations sharing that domain across clients remain unsupported.
+Repo topology is retained once per terminal, so later attachments participate next
+time. After fork, open a fresh Repo: inherited topology raises `RuntimeError`
+before its owner lock. Shared request state resets to pending before child
+acquisition, subject to existing Store/import/SQLite lifecycle rules. Requests
+remain process-local, with no new query serialization or deepcopy contract.
+
+See [Graph Querying](graph_querying.md#refresh-lifecycle-and-scan-controls) for the
+full lineage, cohort, interruption, and process-local lifecycle contract, and
+[Backend Contracts](query_index_backend_contracts.md#explicit-backend-reconciliation)
+for strict maintenance success versus report-oriented reconciliation.
+
+## Verification Budgets And Maintenance Diagnostics
 
 `max_verify` has a tightened **cumulative admission** contract. Ordinary inventory
 and fixed refinement reserve the entire detached domain before filtering or
@@ -179,6 +205,11 @@ query operator effect boundary.
 `tests/core/test_query_v3_acceptance.py` is the compact cross-layer acceptance
 matrix. Its named cases cover stored authority and metadata restrictions, typed
 reference traversal, fixed-set algebra and bounded terminals, query-effect
-boundaries, exact save/load, and derived-sidecar recovery. The focused U1-U6 test
-modules retain the complete error and parameter matrices; the representative profile
-uses acceptance cases rather than expanding those products.
+boundaries, exact save/load, and derived-sidecar recovery. The owning focused test
+modules retain the complete error and parameter matrices. The representative profile
+also selects named lifecycle regressions for one-shot/repeated cadence, operand-local
+lineage, scope extension, controls, fresh authority, and publication failure.
+SQLite backend/concurrency tests retain reconciliation, single-flight, joined
+outcomes, interruption, fork/reset, ownership, and empty-token cleanup coverage
+without curated function lists. Explicit exhaustive-only products remain outside
+routine selection; sampled products retain representative values on every axis.

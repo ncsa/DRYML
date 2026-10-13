@@ -2,6 +2,57 @@
 
 ## 0.3.0b1 (unreleased)
 
+Query `refresh(True)` now creates a lazy process-local **one-shot request**, shared
+by ordinary derivation, shallow copies, closure, occurrences, and owner/target
+projections. Each compatible persistent destination completes it once. Later
+terminals still capture fresh authority and proofs, using demand-driven auto
+recovery rather than reusing query evidence. Another explicit `refresh(True)`
+creates a new request. Migrate repeated per-terminal maintenance to
+`refresh("always")`; it repeats reconciliation, not the old forced rebuild.
+Correct ready SQLite sidecars validate without replacement. Use
+`store.rebuild_query_index()` for unconditional replacement. Direct backend
+True/always calls remain one independent cycle per call.
+
+Algebra preserves operand-local lineage without Cartesian request/target widening.
+New external scopes and Repo attachments introduce pending target obligations;
+empty filtered results retain their obligations. Explicit outer True replaces
+inherited intent with one new request over the expression, while False/auto/always
+suppress it on that expression. Fixed IdentitySet/OccurrenceSet refinements detach
+from live requests. Construction, ordinary explanations, and identity/occurrence
+`take(0)` remain inert. Auto now recovers only indexes consumed by the selected
+execution path; authority-only broad, exact-positive, and external metadata queries
+leave unused dirty sidecars untouched. False performs no derived maintenance.
+
+Same-request concurrent terminals single-flight targets and observe the exact
+joined attempt's outcome. Later-created requests receive no credit from older
+attempts; remaining obligations coalesce into at most one new cohort per target.
+Failure/interruption is retryable in a later terminal, while successful targets
+survive partial failure and later evaluation failure. Owner exceptions remain
+original; joined failure/interruption raises actionable `QueryIndexError`.
+Waiter interruption does not cancel the owner, self-reentry raises `QueryIndexBusy`,
+and published outcomes remain immutable. Request and SQLite synchronization reset
+by PID before child acquisition. Inherited Repo topology fails before its parent
+lock; open a fresh child Repo. No query transport or deepcopy contract is added.
+
+Explicit SQLite reconciliation compares a fenced authoritative inventory with
+graph-exact encoded stored roots and checks active destination continuity. Repair
+completes only after staged validation, activation, and captured-token
+acknowledgement; normal `ReconcileReport` return or `validated=True` is not success
+evidence. Foreign persisted ownership is refused before scanning and after claim
+acquisition. Equivalent configured destinations coalesce only after all visible
+presentations agree. One destination per Store invalidation domain is supported;
+terminal-local checks reject visible conflicts, but independently maintained
+multiple destinations across clients remain unsupported.
+
+Pending explicit work requires scan/indexed-only admission even for ready
+validation or joining another caller. Maintenance accounting retains started work
+through failures and retries, charges owners rather than waiters, and reports
+actual actions as `rebuild > validate > waited > reused > none`, separately from
+declared policy. Empty captured dirty-token sets skip cleanup-only authority reads
+without weakening readiness, staged validation, publication fencing, or preservation
+of later/unrelated tokens. Store formats and SQLite schema are unchanged. See
+[Query V3 Migration](query_v3_migration.md#refresh-lifecycle-migration).
+
 Stored-CDef indexed prefixes now inspect current main authority before every answer,
 including empty pages. A closure-only definition made main after a ready index cut
 can no longer disappear: permitted complete inventory fallback returns it, while
@@ -22,7 +73,7 @@ Query V3 terminal controls now apply through external stored/alias/metadata
 scopes, algebra, closure, occurrence targets, and owner/target projections.
 Projections inherit controls while remaining existential. Explicit outer
 overrides govern nested execution; incompatible algebra policies still fail at
-composition. Disabled refresh preserves missing/dirty sidecars; forced refresh
+composition. Disabled refresh preserves missing/dirty sidecars; explicit refresh
 does not authorize forbidden recovery scans. Warnings precede required scans.
 
 Indexed `take()` now enforces the previously omitted verification-budget check.
