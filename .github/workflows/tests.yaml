@@ -199,6 +199,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r test_requirements.txt -r jax_training_test_requirements.txt
           if [[ "${{ matrix.install }}" == "tf-torch" ]]; then
+            # This CPU qualification must not load the CUDA wheel's Triton stack.
+            python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.14.1+cpu"
             python -m pip install ".[tf,torch]"
           else
             python -m pip install .
@@ -226,6 +228,8 @@ jobs:
           if os.environ["QUALIFICATION_INSTALL"] == "tf-torch":
               import tensorflow
               import torch
+              assert torch.version.cuda is None
+              torch.optim.SGD([torch.nn.Parameter(torch.ones(1))], lr=0.1)
               packages.extend(("tensorflow", "torch"))
           print(f"python: {platform.python_version()}")
           print(f"jax backend: {jax.default_backend()}")

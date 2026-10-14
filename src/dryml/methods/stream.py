@@ -221,7 +221,8 @@ class _CursorLifecycle:
         Raises:
             BaseException: First cleanup failure after every resource gets an
                 attempt. Unexpected cleanup StopIteration becomes RuntimeError
-                with the original cause. Further failures are exception notes.
+                with the original cause. Further failures are exception notes,
+                retained in ``__notes__`` even on Python without ``add_note``.
         """
 
         if self._cleanup_done:
@@ -247,12 +248,16 @@ class _CursorLifecycle:
 
     @staticmethod
     def _annotate_cleanup(primary: BaseException, errors: list[BaseException]) -> None:
+        if not errors:
+            return
+        message = "Cursor cleanup also failed: " + "; ".join(
+            f"{type(error).__name__}: {error}" for error in errors
+        )
         add_note = getattr(primary, "add_note", None)
-        if errors and add_note is not None:
-            add_note(
-                "Cursor cleanup also failed: "
-                + "; ".join(f"{type(error).__name__}: {error}" for error in errors)
-            )
+        if callable(add_note):
+            add_note(message)
+        else:
+            primary.__notes__ = [*getattr(primary, "__notes__", ()), message]
 
     def _close_resources(self) -> list[BaseException]:
         errors = self._deferred_cleanup

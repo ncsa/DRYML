@@ -199,6 +199,9 @@ Alternative-backed Methods begin with `call_mode == "eager"`. Each direct call
 derives observable backend and batch facts, selects a unique safe candidate, and
 invokes it locally. Direct calls do not imply dispatch, sessions, persistence,
 managed execution, code transformation, or backend warmup.
+Weak preparation-state cleanup may run synchronously during another Method's
+state allocation; the side-table synchronization permits this same-thread
+re-entry without retaining the discarded Method.
 
 Dense runtime arrays do not reveal element-versus-batched intent. While eager,
 `default_batched` accepts exact `True`, exact `False`, or `None`. It fills only
@@ -278,7 +281,9 @@ contract: a failed reprepare leaves learning mode with no old or partial plan.
 The protected lifecycle in `methods.stream` is shared with ordinary Dataset and
 native-training cursors. Use a cursor context manager around consumer work to
 close resources deterministically and preserve a consumer failure over cleanup
-errors. `observed_eof` records successful root-output termination independently
+errors. Cleanup diagnostics are retained in the primary exception's `__notes__`,
+including on Python 3.10 where `BaseException.add_note()` is unavailable.
+`observed_eof` records successful root-output termination independently
 of closure; explicit close, interruption, acquisition/operator/validation failure,
 and strict count shortfall never certify EOF. Genuine EOF is recorded before
 cleanup and survives cleanup errors. Non-pull `StopIteration` becomes a causal

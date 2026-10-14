@@ -54,6 +54,30 @@ def test_dataset_cursors_are_independent_and_close_their_own_sources():
     assert not hasattr(dataset, "_cursor")
 
 
+def test_cleanup_diagnostic_survives_without_exception_add_note():
+    """Python 3.10-style errors keep cleanup evidence and their primary identity."""
+    from dryml.data import DatasetCursor
+
+    class LegacyError(ValueError):
+        add_note = None
+
+    class Resource:
+        def close(self):
+            raise OSError("source close failed")
+
+    primary = LegacyError("consumer failed")
+    primary.__notes__ = ["prior diagnostic"]
+    cursor = DatasetCursor(iter(()))
+    cursor._own(Resource())
+    with pytest.raises(LegacyError) as caught:
+        with cursor:
+            raise primary
+    assert caught.value is primary
+    assert primary.__notes__[0] == "prior diagnostic"
+    assert "OSError: source close failed" in primary.__notes__[1]
+    assert not cursor.observed_eof
+
+
 @pytest.mark.parametrize("count", (-1, True, 1.0))
 @pytest.mark.parametrize("prepared", (False, True))
 def test_cursor_skip_rejects_invalid_counts_before_advancement(count, prepared):

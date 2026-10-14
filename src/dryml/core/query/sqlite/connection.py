@@ -136,10 +136,12 @@ class SQLiteConnectionManager:
             durability, and contention settings.
 
     Side Effects:
-        Registers the manager for same-thread path close barriers. Database
+        Registers the manager for path close barriers. Database
         handles and writable parent directories are created only when
         requested. Index read views lease their handles so rebuild teardown
         skips active readers; other direct handle users must coordinate teardown.
+        Discarding the manager best-effort closes its current-process handles;
+        use explicit close methods to observe cleanup errors deterministically.
     """
 
     _instances = WeakSet()
@@ -165,6 +167,14 @@ class SQLiteConnectionManager:
         self._lock_pid = os.getpid()
         with self._registry_lock():
             self._instances.add(self)
+
+    def __del__(self):
+        """Best-effort close owned handles on collection; leave inherited pools alone."""
+        try:
+            if getattr(self, "_lock_pid", None) == os.getpid():
+                self.close_all_current_process()
+        except Exception:
+            pass
 
     @property
     def path(self) -> Path:
@@ -208,7 +218,8 @@ class SQLiteConnectionManager:
 
         Side Effects:
             May create a writable database and its parent directory. Caches the
-            resulting handle until an explicit close or file-identity change.
+            resulting handle until an explicit close, idle publication barrier,
+            file-identity change, or manager collection.
             The handle remains assigned exclusively to the current process,
             thread-key, and access mode despite permitting manager-owned close
             from a coordinator thread.
@@ -329,6 +340,27 @@ class SQLiteConnectionManager:
         con.close()
         self._connections.pop(key, None)
         self._file_identities.pop(key, None)
+
+    @classmethod
+    def _close_idle_current_process_for_path(cls, path: str | Path) -> bool:
+        """Retire idle path handles; return whether protected handles remain."""
+        path_key = os.path.normcase(os.path.abspath(os.fspath(path)))
+        active = False
+        with cls._registry_lock():
+            managers = tuple(cls._instances)
+        for manager in managers:
+            manager_path = os.path.normcase(os.path.abspath(os.fspath(manager.path)))
+            if manager_path != path_key:
+                continue
+            with manager._process_lock():
+                for key, con in list(manager._connections.items()):
+                    if key[0] != os.getpid():
+                        continue
+                    if key in manager._leases or con.in_transaction:
+                        active = True
+                    else:
+                        manager._close_cached(key)
+        return active
 
     @classmethod
     def _close_current_thread_for_path(cls, path: str | Path) -> None:

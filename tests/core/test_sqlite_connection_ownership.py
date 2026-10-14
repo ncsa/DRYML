@@ -1,4 +1,6 @@
+import gc
 import threading
+import weakref
 
 import pytest
 
@@ -26,6 +28,49 @@ def _config(path):
 def _assert_closed(con):
     with pytest.raises(connection_module.require_sqlite().ProgrammingError):
         con.execute("SELECT 1")
+
+
+def test_discarded_manager_closes_owned_handles(tmp_path):
+    """Collecting an unused pool closes its handles rather than leaking SQLite resources."""
+    manager = SQLiteConnectionManager(_config(tmp_path / "discarded.sqlite"))
+    con = manager.connection()
+    reference = weakref.ref(manager)
+    del manager
+    gc.collect()
+    assert reference() is None
+    _assert_closed(con)
+
+
+def test_path_publication_barrier_closes_idle_threads_but_preserves_leases(tmp_path):
+    """Publication retires idle same-path pools without touching pinned or unrelated reads."""
+    path = tmp_path / "shared.sqlite"
+    manager = SQLiteConnectionManager(_config(path))
+    transactional = SQLiteConnectionManager(_config(path))
+    other = SQLiteConnectionManager(_config(tmp_path / "other.sqlite"))
+    idle = manager.connection()
+    active = transactional.connection()
+    active.execute("BEGIN")
+    unrelated = other.connection()
+    errors = []
+
+    def barrier():
+        try:
+            SQLiteConnectionManager._close_idle_current_process_for_path(path)
+        except BaseException as error:
+            errors.append(error)
+
+    with manager._read_lease() as (leased, _):
+        worker = threading.Thread(target=barrier)
+        worker.start()
+        worker.join(5)
+        assert not worker.is_alive() and errors == []
+        _assert_closed(idle)
+        assert leased.execute("SELECT 1").fetchone() == (1,)
+        assert active.in_transaction
+        assert unrelated.execute("SELECT 1").fetchone() == (1,)
+    manager.close_all_current_process()
+    transactional.close_all_current_process()
+    other.close_all_current_process()
 
 
 def test_connection_rejects_invalid_config_without_filesystem_effects(

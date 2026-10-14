@@ -6,7 +6,7 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 
 import pytest
 
@@ -960,7 +960,7 @@ def test_explicit_cycle_detects_wal_generation_change_in_active_destination(tmp_
         original(con, issues, **kwargs)
         if not mutations:
             identity = index._connections._path_identity()
-            with require_sqlite().connect(index.path) as writer:
+            with closing(require_sqlite().connect(index.path)) as writer, writer:
                 writer.execute("UPDATE catalog_state SET generation = generation + 1")
             assert index._connections._path_identity() == identity
             mutations.append(1)
@@ -1113,7 +1113,7 @@ def test_overlapping_foreign_destination_owner_is_refused_after_claim(tmp_path, 
         first.rebuild_query_index()
         owner = first.open_query_index()
         owner.close()
-        with require_sqlite().connect(path) as con:
+        with closing(require_sqlite().connect(path)) as con, con:
             con.execute(f"PRAGMA user_version = {schema_version}")
             assert con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone() == (owner.source_key,)
         first.mark_query_index_dirty()
@@ -1288,13 +1288,19 @@ def test_u7_replacement_preserves_active_same_process_reader(tmp_path):
         worker.start()
         try:
             worker.join(10)
-            assert not worker.is_alive() and not errors
+            assert not worker.is_alive()
+            if os.name == "nt":
+                assert len(errors) == 1 and isinstance(errors[0], QueryIndexBusy)
+            else:
+                assert not errors
             assert view._active and view._con.in_transaction
             assert next(view.iter_stored_identity_cdef_batches(batch_size=1)).cdefs == (root,)
             assert (view.index_uuid, view.generation, view.file_identity) == old
         finally:
             worker.join(10)
     assert not index._connections._leases
+    if errors:
+        index.rebuild(force=True)
     with index._retained_read_view() as fresh:
         assert fresh.generation > old[1]
         assert fresh.index_uuid != old[0] and fresh.file_identity != old[2]

@@ -8,6 +8,11 @@ from dryml.core.tensor_spec import Dynamic
 from dryml.methods.conversion import convert, make_edge
 
 
+def _require_backends(*backends):
+    for backend in backends:
+        pytest.importorskip({"numpy": "numpy", "tf": "tensorflow", "torch": "torch", "jax": "jax"}[backend])
+
+
 def _value(backend, array):
     if backend == "numpy":
         return array
@@ -44,6 +49,7 @@ def _array(value):
 def test_dense_cpu_handoffs_preserve_values_dtype_shape_and_owned_storage(source, target, monkeypatch):
     """Every supported direct CPU direction copies a strided dense value exactly."""
 
+    _require_backends(source, target)
     source_array = np.arange(12, dtype=np.float32).reshape(3, 4)[:, ::-1]
     source_array.setflags(write=False)
     spec = TensorSpec("float32", shape=(4,), batch=3, backend=source)
@@ -88,6 +94,7 @@ def test_dense_cpu_handoffs_preserve_values_dtype_shape_and_owned_storage(source
 def test_nested_handoff_preserves_container_types_and_short_dynamic_batch(monkeypatch):
     """Nested trees retain list/tuple/mapping shape with a short dynamic batch."""
 
+    _require_backends("torch")
     spec = {"x": TensorSpec("int32", shape=(2,), batch=Dynamic, backend="numpy"),
             "y": (TensorSpec("bool", shape=(), batch=Dynamic, backend="numpy"),
                   [TensorSpec("float32", shape=(), batch=Dynamic, backend="numpy")])}
@@ -123,6 +130,7 @@ def test_nested_handoff_preserves_container_types_and_short_dynamic_batch(monkey
 def test_nested_jax_handoffs_preserve_short_dynamic_batches(source, target):
     """Every JAX edge retains nested structure and one-element dynamic batches."""
 
+    _require_backends(source, target)
     spec = {
         "x": TensorSpec("int32", shape=(2,), batch=Dynamic, backend=source),
         "y": (TensorSpec("bool", shape=(), batch=Dynamic, backend=source),),

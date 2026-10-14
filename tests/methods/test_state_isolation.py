@@ -2,6 +2,8 @@
 
 import gc
 import os
+import subprocess
+import sys
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 
@@ -127,6 +129,37 @@ def test_cached_side_state_does_not_keep_method_instances_alive():
     gc.collect()
 
     assert reference() is None
+
+
+def test_side_state_creation_allows_same_thread_gc_cleanup():
+    """A cyclic Method collected during state allocation cannot deadlock its creator."""
+    code = """
+import gc
+import weakref
+from dryml.methods import method as implementation
+from tests.methods.test_state_isolation import Stateful
+
+gc.disable()
+victim = Stateful()
+victim.default_batched = True
+victim.cycle = victim
+key = id(victim)
+reference = weakref.ref(victim)
+probe = Stateful()
+del victim
+factory = implementation._PreparationState
+def collect_then_create(*args, **kwargs):
+    gc.collect()
+    return factory(*args, **kwargs)
+implementation._PreparationState = collect_then_create
+assert probe.call_mode == "eager"
+assert reference() is None
+assert key not in implementation._STATES
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("known_spec", (False, True))

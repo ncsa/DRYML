@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import weakref
 from dataclasses import dataclass, replace
-from threading import Lock
+from threading import RLock
 
 from dryml.annotations import AnnotatedMember, annotations_for_members
 from dryml.core.backend import Backend
@@ -66,7 +66,9 @@ class _PreparationState:
     training_conversion_edges: tuple[object, ...] = ()
 
 
-_STATE_LOCK = Lock()
+# Allocating state can collect another Method and synchronously run its weakref
+# cleanup on this same thread while the side-table lock is held.
+_STATE_LOCK = RLock()
 _STATES: dict[int, _PreparationState] = {}
 
 
@@ -98,7 +100,7 @@ def _fork_child_reset() -> None:
     """Replace inherited synchronization objects in a forked child without locking them."""
 
     global _STATE_LOCK, _STATES
-    _STATE_LOCK = Lock()
+    _STATE_LOCK = RLock()
     _STATES = {}
 
 

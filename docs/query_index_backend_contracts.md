@@ -73,11 +73,18 @@ reuse those facts rather than acquiring a newer selective cut or readmitting its
 unchanged domain.
 
 Read views lease existing manager-cached handles through transaction cleanup.
-Build-claim and replacement cache barriers close only unleased connections; they
-never tear down another active same-process reader. Transactions remain pinned to
+Build-claim barriers never tear down a leased reader. Replacement barriers retire
+idle same-path handles across every thread in the current process, while preserving
+leased readers and active transactions. Transactions remain pinned to
 their original sidecar; later unleased use detects replacement identity. WAL readers
 may cause an explicit bounded checkpoint/rebuild failure until they release. Direct
 unleased connection users still coordinate teardown themselves.
+Windows cannot replace a main file while its protected handles remain open;
+replacement raises retryable `QueryIndexBusy` without closing those handles or
+changing the canonical index. Close the retained reader, then retry the rebuild.
+Discarded connection managers best-effort close their owned current-process
+handles. Explicit close remains the deterministic way to observe cleanup errors;
+collection in a forked child does not close an inherited parent pool.
 
 Read views also belong to their entry process. A forked child must open a fresh
 view; inherited view operations raise `QueryIndexError` before touching the

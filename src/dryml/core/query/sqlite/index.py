@@ -536,6 +536,8 @@ class SQLiteStoreQueryIndex:
             QueryIndexUnavailable: If SQLite is unavailable.
             QueryIndexIncompatible: If a valid persisted foreign owner or
                 unsupported future metadata prevents replacement.
+            QueryIndexBusy: If an active reader prevents checkpoint or replacement.
+                On Windows, close retained readers before retrying replacement.
 
         Side Effects:
             May replace derived files and acknowledge captured covered tokens.
@@ -717,7 +719,7 @@ class SQLiteStoreQueryIndex:
             replacement_generation = _read_generation(con)
             replacement.close()
             self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
-            SQLiteConnectionManager._close_current_thread_for_path(self.path)
+            SQLiteConnectionManager._close_idle_current_process_for_path(self.path)
             self._checkpoint_and_cleanup_sidecars(
                 self.path,
                 label="canonical",
@@ -1920,7 +1922,8 @@ class SQLiteStoreQueryIndex:
             replaces the canonical sidecar through the active platform policy.
         """
 
-        SQLiteConnectionManager._close_current_thread_for_path(self.path)
+        if SQLiteConnectionManager._close_idle_current_process_for_path(self.path) and os.name == "nt":
+            raise QueryIndexBusy("SQLite query-index replacement is blocked by an active reader; retry after it closes.")
         if quarantine_existing and self.path.exists():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             target = self.path.with_name(f"{self.path.name}.quarantine-{stamp}")
@@ -1928,9 +1931,10 @@ class SQLiteStoreQueryIndex:
                 os.link(self.path, target)
             except OSError:
                 shutil.copy2(self.path, target)
-        # A quarantine copy can admit a final canonical read after the first
-        # close barrier; Windows requires that pooled handle closed as well.
-        SQLiteConnectionManager._close_current_thread_for_path(self.path)
+        # Windows replacement also requires idle handles on other threads closed.
+        # A quarantine copy can admit a final read after the first close barrier.
+        if SQLiteConnectionManager._close_idle_current_process_for_path(self.path) and os.name == "nt":
+            raise QueryIndexBusy("SQLite query-index replacement is blocked by an active reader; retry after it closes.")
         try:
             filesystem.publish_file(
                 replacement_path, self.path, replace=True,

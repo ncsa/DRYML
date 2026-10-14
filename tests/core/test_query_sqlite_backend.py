@@ -1,4 +1,5 @@
 import threading
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
@@ -153,7 +154,7 @@ def test_foreign_destination_owner_is_refused_before_scan(tmp_path, monkeypatch,
     first.rebuild_query_index()
     owner = first.open_query_index()
     owner.close()
-    with require_sqlite().connect(path) as con:
+    with closing(require_sqlite().connect(path)) as con, con:
         con.execute(f"PRAGMA user_version = {schema_version}")
         assert con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone() == (owner.source_key,)
     first.mark_query_index_dirty()

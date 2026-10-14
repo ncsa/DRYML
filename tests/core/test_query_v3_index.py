@@ -192,7 +192,7 @@ def test_missing_v3_projection_row_disables_indexed_only_claim(tmp_path, family)
     )
     assert index.v3_projection_coverage().projection_complete
 
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         table = "v3_identity_projection" if family == "identity" else "v3_relationship_projection"
         con.execute(
             f"DELETE FROM {table} WHERE root_graph_hash = "
@@ -221,7 +221,7 @@ def test_missing_stored_root_page_falls_back_or_rejects_indexed_only(tmp_path):
         store.write_definition_record(DefinitionRecord(value))
     store.rebuild_query_index()
     index = store.open_query_index()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute(
             "DELETE FROM stored_roots WHERE root_graph_hash = ?",
             (values[0].graph_hash(),),
@@ -243,12 +243,12 @@ def test_v3_schema_mismatch_rebuilds_only_the_sidecar(tmp_path):
     index = store.open_query_index()
     index.rebuild()
     before = store.read_definition_record(record.digest).to_bytes()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("PRAGMA user_version = 7")
 
     index.refresh("auto")
 
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         assert con.execute("PRAGMA user_version").fetchone()[0] == SQLITE_QUERY_INDEX_SCHEMA_VERSION
     assert store.read_definition_record(record.digest).to_bytes() == before
     assert index.v3_projection_coverage().projection_complete
@@ -980,7 +980,7 @@ def test_u7_sidecar_policy_and_derived_only_recovery(tmp_path, monkeypatch, stat
     elif state == "corrupt":
         index.path.write_bytes(b"not sqlite")
     else:
-        with sqlite3.connect(index.path) as con:
+        with closing(sqlite3.connect(index.path)) as con, con:
             con.execute("PRAGMA user_version = 7")
     original_rebuild = index.rebuild
     rebuilds = []

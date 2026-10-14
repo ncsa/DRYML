@@ -416,7 +416,11 @@ the CPU JAX stack alone and the same stack with DRYML's existing `tf` and
 `torch` extras. It pins JAX/JAXlib, Flax (including `flax.nnx`), and Optax,
 requires their imports, and records a CPU backend with CPU devices before
 running focused JAX import, first-class training, Dataset delivery, and managed
-local/subprocess restoration tests. This file is qualification-only: DRYML's
+local/subprocess restoration tests. The mixed installation uses PyTorch
+`2.14.1+cpu` from the official CPU wheel index, avoiding CUDA/Triton initialization
+in this CPU qualification. Its preflight asserts a CPU-only Torch build and
+constructs an optimizer so native import failures fail before the tests.
+This file is qualification-only: DRYML's
 existing lazy `jax` extra remains unchanged, and Flax/Optax are neither base
 dependencies nor a new package extra. The experimental training API remains
 responsible for selecting and reporting those dependencies.
