@@ -77,6 +77,8 @@ def exact_work_counts():
                 counts[kind] += 1
             if name == "_read_json":
                 counts["json_reads"] += 1
+            if name == "graph_equal" and frame.f_back.f_code.co_name == "_validate_snapshot_locals":
+                counts["path_definition_checks"] += 1
         if event == "c_call" and frame.f_code.co_name == "_validate_local_state_dir" and arg is hashlib.sha256:
             counts["definition_byte_hashes"] += 1
         if previous is not None:
@@ -120,6 +122,7 @@ def test_exact_plan_work_budget(tmp_path, size, monkeypatch):
     assert counts["DefinitionRecord"] == 2 * size + (size != 1)
     assert counts["definition_byte_hashes"] == size
     assert counts["json_reads"] == 3
+    assert counts["path_definition_checks"] == size
     assert len(payload_reads) == size
 
 

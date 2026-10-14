@@ -419,9 +419,7 @@ def _publish_managed_state_result(state_repo, obj, *, reservation,
         if (invocation._state_repo is not state_repo or invocation._obj is not obj
                 or invocation._ownership.reservation is not reservation):
             raise ManagedRecoveryError("invalid_publication_event", "publication does not belong to this invocation")
-        if invocation._publication_event is not None:
-            invocation._publication_event.expire()
-            invocation._publication_event = None
+        invocation._expire_publication_event()
     report = None
     try:
         state_ref, report = state_repo.save_object(

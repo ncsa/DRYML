@@ -1276,14 +1276,17 @@ class DirStore(Store):
         key = self._cut_snapshot_key(cut, reference.digest())
         directory = key[-1]
         validated = cut.locals.setdefault(key, {})
-        if not defer_payload and key not in cut.eager_snapshots:
-            self._validate_snapshot_locals(snapshot, directory, validated=validated)
-            cut.check(self)
-            cut.eager_snapshots.add(key)
-        manifests = self._validate_snapshot_locals(
-            snapshot, directory, paths=(path,), defer_payload=defer_payload,
-            validated=validated,
-        )
+        if not defer_payload:
+            if key not in cut.eager_snapshots:
+                manifests = self._validate_snapshot_locals(snapshot, directory, validated=validated)
+                cut.check(self)
+                cut.eager_snapshots[key] = manifests
+            manifests = cut.eager_snapshots[key]
+        else:
+            manifests = self._validate_snapshot_locals(
+                snapshot, directory, paths=(path,), defer_payload=True,
+                validated=validated,
+            )
         manifest = manifests[path]
         cut.check(self)
         return LocalStateSource(

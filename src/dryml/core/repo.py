@@ -88,7 +88,7 @@ class _AuthorityReadCut:
         self.selected_stores = tuple(selected_stores)
         self.snapshots = {}
         self.locals = {}
-        self.eager_snapshots = set()
+        self.eager_snapshots = {}
         self.resolved_state_refs = {}
         self.validated_state_refs = []
         self._stack = None
