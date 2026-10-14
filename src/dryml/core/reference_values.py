@@ -15,12 +15,15 @@ import builtins
 import hashlib
 import json
 import re
-from typing import Any, Iterator
+from typing import Any, Iterator, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from .freeze import FrozenDict
 from .utils.graph.path import GraphPath, GraphPathLike, Kwarg, Parameter, graph_path_sort_key, normalize_path
 from .utils.stable_hash import stable_int_hash
+
+if TYPE_CHECKING:
+    from .selector import ObjectSelector
 
 
 _NAMESPACE = ContextVar("dryml_object_namespace", default=())
