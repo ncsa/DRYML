@@ -44,6 +44,10 @@ def _train_data():
     return Batch(as_supervised(ArrayDataset((x, y)), 0, 1), 2)
 
 
+def _unknown_pairs(x, y):
+    return iter(zip(x, y))
+
+
 def test_basic_sklearn_training_updates_model_and_experiment_state(tmp_path):
     model = RegressionModel(linear_model.LinearRegression)
     repo = Repo(DirStore(tmp_path / "store"))
@@ -158,6 +162,29 @@ def test_sklearn_fit_failure_records_no_successful_transition():
         exp.train_fn(exp)
 
     assert (exp.state.epoch, exp.state.step, exp.state.examples_seen) == (0, 0, 0)
+
+
+def test_sklearn_retains_unknown_but_finite_legacy_materialization():
+    from dryml.core.cardinality import Cardinality
+    from dryml.data import GeneratorDataset
+
+    class CaptureEstimator:
+        def fit(self, x, y):
+            self.x, self.y = x.copy(), y.copy()
+            return self
+
+    x = np.asarray([[0.0], [1.0], [2.0]], dtype=np.float32)
+    y = np.asarray([0.0, 2.0, 4.0], dtype=np.float32)
+    source = GeneratorDataset(_unknown_pairs, x, y, spec=(
+        TensorSpec("float32", shape=(1,), backend="numpy"),
+        TensorSpec("float32", shape=(), backend="numpy"),
+    ))
+    assert source.yield_cardinality() == Cardinality.UNKNOWN
+    exp = Experiment(Model(CaptureEstimator), BasicTraining(), train_data=source)
+    exp.train_fn(exp)
+    np.testing.assert_array_equal(exp.model.obj.x, x)
+    np.testing.assert_array_equal(exp.model.obj.y, y)
+    assert (exp.state.step, exp.state.examples_seen) == (1, 3)
 
 
 def test_classifier_probability_spec_matches_fitted_predict_proba_output():
