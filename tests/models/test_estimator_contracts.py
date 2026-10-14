@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import pickle
+import subprocess
 import sys
 
 import numpy as np
@@ -383,6 +384,145 @@ def test_experiment_preacceptance_failure_marks_phase_failed_without_erasing_pri
     assert (exp.state.step, exp.state.epoch, exp.state.examples_seen) == (1, 1, 3)
     assert exp.model._accepted_fit is prior_fit
     assert exp.train.status(state_repo=repo).final_state_ref is None
+
+
+def test_xgb_recipe_selection_and_inference_are_native_free():
+    """Passive recipes, prepared Map, and refused foreign handoffs need no extra."""
+    script = """
+import sys
+class RejectNative:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'xgboost', 'sklearn', 'torch', 'tensorflow', 'jax'}:
+            raise AssertionError('unexpected native import: ' + fullname)
+sys.meta_path.insert(0, RejectNative())
+import dryml
+import dryml.models
+from dryml.models.xgb import Model, ClassifierModel, RegressionModel, BasicTraining
+from dryml.models.xgb import base
+from dryml.core import TensorSpec
+from dryml.data import Map
+from tests.data.test_materialize_supervised_numpy import TrackingDataset, pair
+from dryml.methods import ImplementationSelectionError
+from dryml.methods import conversion
+base.version = lambda name: (_ for _ in ()).throw(AssertionError('package inspection'))
+def reject_conversion(*args, **kwargs):
+    raise AssertionError('unexpected conversion planning/activation')
+conversion.make_edge = conversion.convert = reject_conversion
+reg = RegressionModel(n_estimators=2)
+clf = ClassifierModel(output_spec=TensorSpec('float32', shape=(2,), backend='numpy'))
+assert reg.mdl is clf.mdl is None
+assert BasicTraining().supports_safe_points is False
+assert BasicTraining().supports_observers is False
+spec = TensorSpec('float32', shape=(2,), backend='numpy')
+assert reg.infer_output_spec(spec).shape == ()
+assert clf.infer_output_spec(spec).shape == (2,)
+reg.find_implementation(spec).prepared_invoker()
+reg.learn(spec)
+for backend in ('torch', 'tf', 'jax', None):
+    foreign = TensorSpec('float32', shape=(2,), backend=backend)
+    source = TrackingDataset((pair(),), spec=foreign)
+    for action in (lambda: reg.find_implementation(foreign), lambda: reg.learn(foreign),
+                   lambda: reg._prepare_implementation(foreign, backend=foreign.backend, batch_mode=None),
+                   lambda: Map(source, reg).prepare()):
+        try:
+            action()
+        except ImplementationSelectionError:
+            pass
+        else:
+            raise AssertionError('foreign selection admitted')
+    assert source.opens == 0
+assert not {'xgboost', 'sklearn', 'torch', 'tensorflow', 'jax'} & sys.modules.keys()
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+
+
+def test_xgb_pure_specs_and_closed_configuration():
+    from dryml.core import TensorSpec
+    from dryml.models.xgb import ClassifierModel, RegressionModel, BasicTraining
+
+    input_spec = TensorSpec("float64", shape=(3,), batch=5, backend="numpy")
+    model = ClassifierModel()
+    assert model.definition.parameters["n_jobs"] == 1
+    assert model.definition.parameters["random_state"] == 0
+    assert model.definition.parameters["n_estimators"] == 100
+    with pytest.raises(NotImplementedError, match="output_spec"):
+        model.infer_output_spec(input_spec)
+    explicit = TensorSpec("float32", shape=(3,), backend="numpy")
+    selected = ClassifierModel(output_spec=explicit).find_implementation(input_spec)
+    assert selected.conversion_edge is None
+    assert selected.infer_output_spec().equal_exact(explicit.with_batch(5))
+    assert RegressionModel().infer_output_spec(input_spec).equal_exact(
+        TensorSpec("float32", shape=(), batch=5, backend="numpy"))
+    for options in ({"device": "cpu"}, {"objective": "binary:logistic"}, {"booster": "gbtree"},
+                    {"tree_method": "hist"}, {"callbacks": []}, {"n_jobs": True}, {"n_jobs": 0},
+                    {"n_estimators": -1}, {"max_depth": 1.5}, {"random_state": None},
+                    {"learning_rate": float("nan")}, {"subsample": 1.1}, {"reg_lambda": -1},
+                    {"gamma": 1e100}, {"reg_alpha": 2**1024}):
+        with pytest.raises((TypeError, ValueError)):
+            ClassifierModel(**options)
+    for options in ({"verbose": 1}, {"eval_set": ()}, {"early_stopping_rounds": 2},
+                    {"sample_weight": None}, {"xgb_model": None}, {"callbacks": ()}):
+        with pytest.raises(TypeError):
+            BasicTraining(**options)
+    for output in (TensorSpec("float64", shape=(2,), backend="numpy"),
+                   TensorSpec("float32", shape=(2,), backend="torch"),
+                   TensorSpec("float32", shape=(1,), backend="numpy")):
+        with pytest.raises((TypeError, ValueError)):
+            ClassifierModel(output_spec=output)
+
+
+def test_xgb_raw_prediction_refuses_foreign_coercion_and_unfitted_state():
+    from dryml.models.xgb import RegressionModel
+
+    class Convertible:
+        def __array__(self, *args, **kwargs):
+            pytest.fail("foreign coercion attempted")
+
+    model = RegressionModel()
+    for action in (model, model.predict):
+        with pytest.raises(TypeError, match="dense NumPy"):
+            action(Convertible())
+        with pytest.raises(ValueError, match="unfitted"):
+            action(np.ones((2, 3), dtype=np.float32))
+
+
+def test_xgb_missing_extra_and_reader_version_errors_are_actionable(monkeypatch):
+    import builtins
+    from dryml.models.xgb import RegressionModel, base
+
+    original_import = builtins.__import__
+
+    def missing_native(name, *args, **kwargs):
+        if name == "xgboost":
+            raise ModuleNotFoundError("xgboost")
+        return original_import(name, *args, **kwargs)
+
+    model = RegressionModel(n_estimators=2)
+    x, y = np.ones((3, 1), dtype=np.float32), np.arange(3, dtype=np.float32)
+    with monkeypatch.context() as guard:
+        guard.setattr(builtins, "__import__", missing_native)
+        with pytest.raises(ImportError, match=r"dryml\[xgboost\]"):
+            model.fit(x, y)
+    with monkeypatch.context() as guard:
+        guard.setitem(sys.modules, "xgboost", object())
+        guard.setattr(base, "version", lambda name: "unqualified")
+        with pytest.raises(ValueError, match="reader/writer versions"):
+            model.fit(x, y)
+    assert model._accepted_fit is None
+
+
+def test_xgb_unsupported_training_controls_refuse_source_acquisition(monkeypatch):
+    from dryml.models.xgb import ClassifierModel, BasicTraining
+
+    exp = Experiment(ClassifierModel(), BasicTraining(), train_data=_data())
+    monkeypatch.setattr(exp.train_data, "iterator", lambda *a, **k: pytest.fail("opened source"))
+    for controls in ({"callbacks": (lambda: None,)}, {"observer_session": object()},
+                     {"callbacks": None}, {"sample_weight": np.ones(3)}, {"eval_set": ()}):
+        with pytest.raises((TypeError, NotImplementedError)):
+            exp.train_fn(exp, **controls)
+    assert exp.model._accepted_fit is None
+    assert exp.state == TrainState()
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")

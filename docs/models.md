@@ -224,10 +224,11 @@ completed-fit replay. A postacceptance publication or evaluation error retains
 the accepted fit and propagates without a successful terminal receipt; the local
 helper cannot repair association or provide continuation within native fitting.
 
-U2 supplies this private seam and contract tests only. The maintained XGBoost and
-statsmodels adapters/codecs and their backend-specific qualification are later
-rollout stages. Existing sklearn training uses its established lifecycle rather
-than this candidate-first helper.
+U2 supplies this private seam and contract tests. The maintained CPU XGBoost
+adapter now consumes it; see [XGBoost](xgboost.md) for the U3 API, strict NumPy
+boundary, retained UBJSON codec, and bounded native qualification. The statsmodels
+adapter is a later rollout stage. Existing sklearn training uses its established
+lifecycle rather than this candidate-first helper.
 
 Training prepares declared x/y Dataset specs once in the trainer's inspectable
 `method_graph()`. Its producer/consumer specs and direct dense conversion edges
@@ -507,14 +508,25 @@ Examples include:
 
 Backend wrappers should keep external runtime state in object state and keep stable configuration in definitions.
 
+### Maintained CPU XGBoost (U3)
+
+`dryml.models.xgb` exports passive `Model`, `ClassifierModel`, `RegressionModel`
+and `BasicTraining` recipes. Native CPU gbtree/hist fitting uses detached
+candidates and Models' one-shot accounting; call/probabilities are `(N,K)` float32,
+classifier labels `(N,)` int64, and regression `(N,)` float32. Pure NumPy metadata,
+explicit selected element lifting, foreign-spec rejection and exact retained
+`xgboost1` UBJSON state use the existing Method/Data/Core ownership boundaries.
+See [XGBoost](xgboost.md) for closed options, supported reader versions, failure
+behavior, concurrency limitations and current qualification scope.
+
 ### XGBoost and statsmodels: Native Characterization (U1)
 
 The maintained adapter rollout starts with native-only reference tests in
 `tests/models/test_xgb_models.py` and `tests/models/test_statsmodels_models.py`.
-This stage changes no adapter runtime. The current XGBoost implementation still
-uses retired `Meta`/`Component` and compute hooks; statsmodels has no maintained
-adapter yet. Native evidence below does not qualify DRYML Dataset, Method,
-Experiment, Repo, recovery, or worker integration.
+That stage changed no adapter runtime. U3 has since replaced the retired
+XGBoost `Meta`/`Component` compute integration; statsmodels has no maintained
+adapter yet. The historical native evidence below, by itself, does not qualify
+DRYML Dataset, Method, Experiment, Repo, recovery, or worker integration.
 
 On Linux x86-64, Python 3.12.13, CPU XGBoost 3.4.2, statsmodels 0.15.0,
 NumPy 2.1.3, SciPy 1.18.0, pandas 3.0.5, and sklearn 1.9.0 (XGBoost only),
@@ -572,10 +584,11 @@ diagnostic inspection populated caches, producing 10,579 / 6,782 byte pickles,
 while prediction and inspection semantics remained equal (`1e-8` tolerance).
 These sizes are characterization facts, not portable format constants.
 
-The planned `xgboost1` / `statsmodels1` codecs therefore must encode accepted
+The `xgboost1` / planned `statsmodels1` codecs therefore must encode accepted
 native bytes plus canonical version-one metadata once and retain those exact
 bytes for unchanged restored saves. Semantic equality or native reserialization
-cannot replace exact checkpoint replay. These codecs are not implemented by U1.
+cannot replace exact checkpoint replay. U3 implements `xgboost1`; U1 implemented
+neither codec, and `statsmodels1` remains a later unit.
 Full Results **and** their retained payload bytes occupy workload-sized memory;
 the pickle retains training arrays on disk too. Data removal is outside this
 contract. Native Results inspection may populate nonsemantic caches; external
@@ -594,7 +607,8 @@ additive: every class-local state hook in the MRO receives the unchanged codec.
 must use `Serializable` without inheriting automatic native-object pickling.
 Existing `tests/core/test_state_codec_hooks.py` owns the additive-hook regression;
 U1 reuses it instead of duplicating it. Legacy rejection, malformed metadata,
-candidate-first installation, and core restore invalidation remain later gates.
+candidate-first installation, and core restore invalidation are now exercised
+for XGBoost by U3; statsmodels and full integration gates remain later units.
 
 ### Experimental JAX Models
 
