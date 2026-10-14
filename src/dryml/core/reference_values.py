@@ -15,12 +15,15 @@ import builtins
 import hashlib
 import json
 import re
-from typing import Any, Iterator
+from typing import Any, Iterator, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from .freeze import FrozenDict
 from .utils.graph.path import GraphPath, GraphPathLike, Kwarg, Parameter, graph_path_sort_key, normalize_path
 from .utils.stable_hash import stable_int_hash
+
+if TYPE_CHECKING:
+    from .selector import ObjectSelector
 
 
 _NAMESPACE = ContextVar("dryml_object_namespace", default=())
@@ -322,16 +325,17 @@ class ObjectRef:
 
         return _project_object_ref(self, normalize_path(path))
 
-    def object_projection(self, *, traverse_refs: bool = False) -> "ObjectRef":
-        """Return this reference with nested StateRefs weakened to ObjectRefs.
+    def object_projection(self, *, traverse_refs: bool = False) -> "ObjectSelector":
+        """Return a recursive selector for this object graph across states.
 
         Args:
             traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
                 Ref-held exact references are projected regardless of this flag.
 
         Returns:
-            A non-materializing ObjectRef retaining this reference's ObjectIds,
-            graph topology, and edge roles.
+            An ObjectSelector retaining this reference's ObjectIds, graph
+            topology, and edge roles. Every encountered ObjectRef or StateRef is
+            recursively represented by another ObjectSelector.
 
         Raises:
             TypeError: If ``traverse_refs`` is not a bool.
@@ -342,16 +346,29 @@ class ObjectRef:
             not changed, and no Store is consulted.
         """
 
-        from .cdef_codec import object_projection_cdef
+        from .cdef_codec import (
+            object_projection_cdef,
+            _object_reference_projection_cdef,
+        )
+        from .selector import ObjectSelector
 
-        return ObjectRef(
-            object_projection_cdef(self.definition, traverse_refs=traverse_refs),
+        reference = ObjectRef(
+            _object_reference_projection_cdef(
+                self.definition, traverse_refs=traverse_refs,
+            ),
             self.objects,
         )
+        return ObjectSelector._projected(
+            object_projection_cdef(
+                self.definition, traverse_refs=traverse_refs,
+            ),
+            self.objects,
+            reference,
+        )
 
-    def _identity_data(self) -> dict[str, Any]:
+    def _identity_data(self, *, graph_hash=None) -> dict[str, Any]:
         return {
-            "definition_graph": self.definition.graph_hash(),
+            "definition_graph": graph_hash or self.definition.graph_hash(),
             "objects": [
                 [_path_data(path), object_id.to_data()]
                 for path, object_id in self.objects.items()
@@ -404,7 +421,22 @@ class ObjectRef:
 
     @classmethod
     def from_data(cls, data: Any) -> "ObjectRef":
-        """Decode a token-neutral exact ObjectRef authority record."""
+        """Fully validate token-neutral ObjectRef authority with fresh graph nodes.
+
+        Args:
+            data (Mapping): Versioned graph and canonical path/ObjectId entries.
+        Returns:
+            Fresh ObjectRef preserving graph-local sharing and durable ObjectIds.
+        Raises:
+            TypeError: For unsupported field or identity types.
+            ValueError: For malformed graph, duplicate paths or wrong associations.
+        Side Effects:
+            No Store IO or class resolution; retains no cross-call graph storage.
+        """
+        return cls._from_data_prepared(data, None)
+
+    @classmethod
+    def _from_data_prepared(cls, data, prepared):
 
         from .cdef_codec import decode_cdef_graph
 
@@ -420,7 +452,18 @@ class ObjectRef:
             if path in objects:
                 raise ValueError(f"ObjectRef record repeats path {path!s}.")
             objects[path] = ObjectId.from_data(entry["object_id"])
-        return cls(decode_cdef_graph(data["definition"]), objects)
+        if prepared is None:
+            definition = decode_cdef_graph(data["definition"])
+        else:
+            from .cdef_codec import _realize_prepared_graph
+            definition = _realize_prepared_graph(prepared.graph)
+        result = cls(definition, objects)
+        if prepared is not None:
+            object.__setattr__(result, "_digest_cache", hashlib.sha256(
+                b"dryml-object-ref-v1\x00" + _canonical_bytes(
+                    result._identity_data(graph_hash=prepared.graph_hash)
+                )).hexdigest())
+        return result
 
 
 @dataclass(frozen=True, slots=True, init=False, eq=False)
@@ -486,16 +529,16 @@ class StateRef:
         states = _project_mapping(self.object.definition, self.object.objects, self.states, normalized)
         return StateRef(projected, states)
 
-    def object_projection(self, *, traverse_refs: bool = False) -> ObjectRef:
-        """Return this StateRef's recursive non-state association projection.
+    def object_projection(self, *, traverse_refs: bool = False) -> "ObjectSelector":
+        """Return this StateRef's recursive non-state object selector.
 
         Args:
             traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
                 Ref-held exact references are projected regardless of this flag.
 
         Returns:
-            An ObjectRef retaining every ObjectId and all supported graph roles
-            while recursively removing StateRef selections.
+            An ObjectSelector retaining every ObjectId and all supported graph
+            roles while recursively removing StateRef selections.
 
         Raises:
             TypeError: If ``traverse_refs`` is not a bool.
@@ -619,7 +662,22 @@ class StateRef:
 
     @classmethod
     def from_data(cls, data: Any) -> "StateRef":
-        """Decode a token-neutral exact StateRef authority record."""
+        """Fully validate token-neutral StateRef authority and realize fresh values.
+
+        Args:
+            data (Mapping): Versioned ObjectRef and canonical path/state entries.
+        Returns:
+            Fresh StateRef with the exact complete ObjectId/state association.
+        Raises:
+            TypeError: For unsupported reference or state types.
+            ValueError: For malformed graphs, duplicate paths or invalid hashes.
+        Side Effects:
+            No Store IO, payload reads or class resolution.
+        """
+        return cls._from_data_prepared(data, None)
+
+    @classmethod
+    def _from_data_prepared(cls, data, prepared):
 
         if not isinstance(data, Mapping) or set(data) != {"codec_version", "object", "states"}:
             raise ValueError("StateRef records require codec_version, object, and states fields.")
@@ -633,7 +691,9 @@ class StateRef:
             if path in states:
                 raise ValueError(f"StateRef record repeats path {path!s}.")
             states[path] = entry["state"]
-        return cls(ObjectRef.from_data(data["object"]), states)
+        reference = (ObjectRef.from_data(data["object"]) if prepared is None
+                     else ObjectRef._from_data_prepared(data["object"], prepared))
+        return cls(reference, states)
 
 
 @dataclass(frozen=True, slots=True)

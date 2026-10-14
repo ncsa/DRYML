@@ -2,6 +2,129 @@
 
 ## 0.3.0b1 (unreleased)
 
+Query `refresh(True)` now creates a lazy process-local **one-shot request**, shared
+by ordinary derivation, shallow copies, closure, occurrences, and owner/target
+projections. Each compatible persistent destination completes it once. Later
+terminals still capture fresh authority and proofs, using demand-driven auto
+recovery rather than reusing query evidence. Another explicit `refresh(True)`
+creates a new request. Migrate repeated per-terminal maintenance to
+`refresh("always")`; it repeats reconciliation, not the old forced rebuild.
+Correct ready SQLite sidecars validate without replacement. Use
+`store.rebuild_query_index()` for unconditional replacement. Direct backend
+True/always calls remain one independent cycle per call.
+
+Algebra preserves operand-local lineage without Cartesian request/target widening.
+New external scopes and Repo attachments introduce pending target obligations;
+empty filtered results retain their obligations. Explicit outer True replaces
+inherited intent with one new request over the expression, while False/auto/always
+suppress it on that expression. Fixed IdentitySet/OccurrenceSet refinements detach
+from live requests. Construction, ordinary explanations, and identity/occurrence
+`take(0)` remain inert. Auto now recovers only indexes consumed by the selected
+execution path; authority-only broad, exact-positive, and external metadata queries
+leave unused dirty sidecars untouched. False performs no derived maintenance.
+
+Same-request concurrent terminals single-flight targets and observe the exact
+joined attempt's outcome. Later-created requests receive no credit from older
+attempts; remaining obligations coalesce into at most one new cohort per target.
+Failure/interruption is retryable in a later terminal, while successful targets
+survive partial failure and later evaluation failure. Owner exceptions remain
+original; joined failure/interruption raises actionable `QueryIndexError`.
+Waiter interruption does not cancel the owner, self-reentry raises `QueryIndexBusy`,
+and published outcomes remain immutable. Request and SQLite synchronization reset
+by PID before child acquisition. Inherited Repo topology fails before its parent
+lock; open a fresh child Repo. No query transport or deepcopy contract is added.
+
+Explicit SQLite reconciliation compares a fenced authoritative inventory with
+graph-exact encoded stored roots and checks active destination continuity. Repair
+completes only after staged validation, activation, and captured-token
+acknowledgement; normal `ReconcileReport` return or `validated=True` is not success
+evidence. Foreign persisted ownership is refused before scanning and after claim
+acquisition. Equivalent configured destinations coalesce only after all visible
+presentations agree. One destination per Store invalidation domain is supported;
+terminal-local checks reject visible conflicts, but independently maintained
+multiple destinations across clients remain unsupported.
+
+Pending explicit work requires scan/indexed-only admission even for ready
+validation or joining another caller. Maintenance accounting retains started work
+through failures and retries, charges owners rather than waiters, and reports
+actual actions as `rebuild > validate > waited > reused > none`, separately from
+declared policy. Empty captured dirty-token sets skip cleanup-only authority reads
+without weakening readiness, staged validation, publication fencing, or preservation
+of later/unrelated tokens. Store formats and SQLite schema are unchanged. See
+[Query V3 Migration](query_v3_migration.md#refresh-lifecycle-migration).
+
+Stored-CDef indexed prefixes now inspect current main authority before every answer,
+including empty pages. A closure-only definition made main after a ready index cut
+can no longer disappear: permitted complete inventory fallback returns it, while
+indexed-only/no-scan execution refuses unsupported completeness. Missing or malformed
+main targets remain visible authority errors.
+
+Readiness/recovery occurs outside retained readers, followed by sorted unique Store
+fences and non-repairing SQLite views retained through main inspection, paging, and
+direct verification. In-cut readiness and actual sidecar identity/generation are
+checked before results. Failure releases all readers before fallback/recovery and
+discards attempt proofs without refunding cumulative work. Rebuild cache barriers
+protect active same-process read views. Ready direct-root prefixes retain canonical
+ordering, replica evidence, and zero broad definition enumeration. Store formats,
+SQLite schema, and main dirty-token behavior are unchanged; this adds no global
+federated snapshot or broader V3 acceleration.
+
+Query V3 terminal controls now apply through external stored/alias/metadata
+scopes, algebra, closure, occurrence targets, and owner/target projections.
+Projections inherit controls while remaining existential. Explicit outer
+overrides govern nested execution; incompatible algebra policies still fail at
+composition. Disabled refresh preserves missing/dirty sidecars; explicit refresh
+does not authorize forbidden recovery scans. Warnings precede required scans.
+
+Indexed `take()` now enforces the previously omitted verification-budget check.
+Separately, `max_verify` accounting is tightened to cumulative graph-exact identity
+admissions across all terminal stages and retries: ordinary/fixed execution
+reserves the entire detached domain before filtering, while exact/paged checks
+reserve before verification, including rejected candidates. Replicas and repeated
+stages share unchanged-cut charges; collisions remain distinct. Cut replacement,
+unchanged metadata-demand recapture, instability retry, and selective/paged fallback
+readmit candidates without refunding abandoned work. Unverified ordering lookahead
+counts fetch/decode IO only; verified collision lookahead is charged. Metadata and
+recovery IO remain scan work, not identity admissions. Existing explanation fields
+report admission, scan, and page work separately. `take(0)` acquires/verifies
+nothing; witness and depth budgets remain separate. No Store format changes.
+
+Selected Method inference now uses converted consumer inputs consistently across
+Pipe/Project/AutoEncoder successors, graph ports, Map metadata, Fold roles, and
+native training inputs. Raw-result validation stays independent of inference
+and candidate ranking. Map resolves metadata during pure constructor selection;
+known selection failures can now surface at construction, while backend-only
+unknown facts remain cursor-local and shared specs remain unchanged. Metadata
+reads and example counting perform no repeated selection or compilation.
+
+Dense CPU handoffs validate and retain one host representation per leaf instead
+of extracting twice, then construct independent target storage. Backend adapters
+activate lazily through the existing runtime boundary, including previously
+unregistered optional endpoints. Native element adaptation retains its crossing,
+native x/y setup consumes prepared Dataset output facts before source acquisition,
+and experimental JAX zero-work admission remains ahead of native setup.
+
+Fold now uses positive root-output EOF rather than cursor closure to authorize
+exhausted checkpoints. Failed traversal cannot become successful truncated
+recovery; consumer errors remain primary over cleanup failures. New progress is
+version 2 with explicit EOF evidence. Compatible legacy active progress resumes;
+valid legacy exhausted progress loads as ambiguous and requires an explicit fresh
+`ManagedConfig(rerun=True)` before carry/Method/source effects. Saving unchanged
+legacy state preserves its provenance. Genuine EOF cleanup/finalization/publication
+failures retain trusted source-free retry and never report completion on failure.
+Existing snapshots and completed legacy Values remain readable and immutable;
+historically completed truncated results cannot be automatically detected/repaired.
+Downgraded readers cannot resume v2 progress; selecting an earlier compatible
+snapshot may replay work and is not automatic rollback or repair. Frozen synthetic
+compatibility fixtures qualify both versions and the old-reader rejection gate.
+
+`ObjectRef.object_projection()` and `StateRef.object_projection()` now return a
+recursive query-only `ObjectSelector`. Each encountered exact reference becomes a
+nested selector, while explicitly embedded raw ObjectRef and StateRef values remain
+exact. Query V3 and fixed `IdentitySet` results expose `object_projection()` to
+deduplicate checkpoints into fixed `ObjectSelectorSet` run identities without
+merging separately realized ObjectId graphs.
+
 Symbolic construction now uses `Definition` as its only runtime value. `Par`
 expressions, discovery, static `sub(...)`, remapping, and loose selector
 projection live on Definition; symbolic resolution means only that no active
@@ -35,6 +158,38 @@ instead of degrading their public Mapping view to an ordinary dictionary. This
 allows Mat arguments to materialize in workers and keeps `Ref[Definition]` data
 symbolic. Dispatch's incomplete-coverage warning now names its bounded diagnostic
 categories and directs callers to `dispatch.explain(...)` for the full report.
+
+Native training input is now owned entirely by the Dataset graph. Maintained
+TensorFlow, Torch, and experimental JAX trainers consume canonical authored
+`(inputs, targets)` batches, retain inspectable `TrainingPreparation` specs and
+handoffs, and reject the retired trainer-owned batching, shuffle, count, and path
+controls. The ML workflow qualification matrix now includes experimental JAX in
+all W1-W3 CPU placements (36 primary cells), binds JAX/Flax/Optax environment
+evidence and a fixed JAX seed, and adds credential-free managed local and Core
+subprocess exact-restoration representatives. The qualification baseline and
+fixture manifest are now schema version 2; existing version 1 authority remains
+untouched and must be replaced by preparation into new empty roots. GPU
+qualification remains the existing TensorFlow/W1 and Torch/W3 pair.
+
+Core now owns the versioned `dryml-reference-json` codec for portable exact
+`ObjectRef` and `StateRef` authority. Experiment history writes
+`dryml-experiment-data` v3 and delegates embedded references to that codec, so
+native model and Dataset definitions retain source, factory, tensor-specification,
+canonical dtype, cardinality, and frozen-container identity without a model-owned
+serializer. The reader continues to accept closed v1 and v2 histories and
+migrates them in place on their next immutable publication.
+
+Keras, Torch, and experimental JAX trainers now provide saved, recoverable
+completed-epoch early stopping. The shared monitor/patience/mode/minimum-
+improvement contract retains its best metric, wait count, accepted shortened
+target, and, when restoration is enabled, best Model snapshot across pending-
+postlude recovery. Optional best-weight restoration changes only Model parameters
+and mutable buffers;
+optimizer progression and JAX RNG remain at the stopping epoch. The resulting
+mixed-point Experiment is published as a new exact terminal StateRef. Keras uses
+this dedicated DRYML behavior adapter with managed safe points and supported
+validation, without claiming recovery for arbitrary native callbacks or deferred
+`validation_freq` scheduling.
 
 `CachedDataset`, `CacheCodec`, and `CacheIntegrityError` are now concrete public
 Artifact APIs. Finite dense Dataset trees can be streamed into built-in NumPy,

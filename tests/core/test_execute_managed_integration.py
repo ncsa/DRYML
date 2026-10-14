@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from dryml import F
+from dryml.artifacts import CachedDataset
 from dryml.core import Definition, Executor as CoreExecutor
 from dryml.core import Mat, Object, Repo, StateRef, function, signatures
 from dryml.core.execute import CoreExecutionError, CoreOptions
@@ -15,8 +17,12 @@ from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
 from dryml.core.store.store import Store
+from dryml.core.utils.graph.path import GraphPath, Parameter
+from dryml.data import ArrayDataset, as_supervised
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.managed import ManagedConfig, managed_operation
+from dryml.models import Experiment, TrainFunction
+from dryml.models.experiment import _notify_host_observers
 from tests.managed.execution_fixtures import (
     InnerFunctionWrappedManagedValue,
     ManagedMatrixValue,
@@ -125,6 +131,55 @@ class StoreControlValue(Pickleable):
         self.value += 1
 
 
+class WorkerTelemetryModel(Pickleable):
+    """Small worker-owned state proving telemetry never becomes model state."""
+
+    def __init__(self) -> None:
+        """Initialize the one accepted-update counter."""
+
+        self.value = 0
+
+
+class WorkerTelemetryTrainer(TrainFunction):
+    """Emit one worker host event after accepted accounting and safe points."""
+
+    supports_observers = True
+
+    def __call__(self, exp, *, callbacks=(), observer_session=None):
+        """Apply one update and report its retained position."""
+
+        exp.model.value += 1
+        exp.state.record_update(examples=1, loss=1.0)
+        for callback in callbacks:
+            callback()
+        _notify_host_observers(observer_session, {
+            "event": "train_batch_end",
+            "step": exp.state.step,
+        })
+
+
+class WorkerFileObserver:
+    """Reconstructible observer recording construction, delivery, and cleanup."""
+
+    def __init__(self, path: str) -> None:
+        """Record worker-side construction at the admitted invocation boundary."""
+
+        self.path = path
+        Path(path).write_text("constructed\n", encoding="ascii")
+
+    def __call__(self, logs) -> None:
+        """Append one host event without retaining the external file in DRYML state."""
+
+        with Path(self.path).open("a", encoding="ascii") as stream:
+            stream.write(f"{logs['event']}:{logs['step']}\n")
+
+    def close(self) -> None:
+        """Record bounded invocation cleanup."""
+
+        with Path(self.path).open("a", encoding="ascii") as stream:
+            stream.write("closed\n")
+
+
 def _count_checkpoint_callback(value, context) -> None:
     """Record callback delivery on the checkpointed managed receiver."""
 
@@ -163,6 +218,13 @@ def _materialize_worker_target(value: Mat[Object]) -> str:
     """Force worker-side Mat delivery only after Execute has accepted the call."""
 
     return type(value).__name__
+
+
+@function
+def _train_materialized_experiment(value: Mat[Object]) -> StateRef:
+    """Train one materialized Experiment and return its managed terminal state."""
+
+    return value.train()
 
 
 @pytest.mark.usefixtures("fixed_snapshot_environment")
@@ -441,6 +503,105 @@ def test_direct_bound_operation_rejects_malformed_config_before_mutation(tmp_pat
 
     assert subject.value == 0
     assert subject.advance.status(state_repo=repo).state == "not_started"
+
+
+def test_execute_builds_experiment_telemetry_factory_in_worker(
+        tmp_path, fixed_managed_snapshot_environment) -> None:
+    """Execute transports inert observer configuration, not a live client."""
+
+    del fixed_managed_snapshot_environment
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    control = DirStore(tmp_path / "control", query_index="none")
+    exp = Experiment(
+        WorkerTelemetryModel(), WorkerTelemetryTrainer(), repo=repo,
+    )
+    repo.save_object(exp, deep_capture=True)
+    marker = tmp_path / "telemetry.log"
+    invocation = encode_invocation(
+        exp.train,
+        (),
+        {
+            "callbacks": [F(WorkerFileObserver, str(marker))],
+            "managed": ManagedConfig(
+                state_repo=repo, control_store=control,
+            ),
+        },
+        repo=repo,
+    )
+    assert not marker.exists()
+    outcome = decode_outcome(invoke_invocation(invocation, repo=repo), repo=repo)
+
+    assert outcome["success"]
+    result = outcome["result"]
+    assert isinstance(result, StateRef)
+    assert marker.read_text(encoding="ascii").splitlines() == [
+        "constructed", "train_batch_end:1", "closed",
+    ]
+    restored = repo.load_state_ref(result, reuse_live="never")
+    assert (restored.model.value, restored.state.step) == (1, 1)
+
+
+def test_execute_saves_experiment_with_nested_cached_test_data(tmp_path) -> None:
+    """Worker terminal capture retains a materialized test Dataset's saved source."""
+
+    import numpy as np
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    cached = CachedDataset(ArrayDataset({
+        "cart": np.asarray([[1.0, 2.0, 3.0]]),
+    }, repo=repo))
+    source = cached.compute(
+        codec="numpy", managed=ManagedConfig(state_repo=repo),
+    )
+    experiment = Definition(
+        Experiment,
+        Definition(WorkerTelemetryModel),
+        Definition(WorkerTelemetryTrainer),
+        test_data=as_supervised(source, "cart", input_as_target=True),
+    )
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(
+        SubProcessConfig(spool_directory=spool),
+        core=CoreOptions(repo=repo, return_objects=False),
+    )
+    try:
+        future = executor.submit(_train_materialized_experiment, experiment)
+        final = future.result(timeout=30)
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=10)
+
+    assert final.at(GraphPath((
+        Parameter("test_data"), Parameter("src"),
+    ))) == source
+
+
+def test_execute_rejects_live_experiment_telemetry_before_training(tmp_path) -> None:
+    """A live local observer cannot cross Execute's worker transport boundary."""
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    exp = Experiment(
+        WorkerTelemetryModel(), WorkerTelemetryTrainer(), repo=repo,
+    )
+    repo.save_object(exp, deep_capture=True)
+
+    with pytest.raises(CoreCallCodecError, match="live telemetry observer"):
+        encode_invocation(
+            exp.train,
+            (),
+            {"callbacks": [lambda logs: None]},
+            repo=repo,
+        )
+    with pytest.raises(CoreCallCodecError, match="live observer factory configuration"):
+        encode_invocation(
+            exp.train,
+            (),
+            {"callbacks": [F(WorkerFileObserver, object())]},
+            repo=repo,
+        )
+
+    assert (exp.model.value, exp.state.step, exp.state.phase) == (0, 0, None)
 
 
 def test_managed_store_control_uses_definition_transport_and_returns_state_ref(tmp_path) -> None:

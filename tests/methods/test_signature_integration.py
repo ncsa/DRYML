@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, Object, Repo
+from dryml.core import ConcreteDefinition, Definition, Object, Repo, TensorSpec
 from dryml.core.links import DefLink
 from dryml.core.reference_values import ObjectRef
 from dryml.core.signatures import Mat, Ref, SignatureError, signature_context
@@ -276,3 +276,75 @@ def test_selected_signature_keeps_target_control_keywords_and_descriptor_forms()
     tensor = np.ones((2,), dtype=np.float32)
     assert object.__new__(Controls)(tensor, repo=1, cache=2, reuse_live=3) is tensor
     assert isinstance(Mat(value), DefLink)
+
+
+def test_retained_invokers_normalize_fresh_ref_mat_arguments_and_returns(monkeypatch):
+    """Reuse retains a signature, never delivered authority or caller Repo controls."""
+    class Reference(Method):
+        def __call__(self, tensor, value: Ref[ConcreteDefinition]) -> Ref[ConcreteDefinition]:
+            return value
+
+    class Materializing(Method):
+        def __call__(self, tensor, value: Mat[ConcreteDefinition]) -> Mat[ConcreteDefinition]:
+            assert isinstance(value, SignatureValue)
+            return value.definition
+
+    reference, materializing = object.__new__(Reference), object.__new__(Materializing)
+    spec = TensorSpec("float32", shape=(2,), backend="numpy")
+    reference.learn(spec)
+    materializing.learn(spec)
+    from dryml.core import signatures
+    original = signatures.compile_signature
+
+    def compile_constructor_only(target, **kwargs):
+        assert getattr(target, "__name__", None) != "__call__", "Method recompilation"
+        return original(target, **kwargs)
+
+    monkeypatch.setattr(signatures, "compile_signature", compile_constructor_only)
+    values = []
+    for _ in range(2):
+        definition = _definition()
+        with signature_context(repo=Repo(), reuse_live="never"):
+            assert reference(np.ones(2, dtype=np.float32), Ref(definition)) == definition
+            result = materializing(np.ones(2, dtype=np.float32), Mat(definition))
+        assert isinstance(result, SignatureValue)
+        values.append(result)
+    assert values[0] is not values[1]
+    with pytest.raises(SignatureError):
+        reference(np.ones(2, dtype=np.float32), Mat(_definition()))
+
+
+def test_retained_invoker_rejects_inherited_thread_task_and_expired_contexts():
+    """Prepared calls still establish core boundaries in the originating context."""
+    import asyncio
+    from contextvars import copy_context
+    from concurrent.futures import ThreadPoolExecutor
+
+    class ContextTarget(Method):
+        def __call__(self, tensor, value: Ref[ConcreteDefinition]) -> Ref[ConcreteDefinition]:
+            return value
+
+    method = object.__new__(ContextTarget)
+    method.learn(TensorSpec("float32", shape=(2,), backend="numpy"))
+    tensor, definition = np.ones(2, dtype=np.float32), _definition()
+    with signature_context(repo=Repo()):
+        inherited = copy_context()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(inherited.run, method, tensor, definition)
+            with pytest.raises(SignatureError):
+                future.result()
+        expired = copy_context()
+        assert method(tensor, definition) == definition
+    with pytest.raises(SignatureError):
+        expired.run(method, tensor, definition)
+
+    async def child():
+        with pytest.raises(SignatureError):
+            method(tensor, definition)
+
+    async def parent():
+        with signature_context(repo=Repo()):
+            await asyncio.create_task(child())
+            assert method(tensor, definition) == definition
+
+    asyncio.run(parent())

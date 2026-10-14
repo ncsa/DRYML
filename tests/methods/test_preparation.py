@@ -288,3 +288,37 @@ def test_cached_signature_copies_containers_and_preserves_call_layout():
     with pytest.raises(PreparedCallMismatchError):
         method(value=[spec], option={"value": spec})
     assert method.cached_signature == signature
+
+
+def test_failed_direct_reprepare_clears_old_plan_without_partial_publication():
+    """Direct learn retains its clearing semantics, unlike Dataset replacement."""
+    method = SimplePrepared()
+    spec = TensorSpec("float32", shape=(2,), backend="numpy")
+    method.learn(spec)
+    with pytest.raises(ImplementationSelectionError):
+        method.learn(spec, output_spec=object())
+    assert method.call_mode == "learning"
+    assert method.cached_signature is None
+    assert all(node.selected is None for node in method.method_graph().method_nodes)
+
+
+def test_learning_conversion_failure_keeps_published_signature(monkeypatch):
+    """A retained handoff is target work, after learning's input admission/publication."""
+    class Converted(Method):
+        @traits(backend="torch")
+        def torch(self, value):
+            pytest.fail("a failed handoff reached the target")
+
+    import dryml.methods.conversion as conversion
+
+    def fail(*args):
+        raise RuntimeError("handoff failed")
+
+    monkeypatch.setattr(conversion, "convert", fail)
+    method = object.__new__(Converted)
+    method.default_batched = False
+    method.learn()
+    with pytest.raises(RuntimeError, match="handoff failed"):
+        method(np.ones(2, dtype=np.float32))
+    assert method.call_mode == "cached"
+    assert method.cached_signature is not None

@@ -89,7 +89,16 @@ def argument_digest(descriptor: object, instance: object, args: tuple[object, ..
     except TypeError as error:
         raise ManagedConfigError(message="managed arguments do not bind") from error
     return _argument_digest_bound(
-        tuple((name, value) for name, value in bound.arguments.items() if name not in {instance_parameter, "managed"}),
+        tuple(
+            (name, value)
+            for name, value in bound.arguments.items()
+            if name not in {
+                instance_parameter,
+                "managed",
+                getattr(descriptor, "store_parameter", None),
+                *getattr(descriptor, "_invocation_parameters", ()),
+            }
+        ),
     )
 
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import gc
+import weakref
 
 import numpy as np
 import pytest
@@ -141,3 +143,65 @@ def test_accumulator_group_stops_on_an_invalid_branch_output():
             np.ones((1, 2), dtype=np.float32),
             (np.zeros((2,), dtype=np.float32), np.zeros((2,), dtype=np.float32)),
         )
+
+
+def test_prepared_nested_groups_release_weak_state_owners():
+    """Global preparation facts must not close over group owners, even indirectly."""
+    child = Adding()
+    inner = AccumulatorGroup((child,))
+    outer = AccumulatorGroup({"nested": inner, "other": child})
+    outer.learn(OBSERVATION_SPEC, {"nested": (CARRY_SPEC,), "other": CARRY_SPEC})
+    refs = weakref.ref(outer), weakref.ref(inner)
+    del outer, inner
+    gc.collect()
+    assert all(reference() is None for reference in refs)
+
+
+def test_retained_group_compiles_only_during_preparation(monkeypatch):
+    """Five and one hundred transitions reuse each finalized child signature."""
+    from dryml.core import signatures
+    compiled = []
+    original = signatures.compile_signature
+    monkeypatch.setattr(signatures, "compile_signature",
+                        lambda target, **kw: (compiled.append(target), original(target, **kw))[1])
+    child = Adding()
+    group = AccumulatorGroup((child, child))
+    compiled.clear()
+    selected = group.find_implementation(OBSERVATION_SPEC, (CARRY_SPEC, CARRY_SPEC))
+    assert compiled == []
+    prepared = selected.prepared_invoker()
+    assert len(compiled) == 3
+    state = (np.zeros(2, dtype=np.float32), np.zeros(2, dtype=np.float32))
+    for length in (5, 100):
+        for _ in range(length):
+            state = prepared(np.ones((1, 2), dtype=np.float32), state)
+        assert len(compiled) == 3
+        assert child.selections == 2
+
+
+def test_nested_group_occurrences_retain_distinct_carry_constraints_and_invokers():
+    """Repeated leaves keep separate carry contracts in inspection and execution."""
+    class BroadcastAdding(Adding):
+        @traits(backend="numpy", batch_mode="batched")
+        def numpy(self, observation, state):
+            return state + observation.sum()
+
+    child = BroadcastAdding()
+    child.learn()
+    small = TensorSpec("float32", shape=(), backend="numpy")
+    large = TensorSpec("float32", shape=(3,), backend="numpy")
+    inner = AccumulatorGroup((child,))
+    group = AccumulatorGroup({"small": inner, "large": child})
+    graph = group.method_graph()
+    graph.learn(OBSERVATION_SPEC, {"small": (small,), "large": large})
+    nodes = [node for node in graph.method_nodes if node.method_type is BroadcastAdding]
+    assert [node.inputs[1].spec.value.shape for node in nodes] == [(), (3,)]
+    root = graph.method_nodes[0].selected
+    assert root.children[0].children[0] is nodes[0].selected
+    assert root.children[1] is nodes[1].selected
+    result = group(np.ones((1, 2), dtype=np.float32),
+                   {"small": (np.array(0, dtype=np.float32),), "large": np.zeros(3, dtype=np.float32)})
+    assert result["small"][0] == 2
+    np.testing.assert_equal(result["large"], np.full(3, 2, dtype=np.float32))
+    assert child.call_mode == "learning"
+    assert child.cached_signature is None

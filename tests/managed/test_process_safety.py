@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+from threading import Thread
 
 import pytest
 
@@ -91,3 +92,70 @@ def test_forked_managed_token_cannot_release_parent_or_bypass_parent_lock(tmp_pa
     finally:
         os.close(read_fd)
         owner.release()
+
+
+def test_control_reference_proof_rejects_foreign_thread_and_expired_cut(tmp_path, fixed_snapshot_environment):
+    """A populated control memo is usable only by the cut's live owning caller."""
+
+    from dryml.managed.storage import _state_ref_for_digest, _validate_control_state_ref
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    reference = repo.save_object(ProcessValue(1, repo=repo), deep_capture=True)
+    errors = []
+    with repo._read_cut() as cut:
+        assert _state_ref_for_digest(repo, reference.digest(), cut=cut) == reference
+        _validate_control_state_ref(repo, reference, cut)
+
+        def foreign():
+            for operation in (
+                lambda: _state_ref_for_digest(repo, reference.digest(), cut=cut),
+                lambda: _validate_control_state_ref(repo, reference, cut),
+                lambda: cut.__exit__(None, None, None),
+            ):
+                with pytest.raises(RuntimeError, match="another thread"):
+                    operation()
+                errors.append(True)
+
+        worker = Thread(target=foreign)
+        worker.start()
+        worker.join(10)
+        assert not worker.is_alive() and errors == [True] * 3
+        assert cut.active and len(cut.validated_state_refs) == 1
+    assert cut.resolved_state_refs == {} and cut.validated_state_refs == []
+    with pytest.raises(RuntimeError, match="inactive"):
+        _validate_control_state_ref(repo, reference, cut)
+    repo.close(flush=False)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable on this host")
+def test_inherited_control_cut_cannot_use_or_release_parent_proof(tmp_path, fixed_snapshot_environment):
+    """Fork rejection occurs before inherited locks or successful-proof lookup."""
+
+    from dryml.managed.storage import _state_ref_for_digest, _validate_control_state_ref
+
+    repo = Repo(DirStore(tmp_path / "state"))
+    reference = repo.save_object(ProcessValue(1, repo=repo), deep_capture=True)
+    with repo._read_cut() as cut:
+        _state_ref_for_digest(repo, reference.digest(), cut=cut)
+        _validate_control_state_ref(repo, reference, cut)
+        child = os.fork()
+        if child == 0:  # pragma: no cover - checked through process exit status.
+            try:
+                for operation in (
+                    lambda: _state_ref_for_digest(repo, reference.digest(), cut=cut),
+                    lambda: _validate_control_state_ref(repo, reference, cut),
+                    lambda: cut.__exit__(None, None, None),
+                ):
+                    try:
+                        operation()
+                    except RuntimeError:
+                        continue
+                    os._exit(1)
+                os._exit(0)
+            except BaseException:
+                os._exit(2)
+        _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert cut.active and len(cut.validated_state_refs) == 1
+    assert repo._topology_leases == 0
+    repo.close(flush=False)

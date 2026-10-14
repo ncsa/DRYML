@@ -6,6 +6,7 @@ from pathlib import Path
 from time import monotonic, sleep
 
 from dryml.execute.executor import Executor
+from dryml.execute.errors import CleanupError
 from dryml.execute.output import ExecutionOutput
 from dryml.execute.subprocess import SubProcessConfig
 
@@ -51,7 +52,12 @@ def test_concurrent_submissions_keep_worker_identity_and_output_isolated(tmp_pat
         assert second.result(timeout=10) == "second"
         assert first_output.snapshot().stdout == "output-first\n"
         assert second_output.snapshot().stdout == "output-second\n"
-        first.cleanup(timeout=5)
-        second.cleanup(timeout=5)
+        try:
+            first.cleanup(timeout=5)
+            second.cleanup(timeout=5)
+        except CleanupError:
+            print("first cleanup issues:", first.snapshot().cleanup_issues)
+            print("second cleanup issues:", second.snapshot().cleanup_issues)
+            raise
     finally:
         executor.close(cancel=True, timeout=5)

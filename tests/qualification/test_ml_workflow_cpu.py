@@ -77,34 +77,37 @@ def _requests(tmp_path, *, ray_address="127.0.0.1:6379"):
     ), manifest, manifest_path, tfds, roots
 
 
-def test_worker_matrix_enumerates_all_24_primary_cells_once_and_excludes_supplement(tmp_path):
+def test_worker_matrix_enumerates_all_36_primary_cells_once_and_excludes_supplement(tmp_path):
     """The U11 matrix is complete, stable, unique, and not multiplied by TFDS mode."""
 
     requests, manifest, *_ = _requests(tmp_path)
-    assert len(requests) == len({request.case.case_id for request in requests}) == len({request.request_id for request in requests}) == 24
+    assert len(requests) == len({request.case.case_id for request in requests}) == len({request.request_id for request in requests}) == 36
     assert {(request.case.workload, request.case.framework, request.case.execution) for request in requests} == {
         (workload, framework, execution)
-        for workload in ("W1", "W2", "W3") for framework in ("tf", "torch")
+        for workload in ("W1", "W2", "W3") for framework in ("tf", "torch", "jax")
         for execution in ("local", "managed-local", "subprocess", "ray")
     }
     assert all(request.case.w3_test_ref == manifest.references.numpy for request in requests if request.case.workload == "W3")
     assert supplemental_tfds_torch_case(manifest).case_id not in {request.case.case_id for request in requests}
 
 
-def test_fake_execute_routes_all_24_requests_without_live_transport_or_framework_import(tmp_path):
+def test_fake_execute_routes_all_36_requests_without_live_transport_or_framework_import(tmp_path):
     """Routine routing covers every worker request while remaining framework-free."""
 
     requests, *_ = _requests(tmp_path)
     executor = _FakeExecutor()
     for request in requests:
         submit_worker_request(executor, request)
-    assert len(executor.calls) == 24
+    assert len(executor.calls) == 36
     assert all(target is run_worker_request for target, _ in executor.calls)
     for request, (_, payload) in zip(requests, executor.calls):
         assert QualificationWorkerRequest.from_data(payload) == request
         assert json.loads(json.dumps(payload, ensure_ascii=True)) == payload
         optional_before = {
-            name for name in ("pandas", "tensorflow", "tensorflow_datasets", "torch")
+            name for name in (
+                "flax", "jax", "jaxlib", "optax", "pandas", "tensorflow",
+                "tensorflow_datasets", "torch",
+            )
             if name in sys.modules
         }
         result = run_worker_request(payload)
@@ -134,7 +137,7 @@ def test_worker_authority_and_ray_target_reject_before_submission(tmp_path):
     assert roots["output"].is_dir()
 
 
-def test_missing_ray_address_classifies_only_six_selected_ray_cells_as_unrun(tmp_path):
+def test_missing_ray_address_classifies_only_nine_selected_ray_cells_as_unrun(tmp_path):
     """Matrix enumeration remains complete while only selected Ray requests are unrun."""
 
     _, manifest, manifest_path, tfds, roots = _requests(tmp_path)
@@ -142,7 +145,7 @@ def test_missing_ray_address_classifies_only_six_selected_ray_cells_as_unrun(tmp
         manifest, manifest_path=manifest_path, tfds_data_dir=tfds, output_store=roots["output"],
         work_dir=roots["work"], evidence_dir=roots["evidence"], control_store=roots["control"],
     )
-    assert len(requests) == 18
+    assert len(requests) == 27
     outcomes = []
     for case in cpu_matrix(manifest):
         try:
@@ -155,7 +158,7 @@ def test_missing_ray_address_classifies_only_six_selected_ray_cells_as_unrun(tmp
             outcomes.append((case.execution, "unrun"))
         else:
             outcomes.append((case.execution, "constructible"))
-    assert outcomes.count(("ray", "unrun")) == 6
+    assert outcomes.count(("ray", "unrun")) == 9
     assert all(status == "constructible" for execution, status in outcomes if execution != "ray")
 
 
@@ -332,7 +335,10 @@ def test_coordinator_scope_keeps_import_and_materialization_restrictions_after_s
 
     requests, *_ = _requests(tmp_path)
     request = next(item for item in requests if item.case.execution == "subprocess")
-    blocked = {"tensorflow", "tensorflow_datasets", "torch", "pandas"}
+    blocked = {
+        "flax", "jax", "jaxlib", "optax", "tensorflow",
+        "tensorflow_datasets", "torch", "pandas",
+    }
     before = set(sys.modules) & blocked
     with _coordinator_scope():
         assert active_runtime().mode is RuntimeMode.ORCHESTRATOR
@@ -498,7 +504,7 @@ def test_canonical_state_digest_matches_tiny_torch_state_dict_and_changes_with_s
 
 
 @pytest.mark.ml_workflow_qualification
-@pytest.mark.parametrize("case_index", range(24), ids=lambda index: f"cpu-{index:02d}")
+@pytest.mark.parametrize("case_index", range(36), ids=lambda index: f"cpu-{index:02d}")
 def test_ml_workflow_real_cpu_worker_matrix(case_index):
     """Explicit real worker matrix gate; collection remains unrun without opt-in authority.
 

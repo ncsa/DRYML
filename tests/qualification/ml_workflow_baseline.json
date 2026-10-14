@@ -1,6 +1,6 @@
 {
   "format": "dryml-ml-workflow-baseline",
-  "version": 1,
+  "version": 2,
   "mnist": {
     "train_split": "train[:4096]",
     "test_split": "test[:1024]",
@@ -30,6 +30,7 @@
     "threshold": 0.05
   },
   "initialization": {
+    "jax_seed": 7105,
     "tensorflow_seed": 7103,
     "torch_seed": 7104
   },

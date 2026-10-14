@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from threading import get_ident
 
-from dataclasses import replace
-
 from dryml.core.reference_values import StateRef
 
 from .errors import ManagedContextError, ManagedControlError, ManagedInterrupted
@@ -19,6 +17,8 @@ class ManagedContext:
     the running control snapshot are established. They become inactive when the
     method exits and cannot transfer across a thread or process. The context
     borrows its resolved Repo/control Store and owns no caller resource lifetime.
+    Private publication events retire before hooks and never extend the validity
+    of state associated by a checkpoint or independent recovery operation.
     """
 
     def __init__(self, token, *, control_store, operation_id: str,
@@ -49,6 +49,7 @@ class ManagedContext:
         self._terminal_interrupted = False
         self._failure_code: str | None = None
         self._safe_point_error: BaseException | None = None
+        self._publication_event = None
 
     @property
     def active(self) -> bool:
@@ -116,7 +117,11 @@ class ManagedContext:
             Saves through the resolved Repo routing policy, commits only required
             dirty buffered state Stores, verifies exact recovery, commits control
             association, invokes callbacks in configured order, and may commit
-            terminal interruption. Incomplete state never receives association.
+            terminal interruption. The publisher's one-use completed event removes
+            only immediate duplicate validation; control and post-callback reads
+            remain fresh. Each framework-owned field transition may validate equal
+            current/proposed references once within its own control-first Repo cut;
+            the cut ends before callbacks. Incomplete state never receives association.
         """
 
         return self._checkpoint(cause=None, force_interrupt=False)
@@ -137,6 +142,8 @@ class ManagedContext:
             Uses the same routed durable checkpoint and callback boundary as
             :meth:`checkpoint`, then marks this context terminal. Catching the
             resulting exception cannot make the managed invocation complete.
+            The interruption decision rereads current authority after callbacks;
+            no checkpoint-association proof survives that boundary.
         """
 
         self._require_active()
@@ -159,19 +166,16 @@ class ManagedContext:
             try:
                 self._ownership.require_owner()
                 publish_managed_state = _publish_managed_state()
-                state_ref, report = publish_managed_state(
+                publication = publish_managed_state(
                     self._state_repo, self._obj, reservation=self._ownership.reservation,
-                    snapshot_observer=self._snapshot_observer,
+                    snapshot_observer=self._snapshot_observer, invocation=self,
                 )
-                validate_state_ref = _validate_state_ref()
-                validate_state_ref(self._state_repo, state_ref)
+                state_ref, report = publication.state_ref, publication.report
+                publication.event.consume(self._state_repo, state_ref, report, self)
                 _checkpoint_boundary("state_published")
-                self._control.transition_running_owner(
+                self._control._transition_running_fields(
                     self._operation_id, attempt_id=self._attempt_id, owner_id=self._owner_id,
-                    build=lambda current: replace(
-                        current, generation=current.generation + 1,
-                        checkpoint_digest=state_ref.digest(), final_digest=None, failure_code=None,
-                    ),
+                    kind="checkpoint", digest=state_ref.digest(),
                 )
                 self._checkpoint_state_ref = state_ref
                 _checkpoint_boundary("checkpoint_associated")
@@ -189,11 +193,9 @@ class ManagedContext:
                 self._latch_safe_point_error("callback_error", error)
                 raise
             try:
-                interrupted = self._control.transition_running_owner(
+                interrupted = self._control._transition_running_fields(
                     self._operation_id, attempt_id=self._attempt_id, owner_id=self._owner_id,
-                    build=lambda current: _interrupted_snapshot(current) if (
-                        force_interrupt or current.interrupt_request is not None
-                    ) else None,
+                    kind="interruption", force_interrupt=force_interrupt,
                 )
             except BaseException as error:
                 if force_interrupt:
@@ -215,6 +217,7 @@ class ManagedContext:
             _checkpoint_boundary("interruption_decided")
             return state_ref
         finally:
+            self._expire_publication_event()
             self._checkpointing = False
 
     def _raise_if_interrupted(self) -> None:
@@ -245,7 +248,13 @@ class ManagedContext:
     def _deactivate(self) -> None:
         """Retire this private authority after runtime cleanup completes."""
 
+        self._expire_publication_event()
         self._active = False
+
+    def _expire_publication_event(self):
+        if self._publication_event is not None:
+            self._publication_event.expire()
+            self._publication_event = None
 
 
 _CONTEXT_TOKEN = object()
@@ -257,29 +266,12 @@ def _create_context(**kwargs) -> ManagedContext:
     return ManagedContext(_CONTEXT_TOKEN, **kwargs)
 
 
-def _validate_state_ref():
-    """Load the storage validator lazily to keep context metadata import-light."""
-
-    from .storage import validate_state_ref
-
-    return validate_state_ref
-
-
 def _publish_managed_state():
     """Load the shared managed state publisher without widening import scope."""
 
-    from .storage import publish_managed_state
+    from .storage import _publish_managed_state_result
 
-    return publish_managed_state
-
-
-def _interrupted_snapshot(current):
-    """Build one terminal interruption replacement from freshly locked authority."""
-
-    return replace(
-        current, owner_id=None, generation=current.generation + 1,
-        state="interrupted", interrupt_request=None, final_digest=None, failure_code=None,
-    )
+    return _publish_managed_state_result
 
 
 def _checkpoint_boundary(stage: str) -> None:

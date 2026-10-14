@@ -1,0 +1,47 @@
+{
+  "schema": "dryml-test-fold-progress",
+  "version": 1,
+  "provenance": "Synthetic explicit records; schema frozen from fold.py at ba368afc (v1); approved KTD02 grammar (v2). No user Store/data.",
+  "encoding": "base64-wrapped pickle protocol 5; SHA256 covers decoded authoritative bytes and encoded files",
+  "identity_binding": "Managed tests rebind only source_binding, program, operation_id, attempt_id to a synthetic receiver; carry/spec/state/EOF bytes originate here.",
+  "expectations": {
+    "v1-active": "resume saved carry 1 at position 1 over (1,2) -> 3; no initializer execution",
+    "v1-exhausted": "restore succeeds; continuation requires explicit managed rerun; saves preserve v1",
+    "v1-completed": "count 2 and completed Value 3 remain readable without source",
+    "v2-active": "no EOF field; compatible positional recovery",
+    "v2-exhausted": "root-output-eof field required; source-free finalization of saved carry 1",
+    "downgrade": "frozen ba368afc reader rejects v2 at version gate before carry validation"
+  },
+  "files": {
+    "v1-active.pkl.b64": {
+      "sha256": "e3ef3cba6ad55c3c74dd0d171a14efc7719cb1b7f7a1cbbd326e2595f78670f1",
+      "size": 855,
+      "encoded_sha256": "8b7e5514877b455bfe5a13715806f99923be24e1d4f9a9194280d0f8cc131124"
+    },
+    "v1-exhausted.pkl.b64": {
+      "sha256": "c541b2eeeaa042dcf87c2ed027c121f18930244e04c21c8463dc8f857dc495db",
+      "size": 858,
+      "encoded_sha256": "47b4d375b190d00971dadfb8b9fa0029d304587fdab220cbda4232ab7c132e04"
+    },
+    "v1-completed.pkl.b64": {
+      "sha256": "a71560181e0ead47dee97ef7bf75bf3ac1a30dd5f84535b8bbdff7b384928536",
+      "size": 101,
+      "encoded_sha256": "5404a894703028f6c975ff70a251c78ac10e8ee35df0e6c4275bace2a94850fc"
+    },
+    "v2-active.pkl.b64": {
+      "sha256": "f0a1f858b5361cdb3bb93e0b86a1a3368fcc6d404975622eccb1ece6e0d4ce4b",
+      "size": 855,
+      "encoded_sha256": "f04130de89c64ee710bb9df2ec3dee72be1ed04591ecc26a57e072e30bbc30af"
+    },
+    "v2-exhausted.pkl.b64": {
+      "sha256": "60b05ab06c4c39688b77c99de39037522e1ae2ef43f1899c5e7bd4f9e30c755d",
+      "size": 882,
+      "encoded_sha256": "d9d675bb403835d78ef2c5e8291544a43aa1186d02a8ad1160a91cafb9db3935"
+    },
+    "v1-completed-value.pkl.b64": {
+      "sha256": "7392712bb85847a4c879b48f09af0fbfa79f06e4b09b63b9a01e5f8fbbb969ba",
+      "size": 90,
+      "encoded_sha256": "5b41fd1c2869c157d463a4c0d9e2bbfc679df4d9b2793d691534f5e2e006b69c"
+    }
+  }
+}

@@ -17,6 +17,14 @@ class TrainFunction(Method):
     false; Experiment still creates and evaluates its terminal checkpoint.
     """
 
+    supports_observers = False
+    """Whether this trainer accepts Experiment invocation telemetry sessions."""
+
+    def _validate_observer_session(self, observer_session) -> None:
+        """Apply the default host-callable observer admission contract."""
+
+        observer_session.require_callables(type(self).__name__)
+
     @abstractmethod
     def __call__(self, exp, *, callbacks: Sequence[Callable[[], None]] = ()):
         """Train ``exp`` and return its implementation-defined result.

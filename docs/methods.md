@@ -146,6 +146,25 @@ Unconstrained later positional and keyword arguments are forwarded unchanged.
 Calling a selected carrier never discovers candidates or reads/mutates Method
 preparation state.
 
+`MethodImplementation.consumer_input_specs` exposes normalized inputs delivered
+to the selected target after any retained conversion. Its `infer_output_spec()`
+uses those actual consumer inputs, rather than producer constraints or an
+optional raw-result constraint. Inference is pure and never ranks alternatives.
+Pipe threads selected child outputs, Project preserves their exact branch tree,
+and AutoEncoder threads the selected encoder output to its native decoder.
+Graph target-input/output ports expose these selected facts; producer validation
+and raw-result validation remain independently inspectable on the retained
+selection and conversion edge. Arbitrary output backends are never rewritten
+from implementation traits.
+
+Selection and composite specialization are metadata-only: they retain child
+occurrence facts without compiling core signatures, running bodies, opening
+sources, or importing optional backends. Executable preparation compiles each
+finalized occurrence once. `prepared_invoker()` returns a process-local reusable
+invoker; retained Map, Fold, and group execution uses it throughout the invocation.
+Calling a selected carrier directly remains supported and prepares a fresh
+invocation, without a second global or carrier compilation cache.
+
 ## Accumulators
 
 `Accumulator[ObservationT, StateT]` is an abstract two-input Method for one
@@ -163,6 +182,11 @@ Reusing a child declaration creates no shared execution state: callers supply
 distinct carry entries. Group inference and selection do not run transition
 targets or change child learning/cached mode.
 
+Prepared groups retain detached collection structure and prepared children,
+not a closure over the group or owner-bearing selected carriers. The framework's
+weak preparation state therefore does not keep discarded groups alive, including
+nested groups. Carry values remain caller-owned and are never cached.
+
 Fold owns invocation and publication around these Methods. Initializer,
 Accumulator, and finalizer declarations are visible in the Fold definition before
 execution, but their selected carriers and carry values are worker-local. A direct
@@ -175,6 +199,9 @@ Alternative-backed Methods begin with `call_mode == "eager"`. Each direct call
 derives observable backend and batch facts, selects a unique safe candidate, and
 invokes it locally. Direct calls do not imply dispatch, sessions, persistence,
 managed execution, code transformation, or backend warmup.
+Weak preparation-state cleanup may run synchronously during another Method's
+state allocation; the side-table synchronization permits this same-thread
+re-entry without retaining the discarded Method.
 
 Dense runtime arrays do not reveal element-versus-batched intent. While eager,
 `default_batched` accepts exact `True`, exact `False`, or `None`. It fills only
@@ -219,7 +246,7 @@ declarations include ordered inputs, pure spec/cardinality transforms, pull
 policy, and maximum buffered items. The graph is neither a second cache nor a
 compiler, JIT, fusion, async scheduler, key join, or global optimization API.
 
-For a complete dense NumPy, TensorFlow, or Torch source spec, preparation first
+For a complete dense NumPy, TensorFlow, Torch, or JAX source spec, preparation first
 selects a directly compatible candidate. Only when none exists can it retain one
 direct CPU host-copy handoff to a uniquely most-specific target backend. Each
 `ConversionEdge` exposes producer/consumer specs, adapter name, exact
@@ -234,14 +261,68 @@ or body error if cleanup also fails. Each reused Dataset occurrence opens its ow
 cursor and unknown-spec discovery buffer. Planning never opens a source; first
 value discovery happens only in the owning graph cursor and retains at most one
 prefetched value per occurrence.
+Ordinary and prepared Map use the same core runtime discovery operation to
+activate a missing adapter for native first-value leaves, including nested trees.
+Existing custom registered detectors are retained. This opt-in is confined to
+cursor execution: `discover_backend`/`discover_backends` remain passive by default,
+and metadata selection and preparation activate no adapter. Native-family hints
+are not validation or conversion admission; selected runtime constraints and
+dense handoff CPU/gradient checks still apply.
+
+Dataset preparation owns its occurrence selections independently of every child
+Method's direct-call mode, signature, default, and preparation. It never calls
+child `learn()` or resets child state. Replacement publishes only a complete
+local plan: a later-branch selection, inference, or compilation failure leaves
+the previous plan and independently running cursors usable. Dataset graph
+`eager()` discards only that plan's selections; already captured cursors continue
+using their invokers. Direct `Method.learn()` retains its distinct clearing
+contract: a failed reprepare leaves learning mode with no old or partial plan.
+
+The protected lifecycle in `methods.stream` is shared with ordinary Dataset and
+native-training cursors. Use a cursor context manager around consumer work to
+close resources deterministically and preserve a consumer failure over cleanup
+errors. Cleanup diagnostics are retained in the primary exception's `__notes__`,
+including on Python 3.10 where `BaseException.add_note()` is unavailable.
+`observed_eof` records successful root-output termination independently
+of closure; explicit close, interruption, acquisition/operator/validation failure,
+and strict count shortfall never certify EOF. Genuine EOF is recorded before
+cleanup and survives cleanup errors. Non-pull `StopIteration` becomes a causal
+`RuntimeError`, rather than silently truncating a stream. The established
+`DatasetExhaustedError` is defined at this lower boundary and remains re-exported
+by Data with identical fields and exception identity; it is not a Methods-root
+public export. Methods stream execution imports no consumer package to report
+shortfall.
+
+`Dataset.prepare()` keeps this graph plan as a dependency-light native-training
+input carrier. It reports whether qualified `"stream"` execution or documented
+`"eager"` fallback ran, but neither level owns accepted training progress. Every
+native consumer cursor reopens the plan independently; a consumer prefetch or
+read-ahead can only advance that private cursor and cannot advance a successful
+update position or checkpoint association.
+
+Native trainers retain their selected input and target consumer specs plus any
+dense conversion edges in an inspectable `TrainingPreparation`. TensorFlow,
+Torch, and experimental JAX therefore share the same Method-owned preparation
+authority without importing one another during planning.
 
 Dense handoffs preserve mapping/tuple/list structure and exact representable
 bool or fixed-width numeric dtype, shape, values, and batch meaning through an
 owned writable contiguous host copy. They normalize read-only, transposed, and
-negative-stride source arrays by copying. Object/string/complex/bfloat,
-sparse/ragged/quantized, mixed-backend, non-CPU, and inexact values are rejected
-before the selected target runs. A Torch tensor with `requires_grad=True` cannot
-cross a framework boundary and is never detached implicitly.
+negative-stride source arrays by copying. Each accepted leaf is extracted and
+validated exactly once; target construction reuses that validated host tree.
+Source/destination adapters activate through `Backend.module` only at admitted
+runtime validation/crossing boundaries, including a native Method's declared
+runtime backend before first-call signature normalization. Logical TensorSpec
+values require no runtime adapter. Passive selection, construction, and
+inspection do not require prior plugin registration. Missing dependencies report
+the existing backend `ContextError`. JAX sources must be concrete,
+fully-addressable, single-device CPU arrays; tracers, abstract values, and sharded
+arrays are rejected. JAX targets are explicitly placed on one CPU device and reject
+a dtype that JAX would narrow under its current x64 setting; DRYML never changes
+that global setting. Object/string/complex/bfloat, sparse/ragged/quantized,
+mixed-backend, non-CPU, and inexact values are rejected before the selected target
+runs. A Torch tensor with `requires_grad=True` cannot cross a framework boundary
+and is never detached implicitly.
 
 Cached calls must exactly match the learned positional and keyword structure,
 dtype, shape, layout, backend, and observable batch facts. Matching calls invoke
@@ -265,7 +346,7 @@ reuses the identical live object preserves its local state. Concurrent cached
 reads do not mutate state. Concurrent mode/default mutation of one Method is
 unsupported and requires caller coordination.
 
-`Map` selects a local callable once from a complete source spec. `Project`
+`Map` retains a local invoker once per cursor from a complete source spec. `Project`
 selects each branch, `Pipe` threads pure intermediate specs, and `AutoEncoder`
 selects encoder then decoder from threaded specs. This is local structural
 selection, not global pipeline optimization, adapter insertion, or shared-node

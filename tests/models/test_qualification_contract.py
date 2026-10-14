@@ -56,7 +56,7 @@ def test_qualification_case_round_trip_retains_exact_w3_reference_without_live_h
     assert QualificationCase.from_data(case.to_data()) == case
     matrix = cpu_matrix(manifest)
     supplemental = supplemental_tfds_torch_case(manifest)
-    assert len(matrix) == 24
+    assert len(matrix) == 36
     assert all(case.case_kind == "matrix" and not case.tensorflow_mode for case in matrix)
     assert supplemental.case_kind == "tfds-tensorflow-to-torch" and supplemental.tensorflow_mode
     assert supplemental.case_id not in {case.case_id for case in matrix}
@@ -72,7 +72,7 @@ from tests.qualification.ml_workflow_fixtures import load_manifest
 from tests.qualification.ml_workflow_workloads import case_from_manifest
 m = load_manifest(__import__('sys').argv[1], fixture_store=__import__('sys').argv[2], tfds_data_dir=__import__('sys').argv[3], environment={key: 'test' for key in __import__('tests.qualification.ml_workflow_fixtures', fromlist=['REQUIRED_ENVIRONMENT_KEYS']).REQUIRED_ENVIRONMENT_KEYS})
 c = case_from_manifest(m, workload='W3', framework='tf', execution='managed-local')
-print(json.dumps({'digest': c.w3_test_ref.digest(), 'loaded': sorted(n for n in __import__('sys').modules if n in {'tensorflow', 'torch', 'pandas', 'tensorflow_datasets'})}))
+print(json.dumps({'digest': c.w3_test_ref.digest(), 'loaded': sorted(n for n in __import__('sys').modules if n in {'tensorflow', 'torch', 'jax', 'jaxlib', 'flax', 'optax', 'pandas', 'tensorflow_datasets'})}))
 """
     environment = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(Path.cwd() / "src"), str(Path.cwd()), os.environ.get("PYTHONPATH")]))}
     result = subprocess.run([sys.executable, "-c", code, str(path), str(store_path), str(tmp_path / "tfds")], check=True, capture_output=True, text=True, env=environment)
@@ -119,6 +119,10 @@ def test_qualification_preflight_records_tfds_version_without_importing_tfds(mon
     tfds_before = sys.modules.get("tensorflow_datasets", missing)
     versions = {
         "dryml": "0.3.0b1",
+        "flax": "0.12.10",
+        "jax": "0.11.2",
+        "jaxlib": "0.11.2",
+        "optax": "0.2.8",
         "pandas": "3.0.0",
         "pyarrow": "25.0.1",
         "tensorflow": "2.19.0",
@@ -133,4 +137,5 @@ def test_qualification_preflight_records_tfds_version_without_importing_tfds(mon
     observed = installed_environment()
 
     assert observed["tensorflow_datasets"] == "4.9.9"
+    assert observed["jax"] == "0.11.2"
     assert sys.modules.get("tensorflow_datasets", missing) is tfds_before

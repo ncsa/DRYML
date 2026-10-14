@@ -7,7 +7,7 @@ opens for one graph traversal.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -15,6 +15,261 @@ from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import SpecTree
 
 from .errors import ImplementationSelectionError
+
+
+class DatasetExhaustedError(ValueError):
+    """Report a strict yield-count shortfall without changing exception identity.
+
+    Args:
+        requested: Nonnegative number of values required by the operation.
+        yielded: Number actually consumed before exhaustion.
+
+    Attributes:
+        requested: Required yield count.
+        yielded: Successfully consumed yield count.
+
+    Data re-exports this lower-layer exception; it is not a Methods-root export.
+    """
+
+    def __init__(self, requested: int, yielded: int) -> None:
+        self.requested = requested
+        self.yielded = yielded
+        super().__init__(
+            f"Requested {requested} dataset elements, but the source yielded only {yielded}."
+        )
+
+
+class _CursorLifecycle:
+    """Own resources and positive output-termination evidence for one traversal.
+
+    Subclasses implement ``_read`` using designated ``_pull`` calls for iterator
+    exhaustion and ``_call`` for acquisition, operators, and validation. Strict
+    skip shares the failure boundary; consumers may specialize ``_skip`` without
+    certifying EOF or closing resources. Persistence policy remains with consumers.
+    """
+
+    def __init__(self) -> None:
+        self._resources: list[object] = []
+        self._resource_ids: set[int] = set()
+        self._deferred_cleanup: list[BaseException] = []
+        self._closed = False
+        self._cleanup_done = False
+        self._cleanup_deferred = False
+        self._observed_eof = False
+
+    @property
+    def observed_eof(self) -> bool:
+        """Return positive root-output EOF evidence, independent of closure.
+
+        True only after a designated output pull ends or a strict output bound is
+        satisfied and subsequently observed. Cleanup failures do not erase this
+        evidence. Explicit close, interruption, and failures never create it.
+        """
+
+        return self._observed_eof
+
+    def __iter__(self):
+        """Return this traversal's iterator without acquiring a resource."""
+
+        return self
+
+    def __next__(self):
+        """Read one output, closing on EOF/failure while preserving primary errors."""
+
+        if self._closed:
+            raise StopIteration
+        try:
+            value = self._read()
+        except StopIteration:
+            self._observed_eof = True
+            if self._cleanup_deferred:
+                self._closed = True
+            else:
+                self.close()
+            raise
+        except BaseException as error:
+            self._close_after_failure(error)
+            raise
+        return value
+
+    @staticmethod
+    def _validate_skip_count(n: int) -> None:
+        """Reject counts that cannot express an exact nonnegative yield count."""
+
+        if type(n) is not int:
+            raise TypeError("skip count must be a nonnegative exact int.")
+        if n < 0:
+            raise ValueError("skip count must be non-negative.")
+
+    def skip(self, n: int) -> None:
+        """Consume exactly ``n`` outputs or report this call's partial advancement.
+
+        Args:
+            n: Nonnegative exact integer number of yields to discard.
+
+        Returns:
+            None after advancing exactly ``n`` outputs; zero is always a no-op.
+
+        Raises:
+            TypeError: If ``n`` is not an exact integer.
+            ValueError: If ``n`` is negative.
+            DatasetExhaustedError: If fewer than ``n`` outputs remain, including
+                on a closed cursor. Counts describe requested and actual advances.
+            BaseException: Acquisition, read, or operator failure.
+
+        Invalid counts do not advance or close the cursor. Real failures close
+        owned resources while keeping the primary error over cleanup failures.
+        Shortfall never creates root EOF evidence or erases already observed EOF.
+        """
+
+        self._validate_skip_count(n)
+        if n == 0:
+            return
+        if self._closed:
+            raise DatasetExhaustedError(n, 0)
+        try:
+            self._call(self._skip, n)
+        except BaseException as error:
+            self._close_after_failure(error)
+            raise
+
+    def _skip(self, n: int) -> None:
+        """Read a strict prefix before applying root termination/cleanup policy."""
+
+        advanced = 0
+        while advanced < n:
+            try:
+                self._read()
+            except StopIteration as error:
+                raise DatasetExhaustedError(n, advanced) from error
+            advanced += 1
+
+    def __enter__(self):
+        """Enter an ownership boundary; acquisition remains lazy."""
+
+        return self
+
+    def __exit__(self, exc_type, error, traceback):
+        """Close on exit, retaining consumer failures and interruption as primary.
+
+        Cleanup alone is reported normally. Unexpected consumer StopIteration is
+        translated to RuntimeError with the original exception as its cause.
+        """
+
+        if error is None:
+            self.close()
+        elif isinstance(error, StopIteration):
+            failure = RuntimeError("Unexpected StopIteration in cursor consumer.")
+            self._close_after_failure(failure)
+            raise failure from error
+        else:
+            self._close_after_failure(error)
+        return False
+
+    @staticmethod
+    def _call(function, *args, **kwargs):
+        """Call a non-pull operation without mistaking StopIteration for EOF."""
+
+        try:
+            return function(*args, **kwargs)
+        except StopIteration as error:
+            raise RuntimeError("Unexpected StopIteration outside an iterator pull.") from error
+
+    def _pull(self, iterator):
+        """Pull an iterator, deferring known EOF cleanup errors to root policy.
+
+        A child may have proved EOF before cleanup failed. The parent must first
+        validate its own strict bound; only then can it certify its root EOF.
+        """
+
+        try:
+            return next(iterator)
+        except StopIteration:
+            raise
+        except BaseException as error:
+            if isinstance(iterator, _CursorLifecycle) and iterator.observed_eof:
+                self._deferred_cleanup.append(error)
+                raise StopIteration from error
+            raise
+
+    def _own(self, resource):
+        """Retain an acquired resource for exactly one reverse-order close attempt."""
+
+        if id(resource) not in self._resource_ids:
+            if isinstance(resource, _CursorLifecycle):
+                # The parent owns cleanup ordering across sibling cursors. Child
+                # termination records evidence but cannot close ahead of them.
+                resource._cleanup_deferred = True
+            self._resource_ids.add(id(resource))
+            self._resources.append(resource)
+        return resource
+
+    def _release(self, resource) -> None:
+        """Close and forget a finished child, bounding repeated-epoch ownership."""
+
+        try:
+            close = self._call(getattr, resource, "close", None)
+            if close is not None:
+                self._call(close)
+        finally:
+            self._resources = [item for item in self._resources if item is not resource]
+            self._resource_ids.discard(id(resource))
+
+    def close(self) -> None:
+        """Close acquired resources once in reverse order, without proving EOF.
+
+        Raises:
+            BaseException: First cleanup failure after every resource gets an
+                attempt. Unexpected cleanup StopIteration becomes RuntimeError
+                with the original cause. Further failures are exception notes,
+                retained in ``__notes__`` even on Python without ``add_note``.
+        """
+
+        if self._cleanup_done:
+            return
+        self._closed = True
+        self._cleanup_done = True
+        errors = self._close_resources()
+        if errors:
+            primary, *additional = errors
+            self._annotate_cleanup(primary, additional)
+            raise primary
+
+    def _close_after_failure(self, primary: BaseException) -> None:
+        """Close after failure without replacing the primary diagnostic."""
+
+        if self._cleanup_done:
+            return
+        self._closed = True
+        if self._cleanup_deferred:
+            return
+        self._cleanup_done = True
+        self._annotate_cleanup(primary, self._close_resources())
+
+    @staticmethod
+    def _annotate_cleanup(primary: BaseException, errors: list[BaseException]) -> None:
+        if not errors:
+            return
+        message = "Cursor cleanup also failed: " + "; ".join(
+            f"{type(error).__name__}: {error}" for error in errors
+        )
+        add_note = getattr(primary, "add_note", None)
+        if callable(add_note):
+            add_note(message)
+        else:
+            primary.__notes__ = [*getattr(primary, "__notes__", ()), message]
+
+    def _close_resources(self) -> list[BaseException]:
+        errors = self._deferred_cleanup
+        self._deferred_cleanup = []
+        for resource in reversed(self._resources):
+            try:
+                close = self._call(getattr, resource, "close", None)
+                if close is not None:
+                    self._call(close)
+            except BaseException as error:
+                errors.append(error)
+        return errors
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +402,7 @@ class _StreamOp:
     selected: object | None = None
     node: StreamNode | None = None
     tree: object | None = None
+    spec: SpecTree | None = None
 
 
 class StreamPlan:
@@ -159,6 +415,8 @@ class StreamPlan:
     Planning records immutable selected Map invokers but never opens a source.
     Each :meth:`iterator` creates isolated cursor/discovery state and therefore
     reopens every source occurrence independently.
+    Child Methods retain their own direct-call state. Failed replacement leaves
+    the previous complete plan and all independently captured cursors usable.
     """
 
     def __init__(self, dataset: object) -> None:
@@ -193,13 +451,18 @@ class StreamPlan:
             NotImplementedError: If the graph includes an unqualified operator.
             ImplementationSelectionError: If a known Map spec cannot select one
                 local implementation.
+
+        Side Effects:
+            Publishes a complete local plan only after selection, inference,
+            signature compilation, and assertions succeed. Child Method state
+            and previously captured cursors are never changed.
         """
 
         if strategy != "local":
             raise ValueError(f"Unsupported Method preparation strategy {strategy!r}; only 'local' is available.")
         records: list[object] = []
         root = self._build(self.dataset, records)
-        from .signature import spec_from_node
+        from .signature import spec_from_node, spec_node
 
         root_specs = tuple(
             spec_from_node(node.outputs[0].spec)
@@ -209,76 +472,30 @@ class StreamPlan:
         supplied = (() if input_spec is None else (input_spec, *additional_input_specs))
         if supplied and supplied != root_specs:
             raise ValueError("Dataset graph input specs do not match its declared source specs.")
-        if output_spec is not None and output_spec != getattr(self.dataset, "spec"):
+        if output_spec is not None and spec_node(output_spec) != spec_node(root.spec):
             raise ValueError("Dataset graph output spec does not match its declared output spec.")
-        self._root = root
-        self._nodes = tuple(records)
         edges = []
-        for node in self._nodes:
+        for node in records:
             selected = getattr(node, "selected", None)
             edge = None if selected is None else selected.conversion_edge
             if edge is not None and edge not in edges:
                 edges.append(edge)
-        self._conversion_edges = tuple(edges)
+        self._root, self._nodes, self._conversion_edges = root, tuple(records), tuple(edges)
 
     def eager(self) -> None:
-        """Discard graph selections and reset every nested Method occurrence.
+        """Discard only this plan's selections; captured cursors and children survive."""
 
-        Map graph inspection prepares the actual Method instances. Resetting only
-        the plan leaves stale shared selection state for later backend graphs.
-        """
-
-        self._eager_dataset(self.dataset, set())
         self._root = None
         self._nodes = ()
         self._conversion_edges = ()
 
-    @classmethod
-    def _eager_dataset(cls, dataset: object, seen: set[int]) -> None:
-        """Reset each Method reachable through one stream Dataset graph once."""
-
-        identifier = id(dataset)
-        if identifier in seen:
-            return
-        seen.add(identifier)
-        method = getattr(dataset, "method", None)
-        if method is not None:
-            cls._eager_method(method, seen)
-        source = getattr(dataset, "src", None)
-        if source is not None:
-            cls._eager_dataset(source, seen)
-        for child in _iter_dataset_leaves(getattr(dataset, "sources", ())):
-            cls._eager_dataset(child, seen)
-
-    @classmethod
-    def _eager_method(cls, method: object, seen: set[int]) -> None:
-        """Reset one Method and nested Method fields retained by composition."""
-
-        identifier = id(method)
-        if identifier in seen:
-            return
-        seen.add(identifier)
-        eager = getattr(method, "eager", None)
-        if callable(eager):
-            eager()
-        for value in vars(method).values():
-            cls._eager_value(value, seen)
-
-    @classmethod
-    def _eager_value(cls, value: object, seen: set[int]) -> None:
-        """Traverse declared Method/container fields without probing opaque values."""
-
-        if hasattr(value, "eager") and hasattr(value, "method_graph"):
-            cls._eager_method(value, seen)
-        elif isinstance(value, Mapping):
-            for item in value.values():
-                cls._eager_value(item, seen)
-        elif isinstance(value, (tuple, list)):
-            for item in value:
-                cls._eager_value(item, seen)
-
-    def iterator(self) -> "StreamGraphCursor":
+    def iterator(self, *, epoch: int = 0) -> "StreamGraphCursor":
         """Return one isolated pull cursor over this prepared graph.
+
+        Args:
+            epoch: Logical epoch forwarded only to qualified ``Take`` boundaries.
+                Other prepared operators preserve their ordinary traversal
+                semantics around that boundary.
 
         Raises:
             RuntimeError: If :meth:`learn` has not prepared this graph.
@@ -286,91 +503,111 @@ class StreamPlan:
 
         if self._root is None:
             raise RuntimeError("Dataset graph iteration requires graph.learn() first.")
-        return StreamGraphCursor(self._root)
+        if type(epoch) is not int or epoch < 0:
+            raise ValueError("epoch must be a nonnegative exact int.")
+        return StreamGraphCursor(self._root, epoch=epoch)
 
     def _build(self, dataset: object, records: list[object]) -> _StreamOp:
         from .ir import MethodGraphNode, MethodPort
-        from .signature import spec_node
+        from .signature import spec_node, spec_from_node
+        from dryml.core.tensor_spec import batch_spec_tree, unbatch_spec_tree, merge_spec_trees, Dynamic
 
         # Only qualified concrete operators opt in.  Other Dataset subclasses
         # inherit the source marker but must not silently gain stream semantics.
         kind = type(dataset).__dict__.get("_stream_operator")
         if kind is None:
             kind = "unsupported" if hasattr(dataset, "src") else "source"
-        if kind not in {"source", "map", "batch", "unbatch", "zip", "chain", "custom"}:
+        if kind not in {"source", "map", "batch", "unbatch", "take", "zip", "chain", "custom"}:
             raise NotImplementedError(f"Dataset graph planning does not support {type(dataset).__name__}.")
-        spec = getattr(dataset, "spec")
+        spec = spec_from_node(spec_node(getattr(dataset, "spec")))
         if kind == "source":
             records.append(MethodGraphNode(len(records), "source", None, outputs=(MethodPort("iterator", spec_node(spec)),)))
-            return _StreamOp("source", dataset=dataset)
+            return _StreamOp("source", dataset=dataset, spec=spec)
         if kind == "map":
             child = self._build(dataset.src, records)
             selected = None
             try:
                 # A Map is an iterator boundary around an element Method graph.  Keep
-                # the composed Method occurrences visible through the canonical
-                # MethodGraph rather than exposing composition-private fields.
-                element_graph = dataset.method.method_graph()
-                element_graph.learn(dataset.src.spec, strategy="local")
-                element_nodes = element_graph.method_nodes
+                # the composed occurrences visible through the same local build
+                # used by MethodGraph, without publishing child Method state.
+                selected, element_nodes = dataset.method._prepare_local(child.spec)
+                element_nodes = tuple(node for node in element_nodes if node.kind == "method")
+                spec = spec_from_node(element_nodes[0].outputs[0].spec)
                 records.extend(replace(node, occurrence=len(records)) for node in element_nodes)
-                selected = element_nodes[0].selected if element_nodes else None
             except ImplementationSelectionError as error:
                 if error.reason != "unknown_traits" or error.unknown_traits != ("backend",):
                     raise
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset.method),
-                inputs=(MethodPort("iterator", spec_node(dataset.src.spec)),),
+                inputs=(MethodPort("iterator", spec_node(child.spec)),),
                 outputs=(MethodPort("iterator", spec_node(spec)),),
                 selected=selected,
                 traits=None if selected is None else selected.traits,
-                stream_node=self._builtin_node("Map", (dataset.src.spec,), spec, dataset, ("one_to_one",), 1),
+                stream_node=self._builtin_node("Map", (child.spec,), spec, dataset, ("one_to_one",), 1),
             ))
-            return _StreamOp("map", dataset=dataset, inputs=(child,), selected=selected)
+            return _StreamOp("map", dataset=dataset, inputs=(child,), selected=selected, spec=spec)
         if kind in {"batch", "unbatch"}:
             child = self._build(dataset.src, records)
+            spec = (batch_spec_tree(child.spec, batch=dataset.batch_size if dataset.drop_remainder else Dynamic)
+                    if kind == "batch" else unbatch_spec_tree(child.spec))
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),
-                inputs=(MethodPort("iterator", spec_node(dataset.src.spec)),),
+                inputs=(MethodPort("iterator", spec_node(child.spec)),),
                 outputs=(MethodPort("iterator", spec_node(spec)),),
                 stream_node=self._builtin_node(
                     type(dataset).__name__,
-                    (dataset.src.spec,),
+                    (child.spec,),
                     spec,
                     dataset,
                     ("bounded_group" if kind == "batch" else "one_to_many",),
                     dataset.batch_size if kind == "batch" else 1,
                 ),
             ))
-            return _StreamOp(kind, dataset=dataset, inputs=(child,))
+            return _StreamOp(kind, dataset=dataset, inputs=(child,), spec=spec)
+        if kind == "take":
+            child = self._build(dataset.src, records)
+            spec = child.spec
+            records.append(MethodGraphNode(
+                len(records), "method", type(dataset),
+                inputs=(MethodPort("iterator", spec_node(child.spec)),),
+                outputs=(MethodPort("iterator", spec_node(spec)),),
+                stream_node=self._builtin_node(
+                    "Take", (child.spec,), spec, dataset,
+                    ("strict_prefix",), 0,
+                ),
+            ))
+            return _StreamOp("take", dataset=dataset, inputs=(child,), spec=spec)
         if kind == "zip":
             leaves = tuple(_iter_dataset_leaves(dataset.sources))
             children = tuple(self._build(source, records) for source in leaves)
+            spec = _build_zip_tree(dataset.sources, iter(child.spec for child in children))
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),
-                inputs=tuple(MethodPort("iterator", spec_node(source.spec)) for source in leaves),
+                inputs=tuple(MethodPort("iterator", spec_node(child.spec)) for child in children),
                 outputs=(MethodPort("iterator", spec_node(spec)),),
-                stream_node=self._builtin_node("Zip", tuple(source.spec for source in leaves), spec, dataset, ("position_order",) * len(leaves), 0),
+                stream_node=self._builtin_node("Zip", tuple(child.spec for child in children), spec, dataset, ("position_order",) * len(leaves), 0),
             ))
-            return _StreamOp("zip", dataset=dataset, inputs=children, tree=dataset.sources)
+            return _StreamOp("zip", dataset=dataset, inputs=children, tree=dataset.sources, spec=spec)
         if kind == "chain":
             children = tuple(self._build(source, records) for source in dataset.sources)
+            spec = merge_spec_trees([child.spec for child in children])
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),
-                inputs=tuple(MethodPort("iterator", spec_node(source.spec)) for source in dataset.sources),
+                inputs=tuple(MethodPort("iterator", spec_node(child.spec)) for child in children),
                 outputs=(MethodPort("iterator", spec_node(spec)),),
-                stream_node=self._builtin_node("Chain", tuple(source.spec for source in dataset.sources), spec, dataset, ("declaration_order",) * len(dataset.sources), 0),
+                stream_node=self._builtin_node("Chain", tuple(child.spec for child in children), spec, dataset, ("declaration_order",) * len(dataset.sources), 0),
             ))
-            return _StreamOp("chain", dataset=dataset, inputs=children)
+            return _StreamOp("chain", dataset=dataset, inputs=children, spec=spec)
         children = tuple(self._build(source, records) for source in dataset.sources)
         node = dataset.node
+        spec = node.output_spec(tuple(child.spec for child in children))
         records.append(MethodGraphNode(
             len(records), "method", type(node),
-            inputs=tuple(MethodPort("iterator", spec_node(source.spec)) for source in dataset.sources),
+            inputs=tuple(MethodPort("iterator", spec_node(child.spec)) for child in children),
             outputs=(MethodPort("iterator", spec_node(spec)),),
             stream_node=node,
         ))
-        return _StreamOp("custom", dataset=dataset, inputs=children, node=node)
+        return _StreamOp("custom", dataset=dataset, inputs=children, node=node, spec=spec)
 
     @staticmethod
     def _builtin_node(
@@ -383,12 +620,7 @@ class StreamPlan:
     ) -> StreamNode:
         """Expose built-in stream transforms and bounds without opening a source."""
 
-        try:
-            cardinality = dataset.__len__()
-        except NotImplementedError:
-            cardinality = Cardinality.UNKNOWN
-        if not isinstance(cardinality, Cardinality):
-            cardinality = Cardinality.finite(int(cardinality))
+        cardinality = dataset.yield_cardinality()
         return StreamNode(
             name=name,
             inputs=tuple(IteratorPort(spec) for spec in input_specs),
@@ -401,21 +633,26 @@ class StreamPlan:
         )
 
 
-class StreamGraphCursor(Iterator[Any]):
+class StreamGraphCursor(_CursorLifecycle, Iterator[Any]):
     """Own one local graph traversal and all resources acquired for it.
 
     The cursor acquires lazily, closes resources once in reverse acquisition order,
-    and preserves a body/acquisition failure if cleanup also fails.  It does not
-    serialize or retain a generator frame for replay.
+    and preserves a body/acquisition/consumer failure if cleanup also fails. Use
+    it as a context manager around consumer work. ``observed_eof`` records only
+    successful root termination, independently of closure; cleanup errors retain
+    that evidence. Unexpected non-pull StopIteration is a causal RuntimeError.
+    Backend-unknown Map occurrences discover their first value once through core's
+    runtime discovery, lazily activating a missing native adapter without changing
+    shared Dataset specs. Unavailable dependencies raise ContextError. The cursor
+    does not serialize or retain a generator frame for replay.
     """
 
-    def __init__(self, root: _StreamOp) -> None:
+    def __init__(self, root: _StreamOp, *, epoch: int = 0) -> None:
+        super().__init__()
         self._root_op = root
+        self._epoch = epoch
         self._root: Iterator[Any] | None = None
-        self._resources: list[object] = []
-        self._resource_ids: set[int] = set()
         self._position = 0
-        self._closed = False
 
     def __iter__(self) -> "StreamGraphCursor":
         """Return this cursor as its own iterator."""
@@ -428,140 +665,56 @@ class StreamGraphCursor(Iterator[Any]):
 
         return self._position
 
-    def __next__(self) -> Any:
-        """Pull one graph output and close all acquired resources at termination."""
-
-        if self._closed:
-            raise StopIteration
-        try:
-            if self._root is None:
-                self._root = self._open(self._root_op)
-            value = next(self._root)
-        except StopIteration:
-            self.close()
-            raise
-        except BaseException as error:
-            self._close_after_failure(error)
-            raise
+    def _read(self) -> Any:
+        if self._root is None:
+            self._root = self._call(self._open, self._root_op)
+        value = self._pull(self._root)
         self._position += 1
         return value
 
-    def skip(self, n: int) -> None:
-        """Consume exactly ``n`` graph outputs or report partial advancement.
+    def _open(self, op: _StreamOp, *, epoch: int | None = None) -> Iterator[Any]:
+        """Open one operation at an inherited epoch while retaining ownership."""
 
-        Args:
-            n: Nonnegative exact integer count.
-
-        Raises:
-            TypeError: If ``n`` is not an exact integer.
-            ValueError: If ``n`` is negative.
-            DatasetExhaustedError: If the graph ends before ``n`` outputs.
-        """
-
-        from dryml.data.dataset import DatasetExhaustedError
-
-        if type(n) is not int:
-            raise TypeError("skip count must be a nonnegative exact int.")
-        if n < 0:
-            raise ValueError("skip count must be non-negative.")
-        advanced = 0
-        while advanced < n:
-            try:
-                next(self)
-            except StopIteration as error:
-                raise DatasetExhaustedError(n, advanced) from error
-            advanced += 1
-
-    def close(self) -> None:
-        """Close every acquired resource once in reverse acquisition order.
-
-        Raises:
-            BaseException: The first reverse-acquisition cleanup failure. All
-                resources are still given one close attempt; on runtimes that
-                support exception notes, later failures are attached to the first.
-        """
-
-        if self._closed:
-            return
-        self._closed = True
-        errors = self._close_resources()
-        if errors:
-            primary, *additional = errors
-            self._annotate_cleanup(primary, additional)
-            raise primary
-
-    def _close_after_failure(self, primary: BaseException) -> None:
-        """Close after a primary failure without allowing cleanup to mask it."""
-
-        if self._closed:
-            return
-        self._closed = True
-        errors = self._close_resources()
-        self._annotate_cleanup(primary, errors)
-
-    @staticmethod
-    def _annotate_cleanup(primary: BaseException, errors: list[BaseException]) -> None:
-        """Attach secondary cleanup diagnostics when the runtime supports notes."""
-
-        add_note = getattr(primary, "add_note", None)
-        if errors and add_note is not None:
-            add_note(
-                "Stream graph cleanup also failed: "
-                + "; ".join(f"{type(error).__name__}: {error}" for error in errors)
-            )
-
-    def _close_resources(self) -> list[BaseException]:
-        """Close acquired resources in reverse order and collect every failure."""
-
-        errors: list[BaseException] = []
-        for resource in reversed(self._resources):
-            close = getattr(resource, "close", None)
-            if close is None:
-                continue
-            try:
-                close()
-            except BaseException as error:
-                errors.append(error)
-        return errors
-
-    def _own(self, resource: Iterator[Any]) -> Iterator[Any]:
-        """Record one newly acquired owned iterator exactly once."""
-
-        if id(resource) not in self._resource_ids:
-            self._resource_ids.add(id(resource))
-            self._resources.append(resource)
-        return resource
-
-    def _open(self, op: _StreamOp) -> Iterator[Any]:
-        """Open one operation while retaining source/output ownership in this cursor."""
-
+        if epoch is None:
+            epoch = self._epoch
         if op.kind == "source":
-            return self._own(op.dataset.iterator())
+            opener = getattr(op.dataset, "iterator_for_epoch", None)
+            return self._own(self._call(opener, epoch) if callable(opener) else self._call(op.dataset.iterator))
         if op.kind == "map":
-            source = self._open(op.inputs[0])
-            return self._own(_MapIterator(source, op.dataset, op.selected))
+            source = self._open(op.inputs[0], epoch=epoch)
+            return self._own(_MapIterator(self, source, op.dataset, op.selected, op.inputs[0].spec, op.spec))
         if op.kind == "batch":
-            source = self._open(op.inputs[0])
-            return self._own(_BatchIterator(source, op.dataset))
+            source = self._open(op.inputs[0], epoch=epoch)
+            return self._own(_BatchIterator(self, source, op.dataset, op.inputs[0].spec))
         if op.kind == "unbatch":
-            source = self._open(op.inputs[0])
-            return self._own(_UnbatchIterator(source, op.dataset))
+            source = self._open(op.inputs[0], epoch=epoch)
+            return self._own(_UnbatchIterator(self, source, op.dataset, op.inputs[0].spec))
+        if op.kind == "take":
+            if op.dataset.n == 0:
+                return self._own(iter(()))
+            source_epoch = op.dataset.epoch if op.dataset.fixed_prefix else op.dataset.epoch + epoch
+            source = self._open(op.inputs[0], epoch=source_epoch)
+            return self._own(_TakeIterator(self, source, op.dataset.n))
         if op.kind == "zip":
-            return self._own(_ZipIterator(self, op.inputs, op.tree))
+            return self._own(_ZipIterator(self, op.inputs, op.tree, epoch))
         if op.kind == "chain":
-            return self._own(_ChainIterator(self, op.inputs))
+            return self._own(_ChainIterator(self, op.inputs, epoch))
         if op.kind == "custom":
-            return self._own(_CustomIterator(self, op.inputs, op.node))
+            return self._own(_CustomIterator(self, op.inputs, op.node, epoch))
         raise AssertionError(f"unknown stream operation {op.kind!r}")
 
 
 class _MapIterator(Iterator[Any]):
     """One Map output iterator with an occurrence-local discovery buffer."""
 
-    def __init__(self, source: Iterator[Any], dataset: object, selected: object | None) -> None:
+    def __init__(self, cursor, source: Iterator[Any], dataset: object, selected: object | None,
+                 input_spec, output_spec) -> None:
+        self.cursor = cursor
         self.source = source
         self.dataset = dataset
         self.selected = selected
+        self.input_spec = input_spec
+        self.output_spec = output_spec
         self.pending: object | None = None
         self.has_pending = False
         self.resolved = selected is not None
@@ -571,7 +724,7 @@ class _MapIterator(Iterator[Any]):
 
     def __next__(self) -> Any:
         if not self.resolved:
-            self._resolve()
+            self.cursor._call(self._resolve)
         if self.selected is None:
             raise StopIteration
         if self.has_pending:
@@ -579,38 +732,52 @@ class _MapIterator(Iterator[Any]):
             self.pending = None
             self.has_pending = False
         else:
-            item = next(self.source)
-        return self.selected(item)
+            item = self.cursor._pull(self.source)
+        result = self.cursor._call(self.selected, item)
+        if getattr(self.dataset, "preserves_examples", False):
+            source_examples = self.cursor._call(self.dataset.src._examples_in_spec, self.input_spec, item)
+            if self.cursor._call(self.dataset._examples_in_spec, self.output_spec, result) != source_examples:
+                raise ValueError("Map declared preserves_examples but changed an example count.")
+        return result
 
     def _resolve(self) -> None:
         try:
-            selected = self.dataset.method.find_implementation(input_spec=self.dataset.src.spec).prepared_invoker()
+            implementation = self.cursor._call(
+                self.dataset.method.find_implementation, input_spec=self.input_spec,
+            )
         except ImplementationSelectionError as error:
             if error.reason != "unknown_traits" or error.unknown_traits != ("backend",):
                 raise
-            item = next(self.source)
+            try:
+                item = self.cursor._pull(self.source)
+            except StopIteration:
+                self.resolved = True
+                return
             from dryml.core.backend import discover_backends
 
-            backends = discover_backends(item)
+            backends = self.cursor._call(discover_backends, item, activate_native=True)
             if len(backends) != 1:
                 raise ImplementationSelectionError("conflict" if backends else "unknown_traits", () if backends else ("backend",))
-            selected = self.dataset.method.find_implementation(
-                input_spec=self.dataset.src.spec,
+            implementation = self.cursor._call(self.dataset.method.find_implementation,
+                input_spec=self.input_spec,
                 backend=next(iter(backends)),
-            ).prepared_invoker()
+            )
             self.pending = item
             self.has_pending = True
-        self.selected = selected
+        self.selected = self.cursor._call(implementation.prepared_invoker)
+        self.output_spec = self.cursor._call(implementation.infer_output_spec)
         self.resolved = True
 
 
 class _BatchIterator(Iterator[Any]):
     """One bounded Batch output iterator retaining its collate selection once."""
 
-    def __init__(self, source: Iterator[Any], dataset: object) -> None:
+    def __init__(self, cursor, source: Iterator[Any], dataset: object, input_spec) -> None:
+        self.cursor = cursor
         self.source = source
         self.dataset = dataset
         self.collate = None
+        self.input_spec = input_spec
 
     def __iter__(self) -> "_BatchIterator":
         return self
@@ -619,22 +786,23 @@ class _BatchIterator(Iterator[Any]):
         batch = []
         for _ in range(self.dataset.batch_size):
             try:
-                batch.append(next(self.source))
+                batch.append(self.cursor._pull(self.source))
             except StopIteration:
                 break
         if not batch or (self.dataset.drop_remainder and len(batch) < self.dataset.batch_size):
             raise StopIteration
         if self.collate is None:
-            self.collate = self.dataset._resolve_collate(batch)
-        return self.collate(batch)
+            self.collate = self.cursor._call(self.dataset._resolve_collate, batch, input_spec=self.input_spec)
+        return self.cursor._call(self.collate, batch)
 
 
 class _UnbatchIterator(Iterator[Any]):
     """One Unbatch output iterator retaining one selected split implementation."""
 
-    def __init__(self, source: Iterator[Any], dataset: object) -> None:
+    def __init__(self, cursor, source: Iterator[Any], dataset: object, input_spec) -> None:
+        self.cursor = cursor
         self.source = source
-        self.split = dataset._resolve_split()
+        self.split = cursor._call(dataset._resolve_split, input_spec=input_spec)
         self.pending: Iterator[Any] = iter(())
 
     def __iter__(self) -> "_UnbatchIterator":
@@ -643,18 +811,44 @@ class _UnbatchIterator(Iterator[Any]):
     def __next__(self) -> Any:
         while True:
             try:
-                return next(self.pending)
+                return self.cursor._pull(self.pending)
             except StopIteration:
-                self.pending = iter(self.split(next(self.source)))
+                value = self.cursor._pull(self.source)
+                self.cursor._release(self.pending)
+                self.pending = self.cursor._own(self.cursor._call(iter, self.cursor._call(self.split, value)))
+
+
+class _TakeIterator(Iterator[Any]):
+    """Yield one strict prepared prefix without bypassing its child graph."""
+
+    def __init__(self, cursor, source: Iterator[Any], count: int) -> None:
+        self.cursor = cursor
+        self.source = source
+        self.count = count
+        self.position = 0
+
+    def __iter__(self) -> "_TakeIterator":
+        return self
+
+    def __next__(self) -> Any:
+        if self.position >= self.count:
+            raise StopIteration
+        try:
+            value = self.cursor._pull(self.source)
+        except (StopIteration, DatasetExhaustedError) as error:
+            raise DatasetExhaustedError(self.count, self.position) from error
+        self.position += 1
+        return value
 
 
 class _ZipIterator(Iterator[Any]):
     """Pull inputs in declared order and stop at the first exhausted position."""
 
-    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...], tree: object) -> None:
+    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...], tree: object, epoch: int) -> None:
         self.cursor = cursor
         self.inputs = inputs
         self.tree = tree
+        self.epoch = epoch
         self.iterators: tuple[Iterator[Any], ...] | None = None
 
     def __iter__(self) -> "_ZipIterator":
@@ -662,18 +856,19 @@ class _ZipIterator(Iterator[Any]):
 
     def __next__(self) -> Any:
         if self.iterators is None:
-            self.iterators = tuple(self.cursor._open(op) for op in self.inputs)
-        values = [next(iterator) for iterator in self.iterators]
+            self.iterators = tuple(self.cursor._call(self.cursor._open, op, epoch=self.epoch) for op in self.inputs)
+        values = [self.cursor._pull(iterator) for iterator in self.iterators]
         value_iter = iter(values)
-        return _build_zip_tree(self.tree, value_iter)
+        return self.cursor._call(_build_zip_tree, self.tree, value_iter)
 
 
 class _ChainIterator(Iterator[Any]):
     """Open sources only as their declared predecessors become exhausted."""
 
-    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...]) -> None:
+    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...], epoch: int) -> None:
         self.cursor = cursor
         self.inputs = inputs
+        self.epoch = epoch
         self.index = 0
         self.current: Iterator[Any] | None = None
 
@@ -683,9 +878,9 @@ class _ChainIterator(Iterator[Any]):
     def __next__(self) -> Any:
         while self.index < len(self.inputs):
             if self.current is None:
-                self.current = self.cursor._open(self.inputs[self.index])
+                self.current = self.cursor._call(self.cursor._open, self.inputs[self.index], epoch=self.epoch)
             try:
-                return next(self.current)
+                return self.cursor._pull(self.current)
             except StopIteration:
                 self.current = None
                 self.index += 1
@@ -695,10 +890,11 @@ class _ChainIterator(Iterator[Any]):
 class _CustomIterator(Iterator[Any]):
     """Open one custom output lazily after its ordered inputs are acquired."""
 
-    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...], node: StreamNode) -> None:
+    def __init__(self, cursor: StreamGraphCursor, inputs: tuple[_StreamOp, ...], node: StreamNode, epoch: int) -> None:
         self.cursor = cursor
         self.inputs = inputs
         self.node = node
+        self.epoch = epoch
         self.output: Iterator[Any] | None = None
 
     def __iter__(self) -> "_CustomIterator":
@@ -706,9 +902,9 @@ class _CustomIterator(Iterator[Any]):
 
     def __next__(self) -> Any:
         if self.output is None:
-            inputs = tuple(self.cursor._open(op) for op in self.inputs)
-            self.output = self.cursor._own(self.node.open(*inputs))
-        return next(self.output)
+            inputs = tuple(self.cursor._call(self.cursor._open, op, epoch=self.epoch) for op in self.inputs)
+            self.output = self.cursor._own(self.cursor._call(self.node.open, *inputs))
+        return self.cursor._pull(self.output)
 
 
 def _iter_dataset_leaves(tree: object):

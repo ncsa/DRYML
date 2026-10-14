@@ -70,6 +70,13 @@ Store-owned staging children; no public Store/Repo API, inode-based cache identi
 automatic cross-process synchronization, remote Store transport, cache discovery,
 or public codec plugin system is added.
 
+Fold role preparation selects first, then infers each selected initializer,
+transition, and finalizer output from its actual consumer inputs. Producer
+observation constraints, carry constraints, inferred outputs, and raw-result
+validation remain distinct. Converted initializer/finalizer outputs therefore
+drive the same role facts used by Method graphs and Dataset consumers, without
+ranking alternatives through inference or changing child Method state.
+
 `Fold[T]` is a concrete resumable `Value[T]` for a declared streaming
 `Dataset` reduction. Its constructor accepts a non-materializing `Ref[AutoRef]`
 source plus an initializer `Method`, an `Accumulator`, and an optional finalizer
@@ -113,11 +120,33 @@ without caching during compute, so it does not borrow or mutate a live input cac
 
 Compatible recovery restores the same carry, reselects implementations without
 executing the initializer, opens a fresh independent source cursor, and skips
-exactly `processed_count` yields before continuing. Fold checkpoints actual EOF
+exactly `processed_count` yields before continuing. Fold checkpoints positively
+observed root-output EOF (not cursor closure)
 before running the finalizer; recovery from that state retries finalization and
 publication without loading or traversing the source. Source replay is positional:
 a deterministic source reproduces uninterrupted results, while a stochastic fresh
 cursor may produce a new suffix after the saved prefix position.
+
+New progress is version 2: active progress contains no EOF proof; exhausted
+progress requires `eof="root-output-eof"`. A source, Map, acquisition, body,
+validation, strict-skip, or interruption failure cannot manufacture that proof.
+Cleanup failures preserve the primary workload error. After genuine EOF, cleanup
+failure retains the existing finalize-then-report ordering: the call raises even
+if a complete live Value was installed, and its associated exhausted checkpoint
+can retry finalization without reopening the source.
+
+Compatible version-1 active checkpoints remain resumable. Valid version-1
+exhausted checkpoints load successfully as **ambiguous**, but continuation raises
+`ManagedRerunRequiredError` with `rerun_required`; explicitly call
+`compute(..., managed=ManagedConfig(state_repo=repo, rerun=True))` to traverse
+fresh. Admission occurs in the Fold body after managed running/state restoration,
+before native carry materialization, Method selection/invocation, or source access.
+The failure retains checkpoint association and receiver validity. Saving unchanged
+legacy progress preserves version 1 and cannot bless it as new EOF evidence.
+Malformed/unknown progress still fails restoration. Completed legacy Values remain
+readable; historically completed truncated results cannot be detected or repaired
+automatically. Existing snapshots are immutable. See [Formats](formats.md) for
+the closed grammar and downgrade limitations.
 
 NumPy, Torch CPU, and TensorFlow CPU carry leaves are copied losslessly to tagged
 host arrays only at checkpoint boundaries and restored to the same native backend.
@@ -162,6 +191,13 @@ shape/dtype fail before a successor state or terminal payload is installed.
 `Project`, `Select`, `Pipe`, `Diff`, and `Abs` or `Squared` graph as a complete
 concrete definition before supplying it to Fold. No Dataset is traversed, model
 is loaded, state is selected, or input is saved during factory construction.
+Before arithmetic or label reduction, the graph performs one explicit dense
+host handoff of both predictions and targets to independent NumPy storage. This
+copies accelerator predictions only after model inference, keeps Fold reduction
+carry checkpoint-safe, and covers cached evaluation data with Torch, TensorFlow,
+or single-device JAX models without weakening ordinary mixed-backend Method
+rejection. Unsupported dtype, layout, abstract/sharded value, or inexact
+conversion still fails before metric state changes.
 Their mean denominator is the selected global or coordinate population, so an
 uneven final batch has the same meaning as individual observations.
 
@@ -171,11 +207,20 @@ prediction and target label Methods. They never decode logits, probabilities,
 or one-hot values implicitly. A caller can use `ArgMax` or another declared
 Method in the supplied conversion graph when that conversion is intended.
 All five supplied metric helpers return an inert class-rooted `Definition` when
-any supported argument contains a symbolic Definition value or `Par`; concrete-only
+any supported argument contains a Definition or symbolic `Expr`, including `Par`
+and compound arithmetic/repetition expressions; concrete-only
 calls continue to return an uncomputed Fold. Invalid known literal controls fail
 while authoring the symbolic call, while checks that depend on unresolved values
 run when the bound Definition is concretized. Symbolic lifting itself constructs
 no helper Method and performs no input work.
+Recognition and call branching use core `authoring_helper`, including nested
+containers and factory arguments; non-materializing Ref/quotation boundaries
+remain opaque. The metric adapter supplies its own builder and known-argument
+validator and opts into core `function` normalization on the concrete branch only.
+This is not automatic lifting of arbitrary Python functions. Each helper still
+owns its graph recipe and domain validation. A bound classifier recipe carries
+the explicit non-materializing source edge required by Fold just as a regression
+recipe does.
 Incoming `StateRef` inputs remain exact nested references in that declared graph:
 a later model save does not replace the selected snapshot. Factory construction
 never saves an unpersisted source or model. A completed metric Fold can restore

@@ -144,21 +144,51 @@ a file with a curated `representative_functions` entry is omitted until that
 file's function allowlist is deliberately updated. This intentional selection
 gap is why the exhaustive mode remains available on explicit user request.
 
-The ML workflow qualification representative set retains dependency-light coverage for Method
-preparation/stream handoffs, recursive Experiment identity projection, symbolic
-Definition quotation and history v1 fixtures, TrainState observation persistence,
-Artifact/history association, and closed qualification request construction.
-It does not run TFDS preparation, a real 24-cell CPU/recovery matrix, Ray,
-training, or GPU execution. Those are explicit opt-in qualification gates, not
-routine profile evidence.
+The Query/Method contract regressions from U1–U7 retain named routine coverage.
+Curated query allowlists include main-only and empty-index completeness, malformed
+authority, policy-preserving derived recovery, retained paging, and cumulative
+failure/fallback accounting. Deterministic bounded thread barriers cover build-claim
+waits outside fences, active same-process reader replacement, main writers, reversed
+Store ordering, and cancellation cleanup. Existing SQLite concurrency cases remain
+routine; the separate 18-case `test_u7_main_completeness_policy_matrix` is
+`exhaustive_only` and remains available to an explicitly requested exhaustive run.
+
+Tiny U1/U4 model and value-handoff regressions have exact medium node pins so the
+heavy model categories cannot silently omit their named routine representatives.
+The TF/Torch selected-call and accepted-prefix cleanup cases live in
+`tests/models/test_dataset_training_integration.py`, which imports optional backends
+only inside admitted test bodies. Keep backend-neutral generator factories at module
+scope for stable import references, and native layer factories as explicit `F` specs;
+do not pin routine cases inside the eager legacy `test_tf_training.py` or
+`test_torch_training.py` modules. A fresh-process collection guard exercises the
+actual file/tier/profile selection for these owners, checks exact retained node IDs,
+and rejects heavyweight framework import attempts before test execution.
+Four dense CPU directions cover every source/target backend; the full direction and
+nested JAX products retain heavy qualification. These pins do not promote full
+training matrices. Missing optional backends report skips. Collection-only checks
+of explicit affected files with `--dryml-test-profile good-enough
+--dryml-runner-tiers smoke,medium --collect-only` audit selection without running the
+representative gate.
+
+The ML workflow qualification representative set retains dependency-light coverage
+for Method preparation/stream handoffs, recursive Experiment identity projection,
+symbolic Definition quotation and history v1 fixtures, TrainState observation
+persistence, Artifact/history association, closed qualification request
+construction, and credential-free tiny TensorFlow/Torch/JAX Dataset-owned training
+representatives.
+The JAX representatives include exact managed-local and Core subprocess graph
+restoration when the qualified JAX/Flax/Optax stack is installed. The routine
+profile does not run TFDS preparation, the real 36-cell CPU matrix, existing Ray,
+recovery interruption, or GPU execution. Those remain explicit opt-in gates.
 
 The real TFDS NumPy adapter test is `exhaustive_only`. It requires a caller-selected
 `DRYML_ML_QUALIFICATION_TFDS_DATA_DIR` and uses `download=False`; routine selection keeps
 the mocked offline adapter tests while excluding that real reader.
 
 The routine suite has an approximate five-minute feedback goal, not a runtime
-cutoff. A reference selection measured **445.03 seconds (7m25s) wall time** on
-Linux with Python 3.12.13 in `big_env`, with **3,167 passed and 22 skipped**:
+cutoff. Before the Dataset/JAX integration representatives were added, a
+reference selection measured **445.03 seconds (7m25s) wall time** on Linux with
+Python 3.12.13 in `big_env`, with **3,167 passed and 22 skipped**:
 
 ```bash
 ./tests.sh good-enough -q --durations=30 --dryml-timing-summary
@@ -378,6 +408,22 @@ installs and preflights TensorFlow, Torch, JAX/JAXlib, and pinned
 rather than skip. Each job prints the resolved Python, DRYML, and framework
 versions. Workflow configuration is not support evidence until the jobs pass on
 the exact child commit.
+
+The separate `JAX training qualification` matrix runs for pushes, pull requests,
+and manually dispatched workflows on Python 3.12. It
+installs `jax_training_test_requirements.txt` for two clean dependency sets:
+the CPU JAX stack alone and the same stack with DRYML's existing `tf` and
+`torch` extras. It pins JAX/JAXlib, Flax (including `flax.nnx`), and Optax,
+requires their imports, and records a CPU backend with CPU devices before
+running focused JAX import, first-class training, Dataset delivery, and managed
+local/subprocess restoration tests. The mixed installation uses PyTorch
+`2.14.1+cpu` from the official CPU wheel index, avoiding CUDA/Triton initialization
+in this CPU qualification. Its preflight asserts a CPU-only Torch build and
+constructs an optimizer so native import failures fail before the tests.
+This file is qualification-only: DRYML's
+existing lazy `jax` extra remains unchanged, and Flax/Optax are neither base
+dependencies nor a new package extra. The experimental training API remains
+responsible for selecting and reporting those dependencies.
 
 The separately gated `Existing Ray integration (Ubuntu, Python 3.12)` job uses an
 ephemeral Conda coordinator and a venv derived from that same interpreter. It

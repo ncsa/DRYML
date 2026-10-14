@@ -78,9 +78,10 @@ class AccumulatorGroup(Accumulator[ObservationT, StateT]):
             Accumulator leaves. The collection defines the required carry and
             result structure.
 
-    Selected group calls select each child once for the provided observation and
-    carry specs, then retain the resulting carriers. The group itself owns no
-    carry values, so using one child declaration in multiple branches never
+    Selection retains each child's detached occurrence facts for the provided
+    observation and carry specs without compiling. Executable preparation retains
+    each finalized child's invoker once, without capturing the group owner. The
+    group owns no carry values, so using one declaration in multiple branches never
     aliases execution state.
 
     Raises:
@@ -110,7 +111,8 @@ class AccumulatorGroup(Accumulator[ObservationT, StateT]):
 
         Side Effects:
             Direct calls use each child's ordinary Method call behavior. Selected
-            calls retain child carriers and avoid repeat selection.
+            prepared calls retain child invokers and avoid repeat selection or
+            signature compilation.
         """
 
         return self._map_state(state, lambda accumulator, carry: accumulator(observation, carry))
@@ -168,8 +170,8 @@ class AccumulatorGroup(Accumulator[ObservationT, StateT]):
             structures conflict, or the group/child selection is invalid.
 
         Side Effects:
-            Inspects and binds child implementations but does not invoke them or
-            change their eager/learning/cached preparation state.
+            Selects child occurrence facts without signature compilation, target
+            invocation, or changing eager/learning/cached preparation state.
         """
 
         if input_spec is None or len(additional_input_specs) != 1:
@@ -210,16 +212,25 @@ class AccumulatorGroup(Accumulator[ObservationT, StateT]):
         except TypeError as error:
             raise ImplementationSelectionError("conflict") from error
 
-        def invoke_group(observation: ObservationT, state: StateT) -> StateT:
-            return self._map_state_with(
-                selected_children,
-                state,
-                lambda selected, carry: selected(observation, carry),
-            )
+        children = []
+
+        def index(selected, _):
+            children.append(selected)
+            return len(children) - 1
+
+        structure = AccumulatorGroup._map_state_with(selected_children, state_spec, index)
+
+        def prepare_group(prepared):
+            def invoke_group(observation, state):
+                return AccumulatorGroup._map_state_with(
+                    structure, state,
+                    lambda index, carry: prepared[index](observation, carry),
+                )
+            return invoke_group
 
         from dataclasses import replace
 
-        return replace(implementation, _invoker=invoke_group)
+        return replace(implementation, _children=tuple(children), _invoker_factory=prepare_group)
 
     @staticmethod
     def _validate_collection(accumulators: object) -> object:

@@ -1,3 +1,9 @@
+"""Structural contracts for derived query graphs, Store indexes, and read views.
+
+Store backends own repeatable lifecycle calls; Query owns cadence and Store
+authority proofs. Implementations surface readiness and operation failures.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Collection
@@ -221,6 +227,12 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
 
 
 class StoreQueryIndex(Protocol):
+    """Derived Store backend with process-local views and repeatable lifecycle calls.
+
+    Implementations retain Store authority and expose readiness, validation, and
+    mutation failures through QueryIndexError subclasses. Refresh completion is
+    maintenance evidence only; it does not retain a query capture or read view.
+    """
     @property
     def source_key(self) -> str:
         ...
@@ -238,6 +250,14 @@ class StoreQueryIndex(Protocol):
         ...
 
     def refresh(self, policy: RefreshPolicy, *, stats: QueryStats | None = None) -> None:
+        """Complete one lifecycle call or raise, updating optional mutable stats.
+
+        False does no work; auto recovers readiness; True and always each request
+        one independent explicit cycle. Persistent cycles require stable authority
+        agreement or validated, activated, acknowledged replacement. Started
+        inventory expenditure survives failure. Returns None; derived files may
+        change, but Store authority must not. Query owns shared request cadence.
+        """
         ...
 
     def status(self) -> QueryIndexStatus:

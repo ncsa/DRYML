@@ -119,6 +119,18 @@ selected authority during worker decode, so malformed or unavailable authority
 fails before the managed method mutates state. Plain resource descriptors in
 workload code remain inert until that code requests reconstruction.
 
+`Experiment.train(callbacks=..., observer_strict=...)` is a narrow exception to
+ordinary authored-argument identity. Those two declaration-owned values configure
+invocation telemetry, not training behavior, and are excluded from the managed
+argument digest. No other managed argument receives that exemption. Compatible
+resume may therefore change or omit telemetry without `rerun=True`; retained
+updates and the attempt identifier do not change, and external telemetry is not
+replayed. Local callback instances remain process-local. Core Execute accepts only
+`FactorySpec` observer entries for this slot, rejects a live callback/client during
+capture, reconstructs each observer after worker admission, and never embeds it in
+managed control or Object state. See [Models](models.md#invocation-telemetry) for
+backend protocols, strict/default delivery, and cleanup behavior.
+
 Execute reports worker loss, cancellation, and lost delivery through its ordinary
 execution errors. It does not inspect status, reconcile an operation, retry, or
 rerun a managed method automatically. After such an error, reconnect to the
@@ -127,12 +139,23 @@ managed call to decide recovery.
 
 `Fold.compute(checkpoint_every=1000, store=None)` is resumable. At each positive
 exact cadence it saves processed-yield count and bounded host carry together, and
-it saves an exhausted checkpoint before finalization. Compatible recovery uses the
+it saves an exhausted checkpoint only after positive root-output EOF, before
+finalization. Compatible recovery uses the
 same managed attempt and argument authority, restores state before body entry,
 reselects Method implementations without rerunning the initializer, and skips a
-fresh Dataset cursor to the saved count. Exhausted recovery retries finalization
+fresh Dataset cursor to the saved count. Trusted version-2 exhausted recovery retries finalization
 without loading the source. `store` uses the managed Store-override path, so it
 governs checkpoint and final publication without creating Fold control records.
+
+Version-1 active Fold progress remains compatible. Valid legacy exhausted progress
+restores as ambiguous and is rejected during Fold body resume admission with
+`ManagedRerunRequiredError("rerun_required", ...)` and explicit `rerun=True`
+guidance. Managed has already entered running authority and restored framework
+state; Fold rejects before native carry allocation, role selection/invocation, or
+source acquisition. The ordinary failed transition retains the checkpoint and a
+valid receiver for fresh rerun. Save/load preserves legacy provenance. Restore-hook
+failures for malformed/unknown envelopes retain the normal invalid-graph behavior.
+No automatic migration or repair of historical completed Values occurs.
 
 An incompatible cadence or other authored argument requires `rerun=True` under
 the normal argument-digest rule. A rerun starts a new cursor, count, initializer,
@@ -217,6 +240,47 @@ including fresh path-backed ZipStore views, before associating the StateRef in t
 control Store. A publication, commit, validation, or association failure leaves
 completed immutable state intact, preserves the prior associated checkpoint, and
 does not report a new checkpoint or final success. Core partial `StoreReport`
+evidence remains available through publication failures.
+
+Checkpoint and final callers consume a private, one-use completed-publication
+event instead of immediately repeating the publisher's exact closure validation.
+It matches the full StateRef, exact report and originating Repo, active invocation
+and graph ownership, process/thread, selected replicas, and required durable
+recovery coverage. This event describes a completed operation, not continuing
+Store validity. It holds no Store fence, topology lease, or open payload source
+and is neither serialized nor recorded in control. It expires before lifecycle
+boundary hooks, callbacks, and invocation exit.
+
+After required commits, the publisher checks connected replicas and exact closure
+within one explicit Repo read cut. Required direct durability shares that proof
+only for the exact same built-in handles, views, and selection coverage while
+the cut remains uninterrupted. Different coverage or overridden readers retain
+independent validation. Every required ZipStore is freshly reopened and validated
+under an independent durable cut; temporary Repos and reopened Stores close
+before event delivery. All publisher fences close before control acquisition.
+Each selected built-in replica's locally advertised payloads are checked in its
+own view; a valid first replica cannot hide corruption in another selected replica.
+Control association, post-callback decisions, later status, resume, and recovery
+always observe fresh authority, so deletion after publication can still prevent
+association and deletion after completion can still prevent recovery.
+
+Framework-owned checkpoint, completion, and interruption field updates acquire the
+short control lock, then a new explicit Repo read cut with ordered Store fences.
+They reread current/pending authority and check the running owner and generation;
+an interruption decision uses the newly read request. Within this one cut,
+consistent digest resolution and complete-equality StateRef closure validation may
+be shared across current/proposed checkpoint and final fields. Every occurrence
+still checks its receiver ObjectRef association. A changed final StateRef needs its
+own closure validation, even when a lookup hash collides.
+
+This sharing requires unchanged built-in Store readers; overridden readers retain
+their independent authoritative calls. General caller-supplied control builders
+also retain separate current/proposed validation boundaries and their original
+invocation/error order. The field-update cut ends after synchronized current
+replacement, before acknowledgement hooks and callbacks. An acknowledgement
+fault confirms current authority afresh; pending-intent reconciliation, callback
+work (including disjoint nested invocations), post-callback decisions, later
+status, resume, and recovery never inherit an earlier transition's proof.
 
 Callbacks receive `(live_object, context)` in caller order only after both state
 publication and control association succeed. They may inspect
@@ -237,6 +301,14 @@ followed by the normal interruption decision. This is Experiment policy, not a
 generic managed final-hook protocol. A callback failure retains the associated
 checkpoint and any independently published Artifact/history state; it never
 reports overall managed completion.
+
+The `callbacks` above are `ManagedConfig.callbacks`; they are strict durable-
+checkpoint observers receiving `(live_object, context)`. They are unrelated to
+`Experiment.train(callbacks=...)`, whose Keras-native or Torch/JAX host events are
+best-effort by default, have no durable association, and run inside trainer-native
+event ordering after DRYML has retained truthful accounting. A telemetry observer
+cannot replace this managed callback boundary or make external reporting
+recoverable.
 
 Experiment accepts only its direct `Mapping[str, Template] | None` artifact
 mapping. It validates the configured Template-role Definition quotations before it

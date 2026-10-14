@@ -79,6 +79,45 @@ def _references():
     return root, child, state, object_ref, state.at(child_path), object_ref.at(child_path), child_path
 
 
+def test_u2_occurrences_projections_closure_share_and_fixed_results_detach(tmp_path, monkeypatch):
+    from dryml.core.store.records import DefinitionRecord
+    from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+
+    root, child, *_ = _references()
+    producer, scope = (DirStore(tmp_path / name, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+                       for name in ("producer", "scope"))
+    producer.write_definition_record(DefinitionRecord(root))
+    calls = []
+    for store in (producer, scope):
+        store.rebuild_query_index()
+        original = store.open_query_index().refresh
+
+        def refresh(policy, *, stats=None, _original=original, _store=store):
+            calls.append(_store)
+            return _original(policy, stats=stats)
+
+        monkeypatch.setattr(store.open_query_index(), "refresh", refresh)
+    roots = producer.query().sel(root).refresh(True)
+    nested = roots.nested(child)
+    fixed_occurrences = nested.collect()
+    assert calls == [producer]
+    fixed_identities = roots.closure().collect()
+    assert nested.owners().one() == root and nested.targets().one() == child
+    assert calls == [producer]
+    assert fixed_occurrences.query().count() == 1
+    assert fixed_identities.query().count() == 2
+    assert fixed_occurrences.query().where(field("object").missing(), scope=scope).count() == 0
+    assert fixed_identities.query().stored(scope=scope).count() == 0
+    assert calls == [producer]  # result evidence cannot carry live refresh intent
+    scoped = nested.where(field("object").missing(), scope=scope)
+    assert scoped.count() == 0
+    assert calls == [producer, scope]
+    assert scoped.owners().count() == scoped.targets().count() == 0
+    assert calls == [producer, scope]
+    assert scoped.targets().refresh(True).count() == 0
+    assert calls == [producer, scope, producer, scope]
+
+
 def test_v3_closure_uses_typed_associations_and_owned_state_adjacency():
     root, child, state, object_ref, child_state, child_object, _ = _references()
     query = IdentityQuery.from_set(IdentitySet((state,)))
@@ -400,3 +439,134 @@ def test_v3_nested_generator_honors_reference_aware_edge_policies(tmp_path):
     assert roots.nested(selector_value, edges=references).count() == 1
     assert all_occurrences.count() == 3
     assert all_occurrences.through(RelationshipKind.REFERENCE).count() == 2
+
+
+@pytest.mark.parametrize("projection", ("owners", "targets"))
+@pytest.mark.parametrize("sidecar", ("missing", "dirty"))
+def test_u6_projection_disabled_refresh_survives_every_terminal(tmp_path, monkeypatch, projection, sidecar):
+    """Projection inherits disabled refresh with no sidecar mutation."""
+
+    from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+    from dryml.core.store.records import DefinitionRecord
+
+    root, child, *_ = _references()
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.write_definition_record(DefinitionRecord(root))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    if sidecar == "missing":
+        index.close()
+        index.path.unlink()
+    else:
+        store.mark_query_index_dirty()
+    calls = []
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "rebuild", lambda *a, **kw: calls.append("rebuild"))
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "initialize_empty", lambda *a: calls.append("initialize"))
+    query = getattr(store.query().cdefs().stored().refresh(False).nested(child), projection)()
+    for terminal in (query.exists, query.count, query.one, query.one_or_none, query.collect,
+                     lambda: query.take(1), lambda: query.explain(analyze=True)):
+        terminal()
+        assert calls == []
+    assert query.refresh_policy is False
+
+
+def test_u6_projection_outer_budget_depth_and_witness_controls():
+    """Targets, roots, and traversal share the effective outer terminal controls."""
+
+    from dryml.core.errors import ParameterizationLimitError
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    child = Definition(V3TemplateLeaf, 64).concretize()
+    other = Definition(V3TemplateLeaf, 32).concretize()
+    root = Definition(V3TemplateParent, [child, other]).concretize()
+    roots = IdentitySet((root,)).query().max_verify(0).max_depth(0).max_witnesses(1)
+    projected = roots.nested(_v3_template_leaf_selector()).targets()
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        projected.collect()
+    with pytest.raises(RelationshipDepthExceeded):
+        projected.max_verify(3).collect()
+    with pytest.raises(ParameterizationLimitError):
+        projected.max_verify(3).max_depth(None).collect()
+    query = projected.max_verify(3).max_depth(None).max_witnesses(None)
+    assert query.one() == child
+    assert query.explain(analyze=True).verified_count == 3
+    assert roots.closure().max_verify(3).max_depth(None).count() == 3
+
+
+def test_u6_occurrence_external_target_scope_cannot_escape_controls(tmp_path, monkeypatch):
+    """Occurrence targets and both projections guard external metadata IO."""
+
+    from dryml.core.query.model import QueryWouldScanError
+
+    root, child, *_ = _references()
+    store = DirStore(tmp_path / "scope", query_index="memory")
+    scans = []
+    monkeypatch.setattr(store, "_validated_definition_root_inventory", lambda: scans.append(1) or ((), ()))
+    roots = IdentitySet((root,)).query().scan_policy("forbid")
+    occurrence = roots.nested(child).where(field("object").missing(), scope=store)
+    for terminal in (occurrence.exists, occurrence.owners().exists, occurrence.targets().exists):
+        with pytest.raises(QueryWouldScanError):
+            terminal()
+        assert scans == []
+
+
+@pytest.mark.parametrize("projection", ("direct", "owners", "targets"))
+@pytest.mark.parametrize("domain", ("positive", "empty-targets", "empty-roots"))
+def test_occurrence_combines_producer_and_external_metadata_authority(tmp_path, projection, domain):
+    """Unrelated root conflicts precede root/target filtering in every terminal."""
+
+    from dryml.core.query.model import QueryError
+    from dryml.core.store.records import DeclarationRecord, DefinitionRecord
+
+    producer = DirStore(tmp_path / "producer", query_index="memory")
+    metadata = DirStore(tmp_path / "metadata", query_index="memory")
+    target = ObjectRef(Definition(V3TraversalLeaf, "target").concretize(), {GraphPath(): ObjectId()})
+    owner = Definition(V3TraversalParent, target).concretize()
+    producer.write_definition_record(DefinitionRecord(owner))
+    metadata.write_declaration_record(DeclarationRecord(target))
+    metadata.write_metadata(target, {"team": "selected"})
+    object_id = ObjectId()
+    for store, name in ((producer, "first"), (metadata, "second")):
+        store.write_declaration_record(DeclarationRecord(ObjectRef(
+            Definition(V3TraversalLeaf, name).concretize(), {GraphPath(): object_id},
+        )))
+    roots = producer.query().cdefs().sel(
+        Definition(V3TraversalParent, None).concretize() if domain == "empty-roots" else owner
+    )
+    query = roots.nested(target).where(
+        field("object", "team").eq("absent" if domain == "empty-targets" else "selected"),
+        scope=Repo(metadata) if domain == "empty-roots" else metadata,
+    )
+    if projection != "direct":
+        query = getattr(query, projection)()
+    for terminal in (query.exists, query.count, query.one, query.one_or_none, query.collect,
+                     lambda: query.take(1)):
+        with pytest.raises(QueryError, match="object-reference authority conflicts"):
+            terminal()
+
+
+def test_occurrence_metadata_preflight_does_not_admit_or_project_scope_holders(tmp_path):
+    """External holder inventory proves authority without widening candidate work."""
+
+    from dryml.core.store.records import DeclarationRecord, DefinitionRecord
+
+    producer = DirStore(tmp_path / "producer", query_index="memory")
+    metadata = DirStore(tmp_path / "metadata", query_index="memory")
+    target = ObjectRef(Definition(V3TraversalLeaf, "target").concretize(), {GraphPath(): ObjectId()})
+    owner = Definition(V3TraversalParent, target).concretize()
+    producer.write_definition_record(DefinitionRecord(owner))
+    metadata.write_declaration_record(DeclarationRecord(target))
+    metadata.write_metadata(target, {"team": "selected"})
+    for name in ("unrelated-a", "unrelated-b"):
+        metadata.write_declaration_record(DeclarationRecord(ObjectRef(
+            Definition(V3TraversalLeaf, name).concretize(), {GraphPath(): ObjectId()},
+        )))
+    query = producer.query().cdefs().sel(owner).max_verify(3).nested(target).where(
+        field("object", "team").eq("selected"), scope=metadata,
+    )
+    assert query.one().target == target
+    assert query.owners().one() == owner
+    result = query.targets().collect()
+    assert result.one() == target
+    assert result.sources(target) == frozenset((IdentityQuery._source_evidence(producer),))
+    assert query.targets().explain(analyze=True).verified_count == 3

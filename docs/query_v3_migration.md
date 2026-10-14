@@ -26,6 +26,12 @@ queries from different producers, preserve source evidence, and deduplicate comp
 typed identities. Result ordering is deterministic by complete identity; it does not
 mean newest, best, or completed.
 
+`object_projection()` is an explicit terminal on `IdentityQuery` and a source-free
+projection on `IdentitySet`. It maps ObjectRef and StateRef members to recursive
+`ObjectSelector` values, omits CDefs, merges evidence for equal projections, and
+returns a fixed `ObjectSelectorSet`. Exact reference selection remains unchanged;
+an ObjectSelector is the separate state-independent graph-selection value.
+
 The producer option `repo.query(weak=...)` controls which cache tiers enter the
 initial universe. It is distinct from `query.cached(scope=..., weak=...)`, which
 only narrows identities already present in that universe.
@@ -86,6 +92,106 @@ source counts are disclosure-capped, while `candidate_rows_read`,
 `cdef_blobs_decoded`, and `pages_fetched` retain exact keyset-page work through
 fixed-result refinement and algebra.
 
+## Refresh Lifecycle Migration
+
+| Previous intent | Current API |
+| --- | --- |
+| Refresh once, then reuse branches with fresh authority | Keep one `query.refresh(True)` universe; ordinary derivatives share its request |
+| Repeat explicit maintenance at every terminal | `query.refresh("always")` |
+| Request another cycle after completion | Call `query.refresh(True)` again |
+| Replace a persistent index unconditionally | `store.rebuild_query_index()` |
+| Read current authority without maintaining derived state | `query.refresh(False)` |
+| Recover only indexes consumed by execution | `query.refresh("auto")` (the default) |
+
+Controls now survive owner/target projections and govern external stored, alias,
+and metadata scopes as well as nested producers. Algebra operands must agree on
+policies at composition; a later explicit outer override applies throughout the
+expression. `refresh(False)` does not initialize/rebuild missing or dirty sidecars,
+and explicit `refresh(True)` / `refresh("always")` cannot authorize prohibited
+scans, including ready-index validation or joining an in-flight cycle. Query
+`refresh(True)` is now **one-shot**, shared by ordinary derivatives and shallow
+copies. A second explicit `refresh(True)` creates a new request. Use
+`refresh("always")` to retain repeated per-terminal cadence. Ready cycles validate
+without forcing replacement, so `"always"` does not reproduce the old unconditional
+rebuild behavior; use `rebuild_query_index()` when unconditional replacement is
+required. Direct backend calls remain independently repeatable one-cycle operations.
+`Repo.refresh_index(force=True)` likewise requests reconciliation on every call;
+its `force` parameter does not force replacement of a correct ready SQLite sidecar.
+
+```python
+once = repo.query().refresh(True)
+once.cdefs().count()              # explicit cycle, then fresh evaluation
+once.state_refs().collect()       # fresh authority; completed targets use auto
+once.refresh(True).count()        # new one-shot request
+
+repeated = repo.query().refresh("always")
+repeated.count()                  # validates a correct ready sidecar
+repeated.count()                  # validates again; does not force replacement
+store.rebuild_query_index()       # explicit replacement when required
+```
+
+Combining completed disjoint universes preserves operand-local bindings and adds no
+cross-operand cycles. New external scopes extend inherited requests, coalescing
+pending obligations at a target when no older attempt is in flight. An outer True
+creates one new request over the whole expression; False/auto/always suppress
+inherited one-shot intent on that expression without changing originals. Closure,
+occurrences, and both projections share lineage; refinements of fixed IdentitySet
+and OccurrenceSet results are detached. Empty results retain source/scope obligations,
+empty available Stores participate, and optional absent targets remain pending.
+
+Same-request callers single-flight each target and observe exact joined outcomes;
+later-created requests receive no historical credit. Failed/interrupted targets
+remain retryable in later terminals, while successful targets survive partial or
+evaluation failure. Owners retain original exceptions; failed/interrupted-owner
+waiters receive `QueryIndexError`. Waiter interruption leaves the owner running,
+and same-thread self-reentry raises `QueryIndexBusy`. Completed requests use fresh
+terminal authority and auto demand behavior, including otherwise-supported indexed
+prefixes under forbid/indexed-only controls.
+
+Auto refresh is now demand-driven. Broad authority and metadata queries no longer
+clean unused dirty sidecars as an incidental side effect. Use an explicit cycle
+when maintenance itself is required; actual bounded index consumers still recover
+outside retained readers/fences. Authority visibility remains fresh under every
+policy. Ordinary explanation, construction, and identity/occurrence `take(0)`
+remain inert. Optional absent indexes do not become fabricated targets; explicitly
+configured unavailability and explicit maintenance failures surface to the caller.
+
+Configure one persistent destination consistently per Store dirty-token domain,
+including across clients. Terminal-local checks reject visible conflicting
+destinations, ownership, or settings with `QueryIndexIncompatible`; independently
+maintained destinations sharing that domain across clients remain unsupported.
+Repo topology is retained once per terminal, so later attachments participate next
+time. After fork, open a fresh Repo: inherited topology raises `RuntimeError`
+before its owner lock. Shared request state resets to pending before child
+acquisition, subject to existing Store/import/SQLite lifecycle rules. Requests
+remain process-local, with no new query serialization or deepcopy contract.
+
+See [Graph Querying](graph_querying.md#refresh-lifecycle-and-scan-controls) for the
+full lineage, cohort, interruption, and process-local lifecycle contract, and
+[Backend Contracts](query_index_backend_contracts.md#explicit-backend-reconciliation)
+for strict maintenance success versus report-oriented reconciliation.
+
+## Verification Budgets And Maintenance Diagnostics
+
+`max_verify` has a tightened **cumulative admission** contract. Ordinary inventory
+and fixed refinement reserve the entire detached domain before filtering or
+early-stop terminals; exact/paged paths reserve before direct verification.
+Repeated stages and replicas share unchanged-cut admissions, but collision
+identities are distinct. Cut replacement (including unchanged metadata-demand
+recapture), instability retry, and selective/paging fallback retain spent work and
+charge new admissions. A budget formerly sufficient for each stage separately may
+now fail with `QueryVerifyBudgetExceeded`. This accounting tightening is separate
+from fixing the omitted budget check on indexed `take()`. Unverified ordering
+lookahead counts rows/decodes only; verified collision lookahead is charged.
+Metadata-holder discovery and recovery reads are scan-controlled IO rather than
+identity admissions. `take(0)` reads/admits nothing; witness/depth budgets remain
+separate and inherit controls. Analyzed explanations expose admissions as
+`verified_count` and started inventory/maintenance scans as `store_scan_count`,
+including failed recovery, fallback, and recapture. `refresh_action` reports actual
+`rebuild > validate > waited > reused > none` by precedence across targets;
+waiters receive no owner scan charges and reuse is not new reconciliation.
+The declared `refresh` policy is reported separately.
+
 Query authority is Store records, not memory or SQLite indexes. Derived indexes may
 accelerate work, but missing, stale, corrupt, or incompatible indexes rebuild, fall
 back visibly, or fail without changing authoritative records. Query V3 does not read
@@ -99,6 +205,11 @@ query operator effect boundary.
 `tests/core/test_query_v3_acceptance.py` is the compact cross-layer acceptance
 matrix. Its named cases cover stored authority and metadata restrictions, typed
 reference traversal, fixed-set algebra and bounded terminals, query-effect
-boundaries, exact save/load, and derived-sidecar recovery. The focused U1-U6 test
-modules retain the complete error and parameter matrices; the representative profile
-uses acceptance cases rather than expanding those products.
+boundaries, exact save/load, and derived-sidecar recovery. The owning focused test
+modules retain the complete error and parameter matrices. The representative profile
+also selects named lifecycle regressions for one-shot/repeated cadence, operand-local
+lineage, scope extension, controls, fresh authority, and publication failure.
+SQLite backend/concurrency tests retain reconciliation, single-flight, joined
+outcomes, interruption, fork/reset, ownership, and empty-token cleanup coverage
+without curated function lists. Explicit exhaustive-only products remain outside
+routine selection; sampled products retain representative values on every axis.

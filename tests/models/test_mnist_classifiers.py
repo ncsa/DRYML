@@ -4,7 +4,7 @@ from dryml import F
 from dryml.core import Repo
 from dryml.core.repo import default_repo
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import Cast, Flatten, Map, Scale, Select, TFDSAdapter, Zip
+from dryml.data import Batch, Cast, Flatten, Map, Scale, Select, TFDSAdapter, Zip
 from dryml.metrics import categorical_accuracy
 from dryml.models import Experiment
 
@@ -37,7 +37,8 @@ def test_sklearn_basic_mnist_classifier_with_tfds_adapter():
 
     assert categorical_accuracy(model, val_ds, batch_size=64) > 0.1
     assert Map(val_ds, Select(0), model).spec == TensorSpec("float64", shape=(10,), backend="numpy")
-    assert exp.state.phase == "trained"
+    assert (exp.state.epoch, exp.state.step, exp.state.examples_seen) == (1, 1, 64)
+    assert exp.state.phase is None
 
 
 def test_tf_basic_mnist_classifier_with_tfds_adapter():
@@ -54,9 +55,11 @@ def test_tf_basic_mnist_classifier_with_tfds_adapter():
         optimizer=optimizer,
         loss=Loss(tf.keras.losses.SparseCategoricalCrossentropy, from_logits=True),
         epochs=_MNIST_EPOCHS,
-        batch_size=64,
     )
-    exp = Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
+    exp = Experiment(
+        model, train_fn,
+        train_data=Batch(train_ds, 64), val_data=Batch(val_ds, 64),
+    )
 
     exp.train_fn(exp)
 
@@ -79,10 +82,12 @@ def test_torch_basic_mnist_classifier_with_tfds_adapter():
         optimizer=optimizer,
         loss_cls=torch.nn.CrossEntropyLoss,
         epochs=_MNIST_EPOCHS,
-        batch_size=64,
         verbose=0,
     )
-    exp = Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
+    exp = Experiment(
+        model, train_fn,
+        train_data=Batch(train_ds, 64), val_data=Batch(val_ds, 64),
+    )
 
     with default_repo(Repo()):
         exp.train_fn(exp)

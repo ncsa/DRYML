@@ -1,7 +1,137 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import Any
+
+from .utils.stable_hash import stable_int_hash
+
+
+@dataclass(frozen=True, slots=True, init=False, eq=False)
+class ObjectSelector:
+    """Select one realized object graph independently of state revisions.
+
+    Args:
+        reference: Exact ObjectRef or StateRef supplying the root object identity.
+            References already embedded in that graph remain exact. Use
+            ``reference.object_projection()`` to recursively replace encountered
+            references with nested ObjectSelectors.
+
+    Generated selectors preserve CDef topology and every ObjectId while omitting
+    StateRef hashes. They are query values, not Store authority. ``reference``
+    exposes their corresponding ObjectRef association when an API explicitly
+    requires persistent authority; generated projections weaken nested states,
+    while directly constructed selectors retain caller-supplied exact pins.
+    """
+
+    definition: Any
+    objects: Any
+    _reference: Any = field(repr=False, compare=False, hash=False)
+    _digest_cache: str | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False,
+    )
+
+    def __init__(self, reference: Any):
+        from .reference_values import ObjectRef, StateRef
+
+        if isinstance(reference, StateRef):
+            reference = reference.object
+        if not isinstance(reference, ObjectRef):
+            raise TypeError("ObjectSelector requires an ObjectRef or StateRef.")
+        object.__setattr__(self, "definition", reference.definition)
+        object.__setattr__(self, "objects", reference.objects)
+        object.__setattr__(self, "_reference", reference)
+        object.__setattr__(self, "_digest_cache", None)
+
+    @classmethod
+    def _projected(cls, definition: Any, objects: Any, reference: Any) -> "ObjectSelector":
+        """Build one validated internal recursive projection without authority IO."""
+
+        from .definition import ConcreteDefinition
+        from .reference_values import ObjectRef
+
+        if not isinstance(definition, ConcreteDefinition):
+            raise TypeError("ObjectSelector definition must be a ConcreteDefinition.")
+        if not isinstance(reference, ObjectRef):
+            raise TypeError("ObjectSelector reference authority must be an ObjectRef.")
+        if objects != reference.objects:
+            raise ValueError("ObjectSelector objects must match its reference authority.")
+        result = object.__new__(cls)
+        object.__setattr__(result, "definition", definition)
+        object.__setattr__(result, "objects", objects)
+        object.__setattr__(result, "_reference", reference)
+        object.__setattr__(result, "_digest_cache", None)
+        return result
+
+    @property
+    def reference(self):
+        """Return the ObjectRef association authority retained by this selector.
+
+        Returns:
+            An exact ObjectRef suitable for APIs that persist object association.
+            Generated selectors return their recursively state-weakened reference.
+
+        Side Effects:
+            None. No Store is read and no identity is allocated.
+        """
+
+        return self._reference
+
+    def matches(self, target: Any) -> bool:
+        """Return whether an ObjectRef or StateRef has this projected graph.
+
+        Args:
+            target: Candidate exact reference. State hashes are ignored only at
+                generated ObjectSelector nodes; raw embedded references remain exact.
+
+        Returns:
+            Whether object identities, graph topology, and exact embedded pins match.
+
+        Raises:
+            None. Unsupported targets return ``False``.
+
+        Side Effects:
+            None. Matching inspects detached values only.
+        """
+
+        from .query.query import _object_selector_matches
+
+        return _object_selector_matches(self, target)
+
+    def digest(self) -> str:
+        """Return a deterministic digest of this recursive selector graph."""
+
+        if self._digest_cache is None:
+            payload = {
+                "definition_graph": self.definition.graph_hash(),
+                "objects": [
+                    [path.to_data(), object_id.to_data()]
+                    for path, object_id in self.objects.items()
+                ],
+            }
+            object.__setattr__(
+                self,
+                "_digest_cache",
+                hashlib.sha256(
+                    b"dryml-object-selector-v1\x00"
+                    + json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+                ).hexdigest(),
+            )
+        return self._digest_cache
+
+    def __stable_leaf_bytes__(self) -> bytes:
+        return b"dryml-object-selector-v1\x00" + self.digest().encode("ascii")
+
+    def __hash__(self) -> int:
+        return stable_int_hash(self.digest())
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, ObjectSelector)
+            and self.definition.graph_equal(other.definition)
+            and self.objects == other.objects
+        )
 
 
 @dataclass(frozen=True, slots=True)

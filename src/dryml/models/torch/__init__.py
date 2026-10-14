@@ -1,4 +1,5 @@
 from dryml.models.torch.base import (
+    EarlyStoppingTraining,
     Model,
     ModelWrapper,
     Optimizer,
@@ -9,6 +10,7 @@ from dryml.models.torch.base import (
 )
 
 __all__ = [
+    "EarlyStoppingTraining",
     "Model",
     "ModelWrapper",
     "Optimizer",

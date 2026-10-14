@@ -1,3 +1,9 @@
+"""Store-local adapters over the process-local derived definition catalog.
+
+Hydration changes memory membership, never Store authority. Explicit lifecycle
+calls are independently repeatable and propagate catalog hydration failures.
+"""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -17,6 +23,15 @@ class AggregateMemoryQueryIndex(DefinitionCatalog):
 
 
 class MemoryStoreQueryIndex:
+    """Expose one Store's membership through an aggregate DefinitionCatalog.
+
+    Args:
+        catalog: Owning in-process DefinitionCatalog.
+        store: Store whose source identity scopes read views and mutations.
+
+    Construction records identity without IO. Refresh may hydrate catalog Stores;
+    failures propagate and no persistent sidecar or Store authority is modified.
+    """
     def __init__(self, catalog: DefinitionCatalog, store):
         self.catalog = catalog
         self.store = store
@@ -49,6 +64,12 @@ class MemoryStoreQueryIndex:
         return self.catalog.remove_stored_roots(tuple(roots), self.store)
 
     def refresh(self, policy, *, stats=None) -> None:
+        """Delegate one lifecycle call to the catalog; return None or raise.
+
+        False disables work, auto hydrates unseen Stores, and True/always each
+        rehydrate independently. Optional QueryStats retains started inventories
+        even on hydration failure. Only process-local catalog state changes.
+        """
         self.catalog.refresh(policy, stats=stats)
 
     def status(self) -> QueryIndexStatus:

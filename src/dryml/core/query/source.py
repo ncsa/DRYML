@@ -3,16 +3,23 @@
 This layer turns Repo, Store, and fixed members into detached identity evidence
 without publishing a replacement query API. It snapshots Repo topology once per
 capture and groups only identical authority-fence domains.
+The terminal's capture also enforces outer scan/index controls and cumulative
+identity admissions, retaining expenditure across replacement and retry without
+changing authoritative records or introducing cross-terminal proof reuse.
+Retained presentations associate opaque Query-owned requests with accepted targets;
+this layer owns neither request synchronization nor cross-terminal completion.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
+from ...paths import local_path_key
 from ..object import Object
 from ..definition import ConcreteDefinition
+from ..errors import ParameterizationLimitError
 from ..reference_values import ObjectRef, StateRef
 from ..store.records import DefinitionRecord
 from ..store.store import Store, StoreCapabilityError
@@ -23,6 +30,17 @@ from .authority import (
     validate_captured_reference_authority,
 )
 from .identity import IdentitySet, SourceEvidence, identity_key
+
+
+@dataclass(slots=True)
+class _GeneratorWitnessBudget:
+    limit: int | None
+    visited: int = 0
+
+    def consume(self) -> None:
+        self.visited += 1
+        if self.limit is not None and self.visited > self.limit:
+            raise ParameterizationLimitError("generator query witness limit exceeded")
 
 
 class InventoryCapabilityError(StoreCapabilityError):
@@ -84,21 +102,132 @@ class RetainedRepoLookupSource:
             raise TypeError("RetainedRepoLookupSource weak must be an exact bool.")
 
 
+@dataclass(frozen=True, slots=True)
+class _IndexPresentation:
+    """Associate a producer or scoped obligation with its retained Store handle."""
+
+    producer: object
+    scope: object
+    store: Store
+    requests: tuple[object, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexTargetDescriptor:
+    """Destination identity and compatibility, independent of query evidence."""
+
+    destination: tuple
+    authority_domain: str
+    source_key: str
+    dirty_domain: str | None
+    semantics: tuple
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexTarget:
+    """One compatible backend with every producer/scope presentation retained."""
+
+    descriptor: _IndexTargetDescriptor
+    index: object
+    presentations: tuple[_IndexPresentation, ...]
+
+
+def _index_target_descriptor(store, index):
+    """Validate configuration before coalescing or touching a backend destination."""
+
+    from .model import CANONICAL_QUERY_SEMANTICS_VERSION, QueryIndexIncompatible
+    from .sqlite import SQLiteQueryIndexConfig
+    from .sqlite.index import SQLiteStoreQueryIndex
+
+    authority = store.authority_fence_key()
+    source_key = index.source_key
+    expected_source = getattr(store, "catalog_key", lambda: source_key)()
+    if source_key != expected_source:
+        raise QueryIndexIncompatible("Query index source key disagrees with its Store presentation.")
+    owner = getattr(index, "store", None)
+    if owner is not None and owner.authority_fence_key() != authority:
+        raise QueryIndexIncompatible("Query index authority domain disagrees with its Store presentation.")
+    if not isinstance(index, SQLiteStoreQueryIndex):
+        return _IndexTargetDescriptor(("instance", id(index)), authority, source_key, None, (type(index),))
+
+    def normalized(path):
+        return None if path is None else local_path_key(path)
+
+    destination = normalized(index._connections.path)
+    if normalized(index.path) != destination or normalized(index.config.path) != destination:
+        raise QueryIndexIncompatible("Query index backend, manager, and configuration paths disagree.")
+    if replace(index.config, path=index._connections.config.path) != index._connections.config:
+        raise QueryIndexIncompatible("Query index backend and manager settings disagree.")
+    configured = getattr(store, "_query_index_config", None)
+    default_path = getattr(store, "query_index_path", None)
+    if default_path is not None:
+        expected_path = default_path if configured is None or configured.path is None else configured.path
+        if normalized(expected_path) != destination:
+            raise QueryIndexIncompatible("Query index destination disagrees with its configured Store path.")
+    expected_config = configured
+    if expected_config is None and default_path is not None:
+        expected_config = SQLiteQueryIndexConfig(path=index.config.path)
+    if expected_config is not None and replace(expected_config, path=index.config.path) != index.config:
+        raise QueryIndexIncompatible("Query index settings disagree with its configured Store settings.")
+    if index.canonical_version != CANONICAL_QUERY_SEMANTICS_VERSION:
+        raise QueryIndexIncompatible("Query index canonical semantics disagree with its Store presentation.")
+    dirty = normalized(index.dirty_path)
+    if dirty != normalized(getattr(store, "query_index_dirty_path", index.dirty_path)):
+        raise QueryIndexIncompatible("Query index dirty-token domain disagrees with its Store presentation.")
+    settings = tuple(
+        getattr(index.config, name) for name in index.config.__dataclass_fields__ if name != "path"
+    )
+    return _IndexTargetDescriptor(
+        ("sqlite", destination), authority, source_key, dirty,
+        (type(index), index.canonical_version, *settings),
+    )
+
+
 class SourceCapture:
     """One terminal-local registry of detached Store facts and cache inventory.
 
     ``source_cuts`` counts distinct authority-fence domains, while
     ``capture_rounds`` and ``demand_recaptures`` distinguish monotonic metadata
     demand growth from source instability retries owned by later execution work.
+    Complete-combination proofs use sorted unique domains and fresh fact tokens;
+    selective direct reads cannot stand in for complete coverage. Store knowledge,
+    retained lookup roots, topology, and Repo cache tiers remain distinct.
+    Effective outer controls govern every consumer. ``verified_count`` records
+    cumulative identity admissions, while ``store_scan_count`` records inventory
+    and started maintenance scans separately from page fetch/decode counters.
+    Index presentations preserve retained producer/scope associations; compatible
+    destinations coalesce only when a terminal actually requests index work.
     """
 
-    def __init__(self):
+    def __init__(self, controls=None):
+        """Retain effective terminal policies; standalone captures default to allow.
+
+        ``controls`` is the outer IdentityQuery. Its immutable policy declarations
+        govern every nested consumer of this capture. Admissions are graph-exact,
+        cumulative across replacements, and independent of record/replica IO.
+        """
+
+        self.refresh_policy = getattr(controls, "refresh_policy", "auto")
+        self.scan_policy_mode = getattr(controls, "scan_policy_mode", "allow")
+        self.indexed_required = getattr(controls, "indexed_required", False)
+        self.max_verify_limit = getattr(controls, "max_verify_limit", None)
+        self.max_depth_limit = getattr(controls, "max_depth_limit", None)
+        self.max_witness_limit = getattr(controls, "max_witness_limit", None)
+        self._witness_budget = None
+        self._admitted = set()
+        self.verified_count = 0
+        self.store_scan_count = 0
+        self.refresh_action = "none"
+        self.index_presentations: tuple[_IndexPresentation, ...] = ()
+        self.scan_warning_emitted = False
         self._facts: dict[str, CapturedStoreFacts] = {}
         self._exact_states: dict[str, dict[str, StateRef | None]] = {}
         self._exact_stored_cdefs: dict[str, set[object]] = {}
         self._topologies: dict[int, tuple[Store, ...]] = {}
         self._cache_knowledge: dict[tuple[int, bool], IdentitySet] = {}
+        self._retained_cache_cdefs: dict[tuple[int, bool], tuple] = {}
         self._cut_domains: set[str] = set()
+        self._validated_combinations: set[tuple] = set()
         self.active = False
         self.source_cuts = 0
         self.capture_rounds = 0
@@ -107,6 +236,216 @@ class SourceCapture:
         self.candidate_rows_read = 0
         self.cdef_blobs_decoded = 0
         self.pages_fetched = 0
+
+    def resolve_index_targets(self, *, explicit: bool = False) -> tuple[_IndexTarget, ...]:
+        """Open and validate every retained index presentation before maintenance.
+
+        Args:
+            explicit: Surface configured backend unavailability for an explicit
+                cycle. Optional absent backends create no target in either mode.
+
+        Returns:
+            Destination-deduplicated targets retaining all producer/scope pairs.
+
+        Raises:
+            QueryIndexIncompatible: For conflicting destination ownership,
+                settings, path agreement, or multiple destinations sharing one
+                dirty-token domain, including duplicate handles inside a Repo.
+            QueryIndexUnavailable: For explicitly configured backend unavailability.
+
+        Side Effects:
+            Calls Store-owned lazy openers without inventory or maintenance.
+            Inspects persisted SQLite compatibility/ownership through read-only
+            connections after checking all visible descriptors.
+            Re-resolution checks current descriptors; it never revisits live Repo
+            topology or stores cross-terminal completion/authority evidence.
+        """
+
+        from .model import QueryIndexIncompatible, QueryIndexUnavailable
+
+        targets = {}
+        presentations_by_destination = {}
+        dirty_destinations = {}
+        for presentation in self.index_presentations:
+            store = presentation.store
+            if getattr(store, "query_index_policy", None) in {"memory", "none"}:
+                continue
+            try:
+                index = store.open_query_index()
+            except QueryIndexUnavailable:
+                if explicit:
+                    raise
+                continue
+            if index is None:
+                if explicit and getattr(store, "query_index_policy", None) == "sqlite":
+                    raise QueryIndexUnavailable("The configured query index backend is unavailable.")
+                continue
+            descriptor = _index_target_descriptor(store, index)
+            if descriptor.dirty_domain is not None:
+                previous = dirty_destinations.setdefault(descriptor.dirty_domain, descriptor.destination)
+                if previous != descriptor.destination:
+                    raise QueryIndexIncompatible("Multiple query index destinations share one Store dirty-token domain.")
+            existing = targets.get(descriptor.destination)
+            if existing is not None and existing.descriptor != descriptor:
+                raise QueryIndexIncompatible("Query index destination has incompatible Store presentations.")
+            if existing is None:
+                targets[descriptor.destination] = _IndexTarget(descriptor, index, ())
+                presentations_by_destination[descriptor.destination] = []
+            presentations_by_destination[descriptor.destination].append(presentation)
+        resolved = tuple(
+            replace(target, presentations=tuple(presentations_by_destination[destination]))
+            for destination, target in targets.items()
+        )
+        from .sqlite.index import SQLiteStoreQueryIndex
+
+        for target in resolved:
+            if isinstance(target.index, SQLiteStoreQueryIndex):
+                target.index._assert_sidecar_rebuildable()
+        return resolved
+
+    def merge_maintenance_stats(self, stats) -> None:
+        """Charge started backend work, including failures, to this terminal.
+
+        ``stats`` is a backend QueryStats for one call. Returns None and adds its
+        started inventory count without identity admissions. Actions aggregate as
+        rebuild over validate over waited over reused over none; no completion is
+        inferred from a report, and waiters never receive owner inventory counts.
+        Call in finally, after releasing backend resources. No Store IO occurs.
+        """
+
+        self.store_scan_count += stats.store_scan_count
+        action = stats.refresh_action
+        if action == "sqlite-rebuild":
+            self.record_refresh_action("rebuild")
+        elif action == "sqlite-validate":
+            self.record_refresh_action("validate")
+
+    def record_refresh_action(self, action: str) -> None:
+        """Merge one actual maintenance/join/reuse action without charging IO.
+
+        Args:
+            action: One of none, reused, waited, validate, or rebuild.
+
+        Returns:
+            None; updates only this terminal's diagnostic action by precedence.
+
+        Raises:
+            ValueError: For an unsupported action.
+
+        Side Effects:
+            No Store reads, synchronization waits, or authority changes.
+        """
+        precedence = ("none", "reused", "waited", "validate", "rebuild")
+        if precedence.index(action) > precedence.index(self.refresh_action):
+            self.refresh_action = action
+
+    def require_scan(self) -> None:
+        """Enforce effective inventory/recovery policy before scan IO.
+
+        Returns None when allowed. Raises QueryIndexUnavailable for indexed-only
+        or QueryWouldScanError for forbidden scans. Warning mode emits at most
+        one RuntimeWarning per terminal, without reading or changing authority.
+        """
+
+        from .model import QueryIndexUnavailable, QueryWouldScanError
+
+        if self.indexed_required:
+            raise QueryIndexUnavailable("Query V3 index coverage requires an authoritative inventory scan.")
+        if self.scan_policy_mode == "forbid":
+            raise QueryWouldScanError("Query V3 requires an authoritative inventory scan.")
+        if self.scan_policy_mode == "warn" and not self.scan_warning_emitted:
+            import warnings
+
+            warnings.warn("Query V3 requires an authoritative inventory scan.", RuntimeWarning, stacklevel=4)
+            self.scan_warning_emitted = True
+
+    def reserve(self, values: Iterable[IdentityValue]) -> None:
+        """Admit a detached candidate domain atomically before its verification.
+
+        Values may repeat across replicas and stages. Budget exhaustion raises
+        QueryVerifyBudgetExceeded before any new candidate is admitted. Replacement
+        cuts clear reusable admissions, never the cumulative spent count.
+        ``values`` supplies detached CDefs/ObjectRefs/StateRefs; unsupported values
+        raise TypeError. Returns None and updates only terminal-local work state,
+        without Store or index IO.
+        """
+
+        from .model import QueryVerifyBudgetExceeded
+
+        new = {identity_key(value) for value in values} - self._admitted
+        if self.max_verify_limit is not None and self.verified_count + len(new) > self.max_verify_limit:
+            raise QueryVerifyBudgetExceeded("Query V3 verification budget exceeded.")
+        self._admitted.update(new)
+        self.verified_count += len(new)
+
+    def invalidate_admissions(self) -> None:
+        """Discard reusable admissions after replacement without refunding work.
+
+        Returns None, retaining cumulative counters and effective controls. This
+        only changes terminal-local state and never reads or changes authority.
+        """
+
+        self._admitted.clear()
+
+    def has_complete_store_cut(self, store: Store) -> bool:
+        """Return whether this terminal already retains complete facts for a Store.
+
+        ``store`` supplies its authority-fence domain. This performs no IO and
+        returns a bool; paged stages must reuse existing complete facts rather
+        than inspecting a newer selective cut.
+        """
+
+        return store.authority_fence_key() in self._facts
+
+    def discard_index_attempt(self, stores: Iterable[Store]) -> None:
+        """Discard abandoned selective proofs without refunding terminal work.
+
+        ``stores`` are the attempted authority domains. Call only after releasing
+        all retained readers/fences. Complete facts and cumulative IO/admission
+        counters remain intact; subsequent inventory uses a fresh complete cut.
+        This performs no Store IO and returns None.
+        """
+
+        self.invalidate_admissions()
+        for store in stores:
+            key = store.authority_fence_key()
+            self._exact_states.pop(key, None)
+            self._exact_stored_cdefs.pop(key, None)
+
+    def inspect_index_main(self, store: Store) -> None:
+        """Validate current main's direct-root completeness inside a held fence.
+
+        ``store`` is a bounded producer whose authority fence the caller retains.
+        Main inspection is coverage IO, not identity admission. Missing/malformed
+        authoritative targets fail visibly; a valid main outside direct-root
+        coverage raises QueryIndexUnavailable for post-release fallback/refusal.
+        No inventory, payload read, or mutation occurs; returns None.
+        """
+
+        from .model import QueryIndexUnavailable
+
+        self._record_cut(store.authority_fence_key())
+        main = store.read_main_ref()
+        if main is None:
+            return
+        record = store.read_definition_record(main.definition_digest)
+        if record is None:
+            raise InventoryCapabilityError("Main-reference authority targets a missing definition record.")
+        if (type(store).read_stored_root_record is Store.read_stored_root_record
+                or store.read_stored_root_record(main.definition_digest) is None):
+            raise QueryIndexUnavailable("Current main-reference authority lacks direct stored-root authority proof.")
+
+    def witness_budget(self):
+        """Return the shared terminal-local GeneratorSelector witness counter.
+
+        Lazily creates the counter with the effective outer witness limit. It
+        performs no source IO; consuming it raises ParameterizationLimitError
+        when the separate witness bound is exceeded.
+        """
+
+        if self._witness_budget is None:
+            self._witness_budget = _GeneratorWitnessBudget(self.max_witness_limit)
+        return self._witness_budget
 
     def _record_cut(self, key: str) -> None:
         """Account for each fenced read, including selective Store authority."""
@@ -117,7 +456,14 @@ class SourceCapture:
             self.source_cuts += 1
 
     def repo_stores(self, repo) -> tuple[Store, ...]:
-        """Retain the first connected producer topology for this terminal."""
+        """Return the first connected topology retained for this terminal.
+
+        ``repo`` owns topology admission and rejects inherited process handles
+        before its configuration lock. This snapshots handles, not inventory;
+        attachments after this call participate in the next terminal. Returns a
+        tuple of Stores and propagates owner lifecycle/validation errors. Only the
+        brief owner lease and terminal-local registry change; no Store IO occurs.
+        """
 
         key = id(repo)
         if key not in self._topologies:
@@ -142,7 +488,9 @@ class SourceCapture:
 
         Growing metadata demand replaces earlier facts with a complete new cut;
         V3 predicate evaluation therefore never reads live metadata after its
-        identity inventory was captured.
+        identity inventory was captured. Effective scan/index controls reject
+        prohibited work before inventory IO. Replacement discards reusable
+        admissions without refunding cumulative terminal work.
         """
 
         store = source.store if isinstance(source, StoreSource) else source
@@ -152,14 +500,17 @@ class SourceCapture:
         cached = self._facts.get(key)
         if cached is not None and metadata_scopes <= cached.metadata_scopes:
             return cached
+        selective = cached is None and key in self._cut_domains
+        self.require_scan()
         self._require_complete_inventory(store)
         requested_scopes = metadata_scopes | (cached.metadata_scopes if cached else frozenset())
         with store.authority_read_fence():
+            self.store_scan_count += 1
             self._record_cut(key)
             if cached is not None:
                 self.demand_recaptures += 1
             main = store.read_main_ref()
-            definitions = tuple(store.iter_definition_records())
+            definitions, stored_roots = store._validated_definition_root_inventory()
             definition_by_digest = {record.digest: record.definition for record in definitions}
             if main is not None:
                 main_definition = definition_by_digest.get(main.definition_digest)
@@ -169,7 +520,7 @@ class SourceCapture:
                 main_definition = None
             facts = CapturedStoreFacts.build(
                 definitions=definitions,
-                stored_roots=store.iter_stored_root_records(),
+                stored_roots=stored_roots,
                 declarations=store.iter_declaration_records(),
                 state_refs=store.iter_state_ref_records(),
                 object_aliases=store.iter_object_alias_records(),
@@ -178,20 +529,14 @@ class SourceCapture:
                 source=SourceEvidence.from_source(store.authority_fence_key()),
             )
             if requested_scopes:
-                facts = CapturedStoreFacts.build(
-                    definitions=facts.definitions,
-                    stored_roots=facts.stored_roots,
-                    declarations=facts.declarations,
-                    state_refs=facts.state_refs,
-                    object_aliases=facts.object_aliases,
-                    state_aliases=facts.state_aliases,
-                    main_definition=facts.main_definition,
-                    source=facts.source,
-                    metadata=self._capture_metadata(store, facts, requested_scopes),
-                    metadata_scopes=requested_scopes,
+                facts = facts.with_metadata(
+                    self._capture_metadata(store, facts, requested_scopes),
+                    scopes=requested_scopes,
                 )
         exact = self._exact_states.pop(key, {})
         exact_cdefs = self._exact_stored_cdefs.pop(key, set())
+        if cached is not None or selective:
+            self.invalidate_admissions()
         exact_changed = False
         if exact:
             current_states = {record.digest: record.state_ref for record in facts.state_refs}
@@ -210,21 +555,40 @@ class SourceCapture:
     def capture_stores(
         self, sources: Iterable[StoreSource | Store], *, metadata_scopes: frozenset[str] = frozenset()
     ) -> tuple[CapturedStoreFacts, ...]:
-        """Capture each selected Store while preserving distinct transaction cuts."""
+        """Capture and validate the complete selected authority combination.
 
-        facts = tuple(
-            self.capture_store(source, metadata_scopes=metadata_scopes)
-            for source in sources
+        Duplicate fence domains share facts. Sorted domain/token keys reuse only
+        successful terminal-local proofs; demand recapture creates new tokens
+        even without authority mutation. Conflicting authoritative ObjectIds raise
+        QueryError before filtering; embedded references are not root authority.
+        Distinct Zip transactions are always distinct domains.
+        """
+
+        selected = {}
+        for source in sources:
+            store = source.store if isinstance(source, StoreSource) else source
+            key = store.authority_fence_key()
+            if key not in selected:
+                selected[key] = self.capture_store(store, metadata_scopes=metadata_scopes)
+        facts = tuple(selected.values())
+        combination = tuple(
+            (key, "complete", selected[key].capture_token) for key in sorted(selected)
         )
-        validate_captured_reference_authority(facts)
+        if combination not in self._validated_combinations:
+            validate_captured_reference_authority(facts)
+            self._validated_combinations.add(combination)
         return facts
 
     def read_exact_state(self, source: StoreSource | Store, target: StateRef) -> StateRef | None:
         """Read one complete exact StateRef without requiring broad inventory.
 
-        The digest-addressed record is independently authoritative for exact
-        saved-state membership. This selective path intentionally does not use
-        the capture registry or any record-family iterator.
+        A digest-addressed positive proves independent saved-state membership
+        for this source only. A miss does not exclude embedded or projected
+        knowledge: callers need complete capture before a negative live answer.
+        This selective proof is separate from complete captured inventory.
+        The target is admitted to the effective verification budget before the
+        direct check, including a miss; replicas share the same identity charge.
+        Budget exhaustion raises QueryVerifyBudgetExceeded before record IO.
         """
 
         store = source.store if isinstance(source, StoreSource) else source
@@ -234,6 +598,7 @@ class SourceCapture:
             raise TypeError("Exact state lookup requires a StateRef.")
         key = store.authority_fence_key()
         digest = target.digest()
+        self.reserve((target,))
         if key in self._facts:
             record = next(
                 (item for item in self._facts[key].state_refs if item.digest == digest), None
@@ -272,6 +637,8 @@ class SourceCapture:
         Raises:
             TypeError: If source or target has an unsupported type.
             InventoryCapabilityError: If direct marker and definition disagree.
+            QueryVerifyBudgetExceeded: Before a new target exceeds the effective
+                cumulative admission budget, without direct record IO.
 
         A missing direct marker is not a negative V3 answer: declarations,
         snapshots, aliases, and main references may establish stored authority,
@@ -285,6 +652,7 @@ class SourceCapture:
             raise TypeError("Exact stored CDef lookup requires a Store and CDef.")
         if type(store).read_stored_root_record is Store.read_stored_root_record:
             return None
+        self.reserve((target,))
         key = store.authority_fence_key()
         if key in self._facts:
             return target if self._facts[key].is_stored(target) else None
@@ -300,20 +668,23 @@ class SourceCapture:
         self._exact_stored_cdefs.setdefault(key, set()).add(identity_key(record.definition))
         return record.definition
 
-    def has_exact_stored_cdef(self, source: StoreSource, value: ConcreteDefinition) -> bool:
+    def has_exact_stored_cdef(self, source: StoreSource | RepoSource, value: ConcreteDefinition) -> bool:
         """Return whether this cut already verified an exact stored root.
 
         Args:
-            source: Store producer for the prior direct read.
+            source: Normalized Store or Repo scope for prior direct reads.
             value: Candidate CDef to check by complete graph identity.
 
         Returns:
             Whether a matching positive marker was verified in this terminal.
+            Repo scopes require a nonempty topology and proof from every Store.
 
         Side Effects:
             None. This does not reread or change Store authority.
         """
 
+        if isinstance(source, RepoSource):
+            return self.has_exact_stored_cdef_for_repo(source.repo, value)
         return identity_key(value) in self._exact_stored_cdefs.get(
             source.store.authority_fence_key(), set(),
         )
@@ -400,13 +771,16 @@ class SourceCapture:
                     if value is not None:
                         members.append((value, evidence))
                         continue
-                self._require_complete_inventory(store)
-                with store.authority_read_fence():
-                    self._record_cut(key)
-                    for value in store.authoritative_root_definitions():
-                        if exact_cdef is None or value.graph_equal(exact_cdef):
-                            members.append((value, evidence))
-            strong, weak = _retained_lookup_cache_cdefs(repo, weak=source.weak)
+                facts = self.capture_store(store)
+                for value in facts._authoritative_root_definitions():
+                    if exact_cdef is None or value.graph_equal(exact_cdef):
+                        members.append((value, evidence))
+            if exact_cdef is None:
+                self.capture_stores(self.repo_stores(repo))
+            cache_key = id(repo), source.weak
+            if cache_key not in self._retained_cache_cdefs:
+                self._retained_cache_cdefs[cache_key] = _retained_lookup_cache_cdefs(repo, weak=source.weak)
+            strong, weak = self._retained_cache_cdefs[cache_key]
             members.extend(
                 (value, SourceEvidence.from_source(repo))
                 for value in (*strong, *weak)

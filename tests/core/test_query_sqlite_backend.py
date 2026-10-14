@@ -1,5 +1,7 @@
 import threading
+from contextlib import closing
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +18,7 @@ from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqli
 import dryml.core.query.sqlite.index as sqlite_index_module
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core.query.sqlite.lowering import SQLiteOptimizerPolicy
+from dryml.core.query.sqlite.schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION
 
 
 pytestmark = pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
@@ -57,6 +60,357 @@ def sqlite_rows(path, sql, params=()):
         return con.execute(sql, params).fetchall()
     finally:
         con.close()
+
+
+def test_explicit_cycle_validates_ready_index_without_replacement(tmp_path, monkeypatch):
+    """Every direct explicit call validates a fresh cut without replacing ready data."""
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.write_definition_record(DefinitionRecord(SQLiteLeaf("ready").definition))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    before = index.status()
+    identity = index._connections._path_identity()
+    monkeypatch.setattr(index, "_activate_replacement", lambda *a, **kw: pytest.fail("ready cycle replaced sidecar"))
+
+    for policy in (True, True, "always", "always"):
+        stats = QueryStats()
+        index.refresh(policy, stats=stats)
+        assert stats.store_scan_count == 1
+        assert stats.refresh_action == "sqlite-validate"
+        assert index.status().generation == before.generation
+        assert index.status().diagnostics["index_uuid"] == before.diagnostics["index_uuid"]
+        assert index._connections._path_identity() == identity
+        assert not index._connections._leases
+
+
+@pytest.mark.parametrize("phase", ("authority", "staging", "activation", "activation-visible", "acknowledgement"))
+def test_failed_explicit_replacement_counts_started_scan(tmp_path, monkeypatch, phase):
+    """Failure never refunds an inventory, including after visible activation."""
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.write_definition_record(DefinitionRecord(SQLiteLeaf("root").definition))
+    index = store.open_query_index()
+    original_clear = index._clear_dirty
+
+    def fail(*args, **kwargs):
+        raise QueryIndexError("injected " + phase)
+
+    if phase == "authority":
+        monkeypatch.setattr(index, "_preflight_store_roots", fail)
+    elif phase == "staging":
+        monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", fail)
+    elif phase == "activation":
+        monkeypatch.setattr(index, "_activate_replacement", fail)
+    elif phase == "activation-visible":
+        original_activate = index._activate_replacement
+
+        def activate(*args, **kwargs):
+            original_activate(*args, **kwargs)
+            fail()
+
+        monkeypatch.setattr(index, "_activate_replacement", activate)
+    else:
+        monkeypatch.setattr(index, "_clear_dirty", fail)
+    stats = QueryStats()
+    with pytest.raises(QueryIndexError, match="injected"):
+        index.refresh(True, stats=stats)
+    assert stats.store_scan_count == 1
+    assert not index._build_claim_path().exists()
+    assert not index._connections._leases
+    assert not tuple(index.path.parent.glob(f"{index.path.name}.rebuild-*.tmp*"))
+    report = index.reconcile()
+    assert report.action == "rebuild"
+    assert report.changed == (phase in {"acknowledgement", "activation-visible"})
+    assert report.validated == (phase != "authority")
+    assert report.diagnostics["store_scan_count"] == 1
+    assert any("injected " + phase in (issue.detail or "") for issue in report.issues)
+    if phase == "acknowledgement":
+        assert index.path.exists()
+        monkeypatch.setattr(index, "_clear_dirty", original_clear)
+        index.refresh(True)
+        assert index.status().state == "ready"
+
+
+@pytest.mark.parametrize("schema_version", (SQLITE_QUERY_INDEX_SCHEMA_VERSION, 7), ids=("current", "known-older"))
+@pytest.mark.parametrize("operation", (True, "always", "auto", "rebuild"))
+def test_foreign_destination_owner_is_refused_before_scan(tmp_path, monkeypatch, schema_version, operation):
+    """Foreign ownership outranks older-version recovery without changing persisted data."""
+    from dryml.core.query.model import QueryIndexIncompatible
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    path = tmp_path / "shared.sqlite"
+    config = SQLiteQueryIndexConfig(path=path, journal_mode="delete")
+    first, second = (DirStore(tmp_path / name, query_index=config) for name in ("first", "second"))
+    records = tuple(store.write_definition_record(DefinitionRecord(SQLiteLeaf(name).definition))
+                    for store, name in ((first, "first"), (second, "second")))
+    authority_paths = tuple(Path(store._definition_path(record.digest)) for store, record in zip((first, second), records))
+    authority_bytes = tuple(path.read_bytes() for path in authority_paths)
+    first.rebuild_query_index()
+    owner = first.open_query_index()
+    owner.close()
+    with closing(require_sqlite().connect(path)) as con, con:
+        con.execute(f"PRAGMA user_version = {schema_version}")
+        assert con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone() == (owner.source_key,)
+    first.mark_query_index_dirty()
+    index = second.open_query_index()
+    identity = (path.stat().st_dev, path.stat().st_ino)
+    contents = path.read_bytes()
+    tokens = tuple(backend._dirty_markers() for backend in (owner, index))
+    assert all(tokens)
+    monkeypatch.setattr(index, "_capture_authority_cut", lambda: pytest.fail("foreign owner scanned"))
+    stats = QueryStats()
+    with pytest.raises(QueryIndexIncompatible) as error:
+        if operation == "rebuild":
+            index.rebuild(stats=stats)
+        else:
+            index.refresh(operation, stats=stats)
+    assert str(error.value) == "SQLite query-index destination has a foreign Store owner; refusing maintenance."
+    assert stats.store_scan_count == 0
+    assert (path.stat().st_dev, path.stat().st_ino) == identity
+    assert path.read_bytes() == contents
+    assert tuple(backend._dirty_markers() for backend in (owner, index)) == tokens
+    assert tuple(path.read_bytes() for path in authority_paths) == authority_bytes
+    assert not index._connections._leases and not index._build_claim_path().exists()
+    assert all(not con.in_transaction for con in index._connections._connections.values())
+    assert not tuple(path.parent.glob(f"{path.name}.rebuild-*.tmp*"))
+
+
+def test_ready_validation_failure_retains_scan_and_releases_view(tmp_path, monkeypatch):
+    """Unexpected validation errors raise strictly, without losing started work."""
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    generation = index.status().generation
+
+    def fail(*args):
+        assert index._connections._leases
+        raise QueryIndexError("injected validation failure")
+
+    monkeypatch.setattr(index, "_validate_decodable_rows", fail)
+    stats = QueryStats()
+    with pytest.raises(QueryIndexError, match="injected validation failure"):
+        index.refresh(True, stats=stats)
+    assert stats.store_scan_count == 1
+    assert index.status().generation == generation
+    assert not index._connections._leases
+    report = index.reconcile()
+    assert not report.changed
+    assert report.diagnostics["store_scan_count"] == 1
+    assert any("injected validation failure" in (issue.detail or "") for issue in report.issues)
+
+
+def test_explicit_cycle_preserves_unconditional_rebuild_seam(tmp_path):
+    """Explicit reconciliation preserves identity; direct rebuild always replaces."""
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    first = index.status().diagnostics["index_uuid"]
+    index.refresh(True)
+    assert index.status().diagnostics["index_uuid"] == first
+    store.rebuild_query_index()
+    assert index.status().diagnostics["index_uuid"] != first
+
+
+def test_strict_refresh_raises_unavailability_while_reconcile_reports_it(tmp_path, monkeypatch):
+    """The reporting wrapper also owns failures while obtaining initial status."""
+    from dryml.core.query.model import QueryIndexUnavailable
+    from dryml.core.store.dir import DirStore
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.rebuild_query_index()
+    index = store.open_query_index()
+
+    def unavailable():
+        raise QueryIndexUnavailable("injected SQLite absence")
+
+    monkeypatch.setattr(sqlite_index_module, "require_sqlite", unavailable)
+    with pytest.raises(QueryIndexUnavailable, match="injected SQLite absence"):
+        index.refresh(True)
+    report = index.reconcile()
+    assert not report.changed and not report.validated and report.action == "none"
+    assert report.diagnostics["store_scan_count"] == 0
+    assert any("injected SQLite absence" in (issue.detail or "") for issue in report.issues)
+
+
+def test_empty_marker_rebuild_keeps_required_authority_reads(tmp_path, monkeypatch):
+    """A one-root rebuild skips cleanup reads, retaining inventory and validation."""
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    root = SQLiteLeaf("cleanup-count").definition
+    record = store.write_definition_record(DefinitionRecord(root))
+    store.clear_query_index_dirty()
+    index = store.open_query_index()
+    reads = {"inventory": 0, "root-metadata": 0, "cleanup-node": 0, "cleanup-root": 0}
+    phase = "cleanup-node"
+    original_read = store._read_file
+    original_capture = index._capture_authority_cut
+    original_metadata = SQLiteStoreQueryIndex._root_record_metadata
+    original_key = SQLiteStoreQueryIndex._root_marker_key
+    original_validate = SQLiteStoreQueryIndex._validate_rebuild_before_ready
+    validations = []
+
+    def read(path, record_type):
+        value = original_read(path, record_type)
+        if record_type is DefinitionRecord and value is not None:
+            assert value.digest == record.digest
+            reads[phase] += 1
+        return value
+
+    def capture():
+        nonlocal phase
+        phase = "inventory"
+        try:
+            cut = original_capture()
+            assert cut[0] == (root,) and cut[3] == ()
+            return cut
+        finally:
+            phase = "cleanup-node"
+
+    def metadata(backend, cdef):
+        nonlocal phase
+        previous, phase = phase, "root-metadata"
+        try:
+            return original_metadata(backend, cdef)
+        finally:
+            phase = previous
+
+    def key(backend, cdef):
+        nonlocal phase
+        previous, phase = phase, "cleanup-root"
+        try:
+            return original_key(backend, cdef)
+        finally:
+            phase = previous
+
+    def validate(backend, *, roots):
+        assert backend.status().state == "building"
+        validations.append(roots)
+        return original_validate(backend, roots=roots)
+
+    monkeypatch.setattr(store, "_read_file", read)
+    monkeypatch.setattr(index, "_capture_authority_cut", capture)
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_root_record_metadata", metadata)
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_root_marker_key", key)
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", validate)
+    stats = QueryStats()
+    index.rebuild(stats=stats)
+
+    assert validations == [(root,)]
+    assert stats.store_scan_count == 1 and stats.result_count == 1
+    assert reads == {"inventory": 1, "root-metadata": 2, "cleanup-node": 0, "cleanup-root": 0}
+    assert sqlite_rows(index.path, "SELECT storage_hash FROM stored_roots") == [(bytes.fromhex(record.digest),)]
+    assert index.status().state == "ready"
+
+
+@pytest.mark.parametrize("empty", (True, False))
+def test_empty_marker_registration_skips_cleanup_not_readiness(tmp_path, monkeypatch, empty):
+    """Empty registration checks readiness; clean graph writes read only root metadata."""
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.rebuild_query_index()
+    root = SQLiteParent(child=SQLiteLeaf("closure"), name="clean").definition
+    store.write_definition_record(DefinitionRecord(root))
+    store.clear_query_index_dirty()
+    index = store.open_query_index()
+    roots = () if empty else (root,)
+    graph = ConcreteDefinitionGraph.from_roots(roots)
+    original_markers, original_ready = index._dirty_markers, index._ensure_ready
+    original_read, original_metadata = store.read_definition_record, index._root_record_metadata
+    original_key = index._root_marker_key
+    phase = "cleanup"
+    enumerations, reads, keys = [], [], []
+
+    def markers():
+        enumerations.append(phase)
+        result = original_markers()
+        assert result == ()
+        return result
+
+    def ready():
+        nonlocal phase
+        phase = "readiness"
+        try:
+            return original_ready()
+        finally:
+            phase = "cleanup"
+
+    def metadata(cdef):
+        nonlocal phase
+        phase = "root-metadata"
+        try:
+            return original_metadata(cdef)
+        finally:
+            phase = "cleanup"
+
+    def read(digest):
+        reads.append(phase)
+        return original_read(digest)
+
+    def key(cdef):
+        keys.append(cdef)
+        return original_key(cdef)
+
+    monkeypatch.setattr(index, "_dirty_markers", markers)
+    monkeypatch.setattr(index, "_ensure_ready", ready)
+    monkeypatch.setattr(index, "_root_record_metadata", metadata)
+    monkeypatch.setattr(store, "read_definition_record", read)
+    monkeypatch.setattr(index, "_root_marker_key", key)
+    generation = index.status().generation
+    enumerations.clear()
+    result = index.register_stored_roots(graph, roots)
+
+    assert result.changed is not empty
+    assert result.generation == generation + (0 if empty else 1)
+    assert result.definitions_added == (0 if empty else 2)
+    assert result.edges_added == (0 if empty else 1)
+    assert result.roots_added == (0 if empty else 1)
+    assert enumerations == (["readiness"] if empty else ["cleanup"])
+    assert reads == ([] if empty else ["root-metadata"])
+    assert keys == []
+
+
+def test_registration_acknowledges_only_captured_covered_definitions(tmp_path):
+    """Root and direct closure tokens clear without acknowledging other mutations."""
+    from pathlib import Path
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.rebuild_query_index()
+    child = SQLiteLeaf("closure-token").definition
+    root = SQLiteParent(child=child, name="covered-token").definition
+    unrelated = SQLiteLeaf("unrelated-token").definition
+    store.write_definition_record(DefinitionRecord(root))
+    store.write_definition_record(DefinitionRecord(child), stored_root=False)
+    covered = set(store.open_query_index()._dirty_markers())
+    store.write_definition_record(DefinitionRecord(unrelated))
+    unscoped = Path(store.mark_query_index_dirty())
+    index = store.open_query_index()
+    retained = set(index._dirty_markers()) - covered
+    assert len(covered) == 2 and len(retained) == 2 and unscoped in retained
+
+    with store.authority_read_fence():
+        result = index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), (root,))
+
+    assert result.changed and result.definitions_added == 2 and result.roots_added == 1
+    assert not any(marker.exists() for marker in covered)
+    assert set(index._dirty_markers()) == retained
+    assert sqlite_rows(index.path, "SELECT COUNT(*) FROM stored_roots") == [(1,)]
+    assert sqlite_rows(index.path, "SELECT COUNT(*) FROM definitions") == [(2,)]
 
 
 def test_register_stored_roots_persists_graph_and_is_idempotent(tmp_path):

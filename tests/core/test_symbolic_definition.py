@@ -64,6 +64,52 @@ def test_definition_substitution_is_immutable_partial_and_target_inert():
     assert SymbolicLeaf.calls == 0
 
 
+def test_definition_substitution_preserves_definition_values_inside_binding_containers():
+    """Mapping-like definitions stay graph values rather than ordinary dictionaries."""
+
+    soft = Definition(SymbolicLeaf, width=7)
+    concrete = soft.concretize()
+    SymbolicLeaf.calls = 0
+    template = Definition(SymbolicEnvelope, child=Par("child"), members=Par("members"))
+
+    for value in (soft, concrete):
+        bound = template.sub(child=value, members={"nested": (value,)})
+        assert bound.child is value
+        assert bound.members["nested"][0] is value
+        assert bound.concretize() == Definition(
+            SymbolicEnvelope, child=value, members={"nested": (value,)},
+        ).concretize()
+
+    assert SymbolicLeaf.calls == 0
+
+
+def test_shared_authoring_recognition_handles_expressions_authority_and_quote_barriers():
+    """Authoring detection is effect-free and distinct from active-expression admission."""
+
+    from dryml.core import F, Mat
+    from dryml.core.template import _contains_template_value, _is_definition_value
+
+    definition = Definition(SymbolicLeaf, width=7)
+    concrete = definition.concretize()
+    SymbolicLeaf.calls = 0
+
+    assert _is_definition_value(Par("width") * 2)
+    assert _is_definition_value(definition)
+    assert not _is_definition_value(concrete)
+    assert _is_definition_value(concrete, include_authority=True)
+    assert _contains_template_value({"values": (F("builtins:tuple", Par("width") * 2),)})
+    assert _contains_template_value(Mat(definition))
+    assert not _contains_template_value(Ref(definition))
+    assert not _contains_template_value(definition.quote())
+    assert not _contains_template_value(concrete)
+    cyclic = []
+    cyclic.append(cyclic)
+    assert not _contains_template_value(cyclic)
+    cyclic.append(Par("width"))
+    assert _contains_template_value(cyclic)
+    assert SymbolicLeaf.calls == 0
+
+
 def test_definition_rewrites_owned_structure_and_keeps_quotation_boundaries():
     """Shared nodes rewrite once while QuotedDef and Ref stay opaque by default."""
 

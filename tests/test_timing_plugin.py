@@ -538,7 +538,7 @@ def test_good_enough_policy_retains_required_boundary_proofs():
             "test_value_receipt_fixture_round_trips_actual_value_reader_input",
         },
         "tests/qualification/test_ml_workflow_cpu.py": {
-            "test_fake_execute_routes_all_24_requests_without_live_transport_or_framework_import",
+            "test_fake_execute_routes_all_36_requests_without_live_transport_or_framework_import",
         },
         "tests/qualification/test_ml_workflow_accelerated.py": {
             "test_missing_gpu_prerequisite_is_unrun_before_worker_launch",
@@ -581,3 +581,21 @@ def test_good_enough_does_not_collect_backend_training_modules():
         "./tests/models/test_tf_training.py",
         "./tests/models/test_torch_training.py",
     }.intersection(selected)
+
+
+def test_good_enough_native_regressions_have_exact_pins_in_the_lazy_owner():
+    """Routine pins follow the native regressions without promoting legacy files."""
+    baseline = test_buckets.load_baseline(test_buckets.DEFAULT_BASELINE)
+    profile = test_buckets.load_baseline(test_buckets.DEFAULT_PROFILES)["profiles"]["good-enough"]
+    owner = "tests/models/test_dataset_training_integration.py"
+    moved = {
+        "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache": "tests/models/test_tf_training.py",
+        "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache": "tests/models/test_torch_training.py",
+        "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix": "tests/models/test_torch_training.py",
+    }
+    for function, old_owner in moved.items():
+        assert baseline["node_tiers"][f"{owner}::{function}"] == "medium"
+        assert function in profile["representative_functions"][owner]["functions"]
+        assert f"{old_owner}::{function}" not in baseline["node_tiers"]
+        assert old_owner not in profile["representative_functions"]
+        assert test_buckets.tier_for_path(old_owner, baseline) == "heavy"

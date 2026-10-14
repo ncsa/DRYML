@@ -1,4 +1,9 @@
-"""Repo selection, topology evidence, and lifetime locks for managed work."""
+"""Repo selection, topology evidence, and lifetime locks for managed work.
+
+Publication checks use explicit Repo cuts, validate each selected built-in
+replica's local payloads, and yield invocation-local completed events; independent
+control and recovery operations always validate fresh state.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,8 @@ import os
 import shutil
 import stat
 import tempfile
-from contextlib import AbstractContextManager
+import weakref
+from contextlib import AbstractContextManager, ExitStack
 from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import get_ident
@@ -264,6 +270,32 @@ def validate_state_ref(state_repo: Repo, state_ref: StateRef) -> StateRef:
     return state_ref
 
 
+def _validate_control_state_ref(state_repo, state_ref, cut):
+    """Share only successful complete equality matches in one eligible control cut."""
+
+    cut.check()
+    if cut.repo is not state_repo:
+        raise ValueError("Control read cut belongs to another Repo.")
+    if any(_same_control_state_ref(state_ref, previous) for previous in cut.validated_state_refs):
+        cut.check()
+        return
+    _validate_publication_closure(state_repo, state_ref, cut)
+    cut.check()
+    cut.validated_state_refs.append(state_ref)
+
+
+def _same_control_state_ref(left, right):
+    """Tie a public reference match with complete codec content, not graph hashes."""
+
+    if left is right:
+        return True
+    if left != right:
+        return False
+    from dryml.core.cdef_codec import _codec_data_equal
+
+    return _codec_data_equal(left.to_data(), right.to_data())
+
+
 def publish_managed_state(state_repo: Repo, obj: object, *, reservation,
                           snapshot_observer=None):
     """Deep-publish and durably verify one managed state boundary.
@@ -271,7 +303,12 @@ def publish_managed_state(state_repo: Repo, obj: object, *, reservation,
     The normal Repo save engine remains the only router and publication ledger.
     This wrapper commits only the exact replica and recovery Stores named by its
     report, then proves the complete root/descendant closure from freshly reopened
-    buffered archives before lifecycle control may associate the receipt.
+    buffered archives before lifecycle control may associate the StateRef. Managed
+    callers consume a private completed-event handoff instead of repeating this
+    publication check. The handoff proves no future validity: control association,
+    callbacks, status, resume, and recovery still read fresh authority.
+    Each selected built-in replica's locally advertised payloads are validated in
+    that view, even when another replica supplies the root recovery plan.
 
     Args:
         state_repo: Borrowed selected Repo whose current routing policy applies.
@@ -292,6 +329,100 @@ def publish_managed_state(state_repo: Repo, obj: object, *, reservation,
         buffered Stores. Borrowed Repos and Stores remain open.
     """
 
+    result = _publish_managed_state_result(
+        state_repo, obj, reservation=reservation,
+        snapshot_observer=snapshot_observer,
+    )
+    return result.state_ref, result.report
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicationCoverage:
+    """Closed descriptions of the checked replicas and durable recovery set."""
+
+    replicas: tuple
+    required: tuple[int, ...]
+    reopened: tuple[int, ...]
+
+
+def _publication_coverage(report, required):
+    return _PublicationCoverage(
+        tuple((snapshot.state_ref, tuple(id(store) for store in snapshot.stores))
+              for snapshot in report.snapshots),
+        tuple(id(store) for store in required),
+        tuple(id(store) for store in required if type(store) is ZipStore),
+    )
+
+
+class _PublicationEvent:
+    """One immediately consumable completed event, never current Store authority."""
+
+    def __init__(self, state_repo, state_ref, report, invocation, coverage):
+        self._repo = weakref.ref(state_repo)
+        self._invocation = weakref.ref(invocation)
+        self._ownership = weakref.ref(invocation._ownership)
+        self._obj = weakref.ref(invocation._obj)
+        self._reservation_id = id(invocation._ownership.reservation)
+        self._state_ref = state_ref
+        self._report = report
+        self._coverage = coverage
+        self._pid = os.getpid()
+        self._thread_id = get_ident()
+        self._active = True
+
+    def expire(self):
+        self._active = False
+
+    def __reduce__(self):
+        raise TypeError("Publication events are invocation-local and cannot be serialized.")
+
+    def consume(self, state_repo, state_ref, report, invocation):
+        if self._pid != os.getpid() or self._thread_id != get_ident():
+            raise ManagedRecoveryError("invalid_publication_event", "publication event belongs to another caller")
+        try:
+            if (
+                    not self._active or self._repo() is not state_repo
+                    or self._invocation() is not invocation
+                    or not invocation.active
+                    or state_repo._closing or state_repo._closed
+                    or invocation._state_repo is not state_repo
+                    or self._obj() is not invocation._obj
+                    or invocation._publication_event is not self
+                    or self._ownership() is not invocation._ownership
+                    or id(invocation._ownership.reservation) != self._reservation_id
+                    or type(state_ref) is not StateRef or state_ref != self._state_ref
+                    or report is not self._report
+                    or self._coverage != _publication_coverage(
+                        report, _required_managed_publication_stores(report))):
+                raise ManagedRecoveryError("invalid_publication_event", "publication event does not match this completed publication")
+            invocation._ownership.require_owner()
+        finally:
+            self.expire()
+            owner = self._invocation()
+            if owner is not None and owner._publication_event is self:
+                owner._publication_event = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ManagedPublicationResult:
+    """Private projection of one publisher execution and its optional event."""
+
+    state_ref: StateRef
+    report: object
+    event: _PublicationEvent | None
+
+
+def _publish_managed_state_result(state_repo, obj, *, reservation,
+                                  snapshot_observer=None, invocation=None):
+    """Publish once and mint an invocation event only after all resources close."""
+
+    if invocation is not None:
+        invocation._require_active()
+        invocation._ownership.require_owner()
+        if (invocation._state_repo is not state_repo or invocation._obj is not obj
+                or invocation._ownership.reservation is not reservation):
+            raise ManagedRecoveryError("invalid_publication_event", "publication does not belong to this invocation")
+        invocation._expire_publication_event()
     report = None
     try:
         state_ref, report = state_repo.save_object(
@@ -303,7 +434,16 @@ def publish_managed_state(state_repo: Repo, obj: object, *, reservation,
             state_repo, state_ref, report, stores=required, dirty_only=True,
         )
         _validate_managed_publication(state_repo, state_ref, report, required)
-        return state_ref, report
+        event = None
+        if invocation is not None:
+            invocation._require_active()
+            invocation._ownership.require_owner()
+            event = _PublicationEvent(
+                state_repo, state_ref, report, invocation,
+                _publication_coverage(report, required),
+            )
+            invocation._publication_event = event
+        return _ManagedPublicationResult(state_ref, report, event)
     except RepoSaveError as error:
         _raise_managed_publication_error(error, error.report or report)
     except BaseException as error:
@@ -339,15 +479,78 @@ def _validate_managed_publication(state_repo: Repo, state_ref: StateRef, report,
             if publication.phase in _MANAGED_REQUIRED_PUBLICATION_PHASES
     ):
         raise ManagedRecoveryError("incomplete_state_publication", "managed state report has incomplete authority")
-    for snapshot in report.snapshots:
-        if state_ref_for_digest(state_repo, snapshot.state_ref.digest()) != snapshot.state_ref:
-            raise ManagedRecoveryError("conflicting_state_reference", "managed replica StateRef authority conflicts")
-        for store in snapshot.stores:
-            record = store.read_state_ref_record(snapshot.state_ref.digest())
-            if record is None or record.state_ref != snapshot.state_ref:
-                raise ManagedRecoveryError("missing_state_reference", "managed replica StateRef authority is incomplete")
-    validate_state_ref(state_repo, state_ref)
+    with state_repo._read_cut(selected_stores=required) as cut:
+        replicas = []
+        for snapshot in report.snapshots:
+            matches = []
+            for store in cut.stores:
+                bundle = cut.snapshot(store, snapshot.state_ref.digest())
+                if bundle is not None:
+                    record = bundle[0]
+                    if (type(record.state_ref) is not StateRef
+                            or record.state_ref.digest() != snapshot.state_ref.digest()):
+                        raise ManagedRecoveryError("invalid_state_reference", "state Repo has malformed retained StateRef authority")
+                    matches.append(record.state_ref)
+            if not matches or any(item != matches[0] for item in matches[1:]):
+                raise ManagedRecoveryError("missing_state_reference", "state Repo lacks one consistent retained StateRef")
+            if matches[0] != snapshot.state_ref:
+                raise ManagedRecoveryError("conflicting_state_reference", "managed replica StateRef authority conflicts")
+            for store in snapshot.stores:
+                bundle = cut.snapshot(store, snapshot.state_ref.digest())
+                if bundle is None or bundle[0].state_ref != snapshot.state_ref:
+                    raise ManagedRecoveryError("missing_state_reference", "managed replica StateRef authority is incomplete")
+                replicas.append((store, snapshot.state_ref, bundle))
+        _validate_publication_closure(state_repo, state_ref, cut)
+        for store, reference, bundle in replicas:
+            _validate_replica_locals(cut, store, reference, bundle)
+        if _matching_direct_publication_coverage(cut, required):
+            cut.check()
+            return
     _validate_reopened_managed_state(state_repo, state_ref, report, required)
+
+
+def _matching_direct_publication_coverage(cut, required):
+    """Allow sharing only the exact uninterrupted built-in direct handle view."""
+
+    cut.check()
+    return (
+        len(cut.stores) == len(required)
+        and all(connected is selected for connected, selected in zip(cut.stores, required))
+        and all(type(store) is DirStore and store._can_reuse_exact_validation()
+                for store in cut.stores)
+    )
+
+
+def _validate_publication_closure(state_repo, state_ref, cut):
+    """Join publisher substeps to explicit authority, preserving recovery errors."""
+
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    try:
+        build_exact_state_load_plan(state_repo, state_ref, _read_cut=cut)
+    except BaseException as error:
+        raise ManagedRecoveryError("missing_state_reference", "state Repo lacks the exact StateRef closure") from error
+
+
+def _validate_replica_locals(cut, store, state_ref, bundle):
+    """Promote each built-in replica's local placement within its captured view.
+
+    The root closure chooses one payload source, so it cannot by itself establish
+    the other selected replicas' payload integrity. Built-in bundles expose their
+    local placement paths; their cut opener validates each physical payload once.
+    Promotion follows root closure discovery, whose routed-absence probes can
+    discard partial memoized evidence before choosing a physical payload source.
+    Generic bundles expose no placement and retain their existing authoritative
+    reader and closure-validation fallback.
+    """
+    if bundle[2] is not None:
+        if type(store) in (DirStore, ZipStore) and store._can_reuse_exact_validation():
+            path = next(iter(bundle[2]), None)
+            if path is not None:
+                cut.open_local(store, state_ref, path)
+            return
+        for path in bundle[2]:
+            cut.open_local(store, state_ref, path)
 
 
 def _validate_reopened_managed_state(state_repo: Repo, state_ref: StateRef, report, required) -> None:
@@ -358,31 +561,31 @@ def _validate_reopened_managed_state(state_repo: Repo, state_ref: StateRef, repo
     """
 
     reopened = {}
-    try:
+    with ExitStack() as cleanup:
         for store in required:
             if type(store) is ZipStore:
-                reopened[id(store)] = ZipStore.open_existing(store.archive_path)
+                opened = ZipStore.open_existing(store.archive_path)
+                reopened[id(store)] = opened
+                cleanup.callback(opened.close)
         durable = Repo._for_state_io(tuple(
             reopened.get(id(store), store) for store in required
-        ))
-        try:
+        ), _content_owner=state_repo)
+        cleanup.callback(durable.close, flush=False)
+        with durable._read_cut() as cut:
+            replicas = []
             for snapshot in report.snapshots:
                 for store in snapshot.stores:
                     durable_store = reopened.get(id(store), store)
-                    record = durable_store.read_state_ref_record(snapshot.state_ref.digest())
-                    if record is None or record.state_ref != snapshot.state_ref:
+                    bundle = cut.snapshot(durable_store, snapshot.state_ref.digest())
+                    if bundle is None or bundle[0].state_ref != snapshot.state_ref:
                         raise ManagedRecoveryError(
                             "missing_state_reference",
                             "reopened managed replica authority is incomplete",
                         )
-                # Exact replica records prove selected publication; the root's exact
-                # closure covers every projected descendant and materializing seed.
-            validate_state_ref(durable, state_ref)
-        finally:
-            durable.close(flush=False)
-    finally:
-        for store in reversed(tuple(reopened.values())):
-            store.close()
+                    replicas.append((durable_store, snapshot.state_ref, bundle))
+            _validate_publication_closure(durable, state_ref, cut)
+            for store, reference, bundle in replicas:
+                _validate_replica_locals(cut, store, reference, bundle)
 
 
 def _raise_managed_publication_error(error: BaseException, report) -> None:
@@ -393,8 +596,10 @@ def _raise_managed_publication_error(error: BaseException, report) -> None:
         for publication in report.publications
     ) else "not_committed"
     managed = ManagedPublicationError(outcome, "managed state publication was not durable")
-    managed.__cause__ = error
-    raise RepoSaveError("managed state publication failed", report=report) from managed
+    try:
+        raise managed from error
+    except ManagedPublicationError as classified:
+        raise RepoSaveError("managed state publication failed", report=report) from classified
 
 
 def state_ref_for_digest(state_repo: Repo, digest: str) -> StateRef:
@@ -414,15 +619,37 @@ def state_ref_for_digest(state_repo: Repo, digest: str) -> StateRef:
         Reads connected Stores only and never creates or changes authority.
     """
 
+    return _state_ref_for_digest(state_repo, digest)
+
+
+def _state_ref_for_digest(state_repo, digest, *, cut=None):
+    """Resolve against the captured cut, or preserve the public fresh-reader path."""
+
+    if cut is not None:
+        cut.check()
+        if cut.repo is not state_repo:
+            raise ValueError("Control read cut belongs to another Repo.")
+        if digest in cut.resolved_state_refs:
+            return cut.resolved_state_refs[digest]
     matches = []
-    for store in state_repo.stores:
-        record = store.read_state_ref_record(digest)
+    stores = state_repo.stores if cut is None else cut.stores
+    for store in stores:
+        if cut is None:
+            record = store.read_state_ref_record(digest)
+        else:
+            bundle = cut.snapshot(store, digest)
+            record = None if bundle is None else bundle[0]
         if record is not None:
             if type(record.state_ref) is not StateRef or record.state_ref.digest() != digest:
                 raise ManagedRecoveryError("invalid_state_reference", "state Repo has malformed retained StateRef authority")
             matches.append(record.state_ref)
-    if not matches or any(item != matches[0] for item in matches[1:]):
+    if not matches or any(
+            item != matches[0] if cut is None else not _same_control_state_ref(item, matches[0])
+            for item in matches[1:]):
         raise ManagedRecoveryError("missing_state_reference", "state Repo lacks one consistent retained StateRef")
+    if cut is not None:
+        cut.check()
+        cut.resolved_state_refs[digest] = matches[0]
     return matches[0]
 
 

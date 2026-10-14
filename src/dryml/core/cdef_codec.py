@@ -3,12 +3,17 @@
 This module is deliberately dependency-light: it never resolves a class or
 symbol while inspecting or decoding graph authority. Private process tokens are
 replaced by deterministic labels derived from canonical graph paths.
+Complete public validation and private exact-matched fresh realization share the
+same node builder. Optional owned preparation uses only lossless primitive content;
+this module neither owns a cache nor stores tokens, classes or validity verdicts.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import struct
+import sys
 from typing import Any
 
 from .bound_args import BoundArguments
@@ -83,8 +88,24 @@ def decode_cdef_graph(data: Any) -> ConcreteDefinition:
     Raises:
         CDefGraphCodecError: If labels, references, payloads, roles, or the
             normalized deterministic record are malformed.
+
+    Side Effects:
+        Allocates fresh graph nodes without resolving classes. Public calls always
+        perform complete canonical validation; only private exact-matched owning
+        record preparation may use the separate fresh-realization stage.
     """
 
+    payloads = _graph_payloads(data)
+    root = _build_graph_nodes(data, payloads)
+    normalized = encode_cdef_graph(root)
+    if not _codec_data_equal(normalized, data):
+        raise CDefGraphCodecError(
+            "CDef graph labels or payload ordering are not canonical."
+        )
+    return root
+
+
+def _graph_payloads(data):
     if not isinstance(data, dict):
         raise CDefGraphCodecError("CDef graph record must be a mapping.")
     _require_exact_keys(
@@ -125,6 +146,11 @@ def decode_cdef_graph(data: Any) -> ConcreteDefinition:
         raise CDefGraphCodecError(
             f"CDef graph root label {data['root']!r} is undeclared."
         )
+    return payloads
+
+
+def _build_graph_nodes(data, payloads):
+    """Construct fresh nodes, preserving only graph-local label sharing."""
     built: dict[str, ConcreteDefinition] = {}
     active: set[str] = set()
     quotation_budget = _QuotationBudget()
@@ -166,12 +192,167 @@ def decode_cdef_graph(data: Any) -> ConcreteDefinition:
         raise CDefGraphCodecError(
             "CDef graph contains unreachable node declarations."
         )
-    normalized = encode_cdef_graph(root)
-    if not _codec_data_equal(normalized, data):
-        raise CDefGraphCodecError(
-            "CDef graph labels or payload ordering are not canonical."
-        )
     return root
+
+
+def _realize_prepared_graph(content):
+    """Realize owned exact-matched authority already validated by this codec."""
+    data = _thaw_graph_content(content)
+    return _build_graph_nodes(data, {node["label"]: node for node in data["nodes"]})
+
+
+_GRAPH_PREPARATION_POLICY = 1
+
+
+def _eligible_graph_size(data):
+    """Reject unsupported graph contexts before optional retention allocation."""
+    _check_graph_eligibility(data)
+    return _graph_content_size(data)
+
+
+def _check_graph_eligibility(data):
+    """Check the closed retention policy without computing optional owned sizes."""
+    from .symbol import ImportRef
+
+    if type(data) is not dict or type(data.get("nodes")) is not list:
+        raise TypeError("Unsupported graph representation.")
+    def value(payload):
+        if type(payload) is not dict:
+            raise TypeError("Unsupported tagged value.")
+        kind = payload.get("kind")
+        if kind == "atom":
+            atom = payload.get("value")
+            if type(atom) not in (str, bytes, int, float, complex, bool, type(None)):
+                _array_content(atom)
+        elif kind == "dict":
+            for key, item in payload["items"]:
+                from .canonical import validate_canonical_key
+                if type(key) not in (str, bytes, int, float, bool, type(None), tuple):
+                    raise TypeError("Unsupported mapping key.")
+                validate_canonical_key(key, where="retained graph key")
+                value(item)
+        elif kind in ("list", "tuple", "set"):
+            for item in payload["items"]:
+                value(item)
+        elif kind == "link":
+            value(payload["target"])
+        elif kind != "cdef":
+            raise TypeError("Context-dependent graph leaf.")
+    for node in data["nodes"]:
+        if type(node) is not dict or type(node.get("cls")) is not ImportRef:
+            raise TypeError("Only exact ImportRef graph classes are retainable.")
+        value(node["parameters"])
+
+
+def _array_content(value):
+    """Return lossless primitive array descriptors without copying its buffer."""
+    import numpy as np
+    from .freeze import FrozenNDArray
+
+    if type(value) not in (np.ndarray, FrozenNDArray):
+        raise TypeError("Unsupported graph atom.")
+    dtype = value.dtype
+    if (dtype.kind not in "buifc" or dtype.fields is not None
+            or dtype.subdtype is not None or dtype.metadata is not None
+            or type(dtype) is not type(np.dtype(dtype.str))
+            or dtype != np.dtype(dtype.str)):
+        raise TypeError("Unsupported array dtype.")
+    return (type(value) is FrozenNDArray, dtype.str, tuple(value.shape),
+            tuple(value.strides), bool(value.flags.writeable),
+            getattr(value, "_frozen_writeable", None))
+
+
+def _graph_content_size(value):
+    """Conservatively charge immutable tagged copies; never canonicalize input."""
+    from .symbol import ImportRef
+    if type(value) in (dict, list, tuple):
+        items = value.items() if type(value) is dict else enumerate(value)
+        return 256 + sum(128 + _graph_content_size(key) + _graph_content_size(item)
+                         for key, item in items)
+    if type(value) is ImportRef:
+        if type(value.module) is not str or type(value.qualname) is not str:
+            raise TypeError("Unsupported import fields.")
+        return 256 + sys.getsizeof(value.module) + sys.getsizeof(value.qualname)
+    if type(value) in (str, bytes, int, float, complex, bool, type(None)):
+        return 128 + sys.getsizeof(value)
+    descriptor = _array_content(value)
+    return 512 + _graph_content_size(descriptor) + value.nbytes
+
+
+def _freeze_graph_content(value):
+    """Own token-neutral content with type/order/bit-exact scalar information."""
+    from .symbol import ImportRef
+    if type(value) is dict:
+        return ("dict", tuple((_freeze_graph_content(key), _freeze_graph_content(item))
+                              for key, item in value.items()))
+    if type(value) in (list, tuple):
+        return ("list" if type(value) is list else "tuple",
+                tuple(_freeze_graph_content(item) for item in value))
+    if type(value) is ImportRef:
+        return ("import", value.module, value.qualname)
+    if type(value) is float:
+        return ("float", struct.pack("!d", value))
+    if type(value) is complex:
+        return ("complex", struct.pack("!dd", value.real, value.imag))
+    if type(value) in (str, bytes, int, bool, type(None)):
+        return (type(value).__name__, value)
+    return ("array", _array_content(value), value.tobytes(order="C"))
+
+
+def _graph_content_matches(value, content):
+    """Lossless fresh-content tie-break without graph equality or serialization."""
+    from .symbol import ImportRef
+    tag = content[0]
+    if tag == "dict":
+        return type(value) is dict and len(value) == len(content[1]) and all(
+            _graph_content_matches(key, stored_key) and _graph_content_matches(item, stored_item)
+            for (key, item), (stored_key, stored_item) in zip(value.items(), content[1]))
+    if tag in ("list", "tuple"):
+        return type(value) is (list if tag == "list" else tuple) and len(value) == len(content[1]) and all(
+            _graph_content_matches(item, stored) for item, stored in zip(value, content[1]))
+    if tag == "import":
+        return type(value) is ImportRef and (value.module, value.qualname) == content[1:]
+    if tag == "float":
+        return type(value) is float and struct.pack("!d", value) == content[1]
+    if tag == "complex":
+        return type(value) is complex and struct.pack("!dd", value.real, value.imag) == content[1]
+    if tag == "array":
+        try:
+            descriptor = _array_content(value)
+        except TypeError:
+            return False
+        return descriptor == content[1] and value.tobytes(order="C") == content[2]
+    return type(value).__name__ == tag and type(value) in (str, bytes, int, bool, type(None)) and value == content[1]
+
+
+def _thaw_graph_content(content):
+    from .symbol import ImportRef
+    tag = content[0]
+    if tag == "dict":
+        return {_thaw_graph_content(key): _thaw_graph_content(item) for key, item in content[1]}
+    if tag in ("list", "tuple"):
+        values = (_thaw_graph_content(item) for item in content[1])
+        return list(values) if tag == "list" else tuple(values)
+    if tag == "import":
+        return ImportRef(content[1], content[2])
+    if tag == "float":
+        return struct.unpack("!d", content[1])[0]
+    if tag == "complex":
+        return complex(*struct.unpack("!dd", content[1]))
+    if tag == "array":
+        import numpy as np
+        from .freeze import FrozenNDArray
+        frozen, dtype, shape, strides, writeable, frozen_writeable = content[1]
+        dtype = np.dtype(dtype)
+        order = "F" if len(shape) > 1 and strides[0] == dtype.itemsize else "C"
+        array = np.frombuffer(content[2], dtype=dtype).reshape(shape).copy(order=order)
+        if frozen:
+            array = array.view(FrozenNDArray)
+            if frozen_writeable is not None:
+                array._frozen_writeable = frozen_writeable
+        array.setflags(write=writeable)
+        return array
+    return content[1]
 
 
 def cdef_graph_equal(left: ConcreteDefinition, right: object) -> bool:
@@ -200,7 +381,7 @@ def copy_cdef_graph(root: ConcreteDefinition) -> ConcreteDefinition:
 
 def object_projection_cdef(
         root: ConcreteDefinition, *, traverse_refs: bool = False) -> ConcreteDefinition:
-    """Recursively weaken StateRefs in a CDef graph to ObjectRefs.
+    """Recursively replace exact references in a CDef graph with ObjectSelectors.
 
     Args:
         root: Exact CDef graph to rewrite without resolving its class authority.
@@ -208,7 +389,8 @@ def object_projection_cdef(
             Ref-held exact references are always rewritten.
 
     Returns:
-        A graph-isomorphic CDef whose supported nested StateRefs are ObjectRefs.
+        A graph-isomorphic query CDef whose supported exact references are
+        ObjectSelectors. Raw references subsequently added by a caller remain exact.
 
     Raises:
         TypeError: If ``root`` is not a CDef or ``traverse_refs`` is not bool.
@@ -219,6 +401,23 @@ def object_projection_cdef(
         Stores, or allocate ObjectIds.
     """
 
+    return _object_projection_cdef(
+        root, traverse_refs=traverse_refs, selector_references=True,
+    )
+
+
+def _object_reference_projection_cdef(
+        root: ConcreteDefinition, *, traverse_refs: bool = False) -> ConcreteDefinition:
+    """Return the authoritative ObjectRef-compatible non-state CDef projection."""
+
+    return _object_projection_cdef(
+        root, traverse_refs=traverse_refs, selector_references=False,
+    )
+
+
+def _object_projection_cdef(
+        root: ConcreteDefinition, *, traverse_refs: bool,
+        selector_references: bool) -> ConcreteDefinition:
     if not isinstance(root, ConcreteDefinition):
         raise TypeError(f"Expected ConcreteDefinition, got {type(root).__name__}.")
     if type(traverse_refs) is not bool:
@@ -232,7 +431,7 @@ def object_projection_cdef(
     memo: dict[int, Any] = {}
     active: set[int] = set()
 
-    def rewrite_reference(ref: ObjectRef) -> ObjectRef:
+    def rewrite_reference(ref: ObjectRef):
         marker = id(ref)
         if marker in memo:
             return memo[marker]
@@ -240,7 +439,21 @@ def object_projection_cdef(
             raise ValueError("Object projection does not support cyclic reference graphs.")
         active.add(marker)
         try:
-            result = ObjectRef(rewrite(ref.definition), ref.objects)
+            definition = rewrite(ref.definition)
+            if selector_references:
+                from .selector import ObjectSelector
+
+                reference = ObjectRef(
+                    _object_reference_projection_cdef(
+                        ref.definition, traverse_refs=traverse_refs,
+                    ),
+                    ref.objects,
+                )
+                result = ObjectSelector._projected(
+                    definition, ref.objects, reference,
+                )
+            else:
+                result = ObjectRef(definition, ref.objects)
             memo[marker] = result
             return result
         finally:
@@ -592,6 +805,12 @@ def _encode_value(
     labels: dict[object, str],
     quotation_budget: _QuotationBudget,
 ) -> dict[str, Any]:
+    from .selector import ObjectSelector
+
+    if isinstance(value, ObjectSelector):
+        raise CDefGraphCodecError(
+            "ObjectSelector values are query-only and cannot enter CDef authority."
+        )
     if isinstance(value, ObjectRef):
         return {"kind": "object_ref", "value": value.to_data()}
     if isinstance(value, StateRef):

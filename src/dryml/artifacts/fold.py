@@ -1,4 +1,10 @@
-"""Deferred managed streaming folds over referenced Datasets."""
+"""Managed streaming folds with versioned positive root-EOF recovery evidence.
+
+New progress uses v2. Legacy active progress remains resumable, but ambiguous
+v1 exhausted progress requires an explicit managed rerun without rewriting old
+snapshots. Completed historical Values remain readable; truncation in those
+results cannot be detected automatically.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +23,7 @@ from dryml.core.dtype import normalize_dtype
 from dryml.core.tensor_spec import Dynamic, SpecTree, TensorSpec, as_tensor_spec, is_spec_tree, iter_specs, spec_tree_is_batched
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.data import Dataset
-from dryml.managed import ManagedContext, managed_operation
+from dryml.managed import ManagedContext, ManagedRerunRequiredError, managed_operation
 from dryml.methods import Accumulator, ImplementationSelectionError, Method
 from dryml.methods.signature import satisfies, spec_node
 
@@ -27,7 +33,7 @@ from .value import Value, _VALUE_FORMAT, _VALUE_VERSION
 ResultT = TypeVar("ResultT")
 _PROGRESS_FILENAME = "fold-progress.pkl"
 _PROGRESS_FORMAT = "dryml.artifacts.fold-progress"
-_PROGRESS_VERSION = 1
+_PROGRESS_VERSION = 2
 _PROGRESS_KEYS = frozenset((
     "state", "count", "carry", "source_binding", "source_spec",
     "observed_spec", "carry_spec", "observation_devices", "program",
@@ -56,6 +62,9 @@ class Fold(Value[ResultT], Generic[ResultT]):
     preserves the prior Value payload. After payload installation, the managed
     lifecycle may still fail publication; readiness then remains true while the
     operation honestly raises instead of reporting completion.
+    Only positively observed root-output EOF authorizes exhausted progress. Legacy
+    v1 active progress can resume; v1 exhausted progress loads as ambiguous and
+    requires ``ManagedConfig(rerun=True)`` before carry or source execution.
     """
 
     def __init__(
@@ -88,6 +97,7 @@ class Fold(Value[ResultT], Generic[ResultT]):
         self.finalize = finalize
         self._processed_count = 0
         self._fold_progress = None
+        self._fold_progress_version = _PROGRESS_VERSION
 
     @property
     def processed_count(self) -> int:
@@ -129,6 +139,8 @@ class Fold(Value[ResultT], Generic[ResultT]):
             TypeError: If the retained source does not materialize as a Dataset.
             ImplementationSelectionError: If a declared Method contract cannot be
                 selected or its input/output validation fails.
+            ManagedRerunRequiredError: If legacy exhausted progress lacks trustworthy
+                EOF evidence; use ``ManagedConfig(rerun=True)`` for a fresh traversal.
             Exception: Propagates source, Method, result-validation, interruption,
                 and managed-publication failures without exposing a partial result.
 
@@ -138,7 +150,7 @@ class Fold(Value[ResultT], Generic[ResultT]):
             body returns ``None``.
 
         Side Effects:
-            Materializes a fresh source cursor unless resuming exhausted progress,
+            Materializes a fresh source cursor unless resuming trusted v2 exhausted progress,
             checkpoints host carry and position at safe points, and atomically
             installs one validated terminal payload before final publication.
         """
@@ -163,28 +175,25 @@ class Fold(Value[ResultT], Generic[ResultT]):
             source = self._load_source(managed)
             if _encode_spec_tree(_source_spec(source)) != progress["source_spec"]:
                 raise ValueError("Fold checkpoint source specification is incompatible.")
-            cursor = source.iterator()
-            try:
+            with source.iterator() as cursor:
                 cursor.skip(count)
                 self._continue(
                     cursor, source_spec, observed_spec, progress["observation_devices"],
                     carry_spec, carry, transition, finalizer, count,
                     checkpoint_every, managed,
                 )
-            finally:
-                cursor.close()
             return
 
         self._processed_count = 0
         self._fold_progress = None
+        self._fold_progress_version = _PROGRESS_VERSION
         source = self._load_source(managed)
         source_spec = _source_spec(source)
         initial_selection = (
             None if _source_requires_refinement(source_spec)
             else self._select_initializer(source_spec)
         )
-        cursor = source.iterator()
-        try:
+        with source.iterator() as cursor:
             first = _first_observation(cursor)
             _validate_nonempty_observation(first)
             observed_spec = _refine_observation_spec(source_spec, first)
@@ -215,8 +224,6 @@ class Fold(Value[ResultT], Generic[ResultT]):
                 carry_spec, carry, transition, finalizer, count,
                 checkpoint_every, managed,
             )
-        finally:
-            cursor.close()
 
     def _continue(
             self, cursor, source_spec, observed_spec, observation_devices,
@@ -229,12 +236,13 @@ class Fold(Value[ResultT], Generic[ResultT]):
             try:
                 observation = next(cursor)
             except StopIteration:
+                if not cursor.observed_eof:
+                    raise ValueError("Fold cursor stopped without observed root-output EOF.")
                 break
             except BaseException as error:
-                # DatasetCursor marks itself closed only after its source reports
-                # EOF. Preserve Fold's established finalize-then-report ordering
-                # when releasing that exhausted source is what failed.
-                if not getattr(cursor, "_closed", False):
+                # Preserve finalize-then-report only for positively observed root
+                # EOF; closure after a failed read is never exhaustion evidence.
+                if not cursor.observed_eof:
                     raise
                 exhaustion_close_error = error
                 break
@@ -282,7 +290,10 @@ class Fold(Value[ResultT], Generic[ResultT]):
             "operation_id": managed.operation_id,
             "attempt_id": managed.attempt_id,
         }
+        if state == "exhausted":
+            progress["eof"] = "root-output-eof"
         self._fold_progress = progress
+        self._fold_progress_version = _PROGRESS_VERSION
         self._processed_count = count
         managed.checkpoint()
 
@@ -299,6 +310,12 @@ class Fold(Value[ResultT], Generic[ResultT]):
                 or progress["program"] != self._program_evidence()
         ):
             raise ValueError("Fold checkpoint belongs to an incompatible source, program, or attempt.")
+        if self._fold_progress_version == 1 and progress["state"] == "exhausted":
+            raise ManagedRerunRequiredError(
+                "rerun_required",
+                "Fold legacy exhausted progress has ambiguous EOF evidence; "
+                "use ManagedConfig(rerun=True) for a fresh traversal.",
+            )
         return progress
 
     def _program_evidence(self) -> dict[str, str | None]:
@@ -322,24 +339,57 @@ class Fold(Value[ResultT], Generic[ResultT]):
         })
         self._processed_count = count
         self._fold_progress = None
+        self._fold_progress_version = _PROGRESS_VERSION
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
-        """Persist terminal count and optional active progress separately from Value."""
+        """Write count/progress separately from Value, preserving restored v1 provenance.
+
+        Args:
+            dest_dir: Existing payload directory supplied by framework state IO.
+            codec: Framework-selected state codec (progress uses trusted pickle).
+
+        Returns:
+            None. New progress is v2; unchanged restored v1 state stays v1.
+
+        Raises:
+            OSError: If writing the progress payload fails.
+
+        Side Effects:
+            Writes ``fold-progress.pkl``; never migrates existing snapshots.
+        """
 
         pickle_save({
             "format": _PROGRESS_FORMAT,
-            "version": _PROGRESS_VERSION,
+            "version": self._fold_progress_version,
             "processed_count": self.processed_count,
             "progress": getattr(self, "_fold_progress", None),
         }, os.path.join(dest_dir, _PROGRESS_FILENAME))
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
-        """Restore validated Fold progress without materializing source or Methods."""
+        """Restore validated v1/v2 progress without materializing source or native carry.
+
+        Args:
+            src_dir: Framework-validated payload directory containing progress.
+            codec: Framework-selected codec (progress uses trusted pickle).
+
+        Returns:
+            None. Valid v1 exhausted state loads as ambiguous; compute resume
+            rejects it during body admission, leaving explicit rerun possible.
+
+        Raises:
+            ValueError: If envelope, version, grammar, or carry evidence is invalid.
+            OSError: If the payload cannot be read. Pickle decoding errors propagate.
+
+        Side Effects:
+            Assigns count, progress, and provenance only after full validation.
+            Does not select/invoke Methods, allocate native carry, or load source.
+        """
 
         payload = pickle_load(Path(src_dir, _PROGRESS_FILENAME))
         count, progress = _validate_progress_payload(payload)
         self._processed_count = count
         self._fold_progress = progress
+        self._fold_progress_version = payload["version"]
 
     def _select_initializer(self, observation_spec: SpecTree):
         """Infer and select the initializer before allocating a carry.
@@ -349,24 +399,23 @@ class Fold(Value[ResultT], Generic[ResultT]):
                 dynamic dimensions but with explicit batch semantics.
 
         Returns:
-            The inferred initializer carry spec and selected initializer carrier.
+            The inferred initializer carry spec and reusable prepared invoker.
 
         Raises:
             ImplementationSelectionError: If any declared role has no compatible
                 implementation under the independent observation/carry contracts.
 
         Side Effects:
-            Performs pure Method inference and local implementation selection only;
-            it does not invoke Methods or change their preparation state.
+            Performs pure inference/selection, then compiles the finalized invoker
+            once. It does not invoke Methods or change their preparation state.
         """
 
-        initial_spec = self.initial_state.infer_output_spec(observation_spec)
+        initializer = self.initial_state.find_implementation(observation_spec)
+        initial_spec = initializer.infer_output_spec()
         if not is_spec_tree(initial_spec):
             raise ImplementationSelectionError("conflict")
-        initializer = self.initial_state.find_implementation(
-            observation_spec, output_spec=initial_spec,
-        )
-        return initial_spec, initializer
+        initializer = replace(initializer, _output_spec=spec_node(initial_spec))
+        return initial_spec, initializer.prepared_invoker()
 
     def _select_followups(self, observation_spec: SpecTree, carry_spec: SpecTree):
         """Select fixed-carry transition and finalization carriers after initialization.
@@ -378,32 +427,34 @@ class Fold(Value[ResultT], Generic[ResultT]):
                 runtime carry.
 
         Returns:
-            Selected transition and optional selected finalizer.
+            Prepared transition and optional finalizer invokers, reused for this
+            Fold invocation without per-observation compilation or reselection.
 
         Raises:
             ImplementationSelectionError: If the initialized carry cannot remain
                 fixed under the declared transition/finalizer contracts.
 
         Side Effects:
-            Performs pure inference and local selection only. It never invokes a
-            Method or retains the invocation-owned carry.
+            Performs pure inference/selection and compiles finalized invokers once.
+            It never invokes a Method or retains the invocation-owned carry.
         """
 
-        next_spec = self.accumulator.infer_output_spec(observation_spec, carry_spec)
+        transition = self.accumulator.find_implementation(
+            observation_spec, carry_spec, output_spec=carry_spec,
+        )
+        next_spec = transition.infer_output_spec()
         if not is_spec_tree(next_spec):
             raise ImplementationSelectionError("conflict")
         if not satisfies(spec_node(carry_spec), spec_node(next_spec)):
             raise ImplementationSelectionError("conflict")
-        transition = self.accumulator.find_implementation(
-            observation_spec, carry_spec, output_spec=carry_spec,
-        )
         if self.finalize is None:
-            return transition, None
-        final_spec = self.finalize.infer_output_spec(carry_spec)
+            return transition.prepared_invoker(), None
+        finalizer = self.finalize.find_implementation(carry_spec)
+        final_spec = finalizer.infer_output_spec()
         if not is_spec_tree(final_spec):
             raise ImplementationSelectionError("conflict")
-        finalizer = self.finalize.find_implementation(carry_spec, output_spec=final_spec)
-        return transition, finalizer
+        finalizer = replace(finalizer, _output_spec=spec_node(final_spec))
+        return transition.prepared_invoker(), finalizer.prepared_invoker()
 
     def _load_source(self, managed: ManagedContext) -> Dataset:
         """Materialize one retained source reference through selected Repo authority.
@@ -763,15 +814,15 @@ def _carry_backend_devices(record: object) -> tuple[tuple[str, str, str, tuple[i
 
 
 def _validate_progress_payload(payload: object) -> tuple[int, dict[str, Any] | None]:
-    """Validate one complete v1 Fold progress envelope before assignment."""
+    """Validate a closed v1/v2 envelope without certifying legacy exhaustion."""
 
     fields = {"format", "version", "processed_count", "progress"}
     if not isinstance(payload, dict) or set(payload) != fields:
-        raise ValueError("Fold progress payload must be a complete v1 envelope.")
+        raise ValueError("Fold progress payload must be a complete versioned envelope.")
     if (
             payload["format"] != _PROGRESS_FORMAT
             or type(payload["version"]) is not int
-            or payload["version"] != _PROGRESS_VERSION
+            or payload["version"] not in {1, _PROGRESS_VERSION}
     ):
         raise ValueError("Fold progress payload format or version is unsupported.")
     count = payload["processed_count"]
@@ -780,10 +831,19 @@ def _validate_progress_payload(payload: object) -> tuple[int, dict[str, Any] | N
     progress = payload["progress"]
     if progress is None:
         return count, None
-    if not isinstance(progress, dict) or set(progress) != _PROGRESS_KEYS:
+    if not isinstance(progress, dict):
         raise ValueError("Fold active progress is malformed.")
-    if progress["state"] not in {"active", "exhausted"}:
+    state = progress.get("state")
+    if type(state) is not str or state not in {"active", "exhausted"}:
         raise ValueError("Fold active progress state is unsupported.")
+    expected_keys = _PROGRESS_KEYS
+    if payload["version"] == 2 and state == "exhausted":
+        expected_keys = expected_keys | {"eof"}
+    if set(progress) != expected_keys:
+        raise ValueError("Fold active progress is malformed.")
+    if payload["version"] == 2 and state == "exhausted" and (
+            type(progress["eof"]) is not str or progress["eof"] != "root-output-eof"):
+        raise ValueError("Fold exhausted progress requires root-output EOF evidence.")
     if type(progress["count"]) is not int or progress["count"] <= 0 or progress["count"] != count:
         raise ValueError("Fold active progress count is inconsistent.")
     if not isinstance(progress["source_binding"], dict) or set(progress["source_binding"]) != {"kind", "digest"}:

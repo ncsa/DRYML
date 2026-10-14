@@ -92,6 +92,65 @@ def _sqlite_index(tmp_path, *, store=None):
     )
 
 
+def test_explicit_cycle_repairs_graph_distinct_main_without_dirty_token(tmp_path):
+    """An internally complete old index is not graph-exact Store agreement."""
+    from dryml.core.query.model import QueryStats
+
+    shared, separate = _graph_variants()
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.write_definition_record(DefinitionRecord(shared))
+    store.write_definition_record(DefinitionRecord(separate), stored_root=False)
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    generation = index.status().generation
+    store.write_main_ref(MainRefRecord(DefinitionRecord(separate).digest))
+    assert index.status().state == "ready"
+    assert index.v3_projection_coverage().projection_complete
+
+    report = index.reconcile()
+    assert report.changed and report.action == "rebuild"
+    assert report.generation_after > generation
+    assert any("roots differ" in issue.message for issue in report.issues)
+    stats = QueryStats()
+    index.refresh(True, stats=stats)
+    assert stats.store_scan_count == 1 and stats.refresh_action == "sqlite-validate"
+    with index.read_view() as view:
+        roots = next(view.iter_stored_identity_cdef_batches(batch_size=3)).cdefs
+    assert len(roots) == 2
+    assert any(root.graph_equal(separate) for root in roots)
+
+
+def test_explicit_cycle_compares_encoded_collision_ties(tmp_path, monkeypatch):
+    """A graph digest collision cannot hide an omitted graph-distinct root."""
+    from dryml.core import cdef_codec
+
+    monkeypatch.setattr(cdef_codec, "cdef_graph_hash", lambda *a, **kw: "c" * 64)
+    test_explicit_cycle_repairs_graph_distinct_main_without_dirty_token(tmp_path)
+
+
+def test_explicit_cycle_rejects_malformed_ready_store_authority(tmp_path, monkeypatch):
+    """Malformed main authority raises without treating it as sidecar damage."""
+    from dryml.core.query.model import QueryStats
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    record = store.write_definition_record(DefinitionRecord(Definition(ProjectionLeaf, "root").concretize()))
+    store.write_main_ref(MainRefRecord(record.digest))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    generation = index.status().generation
+    Path(store._ref_path("main.record")).write_bytes(b"malformed")
+    monkeypatch.setattr(index, "_activate_replacement", lambda *a, **kw: pytest.fail("malformed authority replaced index"))
+    stats = QueryStats()
+    with pytest.raises(Exception, match="main|Main|record|JSON"):
+        index.refresh(True, stats=stats)
+    assert stats.store_scan_count == 1
+    assert index.status().generation == generation
+    assert not index._connections._leases
+    report = index.reconcile()
+    assert not report.changed and report.issues
+    assert report.diagnostics["store_scan_count"] == 1
+
+
 @pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
 def test_memory_and_sqlite_retain_graph_distinct_projection_roots(tmp_path):
     """Projection rows retain graph topology even when legacy CDefs compare equal."""
@@ -133,7 +192,7 @@ def test_missing_v3_projection_row_disables_indexed_only_claim(tmp_path, family)
     )
     assert index.v3_projection_coverage().projection_complete
 
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         table = "v3_identity_projection" if family == "identity" else "v3_relationship_projection"
         con.execute(
             f"DELETE FROM {table} WHERE root_graph_hash = "
@@ -162,7 +221,7 @@ def test_missing_stored_root_page_falls_back_or_rejects_indexed_only(tmp_path):
         store.write_definition_record(DefinitionRecord(value))
     store.rebuild_query_index()
     index = store.open_query_index()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute(
             "DELETE FROM stored_roots WHERE root_graph_hash = ?",
             (values[0].graph_hash(),),
@@ -184,12 +243,12 @@ def test_v3_schema_mismatch_rebuilds_only_the_sidecar(tmp_path):
     index = store.open_query_index()
     index.rebuild()
     before = store.read_definition_record(record.digest).to_bytes()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("PRAGMA user_version = 7")
 
     index.refresh("auto")
 
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         assert con.execute("PRAGMA user_version").fetchone()[0] == SQLITE_QUERY_INDEX_SCHEMA_VERSION
     assert store.read_definition_record(record.digest).to_bytes() == before
     assert index.v3_projection_coverage().projection_complete
@@ -447,6 +506,8 @@ def test_metadata_rebuild_keeps_overlapping_dirty_token_without_payload_access(
     assert repo.query().where(
         field("object", "project").eq("after")
     ).object_refs().one() == state.object
+    assert index.status().state == "dirty"
+    assert repo.query().cdefs().stored().take(1).one() == state.definition
     assert index.status().state == "ready"
 
 
@@ -685,3 +746,369 @@ def test_interrupted_staged_rebuild_preserves_ready_sidecar_and_authority(
     assert store.read_definition_record(second.digest) == second
     assert store.query_index_status().state == "dirty"
     assert not list(index.path.parent.glob(f"{index.path.name}.rebuild-*.tmp*"))
+
+
+def test_u6_indexed_take_admissions_replicas_and_ordering_lookahead(tmp_path, monkeypatch):
+    """Ordering-only lookahead decodes but does not verify; replicas charge once."""
+
+    from dataclasses import replace
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    stores = tuple(DirStore(tmp_path / name, query_index="sqlite") for name in ("a", "b"))
+    values = sorted((Definition(ProjectionLeaf, str(i)).concretize() for i in range(3)),
+                    key=lambda value: value.graph_hash())
+    for store in stores:
+        for value in values:
+            store.write_definition_record(DefinitionRecord(value))
+        store.rebuild_query_index()
+    reads = []
+    original = SourceCapture.read_exact_stored_cdef
+
+    def direct(self, source, target):
+        reads.append(target.graph_hash())
+        return original(self, source, target)
+
+    monkeypatch.setattr(SourceCapture, "read_exact_stored_cdef", direct)
+    query = Repo(stores).query().cdefs().stored().refresh(False).require_indexed()
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        query.max_verify(0).take(1)
+    assert reads == []
+    bounded = replace(query.max_verify(1), take_limit=1)
+    result, capture = bounded._run_terminal(bounded._collect_with_capture, return_capture=True)
+    assert tuple(result) == (values[0],)
+    assert capture.verified_count == 1 and len(reads) == 2
+    assert capture.cdef_blobs_decoded == 4 and capture.candidate_rows_read == 4
+    assert capture.store_scan_count == 0
+    explanation = bounded.explain(analyze=True)
+    assert explanation.verified_count == 1 and explanation.result_count == 1
+    assert explanation.cdef_blobs_decoded == 4 and explanation.store_scan_count == 0
+
+
+def test_u7_main_outside_ready_index_requires_complete_fallback(tmp_path):
+    """Main-only authority predating neither dirty tokens nor pages cannot vanish."""
+
+    from dryml.core.query.model import QueryWouldScanError
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    values = sorted((Definition(ProjectionLeaf, str(i)).concretize() for i in range(4)),
+                    key=lambda value: value.graph_hash())
+    main, root = values[0], values[-1]
+    store.write_definition_record(DefinitionRecord(main), stored_root=False)
+    store.write_definition_record(DefinitionRecord(root))
+    store.rebuild_query_index()
+    store.write_main_ref(MainRefRecord(DefinitionRecord(main).digest))
+    assert store.query_index_status().state == "ready"
+    query = store.query().cdefs().stored().refresh(False)
+    assert tuple(query.collect()) == (main, root)
+    assert tuple(query.take(1)) == (main,)
+    with pytest.raises(QueryIndexUnavailable, match="main|Main"):
+        query.require_indexed().take(1)
+    with pytest.raises(QueryWouldScanError):
+        query.scan_policy("forbid").take(1)
+
+
+def test_u6_paging_fallback_readmits_domain_and_retains_expenditure(tmp_path):
+    """An alias candidate abandons paging proof without refunding its admission."""
+
+    from dataclasses import replace
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    reference = ObjectRef(Definition(ProjectionLeaf, "alias").concretize(), {})
+    store.write_object_alias(ObjectAliasRecord("chosen", reference))
+    store.rebuild_query_index()
+    query = replace(store.query().cdefs().stored().refresh(False), take_limit=1)
+    result, capture = query.max_verify(3)._run_terminal(query._collect_with_capture, return_capture=True)
+    assert result.one() == reference.definition
+    assert capture.verified_count == 3  # paged CDef, then inventory CDef + ObjectRef
+    assert capture.store_scan_count == 1
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        query.max_verify(2).collect()
+
+
+def test_u6_collision_bucket_verified_lookahead_is_charged(tmp_path, monkeypatch):
+    """Distinct graph identities in one digest bucket all need verification."""
+
+    from dataclasses import replace
+    from dryml.core import cdef_codec
+    from dryml.core.query.identity import IdentitySet
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    monkeypatch.setattr(cdef_codec, "cdef_graph_hash", lambda *a, **kw: "a" * 64)
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    shared, separate = _graph_variants()
+    for value in (shared, separate):
+        store.write_definition_record(DefinitionRecord(value))
+    store.rebuild_query_index()
+    monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("ready collision bucket enumerated authority"))
+    query = replace(store.query().cdefs().stored().refresh(False).require_indexed(), take_limit=1)
+    result, capture = query.max_verify(2)._run_terminal(query._collect_with_capture, return_capture=True)
+    assert result.count() == 1
+    assert capture.verified_count == 2
+    expected = tuple(IdentitySet((shared, separate)))[0]
+    assert result.one().graph_equal(expected) and len(result.sources(expected)) == 1
+    assert capture.store_scan_count == 0
+    assert capture.candidate_rows_read == capture.cdef_blobs_decoded == 2
+    reads = []
+    original = SourceCapture.read_exact_stored_cdef
+
+    def direct(self, source, target):
+        reads.append(1)
+        return original(self, source, target)
+
+    monkeypatch.setattr(SourceCapture, "read_exact_stored_cdef", direct)
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        query.max_verify(1).collect()
+    assert len(reads) == 1
+
+
+@pytest.mark.parametrize("policy", ("allow", "forbid", "indexed"))
+def test_u6_disabled_refresh_retains_one_view_through_pages(tmp_path, monkeypatch, policy):
+    """Pages and verification share one cut; later dirty state cannot repair it."""
+
+    from dryml.core import cdef_codec
+    from dryml.core.query.sqlite.index import SQLiteQueryIndexReadView
+
+    monkeypatch.setattr(cdef_codec, "cdef_graph_hash", lambda *a, **kw: "b" * 64)
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    for name in ("a", "b", "c"):
+        store.write_definition_record(DefinitionRecord(Definition(ProjectionLeaf, name).concretize()))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    original_view = index._retained_read_view
+    original_rebuild = index.rebuild
+    rebuilds = []
+    views = []
+    pages = []
+    original_page = SQLiteQueryIndexReadView.iter_stored_identity_cdef_batches
+    original_direct = SourceCapture.read_exact_stored_cdef
+
+    @contextmanager
+    def dirty_after_cut():
+        with original_view() as view:
+            views.append(view)
+            yield view
+        store.mark_query_index_dirty()
+
+    def page(view, **kwargs):
+        assert view is views[0] and view._active and view._con.in_transaction
+        pages.append(view)
+        yield from original_page(view, **kwargs)
+
+    def direct(capture, source, target):
+        assert views[0]._active and views[0]._con.in_transaction
+        return original_direct(capture, source, target)
+
+    def rebuild(**kwargs):
+        rebuilds.append(1)
+        return original_rebuild(**kwargs)
+
+    monkeypatch.setattr(index, "read_view", lambda **kw: pytest.fail("ordinary repair-capable view entered"))
+    monkeypatch.setattr(index, "_retained_read_view", dirty_after_cut)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "iter_stored_identity_cdef_batches", page)
+    monkeypatch.setattr(SourceCapture, "read_exact_stored_cdef", direct)
+    monkeypatch.setattr(index, "rebuild", rebuild)
+    query = store.query().cdefs().stored().refresh(False)
+    query = query.require_indexed() if policy == "indexed" else query.scan_policy(policy)
+    assert query.take(1).count() == 1
+    assert len(views) == 1 and len(pages) == 3
+    assert not views[0]._active and not views[0]._con.in_transaction
+    assert rebuilds == []
+    assert store.query_index_is_dirty()
+
+
+def test_u7_empty_index_inspects_replaced_main_and_missing_target(tmp_path, monkeypatch):
+    """Empty frontiers still inspect mutable main and expose broken authority."""
+
+    from dryml.core.query.source import InventoryCapabilityError
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    first, second = (Definition(ProjectionLeaf, name).concretize() for name in ("first", "second"))
+    for value in (first, second):
+        store.write_definition_record(DefinitionRecord(value), stored_root=False)
+    store.rebuild_query_index()
+    query = store.query().cdefs().stored().refresh(False)
+    assert query.require_indexed().take(1).count() == 0
+    for value in (first, second):
+        store.write_main_ref(MainRefRecord(DefinitionRecord(value).digest))
+        assert tuple(query.take(1)) == tuple(query.collect()) == (value,)
+        with pytest.raises(QueryIndexUnavailable, match="main-reference"):
+            query.require_indexed().take(1)
+    store.write_main_ref(MainRefRecord("0" * 64))
+    monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("missing main was hidden by inventory"))
+    with pytest.raises(InventoryCapabilityError, match="missing definition"):
+        query.require_indexed().take(1)
+    assert not store.open_query_index()._connections._leases
+
+
+@pytest.mark.parametrize("damage", ("main", "target"))
+def test_u7_malformed_main_is_visible_before_empty_page(tmp_path, monkeypatch, damage):
+    """Corrupt current main or its target is an error, never an empty answer."""
+
+    from dryml.core.store.store import StoreAuthorityError
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    record = DefinitionRecord(Definition(ProjectionLeaf, "main").concretize())
+    store.write_definition_record(record, stored_root=False)
+    store.rebuild_query_index()
+    store.write_main_ref(MainRefRecord(record.digest))
+    path = store._ref_path("main.record") if damage == "main" else store._definition_path(record.digest)
+    Path(path).write_bytes(b"incomplete record")
+    monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("malformed main was hidden"))
+    with pytest.raises(StoreAuthorityError):
+        store.query().cdefs().stored().refresh(False).require_indexed().take(1)
+    assert not store.open_query_index()._connections._leases
+
+
+@pytest.mark.parametrize("state", ("missing", "dirty", "corrupt", "incompatible"))
+def test_u7_sidecar_policy_and_derived_only_recovery(tmp_path, monkeypatch, state):
+    """Disabled/forbidden recovery never writes; allowed recovery preserves records."""
+
+    from dryml.core.query.model import QueryWouldScanError
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    root = Definition(ProjectionLeaf, "authority").concretize()
+    record = store.write_definition_record(DefinitionRecord(root))
+    store.rebuild_query_index()
+    before = store.read_definition_record(record.digest).to_bytes()
+    index = store.open_query_index()
+    index.close()
+    if state == "missing":
+        index.path.unlink()
+    elif state == "dirty":
+        store.mark_query_index_dirty()
+    elif state == "corrupt":
+        index.path.write_bytes(b"not sqlite")
+    else:
+        with closing(sqlite3.connect(index.path)) as con, con:
+            con.execute("PRAGMA user_version = 7")
+    original_rebuild = index.rebuild
+    rebuilds = []
+
+    def rebuild(**kwargs):
+        rebuilds.append(1)
+        return original_rebuild(**kwargs)
+
+    monkeypatch.setattr(index, "rebuild", rebuild)
+    query = store.query().cdefs().stored()
+    assert tuple(query.refresh(False).take(1)) == (root,)
+    with pytest.raises(QueryIndexUnavailable):
+        query.refresh(False).require_indexed().take(1)
+    with pytest.raises(QueryWouldScanError):
+        query.refresh(True).scan_policy("forbid").take(1)
+    assert rebuilds == []
+    with pytest.warns(RuntimeWarning) as warnings:
+        assert tuple(query.scan_policy("warn").take(1)) == (root,)
+    assert len(warnings) == 1 and rebuilds == [1]
+    assert index.status().state == "ready"
+    assert store.read_definition_record(record.digest).to_bytes() == before
+
+
+def test_u7_entry_readiness_failure_releases_cut_before_inventory(tmp_path, monkeypatch):
+    """A changed readiness proof cannot repair under a fence or refund admissions."""
+
+    from dataclasses import replace
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    root = Definition(ProjectionLeaf, "root").concretize()
+    store.write_definition_record(DefinitionRecord(root))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    original_fence = store.authority_read_fence
+    original_inventory = store.iter_definition_records
+    held = 0
+    first = True
+
+    @contextmanager
+    def change_before_entry():
+        nonlocal held, first
+        if first:
+            first = False
+            store.mark_query_index_dirty()
+        with original_fence():
+            held += 1
+            try:
+                yield
+            finally:
+                held -= 1
+
+    def inventory():
+        assert held == 1  # only the new inventory fence, no abandoned cut
+        assert not index._connections._leases
+        return original_inventory()
+
+    monkeypatch.setattr(store, "authority_read_fence", change_before_entry)
+    monkeypatch.setattr(store, "iter_definition_records", inventory)
+    monkeypatch.setattr(index, "rebuild", lambda **kw: pytest.fail("disabled refresh rebuilt"))
+    query = replace(store.query().cdefs().stored().refresh(False), take_limit=1)
+    result, capture = query._run_terminal(query._collect_with_capture, return_capture=True)
+    assert tuple(result) == (root,)
+    assert capture.store_scan_count == 1 and capture.verified_count == 1
+    assert capture.candidate_rows_read == 0 and held == 0
+
+
+def test_u7_failed_direct_proof_discards_selective_cut_without_refund(tmp_path, monkeypatch):
+    """Post-verification failure releases readers and readmits fallback's domain."""
+
+    from dataclasses import replace
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    values = sorted((Definition(ProjectionLeaf, str(i)).concretize() for i in range(2)),
+                    key=lambda value: value.graph_hash())
+    for value in values:
+        store.write_definition_record(DefinitionRecord(value))
+    store.rebuild_query_index()
+    index = store.open_query_index()
+    original = SourceCapture.read_exact_stored_cdef
+    original_inventory = store.iter_definition_records
+
+    def fail_after_proof(capture, source, target):
+        assert original(capture, source, target) == target
+        assert index._connections._leases
+        raise QueryIndexDirty("attempt invalidated after direct proof")
+
+    def inventory():
+        assert not index._connections._leases
+        return original_inventory()
+
+    monkeypatch.setattr(SourceCapture, "read_exact_stored_cdef", fail_after_proof)
+    monkeypatch.setattr(store, "iter_definition_records", inventory)
+    query = replace(store.query().cdefs().stored().refresh(False), take_limit=1)
+    result, capture = query.max_verify(3)._run_terminal(query._collect_with_capture, return_capture=True)
+    assert tuple(result) == (values[0],)
+    assert capture.verified_count == 3 and capture.store_scan_count == 1
+    assert capture.candidate_rows_read == capture.cdef_blobs_decoded == 2
+    assert capture._exact_stored_cdefs == {} and not index._connections._leases
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        query.max_verify(2).collect()
+
+
+@pytest.mark.exhaustive_only
+@pytest.mark.parametrize("refresh", (False, "auto", True))
+@pytest.mark.parametrize("policy", ("allow", "forbid", "indexed"))
+@pytest.mark.parametrize("empty", (False, True))
+def test_u7_main_completeness_policy_matrix(tmp_path, refresh, policy, empty):
+    """The larger refresh/coverage policy product remains explicitly available."""
+
+    from dryml.core.query.model import QueryWouldScanError
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    main, root = sorted((Definition(ProjectionLeaf, name).concretize() for name in ("a", "b")),
+                        key=lambda value: value.graph_hash())
+    record = store.write_definition_record(DefinitionRecord(main), stored_root=False)
+    if not empty:
+        store.write_definition_record(DefinitionRecord(root))
+    store.rebuild_query_index()
+    store.write_main_ref(MainRefRecord(record.digest))
+    before = store.read_definition_record(record.digest).to_bytes()
+    query = store.query().cdefs().stored().refresh(refresh)
+    if policy == "allow":
+        assert tuple(query.take(1)) == (main,)
+    elif policy == "forbid":
+        with pytest.raises(QueryWouldScanError):
+            query.scan_policy(policy).take(1)
+    else:
+        with pytest.raises(QueryIndexUnavailable):
+            query.require_indexed().take(1)
+    assert store.read_definition_record(record.digest).to_bytes() == before

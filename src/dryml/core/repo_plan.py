@@ -778,20 +778,22 @@ def _record_runtime_values(canonical: Any, runtime: Any, path: GraphPath, out: d
 
 def _rebase_imported_runtime_projections(
         canonical: Any, runtime: Any, path: GraphPath, out: dict[GraphPath, Any]) -> None:
-    """Expose materialized exact-reference bindings below their outer occurrence.
+    """Expose nested materialized bindings below their outer occurrence.
 
-    Bare, materializing ``Mat(ObjectRef)``, and ``StateRef`` values construct a
-    live subtree. Its private runtime projection remains authoritative, but its
-    paths must also be visible from the enclosing root for exact graph saves.
-    ``Ref`` links deliberately retain their immutable reference value and never
-    contribute owned runtime bindings.
+    Nested CDefs and materializing exact references construct a live subtree. Its
+    private runtime projection remains authoritative, but its paths must also be
+    visible from the enclosing root for exact graph saves. ``Ref`` links
+    deliberately retain their immutable reference value and never contribute
+    owned runtime bindings.
     """
 
     from .cdef_graph import EdgeKind
     from .links import DefLink
     from .reference_values import ObjectRef, StateRef
 
-    if isinstance(canonical, (ObjectRef, StateRef)):
+    if isinstance(canonical, (ObjectRef, StateRef)) or (
+            isinstance(canonical, ConcreteDefinition)
+            and path.segments and isinstance(runtime, Object)):
         if not isinstance(runtime, Object):
             raise ValueError(f"Materialized exact reference at {path!s} did not produce an Object.")
         for inner_path, value in runtime._runtime_projection.items():

@@ -8,6 +8,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Callable
 
+from dryml.core.tensor_spec import SpecTree, TensorSpec
+
 from .errors import ImplementationDeclarationError, ImplementationSelectionError, MethodError
 from .signature import MethodCallNode, runtime_node_for_constraint, satisfies
 from .traits import Traits
@@ -172,6 +174,7 @@ class SelectedDescriptorAdapter:
     direct: bool
     invoker: Callable[..., object] | None
     plan: object
+    conversion_edge: object | None = None
 
     @classmethod
     def create(
@@ -182,6 +185,7 @@ class SelectedDescriptorAdapter:
         receiver_type: type,
         direct: bool,
         invoker: Callable[..., object] | None,
+        conversion_edge: object | None = None,
     ) -> "SelectedDescriptorAdapter":
         """Bind and compile a selected target with a lazy core-signature import.
 
@@ -192,6 +196,8 @@ class SelectedDescriptorAdapter:
             receiver_type: Runtime Method type for descriptor binding.
             direct: Whether target invocation establishes a cooperative boundary.
             invoker: Optional Method-local selected callable.
+            conversion_edge: Optional retained input handoff, executed after
+                argument delivery and before target invocation on each fresh call.
 
         Returns:
             A reusable adapter retaining the selected target's compiled signature.
@@ -219,7 +225,8 @@ class SelectedDescriptorAdapter:
         plan = compile_signature(target)
         # Ordinary BoundaryPlan delivery never calls SignaturePlan.target. Replacing
         # the bound target prevents cached plans from retaining their Method key.
-        return cls(name, descriptor, receiver_ref, receiver_type, direct, invoker, replace(plan, target=lambda: None))
+        return cls(name, descriptor, receiver_ref, receiver_type, direct, invoker,
+                   replace(plan, target=lambda: None), conversion_edge)
 
     def prepare(
         self,
@@ -259,13 +266,18 @@ class SelectedDescriptorAdapter:
             SignatureError: If return normalization or ambient delivery fails.
 
         Side Effects:
-            Invokes the selected target once. A materializing return may realize
-            through the caller-owned ambient Repo.
+            Executes any retained input handoff and invokes the selected target
+            once. A materializing return may realize through the caller-owned
+            ambient Repo.
         """
 
         receiver = self.receiver_ref()
         if receiver is None:
             raise MethodError("The selected Method receiver is no longer live.")
+        if self.conversion_edge is not None:
+            from .conversion import convert
+
+            args = (convert(self.conversion_edge, args[0]), *args[1:])
         if self.invoker is not None:
             result = self.invoker(*args, **kwargs)
         elif self.descriptor is not None:
@@ -301,6 +313,9 @@ class PreparedMethodInvoker:
         adapter: Reusable weak-receiver descriptor adapter.
         input_specs: Immutable positional input constraints.
         output_spec: Optional immutable raw-result constraint.
+        conversion_edge: Optional input handoff retained for inspection/runtime.
+        children: Finalized occurrence-local child invokers also exposed in the
+            owning graph; shared declarations still have separate occurrences.
 
     The invoker is process-local and deliberately not a persistence carrier. It
     validates each call against declared dynamic/fixed facts before running the
@@ -314,6 +329,7 @@ class PreparedMethodInvoker:
     input_specs: tuple[MethodCallNode, ...]
     output_spec: MethodCallNode | None
     conversion_edge: object | None = None
+    children: tuple["PreparedMethodInvoker", ...] = ()
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         """Validate and invoke retained selection using logical call arguments."""
@@ -359,6 +375,13 @@ class MethodImplementation:
     before invocation and on every fresh return. A retained output constraint is
     checked against the raw target result before a caller-provided raw-result
     callback can publish it.
+
+    Selection and specialization retain child occurrence facts without compiling
+    signatures or changing child Method state. ``prepared_invoker()`` compiles
+    this finalized occurrence and each child once. Convenience calls prepare a
+    fresh invocation; consumers executing repeatedly retain the returned invoker.
+    ``infer_output_spec()`` derives truthful selected outputs from converted
+    consumer inputs, independently of producer and raw-result constraints.
     """
 
     name: str
@@ -371,13 +394,60 @@ class MethodImplementation:
     _output_spec: MethodCallNode | None = field(default=None, repr=False, compare=False)
     _direct: bool = field(default=False, repr=False, compare=False)
     _invoker: Callable[..., object] | None = field(default=None, repr=False, compare=False)
+    _children: tuple["MethodImplementation", ...] = field(default=(), repr=False, compare=False)
+    _invoker_factory: Callable[[tuple[PreparedMethodInvoker, ...]], Callable[..., object]] | None = field(
+        default=None, repr=False, compare=False,
+    )
+    _output_inference: Callable[[tuple["MethodImplementation", ...]], SpecTree] | None = field(
+        default=None, repr=False, compare=False,
+    )
     conversion_edge: object | None = field(default=None, compare=False)
+
+    @property
+    def consumer_input_specs(self) -> tuple[MethodCallNode, ...]:
+        """Return actual target-input facts, separate from producer validation.
+
+        A retained unary crossing replaces only the first input with its consumer
+        tree. This metadata read imports no adapter and executes no target.
+        """
+        from .signature import spec_node
+
+        if self.conversion_edge is None:
+            return self._input_specs
+        return (spec_node(self.conversion_edge.consumer_spec), *self._input_specs[1:])
+
+    def infer_output_spec(self) -> SpecTree:
+        """Infer selected output facts from the actual converted consumer inputs.
+
+        Returns:
+            The owning Method's pure output SpecTree, or the composite's tree of
+            selected child outputs. Raw-result constraints do not affect inference.
+
+        Raises:
+            NotImplementedError: If the owner has no pure inference contract.
+            TypeError, ValueError: If consumer inputs cannot satisfy inference.
+            ImplementationDeclarationError: If this carrier lacks a Method binding.
+
+        Side Effects:
+            None: no selection, compilation, source acquisition, optional adapter
+            activation, body execution, or shared-state publication occurs.
+        """
+        from .signature import spec_from_node
+
+        if self._output_inference is not None:
+            return self._output_inference(self._children)
+        if self._receiver is None:
+            raise ImplementationDeclarationError("Selected output inference requires a Method binding.")
+        return self._receiver.infer_output_spec(
+            *(spec_from_node(node) for node in self.consumer_input_specs),
+        )
 
     def selected_adapter(self) -> SelectedDescriptorAdapter:
         """Create a reusable signature adapter for this already-selected carrier.
 
         Returns:
-            An adapter with one bound target-signature plan and a weak receiver.
+            An adapter with one finalized target-signature plan, prepared children,
+            and a weak receiver. This compiles once per occurrence for this build.
 
         Raises:
             ImplementationDeclarationError: If this carrier lacks its Method
@@ -385,37 +455,51 @@ class MethodImplementation:
             SignatureError: If selected target signature activation fails.
         """
 
+        return self.prepared_invoker().adapter
+
+    def _selected_adapter(self, invoker) -> SelectedDescriptorAdapter:
+        """Compile only the finalized target, without retaining its carrier."""
+
         if self._descriptor is None or self._receiver is None or self._receiver_type is None:
             raise ImplementationDeclarationError(
                 f"Method implementation {self.name!r} is not bound to a Method instance."
             )
+        # Composite edge metadata may describe a child's handoff. Its factory
+        # owns conversion placement; applying it here could cross twice.
         return SelectedDescriptorAdapter.create(
             self.name,
             self._descriptor,
             self._receiver,
             self._receiver_type,
             self._direct,
-            self._invoker,
+            invoker,
+            self.conversion_edge if self._invoker_factory is None else None,
         )
 
     def prepared_invoker(self) -> PreparedMethodInvoker:
-        """Return one reusable local invoker retaining this selection's facts.
+        """Compile a complete occurrence tree into reusable local invokers.
 
         Returns:
-            An immutable process-local invoker with a weak Method receiver.
+            An immutable process-local invoker with weak Method receivers and
+            finalized child invokers. No selected carrier or caller context is
+            retained. Repeated builds are independent; there is no global cache.
 
         Raises:
             ImplementationDeclarationError: If the selected declaration cannot
                 be bound. No target body runs during invoker construction.
+            SignatureError: If a finalized occurrence's annotations are invalid.
         """
 
+        children = tuple(child.prepared_invoker() for child in self._children)
+        invoker = self._invoker if self._invoker_factory is None else self._invoker_factory(children)
         return PreparedMethodInvoker(
             self.name,
             self.traits,
-            self.selected_adapter(),
+            self._selected_adapter(invoker),
             self._input_specs,
             self._output_spec,
             self.conversion_edge,
+            children,
         )
 
     def __call__(self, *args: object, **kwargs: object) -> object:
@@ -467,6 +551,8 @@ def _validate_input_specs(input_specs: tuple[MethodCallNode, ...], args: tuple[o
 
     if len(args) < len(input_specs):
         raise ImplementationSelectionError("conflict")
+    for constraint, value in zip(input_specs, args):
+        _activate_constraint(constraint, value)
     try:
         valid = all(
             satisfies(constraint, runtime_node_for_constraint(args[index], constraint))
@@ -481,6 +567,7 @@ def _validate_input_specs(input_specs: tuple[MethodCallNode, ...], args: tuple[o
 def _validate_raw_result(output_spec: MethodCallNode, result: object) -> None:
     """Reject a result that fails a retained output specification."""
 
+    _activate_constraint(output_spec, result)
     try:
         valid = satisfies(
             output_spec,
@@ -490,6 +577,20 @@ def _validate_raw_result(output_spec: MethodCallNode, result: object) -> None:
         raise ImplementationSelectionError("conflict") from error
     if not valid:
         raise ImplementationSelectionError("conflict")
+
+
+def _activate_constraint(constraint: MethodCallNode, value: object) -> None:
+    """Activate declared adapters only at admitted runtime validation boundaries."""
+    if constraint.kind == "tensor":
+        if constraint.value.backend is not None and not isinstance(value, TensorSpec):
+            constraint.value.backend.module
+    elif constraint.kind == "mapping" and isinstance(value, dict):
+        for key, child in constraint.value:
+            if key in value:
+                _activate_constraint(child, value[key])
+    elif constraint.kind in {"tuple", "list"} and isinstance(value, (tuple, list)):
+        for child, runtime in zip(constraint.value, value):
+            _activate_constraint(child, runtime)
 
 
 __all__ = ["MethodImplementation"]

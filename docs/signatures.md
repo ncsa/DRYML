@@ -84,9 +84,10 @@ keys, and nested Ref/Mat forms are rejected.
 terminal `Ref` field containing an exact `ObjectRef` or `StateRef`. It may pass
 through preceding materializing graph edges but never crosses a Ref boundary,
 loads state, or accesses Python attributes. `StateRef.at(path)` remains limited to
-materializing subtrees and rejects Ref-only paths. Symbolic artifact bindings use this
-accessor for paths such as `Par("this.test_data")`, preserving the supplied exact
-StateRef instead of selecting a live or floating reference.
+materializing subtrees and rejects Ref-only paths. Symbolic artifact bindings use
+the accessor matching the stored edge: for example, materializing
+`Experiment.test_data` is projected with `StateRef.at(path)`, while terminal
+Ref-held fields retain their exact stored reference value.
 
 A fresh constructor with an explicit Ref/Mat role validates finalized structural
 links against that role before canonicalization can erase their edge authority.
@@ -190,6 +191,16 @@ annotated authority before realization, retain unannotated argument identity tag
 and normalize returns after the terminal-interruption guard and before final
 publication. An unannotated managed structural return now materializes; annotate a
 top-level structural result with `Ref[...]` when it must remain data.
+
+Method selection and composite specialization do not compile signatures.
+Executable preparation compiles each finalized occurrence once, and graph
+inspection and retained Map/Fold/group execution share that invoker. Reuse keeps
+only the signature plan: each call still normalizes fresh Ref/Mat arguments and
+returns, borrows the current caller's controls, and enforces thread, task, and
+context lifetime boundaries. Explicit raw-result constraints are validated
+before callbacks can observe or publish the result, then core return delivery
+runs. Prepared group closures retain detached structure and child invokers so
+global weak preparation state cannot retain their Method owner indirectly.
 
 Core Execute reconstructs a new worker-local plan rather than transporting a
 `SignaturePlan` or `BoundaryPlan`. Its function, Method, and managed integrations

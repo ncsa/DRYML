@@ -3,44 +3,32 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from functools import wraps
-from inspect import signature
+from dataclasses import replace
+from functools import partial
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
 
 from dryml.artifacts import Fold, mean
-from dryml.core import AutoRef, ConcreteDefinition, Definition, Par, Ref, function
+from dryml.core import AutoRef, ConcreteDefinition, Definition, Ref, authoring_helper
+from dryml.core.backend import Backend
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
-from dryml.core.tensor_spec import SpecTree, TensorSpec
+from dryml.core.tensor_spec import BatchMode, SpecTree, TensorSpec
+from dryml.core.template import Expr, _contains_template_value
 from dryml.data import Abs, Diff, Map, Pipe, Project, Select, Squared
 from dryml.data.reduction_methods import (
     MeanFinalize, MeanInitial, MeanUpdate, Path, ReductionMode, _MAX_INT64,
     _backend, _cast_float64, _dtype_name,
     _path, _reshape, _scalar, _where, _zeros,
 )
-from dryml.methods import Accumulator, Method
+from dryml.methods import Accumulator, ImplementationSelectionError, Method
+from dryml.methods.conversion import backend_spec
+from dryml.methods.signature import spec_node
 
 
 Label: TypeAlias = int | str
 F1Average: TypeAlias = Literal["binary", "micro", "macro", "weighted", "none"]
-
-
-def _contains_template_value(value: object) -> bool:
-    """Return whether supported metric input structure contains symbolic values."""
-
-    if isinstance(value, (Definition, Par)):
-        return True
-    if isinstance(value, Mapping):
-        return any(
-            _contains_template_value(item)
-            for pair in value.items()
-            for item in pair
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_template_value(item) for item in value)
-    return False
 
 
 def _metric_factory(target):
@@ -52,24 +40,17 @@ def _metric_factory(target):
     deliberately not a general function-lifting facility.
     """
 
-    concrete = function(target)
-
-    @wraps(target)
-    def wrapped(*args, **kwargs):
-        if _contains_template_value((args, kwargs)):
-            bound = signature(target).bind(*args, **kwargs)
-            bound.apply_defaults()
-            _validate_known_metric_arguments(target.__name__, bound.arguments)
-            return _symbolic_metric_definition(target.__name__, bound.arguments)
-        return concrete(*args, **kwargs)
-
-    return wrapped
+    return authoring_helper(
+        author_definition=partial(_symbolic_metric_definition, target.__name__),
+        validate_known_arguments=partial(_validate_known_metric_arguments, target.__name__),
+        normalize_concrete=True,
+    )(target)
 
 
 def _validate_known_metric_arguments(name: str, arguments: Mapping[str, object]) -> None:
     """Validate literal metric controls while retaining symbolic dependencies."""
 
-    if "mode" in arguments and not isinstance(arguments["mode"], Par):
+    if "mode" in arguments and not isinstance(arguments["mode"], Expr):
         mode = arguments["mode"]
         if mode not in ("global", "coordinate"):
             raise ValueError("mode must be 'global' or 'coordinate'.")
@@ -84,7 +65,7 @@ def _validate_known_metric_arguments(name: str, arguments: Mapping[str, object])
 def _validate_known_classes(classes: object) -> None:
     """Reject fixed class-domain errors while allowing symbolic tuple members."""
 
-    if isinstance(classes, Par):
+    if isinstance(classes, Expr):
         return
     if not isinstance(classes, tuple) or not classes:
         _classes(classes)
@@ -102,8 +83,8 @@ def _validate_known_classes(classes: object) -> None:
 def _validate_known_f1_controls(average: object, positive_index: object) -> None:
     """Validate F1 facts that do not depend on unresolved direct controls."""
 
-    average_symbolic = isinstance(average, Par)
-    positive_symbolic = isinstance(positive_index, Par)
+    average_symbolic = isinstance(average, Expr)
+    positive_symbolic = isinstance(positive_index, Expr)
     if not average_symbolic and average not in ("binary", "micro", "macro", "weighted", "none"):
         raise ValueError("average must be binary, micro, macro, weighted, or none.")
     if not positive_symbolic and positive_index is not None and (
@@ -115,6 +96,161 @@ def _validate_known_f1_controls(average: object, positive_index: object) -> None
         raise ValueError("binary F1 requires a nonnegative exact int positive_index.")
     if average != "binary" and positive_index is not None:
         raise ValueError("positive_index is valid only for binary F1.")
+
+
+def _evaluation_pair_specs(input_spec: SpecTree) -> tuple[TensorSpec, TensorSpec]:
+    """Return the prediction and target leaves from one metric evaluation spec."""
+
+    if not isinstance(input_spec, Mapping) or tuple(input_spec) != (
+            "prediction", "target"):
+        raise TypeError("Metric evaluation requires prediction and target fields.")
+    prediction, target = input_spec["prediction"], input_spec["target"]
+    if not isinstance(prediction, TensorSpec) or not isinstance(target, TensorSpec):
+        raise TypeError("Metric evaluation prediction and target must be TensorSpecs.")
+    if prediction.backend is None or target.backend is None:
+        raise ValueError("Metric evaluation requires declared prediction and target backends.")
+    if prediction.batched != target.batched:
+        raise ValueError("Metric evaluation prediction and target batch modes differ.")
+    return prediction, target
+
+
+def _evaluation_host_array(value: object, backend: Backend) -> np.ndarray:
+    """Copy one dense metric value to independent C-contiguous NumPy storage.
+
+    Accelerator transfer is intentional at this terminal evaluation boundary:
+    training remains native while Fold reduction carry stays host-portable.
+    """
+
+    if backend is Backend.numpy:
+        if not isinstance(value, (np.ndarray, np.generic)):
+            raise TypeError("Metric evaluation expected a NumPy value.")
+        array = np.asarray(value)
+    elif backend is Backend.torch:
+        import torch
+
+        if not isinstance(value, torch.Tensor) or value.layout is not torch.strided:
+            raise TypeError("Metric evaluation requires a dense strided Torch tensor.")
+        array = value.detach().cpu().numpy()
+    elif backend is Backend.tf:
+        import tensorflow as tf
+
+        if (
+                not tf.is_tensor(value)
+                or isinstance(value, (tf.RaggedTensor, tf.SparseTensor))
+                or not callable(getattr(value, "numpy", None))):
+            raise TypeError("Metric evaluation requires a concrete dense TensorFlow tensor.")
+        array = value.numpy()
+    elif backend is Backend.jax:
+        import jax
+
+        if not isinstance(value, jax.Array) or not value.is_fully_addressable:
+            raise TypeError("Metric evaluation requires a concrete addressable JAX array.")
+        if len(value.devices()) != 1:
+            raise TypeError("Metric evaluation requires one JAX prediction device.")
+        array = np.asarray(jax.device_get(value))
+    else:
+        raise TypeError("Metric evaluation selected an unsupported backend.")
+    if array.dtype == np.dtype(object) or array.dtype.kind not in "?biufcSU":
+        raise TypeError("Metric evaluation produced an unsupported host dtype.")
+    return np.array(array, copy=True, order="C")
+
+
+def _evaluation_host_spec(spec: TensorSpec) -> TensorSpec:
+    """Return the host contract, retaining already-host semantic string dtype."""
+
+    if spec.backend is Backend.numpy:
+        return spec
+    return backend_spec(spec, Backend.numpy)
+
+
+class _AlignEvaluationTarget(Method):
+    """Normalize one prediction/target pair at the host evaluation boundary.
+
+    The original private name remains stable because authored Artifact graphs
+    persist its import reference.
+    """
+
+    def __call__(self, item):
+        """Reject direct use that bypasses the spec-planned metric handoff."""
+
+        raise RuntimeError("Metric target alignment requires selected specification evidence.")
+
+    def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
+        """Declare both evaluation values on the checkpoint-safe NumPy backend."""
+
+        prediction, target = _evaluation_pair_specs(input_spec)
+        return {
+            "prediction": _evaluation_host_spec(prediction),
+            "target": _evaluation_host_spec(target),
+        }
+
+    def find_implementation(
+            self, input_spec=None, *additional_input_specs, backend=None,
+            batch_mode=None, output_spec=None):
+        """Plan one explicit host boundary despite the mixed input pair."""
+
+        return self._select_alignment(
+            input_spec, additional_input_specs, backend=backend,
+            batch_mode=batch_mode, output_spec=output_spec, prepare=False,
+        )
+
+    def _prepare_implementation(self, input_spec, *, backend, batch_mode):
+        """Plan the same explicit host boundary during graph preparation."""
+
+        return self._select_alignment(
+            input_spec, (), backend=backend, batch_mode=batch_mode,
+            output_spec=None, prepare=True,
+        )
+
+    def _select_alignment(
+            self, input_spec, additional_input_specs, *, backend, batch_mode,
+            output_spec, prepare):
+        """Select a NumPy carrier while retaining exact pair specifications."""
+
+        if additional_input_specs or input_spec is None:
+            raise ImplementationSelectionError("conflict")
+        try:
+            prediction, target = _evaluation_pair_specs(input_spec)
+            prediction_batch = (
+                BatchMode.batched if prediction.batched else BatchMode.element
+            )
+            required_backend = None if backend is None else Backend(backend)
+            required_batch = None if batch_mode is None else BatchMode(batch_mode)
+            if (
+                    required_backend not in (None, Backend.numpy)
+                    or required_batch not in (None, prediction_batch)):
+                raise ValueError("Metric evaluation selection facts conflict.")
+            aligned_spec = self.infer_output_spec(input_spec)
+            selected_output = aligned_spec if output_spec is None else output_spec
+            input_node = spec_node(input_spec)
+            output_node = spec_node(selected_output)
+        except (TypeError, ValueError) as error:
+            raise ImplementationSelectionError("conflict") from error
+
+        implementation = (
+            super()._prepare_implementation(
+                None, backend=Backend.numpy, batch_mode=prediction_batch,
+            )
+            if prepare
+            else super().find_implementation(
+                None, backend=Backend.numpy, batch_mode=prediction_batch,
+            )
+        )
+
+        def invoke(item):
+            return {
+                "prediction": _evaluation_host_array(
+                    item["prediction"], prediction.backend,
+                ),
+                "target": _evaluation_host_array(item["target"], target.backend),
+            }
+
+        return replace(
+            implementation,
+            _input_specs=(input_node,),
+            _output_spec=output_node,
+            _invoker=invoke,
+        )
 
 
 def _symbolic_evaluation_source(
@@ -133,7 +269,10 @@ def _symbolic_evaluation_source(
     target = Select.defn(y) if target_labels is None else Pipe.defn(
         Select.defn(y), target_labels,
     )
-    return Map.defn(test_ds, Project.defn(prediction=prediction, target=target))
+    evaluation = Map.defn(
+        test_ds, Project.defn(prediction=prediction, target=target),
+    )
+    return Map.defn(evaluation, _AlignEvaluationTarget.defn())
 
 
 def _symbolic_metric_definition(name: str, arguments: Mapping[str, object]) -> Definition:
@@ -174,7 +313,7 @@ def _symbolic_metric_definition(name: str, arguments: Mapping[str, object]) -> D
             positive_index=arguments["positive_index"],
         )
     return Fold.defn(
-        source,
+        DefLink.finalized(EdgeKind.REF, source),
         initial_state=ConfusionInitial.defn(domain),
         accumulator=ConfusionCounts.defn(domain),
         finalize=finalize,
@@ -643,15 +782,19 @@ def regressor_mae(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", 
     """Declare an inert streaming MAE Fold over one model evaluation graph.
 
     Args:
-        test_ds: Non-materializing evaluation Dataset reference.
-        model: Non-materializing model Method reference.
+        test_ds: Non-materializing evaluation Dataset reference, Definition, or
+            Expr placeholder.
+        model: Non-materializing model Method reference, Definition, or Expr
+            placeholder.
         x: Source path selecting model input.
         y: Source path selecting regression target.
         mode: Global or coordinate-wise mean population definition.
 
     Returns:
         An uncomputed Fold using U6's native mean carry, or an inert Definition
-        when any supplied argument contains an active symbolic expression.
+        when any supplied argument contains a Definition or symbolic Expr,
+        including compound expressions. Exact reference inputs alone retain the
+        Fold return form; expression-dependent validation is deferred to binding.
 
     Raises:
         TypeError: If references or paths cannot form the declared Method graph.
@@ -670,15 +813,19 @@ def regressor_mse(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, x: Path = "x", 
     """Declare an inert streaming MSE Fold over one model evaluation graph.
 
     Args:
-        test_ds: Non-materializing evaluation Dataset reference.
-        model: Non-materializing model Method reference.
+        test_ds: Non-materializing evaluation Dataset reference, Definition, or
+            Expr placeholder.
+        model: Non-materializing model Method reference, Definition, or Expr
+            placeholder.
         x: Source path selecting model input.
         y: Source path selecting regression target.
         mode: Global or coordinate-wise mean population definition.
 
     Returns:
         An uncomputed Fold using U6's native mean carry, or an inert Definition
-        when any supplied argument contains an active symbolic expression.
+        when any supplied argument contains a Definition or symbolic Expr,
+        including compound expressions. Exact reference inputs alone retain the
+        Fold return form; expression-dependent validation is deferred to binding.
 
     Raises:
         TypeError: If references or paths cannot form the declared Method graph.
@@ -713,8 +860,10 @@ def classifier_confusion_matrix(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, c
     """Declare an inert fixed-domain confusion-matrix Fold without label guessing.
 
     Args:
-        test_ds: Non-materializing evaluation Dataset reference.
-        model: Non-materializing model Method reference.
+        test_ds: Non-materializing evaluation Dataset reference, Definition, or
+            Expr placeholder.
+        model: Non-materializing model Method reference, Definition, or Expr
+            placeholder.
         classes: Ordered finite domain of decoded labels.
         prediction_labels: Declared Method converting model output to labels.
         target_labels: Declared Method converting targets to labels.
@@ -723,7 +872,10 @@ def classifier_confusion_matrix(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, c
 
     Returns:
         An uncomputed Fold whose result is a truth-row, prediction-column matrix,
-        or an inert Definition when any supplied argument is symbolic.
+        or an inert Definition when any supplied argument contains a Definition
+        or symbolic Expr, including compound expressions. Exact reference inputs
+        alone retain the Fold form; expression-dependent validation is deferred
+        to binding.
 
     Raises:
         TypeError: If references, labels, or Methods are unsupported.
@@ -741,8 +893,10 @@ def classifier_accuracy(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: 
     """Declare an inert confusion-based accuracy Fold without a second evaluation loop.
 
     Args:
-        test_ds: Non-materializing evaluation Dataset reference.
-        model: Non-materializing model Method reference.
+        test_ds: Non-materializing evaluation Dataset reference, Definition, or
+            Expr placeholder.
+        model: Non-materializing model Method reference, Definition, or Expr
+            placeholder.
         classes: Ordered finite domain of decoded labels.
         prediction_labels: Declared Method converting model output to labels.
         target_labels: Declared Method converting targets to labels.
@@ -751,7 +905,9 @@ def classifier_accuracy(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: 
 
     Returns:
         An uncomputed Fold whose result is native scalar accuracy, or an inert
-        Definition when any supplied argument is symbolic.
+        Definition when any supplied argument contains a Definition or symbolic
+        Expr, including compound expressions. Exact reference inputs alone retain
+        the Fold form; expression-dependent validation is deferred to binding.
 
     Raises:
         TypeError: If references, labels, or Methods are unsupported.
@@ -769,8 +925,10 @@ def classifier_f1(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[
     """Declare an inert confusion-based F1 Fold using explicit label conversion.
 
     Args:
-        test_ds: Non-materializing evaluation Dataset reference.
-        model: Non-materializing model Method reference.
+        test_ds: Non-materializing evaluation Dataset reference, Definition, or
+            Expr placeholder.
+        model: Non-materializing model Method reference, Definition, or Expr
+            placeholder.
         classes: Ordered finite domain of decoded labels.
         prediction_labels: Declared Method converting model output to labels.
         target_labels: Declared Method converting targets to labels.
@@ -781,7 +939,10 @@ def classifier_f1(test_ds: Ref[AutoRef], model: Ref[AutoRef], *, classes: tuple[
 
     Returns:
         An uncomputed Fold with scalar or per-class native F1 result semantics,
-        or an inert Definition when any supplied argument is symbolic.
+        or an inert Definition when any supplied argument contains a Definition
+        or symbolic Expr, including compound expressions. Exact reference inputs
+        alone retain the Fold form; expression-dependent validation is deferred
+        to binding.
 
     Raises:
         TypeError: If references, labels, or Methods are unsupported.

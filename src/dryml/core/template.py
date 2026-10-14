@@ -364,6 +364,44 @@ class Template:
             raise TypeError("Template supports only the exact Definition target.")
         return Annotated[Definition, _Role("template")]
 
+def _is_definition_value(value: object, *, include_authority: bool = False) -> bool:
+    """Recognize inert authoring inputs, optionally including exact authority.
+
+    Definitions and expressions require graph authoring. ConcreteDefinitions and
+    exact references are opt-in because some helpers retain live return values for
+    resolved authority. This does not resolve, validate, or materialize a target.
+    """
+
+    from .definition import ConcreteDefinition, Definition
+    from .reference_values import ObjectRef, StateRef
+
+    return isinstance(value, (Definition, Expr)) or (
+        include_authority and isinstance(value, (ConcreteDefinition, ObjectRef, StateRef))
+    )
+
+
+def _contains_template_value(value: object) -> bool:
+    """Detect authoring inputs through supported structure without crossing quotes.
+
+    Resolved Definitions still select authoring; resolved exact authority does not.
+    Materializing links, factory calls, and containers are traversed with cycle
+    protection. Ref links and explicit quotations remain opaque.
+    """
+
+    seen: set[int] = set()
+
+    def visit(current: object) -> bool:
+        if _is_definition_value(current):
+            return True
+        marker = id(current)
+        if marker in seen:
+            return False
+        seen.add(marker)
+        return any(visit(child) for child in _template_children(current))
+
+    return visit(value)
+
+
 def _contains_expression(
         value: object, *, traverse_refs: bool = False) -> bool:
     from .cdef_graph import EdgeKind
@@ -612,6 +650,7 @@ def _freeze_binding_value(value: object) -> object:
     """Detach containers and lower live Object leaves without traversing their graphs."""
 
     from .canonical import freeze_def_value
+    from .definition import ConcreteDefinition, Definition
     from .object import Object
 
     memo: dict[int, object] = {}
@@ -619,6 +658,8 @@ def _freeze_binding_value(value: object) -> object:
     def lower(current: object) -> object:
         if isinstance(current, Object):
             return current.object_ref
+        if isinstance(current, (Definition, ConcreteDefinition)):
+            return current
         if isinstance(current, Mapping):
             marker = id(current)
             if marker in memo:

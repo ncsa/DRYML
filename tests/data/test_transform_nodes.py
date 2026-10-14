@@ -4,6 +4,7 @@ import sys
 import numpy as np
 import pytest
 
+from dryml.core import Definition, Mat, Par, Ref
 from dryml.core.cardinality import Cardinality
 from dryml.core.backend import Backend
 from dryml.core.tensor_spec import Dynamic, TensorSpec
@@ -25,6 +26,7 @@ from dryml.data import (
     Unbatch,
     Zip,
     Chain,
+    as_supervised,
 )
 
 
@@ -174,11 +176,11 @@ def test_elementwise_dataset_resolves_dispatch_once_per_iterator():
     )
 
     ds = Map(src, transform)
-
+    assert transform.dispatch_count == 1
     list(ds)
     list(ds)
 
-    assert transform.dispatch_count == 2
+    assert transform.dispatch_count == 3
 
 
 def test_prepared_map_graph_retains_one_selected_invoker_without_per_yield_discovery():
@@ -191,9 +193,9 @@ def test_prepared_map_graph_retains_one_selected_invoker_without_per_yield_disco
     graph = Map(src, transform).method_graph()
 
     graph.learn()
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
     assert [item.dtype for item in graph.iterator()] == [np.dtype("float32")] * 2
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
 
 
 def test_map_selects_before_consuming_complete_specs():
@@ -204,7 +206,7 @@ def test_map_selects_before_consuming_complete_specs():
     )
 
     assert [item.dtype for item in Map(src, transform)] == [np.dtype("float32")]
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
 
 
 def test_empty_complete_spec_map_selects_without_invoking_a_target():
@@ -212,7 +214,7 @@ def test_empty_complete_spec_map_selects_without_invoking_a_target():
     src = ListDataset([], TensorSpec("int32", shape=(1,), backend="numpy"))
 
     assert list(Map(src, transform)) == []
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
 
 
 def test_map_backend_fallback_reads_only_the_first_value_before_selection():
@@ -232,9 +234,15 @@ def test_map_backend_fallback_reads_only_the_first_value_before_selection():
 
     transform = ObservingCast()
     transform.source = src
-    assert [item.tolist() for item in Map(src, transform)] == [[1.0], [2.0]]
-    assert transform.dispatch_count == 2
-    assert transform.next_counts == [0, 1]
+    successor = CountingCast("float64")
+    mapped = Map(src, Pipe(Pipe(transform), successor))
+    before = (transform.dispatch_count, successor.dispatch_count)
+    assert [item.tolist() for item in mapped] == [[1.0], [2.0]]
+    assert successor.dispatch_count == before[1] + 1
+    assert transform.dispatch_count == before[0] + 2
+    assert transform.next_counts == [0, 0, 1]
+    assert mapped.spec.backend is None
+    assert src.spec.backend is None
 
 
 def test_map_empty_missing_backend_only_checks_exhaustion():
@@ -242,7 +250,7 @@ def test_map_empty_missing_backend_only_checks_exhaustion():
     src = OneShotDataset([], TensorSpec("int32", shape=(1,), backend=None))
 
     assert list(Map(src, transform)) == []
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
     assert src.next_calls == 1
 
 
@@ -405,7 +413,7 @@ def test_map_accepts_multiple_transforms_as_pipe():
 
     assert ds.spec == TensorSpec("float32", shape=(2,), backend="numpy")
     assert [item.dtype for item in out] == [np.dtype("float32"), np.dtype("float32")]
-    assert transform.dispatch_count == 1
+    assert transform.dispatch_count == 2
 
 
 def test_project_and_pipe_select_children_once_from_structural_specs():
@@ -421,8 +429,8 @@ def test_project_and_pipe_select_children_once_from_structural_specs():
 
     assert [item["right"].dtype for item in projected] == [np.dtype("float32")] * 2
     assert [item.dtype for item in piped] == [np.dtype("float64")] * 2
-    assert first.dispatch_count == 1
-    assert second.dispatch_count == 1
+    assert first.dispatch_count == 2
+    assert second.dispatch_count == 2
 
     argmax = CountingArgMax()
     vector_src = ListDataset(
@@ -430,7 +438,77 @@ def test_project_and_pipe_select_children_once_from_structural_specs():
         TensorSpec("float32", shape=(1, 2), backend="numpy"),
     )
     assert [int(item) for item in Map(vector_src, Pipe(Flatten(), argmax))] == [1]
-    assert argmax.dispatch_count == 1
+    assert argmax.dispatch_count == 2
+
+
+@pytest.mark.parametrize("count", (5, 100))
+@pytest.mark.parametrize("graph_mode", (False, True))
+@pytest.mark.parametrize("native", (False, True))
+def test_map_metadata_and_preserving_counts_do_not_repeat_selection(count, graph_mode, native, monkeypatch):
+    """Inert metadata and example validation never select or compile per yield."""
+    from dryml.core import signatures
+    if native:
+        pytest.importorskip("torch")
+
+    class NativeIdentity(Method):
+        @traits(backend="torch")
+        def torch(self, value):
+            return value
+
+        def infer_output_spec(self, spec):
+            return spec
+
+    transform = CountingCast("float32")
+    source = ListDataset([np.array([i], dtype=np.int32) for i in range(count)],
+                         TensorSpec("int32", shape=(1,), backend="numpy"))
+    methods = (Pipe(transform), Cast("float64"))
+    identity = NativeIdentity() if native else None
+    if native:
+        methods = (identity, *methods)
+    compiled = []
+    original = signatures.compile_signature
+
+    def compile_selected(target, **kwargs):
+        if not isinstance(target, type):
+            compiled.append(target)
+        return original(target, **kwargs)
+
+    monkeypatch.setattr(signatures, "compile_signature", compile_selected)
+    mapped = Map(source, Pipe(*methods), preserves_examples=True)
+    calls = transform.dispatch_count
+    assert compiled == []
+    for _ in range(count):
+        assert mapped.spec.dtype.name == "float64"
+        assert mapped.examples_in(np.ones(1)) == 1
+    assert transform.dispatch_count == calls
+    assert compiled == []
+    graph = mapped.method_graph()
+    if graph_mode:
+        graph.learn()
+        cursor = graph.iterator()
+    else:
+        cursor = mapped.iterator()
+    with cursor:
+        assert str(next(cursor).dtype) in ("float64", "torch.float64")
+        selected_calls, compilation_count = transform.dispatch_count, len(compiled)
+        monkeypatch.setattr(transform, "implementations", lambda: pytest.fail("per-yield selection"))
+        if native:
+            monkeypatch.setattr(identity, "implementations", lambda: pytest.fail("native per-yield selection"))
+        assert len(list(cursor)) == count - 1
+    assert transform.dispatch_count == selected_calls
+    assert len(compiled) == compilation_count == (5 if native else 4)
+
+
+def test_map_constructor_retains_inference_failures_and_missing_specs_without_sources():
+    """Declaration admission remains pure and preserves invalid-inference timing."""
+    source = OneShotDataset([], TensorSpec("float32", shape=(), backend="numpy"))
+    with pytest.raises(ValueError, match="non-scalar"):
+        Map(source, ArgMax())
+    assert source.next_calls == 0
+    missing = OneShotDataset([], None)
+    with pytest.raises(ValueError, match="no known spec"):
+        Map(missing, Cast("float32"))
+    assert missing.next_calls == 0
 
 
 def test_flatten_and_scale_infer_output_spec_and_iteration():
@@ -740,3 +818,193 @@ def test_chain_merges_specs_and_concatenates_sources():
     assert ds.spec == TensorSpec("int32", shape=(Dynamic,), backend="numpy")
     assert ds.__len__() == Cardinality.finite(3)
     assert [item.tolist() for item in ds] == [[1], [2], [3, 4]]
+
+
+def test_as_supervised_projects_scalar_whole_tree_named_and_autoencoder_targets():
+    source = ListDataset(
+        [{"features": {"left": np.array([1]), "right": np.array([2])}, "label": np.array(3)}],
+        {
+            "features": {
+                "left": TensorSpec("int64", shape=(1,), backend="numpy"),
+                "right": TensorSpec("int64", shape=(1,), backend="numpy"),
+            },
+            "label": TensorSpec("int64", shape=(), backend="numpy"),
+        },
+    )
+
+    scalar = as_supervised(source, "features", "label")
+    named = as_supervised(
+        source,
+        {"left": Select.from_path(("features", "left")), "right": Select.from_path(("features", "right"))},
+        "label",
+    )
+    autoencoder = as_supervised(source, "features", input_as_target=True)
+
+    scalar_value = next(iter(scalar))
+    named_value = next(iter(named))
+    autoencoder_value = next(iter(autoencoder))
+    assert scalar_value[0]["left"].tolist() == [1]
+    assert scalar_value[1].item() == 3
+    assert named_value[0]["left"].tolist() == [1]
+    assert named_value[0]["right"].tolist() == [2]
+    assert autoencoder_value[0] is autoencoder_value[1]
+
+
+@pytest.mark.parametrize("authority", ("soft", "concrete", "mat", "ref"))
+def test_as_supervised_authors_definition_native_autoencoder_projection(authority):
+    """Symbolic Dataset sources remain inert until their Map graph is built."""
+
+    source = Definition(
+        ListDataset,
+        [{"cart": np.array([1, 2])}],
+        {"cart": TensorSpec("int64", shape=(2,), backend="numpy")},
+    )
+    if authority == "concrete":
+        source = source.concretize()
+    elif authority == "mat":
+        source = Mat(source)
+    elif authority == "ref":
+        source = Ref(source)
+
+    projected = as_supervised(source, "cart", input_as_target=True)
+
+    assert isinstance(projected, Definition)
+    assert projected.cls is Map
+    inputs, targets = next(iter(projected.build()))
+    assert inputs is targets
+    assert inputs.tolist() == [1, 2]
+
+
+@pytest.mark.parametrize("test_authority", ("concrete", "state"))
+def test_as_supervised_parameter_sources_bind_inside_modular_experiments(tmp_path, test_authority):
+    """Dataset placeholders compose before their sources are supplied or built."""
+
+    from dryml.models import Experiment
+    from dryml.metrics import regressor_mae
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+
+    source = Definition(
+        ListDataset,
+        [{"cart": np.array([1, 2])}],
+        {"cart": TensorSpec("int64", shape=(2,), backend="numpy")},
+    ).concretize()
+    repo = Repo(DirStore(tmp_path / "store"))
+    test_source = source if test_authority == "concrete" else repo.save_object(source.build(repo=repo))
+    template = Experiment.defn(
+        model=None,
+        train_fn=None,
+        train_data=as_supervised(Par("train_ds"), "cart", input_as_target=True),
+        test_data=as_supervised(Par("test_ds"), "cart", input_as_target=True),
+        artifacts={"mae": regressor_mae(
+            Par("this.test_data"), Par("this.model"), x=0, y=1, mode="global",
+        )},
+    )
+
+    assert {"train_ds", "test_ds"} <= set(template.names)
+    bound = template.sub(train_ds=source, test_ds=test_source)
+    direct = Experiment.defn(
+        model=None,
+        train_fn=None,
+        train_data=as_supervised(source, "cart", input_as_target=True),
+        test_data=as_supervised(test_source, "cart", input_as_target=True),
+        artifacts=template.artifacts,
+    )
+    assert bound.concretize(repo=repo) == direct.concretize(repo=repo)
+    inputs, targets = next(iter(bound.train_data.build()))
+    assert inputs is targets
+    assert inputs.tolist() == [1, 2]
+    test_inputs, test_targets = next(iter(bound.test_data.build(repo=repo)))
+    assert test_inputs is test_targets
+    assert test_inputs.tolist() == [1, 2]
+
+
+def test_as_supervised_accepts_wrapped_parameters_but_rejects_non_dataset_values():
+    """Ref/Mat source placeholders remain inert and invalid literal inputs fail."""
+
+    for value in (Par("data"), Ref(Par("data")), Mat(Par("data"))):
+        projected = as_supervised(value, "cart", input_as_target=True)
+        assert isinstance(projected, Definition)
+        assert projected.names == ("data",)
+
+    for value in (object(), {"source": Par("data")}, [Par("data")]):
+        with pytest.raises(TypeError, match="Dataset or Dataset reference"):
+            as_supervised(value, "cart", input_as_target=True)
+
+
+def test_as_supervised_rejects_empty_or_ambiguous_selection_trees():
+    source = ListDataset(
+        [{"x": np.array([1]), "y": np.array([2])}],
+        {
+            "x": TensorSpec("int64", shape=(1,), backend="numpy"),
+            "y": TensorSpec("int64", shape=(1,), backend="numpy"),
+        },
+    )
+
+    with pytest.raises(ValueError, match="empty"):
+        as_supervised(source, {}, "y")
+    with pytest.raises(TypeError, match="Ambiguous"):
+        as_supervised(source, ("x", "y"), "y")
+    with pytest.raises(TypeError, match="Select.from_path"):
+        as_supervised(source, {"x": "x"}, "y")
+    with pytest.raises(ValueError, match="requires targets"):
+        as_supervised(source, "x")
+    with pytest.raises(ValueError, match="does not accept"):
+        as_supervised(source, "x", "y", input_as_target=True)
+    with pytest.raises(TypeError, match="Dataset or Dataset reference"):
+        as_supervised(object(), "x", "y")
+
+
+def test_as_supervised_authors_graph_from_persisted_dataset_references(tmp_path):
+    """ObjectRef and StateRef inputs stay inert until the authored graph is built."""
+
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    source = ListDataset(
+        [{"x": np.array([1]), "y": np.array([2])}],
+        {
+            "x": TensorSpec("int64", shape=(1,), backend="numpy"),
+            "y": TensorSpec("int64", shape=(1,), backend="numpy"),
+        },
+    )
+    state_ref = repo.save_object(source, deep_capture=True)
+
+    for reference in (state_ref.object, state_ref):
+        projected = as_supervised(reference, "x", "y")
+
+        assert isinstance(projected, Definition)
+        assert projected.cls is Map
+
+    inputs, targets = next(iter(as_supervised(state_ref, "x", "y").build(repo=repo)))
+    assert inputs.tolist() == [1]
+    assert targets.tolist() == [2]
+
+
+def test_as_supervised_nested_and_tuple_selection_trees_survive_save_load(tmp_path):
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+
+    source = ListDataset(
+        [{"feature": {"left": np.array([1]), "right": np.array([2])}, "label": np.array([3])}],
+        {
+            "feature": {
+                "left": TensorSpec("int64", shape=(1,), backend="numpy"),
+                "right": TensorSpec("int64", shape=(1,), backend="numpy"),
+            },
+            "label": TensorSpec("int64", shape=(1,), backend="numpy"),
+        },
+    )
+    projected = as_supervised(
+        source,
+        {"feature": {"left": Select.from_path(("feature", "left"))}},
+        (Select.from_path(("label",)), Select.from_path(("feature", "right"))),
+    )
+    repo = Repo(DirStore(tmp_path / "store"))
+    reference = repo.save_object(projected, deep_capture=True)
+    loaded = repo.load_state_ref(reference, reuse_live="never")
+
+    inputs, targets = next(iter(loaded))
+    assert inputs["feature"]["left"].tolist() == [1]
+    assert [target.tolist() for target in targets] == [[3], [2]]

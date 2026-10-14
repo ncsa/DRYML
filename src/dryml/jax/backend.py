@@ -1,16 +1,19 @@
+"""Passive JAX value detection and installed runtime-adapter availability."""
+
 from typing import Any
-from dryml.context import check_context, ContextError
+import importlib.util
+import sys
 
 
 def is_jax_available() -> bool:
-    try:
-        check_context('jax')
-        return True
-    except ContextError:
-        pass
-    return False
+    """Return installed-adapter availability without requiring a training context."""
+    return importlib.util.find_spec("jax") is not None
 
 
 def is_jax_value(x: Any) -> bool:
-    import jax
-    return isinstance(x, (jax.Array, jax.ShapeDtypeStruct))
+    """Recognize loaded JAX values without activating JAX during discovery."""
+    jax = sys.modules.get("jax")
+    if jax is None:
+        return False
+    value_types = (vars(jax).get(name) for name in ("Array", "ShapeDtypeStruct"))
+    return any(isinstance(value_type, type) and isinstance(x, value_type) for value_type in value_types)

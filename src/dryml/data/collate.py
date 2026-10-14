@@ -20,9 +20,9 @@ def collate_for_spec(spec):
         only supported path.
 
     Side Effects:
-        Imports only the declared TensorFlow or Torch endpoint when selecting its
-        existing stack operation; no optional framework is imported for NumPy or
-        fallback selection.
+        Imports only the declared TensorFlow, Torch, or JAX endpoint when selecting
+        its stack operation; no optional framework is imported for NumPy or fallback
+        selection.
     """
 
     backends = {tensor_spec.backend for tensor_spec in iter_specs(spec)}
@@ -41,6 +41,10 @@ def collate_for_spec(spec):
         import tensorflow as tf
 
         return lambda items: _native_collate(items, tf.stack, axis=0)
+    if backend.value == "jax":
+        import jax.numpy as jnp
+
+        return lambda items: _native_collate(items, jnp.stack, axis=0)
     return None
 
 

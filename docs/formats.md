@@ -13,6 +13,13 @@ fully bound parameters, and stateful-role bits. `ObjectRef` records add canonica
 primary ObjectId paths. `StateRef` records add exactly matching state-hash paths.
 Private graph node tokens and Store locations are never durable identity.
 
+Core owns the portable `dryml-reference-json` v1 envelope for embedding exact
+`ObjectRef` and `StateRef` authority in closed JSON formats. It tags canonical
+Definition atoms, frozen containers, symbols, factories, tensor specifications,
+and reference identity without loading Objects or state. Store authority records
+continue to use their separate trusted dill frame; `StateRef.to_data()` alone is
+a token-neutral Python record and is not promised to be JSON-compatible.
+
 DirStore format v3 publishes a `store-format.record`, digest-sharded
 DefinitionRecords, explicit `stored-roots/` membership records, declarations,
 claims, aliases, lineage/current-metadata records, and complete snapshot
@@ -86,6 +93,45 @@ Fixture authority is checked out byte-for-byte via `.gitattributes`, without
 line-ending conversion. Git for Windows needs long-path support to check out the
 snapshot directory fixtures; CI enables `core.longpaths` for its Git processes.
 
+## Fold Progress V1 And V2
+
+`fold-progress.pkl` is a trusted pickle envelope with exactly `format`, `version`,
+`processed_count`, and `progress`. Format is `dryml.artifacts.fold-progress`;
+version is the exact integer 1 or 2, and processed count is a nonnegative exact
+integer. `progress=None` represents no remaining continuation (uncomputed or
+completed); a separate `value.pkl` v1 envelope determines result presence.
+
+Non-null progress has positive `count` equal to processed count and the existing
+fields `state`, `carry`, `source_binding`, `source_spec`, `observed_spec`,
+`carry_spec`, `observation_devices`, `program`, `backend_devices`, `operation_id`,
+and `attempt_id`. Specs, tagged lossless host carry, backend/device records, and
+source/program/attempt compatibility checks retain their existing meanings.
+
+| Version/state | Additional fields | Recovery |
+|---|---|---|
+| v1 active | None | Compatible positional resume |
+| v1 exhausted | None | Loadable ambiguous state; explicit fresh managed rerun required |
+| v2 active | None (`eof` forbidden) | Compatible positional resume |
+| v2 exhausted | Exactly `eof="root-output-eof"` | Trusted source-free finalization retry |
+
+Only positive root-output termination authorizes new exhausted progress; closure,
+failure, child EOF, and strict replay shortfall are not evidence. Unknown versions,
+extra/missing fields, invalid EOF tokens, and inconsistent carry/count evidence
+fail restoration before assignment. Valid legacy exhaustion is rejected at Fold
+body admission rather than in restore, so the receiver remains usable for explicit
+rerun. Unchanged restored v1 envelopes save as v1; new checkpoints and completed
+computations write v2. No existing immutable snapshot is rewritten.
+
+`tests/fixtures/fold_progress/` freezes synthetic v1 active/exhausted/completed and
+v2 active/exhausted payload bytes, wrapped in base64 for byte-preserving checkout.
+One manifest records decoded and encoded SHA256 hashes, semantic expectations,
+and identity rebinding for synthetic managed tests. Its independent generation
+recipe never runs in reader assertions. A frozen v1 validator from `ba368afc`
+qualifies v2 rejection at its version gate **before carry restoration**.
+Downgraded readers cannot resume v2 progress. Choosing a retained earlier
+compatible snapshot may replay work; this is neither automatic rollback nor
+repair. Historical completed truncated Values cannot be identified automatically.
+
 ## Symbolic Definition And Generator Selector V1
 
 Quoted symbolic Definition data uses the closed
@@ -115,11 +161,15 @@ Store records.
 ## Workflow Records
 
 `ExperimentData` persists its authoritative `experiment_data.json` as the closed
-`dryml-experiment-data` v1 format. It stores declared column kinds, ordered row
-facts, opaque `ObjectRef`/`StateRef` values, artifact-reference mappings, and
+`dryml-experiment-data` v3 format. It stores declared column kinds, ordered row
+facts, exact `ObjectRef`/`StateRef` values, artifact-reference mappings, and
 status cells without opening an Experiment, checkpoint, Dataset, or Artifact
-payload. Pandas is only a lazy inspection dependency; it is not part of this
-format or a reader requirement.
+payload. V3 delegates every embedded exact reference to core's versioned
+`dryml-reference-json` envelope. The reader retains the closed v1 and v2 value
+grammars, and an existing history migrates under its established current-history
+alias when its next immutable v3 snapshot publishes.
+Pandas is only a lazy inspection dependency; it is not part of this format or a
+reader requirement.
 
 Completed `Value` Artifacts retain their result through the
 `dryml.artifacts.value` v1 envelope. A `TrainState` is ordinary Object state, not

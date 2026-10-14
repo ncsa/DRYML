@@ -1,10 +1,12 @@
+"""Ordered Dataset combinations with occurrence-local resource ownership."""
+
 from __future__ import annotations
 
 from typing import Any
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import merge_spec_trees
-from dryml.data.dataset import Dataset
+from dryml.data.dataset import Dataset, DatasetCursor
 
 
 def _pack_tree(args: tuple[Any, ...], kwargs: dict[str, Any] | None = None) -> Any:
@@ -53,17 +55,13 @@ def _iter_dataset_leaves(tree):
     raise TypeError(f"Zip expects Dataset leaves, got {type(tree).__name__}.")
 
 
-def _as_cardinality(value):
-    if isinstance(value, Cardinality):
-        return value
-    return Cardinality.finite(int(value))
-
-
 def _min_cardinality(cardinalities):
+    cardinalities = tuple(cardinalities)
+    if any(cardinality.is_finite and cardinality.require_finite() == 0 for cardinality in cardinalities):
+        return Cardinality.finite(0)
     finite_values = []
     saw_infinite = False
     for cardinality in cardinalities:
-        cardinality = _as_cardinality(cardinality)
         if cardinality.is_unknown:
             return Cardinality.UNKNOWN
         if cardinality.is_infinite:
@@ -82,7 +80,6 @@ def _sum_cardinality(cardinalities):
     total = 0
     saw_unknown = False
     for cardinality in cardinalities:
-        cardinality = _as_cardinality(cardinality)
         if cardinality.is_infinite:
             return Cardinality.INFINITE
         if cardinality.is_unknown:
@@ -96,7 +93,18 @@ def _sum_cardinality(cardinalities):
 
 
 class Zip(Dataset):
-    """Combine one or more datasets in parallel into matching element trees."""
+    """Combine Dataset occurrences in parallel into matching element trees.
+
+    Args:
+        *sources: Positional Dataset leaves or a nested tree of Dataset leaves.
+        **named_sources: Alternative named Dataset branches.
+
+    Iteration returns a lazy closeable cursor, stopping at the shortest input in
+    positional pull order. Each occurrence owns its independent traversal, and
+    partial acquisition failures close all acquired inputs in reverse order.
+    Primary acquisition/read failures survive cleanup errors. Invalid or empty
+    source trees raise TypeError/ValueError without opening a traversal.
+    """
 
     _stream_operator = "zip"
 
@@ -107,13 +115,18 @@ class Zip(Dataset):
         super().__init__(spec=_map_dataset_tree(self.sources, lambda ds: ds.spec))
 
     def __iter__(self):
-        iterators = [iter(ds) for ds in _iter_dataset_leaves(self.sources)]
+        """Return a lazy cursor closing all inputs, including partial acquisition."""
+
+        return DatasetCursor._from_generator(self._iterate)
+
+    def _iterate(self, owner):
+        iterators = [owner._own(owner._call(ds.iterator)) for ds in _iter_dataset_leaves(self.sources)]
 
         while True:
             values = []
             for it in iterators:
                 try:
-                    values.append(next(it))
+                    values.append(owner._pull(it))
                 except StopIteration:
                     return
 
@@ -132,14 +145,49 @@ class Zip(Dataset):
                     return [build(v) for v in tree]
                 raise TypeError(f"Zip expects Dataset leaves, got {type(tree).__name__}.")
 
-            yield build(self.sources)
+            yield owner._call(build, self.sources)
 
     def __len__(self) -> Cardinality:
-        return _min_cardinality(ds.__len__() for ds in _iter_dataset_leaves(self.sources))
+        return _min_cardinality(
+            ds.yield_cardinality() for ds in _iter_dataset_leaves(self.sources)
+        )
+
+    def example_cardinality(self) -> Cardinality:
+        """Return a total only when every zipped branch is provably aligned.
+
+        Returns:
+            A shared source example cardinality when every branch has the same
+            known yield and example total; zero when any branch is known empty;
+            otherwise ``Cardinality.UNKNOWN``.
+
+        Side Effects:
+            None. This inspects declarations and never opens source iterators.
+        """
+
+        output = self.yield_cardinality()
+        if output.is_finite and output.require_finite() == 0:
+            return Cardinality.finite(0)
+        sources = tuple(_iter_dataset_leaves(self.sources))
+        yields = tuple(ds.yield_cardinality() for ds in sources)
+        examples = tuple(ds.example_cardinality() for ds in sources)
+        if any(value.is_unknown for value in yields) or any(value.is_unknown for value in examples):
+            return Cardinality.UNKNOWN
+        if len(set(yields)) != 1 or len(set(examples)) != 1:
+            return Cardinality.UNKNOWN
+        return examples[0]
 
 
 class Chain(Dataset):
-    """Yield all elements from each source dataset in sequence."""
+    """Yield all elements from independently owned Dataset sources in sequence.
+
+    Args:
+        *sources: Nonempty ordered Dataset sequence.
+
+    Iteration returns a closeable cursor and defers later acquisition until its
+    predecessors end. Acquisition/read failures close acquired resources without
+    masking the primary error; acquisition StopIteration is causal RuntimeError.
+    Invalid/empty source sequences raise TypeError/ValueError during construction.
+    """
 
     _stream_operator = "chain"
 
@@ -153,11 +201,56 @@ class Chain(Dataset):
         super().__init__(spec=merge_spec_trees([source.spec for source in self.sources]))
 
     def __iter__(self):
+        """Return a lazy traversal owning each source acquired in declaration order."""
+
+        return DatasetCursor._from_generator(self._iterate)
+
+    def _iterate(self, owner):
         for source in self.sources:
-            yield from source
+            iterator = owner._own(owner._call(source.iterator))
+            while True:
+                try:
+                    value = owner._pull(iterator)
+                except StopIteration:
+                    break
+                yield value
 
     def __len__(self) -> Cardinality:
-        return _sum_cardinality(source.__len__() for source in self.sources)
+        return _sum_cardinality(source.yield_cardinality() for source in self.sources)
+
+    def example_cardinality(self) -> Cardinality:
+        """Sum source totals only when their batch representations are compatible.
+
+        Returns:
+            The sum of all known source example totals for uniformly batched or
+            uniformly unbatched sources; otherwise ``Cardinality.UNKNOWN``.
+
+        Side Effects:
+            None. This inspects declarations and never opens source iterators.
+        """
+
+        examples = tuple(source.example_cardinality() for source in self.sources)
+        if any(value.is_unknown for value in examples):
+            return Cardinality.UNKNOWN
+        modes = {_example_mode(source) for source in self.sources}
+        if None in modes or len(modes) != 1:
+            return Cardinality.UNKNOWN
+        return _sum_cardinality(examples)
+
+
+def _example_mode(dataset: Dataset) -> str | None:
+    """Classify one complete TensorSpec tree's top-level example representation."""
+
+    try:
+        from dryml.data.dataset import _spec_tensor_leaves
+
+        leaves = _spec_tensor_leaves(dataset.spec, strict=True)
+    except (TypeError, ValueError):
+        return None
+    if not leaves:
+        return None
+    batched = {leaf.batched for leaf in leaves}
+    return "batched" if batched == {True} else "unbatched" if batched == {False} else None
 
 
 __all__ = ["Chain", "Zip"]

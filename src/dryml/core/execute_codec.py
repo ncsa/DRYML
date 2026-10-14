@@ -424,6 +424,7 @@ class _Encoder:
                 "resumable": value.resumable,
                 "return_state_ref": value.return_state_ref,
                 "store_parameter": value.store_parameter,
+                "invocation_parameters": dict(value._invocation_parameters),
             }
         if type(value) is _ManagedComposite:
             descriptor = value._descriptor
@@ -720,7 +721,7 @@ class _Decoder:
             "function": {"tag", "code", "name", "defaults", "kwdefaults", "annotations", "captures", "freevars"},
             "class": {"tag", "name", "bases", "namespace"},
             "instance": {"tag", "type", "fields"},
-            "managed_declaration": {"tag", "authored", "executable", "owner", "member", "resumable", "return_state_ref", "store_parameter"},
+            "managed_declaration": {"tag", "authored", "executable", "owner", "member", "resumable", "return_state_ref", "store_parameter", "invocation_parameters"},
             "managed_composite": {"tag", "declaration", "outer", "owner", "member"},
             "managed_target": {"tag", "receiver", "declaration"},
             "managed_composite_target": {"tag", "receiver", "composite"},
@@ -803,6 +804,12 @@ class _Decoder:
                         or type(node["resumable"]) is not bool
                         or type(node["return_state_ref"]) is not bool
                         or (node["store_parameter"] is not None and type(node["store_parameter"]) is not str)
+                        or not isinstance(node["invocation_parameters"], Mapping)
+                        or not all(
+                            type(name) is str
+                            and policy in {"observer_factories", "observer_strict"}
+                            for name, policy in node["invocation_parameters"].items()
+                        )
                 ):
                     _fail("malformed managed target", f"$.node[{index}]")
                 references.extend((node["authored"], node["executable"], node["owner"]))
@@ -1093,6 +1100,10 @@ class _Decoder:
                     return_state_ref=node["return_state_ref"],
                     store_parameter=node["store_parameter"],
                 )
+                if node["invocation_parameters"]:
+                    declaration._declare_invocation_parameters(
+                        **dict(node["invocation_parameters"]),
+                    )
                 declaration.__set_name__(owner, node["member"])
             except (TypeError, ValueError) as error:
                 raise CoreCallCodecError(
@@ -1267,6 +1278,77 @@ def _managed_store_control(fn: Any, kwargs: Mapping[str, Any]) -> tuple[dict[str
     return {"version": 1, "store_parameter": name, "store": store}, values
 
 
+def _validate_managed_invocation_parameters(
+        fn: Any, kwargs: Mapping[str, Any]) -> None:
+    """Reject unsupported transient managed controls before worker submission.
+
+    Only declaration-owned observer slots use this private channel. Live callback
+    instances remain local; workers receive inert :class:`FactorySpec` values and
+    build their observers after runtime admission.
+    """
+
+    descriptor = getattr(fn, "_descriptor", None)
+    policies = getattr(descriptor, "_invocation_parameters", {})
+    if not policies:
+        return
+    from .factory import FactorySpec
+
+    for name, policy in policies.items():
+        if name not in kwargs:
+            continue
+        value = kwargs[name]
+        if policy == "observer_strict":
+            if type(value) is not bool:
+                _fail("malformed observer strict policy", f"$.kwargs[{name!r}]")
+            continue
+        if policy != "observer_factories":
+            _fail("unsupported managed invocation control", f"$.kwargs[{name!r}]")
+        if value is None:
+            continue
+        if type(value) not in {list, tuple} or len(value) > 64:
+            _fail("malformed observer factory collection", f"$.kwargs[{name!r}]")
+        for index, factory in enumerate(value):
+            if type(factory) is not FactorySpec:
+                _fail(
+                    "live telemetry observer; use FactorySpec for worker construction",
+                    f"$.kwargs[{name!r}][{index}]",
+                )
+            _validate_observer_factory(factory, f"$.kwargs[{name!r}][{index}]", 0)
+
+
+def _validate_observer_factory(value: Any, path: str, depth: int) -> None:
+    """Require bounded plain worker-construction configuration."""
+
+    from .factory import FactorySpec
+    from .symbol import ImportRef, SourceSpec
+
+    if depth > 32:
+        _fail("observer factory configuration depth", path)
+    if value is None or type(value) in {bool, int, float, str, bytes}:
+        return
+    if isinstance(value, (ImportRef, SourceSpec)) or type(value) in _PATH_TYPES.values():
+        return
+    if isinstance(value, FactorySpec):
+        _validate_observer_factory(value.target, f"{path}.target", depth + 1)
+        for index, item in enumerate(value.args):
+            _validate_observer_factory(item, f"{path}.args[{index}]", depth + 1)
+        for key, item in value.kwargs.items():
+            if type(key) is not str:
+                _fail("observer factory configuration", f"{path}.kwargs")
+            _validate_observer_factory(item, f"{path}.kwargs[{key!r}]", depth + 1)
+        return
+    if isinstance(value, (tuple, list, set, frozenset)):
+        for index, item in enumerate(value):
+            _validate_observer_factory(item, f"{path}[{index}]", depth + 1)
+        return
+    if isinstance(value, Mapping):
+        for index, (key, item) in enumerate(value.items()):
+            _validate_observer_factory(key, f"{path}.key[{index}]", depth + 1)
+            _validate_observer_factory(item, f"{path}.value[{index}]", depth + 1)
+        return
+    _fail("live observer factory configuration", path)
+
+
 def _decode_managed_store_control(target: Any, data: Any) -> tuple[str | None, Store | None]:
     """Validate and rebuild a declaration-owned Store control on the worker."""
 
@@ -1314,6 +1396,7 @@ def encode_invocation(
     owner = description.owner
     if description.native_modality != "sync":
         raise CoreCallCodecError("core execution transport rejected async or generator target")
+    _validate_managed_invocation_parameters(fn, kwargs)
     encoder = _Encoder(limit_bytes=limit_bytes, allow_assertions=True)
     if not isinstance(update_targets, tuple):
         raise CoreCallCodecError("core execution transport requires tuple update targets")

@@ -3,7 +3,7 @@ import pytest
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import TensorSpec
-from dryml.data import ArrayDataset, Dataset, DatasetExhaustedError, Map, Pipe, Project
+from dryml.data import ArrayDataset, Cast, Dataset, DatasetExhaustedError, Map, Pipe, Project
 from dryml.methods import Method, traits
 
 
@@ -162,3 +162,36 @@ def test_prepared_map_graph_skip_and_replay_keep_iteration_dependent_calls():
     second = graph.iterator()
     assert int(next(second)) == 10
     assert method.calls == [0, 1, 2, 0]
+
+
+@pytest.mark.parametrize("prepared", (False, True))
+@pytest.mark.parametrize("unknown_backend", (False, True))
+def test_retained_map_execution_compiles_and_selects_only_at_resolution(monkeypatch, prepared, unknown_backend):
+    """Ordinary/prepared cursors retain invokers after known or cursor-local resolution."""
+    from dryml.core import signatures
+    compiled, selections = [], []
+    original_compile = signatures.compile_signature
+    original_select = Method.find_implementation
+
+    def select(self, *args, **kwargs):
+        selections.append(type(self))
+        return original_select(self, *args, **kwargs)
+
+    monkeypatch.setattr(signatures, "compile_signature",
+                        lambda target, **kw: (compiled.append(target), original_compile(target, **kw))[1])
+    monkeypatch.setattr(Method, "find_implementation", select)
+    for length in (5, 100):
+        source = ArrayDataset(np.arange(length, dtype=np.int64),
+                              spec=TensorSpec("int64", shape=(), backend=None if unknown_backend else "numpy"))
+        method = Cast("float64") if unknown_backend else Pipe(Cast("float64"), Cast("float32"))
+        mapped = Map(source, method)
+        if prepared:
+            graph = mapped.method_graph()
+            graph.learn()
+            cursor = graph.iterator()
+        else:
+            cursor = mapped.iterator()
+        assert next(cursor) == 0
+        resolved = len(compiled), len(selections)
+        assert list(cursor) == list(range(1, length))
+        assert (len(compiled), len(selections)) == resolved

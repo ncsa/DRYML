@@ -13,7 +13,7 @@ from .model import (
 )
 from .lowering import CandidateRelation, LoweredEdgeStep, LoweredGraphPlan, ScanPolicy
 from .metadata import MetadataField, MetadataPredicate, field
-from .identity import IdentitySet, Occurrence, OccurrenceSet, SourceEvidence
+from .identity import IdentitySet, ObjectSelectorSet, Occurrence, OccurrenceSet, SourceEvidence
 from .query import IdentityQuery, OccurrenceQuery, intersection, union
 from .relationships import EdgePolicy, RelationshipKind, RelationshipPath
 from .result import ObjectResultSet
@@ -35,6 +35,7 @@ __all__ = [
     "MetadataPredicate",
     "IdentityQuery",
     "IdentitySet",
+    "ObjectSelectorSet",
     "Occurrence",
     "OccurrenceQuery",
     "OccurrenceSet",

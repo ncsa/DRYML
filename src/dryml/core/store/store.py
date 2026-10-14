@@ -21,6 +21,9 @@ from .records import (
 )
 
 
+_DELEGATED_LOCAL_STATE = object()
+
+
 class StoreAuthorityError(RuntimeError):
     """Raised when Store authority is malformed, missing, or incompatible."""
 
@@ -103,6 +106,18 @@ class LocalStateSource:
     borrowed immutable authority and cannot be discarded by its consumer.
     ``eagerly_validated`` is private provenance: metadata-only exact-restore
     sources cannot be rebound, copied, or published as verified authority.
+    A Repo preflight cut may expire while this source remains borrowed: direct
+    paths keep their Store lifetime, and closing a ZipStore removes extracted
+    paths. Consumers must not use this value as proof in a later authority cut.
+
+    Args:
+        store (Store): Backend owning the source and its lifetime.
+        handle (object): Backend-private borrowed directory/staging handle.
+        manifest (LocalStateManifest): Validated local inventory and identity.
+        eagerly_validated (bool): Whether every payload byte was authenticated;
+            false sources are restore-only and fail eager publication/rebinding.
+
+    Creating this frozen value does not perform I/O or extend backend lifetime.
     """
 
     store: "Store"
@@ -112,7 +127,13 @@ class LocalStateSource:
 
 
 class Store(ABC):
-    """Backend-neutral authority contract for complete snapshot-local records."""
+    """Backend-neutral authority contract for complete snapshot-local records.
+
+    Backends own public record/metadata readers, local source lifetimes, and
+    capability failures. Optional protected read-cut seams preserve those public
+    paths by default; explicit backend opt-in may share successful evidence under
+    a retained Repo cut, but cannot establish cross-operation payload validity.
+    """
 
     @property
     @abstractmethod
@@ -286,6 +307,24 @@ class Store(ABC):
     def iter_stored_root_records(self):
         """Yield authoritative stored-root membership records."""
 
+    def _validated_definition_root_inventory(
+        self,
+    ) -> tuple[tuple[DefinitionRecord, ...], tuple[StoredRootRecord, ...]]:
+        """Return validated definition and stored-root record tuples.
+
+        Callers retain the authority read fence for a coherent cut. Backends may
+        reuse decoded definitions when checking marker targets; this compatibility
+        fallback uses the existing complete readers. Missing targets raise
+        StoreAuthorityError. No payloads, indexes, or authority writes are needed.
+        """
+
+        definitions = tuple(self.iter_definition_records())
+        roots = tuple(self.iter_stored_root_records())
+        digests = {record.digest for record in definitions}
+        if any(root.definition_digest not in digests for root in roots):
+            raise StoreAuthorityError("Stored-root membership targets a missing DefinitionRecord.")
+        return definitions, roots
+
     def read_stored_root_record(self, digest: str) -> StoredRootRecord | None:
         """Read and validate one stored-root membership by DefinitionRecord digest.
 
@@ -355,6 +394,54 @@ class Store(ABC):
         """Validate one snapshot-local payload manifest and return it."""
 
         raise NotImplementedError("This Store does not validate snapshot-local payloads.")
+
+    def _read_snapshot_for_cut(self, cut, digest):
+        """Inspect via public readers by default, without memoizing validity.
+
+        Built-ins may supply a complete bundle under an explicitly owner-checked
+        cut. Custom implementations retain their reader errors and lifetimes.
+        Only an eligible built-in read receives the cut's narrow prepared-content
+        interface. Fresh sibling bytes/shape and enclosing domain checks remain
+        mandatory; this seam establishes no ambient or Store-attached fact owner.
+        """
+        cut.check(self)
+        record = self.read_state_ref_record(digest)
+        if record is None:
+            return None
+        return record, None, None
+
+    def _definition_record_for_cut(self, cut, digest):
+        """Preserve custom public definition readers under an explicit cut."""
+        cut.check(self)
+        return self.read_definition_record(digest)
+
+    def _snapshot_metadata_for_cut(self, cut, digest):
+        """Read public metadata only after the caller admits the record target."""
+        cut.check(self)
+        return self.read_snapshot_metadata(digest)
+
+    def _state_ref_records_for_cut(self, cut):
+        """Enumerate through the established reader unless a backend opts in."""
+        cut.check(self)
+        return self.iter_state_ref_records()
+
+    def _open_local_state_for_cut(self, cut, reference, path, *, defer_payload=False):
+        """Keep custom openers and deferred adapters authoritative and uncached.
+
+        Eligible built-ins may return ``_DELEGATED_LOCAL_STATE`` only after their
+        complete matching bundle proves a stateful path is delegated, not local.
+        Eager probes still promote all advertised local siblings before returning
+        that marker without discarding cut evidence. Generic public-reader
+        KeyError keeps its missing-placement routing meaning, but the cut
+        conservatively discards evidence from the failed probe. Authority errors
+        remain failures without child fallback.
+        """
+        cut.check(self)
+        if defer_payload:
+            adapter = getattr(self, "_open_local_state_for_exact_load", None)
+            if adapter is not None:
+                return adapter(reference, path)
+        return self.open_local_state(reference, path)
 
     def _validate_local_state_source_for_publication(
             self, source: LocalStateSource) -> None:
@@ -751,11 +838,17 @@ class Store(ABC):
         Raises:
             StoreAuthorityError: If referenced definition authority is missing
                 or malformed.
+
+        Side Effects:
+            Reads complete definition/root inventory through the protected
+            validated seam, permitting backend-local decode reuse. Standalone
+            readers retain complete authority checks. No payloads, index writes,
+            or authority writes are involved; callers needing a coherent cut
+            retain the Store authority read fence.
         """
 
-        records = {
-            record.digest: record for record in self.iter_definition_records()
-        }
+        inventory, roots = self._validated_definition_root_inventory()
+        records = {record.digest: record for record in inventory}
         definitions = []
         by_hash = {}
 
@@ -766,7 +859,7 @@ class Store(ABC):
             bucket.append(definition)
             definitions.append(definition)
 
-        for root in self.iter_stored_root_records():
+        for root in roots:
             record = records.get(root.definition_digest)
             if record is None:
                 raise StoreAuthorityError(

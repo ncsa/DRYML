@@ -24,11 +24,57 @@
             "test_shared_factory_repetition_does_not_tie_backend_instances"
           ]
         },
+        "tests/models/test_jax_models.py": {
+          "rationale": "Retain tiny selected-call and weak-owner regressions from U4; model construction, persistence, and training matrices retain heavy qualification.",
+          "functions": [
+            "test_functional_model_supports_raw_selected_map_and_autoencoder_calls",
+            "test_cached_native_element_adaptation_does_not_retain_model"
+          ]
+        },
+        "tests/multi_framework/test_value_handoffs.py": {
+          "rationale": "Retain every new U4 handoff/failure regression with four tier-pinned CPU directions covering all backends; the full direct and nested JAX direction products remain available in heavy/exhaustive qualification.",
+          "functions": [
+            "test_dense_cpu_handoffs_preserve_values_dtype_shape_and_owned_storage",
+            "test_nested_handoff_preserves_container_types_and_short_dynamic_batch",
+            "test_torch_requires_grad_and_object_values_fail_before_crossing",
+            "test_jax_narrowing_rejects_before_target_construction",
+            "test_unknown_runtime_leaf_rejects_before_extraction_or_target_activation",
+            "test_nested_gradient_rejection_preflights_all_leaves_before_extraction",
+            "test_raw_validation_precedes_callback_and_never_replaces_selected_inference"
+          ]
+        },
         "tests/models/test_qualification_contract.py": {
           "rationale": "Retain the fresh-process manifest/case and minimal schema guard only; real TFDS/training qualification remains explicit opt-in.",
           "functions": [
             "test_qualification_case_round_trip_retains_exact_w3_reference_without_live_handles",
             "test_fixture_manifest_portable_tfds_identity_excludes_local_root"
+          ]
+        },
+        "tests/models/test_dataset_training_integration.py": {
+          "rationale": "Run lazy-import Dataset cardinality/native delivery, U1 causal source cleanup, U4 element/batched selected calls, and managed local/subprocess JAX representatives; eager legacy training modules remain heavy.",
+            "functions": [
+              "test_generic_trainer_and_empty_artifacts_use_final_dataset_cardinality",
+              "test_native_trainers_consume_authored_dataset_batches",
+              "test_jax_trainer_consumes_authored_dataset_batches",
+            "test_jax_qualification_model_runs_on_authored_dataset_batches",
+            "test_jax_managed_local_publishes_exact_history_and_independent_owner_state",
+            "test_jax_managed_subprocess_restores_exact_graph",
+            "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
+            "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
+            "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
+          ]
+        },
+        "tests/models/test_jax_imports.py": {
+          "rationale": "Exercise the selected CPU JAX/Flax/Optax stack while retaining lazy generic imports.",
+          "functions": [
+            "test_generic_and_jax_facade_imports_defer_training_dependencies",
+            "test_selected_jax_training_stack_exposes_nnx_and_optax"
+          ]
+        },
+        "tests/models/test_jax_training.py": {
+          "rationale": "Retain one first-class Flax NNX training representative in the routine qualified stack.",
+          "functions": [
+            "test_jax_training_updates_first_class_flax_nnx_model"
           ]
         },
         "tests/models/test_qualification_persistence_fixtures.py": {
@@ -68,9 +114,11 @@
           ]
         },
         "tests/methods/test_preparation.py": {
-          "rationale": "Retain one known-spec preparation and retained-call validation path without optional backends.",
+          "rationale": "Retain known-spec validation and direct reprepare clearing semantics without optional backends.",
           "functions": [
-            "test_known_spec_learning_selects_without_a_body_and_validates_dynamic_batches"
+            "test_known_spec_learning_selects_without_a_body_and_validates_dynamic_batches",
+            "test_failed_direct_reprepare_clears_old_plan_without_partial_publication",
+            "test_learning_conversion_failure_keeps_published_signature"
           ]
         },
         "tests/methods/test_stream_ir.py": {
@@ -80,23 +128,31 @@
           ]
         },
         "tests/methods/test_conversion_planning.py": {
-          "rationale": "Retain local handoff planning without executing an optional backend or transfer.",
+          "rationale": "Retain passive selected inference, Fold/AutoEncoder role facts, missing-dependency diagnostics, and one tiny installed-backend successor handoff.",
           "functions": [
-            "test_known_spec_handoff_records_one_immutable_graph_edge_without_body_execution"
+            "test_known_spec_handoff_records_one_immutable_graph_edge_without_body_execution",
+            "test_selected_outputs_use_consumer_inputs_independently_of_raw_constraint",
+            "test_converted_pipe_project_and_map_share_selected_output_facts",
+            "test_missing_runtime_dependency_uses_backend_context_error",
+            "test_autoencoder_completes_outer_backend_hint_before_native_only_children",
+            "test_fold_roles_infer_selected_consumer_outputs_before_invocation",
+            "test_autoencoder_explicit_output_does_not_require_decoder_inference"
           ]
         },
         "tests/qualification/test_ml_workflow_local.py": {
           "rationale": "Retain explicit no-download fixture preparation and fixed-case construction only; real TFDS/training remains opt-in.",
           "functions": [
             "test_preparation_requires_opt_in_and_never_overwrites_authority",
+            "test_all_workload_artifact_definitions_preflight_without_framework_imports",
+            "test_workload_cache_uses_selected_control_store",
             "test_case_is_closed_and_carries_manifest_environment_seed_and_fixture_identity"
           ]
         },
         "tests/qualification/test_ml_workflow_cpu.py": {
-          "rationale": "Retain deterministic 24-cell request enumeration and closed fake worker transport, not the real CPU/recovery gates.",
+          "rationale": "Retain deterministic 36-cell request enumeration and closed fake worker transport, not the real CPU/recovery gates.",
           "functions": [
-            "test_worker_matrix_enumerates_all_24_primary_cells_once_and_excludes_supplement",
-            "test_fake_execute_routes_all_24_requests_without_live_transport_or_framework_import"
+            "test_worker_matrix_enumerates_all_36_primary_cells_once_and_excludes_supplement",
+            "test_fake_execute_routes_all_36_requests_without_live_transport_or_framework_import"
           ]
         },
         "tests/qualification/test_ml_workflow_accelerated.py": {
@@ -147,7 +203,8 @@
           "rationale": "Retain direct and real-subprocess Value/Fold publication, fresh lightweight restoration, and honest missing-input rerun failure; caller-supplied Ray remains explicit opt-in evidence.",
           "functions": [
             "test_value_execution_publishes_a_result_only_state_for_a_fresh_reader",
-            "test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader"
+            "test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader",
+            "test_fold_worker_failed_read_repairs_and_returns_exact_completion_receipt"
           ]
         },
         "tests/artifacts/test_fold_resume.py": {
@@ -159,7 +216,13 @@
             "test_fold_store_override_controls_checkpoint_and_final_publication",
             "test_fold_resume_fails_if_fresh_source_exhausts_during_saved_skip",
             "test_fold_resume_crosses_a_fresh_process_without_cursor_transport",
-            "test_fold_resumes_reservoir_and_confusion_carry_without_losing_components"
+            "test_fold_resumes_reservoir_and_confusion_carry_without_losing_components",
+            "test_fold_failed_read_retains_active_authority_before_repaired_resume",
+            "test_fold_frozen_progress_compatible_recovery",
+            "test_fold_legacy_exhausted_admission_preserves_valid_receiver_and_provenance",
+            "test_fold_frozen_progress_roundtrip_and_downgrade_gate",
+            "test_fold_malformed_progress_does_not_partially_install",
+            "test_fold_incompatible_progress_rejected_before_runtime_effects"
           ]
         },
         "tests/artifacts/test_cached_dataset.py": {
@@ -303,42 +366,129 @@
           "functions": [
             "test_store_capture_includes_represented_references_and_owned_derivatives",
             "test_broad_capture_reuses_one_record_family_pass_and_exact_state_reads_directly",
-            "test_object_reference_authority_conflicts_fail_within_and_across_stores"
+            "test_object_reference_authority_conflicts_fail_within_and_across_stores",
+            "test_exact_embedded_state_and_owned_projection_preserve_full_knowledge",
+            "test_exact_direct_state_collect_completes_embedded_source_evidence",
+            "test_exact_state_scoped_scalars_validate_complete_reference_authority",
+            "test_exact_state_negative_requires_complete_knowledge_or_scan_refusal",
+            "test_selected_combinations_and_replacement_tokens_do_not_hide_conflicts",
+            "test_repo_knowledge_reuse_separates_cache_tiers_and_retained_lookup",
+            "test_metadata_replacement_has_fresh_failure_facts_and_invalidates_results",
+            "test_zip_inventory_preserves_uncommitted_transaction_domains"
+          ]
+        },
+        "tests/core/test_repo_query_refresh.py": {
+          "rationale": "Retain U2 one-shot lineage including common-base independent requests, partial/publication failure, compatible completion and overrides alongside U3 target, optional-absence exact-positive admission, demand, topology and ownership contracts.",
+          "functions": [
+            "test_u2_shared_branches_fresh_request_and_direct_construction",
+            "test_u2_disjoint_algebra_scope_extension_and_outer_overrides",
+            "test_u2_partial_failure_retries_only_unresolved_and_keeps_evaluation_completion",
+            "test_u2_optional_late_target_empty_store_and_completed_configuration_check",
+            "test_u2_same_producer_operands_preserve_external_scope_bindings",
+            "test_u2_completed_descriptor_is_rechecked_after_consistent_reconfiguration",
+            "test_u2_publication_failure_is_retryable_and_demand_recovery_outranks_reuse",
+            "test_v3_query_observes_committed_external_writes",
+            "test_current_process_save_updates_v3_cached_and_stored_membership",
+            "test_u3_equivalent_destinations_coalesce_in_both_store_repo_orders",
+            "test_u3_conflicting_presentations_refuse_before_maintenance",
+            "test_u3_backend_manager_path_mismatch_refuses_before_maintenance",
+            "test_u3_independent_domains_each_validate",
+            "test_u3_demand_consumer_rejects_conflicting_repo_presentations",
+            "test_u3_foreign_persisted_target_refuses_before_any_target_maintenance",
+            "test_u3_optional_absence_and_explicit_configured_unavailability",
+            "test_u3_optional_absence_exact_positive_scan_controls",
+            "test_u3_warning_precedes_ready_validation_once",
+            "test_u3_always_repeats_ready_validation_and_inert_paths_do_nothing",
+            "test_u3_ready_explicit_scan_admission_precedes_backend_io",
+            "test_u3_demand_recovery_reports_actual_rebuild_and_failed_scan",
+            "test_u3_unavailable_consumer_preflight_keeps_authority_fallback",
+            "test_u3_explicit_failure_merges_started_work_in_finally",
+            "test_u3_topology_attachment_after_retention_waits_until_next_terminal",
+            "test_u3_explicit_recapture_keeps_cycle_and_cumulative_ledger",
+            "test_u3_target_resolution_retains_operand_and_scope_associations",
+            "test_u3_inherited_repo_refuses_before_parent_configuration_lock"
           ]
         },
         "tests/core/test_query_v3_restrictions.py": {
-          "rationale": "Retain typed metadata validation, failed-read disclosure, refresh controls, and exact-selective coverage checks; run the full save-backed restriction matrix in focused verification.",
+          "rationale": "Retain typed metadata failure, external-scope scan refusals, warnings, exact refresh-policy validation, backend-unavailability consumers, demand-driven auto boundaries, explicit refresh controls, and exact-selective coverage; sample the external scope/policy product by axis and keep its full matrix in focused verification.",
           "functions": [
+            "test_u2_completed_prefix_admission_and_fresh_authority",
             "test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals",
+            "test_v3_refresh_rejects_values_outside_its_exact_policy_domain",
+            "test_v3_repo_refresh_reports_only_completed_reconciliation",
+            "test_v3_repo_auto_refresh_tolerates_index_open_unavailability",
+            "test_v3_store_auto_refresh_tolerates_index_open_unavailability",
             "test_v3_metadata_read_failure_is_not_a_missing_field",
             "test_v3_metadata_keeps_scalar_types_and_validates_every_populated_leaf",
-            "test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed"
+            "test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed",
+            "test_v3_exact_state_exists_uses_the_digest_addressed_positive_authority_path",
+            "test_v3_controls_report_or_reject_required_inventory_scans",
+            "test_u6_fixed_external_scopes_reject_before_inventory",
+            "test_u6_external_scope_warning_precedes_io_once",
+            "test_u6_forced_refresh_cannot_authorize_recovery_scan",
+            "test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities"
           ]
         },
         "tests/core/test_query_v3_traversal.py": {
-          "rationale": "Retain typed state associations, direct existential projections, and bounded evidence with lightweight detached fixtures.",
+          "rationale": "Retain typed associations, existential projections, missing/dirty disabled-refresh behavior across terminals, inherited budgets, external target scopes, and bounded evidence.",
           "functions": [
+            "test_u2_occurrences_projections_closure_share_and_fixed_results_detach",
             "test_v3_closure_uses_typed_associations_and_owned_state_adjacency",
             "test_v3_direct_projections_ignore_raw_caps_without_enumerating_occurrences",
             "test_v3_direct_projection_visits_each_diamond_state_once",
-            "test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships"
+            "test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships",
+            "test_u6_projection_disabled_refresh_survives_every_terminal",
+            "test_u6_projection_outer_budget_depth_and_witness_controls",
+            "test_u6_occurrence_external_target_scope_cannot_escape_controls",
+            "test_occurrence_combines_producer_and_external_metadata_authority",
+            "test_occurrence_metadata_preflight_does_not_admit_or_project_scope_holders"
           ]
         },
         "tests/core/test_query_v3_execution.py": {
-          "rationale": "Retain terminal cut-retry failure, collision-free prefix ordering, and zero-limit behavior without the full save-backed algebra matrix.",
+          "rationale": "Retain cut-retry failure, cumulative broad/fixed/exact admissions, demand/retry readmission, outer policy overrides, selective fallback, zero work, and late authority failures without the full save-backed algebra matrix.",
           "functions": [
+            "test_u2_completed_request_uses_fresh_scoped_conflict_proof",
             "test_u5_repeated_cut_instability_fails_without_a_partial_answer",
             "test_u5_fixed_prefix_does_not_reencode_unique_graph_digests",
             "test_u5_zero_prefix_validates_without_opening_source_inventory",
-            "test_u5_scalar_terminals_stop_at_distinct_cardinality_thresholds"
+            "test_u5_scalar_terminals_stop_at_distinct_cardinality_thresholds",
+            "test_exact_state_scoped_read_failure_is_visible_before_scalar_stop",
+            "test_empty_candidates_do_not_suppress_external_alias_conflict",
+            "test_algebra_validates_selected_roots_before_operand_filtering",
+            "test_bounded_inventory_combines_external_stored_authority",
+            "test_bounded_fallback_algebra_combines_complete_authority",
+            "test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut",
+            "test_u6_budget_reserves_broad_domain_before_scalar_verification",
+            "test_u6_fixed_repeated_stages_share_admissions_and_outer_controls",
+            "test_u6_exact_paths_reserve_before_direct_verification",
+            "test_u6_recapture_retains_spent_admissions",
+            "test_u6_operand_policy_conflicts_and_outer_overrides",
+            "test_u6_repeated_fixed_bounded_stages_do_not_replace_the_cut",
+            "test_u6_selective_state_miss_readmits_complete_inventory",
+            "test_u6_selective_cdef_miss_readmits_complete_inventory",
+            "test_u7_bounded_stage_reuses_existing_complete_cut"
           ]
         },
         "tests/core/test_query_v3_index.py": {
-          "rationale": "Retain corrupt-sidecar recovery and the no-historical-rescan incremental SQLite coverage invariant in routine runs; keep larger schema/recovery and backend parity matrices focused.",
+          "rationale": "Retain graph-exact explicit reconciliation (including main-only collision ties and malformed authority), U6 budgets and U7 main/empty-page completeness, retained non-repairing cuts, entry failure, derived-only policy recovery, and cumulative fallback; the larger main policy product is exhaustive-only.",
           "functions": [
+            "test_explicit_cycle_repairs_graph_distinct_main_without_dirty_token",
+            "test_explicit_cycle_compares_encoded_collision_ties",
+            "test_explicit_cycle_rejects_malformed_ready_store_authority",
             "test_corrupt_sidecar_rebuild_preserves_authoritative_record_bytes",
+            "test_metadata_rebuild_keeps_overlapping_dirty_token_without_payload_access",
             "test_incremental_v3_publication_does_not_rescan_historical_projection_rows",
-            "test_clean_incremental_save_does_not_enumerate_historical_references"
+            "test_clean_incremental_save_does_not_enumerate_historical_references",
+            "test_u6_indexed_take_admissions_replicas_and_ordering_lookahead",
+            "test_u6_paging_fallback_readmits_domain_and_retains_expenditure",
+            "test_u6_collision_bucket_verified_lookahead_is_charged",
+            "test_u6_disabled_refresh_retains_one_view_through_pages",
+            "test_u7_main_outside_ready_index_requires_complete_fallback",
+            "test_u7_empty_index_inspects_replaced_main_and_missing_target",
+            "test_u7_malformed_main_is_visible_before_empty_page",
+            "test_u7_sidecar_policy_and_derived_only_recovery",
+            "test_u7_entry_readiness_failure_releases_cut_before_inventory",
+            "test_u7_failed_direct_proof_discards_selective_cut_without_refund"
           ]
         },
         "tests/core/test_query_v3_acceptance.py": {
@@ -373,13 +523,16 @@
             "test_same_cdef_in_two_stores_deduplicates_and_tracks_sources",
             "test_equivalent_store_instances_share_physical_identity",
             "test_v3_query_uses_replaced_connected_store_reference",
-            "test_structural_query_is_fresh_while_exact_state_ref_load_restores_state"
+            "test_structural_query_is_fresh_while_exact_state_ref_load_restores_state",
+            "test_u7_reversed_store_order_acquires_unique_sorted_retained_cuts"
           ]
         },
         "tests/core/test_repo_query_performance_contract.py": {
           "rationale": "Retain canonical multi-Store bounded paging with duplicate frontiers and exact work counters in the representative gate.",
           "functions": [
-            "test_v3_multistore_take_uses_only_canonical_index_frontier_pages"
+            "test_u2_completed_exact_positive_has_no_maintenance_inventory",
+            "test_v3_multistore_take_uses_only_canonical_index_frontier_pages",
+            "test_reference_validation_visits_roots_linearly_per_selected_cut"
           ]
         },
         "tests/core/test_repo_save_load.py": {
@@ -391,7 +544,8 @@
             "test_structural_load_without_state_restore_builds_from_definition_authority",
             "test_reopen_v3_query_discovers_definition_authority_without_materializing",
             "test_u7_exact_state_ref_restores_nested_independent_local_states",
-            "test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph"
+            "test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph",
+            "test_real_borrowed_reads_share_budget_but_not_authority_or_public_values"
           ]
         },
         "tests/core/test_repo_save_routing.py": {
@@ -484,7 +638,10 @@
           "functions": [
             "test_callbacks_receive_exact_committed_receipt_in_list_order",
             "test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails",
+            "test_callback_can_save_and_manage_a_disjoint_derived_object",
             "test_callback_cannot_begin_an_overlapping_managed_operation",
+            "test_request_arriving_during_callbacks_is_honored_at_that_checkpoint",
+            "test_post_callback_decision_revalidates_deleted_checkpoint",
             "test_caught_local_interruption_remains_terminal_and_rejects_safe_points"
           ]
         },
@@ -509,18 +666,30 @@
             "test_late_request_does_not_stale_owner_completion_or_failure",
             "test_indeterminate_completion_preserves_pending_authority_and_withholds_result",
             "test_final_save_failure_records_failed_without_a_completion_association",
-            "test_managed_workload_requires_a_materialized_receiver_and_runtime_admission"
+            "test_managed_workload_requires_a_materialized_receiver_and_runtime_admission",
+            "test_integrated_checkpoint_final_phase_budget"
           ]
         },
         "tests/managed/test_repo_routing.py": {
-          "rationale": "Retain checkpoint/final replica routing, Zip commit success/failure/interruption, route-stable resume, partial-publication rejection, reopened closure validation, and borrowed-store ownership; exhaustive mode covers repeated closure/seed layouts.",
+          "rationale": "Retain checkpoint/final replica routing, direct unequal-coverage and override fallback, independent Zip durability/cleanup failures, route-stable resume, warm deletion rejection, partial-publication rejection, and required seed coverage; exhaustive mode covers repeated closure/seed layouts.",
           "functions": [
             "test_checkpoint_and_final_preserve_per_object_replica_closures",
             "test_resume_uses_retained_checkpoint_authority_after_routes_change",
             "test_zip_commit_failure_has_report_and_never_associates_checkpoint",
             "test_interrupted_completed_zip_commit_preserves_prior_checkpoint",
             "test_replica_or_index_failure_never_associates_partial_state",
-            "test_missing_committed_replica_cannot_be_hidden_by_a_valid_replica"
+            "test_missing_committed_replica_cannot_be_hidden_by_a_valid_replica",
+            "test_reopened_nested_payloads_are_validated_once_per_durable_closure",
+            "test_reopened_root_closure_rejects_missing_nested_replica_authority",
+            "test_zip_event_follows_independent_durable_cut_and_resource_cleanup",
+            "test_uncertain_zip_commit_mints_no_event_and_retains_prior_checkpoint",
+            "test_missing_required_embedded_seed_cannot_reuse_connected_proof",
+            "test_overridden_direct_reader_preserves_independent_publication_validation",
+            "test_direct_replica_lifecycle_keeps_required_coverage_independent",
+            "test_warm_status_and_resume_reject_deleted_associated_checkpoint",
+            "test_reopened_selected_replica_payload_corruption_cannot_hide_behind_first",
+            "test_replica_promotion_opens_once_and_checks_every_local_path",
+            "test_routed_stateful_parent_replica_cuts_keep_complete_view_evidence"
           ]
         },
         "tests/managed/test_signature_integration.py": {
@@ -628,6 +797,9 @@
         }
       },
       "sampled_functions": {
+        "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings": "Represent common versus separate base sources, union/intersection, both operand orders, and pending/completed requests; retain common-base cases while focused verification covers the full product.",
+        "tests/core/test_repo_query_refresh.py::test_u3_conflicting_presentations_refuse_before_maintenance": "Represent every destination/settings/source/dirty/authority conflict and both direct and Repo presentation boundaries; focused verification retains the complete product.",
+        "tests/core/test_query_v3_restrictions.py::test_u6_fixed_external_scopes_reject_before_inventory": "Represent every external authority scope and both scan/index policies; focused verification retains the complete product.",
         "tests/core/test_execute_managed_integration.py::test_managed_decorator_orders_materialize_once_and_publish_one_final_state": "Genuine decorator-order by placement product; every member/order and placement value remains represented.",
         "tests/managed/test_execute_defaults.py::test_managed_default_resolution_uses_invocation_state_and_worker_control": "Genuine nested-state by control-selection product; every value remains represented."
       },
@@ -651,6 +823,8 @@
         "tests/runtime/test_publication_concurrency.py": "Runtime publication concurrency proof."
       },
       "must_run": {
+        "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings[True-False-union-True]": "Pin completed independent requests from one shared base so sibling scopes cannot repeat maintenance.",
+        "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings[True-True-intersection-True]": "Pin the shared-base completed intersection in reversed order alongside marginal pending and separate-base coverage.",
         "tests/core/test_execute_managed_integration.py::test_managed_decorator_orders_materialize_once_and_publish_one_final_state[subprocess-operation_afm-written_order0]": "Keep the real managed worker boundary even if parameter collection order changes.",
         "tests/managed/test_execute_defaults.py::test_managed_default_resolution_uses_invocation_state_and_worker_control[both-True]": "Pin the nested state-plus-control interaction in addition to marginal axis coverage."
       },

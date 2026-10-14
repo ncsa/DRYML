@@ -55,6 +55,13 @@ produce an ineligible report. `run` and `submit` expose the same failure as
 uncertain-delivery, and cleanup errors from owned probe/discovery lifecycles
 continue unchanged.
 
+Backend discovery may report incomplete aggregate capacity when an unrelated
+resource dimension is unknown, including an unconstrained memory charge from an
+already running worker. An affirmative backend-owned environment candidate and
+feasible world plan still prove the exact requested requirements. Without that
+scoped evidence, incomplete discovery remains ineligible; Dispatch never treats
+unknown capacity as available or turns discovery into a reservation.
+
 ## In-Process Execution
 
 `with_options(backend=InProcess()).run(fn, *args, **kwargs)` probes first, then

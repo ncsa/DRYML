@@ -167,6 +167,7 @@ class StableHashGraphHasher(GraphHasher):
             NodeKind.IMPORT_REF,
             NodeKind.SOURCE_SPEC,
             NodeKind.STATE_SELECTOR_REF,
+            NodeKind.OBJECT_SELECTOR,
             NodeKind.EXPR,
         }
 

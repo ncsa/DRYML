@@ -18,13 +18,13 @@ from dryml.core import Repo
 from dryml.core.cardinality import Cardinality
 from dryml.core import TensorSpec
 from dryml.core.store.dir import DirStore
-from dryml.data import ArrayDataset, GeneratorDataset
+from dryml.data import ArrayDataset, Batch, GeneratorDataset
 from tests.qualification.ml_workflow_fixtures import (
     FixtureManifest, FixtureManifestError, FixtureReferences, QualificationUnrun,
     REQUIRED_ENVIRONMENT_KEYS, TFDSAuthority, load_baseline,
 )
 from tests.qualification.ml_workflow_workloads import (
-    QualificationEvidence, accelerated_cases, cpu_matrix, mnist_pipeline,
+    QualificationEvidence, accelerated_cases, cpu_matrix, initialize_gpu_framework, mnist_pipeline,
     native_device_observations, preflight_gpu_framework, qualification_case_paths, selected_gpu_device,
 )
 from tests.qualification.ml_workflow_workers import (
@@ -100,11 +100,11 @@ def _gpu_evidence(manifest, case, control):
 
 
 def test_accelerated_cases_are_outside_the_matrix_and_use_noncolliding_paths(tmp_path):
-    """U12 has exactly two isolated GPU cases without changing the 24-cell matrix."""
+    """U12 has exactly two isolated GPU cases outside the 36-cell CPU matrix."""
 
     manifest, _, roots = _authority(tmp_path)
     accelerated = accelerated_cases(manifest)
-    assert len(cpu_matrix(manifest)) == 24
+    assert len(cpu_matrix(manifest)) == 36
     assert {case.case_id for case in accelerated}.isdisjoint(case.case_id for case in cpu_matrix(manifest))
     paths = [
         qualification_case_paths(
@@ -151,6 +151,23 @@ def test_missing_gpu_prerequisite_is_unrun_before_worker_launch(monkeypatch):
     )
     with pytest.raises(QualificationUnrun, match="no single usable"):
         preflight_gpu_framework("tf", visible_device="0")
+
+
+def test_jax_gpu_helpers_reject_before_probe_import_or_environment_mutation(monkeypatch):
+    """CPU-only JAX qualification cannot fall through to Torch GPU handling."""
+
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(
+        "tests.qualification.ml_workflow_workloads.subprocess.run",
+        lambda *args, **kwargs: pytest.fail("unsupported JAX must not launch a GPU probe"),
+    )
+
+    with pytest.raises(FixtureManifestError, match="accelerated"):
+        preflight_gpu_framework("jax", visible_device="0")
+    with pytest.raises(FixtureManifestError, match="accelerated"):
+        initialize_gpu_framework("jax", 1, visible_device="0")
+
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ
 
 
 def test_accelerated_evidence_rejects_missing_mixed_or_contradictory_native_device_facts(tmp_path):
@@ -267,13 +284,16 @@ def test_tensorflow_to_torch_handoff_runs_through_training_preparation_and_is_gr
 
     trainer = Training(
         optimizer=Optimizer(torch.optim.SGD, target=(model := Model(torch.nn.Linear, 1, 1)), lr=0.0),
-        loss_cls=torch.nn.MSELoss, epochs=1, batch_size=1, verbose=0,
+        loss_cls=torch.nn.MSELoss, epochs=1, verbose=0,
     )
     trainer(Experiment(
         model, trainer,
-        train_data=GeneratorDataset(
-            _tiny_tensorflow_pairs, cardinality=Cardinality.finite(2),
-            spec=(TensorSpec("float32", shape=(1,), backend="tf"), TensorSpec("float32", shape=(1,), backend="tf")),
+        train_data=Batch(
+            GeneratorDataset(
+                _tiny_tensorflow_pairs, cardinality=Cardinality.finite(2),
+                spec=(TensorSpec("float32", shape=(1,), backend="tf"), TensorSpec("float32", shape=(1,), backend="tf")),
+            ),
+            1,
         ),
     ))
 

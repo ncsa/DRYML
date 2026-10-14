@@ -1,5 +1,7 @@
 from pathlib import Path
 import builtins
+from dataclasses import replace
+import shutil
 
 import pytest
 
@@ -12,6 +14,7 @@ from dryml.core.store.records import StoreRecordError
 from dryml.core.store.store import StoreCapabilityError
 from dryml.core.store.zip import ZipStore
 from dryml.core.utils.graph.path import GraphPath
+from dryml.core.materialization import build_exact_state_load_plan
 
 
 class DeferredPayload(Serializable):
@@ -150,15 +153,21 @@ def test_zip_store_rejects_deferred_manifest_before_snapshot_install(tmp_path):
 
 
 def test_zip_store_exact_load_remains_eager_for_all_eager_manifests(tmp_path):
+    """Eager archive sources outlive their cut, but not the owning extraction."""
     store = ZipStore(tmp_path / "store.zip")
     writer = Repo(store)
     state = writer.save_object(AllEagerPayload(repo=writer))
+    plan = build_exact_state_load_plan(Repo(store), state, _defer_payload=True)
+    assert plan.actions[0].payload.eagerly_validated
     source = store.open_local_state(state, GraphPath())
+    assert plan.actions[0].payload.handle == source.handle
+    assert Path(source.handle).is_dir()
     Path(source.handle, "data", "payload.bin").write_bytes(b"corrupt")
 
     with pytest.raises(RepoLoadError, match="preflight is incomplete"):
         Repo(store).load_state_ref(state, reuse_live="never")
     store.close()
+    assert not Path(source.handle).exists()
 
 
 def test_unsupported_replica_rejects_deferred_state_after_staging_before_install(tmp_path, monkeypatch):
@@ -189,3 +198,75 @@ def test_unsupported_replica_rejects_deferred_state_after_staging_before_install
     assert tuple(primary.iter_state_ref_records()) == ()
     assert tuple(replica.iter_state_ref_records()) == ()
     replica.close()
+
+
+def test_metadata_reads_no_payload_and_deferred_proof_cannot_authorize_eager_plan(tmp_path, monkeypatch):
+    """Promotion uses stronger physical proof rather than relabeling deferred evidence."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(DeferredPayload(repo=writer))
+    source = store.open_local_state(state, GraphPath())
+    payload = Path(source.handle, "data", "payload.bin")
+    payload.write_bytes(b"corrupt")
+    original_open = builtins.open
+
+    def forbid_data_reads(path, *args, **kwargs):
+        if Path(path).parent.name == "data":
+            raise AssertionError("metadata inspection read payload bytes")
+        return original_open(path, *args, **kwargs)
+
+    reader = Repo(store)
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", forbid_data_reads)
+        assert reader.get_snapshot_metadata(state).state_ref == state
+    assert store._can_reuse_exact_validation()
+    with reader._read_cut() as cut:
+        deferred = build_exact_state_load_plan(reader, state, _defer_payload=True, _read_cut=cut)
+        assert not deferred.actions[0].payload.eagerly_validated
+        with pytest.raises(RepoLoadError, match="payload is invalid"):
+            build_exact_state_load_plan(reader, state, _read_cut=cut)
+        assert not cut.snapshots and not cut.locals and not cut.eager_snapshots
+    assert reader._topology_leases == 0
+    assert Path(deferred.actions[0].payload.handle).is_dir()
+
+
+def test_deferred_adapter_override_uses_uncached_fallback(tmp_path, monkeypatch):
+    """Exact restoration still calls an overridden adapter and preserves its error."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(DeferredPayload(repo=writer))
+
+    def reject(reference, path):
+        raise StoreCapabilityError("custom deferred adapter")
+
+    monkeypatch.setattr(store, "_open_local_state_for_exact_load", reject)
+    assert not store._can_reuse_exact_validation()
+    with pytest.raises(RepoLoadError, match="custom deferred adapter"):
+        Repo(store).load_state_ref(state, reuse_live="never")
+
+
+def test_cut_exact_validation_accepts_all_eager_v2_manifest(tmp_path):
+    """Version-two local manifests keep eager validation in restore cuts."""
+    from dryml.core import StateRef
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    original = writer.save_object(AllEagerPayload(repo=writer))
+    source = store.open_local_state(original, GraphPath())
+    manifest = replace(source.manifest, version=2)
+    stage = store.create_local_state_staging()
+    try:
+        shutil.copytree(source.handle, stage, dirs_exist_ok=True)
+        Path(stage, "manifest.record").write_bytes(manifest.to_bytes())
+        prepared = store.prepare_local_state(stage, manifest)
+        state = StateRef(original.object, {GraphPath(): manifest.state_hash})
+        metadata = replace(store.read_snapshot_metadata(original.digest()), state_ref=state)
+        store.publish_snapshot(state, evidence=metadata, local_states={GraphPath(): prepared})
+    finally:
+        store.discard_local_state_staging(stage)
+    plan = build_exact_state_load_plan(Repo(store), state, _defer_payload=True)
+    assert plan.actions[0].payload.manifest.version == 2
+    assert plan.actions[0].payload.eagerly_validated
+    Path(plan.actions[0].payload.handle, "data", "payload.bin").write_bytes(b"corrupt")
+    with pytest.raises(RepoLoadError, match="payload is invalid"):
+        build_exact_state_load_plan(Repo(store), state, _defer_payload=True)

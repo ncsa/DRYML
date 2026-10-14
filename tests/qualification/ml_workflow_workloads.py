@@ -1,12 +1,14 @@
 """Real opt-in W1/W2/W3 builders and closed qualification evidence contracts.
 
-Importing this module is NumPy-only. TensorFlow, Torch, TFDS, pandas, Stores, and
-training are reached only by a selected real runner after manifest preflight.
+Importing this module is NumPy-only. TensorFlow, Torch, JAX, Flax, Optax, TFDS,
+pandas, Stores, and training are reached only by a selected real runner after
+manifest preflight.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -19,9 +21,12 @@ from types import MappingProxyType
 
 import numpy as np
 
-from dryml.core import StateRef
-from dryml.data import ArgMax, ArrayDataset, Cast, Flatten, Map, Pipe, Project, Select
+from dryml.artifacts import Value
+from dryml.artifacts.value import _VALUE_FORMAT, _VALUE_VERSION
+from dryml.core import AutoRef, ConcreteDefinition, Definition, ObjectRef, Ref, StateRef
+from dryml.data import ArgMax, ArrayDataset, Batch, Cast, Dataset, Flatten, Map, Pipe, Project, Select, as_supervised
 from dryml.data.image import ImageNormalize
+from dryml.managed import ManagedConfig, ManagedContext, managed_operation
 
 from .ml_workflow_fixtures import (
     FixtureManifest, FixtureManifestError, QualificationUnrun, REQUIRED_ENVIRONMENT_KEYS, _reference_from_json,
@@ -31,7 +36,7 @@ from .ml_workflow_fixtures import (
 
 THRESHOLDS = {"W1": 0.80, "W2": 0.12, "W3": 0.05}
 WORKLOADS = ("W1", "W2", "W3")
-FRAMEWORKS = ("tf", "torch")
+FRAMEWORKS = ("tf", "torch", "jax")
 EXECUTION_MODES = ("local", "managed-local", "subprocess", "ray")
 CASE_KINDS = ("matrix", "tfds-tensorflow-to-torch")
 _METRIC_NAMES = {"W1": "accuracy", "W2": "reconstruction_mse", "W3": "test_mse"}
@@ -40,6 +45,127 @@ _EXECUTION_BACKENDS = {
     "local": "core-local", "managed-local": "core-local",
     "subprocess": "core-subprocess", "ray": "core-ray",
 }
+
+
+class _QualificationMetric(Value[float]):
+    """Compute one qualification metric from exact Dataset and Model authority."""
+
+    def __init__(
+            self, test_ds: Ref[AutoRef], model: Ref[AutoRef], *,
+            metric: str, x: object, y: object, fixture_store: str | None,
+    ) -> None:
+        if metric not in {"accuracy", "mse"}:
+            raise ValueError("Qualification metric must be accuracy or mse.")
+        if fixture_store is not None and (type(fixture_store) is not str or not fixture_store):
+            raise ValueError("Qualification metric fixture Store must be a nonempty path or None.")
+        self.test_ds = test_ds
+        self.model = model
+        self.metric = metric
+        self.x = x
+        self.y = y
+        self.fixture_store = fixture_store
+
+    @property
+    def ready(self) -> bool:
+        """Return whether the complete scalar result is installed."""
+
+        return self._value_is_present()
+
+    @managed_operation(resumable=True, return_state_ref=True, store_parameter="store")
+    def compute(self, *, store=None, managed: ManagedContext) -> None:
+        """Evaluate the exact saved model over the exact saved test Dataset."""
+
+        del store
+        from dryml.core import Repo
+        from dryml.core.store.dir import DirStore
+
+        fixture_repo = None
+        cursor = None
+        try:
+            if self.fixture_store is None:
+                source = self._load(self.test_ds, managed.state_repo)
+            else:
+                fixture_repo = Repo(DirStore.open_existing(
+                    self.fixture_store,
+                    query_index="none",
+                ))
+                source = self._load(self.test_ds, fixture_repo)
+            model = self._load(self.model, managed.state_repo)
+            if not isinstance(source, Dataset) or not callable(model):
+                raise TypeError("Qualification metric requires Dataset and callable Model authority.")
+            numerator = 0.0
+            denominator = 0
+            cursor = source.iterator()
+            for sample in cursor:
+                target = self._array(self._select(sample, self.y))
+                prediction = self._array(model(self._select(sample, self.x)))
+                if self.metric == "accuracy":
+                    prediction = np.argmax(prediction, axis=-1)
+                    matches = np.asarray(prediction == target)
+                    numerator += float(np.sum(matches))
+                    denominator += int(matches.size)
+                else:
+                    difference = prediction - target
+                    numerator += float(np.sum(difference * difference))
+                    denominator += int(difference.size)
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if fixture_repo is not None:
+                fixture_repo.close(flush=False)
+        if denominator == 0:
+            raise ValueError("Qualification metric cannot evaluate an empty Dataset.")
+        result = numerator / denominator
+        if not math.isfinite(result):
+            raise ValueError("Qualification metric result must be finite.")
+        self._install_value_payload({
+            "format": _VALUE_FORMAT,
+            "version": _VALUE_VERSION,
+            "present": True,
+            "result": result,
+        })
+
+    @staticmethod
+    def _load(reference, repo):
+        """Materialize one retained reference through the selected state Repo."""
+
+        if isinstance(reference, StateRef):
+            return repo.load_state_ref(
+                reference,
+                reuse_live="never",
+                cache="none",
+                source_store=repo.stores[0],
+            )
+        if isinstance(reference, ObjectRef):
+            return repo.build_object_ref(reference)
+        if isinstance(reference, ConcreteDefinition):
+            return repo._load_structural(reference, require_store=False, cache="none")
+        if isinstance(reference, Definition):
+            return repo._load_structural(
+                reference.concretize(repo=repo), require_store=False, cache="none",
+            )
+        raise TypeError("Qualification metric reference is unsupported.")
+
+    @staticmethod
+    def _select(value, path):
+        """Select one qualification tuple or mapping path."""
+
+        components = path if isinstance(path, tuple) else (path,)
+        for component in components:
+            value = value[component]
+        return value
+
+    @staticmethod
+    def _array(value):
+        """Return one native value as a host NumPy array."""
+
+        if hasattr(value, "detach"):
+            value = value.detach()
+        if hasattr(value, "cpu"):
+            value = value.cpu()
+        if hasattr(value, "numpy"):
+            value = value.numpy()
+        return np.asarray(value)
 
 
 def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
@@ -52,7 +178,9 @@ def _case_seed(manifest: FixtureManifest, framework: str) -> dict[str, int]:
     """Return exactly the fixed seeds relevant to a matrix request."""
 
     initialization = manifest.baseline["initialization"]
-    seed = initialization["tensorflow_seed" if framework == "tf" else "torch_seed"]
+    seed = initialization[
+        {"tf": "tensorflow_seed", "torch": "torch_seed", "jax": "jax_seed"}[framework]
+    ]
     if type(seed) is not int:
         raise FixtureManifestError("KTD11 initialization seed is malformed.")
     values = {"framework": seed}
@@ -71,7 +199,7 @@ def initialize_cpu_framework(framework: str, seed: int) -> None:
             from inheriting an ambient GPU/device initialization.
     """
 
-    module_name = "tensorflow" if framework == "tf" else "torch"
+    module_name = {"tf": "tensorflow", "torch": "torch", "jax": "jax"}[framework]
     if module_name in sys.modules:
         raise QualificationUnrun(f"{module_name} was initialized before CPU qualification controls.")
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -89,6 +217,12 @@ def initialize_cpu_framework(framework: str, seed: int) -> None:
             raise QualificationUnrun("PyTorch exposed a GPU despite CPU qualification controls.")
         torch.manual_seed(seed)
         torch.use_deterministic_algorithms(True)
+    elif framework == "jax":
+        os.environ["JAX_PLATFORMS"] = "cpu"
+        import jax
+
+        if any(device.platform != "cpu" for device in jax.devices()):
+            raise QualificationUnrun("JAX exposed a non-CPU device despite CPU qualification controls.")
     else:  # pragma: no cover - QualificationCase validates the framework first.
         raise FixtureManifestError("Unsupported qualification framework.")
 
@@ -143,6 +277,8 @@ def initialize_gpu_framework(framework: str, seed: int, *, visible_device: str |
         then enables that framework's deterministic controls.
     """
 
+    if framework not in {"tf", "torch"}:
+        raise FixtureManifestError("Unsupported accelerated qualification framework.")
     module_name = "tensorflow" if framework == "tf" else "torch"
     if module_name in sys.modules:
         raise QualificationUnrun(f"{module_name} was initialized before GPU qualification controls.")
@@ -164,8 +300,6 @@ def initialize_gpu_framework(framework: str, seed: int, *, visible_device: str |
         torch.cuda.set_device(0)
         torch.manual_seed(seed)
         torch.use_deterministic_algorithms(True)
-    else:  # pragma: no cover - QualificationCase validates the framework first.
-        raise FixtureManifestError("Unsupported qualification framework.")
     return "gpu:0"
 
 
@@ -185,8 +319,8 @@ def preflight_gpu_framework(framework: str, *, visible_device: str | None = None
         worker will receive. The coordinator imports no optional framework.
     """
 
-    if framework not in FRAMEWORKS:
-        raise FixtureManifestError("Unsupported qualification framework.")
+    if framework not in {"tf", "torch"}:
+        raise FixtureManifestError("Unsupported accelerated qualification framework.")
     selected = selected_gpu_device(visible_device)
     code = (
         "import sys\n"
@@ -212,8 +346,16 @@ def preflight_gpu_framework(framework: str, *, visible_device: str | None = None
 
 
 def _normalize_native_device(value: object) -> str:
-    """Normalize native TF/Keras and Torch device spellings to closed evidence."""
+    """Normalize native TF/Keras, Torch, and JAX devices to closed evidence."""
 
+    platform = getattr(value, "platform", None)
+    if platform == "cpu":
+        return "cpu"
+    if platform == "gpu":
+        index = getattr(value, "id", None)
+        if type(index) is int and index >= 0:
+            return f"gpu:{index}"
+        raise FixtureManifestError("Qualification observed a JAX GPU without a valid device id.")
     raw = str(value).strip().lower()
     if raw == "cpu" or "/device:cpu:" in raw or raw.startswith("cpu:"):
         return "cpu"
@@ -235,7 +377,7 @@ def _observed_native_device(value: object) -> object | None:
 
     device = getattr(value, "device", None)
     if device is not None:
-        return device
+        return device() if callable(device) else device
     handle = getattr(value, "handle", None)
     return None if handle is None else getattr(handle, "device", None)
 
@@ -292,6 +434,13 @@ def _native_parameter_values_for_node(model) -> tuple[object, ...] | None:
         from dryml.torch.measurements import parameter_sets
 
         return parameter_sets(target)[1]
+    if backend == "jax":
+        from dryml.jax.measurements import parameter_sets
+
+        parameters = getattr(model, "parameters", ())
+        effective = getattr(model, "trainable_parameters", None)
+        trainables = effective("jax") if callable(effective) else parameters
+        return parameter_sets(parameters, trainables)[1]
     if backend is not None:
         raise FixtureManifestError(
             f"Qualification model uses unsupported native backend {backend!r}."
@@ -356,7 +505,7 @@ def native_device_observations(
         model: Native or DRYML-wrapped native model whose trainable parameters
             prove persisted model placement.
         training_tensors: Actual native tensors consumed at the training call.
-        execution_tensors: Native forward-call results observed at that boundary.
+        execution_tensors: Native results returned by the executed training call.
 
     Returns:
         A closed mapping containing all normalized placements and their one shared
@@ -387,6 +536,50 @@ def native_device_observations(
     if len(observed) != 1:
         raise FixtureManifestError("Qualification native parameters/training/execution tensors have mixed devices.")
     return MappingProxyType({**normalized, "observed_device": next(iter(observed))})
+
+
+@contextmanager
+def observe_jax_training_tensors(
+        trainer, *, training_tensors: list[object], execution_tensors: list[object],
+):
+    """Observe concrete host-boundary arrays around a qualification JAX update.
+
+    Instrumentation wraps the JITted update callable rather than the traced model
+    body, so retained evidence consists of concrete device arrays instead of JAX
+    tracers. Qualification workers are isolated and execute one case at a time.
+    """
+
+    def collect(destination, value):
+        if isinstance(value, Mapping):
+            for item in value.values():
+                collect(destination, item)
+        elif isinstance(value, (tuple, list)):
+            for item in value:
+                collect(destination, item)
+        else:
+            destination.append(value)
+
+    trainer_type = type(trainer)
+    original_update = trainer_type._native_update
+
+    def capture_update(*args, **kwargs):
+        update = original_update(*args, **kwargs)
+
+        def observed_update(*transition_args, **transition_kwargs):
+            if not training_tensors:
+                collect(training_tensors, transition_args[-2:])
+            result = update(*transition_args, **transition_kwargs)
+            if not execution_tensors:
+                collect(execution_tensors, result[0])
+            return result
+
+        return observed_update
+
+    trainer_type._native_update = staticmethod(capture_update)
+    try:
+        yield
+    finally:
+        trainer_type._native_update = staticmethod(original_update)
 
 
 def prepare_exact_model_for_formula(model, case: "QualificationCase") -> None:
@@ -579,14 +772,14 @@ def accelerated_cases(manifest: FixtureManifest) -> tuple[QualificationCase, Qua
 
 
 def cpu_matrix(manifest: FixtureManifest) -> tuple[QualificationCase, ...]:
-    """Return the fixed 24 requests without opening fixture payloads or workers."""
+    """Return the fixed 36 requests without opening fixture payloads or workers."""
 
     cases = tuple(
         case_from_manifest(manifest, workload=workload, framework=framework, execution=execution)
         for workload in WORKLOADS for framework in FRAMEWORKS for execution in EXECUTION_MODES
     )
-    if len(cases) != 24:
-        raise AssertionError("ML workflow CPU matrix must contain exactly 24 cases.")
+    if len(cases) != 36:
+        raise AssertionError("ML workflow CPU matrix must contain exactly 36 cases.")
     identities = {(case.workload, case.framework, case.execution) for case in cases}
     if len(identities) != len(cases) or identities != {
             (workload, framework, execution)
@@ -679,15 +872,24 @@ def _paths_overlap(left: Path, right: Path) -> bool:
     return left == right or left in right.parents or right in left.parents
 
 
-def mnist_pipeline(source, *, autoencode: bool = False):
+def mnist_pipeline(source, *, autoencode: bool = False, label_dtype: str | None = None):
     """Build the public U4-U6 MNIST Method graph from a supplied TFDS Dataset.
 
     Image projection, normalization, flatten/layout adaptation, cast, and target
-    projection are all graph nodes. No caller-written backend conversion is used.
+    projection are all graph nodes. ``label_dtype`` lets the caller author a
+    backend-supported sparse-label dtype without relying on implicit narrowing.
+    No caller-written backend conversion is used.
     """
 
     image = Pipe(Select(0), ImageNormalize(), Flatten(), Cast("float32"))
-    return Map(source, Project(x=image, y=image if autoencode else Select(1)))
+    target = image if autoencode else Select(1)
+    if label_dtype is not None and not autoencode:
+        target = Pipe(target, Cast(label_dtype))
+    return Map(
+        source,
+        Project(image, target),
+        preserves_examples=True,
+    )
 
 
 def w1_label_methods():
@@ -1046,13 +1248,17 @@ def validate_evidence(
         raise FixtureManifestError("W3 evidence changed the retained fixture StateRef.")
     try:
         expected_model = evidence.final_experiment_ref.at("model")
-        expected_test = evidence.final_experiment_ref.reference_value_at("test_data")
+        expected_test = evidence.final_experiment_ref.at("test_data")
     except ValueError as error:
         raise FixtureManifestError("Final Experiment StateRef lacks exact model/test bindings.") from error
     if expected_model != evidence.model_ref or expected_test != evidence.test_ref:
         raise FixtureManifestError("Evidence model/test bindings disagree with final Experiment StateRef.")
-    if case.workload == "W3" and evidence.test_ref != manifest.references.numpy:
-        raise FixtureManifestError("W3 Experiment did not retain the manifest NumPy cache StateRef.")
+    if (
+            case.workload == "W3"
+            and evidence.test_ref.object != manifest.references.numpy.object):
+        raise FixtureManifestError(
+            "W3 Experiment did not retain the manifest NumPy cache object identity."
+        )
     coordinator_refs = evidence.worker["coordinator_validated_refs"]
     if coordinator_refs is None:
         raise FixtureManifestError("Worker provisional evidence has no coordinator final-reference authority.")
@@ -1107,7 +1313,7 @@ def validate_evidence(
             raise FixtureManifestError("Qualification receipt does not equal exact selected Store authority.")
         if (
                 final_experiment.last_state_ref.at("model") != evidence.model_ref
-                or final_experiment.last_state_ref.reference_value_at("test_data") != evidence.test_ref):
+                or final_experiment.last_state_ref.at("test_data") != evidence.test_ref):
             raise FixtureManifestError("Loaded final Experiment bindings disagree with evidence authority.")
         observed_parameters = _native_parameter_values(model)
         observed_devices = {
@@ -1191,7 +1397,7 @@ def _absolute_output_store(value):
     return Path(value).expanduser().resolve(strict=False)
 
 
-def _model_and_training(framework: str, workload: str):
+def _model_and_training(framework: str, workload: str, *, seed: int):
     """Construct the fixed native model/trainer pair only in a selected real run."""
 
     from dryml import F
@@ -1201,62 +1407,246 @@ def _model_and_training(framework: str, workload: str):
         from dryml.models.torch import Optimizer, Sequential, Training
         if workload == "W1":
             model = Sequential(layer_defs=(F("Linear", 784, 128), F("ReLU"), F("Linear", 128, 10)))
-            trainer = Training(optimizer=Optimizer(torch.optim.Adam, target=model, lr=1e-3), loss_cls=torch.nn.CrossEntropyLoss, epochs=1, batch_size=64, x_path="x", y_path="y", verbose=0)
+            trainer = Training(optimizer=Optimizer(torch.optim.Adam, target=model, lr=1e-3), loss_cls=torch.nn.CrossEntropyLoss, epochs=1, verbose=0)
         elif workload == "W2":
             model = AutoEncoder(Sequential(layer_defs=(F("Linear", 784, 32), F("ReLU"))), Sequential(layer_defs=(F("Linear", 32, 784), F("Sigmoid"))))
-            trainer = Training(optimizer=Optimizer(torch.optim.Adam, target=model, lr=1e-3), loss_cls=torch.nn.MSELoss, epochs=1, batch_size=64, x_path="x", y_path="y", verbose=0)
+            trainer = Training(optimizer=Optimizer(torch.optim.Adam, target=model, lr=1e-3), loss_cls=torch.nn.MSELoss, epochs=1, verbose=0)
         else:
             model = Sequential(layer_defs=(F("Linear", 1, 32), F("Tanh"), F("Linear", 32, 1)))
-            trainer = Training(optimizer=Optimizer(torch.optim.Adam, target=model, lr=1e-3), loss_cls=torch.nn.MSELoss, epochs=10, batch_size=64, x_path="x", y_path="y", verbose=0)
+            trainer = Training(optimizer=Optimizer(torch.optim.Adam, target=model, lr=1e-3), loss_cls=torch.nn.MSELoss, epochs=10, verbose=0)
         return model, trainer
     if framework == "tf":
         import tensorflow as tf
         from dryml.models.tf import BasicTraining, Loss, Optimizer, Sequential
         if workload == "W1":
             model = Sequential(layer_defs=(F("Dense", units=128, activation="relu"), F("Dense", units=10)))
-            trainer = BasicTraining(optimizer=Optimizer(tf.keras.optimizers.Adam, learning_rate=1e-3), loss=Loss(tf.keras.losses.SparseCategoricalCrossentropy, from_logits=True), epochs=1, batch_size=64, x_path="x", y_path="y", verbose=0)
+            trainer = BasicTraining(optimizer=Optimizer(tf.keras.optimizers.Adam, learning_rate=1e-3), loss=Loss(tf.keras.losses.SparseCategoricalCrossentropy, from_logits=True), epochs=1, verbose=0)
         elif workload == "W2":
             model = AutoEncoder(Sequential(layer_defs=(F("Dense", units=32, activation="relu"),)), Sequential(layer_defs=(F("Dense", units=784, activation="sigmoid"),)))
-            trainer = BasicTraining(optimizer=Optimizer(tf.keras.optimizers.Adam, learning_rate=1e-3), loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, batch_size=64, x_path="x", y_path="y", verbose=0)
+            trainer = BasicTraining(optimizer=Optimizer(tf.keras.optimizers.Adam, learning_rate=1e-3), loss=Loss(tf.keras.losses.MeanSquaredError), epochs=1, verbose=0)
         else:
             model = Sequential(layer_defs=(F("Dense", units=32, activation="tanh"), F("Dense", units=1)))
-            trainer = BasicTraining(optimizer=Optimizer(tf.keras.optimizers.Adam, learning_rate=1e-3), loss=Loss(tf.keras.losses.MeanSquaredError), epochs=10, batch_size=64, x_path="x", y_path="y", verbose=0)
+            trainer = BasicTraining(optimizer=Optimizer(tf.keras.optimizers.Adam, learning_rate=1e-3), loss=Loss(tf.keras.losses.MeanSquaredError), epochs=10, verbose=0)
+        return model, trainer
+    if framework == "jax":
+        from dryml.core import TensorSpec
+        from dryml.models.jax import Model, Optimizer, Training
+
+        if workload == "W1":
+            widths, hidden, output, epochs = (784, 128, 10), "relu", None, 1
+            loss = _jax_sparse_categorical_loss
+        elif workload == "W2":
+            widths, hidden, output, epochs = (784, 32, 784), "relu", "sigmoid", 1
+            loss = _jax_mse
+        else:
+            widths, hidden, output, epochs = (1, 32, 1), "tanh", None, 10
+            loss = _jax_mse
+        model = Model(
+            F(_jax_mlp_init_factory),
+            F(_jax_mlp_apply_factory, hidden_activation=hidden, output_activation=output),
+            widths,
+            output_spec=TensorSpec("float32", shape=(widths[-1],), backend="jax"),
+            seed=seed,
+        )
+        trainer = Training(
+            optimizer=Optimizer(F(_jax_adam_factory, learning_rate=1e-3)),
+            loss=loss,
+            epochs=epochs,
+            verbose=0,
+        )
         return model, trainer
     raise FixtureManifestError("Unsupported qualification framework.")
 
 
-def build_workload(repo, case: QualificationCase, *, mnist_source: Callable[[str, bool], object] | None = None):
+def _jax_mlp_init(key, widths):
+    """Initialize a deterministic dense JAX network for selected qualification."""
+
+    import jax
+
+    keys = jax.random.split(key, len(widths) - 1)
+    layers = []
+    for layer_key, input_width, output_width in zip(keys, widths[:-1], widths[1:]):
+        limit = math.sqrt(6.0 / (input_width + output_width))
+        layers.append({
+            "weight": jax.random.uniform(
+                layer_key, (input_width, output_width), minval=-limit,
+                maxval=limit, dtype=jax.numpy.float32,
+            ),
+            "bias": jax.numpy.zeros((output_width,), dtype=jax.numpy.float32),
+        })
+    return layers, {}
+
+
+def _jax_mlp_apply(
+        parameters, mutable_state, rng, value, training, *,
+        hidden_activation, output_activation):
+    """Apply the qualification dense network as one pure JAX candidate."""
+
+    import jax
+
+    del training
+    next_rng, _ = jax.random.split(rng)
+    result = value
+    for index, layer in enumerate(parameters):
+        result = result @ layer["weight"] + layer["bias"]
+        activation = output_activation if index == len(parameters) - 1 else hidden_activation
+        if activation == "relu":
+            result = jax.nn.relu(result)
+        elif activation == "tanh":
+            result = jax.numpy.tanh(result)
+        elif activation == "sigmoid":
+            result = jax.nn.sigmoid(result)
+    return result, mutable_state, next_rng
+
+
+def _jax_mlp_init_factory():
+    """Build the definition-compatible qualification initializer."""
+
+    return _jax_mlp_init
+
+
+def _jax_mlp_apply_factory(*, hidden_activation, output_activation):
+    """Build the definition-compatible qualification apply callable."""
+
+    from functools import partial
+
+    return partial(
+        _jax_mlp_apply,
+        hidden_activation=hidden_activation,
+        output_activation=output_activation,
+    )
+
+
+def _jax_adam_factory(*, learning_rate):
+    """Build the qualification Optax optimizer lazily in a selected worker."""
+
+    import optax
+
+    return optax.adam(learning_rate)
+
+
+def _jax_mse(predictions, targets):
+    """Return scalar mean squared error for JAX qualification."""
+
+    import jax
+
+    return jax.numpy.mean((predictions - targets) ** 2)
+
+
+def _jax_sparse_categorical_loss(predictions, targets):
+    """Return scalar sparse softmax loss for JAX qualification."""
+
+    import optax
+
+    return optax.softmax_cross_entropy_with_integer_labels(predictions, targets).mean()
+
+
+def build_workload(
+        repo, case: QualificationCase, *, managed: ManagedConfig,
+        mnist_source: Callable[[str, bool], object] | None = None,
+):
     """Build real Experiment W1/W2/W3 workflows from a manifest-derived request.
+
+    Args:
+        repo: Isolated case output Repo receiving model, Dataset, and result state.
+        case: Closed manifest-derived workload and backend selection.
+        managed: Managed authority selecting the output Repo and request control
+            Store for W1/W2 cache publication.
+        mnist_source: Prepared no-download TFDS source factory required by W1/W2.
+
+    Returns:
+        A configured Experiment whose metric recipe binds to exact checkpoint
+        model and test Dataset references.
+
+    Raises:
+        QualificationUnrun: If W1/W2 has no prepared source or native framework
+            initialization cannot honor the selected case.
+        FixtureManifestError: If the case selects an unsupported framework.
+
+    Side Effects:
+        Initializes the selected native framework and publishes the fixed W1/W2
+        test slice to the output Repo using the request's control Store.
 
     W1/W2 require a caller-provided already-prepared TFDS source factory. W3 uses
     the exact manifest StateRef embedded in ``case`` and never regenerates test
-    samples. All metrics are checkpoint-bound Artifacts.
+    samples. W1/W2 materialize their fixed test slice into the case output Store
+    so every metric has exact stateful Dataset authority. All metrics are
+    checkpoint-bound Artifacts.
     """
 
+    from dryml.artifacts import CachedDataset
     from dryml.core import Par
-    from dryml.metrics import classifier_accuracy, regressor_mse
     from dryml.models import Experiment
 
     if case.accelerator == "gpu":
         initialize_gpu_framework(case.framework, case.seed["framework"])
     else:
         initialize_cpu_framework(case.framework, case.seed["framework"])
-    model, trainer = _model_and_training(case.framework, case.workload)
+    model, trainer = _model_and_training(
+        case.framework, case.workload, seed=case.seed["framework"],
+    )
     if case.workload in {"W1", "W2"}:
         if mnist_source is None:
             raise QualificationUnrun("W1/W2 require caller-prepared TFDS fixture sources.")
-        train = mnist_pipeline(mnist_source("train[:4096]", case.tensorflow_mode), autoencode=case.workload == "W2")
-        test = mnist_pipeline(mnist_source("test[:1024]", case.tensorflow_mode), autoencode=case.workload == "W2")
-        test_ref = repo.save_object(test)
+        label_dtype = "int32" if case.framework == "jax" and case.workload == "W1" else None
+        train = Batch(
+            mnist_pipeline(
+                mnist_source("train[:4096]", case.tensorflow_mode),
+                autoencode=case.workload == "W2",
+                label_dtype=label_dtype,
+            ),
+            64,
+        )
+        test = mnist_pipeline(
+            mnist_source("test[:1024]", case.tensorflow_mode),
+            autoencode=case.workload == "W2",
+            label_dtype=label_dtype,
+        )
+        test_cache = CachedDataset(test, repo=repo)
+        test_ref = test_cache.compute(
+            codec="numpy",
+            store=repo.stores[0],
+            managed=managed,
+        )
+        test_data = None if test_ref is None else test_cache
     else:
-        train = polynomial_samples(seed=case.seed["train"], count=4096)
+        train = Batch(
+            as_supervised(
+                polynomial_samples(seed=case.seed["train"], count=4096),
+                "x",
+                "y",
+            ),
+            64,
+        )
         test_ref = case.w3_test_ref
+        test_data = repo.load_state_ref(test_ref, reuse_live="never")
+    if test_data is not None:
+        repo.cache_strong(test_data)
     if case.workload == "W1":
-        artifact_name, artifact = "accuracy", classifier_accuracy(Par("this.test_data"), Par("this.model"), classes=tuple(range(10)), prediction_labels=ArgMax(axis=-1), target_labels=Select())
+        artifact_name = "accuracy"
+        artifact = Definition(
+            _QualificationMetric,
+            Par("this.test_data"),
+            Par("this.model"),
+            metric="accuracy",
+            x=(0,),
+            y=(1,),
+            fixture_store=None,
+        )
     else:
-        artifact_name, artifact = _METRIC_NAMES[case.workload], regressor_mse(Par("this.test_data"), Par("this.model"), mode="global")
+        artifact_name = _METRIC_NAMES[case.workload]
+        x_path, y_path = ((0,), (1,)) if case.workload == "W2" else ("x", "y")
+        artifact = Definition(
+            _QualificationMetric,
+            Par("this.test_data"),
+            Par("this.model"),
+            metric="mse",
+            x=x_path,
+            y=y_path,
+            fixture_store=None if case.workload == "W2" else case.fixture_store,
+        )
     return Experiment(
-        model, trainer, train_data=train, test_data=test_ref,
+        model, trainer, train_data=train, test_data=test_data,
         artifacts={artifact_name: artifact}, checkpoint_every_steps=32,
     )
 
@@ -1264,6 +1654,6 @@ def build_workload(repo, case: QualificationCase, *, mnist_source: Callable[[str
 __all__ = [
     "CASE_KINDS", "EXECUTION_MODES", "FRAMEWORKS", "QualificationCase", "QualificationCasePaths", "QualificationEvidence", "THRESHOLDS", "WORKLOADS",
     "accelerated_cases", "accuracy_formula", "build_w3_fixtures", "build_workload", "case_from_manifest", "cpu_matrix",
-    "initialize_cpu_framework", "initialize_gpu_framework", "mnist_pipeline", "mse_formula", "native_device_evidence", "native_device_observations", "polynomial_samples", "preflight_gpu_framework", "prepare_exact_model_for_formula", "qualification_case_paths", "require_real_qualification", "run_local_case", "selected_gpu_device",
+    "initialize_cpu_framework", "initialize_gpu_framework", "mnist_pipeline", "mse_formula", "native_device_evidence", "native_device_observations", "observe_jax_training_tensors", "polynomial_samples", "preflight_gpu_framework", "prepare_exact_model_for_formula", "qualification_case_paths", "require_real_qualification", "run_local_case", "selected_gpu_device",
     "supplemental_tfds_torch_case", "validate_evidence", "w1_label_methods",
 ]

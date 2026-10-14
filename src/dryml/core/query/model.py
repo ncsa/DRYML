@@ -1,3 +1,9 @@
+"""Query policy types, detached reports, identities, and execution counters.
+
+Backend refresh policies describe one call; Query owns any shared cadence.
+Reports record performed work and issues, not reusable Store authority proofs.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -7,7 +13,16 @@ from ..cdef_graph import EdgeKind
 from .path import DefinitionPath
 
 
-RefreshPolicy = Literal[False, "auto", True]
+RefreshPolicy = Literal[False, "auto", True, "always"]
+"""Disable maintenance, demand readiness recovery, or request explicit cycles.
+
+Query True creates a lazy one-shot request shared by ordinary derivatives; always
+reconciles each participating terminal. Direct backend calls independently perform
+one cycle. Completed True uses auto demand behavior, not reused authority facts.
+False still reads fresh authority,
+and auto leaves unconsumed indexes untouched. Invalid Query policy values raise
+ValueError before IO. Policy declaration itself performs no work.
+"""
 ClassMatchPolicy = Literal["selector", "exact"]
 QueryDomain = Literal["stored", "cached", "known", "nested"]
 QueryProjection = Literal["definitions", "owners", "object_refs", "state_refs"]
@@ -188,7 +203,13 @@ class QueryIndexCorrupt(QueryIndexError):
 
 
 class QueryIndexBusy(QueryIndexError):
-    pass
+    """Report retryable index contention or same-thread refresh self-reentry.
+
+    Accepts ordinary Exception message arguments and performs no IO. Query
+    terminals raise this before waiting on their own in-flight request; callers
+    must leave the owning cycle and retry through a later terminal. Backend build
+    claims retain their existing contention behavior.
+    """
 
 
 class QueryIndexDirty(QueryIndexError):
@@ -270,7 +291,10 @@ class ReconcileReport:
 
     `changed` records whether the index was modified. `validated` captures
     whether the pass performed consistency validation in addition to any
-    rebuild or repair action.
+    rebuild or repair action. It is not a success flag: historical issues survive
+    successful repair, and an error issue may follow visible activation. Generation
+    fields describe the observed validation/activation cut, definitions_scanned
+    counts captured roots, and diagnostics may include started inventory work.
     """
 
     backend: str
@@ -700,6 +724,19 @@ class AllOccurrenceTraversalSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class QueryExplanation:
+    """Detached query policy, chosen actions, work counters, and result diagnostics.
+
+    ``refresh`` is the declared policy; V3 ``refresh_action`` aggregates actual
+    actions by precedence rebuild > validate > waited > reused > none, including
+    demand recovery. Waited reports joined attempt completion; reused is prior
+    compatible request completion, not new reconciliation or authority evidence.
+    Backend-specific reports retain their own phase names.
+    ``store_scan_count`` counts started inventories, including maintenance and
+    failed/retried scans, independently of identity-verification admissions.
+    Request waiters never receive owner inventory charges.
+    Remaining fields describe candidate, graph, page, and source-plan work.
+    Construction records supplied values without IO or retained backend resources.
+    """
     domain: str
     refresh: RefreshPolicy
     refresh_action: str = "none"
@@ -822,6 +859,14 @@ class ResultUniverse:
 
 @dataclass(slots=True)
 class QueryStats:
+    """Mutable execution counters optionally supplied to backend lifecycle calls.
+
+    ``store_scan_count`` charges started authority inventories once, including
+    failed validation/rebuild/hydration and retries; it is never refunded.
+    ``refresh_action`` records the actual maintenance phase rather than replacement
+    credit for another owner. Other fields track evaluation/admission/page work.
+    Construction has no IO; callers mutate counters and can detach an explanation.
+    """
     refresh_action: str = "none"
     store_scan_count: int = 0
     universe_size: int | None = None

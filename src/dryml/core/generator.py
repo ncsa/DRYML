@@ -526,7 +526,7 @@ def _project_selector_definition_roles(
     def project(current: object) -> object:
         if current is _UNKNOWN:
             return current
-        if isinstance(current, (Expr, QuotedDef)):
+        if isinstance(current, (Expr, QuotedDef, ConcreteDefinition)):
             return current
         marker = id(current)
         if marker in memo:
@@ -713,6 +713,8 @@ def _loose_selector(value: Definition, *, traverse_refs: bool = False):
             return _UNKNOWN
         if isinstance(current, Expr):
             return _UNKNOWN
+        if isinstance(current, ConcreteDefinition):
+            return current
         if isinstance(current, DefLink):
             if current.kind is EdgeKind.MATERIALIZE:
                 target = project(current.target)

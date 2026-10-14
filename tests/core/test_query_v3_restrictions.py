@@ -15,6 +15,7 @@ from dryml.core import (
     Selector,
     Serializable,
     StateRef,
+    Template,
     selector,
 )
 from dryml.core.domains import UniformFromSet
@@ -71,6 +72,20 @@ class V3FactoryOwner(Object):
         self.factory = factory
 
 
+class V3TemplateOwner(Serializable):
+    """Stateful fixture retaining one inert Template-role Definition."""
+
+    def __init__(self, recipe: Template):
+        self.recipe = recipe
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        """Write one deterministic marker for exact-reference query coverage."""
+
+        from pathlib import Path
+
+        Path(dest_dir, "value").write_text("template-owner", encoding="utf-8")
+
+
 class V3Variadic(Object):
     """Selector fixture with semantic var-positional and var-keyword paths."""
 
@@ -101,6 +116,25 @@ def test_v3_structural_and_exact_selection_preserve_fixed_candidate_universe(tmp
     assert second.object not in fixed.collect()
 
 
+def test_resolved_definition_matches_equivalent_quoted_template_graph(tmp_path):
+    """Authored Template values match their canonical quoted reference form."""
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    authored = Definition(
+        V3TemplateOwner,
+        Definition(V3Leaf, "quoted"),
+    )
+    owner = repo.load_or_build(authored)
+    state = repo.save_object(owner)
+    exact = authored.concretize(repo=repo)
+    exact_members = repo.query().sel(exact).collect()
+
+    assert exact.graph_equal(state.definition)
+    assert len(exact_members) == 3
+    assert exact_members.query().sel(authored).count() == 3
+    assert repo.query().sel(authored).count() == 3
+
+
 def test_v3_reference_filters_are_subsets_and_namespace_validation_allocates_no_identity(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     state = _saved(repo, "value")
@@ -116,7 +150,7 @@ def test_v3_reference_filters_are_subsets_and_namespace_validation_allocates_no_
         query.namespace(("bad-part",))
 
 
-def test_v3_exact_state_selection_uses_the_digest_addressed_authority_path(tmp_path, monkeypatch):
+def test_v3_exact_state_exists_uses_the_digest_addressed_positive_authority_path(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     state = _saved(repo, "value")
@@ -124,7 +158,7 @@ def test_v3_exact_state_selection_uses_the_digest_addressed_authority_path(tmp_p
         store, "iter_state_ref_records", lambda: pytest.fail("exact StateRef performed an inventory scan")
     )
 
-    assert IdentityQuery.from_store(store).sel(state).state_refs().one() == state
+    assert IdentityQuery.from_store(store).sel(state).state_refs().exists()
 
 
 def test_v3_object_ref_selector_keeps_its_existing_state_members(tmp_path):
@@ -152,35 +186,66 @@ def test_v3_controls_report_or_reject_required_inventory_scans(tmp_path):
     with pytest.raises(Exception, match="inventory scan"):
         IdentityQuery.from_store(store).scan_policy("forbid").collect()
     exact = IdentityQuery.from_store(store).sel(state).state_refs().scan_policy("forbid")
-    assert exact.explain().fast_path == "exact-state-ref"
-    assert exact.explain(analyze=True).source_cuts == 1
-    assert exact.one() == state
+    assert exact.explain().scan_required
+    assert exact.exists()
+    with pytest.raises(Exception, match="inventory scan"):
+        exact.one()
+    with pytest.raises(Exception, match="inventory scan"):
+        exact.explain(analyze=True)
 
 
 def test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals(
         tmp_path, monkeypatch):
-    """Refresh executes once per terminal and warn reports a required scan."""
+    """Authority-only auto skips maintenance; explicit cycles use Store owners."""
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(store)
     _saved(repo, "value")
     calls = []
     monkeypatch.setattr(
-        repo._query_index,
+        store.open_query_index(),
         "refresh",
         lambda policy, **_kwargs: calls.append(policy),
     )
 
     with pytest.warns(RuntimeWarning, match="authoritative inventory scan"):
         assert repo.query().scan_policy("warn").exists()
-    assert calls == ["auto"]
+    assert calls == []
     assert repo.query().refresh(True).exists()
-    assert calls == ["auto", True]
+    assert calls == [True]
     assert repo.query().refresh(False).exists()
-    assert calls == ["auto", True]
+    assert calls == [True]
     with pytest.raises(QueryError, match="inventory scan"):
         repo.query().scan_policy("forbid").exists()
-    assert calls == ["auto", True]
+    assert calls == [True]
+
+
+def test_u2_completed_prefix_admission_and_fresh_authority(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from dryml.core.query.model import QueryWouldScanError
+    from dryml.core.store.records import DefinitionRecord
+    from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    root = Definition(V3Parent, None).concretize()
+    store.write_definition_record(DefinitionRecord(root))
+    store.rebuild_query_index()
+    base = store.query().refresh(True)
+    base.count()
+    prefix = replace(base.cdefs().stored().require_indexed(), take_limit=1)
+    explanation = prefix.explain(analyze=True)
+    assert explanation.refresh is True and explanation.refresh_action == "reused"
+    assert explanation.store_scan_count == 0 and prefix.one() == root
+    pending = base.refresh(True).cdefs().stored()
+    with pytest.raises(QueryWouldScanError):
+        pending.scan_policy("forbid").take(1)
+    with pytest.raises(QueryIndexUnavailable):
+        pending.require_indexed().take(1)
+    other = Definition(V3Parent, "later").concretize()
+    DirStore(store.base_dir, query_index="sqlite").write_definition_record(DefinitionRecord(other))
+    monkeypatch.setattr(store.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("unused dirty index refreshed"))
+    assert base.cdefs().count() == 2
+    assert store.query_index_is_dirty()
 
 
 @pytest.mark.parametrize("value", (0, 1, None, [], "invalid"))
@@ -199,14 +264,14 @@ def test_v3_repo_refresh_reports_only_completed_reconciliation(tmp_path, monkeyp
     store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(store)
     _saved(repo, "value")
-    monkeypatch.setattr(repo._query_index, "refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(store.open_query_index(), "refresh", lambda *_args, **_kwargs: None)
 
     assert repo.query().explain(analyze=True).refresh_action == "none"
 
     def unavailable(*_args, **_kwargs):
         raise QueryIndexUnavailable("synthetic unavailable index")
 
-    monkeypatch.setattr(repo._query_index, "refresh", unavailable)
+    monkeypatch.setattr(store.open_query_index(), "refresh", unavailable)
     with pytest.raises(QueryIndexUnavailable, match="synthetic unavailable index"):
         repo.query().refresh(True).exists()
 
@@ -242,6 +307,8 @@ def test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed(tmp_pat
 
     with pytest.raises(Exception, match="index"):
         IdentityQuery.from_store(store).sel(state).require_indexed().one()
+    with pytest.raises(QueryIndexUnavailable, match="index coverage"):
+        IdentityQuery.from_store(store).sel(state).require_indexed().exists()
 
 
 def test_v3_strict_selector_policy_is_not_dropped(tmp_path):
@@ -728,3 +795,121 @@ def test_v3_partial_factory_pattern_uses_residual_scan_verification():
 
     assert graph is not None and graph.requires_scan
     assert set(result) == {first, second}
+
+
+@pytest.mark.parametrize("restriction", ("stored", "alias", "object", "state", "lineage", "snapshot"))
+@pytest.mark.parametrize("policy", ("forbid", "indexed"))
+def test_u6_fixed_external_scopes_reject_before_inventory(tmp_path, monkeypatch, restriction, policy):
+    """Fixed membership cannot hide required external authority work."""
+
+    from dryml.core.query.model import QueryWouldScanError
+
+    store = DirStore(tmp_path / "scope", query_index="memory")
+    state = _saved(Repo(store), "member")
+    fixed = IdentitySet((state,)).query()
+    if restriction == "stored":
+        query = fixed.stored(scope=store)
+    elif restriction == "alias":
+        query = fixed.alias("chosen", scope=store)
+    else:
+        query = fixed.where(field(restriction).missing(), scope=store)
+    query = query.require_indexed() if policy == "indexed" else query.scan_policy("forbid")
+    assert query.explain().scan_required
+    scans = []
+    original = store._validated_definition_root_inventory
+
+    def inventory():
+        scans.append(1)
+        return original()
+
+    monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+    with pytest.raises(QueryIndexUnavailable if policy == "indexed" else QueryWouldScanError):
+        query.exists()
+    assert scans == []
+
+
+def test_u6_external_scope_warning_precedes_io_once(tmp_path, monkeypatch):
+    """One terminal warning covers both external scopes and recovery scans."""
+
+    import warnings
+
+    store = DirStore(tmp_path / "scope", query_index="memory")
+    state = _saved(Repo(store), "member")
+    original = store._validated_definition_root_inventory
+    scans = []
+    with warnings.catch_warnings(record=True) as observed:
+        warnings.simplefilter("always")
+
+        def inventory():
+            assert len(observed) == 1
+            scans.append(1)
+            return original()
+
+        monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+        query = IdentitySet((state,)).query().stored(scope=store).where(
+            field("state").missing(), scope=store,
+        ).scan_policy("warn")
+        assert query.exists()
+    assert len(observed) == 1 and len(scans) == 1
+
+
+@pytest.mark.parametrize("indexed", (False, True))
+def test_u6_forced_refresh_cannot_authorize_recovery_scan(tmp_path, monkeypatch, indexed):
+    """A missing sidecar is refused before initialization or rebuild IO."""
+
+    from dryml.core.query.model import QueryWouldScanError
+    from dryml.core.store.records import DefinitionRecord
+
+    store = DirStore(tmp_path / "scope", query_index="sqlite")
+    value = Definition(V3Parent, None).concretize()
+    store.write_definition_record(DefinitionRecord(value))
+    index = store.open_query_index()
+    calls = []
+    monkeypatch.setattr(index, "rebuild", lambda **kw: calls.append("rebuild"))
+    monkeypatch.setattr(index, "initialize_empty", lambda: calls.append("initialize"))
+    query = store.query().cdefs().stored().refresh(True)
+    query = query.require_indexed() if indexed else query.scan_policy("forbid")
+    with pytest.raises(QueryIndexUnavailable if indexed else QueryWouldScanError):
+        query.take(1)
+    assert calls == []
+
+
+def test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities(tmp_path, monkeypatch):
+    """Authority-only external metadata leaves dirty unused indexes untouched."""
+
+    store = DirStore(tmp_path / "scope", query_index="sqlite")
+    state = _saved(Repo(store), "member")
+    store.mark_query_index_dirty()
+    reads = []
+    scans = []
+    rebuilds = []
+    original = store.read_snapshot_metadata
+    original_inventory = store._validated_definition_root_inventory
+    index = store.open_query_index()
+    original_rebuild = index.rebuild
+
+    def snapshot(digest):
+        reads.append(digest)
+        return original(digest)
+
+    def inventory():
+        scans.append(1)
+        return original_inventory()
+
+    def rebuild(**kwargs):
+        rebuilds.append(1)
+        return original_rebuild(**kwargs)
+
+    monkeypatch.setattr(store, "read_snapshot_metadata", snapshot)
+    monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+    monkeypatch.setattr(index, "rebuild", rebuild)
+    query = IdentitySet((state,)).query().where(
+        field("snapshot", "saved_at").exists(), scope=store,
+    ).max_verify(1)
+    explanation = query.explain(analyze=True)
+    assert explanation.result_count == 1 and explanation.verified_count == 1
+    assert explanation.store_scan_count == 1
+    assert explanation.refresh_action == "none"
+    assert reads == [state.digest()]
+    assert len(scans) == 1 and rebuilds == []
+    assert store.query_index_is_dirty()

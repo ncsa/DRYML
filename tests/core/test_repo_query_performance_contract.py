@@ -4,7 +4,7 @@ from dryml.core import Definition, Object, Repo, Serializable, SKIP_ARGS
 from dryml.core.query import EdgePolicy
 from dryml.core.query.sqlite.index import SQLiteQueryIndexReadView
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
+from dryml.core.store.records import DefinitionRecord, MainRefRecord
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
@@ -56,6 +56,22 @@ def test_equivalent_broad_v3_workload_captures_each_query_cut_once(tmp_path):
     assert counting.hydrate_count == 1
     assert repo2.query().cdefs().stored().count() == 1
     assert counting.hydrate_count == 2
+
+
+def test_u2_completed_exact_positive_has_no_maintenance_inventory(tmp_path, monkeypatch):
+    from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    root = Definition(PerfLeaf, "root").concretize()
+    store.write_definition_record(DefinitionRecord(root))
+    store.rebuild_query_index()
+    counting = CountingStore(store)
+    query = counting.query().refresh(True)
+    query.count()
+    counting.hydrate_count = counting.definition_read_count = 0
+    monkeypatch.setattr(counting.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("completed request refreshed"))
+    assert query.sel(root).cdefs().stored().exists()
+    assert counting.hydrate_count == 0 and counting.definition_read_count == 2
 
 
 def test_v3_broad_query_does_not_restore_payloads(tmp_path):
@@ -161,6 +177,8 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
         second.write_definition_record(DefinitionRecord(value))
     first.rebuild_query_index()
     second.rebuild_query_index()
+    for store in (first, second):
+        store.write_main_ref(MainRefRecord(DefinitionRecord(values[0]).digest))
     monkeypatch.setattr(
         first,
         "iter_definition_records",
@@ -188,7 +206,7 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
         counted,
     )
 
-    result = Repo((first, second)).query().cdefs().stored().require_indexed().take(3)
+    result = Repo((first, second)).query().cdefs().stored().require_indexed().max_verify(3).take(3)
 
     assert tuple(result) == tuple(values[:3])
     assert result.bounded and result.requested_limit == 3
@@ -197,6 +215,7 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
     assert result.diagnostic().cdef_blobs_decoded == 8
     assert pages == 2
     assert rows == 8
+    assert all(len(result.sources(value)) == 2 for value in values[:3])
 
     refined = result.query().sel(values[0]).collect()
     combined = result.union(refined)
@@ -206,3 +225,58 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
     assert combined.diagnostic().candidate_rows_read == 8
     assert combined.diagnostic().cdef_blobs_decoded == 8
     assert combined.diagnostic().pages_fetched == 2
+
+
+@pytest.mark.parametrize("root_count", (10, 30, 100))
+def test_reference_validation_visits_roots_linearly_per_selected_cut(
+        tmp_path, monkeypatch, root_count):
+    """Candidate filtering does not repeatedly validate the selected root set."""
+
+    from dryml.core import ObjectId, ObjectRef
+    from dryml.core.query import authority, source
+    from dryml.core.store.records import DeclarationRecord
+    from dryml.core.utils.graph.path import GraphPath
+
+    store = DirStore(tmp_path / "store", query_index="memory")
+    for index in range(root_count):
+        store.write_declaration_record(DeclarationRecord(ObjectRef(
+            Definition(PerfParent, index).concretize(),
+            {GraphPath(): ObjectId(("linear",))},
+        )))
+    passes = 0
+    visits = 0
+    materializations = 0
+    original_combination = source.validate_captured_reference_authority
+    original_roots = authority._validate_object_reference_roots
+    original_repo = source.SourceCapture.capture_repo
+
+    def capture_repo(capture, *args, **kwargs):
+        nonlocal materializations
+        materializations += 1
+        return original_repo(capture, *args, **kwargs)
+
+    def combination(facts):
+        nonlocal passes
+        passes += 1
+        return original_combination(facts)
+
+    def roots(values):
+        def counted():
+            nonlocal visits
+            for value in values:
+                visits += 1
+                yield value
+        return original_roots(counted())
+
+    monkeypatch.setattr(source, "validate_captured_reference_authority", combination)
+    monkeypatch.setattr(authority, "_validate_object_reference_roots", roots)
+    monkeypatch.setattr(source.SourceCapture, "capture_repo", capture_repo)
+    query = Repo(store).query().object_refs().stored()
+    assert query.count() == root_count
+    assert passes == 1
+    assert visits == root_count
+    assert materializations == 1
+    assert query.count() == root_count
+    assert passes == 2
+    assert visits == 2 * root_count
+    assert materializations == 2

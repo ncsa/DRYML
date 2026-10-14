@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import traceback
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -249,6 +252,7 @@ def test_zip_commit_failure_has_report_and_never_associates_checkpoint(tmp_path,
     assert any(item.phase == "commit" and item.status == "failed" for item in caught.value.report.publications)
     assert isinstance(caught.value.__cause__, ManagedPublicationError)
     assert isinstance(caught.value.__cause__.__cause__, RepoSaveError)
+    assert "OSError: commit failed" in "".join(traceback.format_exception(caught.value))
     assert value.checkpoint_then_finish.status(
         state_repo=repo, control_store=control,
     ).checkpoint_state_ref is None
@@ -294,7 +298,7 @@ def test_control_failure_after_committed_state_leaves_reopenable_orphan(tmp_path
     control = DirStore(tmp_path / "control")
     repo = Repo(state)
     value = RoutedValue(repo=repo)
-    original = ManagedControlStore.transition_running_owner
+    original = ManagedControlStore._transition_running_fields
 
     calls = 0
 
@@ -305,7 +309,7 @@ def test_control_failure_after_committed_state_leaves_reopenable_orphan(tmp_path
             raise OSError("control association failed")
         return original(self, operation_id, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "transition_running_owner", fail_association)
+    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_association)
     with pytest.raises(OSError, match="control association failed") as caught:
         value.checkpoint_then_finish(
             managed=ManagedConfig(state_repo=repo, control_store=control),
@@ -442,24 +446,32 @@ def test_reopened_nested_payloads_are_validated_once_per_durable_closure(tmp_pat
     value = RoutedRoot(RoutedValue(repo=repo), repo=repo)
     reopened = set()
     validations = []
+    accelerated = []
     original_open = ZipStore.open_existing
-    original_validate = ZipStore.validate_local_state
+    previous = sys.getprofile()
 
     def open_existing(path):
         store = original_open(path)
         reopened.add(id(store))
         return store
 
-    def validate_local_state(self, reference, path):
-        if id(self) in reopened:
-            validations.append((reference.digest(), path))
-        return original_validate(self, reference, path)
+    def observe(frame, event, arg):
+        if id(frame.f_locals.get("self")) not in reopened:
+            return
+        if event == "call" and frame.f_code is DirStore._validate_local_state_dir.__code__:
+            validations.append(frame.f_locals["directory"])
+        if event == "return" and frame.f_code is DirStore._can_reuse_exact_validation.__code__:
+            accelerated.append(arg)
 
     monkeypatch.setattr(ZipStore, "open_existing", staticmethod(open_existing))
-    monkeypatch.setattr(ZipStore, "validate_local_state", validate_local_state)
-    value.checkpoint_then_finish(managed=ManagedConfig(state_repo=repo, control_store=control))
+    sys.setprofile(observe)
+    try:
+        value.checkpoint_then_finish(managed=ManagedConfig(state_repo=repo, control_store=control))
+    finally:
+        sys.setprofile(previous)
 
-    assert len(validations) == len(set(validations))
+    assert len(validations) == len(set(validations)) == 2
+    assert accelerated and all(accelerated)
 
 
 @pytest.mark.parametrize("missing", ("record", "payload"))
@@ -533,13 +545,13 @@ def test_dirty_reused_zip_seed_is_required_durable_and_commit_failure_keeps_chec
     value = SeededRoutedRoot(seed, repo=repo)
     reports = []
     from dryml.managed import context as context_module
-    from dryml.managed.storage import publish_managed_state
+    from dryml.managed.storage import _publish_managed_state_result
 
     def capture_publication():
         def publish(*args, **kwargs):
-            state_ref, report = publish_managed_state(*args, **kwargs)
-            reports.append(report)
-            return state_ref, report
+            result = _publish_managed_state_result(*args, **kwargs)
+            reports.append(result.report)
+            return result
 
         return publish
 
@@ -636,13 +648,13 @@ def test_closure_seed_replica_excludes_dirty_historical_source_from_required_com
     value = SeededRoutedRoot(seed, repo=repo)
     reports = []
     from dryml.managed import context as context_module
-    from dryml.managed.storage import publish_managed_state
+    from dryml.managed.storage import _publish_managed_state_result
 
     def capture_publication():
         def publish(*args, **kwargs):
-            state_ref, report = publish_managed_state(*args, **kwargs)
-            reports.append(report)
-            return state_ref, report
+            result = _publish_managed_state_result(*args, **kwargs)
+            reports.append(result.report)
+            return result
 
         return publish
 
@@ -694,3 +706,433 @@ def test_store_shorthand_context_exposes_repo_without_closing_borrowed_store(tmp
     assert isinstance(resolved, Repo)
     assert tuple(resolved.stores) == (state,)
     assert state.read_state_ref_record(final.digest()).state_ref == final
+
+
+@pytest.mark.parametrize("failure", [None, "stale", "validation", "cleanup"])
+def test_zip_event_follows_independent_durable_cut_and_resource_cleanup(tmp_path, monkeypatch, failure):
+    """Even failed durable verification closes every temporary view before delivery."""
+
+    control = DirStore(tmp_path / "control")
+    first, second = (ZipStore(tmp_path / name) for name in ("first.zip", "second.zip"))
+    repo = Repo(
+        [first, second], save_routing=SaveRouting(
+            ((Selector(RoutedValue), first), (Selector(RoutedValue), second)),
+            match_mode="all",
+        ),
+    )
+    value = RoutedValue(repo=repo)
+    repo.save_object(value, deep_capture=True)
+    first.commit()
+    second.commit()
+    stale = tmp_path / "stale.zip"
+    shutil.copyfile(second.archive_path, stale)
+    opened, temporary, minted, closure_cuts = [], [], [], []
+    durable_payloads = []
+    original_open = ZipStore.open_existing
+    original_closure = storage_module._validate_publication_closure
+    original_event = storage_module._PublicationEvent.__init__
+    previous = sys.getprofile()
+
+    def observe(frame, event, arg):
+        if event == "return" and frame.f_code is Repo._for_state_io.__func__.__code__:
+            assert arg._validation_evidence is repo._validation_evidence
+            temporary.append(arg)
+        if event == "call" and frame.f_code is DirStore._validate_local_state_dir.__code__:
+            if any(frame.f_locals["self"] is store for store in opened):
+                durable_payloads.append(frame.f_locals["directory"])
+        if previous is not None:
+            previous(frame, event, arg)
+
+    def open_existing(path):
+        store = original_open(stale if failure == "stale" and path == second.archive_path else path)
+        opened.append(store)
+        if failure == "cleanup" and path == second.archive_path:
+            original_close = store.close
+
+            def close_then_fail():
+                original_close()
+                raise OSError("durable cleanup failed")
+
+            monkeypatch.setattr(store, "close", close_then_fail)
+        return store
+
+    def closure(selected_repo, reference, cut):
+        closure_cuts.append(cut)
+        if failure == "validation" and selected_repo is not repo:
+            raise SystemExit("durable validation stopped")
+        return original_closure(selected_repo, reference, cut)
+
+    def mint(self, *args):
+        assert opened and all(store._closed_handle for store in opened)
+        assert temporary and all(item._closed for item in temporary)
+        assert all(not cut.active for cut in closure_cuts)
+        minted.append(self)
+        original_event(self, *args)
+
+    monkeypatch.setattr(ZipStore, "open_existing", staticmethod(open_existing))
+    monkeypatch.setattr(storage_module, "_validate_publication_closure", closure)
+    monkeypatch.setattr(storage_module._PublicationEvent, "__init__", mint)
+    sys.setprofile(observe)
+    try:
+        if failure is None:
+            assert value.finish(managed=ManagedConfig(state_repo=repo, control_store=control)) == 1
+        else:
+            error_type = SystemExit if failure == "validation" else RepoSaveError
+            with pytest.raises(error_type) as caught:
+                value.finish(managed=ManagedConfig(state_repo=repo, control_store=control))
+            assert caught.value.report is not None
+    finally:
+        sys.setprofile(previous)
+    assert len(opened) == 2 and all(store._closed_handle for store in opened)
+    assert all(not Path(store.base_dir).exists() for store in opened)
+    assert temporary and all(item._closed for item in temporary)
+    assert all(not cut.active for cut in closure_cuts)
+    assert len(minted) == (1 if failure is None else 0)
+    if failure is None:
+        assert len(durable_payloads) == len(set(durable_payloads)) == 2
+        assert repo._validation_evidence._resident
+    assert not repo._validation_evidence._pending
+    assert repo._validation_evidence.accounted_bytes == sum(
+        fact.charge for fact in repo._validation_evidence._resident.values())
+    if failure != "stale":
+        assert len(closure_cuts) == (3 if failure is None else 2)
+        assert closure_cuts[0] is not closure_cuts[1]
+        if failure is None:
+            assert closure_cuts[2] not in closure_cuts[:2]
+    status = value.finish.status(state_repo=repo, control_store=control)
+    assert (status.state, status.final_state_ref is not None) == (
+        "completed" if failure is None else "failed", failure is None,
+    )
+
+
+def test_uncertain_zip_commit_mints_no_event_and_retains_prior_checkpoint(tmp_path, monkeypatch):
+    """Indeterminate commit evidence cannot be upgraded to completed publication."""
+
+    state = ZipStore(tmp_path / "state.zip")
+    control = DirStore(tmp_path / "control")
+    repo = Repo(state)
+    value = RoutedValue(repo=repo)
+    config = ManagedConfig(state_repo=repo, control_store=control)
+    with pytest.raises(ManagedInterrupted):
+        value.interrupt_then_finish(managed=config)
+    prior = value.interrupt_then_finish.status(state_repo=repo, control_store=control).checkpoint_state_ref
+    original_commit = state.commit
+
+    def uncertain_commit():
+        original_commit()
+        monkeypatch.setattr(state, "_archive_identity", lambda: (_ for _ in ()).throw(OSError("commit evidence unavailable")))
+
+    def no_event(*args, **kwargs):
+        raise AssertionError("uncertain commit cannot mint an event")
+
+    monkeypatch.setattr(state, "commit", uncertain_commit)
+    monkeypatch.setattr(storage_module._PublicationEvent, "__init__", no_event)
+    with pytest.raises(RepoSaveError) as caught:
+        value.interrupt_then_finish(managed=config)
+    assert isinstance(caught.value.__cause__, ManagedPublicationError)
+    assert caught.value.__cause__.outcome == "indeterminate"
+    assert any(item.phase == "commit" and item.status == "uncertain" for item in caught.value.report.publications)
+    assert value.interrupt_then_finish.status(state_repo=repo, control_store=control).checkpoint_state_ref == prior
+
+
+def test_missing_required_embedded_seed_cannot_reuse_connected_proof(tmp_path, monkeypatch):
+    """A smaller required view cannot borrow an otherwise valid connected closure."""
+
+    dependency, root_store = (DirStore(tmp_path / name) for name in ("dependency", "root"))
+    dependency_repo = Repo(dependency)
+    seed = dependency_repo.save_object(SeedDependency(41, repo=dependency_repo), deep_capture=True)
+    repo = Repo(
+        [dependency, root_store], save_routing=SaveRouting(
+            ((Selector(SeededRoutedRoot), root_store), (Selector(SeedDependency), root_store)),
+            graph_mode="per-object",
+        ),
+    )
+    value = SeededRoutedRoot(seed, repo=repo)
+    monkeypatch.setattr(storage_module, "_required_managed_publication_stores", lambda report: (root_store,))
+    with pytest.raises(RepoSaveError) as caught:
+        value.checkpoint_then_interrupt(managed=ManagedConfig(state_repo=repo))
+    assert caught.value.report is not None
+    assert value.checkpoint_then_interrupt.status(state_repo=repo).checkpoint_state_ref is None
+
+
+def test_overridden_direct_reader_preserves_independent_publication_validation(tmp_path, monkeypatch):
+    """Reader overrides retain their authority behavior and disable proof sharing."""
+
+    store = DirStore(tmp_path / "state")
+    repo = Repo(store)
+    value = RoutedValue(repo=repo)
+    original = store.read_state_ref_record
+    durable_calls = []
+    original_durable = storage_module._validate_reopened_managed_state
+
+    def reader(digest):
+        return original(digest)
+
+    def durable(*args):
+        durable_calls.append(True)
+        return original_durable(*args)
+
+    monkeypatch.setattr(store, "read_state_ref_record", reader)
+    monkeypatch.setattr(storage_module, "_validate_reopened_managed_state", durable)
+    assert not store._can_reuse_exact_validation()
+    assert value.finish(managed=ManagedConfig(state_repo=repo)) == 1
+    assert durable_calls == [True]
+
+
+@pytest.mark.parametrize("extra_store", [False, True], ids=["matching", "unequal"])
+def test_direct_replica_lifecycle_keeps_required_coverage_independent(tmp_path, extra_store):
+    """An unselected connected view restores the two separate durable obligations."""
+    from dryml.core.materialization import _build_exact_state_load_plan
+
+    replicas = [DirStore(tmp_path / name, query_index="none") for name in ("first", "second")]
+    stores = [*replicas, DirStore(tmp_path / "unselected", query_index="none")] if extra_store else replicas
+    repo = Repo(stores, save_routing=SaveRouting(
+        tuple((Selector(RoutedValue), store) for store in replicas), match_mode="all",
+    ))
+    value = RoutedValue(repo=repo)
+    closures, durable_repos, accelerated = [], [], []
+    previous = sys.getprofile()
+
+    def observe(frame, event, arg):
+        if event == "call" and frame.f_code is _build_exact_state_load_plan.__code__:
+            closures.append((frame.f_locals["repo"], frame.f_locals["state_ref"]))
+        if event == "return" and frame.f_code is Repo._for_state_io.__func__.__code__:
+            durable_repos.append(arg)
+        if event == "return" and frame.f_code is DirStore._can_reuse_exact_validation.__code__:
+            accelerated.append(arg)
+        if previous is not None:
+            previous(frame, event, arg)
+
+    sys.setprofile(observe)
+    try:
+        checkpoint = value.checkpoint_then_finish(managed=ManagedConfig(state_repo=repo))
+    finally:
+        sys.setprofile(previous)
+    final = value.last_state_ref
+    assert len(closures) == (8 if extra_store else 6)
+    assert accelerated and all(accelerated)
+    assert len(durable_repos) == (2 if extra_store else 0)
+    for durable in durable_repos:
+        assert durable._closed and durable._topology_leases == 0
+        assert tuple(durable.stores) == tuple(replicas)
+    assert sum(selected is not repo for selected, _ in closures) == (2 if extra_store else 0)
+    assert repo._topology_leases == 0 and not repo._validation_evidence._pending
+    for reference in (checkpoint, final):
+        for store in replicas:
+            assert store.read_state_ref_record(reference.digest()).state_ref == reference
+            assert Repo(store).load_state_ref(reference, reuse_live="never").value == (1 if reference == checkpoint else 2)
+    if extra_store:
+        assert stores[-1].read_state_ref_record(checkpoint.digest()) is None
+
+
+def test_warm_status_and_resume_reject_deleted_associated_checkpoint(tmp_path):
+    """Independent checkpoint recovery never trusts publication or warm content facts."""
+    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
+
+    store = DirStore(tmp_path / "state", query_index="none")
+    control = DirStore(tmp_path / "control", query_index="none")
+    repo = Repo(store)
+    value = RoutedValue(repo=repo)
+    config = ManagedConfig(state_repo=repo, control_store=control)
+    with pytest.raises(ManagedInterrupted):
+        value.interrupt_then_finish(managed=config)
+    status = value.interrupt_then_finish.status(state_repo=repo, control_store=control)
+    checkpoint = status.checkpoint_state_ref
+    assert status.state == "interrupted" and checkpoint is not None
+    assert repo._validation_evidence._resident
+    shutil.rmtree(store._snapshot_path(checkpoint.digest()))
+    for operation in (
+        lambda: value.interrupt_then_finish.status(state_repo=repo, control_store=control),
+        lambda: value.interrupt_then_finish(managed=config),
+    ):
+        with exact_work_counts() as counts:
+            with pytest.raises(ManagedRecoveryError, match="missing_state_reference"):
+                operation()
+        assert counts["_read_snapshot"] > 0
+        assert value.value == 1 and value.last_state_ref == checkpoint
+        assert repo._topology_leases == 0 and not repo._validation_evidence._pending
+
+
+@pytest.mark.parametrize("backend", ["direct", "reopened"])
+def test_reopened_selected_replica_payload_corruption_cannot_hide_behind_first(tmp_path, monkeypatch, backend):
+    """A valid first replica cannot authorize a corrupt selected physical view."""
+    control = DirStore(tmp_path / "control", query_index="none")
+    if backend == "direct":
+        first, second = (DirStore(tmp_path / name, query_index="none") for name in ("first", "second"))
+    else:
+        first, second = (ZipStore(tmp_path / name) for name in ("first.zip", "second.zip"))
+    repo = Repo([first, second], save_routing=SaveRouting(
+        ((Selector(RoutedValue), first), (Selector(RoutedValue), second)), match_mode="all",
+    ))
+    value = RoutedValue(repo=repo)
+    original_open = ZipStore.open_existing
+    opened = []
+
+    def corrupt(store):
+        reference = value.last_state_ref
+        local = store.open_local_state(reference, next(iter(reference.states)))
+        files = tuple(Path(local.handle, "data").iterdir())
+        assert files
+        files[0].write_bytes(b"corrupt selected replica")
+        assert store._can_reuse_exact_validation()
+
+    def open_existing(path):
+        store = original_open(path)
+        opened.append(store)
+        if path == second.archive_path:
+            corrupt(store)
+        assert store._can_reuse_exact_validation()
+        return store
+
+    if backend == "reopened":
+        monkeypatch.setattr(ZipStore, "open_existing", staticmethod(open_existing))
+    else:
+        commit = storage_module._commit_save_report
+
+        def commit_then_corrupt(*args, **kwargs):
+            report = commit(*args, **kwargs)
+            corrupt(second)
+            return report
+
+        monkeypatch.setattr(storage_module, "_commit_save_report", commit_then_corrupt)
+    try:
+        with pytest.raises(RepoSaveError, match="managed state publication") as caught:
+            value.finish(managed=ManagedConfig(state_repo=repo, control_store=control))
+        assert caught.value.report is not None
+        assert len(opened) == (2 if backend == "reopened" else 0)
+        assert all(store._closed_handle for store in opened)
+        assert not repo._validation_evidence._pending and repo._topology_leases == 0
+        status = value.finish.status(state_repo=repo, control_store=control)
+        assert status.state == "failed" and status.final_state_ref is None
+    finally:
+        repo.close(flush=False)
+        first.close()
+        second.close()
+
+
+@pytest.mark.parametrize("corrupt_last", [False, True])
+def test_replica_promotion_opens_once_and_checks_every_local_path(tmp_path, corrupt_last):
+    """One eager promotion still validates non-first payloads and their bindings."""
+    from dryml.core.store.store import StoreAuthorityError
+    from tests.core.test_exact_load_metadata_evidence import (
+        EvidenceValue, StatelessSeedContainer, exact_work_counts,
+    )
+
+    store = DirStore(tmp_path / "state", query_index="none")
+    repo = Repo(store)
+    root = StatelessSeedContainer([EvidenceValue(i, repo=repo) for i in range(3)], repo=repo)
+    reference = repo.save_object(root, deep_capture=True)
+    if corrupt_last:
+        path = tuple(reference.states)[-1]
+        source = store.open_local_state(reference, path)
+        Path(source.handle, "data", "value").write_bytes(b"corrupt non-first payload")
+    opens = []
+    with repo._read_cut() as cut:
+        bundle = cut.snapshot(store, reference.digest())
+        with exact_work_counts() as ledger:
+            previous = sys.getprofile()
+
+            def observe(frame, event, arg):
+                if event == "call" and frame.f_code is DirStore._open_local_state_for_cut.__code__:
+                    opens.append(frame.f_locals["path"])
+                previous(frame, event, arg)
+
+            sys.setprofile(observe)
+            try:
+                if corrupt_last:
+                    with pytest.raises(StoreAuthorityError, match="payload is invalid"):
+                        storage_module._validate_replica_locals(cut, store, reference, bundle)
+                else:
+                    storage_module._validate_replica_locals(cut, store, reference, bundle)
+            finally:
+                sys.setprofile(previous)
+        assert len(opens) == 1
+        assert ledger["validate_payload"] == 3
+        if not corrupt_last:
+            assert ledger["path_definition_checks"] == 3
+    repo.close(flush=False)
+
+
+@pytest.mark.parametrize("backend", ["direct", "reopened"])
+def test_routed_stateful_parent_replica_cuts_keep_complete_view_evidence(tmp_path, backend):
+    """Connected and required/reopened views each validate every routed replica once."""
+    from collections import Counter
+    from dryml.core import Definition
+    from dryml.core.repo import _AuthorityReadCut
+    from tests.core.test_exact_load_metadata_evidence import (
+        EvidenceValue, StatefulEvidenceRoot, exact_work_counts,
+    )
+
+    def store(name):
+        return (DirStore(tmp_path / name, query_index="none") if backend == "direct"
+                else ZipStore(tmp_path / f"{name}.zip"))
+
+    roots = [store(f"parent-{replica}") for replica in range(2)]
+    children = [[store(f"child-{i}-{replica}") for replica in range(2)] for i in range(3)]
+    required = [*roots, *(item for pair in children for item in pair)]
+    unrelated = DirStore(tmp_path / "unselected", query_index="none")
+    repo = Repo([*required, unrelated], save_routing=SaveRouting((
+        *((Selector(StatefulEvidenceRoot), item) for item in roots),
+        *((Selector(Definition(EvidenceValue, i)), item)
+          for i, pair in enumerate(children) for item in pair),
+    ), graph_mode="per-object", match_mode="all"))
+    root = StatefulEvidenceRoot([EvidenceValue(i, repo=repo) for i in range(3)], repo=repo)
+    state, report = repo.save_object(root, deep_capture=True, report_stores=True)
+    for item in required:
+        if backend == "reopened":
+            item.commit()
+    selected = storage_module._required_managed_publication_stores(report)
+    assert set(selected) == set(required)
+    cuts, validations, bundles, accelerated = [], Counter(), Counter(), []
+    active = None
+    try:
+        with exact_work_counts() as ledger:
+            previous = sys.getprofile()
+
+            def observe(frame, event, arg):
+                nonlocal active
+                if event == "return" and frame.f_code is _AuthorityReadCut.__enter__.__code__:
+                    active = arg
+                    cuts.append(arg)
+                if event == "call" and frame.f_code is _AuthorityReadCut.__exit__.__code__:
+                    active = None
+                if event == "call" and frame.f_code is DirStore._validate_local_state_dir.__code__:
+                    assert active is not None
+                    validations[(active, frame.f_locals["self"], frame.f_locals["directory"])] += 1
+                if event == "return" and frame.f_code is DirStore._read_snapshot.__code__ and arg is not None:
+                    assert active is not None
+                    bundles[(active, frame.f_locals["self"], frame.f_locals["digest"])] += 1
+                if event == "return" and frame.f_code is DirStore._can_reuse_exact_validation.__code__:
+                    accelerated.append(arg)
+                previous(frame, event, arg)
+
+            sys.setprofile(observe)
+            try:
+                storage_module._validate_managed_publication(repo, state, report, selected)
+            finally:
+                sys.setprofile(previous)
+        assert len(cuts) == 2 and cuts[0].repo is repo and cuts[1].repo is not repo
+        assert cuts[0].stores == tuple(repo.stores)
+        assert len(cuts[1].stores) == len(required)
+        assert unrelated not in cuts[1].stores
+        assert cuts[1].repo._closed and cuts[1].repo._topology_leases == 0
+        if backend == "direct":
+            assert set(cuts[1].stores) == set(required)
+        else:
+            assert all(item not in required and item._closed_handle for item in cuts[1].stores)
+            assert all(not Path(item.base_dir).exists() for item in cuts[1].stores)
+        assert len(validations) == len(bundles) == 16
+        assert set(validations.values()) == set(bundles.values()) == {1}
+        for cut in cuts:
+            assert sum(key[0] is cut for key in validations) == 8
+            assert sum(key[0] is cut for key in bundles) == 8
+            assert not cut.active
+        assert ledger["validate_payload"] == ledger["path_definition_checks"] == 16
+        assert accelerated and all(accelerated)
+        assert repo._validation_evidence._resident and not repo._validation_evidence._pending
+        assert repo._topology_leases == 0
+        assert all(item._can_reuse_exact_validation() for item in required)
+    finally:
+        repo.close(flush=False)
+        for item in required:
+            item.close()

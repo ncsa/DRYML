@@ -1,4 +1,8 @@
-"""Buffered Zip implementation of the current logical Store interface."""
+"""Buffered Zip Store authority with distinct, live extraction views per handle.
+
+Scoped exact validation never equates equal archive paths with equal transaction
+views. Borrowed sources expire when their owning transaction is closed.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ import zipfile
 from contextlib import contextmanager
 
 from ... import filesystem
-from .dir import DirStore, _REMOVED_ENTRY_PREFIX
+from .dir import DirStore, _REMOVED_ENTRY_PREFIX, _EXACT_READERS, _EXACT_READER_NAMES
 from .records import StoreFormatRecord, StoreRecordError
 from ...locking import interprocess_lock
 from .store import StoreAuthorityError, StorePublicationCapabilities
@@ -34,6 +38,24 @@ class ZipStore(DirStore):
     after comparing the archive bytes observed at open.  File-like destinations
     remain readable but explicitly reject writable authority because they cannot
     make the required replacement guarantee.
+
+    Reader wrappers preserve legacy DirStore delegate signatures when optional
+    preparation is absent. Exact read-cut reuse requires both these wrappers and
+    their underlying DirStore implementations to remain unmodified; custom
+    delegate results and errors remain authoritative through uncached reads.
+
+    Args:
+        zip_dest (str, Path, or IOBase): Path-backed archive or read-only file-like
+            archive destination. Each handle owns a distinct extraction view.
+
+    Raises:
+        StoreAuthorityError: If existing archive contents are incompatible.
+        OSError: If extraction or filesystem access fails.
+
+    Side Effects:
+        Allocates an extracted transaction directory. Exact read-cut reuse checks
+        this handle's liveness and never substitutes another archive handle's
+        evidence. Closing the handle invalidates borrowed extracted sources.
     """
 
     _supports_deferred_local_state = False
@@ -51,6 +73,8 @@ class ZipStore(DirStore):
         # before the inherited Store writer/archive locks so commit cannot clear
         # dirty state while another same-handle mutation is still publishing.
         self._transaction_lock = RLock()
+        self._writer_depth = 0
+        self._close_pending = False
         self._initializing = True
         self._file_like = _is_file_like(zip_dest)
         try:
@@ -284,14 +308,36 @@ class ZipStore(DirStore):
         return f"{super().authority_fence_key()}:transaction:{id(self)}"
 
     def writer_lock(self):
-        """Acquire the transaction fence before the inherited Store writer lock."""
+        """Fence writes and release deferred extraction cleanup after the final lock.
+
+        Returns:
+            A reentrant context manager over the transaction and native writer lock.
+
+        Raises:
+            RuntimeError: If the transaction is closed on entry.
+            OSError: If deferred extraction cleanup fails on outermost exit.
+
+        Side Effects:
+            Serializes same-handle writers. A close requested inside the fence
+            invalidates the handle immediately but removes its extraction only
+            after the last native writer lock is released.
+        """
 
         @contextmanager
         def locked():
             self._assert_open()
             with self.transaction_fence():
-                with super(ZipStore, self).writer_lock():
-                    yield
+                try:
+                    with super(ZipStore, self).writer_lock():
+                        self._writer_depth += 1
+                        try:
+                            yield
+                        finally:
+                            self._writer_depth -= 1
+                finally:
+                    if self._writer_depth == 0 and self._close_pending:
+                        self._tmp.cleanup()
+                        self._close_pending = False
 
         return locked()
 
@@ -457,6 +503,14 @@ class ZipStore(DirStore):
         if getattr(self, "_closed_handle", False):
             raise RuntimeError("ZipStore transaction is closed.")
 
+    def _can_reuse_exact_validation(self):
+        """Require live, unmodified wrappers and their captured base delegates."""
+        self._assert_open()
+        return super()._can_reuse_exact_validation() and all(
+            getattr(DirStore, name) is value
+            for name, value in _EXACT_READERS[DirStore].items()
+        )
+
     def preflight_publication(self, operation: str, *, local_state: bool = False) -> None:
         """Validate inherited publication capabilities on an open transaction.
 
@@ -478,23 +532,29 @@ class ZipStore(DirStore):
         self._assert_open()
         super().preflight_publication(operation, local_state=local_state)
 
-    def _read_file(self, path, record_type):
+    def _read_file(self, path, record_type, *, preparation=None):
         """Read one record only while this extracted transaction remains live."""
 
         self._assert_open()
-        return super()._read_file(path, record_type)
+        if preparation is None:
+            return super()._read_file(path, record_type)
+        return super()._read_file(path, record_type, preparation=preparation)
 
-    def _read_json(self, path):
+    def _read_json(self, path, *, cut=None, kind=None):
         """Read one JSON sidecar only while this transaction remains live."""
 
         self._assert_open()
-        return super()._read_json(path)
+        if cut is None:
+            return super()._read_json(path)
+        return super()._read_json(path, cut=cut, kind=kind)
 
-    def _read_snapshot(self, digest, *, payloads=False, directory=None):
+    def _read_snapshot(self, digest, *, payloads=False, directory=None, cut=None):
         """Read one snapshot only while this transaction remains live."""
 
         self._assert_open()
-        return super()._read_snapshot(digest, payloads=payloads, directory=directory)
+        if cut is None:
+            return super()._read_snapshot(digest, payloads=payloads, directory=directory)
+        return super()._read_snapshot(digest, payloads=payloads, directory=directory, cut=cut)
 
     def _query_index_dirty_markers(self):
         """Read dirty tokens only while this transaction remains live."""
@@ -567,6 +627,12 @@ class ZipStore(DirStore):
 
         self._assert_open()
         return super().iter_stored_root_records()
+
+    def _validated_definition_root_inventory(self):
+        """Read one validated inventory in this open extracted transaction only."""
+
+        self._assert_open()
+        return super()._validated_definition_root_inventory()
 
     def iter_state_ref_records(self):
         """Return validated StateRef records from an open transaction.
@@ -647,6 +713,7 @@ class ZipStore(DirStore):
 
         Raises:
             RuntimeError: If an active Session resource cache retains this Store.
+            OSError: If extraction cleanup fails; retry close after releasing fences.
 
         Returns:
             ``None``. Repeated close calls are no-ops.
@@ -654,13 +721,27 @@ class ZipStore(DirStore):
         Side Effects:
             Acquires the transaction fence, removes the extracted directory, and
             invalidates snapshot and payload paths borrowed from this handle.
+            When called inside a retained writer/authority fence, invalidates the
+            handle immediately and defers removal until that outer fence releases
+            its native lock. Deferred cleanup errors propagate at fence exit.
         """
         with self.transaction_fence():
             if self._closed_handle:
+                if self._close_pending and not self._writer_depth:
+                    self._tmp.cleanup()
+                    self._close_pending = False
                 return
             super().close()
+            if self._writer_depth:
+                self._closed_handle = True
+                self._close_pending = True
+                return
             self._tmp.cleanup()
             self._closed_handle = True
 
 
 ZipStore.publish_snapshot._dryml_annotation_phase_callback = True
+_EXACT_READERS[ZipStore] = {
+    name: getattr(ZipStore, name)
+    for name in (*_EXACT_READER_NAMES, "_assert_open", "transaction_fence")
+}

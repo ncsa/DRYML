@@ -440,6 +440,56 @@ def test_dirstore_rejects_unknown_or_factory_query_index_policy(tmp_path):
         DirStore(tmp_path / "factory", query_index=lambda store: store)
 
 
+@pytest.mark.parametrize("policy", (True, "always"))
+def test_direct_memory_explicit_calls_repeat_hydration_and_retain_failures(tmp_path, monkeypatch, policy):
+    """Backend calls have no shared one-shot state and charge failed inventories."""
+    from dryml.core.query.model import QueryIndexError, QueryStats
+
+    store = DirStore(tmp_path / "memory", query_index="memory")
+    store.write_definition_record(DefinitionRecord(ContractLeaf("first").definition))
+    index = MemoryContractIndex(store)
+    scans = []
+    original = store.hydrate_index
+
+    def hydrate():
+        scans.append(1)
+        return original()
+
+    monkeypatch.setattr(store, "hydrate_index", hydrate)
+    for _ in range(2):
+        stats = QueryStats()
+        index.refresh(policy, stats=stats)
+        assert stats.store_scan_count == 1
+    assert scans == [1, 1]
+    generation = index.current_generation()
+
+    def fail():
+        raise OSError("injected hydration failure")
+
+    monkeypatch.setattr(store, "hydrate_index", fail)
+    stats = QueryStats()
+    with pytest.raises(QueryIndexError, match="injected hydration failure"):
+        index.refresh(policy, stats=stats)
+    assert stats.store_scan_count == 1
+    assert index.current_generation() == generation
+
+
+@pytest.mark.parametrize("policy", (True, "always"))
+def test_direct_federation_explicit_calls_propagate_unavailability(tmp_path, monkeypatch, policy):
+    """Both explicit policies expose configured backend absence to their caller."""
+    from dryml.core.query.model import QueryIndexUnavailable
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+
+    def unavailable():
+        raise QueryIndexUnavailable("injected configured backend absence")
+
+    monkeypatch.setattr(store, "open_query_index", unavailable)
+    with pytest.raises(QueryIndexUnavailable, match="configured backend absence"):
+        repo._query_index.refresh(policy)
+
+
 @pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
 def test_dirstore_accepts_sqlite_config_without_creating_a_sidecar(tmp_path):
     """Opening configured SQLite support remains lazy until index mutation."""

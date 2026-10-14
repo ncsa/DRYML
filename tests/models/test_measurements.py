@@ -46,11 +46,11 @@ def test_parameter_counts_deduplicate_identity_and_preserve_effective_trainabili
     assert reversed_counts == counts
 
 
-def test_dataset_size_returns_declared_cardinality_without_iteration():
+def test_dataset_size_requires_the_public_dataset_example_contract_without_iteration():
     for cardinality in (Cardinality.finite(17), Cardinality.UNKNOWN, Cardinality.INFINITE):
         dataset = CountingDataset(cardinality)
 
-        assert dataset_size(dataset) == cardinality
+        assert dataset_size(dataset) is Cardinality.UNKNOWN
         assert dataset.iterations == 0
 
 
@@ -70,7 +70,7 @@ def test_dataset_size_never_relabels_native_batch_count_as_example_count():
 
     class NativeBatches(Dataset):
         def __init__(self, examples=None):
-            self.example_cardinality = examples
+            self.examples = examples
             super().__init__(TensorSpec("float32", shape=(1,), batch=3, backend="numpy"))
 
         def __iter__(self):
@@ -78,6 +78,9 @@ def test_dataset_size_never_relabels_native_batch_count_as_example_count():
 
         def __len__(self):
             return Cardinality.finite(2)
+
+        def example_cardinality(self):
+            return Cardinality.UNKNOWN if self.examples is None else Cardinality.finite(self.examples)
 
     assert dataset_size(Unbatch(NativeBatches())) is Cardinality.UNKNOWN
     assert dataset_size(Unbatch(NativeBatches(5))) == Cardinality.finite(5)
@@ -102,6 +105,17 @@ def test_torch_native_parameter_counts_cover_shared_frozen_and_lazy_models():
     assert parameter_counts(Shared()) == ParameterCounts(total=10, trainable=6)
     with pytest.raises(MeasurementUnavailableError):
         parameter_counts(torch.nn.LazyLinear(2))
+
+
+def test_jax_native_parameter_counts_exclude_non_parameter_state():
+    """The JAX helper accepts only the declared parameter tree."""
+    if os.environ.get("JAX_PLATFORMS") != "cpu":
+        pytest.skip("JAX native measurement runs in the dedicated CPU qualification environment.")
+    jax = pytest.importorskip("jax")
+    from dryml.jax.measurements import parameter_counts
+
+    parameter = jax.numpy.zeros((2, 3))
+    assert parameter_counts({"shared": parameter}, {"shared": parameter}) == ParameterCounts(6, 6)
 
 
 def test_composite_measurement_unions_trainable_paths_for_shared_torch_parameter():

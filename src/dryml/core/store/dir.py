@@ -1,4 +1,8 @@
-"""Direct-root filesystem implementation of current Store authority."""
+"""Direct-root Store authority with optional exact validation inside Repo cuts.
+
+Complete snapshot bundles and physical payload evidence can be shared only while
+explicit authority fences are retained; ordinary public reads remain validating.
+"""
 
 from __future__ import annotations
 
@@ -21,10 +25,14 @@ from .records import (
     MainRefRecord, ObjectAliasRecord, StateAliasRecord, StateRefRecord,
     StoredRootRecord, StoreFormatRecord, StoreRecordError,
 )
-from .store import LocalStateSource, Store, StoreAuthorityError, StoreCapabilityError, StorePublicationCapabilities
+from .store import (
+    LocalStateSource, Store, StoreAuthorityError, StoreCapabilityError,
+    StorePublicationCapabilities, _DELEGATED_LOCAL_STATE,
+)
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
 from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from ..query.sqlite.index import SQLiteStoreQueryIndex
+from ..reference_values import ObjectRef, StateRef
 
 
 QueryIndexPolicy = Literal["auto", "sqlite", "memory", "none"]
@@ -42,6 +50,26 @@ class DirStore(Store):
     format. Initial root creation and format-gate publication use a derived
     sibling advisory lock, so simultaneous trusted constructors never mistake a
     live temporary format file for old authority.
+
+    Custom eager local-state validators retain the two-positional-argument
+    ``(directory, manifest)`` call and may return ``None`` on success. Deferred
+    validation passes its option only when requested; unknown overrides use
+    uncached validation rather than built-in read-cut reuse.
+
+    Args:
+        base_dir (str or PathLike): Direct Store root to open or initialize.
+        query_index: Derived-index policy string or SQLiteQueryIndexConfig; it
+            never changes which files constitute authoritative contents.
+
+    Raises:
+        ValueError: If the derived-index policy is unsupported.
+        StoreAuthorityError: If existing authority is malformed/incompatible.
+        StoreCapabilityError: If required filesystem guarantees are unavailable.
+
+    Side Effects:
+        May initialize the root and format gate. Eligible exact reads share
+        complete bundle/payload validation only inside explicit Repo cuts; public
+        readers and unknown overrides remain independently authoritative.
     """
 
     _supports_deferred_local_state = True
@@ -280,7 +308,29 @@ class DirStore(Store):
         return index
 
     def rebuild_query_index(self) -> ReconcileReport:
-        """Rebuild SQLite solely by scanning validated authoritative DefinitionRecords."""
+        """Request unconditional replacement of the configured SQLite sidecar.
+
+        Scans validated Store authority and uses the backend's default forced
+        build claim, unlike refresh(True)/refresh("always"), which may only
+        validate a correct ready sidecar. Replacement is staged and validated;
+        Store records are never rewritten.
+
+        Returns:
+            ReconcileReport with the rebuild action and observed generations.
+            The backend may decline a build claim; this report alone is not
+            strict reconciliation evidence. Use backend ``refresh(True)`` when
+            successful maintenance must be proven.
+
+        Raises:
+            QueryIndexUnavailable: If no persistent backend is available.
+            QueryIndexError: If authority capture, compatibility, contention,
+                staging, activation, or captured-token acknowledgement fails.
+                Failure after visible activation does not imply rollback.
+
+        Side Effects:
+            An owned rebuild replaces derived index files and acknowledges only
+            captured covered dirty tokens. Later tokens remain for recovery.
+        """
         index = self._open_rebuildable_query_index()
         before = index.status()
         index.rebuild()
@@ -297,7 +347,28 @@ class DirStore(Store):
         )
 
     def reconcile_query_index(self) -> ReconcileReport:
-        """Validate or safely rebuild a missing, stale, or corrupt SQLite sidecar."""
+        """Report one reconciliation of the configured persistent query index.
+
+        A correct ready sidecar is validated against graph-exact Store authority
+        without replacement; missing, divergent, or recoverable damaged derived
+        state is rebuilt. This method retains no cross-call completion state.
+
+        Returns:
+            ReconcileReport with historical issues and actual maintenance phases.
+            Ordinary backend failures become error issues. ``validated`` records
+            validation work, not success; ``changed`` records visible activation,
+            even when acknowledgement fails. Neither implies a successful cycle.
+
+        Raises:
+            QueryIndexUnavailable: If no persistent backend can be opened.
+            QueryIndexError: If opening the configured backend fails.
+            BaseException: Cancellation/interruption propagates rather than
+                returning a successful report.
+
+        Side Effects:
+            May replace derived files and acknowledge captured covered dirty
+            tokens. Store authority and later/unrelated tokens are preserved.
+        """
         return self._open_rebuildable_query_index().reconcile()
 
     def validate_query_index(self, *, thorough: bool = False):
@@ -415,7 +486,7 @@ class DirStore(Store):
                 raise StoreAuthorityError("Store lacks current store-format.record; old or mixed authority is unsupported.")
             self._atomic_write(self.store_format_path, StoreFormatRecord().to_bytes())
 
-    def _read_file(self, path: str, record_type):
+    def _read_file(self, path: str, record_type, *, preparation=None):
         try:
             mode = os.lstat(path).st_mode
         except FileNotFoundError:
@@ -424,7 +495,10 @@ class DirStore(Store):
             raise StoreAuthorityError(f"Store record is not a regular file: {path!r}.")
         try:
             with open(path, "rb") as source:
-                return record_type.from_bytes(source.read())
+                payload = source.read()
+            if preparation is not None:
+                return record_type._from_bytes_prepared(payload, preparation)
+            return record_type.from_bytes(payload)
         except StoreRecordError as error:
             raise StoreAuthorityError(f"Malformed Store record {path!r}: {error}") from error
 
@@ -571,11 +645,38 @@ class DirStore(Store):
         )
 
     def read_definition_record(self, digest: str) -> DefinitionRecord | None:
-        """Read a validated DefinitionRecord and recompute its path key."""
-        record = self._read_file(self._definition_path(digest), DefinitionRecord)
+        """Fully validate current definition bytes and their direct path association.
+
+        Args:
+            digest (str): DefinitionRecord digest naming the direct record path.
+        Returns:
+            Fresh DefinitionRecord, or None when absent.
+        Raises:
+            StoreAuthorityError: For malformed bytes, file shape or path mismatch.
+        Side Effects:
+            Reads and freshly decodes trusted dill; public reads retain no facts.
+        """
+        return self._read_definition_record(digest)
+
+    def _read_definition_record(self, digest, preparation=None):
+        if preparation is None:
+            record = self._read_file(self._definition_path(digest), DefinitionRecord)
+        else:
+            record = self._read_file(self._definition_path(digest), DefinitionRecord, preparation=preparation)
         if record is not None and record.digest != digest:
             raise StoreAuthorityError("DefinitionRecord digest does not match its direct path.")
         return record
+
+    def _definition_record_for_cut(self, cut, digest):
+        if not self._can_reuse_exact_validation():
+            return super()._definition_record_for_cut(cut, digest)
+        from .records import _RecordPreparation
+        cut.check(self)
+        try:
+            return self._read_definition_record(digest, _RecordPreparation(cut))
+        except BaseException:
+            cut.discard()
+            raise
 
     def write_definition_record(
             self, record: DefinitionRecord, *, stored_root: bool = True
@@ -634,7 +735,26 @@ class DirStore(Store):
         Raises:
             StoreAuthorityError: If a marker path or DefinitionRecord target is
                 malformed or missing.
+
+        Returns:
+            Complete validated marker records in digest order. Standalone reads
+            validate each target directly; fenced inventory capture reuses its
+            already validated definitions instead. Neither path reads payloads
+            or changes authority.
         """
+        return self._read_stored_root_inventory()
+
+    def _validated_definition_root_inventory(
+        self,
+    ) -> tuple[tuple[DefinitionRecord, ...], tuple[StoredRootRecord, ...]]:
+        """Reuse one complete definition decode pass to validate root targets."""
+
+        definitions = tuple(self.iter_definition_records())
+        return definitions, self._read_stored_root_inventory(
+            {record.digest: record for record in definitions},
+        )
+
+    def _read_stored_root_inventory(self, definitions=None):
         root = Path(self.base_dir, "stored-roots")
         if not root.exists():
             return ()
@@ -645,7 +765,8 @@ class DirStore(Store):
                     record is None
                     or path.name != f"{record.definition_digest}.record"
                     or path.parent.name != record.definition_digest[:2]
-                    or self.read_definition_record(record.definition_digest) is None
+                    or (self.read_definition_record(record.definition_digest)
+                        if definitions is None else definitions.get(record.definition_digest)) is None
             ):
                 raise StoreAuthorityError(
                     f"StoredRootRecord is stored under an invalid digest path: {path!s}."
@@ -751,8 +872,13 @@ class DirStore(Store):
         )
 
     def _validate_local_state_dir(
-            self, directory: str, manifest: LocalStateManifest,
-            *, defer_payload: bool = False) -> None:
+            self, directory: str, manifest: LocalStateManifest | None,
+            *, defer_payload: bool = False, preparation=None):
+        """Validate a physical payload once and return its manifest/definition.
+
+        A supplied manifest is additionally matched to on-disk authority. Passing
+        None reads that authority here, avoiding a redundant manifest decode.
+        """
         expected = {"data", "def.pkl", "manifest.record"}
         try:
             root_mode = os.lstat(directory).st_mode
@@ -768,12 +894,18 @@ class DirStore(Store):
         if not entries["def.pkl"].is_file(follow_symlinks=False) or not entries["manifest.record"].is_file(follow_symlinks=False):
             raise StoreAuthorityError("local state metadata entries must be regular files.")
         stored_manifest = self._read_file(os.path.join(directory, "manifest.record"), LocalStateManifest)
-        if stored_manifest != manifest:
+        if stored_manifest is None or (manifest is not None and stored_manifest != manifest):
             raise StoreAuthorityError("local state manifest bytes do not match requested manifest authority.")
+        manifest = stored_manifest
+        if defer_payload:
+            self._require_deferred_local_state_support(manifest)
         definition_bytes = Path(directory, "def.pkl").read_bytes()
         if hashlib.sha256(definition_bytes).hexdigest() != manifest.definition_file_digest:
             raise StoreAuthorityError("local state definition file bytes do not match manifest authority.")
-        definition = self._read_file(os.path.join(directory, "def.pkl"), DefinitionRecord)
+        if preparation is None:
+            definition = self._read_file(os.path.join(directory, "def.pkl"), DefinitionRecord)
+        else:
+            definition = self._read_file(os.path.join(directory, "def.pkl"), DefinitionRecord, preparation=preparation)
         if definition is None or definition.digest != manifest.definition_digest or definition.graph_hash != manifest.graph_hash:
             raise StoreAuthorityError("local state definition does not match manifest graph and definition digests.")
         try:
@@ -782,9 +914,27 @@ class DirStore(Store):
             )
         except StoreRecordError as error:
             raise StoreAuthorityError(f"local state payload is invalid: {error}") from error
+        return manifest, definition
 
     def iter_state_ref_records(self) -> Iterable[StateRefRecord]:
-        """Yield only complete v3 snapshot StateRef authority in digest order."""
+        """Enumerate complete v3 snapshot StateRef authority in digest order.
+
+        Returns:
+            Iterable of StateRefRecords whose complete association siblings have
+            validated, or an empty tuple when no snapshot directories exist.
+
+        Raises:
+            StoreAuthorityError: If catalogue shape or a complete snapshot is
+                invalid, including a directory disappearing during capture.
+
+        Side Effects:
+            Reads every bundle without opening payload bytes or changing Store
+            authority. Scoped internal enumeration uses the same validator.
+        """
+        return self._iter_state_ref_records(self._read_snapshot)
+
+    def _iter_state_ref_records(self, read_snapshot):
+        """Enumerate with the same shape validation for public and scoped reads."""
         root = Path(self.base_dir, "snapshots")
         if not root.exists():
             return ()
@@ -792,21 +942,55 @@ class DirStore(Store):
         for path in sorted(root.glob("*/*")):
             if not path.is_dir() or path.parent.name != path.name[:2]:
                 raise StoreAuthorityError(f"Snapshot is stored under an invalid digest path: {path!s}.")
-            snapshot = self._read_snapshot(path.name)
-            assert snapshot is not None
+            snapshot = read_snapshot(path.name)
+            if snapshot is None:
+                raise StoreAuthorityError("Snapshot disappeared during authority capture.")
             records.append(snapshot[0])
         return tuple(records)
 
     @staticmethod
-    def _read_json(path: str):
+    def _read_json(path: str, *, cut=None, kind=None):
         from dryml.formats import canonical_json_load_bytes
+        from dryml.formats import canonical as parser
+        from .._content_facts import _primitive_size, _freeze_json_fact, _thaw_json_fact
+        from weakref import ref
 
         try:
             mode = os.lstat(path).st_mode
             if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
                 raise StoreAuthorityError("snapshot metadata is not a regular file.")
             with open(path, "rb") as source:
-                return canonical_json_load_bytes(source.read(), max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
+                payload = source.read()
+            bounds = dict(max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
+            if cut is not None:
+                if kind not in {"placement.json", "metadata.json", "snapshot.json"}:
+                    raise ValueError("Only snapshot JSON siblings support retained primitives.")
+                implementations = (
+                    canonical_json_load_bytes, parser.canonical_json_loads,
+                    parser.deep_freeze_json, parser.json.loads,
+                    parser._reject_constant, parser._reject_duplicate_keys,
+                    parser.check_string, _freeze_json_fact, _thaw_json_fact,
+                    _primitive_size,
+                )
+                try:
+                    context = ("snapshot-json", kind, 1, "canonical-json", 1,
+                               tuple(bounds.items()), "exact-primitives", 1,
+                               tuple((ref(value), ref(getattr(value, "__code__", value)))
+                                     for value in implementations))
+                except TypeError:
+                    context = None
+                if context is not None:
+                    prepared = cut.prepared(context, payload)
+                    if prepared is not None:
+                        return _thaw_json_fact(prepared)
+            value = canonical_json_load_bytes(payload, **bounds)
+            if cut is not None and context is not None:
+                try:
+                    owned_size = _primitive_size(value)
+                except TypeError:
+                    return value
+                cut.stage_prepared(context, payload, owned_size, lambda: _freeze_json_fact(value))
+            return value
         except FileNotFoundError:
             return None
         except StoreAuthorityError:
@@ -982,7 +1166,7 @@ class DirStore(Store):
 
     def _read_snapshot(
             self, digest: str, *, payloads: bool = False,
-            directory: str | None = None):
+            directory: str | None = None, cut=None):
         """Validate one v3 snapshot association without opening payloads by default."""
 
         from dryml.core.metadata import decode_snapshot_metadata
@@ -1005,12 +1189,22 @@ class DirStore(Store):
         if not required.issubset(entries) or any(
                 not entries[name].is_file(follow_symlinks=False) for name in required):
             raise StoreAuthorityError("snapshot lacks required complete metadata siblings.")
-        record = self._read_file(os.path.join(directory, "state-ref.record"), StateRefRecord)
+        if cut is None:
+            record = self._read_file(os.path.join(directory, "state-ref.record"), StateRefRecord)
+        else:
+            from .records import _RecordPreparation
+            record = self._read_file(os.path.join(directory, "state-ref.record"), StateRefRecord,
+                                     preparation=_RecordPreparation(cut))
         if record is None or record.digest != digest:
             raise StoreAuthorityError("snapshot StateRef record does not match its directory.")
-        placement_envelope = self._read_json(os.path.join(directory, "placement.json"))
-        metadata_envelope = self._read_json(os.path.join(directory, "metadata.json"))
-        snapshot_envelope = self._read_json(os.path.join(directory, "snapshot.json"))
+
+        def sibling(name):
+            path = os.path.join(directory, name)
+            return self._read_json(path) if cut is None else self._read_json(path, cut=cut, kind=name)
+
+        placement_envelope = sibling("placement.json")
+        metadata_envelope = sibling("metadata.json")
+        snapshot_envelope = sibling("snapshot.json")
         try:
             placement_record = decode_record(placement_envelope)
             snapshot_record = decode_record(snapshot_envelope)
@@ -1063,19 +1257,157 @@ class DirStore(Store):
         if set(covered) != set(record.state_ref.states):
             raise StoreAuthorityError("snapshot placement does not cover every stateful path.")
         if payloads:
-            for path, relative in local.items():
-                manifest = self._read_file(os.path.join(directory, relative, "manifest.record"), LocalStateManifest)
-                if manifest is None or manifest.state_hash != record.state_ref.states[path]:
-                    raise StoreAuthorityError("snapshot payload manifest does not match placement.")
-                self._validate_local_state_dir(os.path.join(directory, relative), manifest)
-                expected = record.state_ref.object.at(path).definition
-                definition = self._read_file(os.path.join(directory, relative, "def.pkl"), DefinitionRecord)
-                if definition is None or not definition.definition.graph_equal(expected):
-                    raise StoreAuthorityError("snapshot payload definition does not match StateRef path.")
+            self._validate_snapshot_locals((record, metadata, local), directory)
         return record, metadata, local
 
+    def _validate_snapshot_locals(
+            self, snapshot, directory, *, paths=None, defer_payload=False,
+            validated=None, preparation=None):
+        """Share physical work while checking every placement/definition binding."""
+        record, _, local = snapshot
+        validated = {} if validated is None else validated
+        reusable = self._can_reuse_exact_validation()
+        results = {}
+        for path in local if paths is None else paths:
+            relative = local.get(path)
+            if relative is None:
+                raise KeyError(path)
+            target = os.path.normpath(os.path.join(directory, relative))
+            key = (target, defer_payload)
+            evidence = (validated.get((target, False)) or validated.get(key)) if reusable else None
+            if evidence is None:
+                # Preserve the old supplied-manifest contract for custom lower
+                # validators, including overrides returning None on success.
+                manifest = None
+                if not reusable:
+                    manifest = self._read_file(
+                        os.path.join(target, "manifest.record"), LocalStateManifest,
+                    )
+                    if manifest is None:
+                        raise StoreAuthorityError("snapshot payload manifest does not match placement.")
+                options = {} if preparation is None else {"preparation": preparation}
+                if defer_payload:
+                    options["defer_payload"] = True
+                evidence = self._validate_local_state_dir(
+                    target, manifest, **options,
+                )
+                if evidence is None:
+                    evidence = (manifest, self._read_file(
+                        os.path.join(target, "def.pkl"), DefinitionRecord,
+                    ))
+            manifest, definition = evidence
+            if manifest.state_hash != record.state_ref.states[path]:
+                raise StoreAuthorityError("snapshot payload manifest does not match placement.")
+            if defer_payload:
+                self._require_deferred_local_state_support(manifest)
+            expected = record.state_ref.object.at(path).definition
+            if definition is None or not definition._matches_definition(expected):
+                raise StoreAuthorityError("snapshot payload definition does not match StateRef path.")
+            if reusable:
+                validated[key] = evidence
+            results[path] = manifest
+        return results
+
+    def _can_reuse_exact_validation(self):
+        """Opt in only for effective, unmodified built-in authority readers."""
+        expected = _EXACT_READERS.get(type(self))
+        return expected is not None and all(
+            getattr(getattr(self, name), "__func__", getattr(self, name)) is value
+            and name not in self.__dict__
+            for name, value in expected.items()
+        ) and LocalStateManifest.validate_payload is _EXACT_PAYLOAD_VALIDATOR and all(
+            getattr(getattr(owner, name), "__func__", getattr(owner, name)) is value
+            for owner, name, value in _EXACT_RECORD_VALIDATORS
+        )
+
+    def _cut_snapshot_key(self, cut, digest):
+        cut.check(self)
+        return (self, self.base_dir, self._authority_evidence, self._snapshot_path(digest))
+
+    def _read_snapshot_for_cut(self, cut, digest):
+        if not self._can_reuse_exact_validation():
+            return super()._read_snapshot_for_cut(cut, digest)
+        key = self._cut_snapshot_key(cut, digest)
+        snapshot = cut.snapshots.get(key)
+        if snapshot is None:
+            snapshot = self._read_snapshot(digest, cut=cut)
+            if snapshot is not None:
+                cut.check(self)
+                cut.snapshots[key] = snapshot
+        return snapshot
+
+    def _state_ref_records_for_cut(self, cut):
+        if not self._can_reuse_exact_validation():
+            return super()._state_ref_records_for_cut(cut)
+        cut.check(self)
+        return self._iter_state_ref_records(
+            lambda digest: self._read_snapshot_for_cut(cut, digest),
+        )
+
+    def _snapshot_metadata_for_cut(self, cut, digest):
+        if not self._can_reuse_exact_validation():
+            return super()._snapshot_metadata_for_cut(cut, digest)
+        snapshot = self._read_snapshot_for_cut(cut, digest)
+        return None if snapshot is None else snapshot[1]
+
+    def _open_local_state_for_cut(self, cut, reference, path, *, defer_payload=False):
+        """Promote local siblings once; report validated delegation without failure."""
+        if not self._can_reuse_exact_validation():
+            return super()._open_local_state_for_cut(
+                cut, reference, path, defer_payload=defer_payload,
+            )
+        from ..utils.graph.path import normalize_path
+
+        path = normalize_path(path)
+        snapshot = self._read_snapshot_for_cut(cut, reference.digest())
+        if snapshot is None or snapshot[0].state_ref != reference:
+            raise KeyError(reference.digest())
+        key = self._cut_snapshot_key(cut, reference.digest())
+        directory = key[-1]
+        validated = cut.locals.setdefault(key, {})
+        from .records import _RecordPreparation
+        preparation = _RecordPreparation(cut)
+        if not defer_payload:
+            if key not in cut.eager_snapshots:
+                manifests = self._validate_snapshot_locals(snapshot, directory, validated=validated,
+                                                            preparation=preparation)
+                cut.check(self)
+                cut.eager_snapshots[key] = manifests
+            manifests = cut.eager_snapshots[key]
+        if path not in snapshot[2]:
+            if path not in reference.states:
+                raise KeyError(path)
+            cut.check(self)
+            return _DELEGATED_LOCAL_STATE
+        if defer_payload:
+            manifests = self._validate_snapshot_locals(
+                snapshot, directory, paths=(path,), defer_payload=True,
+                validated=validated,
+                preparation=preparation,
+            )
+        manifest = manifests[path]
+        cut.check(self)
+        return LocalStateSource(
+            self, os.path.join(directory, snapshot[2][path]), manifest,
+            eagerly_validated=not (defer_payload and manifest.deferred_paths),
+        )
+
     def read_state_ref_record(self, digest: str) -> StateRefRecord | None:
-        """Read one StateRef only when its complete v3 snapshot validates."""
+        """Read one StateRef only when its complete v3 snapshot validates.
+
+        Args:
+            digest (str): Exact digest naming a snapshot directory.
+
+        Returns:
+            StateRefRecord, or None for an absent snapshot.
+
+        Raises:
+            StoreAuthorityError: If record, metadata, or placement is incomplete
+                or incompatible. Payload bytes are not opened by this reader.
+
+        Side Effects:
+            Reads complete association siblings without retaining validity.
+        """
 
         snapshot = self._read_snapshot(digest)
         return None if snapshot is None else snapshot[0]
@@ -1181,7 +1513,26 @@ class DirStore(Store):
             raise
 
     def validate_local_state(self, reference, path) -> LocalStateManifest:
-        """Fully validate one exact snapshot-local payload manifest and bytes."""
+        """Fully validate one snapshot's local payloads and return a selected manifest.
+
+        Args:
+            reference (StateRef): Exact snapshot to inspect.
+            path (GraphPath or path data): Requested locally placed state.
+
+        Returns:
+            LocalStateManifest for the selected path, with all local siblings
+            eagerly checked as well.
+
+        Raises:
+            TypeError: If the reference or path type is unsupported.
+            KeyError: If snapshot authority or local placement is absent.
+            StoreAuthorityError: If association, manifest, definition, or payload
+                bytes are inconsistent.
+
+        Side Effects:
+            Reads and hashes local bytes without restoring Objects, retaining
+            cross-call validity, or mutating authority.
+        """
 
         from ..reference_values import StateRef
         from ..utils.graph.path import normalize_path
@@ -1200,7 +1551,26 @@ class DirStore(Store):
         return manifest
 
     def open_local_state(self, reference, path) -> LocalStateSource:
-        """Open one validated snapshot-local payload source for restoration/copy."""
+        """Open one eagerly validated borrowed source for restoration or copy.
+
+        Args:
+            reference (StateRef): Complete exact snapshot authority.
+            path (GraphPath or path data): Selected snapshot-local state path.
+
+        Returns:
+            LocalStateSource borrowing a directory from this Store. Expiration of
+            Repo preflight evidence does not shorten the source handle lifetime.
+
+        Raises:
+            TypeError: If reference or path has an unsupported type.
+            KeyError: If snapshot or local placement is absent.
+            StoreAuthorityError: If the bundle, any local sibling payload, or a
+                path's definition association is invalid.
+
+        Side Effects:
+            Hashes all locally placed payloads eagerly; no Objects are restored
+            or constructed and no authority is written.
+        """
 
         from ..utils.graph.path import normalize_path
 
@@ -1211,7 +1581,11 @@ class DirStore(Store):
         return LocalStateSource(self, os.path.join(self._snapshot_path(reference.digest()), snapshot[2][path]), manifest)
 
     def _open_local_state_for_exact_load(self, reference, path) -> LocalStateSource:
-        """Open one exact-restore payload after metadata-only deferred validation."""
+        """Open one exact-restore payload after metadata-only deferred validation.
+
+        Non-deferred payloads retain the eager ``(directory, manifest)`` validator
+        call, including custom validators returning None on success.
+        """
 
         from ..reference_values import StateRef
         from ..utils.graph.path import normalize_path
@@ -1232,9 +1606,10 @@ class DirStore(Store):
         if manifest is None or manifest.state_hash != reference.states[path]:
             raise StoreAuthorityError("snapshot payload manifest does not match placement.")
         self._require_deferred_local_state_support(manifest)
-        self._validate_local_state_dir(
-            directory, manifest, defer_payload=bool(manifest.deferred_paths),
-        )
+        if manifest.deferred_paths:
+            self._validate_local_state_dir(directory, manifest, defer_payload=True)
+        else:
+            self._validate_local_state_dir(directory, manifest)
         expected = reference.object.at(path).definition
         definition = self._read_file(os.path.join(directory, "def.pkl"), DefinitionRecord)
         if definition is None or not definition.definition.graph_equal(expected):
@@ -1556,3 +1931,23 @@ class DirStore(Store):
 
 
 DirStore.publish_snapshot._dryml_annotation_phase_callback = True
+
+# These are capability identities, not validity facts. Observers must leave them
+# intact; unknown readers and subclasses use the Store compatibility seam.
+_EXACT_READER_NAMES = (
+    "read_state_ref_record", "read_snapshot_metadata", "iter_state_ref_records",
+    "open_local_state", "validate_local_state", "_open_local_state_for_exact_load",
+    "read_definition_record", "_read_definition_record", "_read_snapshot", "_validate_local_state_dir",
+    "_validate_snapshot_locals", "_read_file", "_read_json", "_snapshot_path",
+    "_require_deferred_local_state_support", "authority_fence_key",
+    "authority_read_fence", "writer_lock", "_cut_snapshot_key",
+    "_iter_state_ref_records", "_can_reuse_exact_validation",
+    "_supports_deferred_local_state",
+)
+_EXACT_READERS = {DirStore: {name: getattr(DirStore, name) for name in _EXACT_READER_NAMES}}
+_EXACT_PAYLOAD_VALIDATOR = LocalStateManifest.validate_payload
+_EXACT_RECORD_VALIDATORS = tuple(
+    (owner, name, getattr(owner, name).__func__)
+    for owner in (StateRefRecord, DefinitionRecord, LocalStateManifest)
+    for name in ("from_bytes", "from_data", "_decode_framed")
+) + tuple((owner, "from_data", owner.from_data.__func__) for owner in (ObjectRef, StateRef))

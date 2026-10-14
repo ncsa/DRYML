@@ -52,8 +52,9 @@ class MethodGraphNode:
         traits: Traits of the selected implementation, when known.
 
     The virtual source node records only supplied specification facts. It never
-    opens a Dataset source. A selected invoker retains a weak receiver and can be
-    inspected for future compilation, but no compiler or executor is provided.
+    opens a Dataset source. A selected invoker retains a weak receiver and its
+    already-compiled core signature; inspection and execution share this exact
+    finalized invoker. The IR supplies no code-generation compiler.
     """
 
     occurrence: int
@@ -160,8 +161,11 @@ class MethodGraph:
                 operator.
 
         Side Effects:
-            Stores immutable occurrence selections in local preparation state. It
-            invokes no candidate body or Dataset source.
+            Stores complete immutable occurrence selections and compiled signature
+            invokers without running bodies or opening sources. Dataset plans do
+            not change child Method state and retain their old complete plan if
+            replacement fails. Direct Method preparation clears its prior state
+            before building, preserving Method.learn failure semantics.
         """
 
         if self._stream_plan is not None:
@@ -175,7 +179,8 @@ class MethodGraph:
         Side Effects:
             Delegates to the owner Method's normal eager reset or clears Dataset
             graph selections. The graph remains inspectable but no longer exposes
-            retained selected invokers.
+            retained selected invokers. Dataset resets leave shared child Methods
+            and independently captured cursors usable.
         """
 
         if self._stream_plan is not None:
@@ -183,8 +188,12 @@ class MethodGraph:
             return
         self._owner().eager()
 
-    def iterator(self):
+    def iterator(self, *, epoch: int = 0):
         """Open one isolated cursor for a prepared Dataset iterator-port graph.
+
+        Args:
+            epoch: Logical Dataset epoch forwarded to qualified stream boundaries
+                that own epoch selection, such as ``Take``.
 
         Raises:
             NotImplementedError: If this is an element-only Method graph.
@@ -197,7 +206,7 @@ class MethodGraph:
 
         if self._stream_plan is None:
             raise NotImplementedError("MethodGraph iterator execution requires Dataset iterator ports.")
-        return self._stream_plan.iterator()
+        return self._stream_plan.iterator(epoch=epoch)
 
     def _owner(self):
         owner = self._owner_ref()

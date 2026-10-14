@@ -2,6 +2,8 @@
 
 import gc
 import os
+import subprocess
+import sys
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 
@@ -11,6 +13,7 @@ import pytest
 from dryml.core.object import Pickleable
 from dryml.core.repo import Repo
 from dryml.core.store.dir import DirStore
+from dryml.core.tensor_spec import TensorSpec
 from dryml.methods import Method, traits
 
 
@@ -86,13 +89,17 @@ def test_preparation_never_changes_definition_hash_or_instance_storage():
     assert set(method.__dict__) == object_keys
 
 
-def test_pickleable_save_load_resets_fresh_state_and_preserves_live_reuse(tmp_path):
+@pytest.mark.parametrize("known_spec", (False, True))
+def test_pickleable_save_load_resets_fresh_state_and_preserves_live_reuse(tmp_path, known_spec):
     """Saving excludes preparation while explicit reuse retains only the same live object."""
 
     repo = Repo(DirStore(tmp_path / "store"))
     method = PersistentStateful(repo=repo)
     method.default_batched = True
-    method.learn()
+    if known_spec:
+        method.learn(TensorSpec("float32", shape=(2,), backend="numpy"))
+    else:
+        method.learn()
     method(np.ones((2,), dtype=np.float32))
 
     state = method.save(repo=repo)
@@ -124,11 +131,46 @@ def test_cached_side_state_does_not_keep_method_instances_alive():
     assert reference() is None
 
 
-def test_concurrent_cached_reads_and_unrelated_transitions_remain_isolated():
+def test_side_state_creation_allows_same_thread_gc_cleanup():
+    """A cyclic Method collected during state allocation cannot deadlock its creator."""
+    code = """
+import gc
+import weakref
+from dryml.methods import method as implementation
+from tests.methods.test_state_isolation import Stateful
+
+gc.disable()
+victim = Stateful()
+victim.default_batched = True
+victim.cycle = victim
+key = id(victim)
+reference = weakref.ref(victim)
+probe = Stateful()
+del victim
+factory = implementation._PreparationState
+def collect_then_create(*args, **kwargs):
+    gc.collect()
+    return factory(*args, **kwargs)
+implementation._PreparationState = collect_then_create
+assert probe.call_mode == "eager"
+assert reference() is None
+assert key not in implementation._STATES
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("known_spec", (False, True))
+def test_concurrent_cached_reads_and_unrelated_transitions_remain_isolated(known_spec):
     """Cached reads do not mutate state while other Method identities transition."""
 
     cached = Stateful()
-    cached.learn()
+    if known_spec:
+        cached.learn(TensorSpec("float32", shape=(2,), backend="numpy"))
+    else:
+        cached.learn()
     cached(np.ones((2,), dtype=np.float32))
     signature = cached.cached_signature
 
@@ -157,14 +199,18 @@ def test_concurrent_cached_reads_and_unrelated_transitions_remain_isolated():
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork support")
-def test_forked_child_replaces_inherited_state_even_while_parent_lock_is_held():
+@pytest.mark.parametrize("known_spec", (False, True))
+def test_forked_child_replaces_inherited_state_even_while_parent_lock_is_held(known_spec):
     """The at-fork child callback resets state without acquiring a parent-owned lock."""
 
     from dryml.methods import method as method_module
 
     method = Stateful()
     method.default_batched = True
-    method.learn()
+    if known_spec:
+        method.learn(TensorSpec("float32", shape=(2,), backend="numpy"))
+    else:
+        method.learn()
     method(np.ones((2,), dtype=np.float32))
     read_fd, write_fd = os.pipe()
     method_module._STATE_LOCK.acquire()

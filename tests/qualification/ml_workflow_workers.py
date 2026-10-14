@@ -367,8 +367,8 @@ def worker_requests(manifest, *, manifest_path, tfds_data_dir, output_store, wor
                     evidence_dir, control_store, ray_address: str | None = None) -> tuple[QualificationWorkerRequest, ...]:
     """Return every constructible primary request without starting workers or loading data.
 
-    Callers that omit a Ray address receive all 18 non-Ray requests.  They can use
-    :func:`worker_request` to truthfully classify each of the six Ray cells.
+    Callers that omit a Ray address receive all 27 non-Ray requests. They can use
+    :func:`worker_request` to truthfully classify each of the nine Ray cells.
     """
 
     requests = tuple(
@@ -497,7 +497,7 @@ def inspect_worker_transport(request: QualificationWorkerRequest) -> Mapping[str
 def submit_worker_request(executor, request: QualificationWorkerRequest):
     """Preflight and submit one JSON-only request through a Core Execute facade.
 
-    The narrow executor seam makes routine tests inspect all 24 submissions without
+    The narrow executor seam makes routine tests inspect all 36 submissions without
     importing ML frameworks.  Production callers pass an existing ``CoreExecutor``;
     no Ray service is created here.
     """
@@ -920,7 +920,7 @@ def _validate_coordinator_reference_metadata(evidence, *, output_store) -> None:
     repo = Repo((output, fixture))
     try:
         expected_model = evidence.final_experiment_ref.at("model")
-        expected_test = evidence.final_experiment_ref.reference_value_at("test_data")
+        expected_test = evidence.final_experiment_ref.at("test_data")
         if expected_model != evidence.model_ref or expected_test != evidence.test_ref:
             raise FixtureManifestError("Evidence model/test bindings disagree with final Experiment StateRef.")
         for reference in (
@@ -1150,7 +1150,8 @@ def run_worker_request(data: Mapping[str, object]) -> Mapping[str, object]:
         "worker_pid": os.getpid(), "execution_backend": request.execution_backend,
         "resource_mode": request.resource_mode, "recovery": request.recovery is not None,
         "optional_modules": tuple(sorted(name for name in sys.modules if name in {
-            "tensorflow", "tensorflow_datasets", "torch", "pandas",
+            "flax", "jax", "jaxlib", "optax", "tensorflow",
+            "tensorflow_datasets", "torch", "pandas",
         })),
     }
 

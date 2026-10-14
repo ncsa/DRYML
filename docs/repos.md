@@ -107,6 +107,141 @@ later index, name, or commit boundary fails.
 `Repo.load(cdef)` and `load_object(cdef)` construct structural Objects and do not
 infer state. `Repo.load_or_build()` may create missing structure.
 
+`Repo.load_state_ref()` accepts either a directly published complete snapshot or
+an exact descendant projection retained by a complete enclosing closure snapshot.
+For an enclosing projection, exact-load preflight validates the projected
+definition, ObjectIds, state hashes, lineage, and enclosing snapshot-local payload
+paths before construction. Loading a projection does not synthesize or require an
+independent child snapshot directory; per-object routed descendants still use
+their independently published child authority.
+
+Exact preflight uses a Repo-owned, explicit read cut: it atomically retains the
+connected handle order and acquires ordered cooperating-writer authority fences
+before reading. Supported default/routing changes affect later calls. Read-side
+physical aliases remain permitted, but deduplicating their lock domain does not
+merge distinct handles' evidence; ZipStore extractions are always distinct views.
+
+Within an eligible built-in view, preflight validates each complete snapshot
+bundle once. Eager exact planning hashes each distinct physical local payload
+once, checks **every** path/definition association, and validates unrequested
+local siblings even when loading a projected child. A confirmed built-in delegated
+placement sentinel routes to child snapshots without discarding parent bundle,
+eager sibling, or staged content evidence. Generic public-reader `KeyError` keeps
+its established missing-local-placement routing meaning, while conservatively
+discarding partial cut evidence and preventing content admission from that cut.
+Advertised built-in local corruption and genuine custom authority errors such as
+`StoreAuthorityError` fail without child/replica fallback. Metadata inspection
+opens no payload bytes. Restoration uses path-specific deferred validation: inventory,
+types, and sizes are checked, while only eager files are hashed. Deferred evidence
+cannot authorize eager copy, fork, publication, or recovery. Custom Stores and
+overridden readers/validators/adapters retain their existing uncached behavior
+and capability errors.
+Eager custom local-state validators keep the legacy `(directory, manifest)` call
+and may return `None` after successful validation, including for non-deferred
+payloads during exact restoration. ZipStore wrappers likewise omit
+new preparation/cut keywords when those options are absent. Archive acceleration
+checks the captured DirStore implementations beneath the wrappers as well as the
+wrappers themselves; replacing a base reader uses uncached reads and preserves
+its custom validation errors, including after a Repo has warmed content evidence.
+
+Cuts are process/thread-bound and expire on exit; independent nested calls begin
+fresh cuts. Internal substeps may join only by passing the same cut explicitly.
+No cut spans construction or restore hooks. Exceptions discard partial evidence
+and release fences/topology; foreign-thread or inherited-process unwind cannot
+release the owner's resources. A forked child opens a fresh Repo. `clear_cache()`
+invalidates derived evidence independently of its live-tier flags, and `close()`
+rejects while a cut retains topology. There is no permanent payload-validity cache.
+
+An exact plan's `LocalStateSource` handles retain their established borrowed Store
+lifetime after the cut expires. Direct directories remain Store-owned; closing a
+ZipStore removes its extracted paths. Holding a source does not prove that it is
+valid for another independent operation, which always validates fresh authority.
+
+### Bounded Snapshot And Graph Content Reuse
+
+The same Repo-owned validation facility may retain parsed primitive content for
+the snapshot's `placement.json`, `metadata.json`, and `snapshot.json` siblings.
+Eligible built-in reads through explicit authority cuts, including exact preflight
+and managed durable validation, use this private path. Direct public Store readers
+continue their fully validating uncached path. Custom Stores, subclasses and
+overridden readers keep their established authoritative fallback.
+
+A warm hit avoids the existing canonical JSON parser and its primitive projection
+preparation. **Every independent cut still reads current sibling bytes and checks
+filesystem shape.** Matching includes exact source bytes, component kind, parser
+bounds, schema/representation and policy versions, and live parser/preparation
+implementation identities. Hashes only select buckets, with at most four candidates
+per bucket. Collisions, changed context or changed bytes cannot substitute another
+fact. Envelope freezing, encoding/ID verification, domain decoding, sibling/target
+association, aggregate closure and live-lineage checks still run. No decoded domain
+objects, references, live Objects, CDefs, annotations, resource handles, extraction
+paths, or payload-validity verdicts are retained.
+
+The same facility also retains token-neutral preparation for eligible
+`DefinitionRecord` and `StateRefRecord` graphs, through the existing record and
+reference owners. Exact preflight and plain built-in `Repo.has_cdef_light()` reads
+pass this private interface explicitly. Each read first checks current file shape,
+frame, size and trailing bytes and **freshly decodes dill**. A graph hit additionally
+requires lossless fresh-content matching (types, tags, labels, order, role bits,
+scalar bits and array representation), exact source bytes, and matching codec,
+normalizer and decoding-policy implementation/version context. Neither a digest
+nor public graph/reference equality is sufficient. Malformed data cannot be
+sorted, relabelled or deduplicated into a hit.
+
+Eligible graphs have exact `ImportRef` class symbols, primitive scalar/container
+and link tags, canonical primitive mapping keys, and standard non-object numeric
+or bool ndarrays (including exact `FrozenNDArray`). Arrays are retained as owned
+immutable bytes with dtype/shape/representation descriptors. SourceSpec classes,
+quotations, embedded ObjectRef/StateRef leaves, arbitrary atoms/subclasses and
+object/extension dtypes fall back to ordinary complete decoding. In an ordinary
+small mean Fold exact preflight, the separately stored `MeanInitial`, `MeanUpdate`
+and `MeanFinalize` records benefit; the Ref-bearing Fold root containing unsupported
+source data follows the full path.
+
+Warm eligible reads omit repeated canonical label/order proof and graph topology,
+hash and role derivation inside the prepared record path. Existing codec node
+construction still allocates fresh private tokens, ImportRefs, containers and
+arrays, preserving sharing within one graph but never across independent decodes.
+Current path/ObjectId/state/target associations and materializing class abstractness
+and recorded-role admission remain mandatory. Prepared topology comparison still
+derives the current target's topology; there is no universal live-definition
+equality cache. Whole snapshot environment/requirements envelopes still undergo
+freezing, encoding/ID verification and domain decoding. Fresh matching, hashing,
+realization, association checks and payload validation remain size-dependent work.
+
+The internal LRU admits at most **256 entries, 32 MiB of accounted owned data, and
+2 MiB per entry**. Resident facts and pending reservations share those limits
+across threads, independent nested cuts and internal borrowers. Charges include
+keys/implementation weak identities, source bytes, prospective immutable
+containers and leaves, and a conservative per-entry bookkeeping surcharge. Repeated
+immutable leaves are deliberately overcounted. Budget is reserved **before** optional
+retention copies; failed admission uses ordinary uncached processing and does not
+reject input. Necessary decoding, detached public returns and cut-local evidence
+have independent input-dependent working memory: these bounds are not a process
+memory ceiling. Eviction causes recomputation, never loss of Store authority.
+
+Facts are staged until the complete owning cut succeeds, including aggregate and
+live-lineage validation. Failures/absences are never cached; a failed scope drops
+pending facts and partial authority evidence. Hits rebuild detached primitive
+containers and existing owners decode fresh public graphs/metadata, so mutating
+nested returned lists/maps cannot affect retained content or later reads.
+
+`clear_cache(strong=..., weak=...)` keeps the existing live-tier flag meanings and
+also drops content facts and advances a shared epoch. An in-flight optional copy
+keeps its budget reservation until preparation finishes, but cannot repopulate the
+cleared epoch. Accepted owner close clears facts before cleanup; a failed close may
+leave the Repo open with empty facts for retry. PID/closing checks precede evidence
+lock acquisition, and cuts remain thread-bound. Cache locking covers bookkeeping
+only; reading, parsing, preparation, matching, decoding and cleanup run outside it.
+
+Managed durable reopen creates a temporary Repo that **explicitly borrows** the
+originating Repo's facility while retaining its lifetime through a topology lease.
+It owns a distinct authority cut over freshly reopened Stores; buffered validity
+never authorizes the reopened view. Closing that borrower detaches without clearing
+the owner's facts. Owner clear invalidates the shared epoch for every borrower,
+and owner close rejects while a borrower retains its lifetime. No reopened path or
+resource is stored in a content fact.
+
 ## Query V3
 
 `Repo.query()` creates one unevaluated identity universe over connected Store
@@ -193,6 +328,11 @@ holders and require explicit `store=` selection when facts conflict. Snapshot
 directories and local-state sources returned by a ZipStore are borrowed from its
 extraction and expire when the handle closes. See [Persistent Metadata](metadata.md)
 for scopes, queries, capture, recovery, and sharing guidance.
+
+Closing a ZipStore inside its retained writer/authority fence invalidates the
+handle immediately, but extraction removal waits until the outermost native lock
+has been released. This avoids deleting an open lock file on Windows. A deferred
+removal failure is raised at fence exit; calling `close()` again retries cleanup.
 
 ## Portable Repo Definitions
 

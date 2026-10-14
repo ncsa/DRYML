@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import shutil
 
 pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 
@@ -179,13 +180,24 @@ def test_callback_can_save_and_manage_a_disjoint_derived_object(tmp_path):
     repo = Repo((store,))
     value = CallbackValue(repo=repo)
     derived = DerivedValue(repo=repo)
+    callback_reads = []
+    from dryml.core.materialization import build_exact_state_load_plan
+    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
 
     def save_derived(obj, context):
+        assert context.state_repo._topology_leases == 1
+        assert context._publication_event is None
+        with exact_work_counts() as counts:
+            build_exact_state_load_plan(context.state_repo, context.checkpoint_state_ref)
+        callback_reads.append(counts)
+        assert counts["_read_snapshot"] == counts["validate_payload"] == 1
         assert derived.bump(managed=ManagedConfig(state_repo=context.state_repo)) is None
+        assert context.state_repo._topology_leases == 1
 
     value.run(managed=ManagedConfig(state_repo=store, callbacks=[save_derived]))
     assert derived.value == 1
     assert derived.bump.status(state_repo=store).state == "completed"
+    assert len(callback_reads) == 1
 
 
 def test_callback_cannot_begin_an_overlapping_managed_operation(tmp_path):
@@ -255,3 +267,27 @@ def test_caught_local_interruption_remains_terminal_and_rejects_safe_points(tmp_
     assert value.rejected_safe_points == ["inactive_context", "inactive_context"]
     assert len(callbacks) == 1
     assert (status.state, status.final_state_ref) == ("interrupted", None)
+
+
+def test_post_callback_decision_revalidates_deleted_checkpoint(tmp_path):
+    """No association cut survives a callback or authorizes its later safe-point read."""
+
+    from dryml.managed.errors import ManagedControlError, ManagedRecoveryError
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    value = CallbackValue(repo=repo)
+    observed = []
+
+    def delete(obj, context):
+        assert repo._topology_leases == 1
+        observed.append(context.checkpoint_state_ref)
+        shutil.rmtree(store._snapshot_path(context.checkpoint_state_ref.digest()))
+
+    with pytest.raises(ManagedControlError, match="failure_recording_failed") as caught:
+        value.run(managed=ManagedConfig(state_repo=repo, callbacks=[delete]))
+    assert isinstance(caught.value.__cause__, ManagedRecoveryError)
+    assert len(observed) == 1
+    with pytest.raises(ManagedRecoveryError):
+        value.run.status(state_repo=repo)
+    assert repo._topology_leases == 0

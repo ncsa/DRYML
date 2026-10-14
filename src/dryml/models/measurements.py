@@ -120,54 +120,23 @@ def parameter_counts_from_parameters(
 
 
 def dataset_size(dataset) -> Cardinality:
-    """Return declared effective Dataset cardinality without opening a cursor.
+    """Return a Dataset's declared example cardinality without opening a cursor.
 
     Args:
-        dataset: Dataset after any training selection/subsetting and unbatching,
-            but before trainer batching or epoch repetition.
+        dataset: Final canonical Dataset persisted by an Experiment.
 
     Returns:
         A finite, unknown, or infinite :class:`Cardinality`.
 
     Side Effects:
         Calls only declared cardinality accessors. It never iterates or consumes
-        data. An opaque natively batched source reports UNKNOWN rather than its
-        number of batches as a number of examples.
+        data. It delegates wholly to the Dataset's public example contract.
     """
 
-    source = getattr(dataset, "src", None)
-    batch_size = getattr(dataset, "batch_size", None)
-    if source is not None and batch_size is not None:
-        # Both a trainer Batch and Unbatch(Batch(...)) describe source examples,
-        # not the number of emitted batches. A dropping Batch removes its final
-        # partial examples before the effective training stream.
-        cardinality = dataset_size(source)
-        if getattr(dataset, "drop_remainder", False) and cardinality.is_finite:
-            return Cardinality.finite(
-                (cardinality.require_finite() // batch_size) * batch_size
-            )
-        return cardinality
-    if source is not None and type(dataset).__name__ == "Unbatch":
-        # Batch carries explicit source-example semantics.  A native batched
-        # Dataset normally exposes only its emitted batch count, which must not
-        # be relabeled as examples merely because Unbatch splits it.
-        if hasattr(source, "batch_size"):
-            return dataset_size(source)
-        explicit = getattr(source, "example_cardinality", None)
-        if isinstance(explicit, Cardinality):
-            return explicit
-        if type(explicit) is int and explicit >= 0:
-            return Cardinality.finite(explicit)
+    cardinality = getattr(dataset, "example_cardinality", None)
+    if cardinality is None:
         return Cardinality.UNKNOWN
-    try:
-        value = dataset.__len__()
-    except Exception:
-        return Cardinality.UNKNOWN
-    if isinstance(value, Cardinality):
-        return value
-    if type(value) is int and value >= 0:
-        return Cardinality.finite(value)
-    return Cardinality.UNKNOWN
+    return cardinality()
 
 
 def model_parameter_counts(model, *, repo=None) -> ParameterCounts:
@@ -193,7 +162,7 @@ def model_parameter_counts(model, *, repo=None) -> ParameterCounts:
     """
 
     backend = getattr(model, "native_backend", None)
-    if backend in {"tf", "torch"}:
+    if backend in {"tf", "torch", "jax"}:
         _, parameters, trainables = _model_parameter_set(model)
         return parameter_counts_from_parameters(parameters, trainables)
     if backend is not None:
@@ -226,8 +195,16 @@ def model_parameter_counts(model, *, repo=None) -> ParameterCounts:
 
 def _model_parameter_set(model):
     backend = getattr(model, "native_backend", None)
-    if backend not in {"tf", "torch"}:
+    if backend not in {"tf", "torch", "jax"}:
         return None
+    if backend == "jax":
+        from dryml.jax.measurements import parameter_sets
+
+        parameters = getattr(model, "parameters", ())
+        effective = getattr(model, "trainable_parameters", None)
+        trainables = effective("jax") if callable(effective) else parameters
+        parameters, trainables = parameter_sets(parameters, trainables)
+        return backend, parameters, trainables
     parameters, trainables = _backend_parameter_set(backend, getattr(model, "obj", model))
     effective = getattr(model, "trainable_parameters", None)
     if callable(effective):

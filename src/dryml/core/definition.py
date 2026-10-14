@@ -657,6 +657,9 @@ class Definition(DefInterface, Mapping):
         Returns:
             A new ``Definition`` retaining partial symbolic structure when roots
             remain and evaluating supported closed arithmetic and repetition.
+            Supplied Definition/CDef values retain construction structure and
+            exact references retain their identities; live Object bindings are
+            lowered to ObjectRefs without traversing their graphs.
 
         Raises:
             ParameterizationError: If bindings are invalid, unknown, or contain a
@@ -777,10 +780,15 @@ class Definition(DefInterface, Mapping):
 
         Returns:
             A selector that replaces unknown symbolic relationships with local
-            wildcards while preserving known Definition structure.
+            wildcards while preserving known Definition structure. Fixed nested
+            ConcreteDefinitions and exact reference values remain exact anchors;
+            their parameters and identities are not loosened.
 
         Raises:
             ParameterizationError: If the Definition cannot be projected.
+
+        Side Effects:
+            None. Projection does not construct Objects or access Store authority.
         """
 
         from .generator import _loose_selector
@@ -1164,15 +1172,15 @@ class ConcreteDefinition(DefInterface, Mapping):
         return copy_cdef_graph(self)
 
     def object_projection(self, *, traverse_refs: bool = False) -> "ConcreteDefinition":
-        """Return this CDef with nested StateRefs weakened to ObjectRefs.
+        """Return this CDef with exact references replaced by ObjectSelectors.
 
         Args:
             traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
                 Ref-held exact references are projected regardless of this flag.
 
         Returns:
-            An import-free, non-materializing CDef preserving graph topology,
-            edge roles, and all ObjectIds carried by nested references.
+            An import-free, query-only CDef preserving graph topology, edge roles,
+            and all ObjectIds carried by recursive ObjectSelector leaves.
 
         Raises:
             TypeError: If ``traverse_refs`` is not a bool.
