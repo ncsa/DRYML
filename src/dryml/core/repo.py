@@ -69,7 +69,12 @@ class _ValidationEvidence:
 
 
 class _AuthorityReadCut:
-    """One owner-bound topology/fence lease, never an ambient validity cache."""
+    """One owner-bound topology/fence lease, never an ambient validity cache.
+
+    Internal consumers may retain resolved StateRefs and successful eager closure
+    matches only for this captured view and identical validation policy. Discard
+    and exit clear those values alongside bundle/payload evidence.
+    """
 
     def __init__(self, facility, *, selected_stores=()):
         self.facility = facility
@@ -84,6 +89,8 @@ class _AuthorityReadCut:
         self.snapshots = {}
         self.locals = {}
         self.eager_snapshots = set()
+        self.resolved_state_refs = {}
+        self.validated_state_refs = []
         self._stack = None
 
     def _check_owner(self):
@@ -150,6 +157,8 @@ class _AuthorityReadCut:
         self.snapshots.clear()
         self.locals.clear()
         self.eager_snapshots.clear()
+        self.resolved_state_refs.clear()
+        self.validated_state_refs.clear()
 
     def snapshot(self, store, digest):
         self.check(store)

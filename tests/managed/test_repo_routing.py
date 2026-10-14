@@ -298,7 +298,7 @@ def test_control_failure_after_committed_state_leaves_reopenable_orphan(tmp_path
     control = DirStore(tmp_path / "control")
     repo = Repo(state)
     value = RoutedValue(repo=repo)
-    original = ManagedControlStore.transition_running_owner
+    original = ManagedControlStore._transition_running_fields
 
     calls = 0
 
@@ -309,7 +309,7 @@ def test_control_failure_after_committed_state_leaves_reopenable_orphan(tmp_path
             raise OSError("control association failed")
         return original(self, operation_id, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "transition_running_owner", fail_association)
+    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_association)
     with pytest.raises(OSError, match="control association failed") as caught:
         value.checkpoint_then_finish(
             managed=ManagedConfig(state_repo=repo, control_store=control),

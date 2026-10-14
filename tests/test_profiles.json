@@ -637,7 +637,10 @@
           "functions": [
             "test_callbacks_receive_exact_committed_receipt_in_list_order",
             "test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails",
+            "test_callback_can_save_and_manage_a_disjoint_derived_object",
             "test_callback_cannot_begin_an_overlapping_managed_operation",
+            "test_request_arriving_during_callbacks_is_honored_at_that_checkpoint",
+            "test_post_callback_decision_revalidates_deleted_checkpoint",
             "test_caught_local_interruption_remains_terminal_and_rejects_safe_points"
           ]
         },

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import shutil
 
 pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 
@@ -181,7 +182,9 @@ def test_callback_can_save_and_manage_a_disjoint_derived_object(tmp_path):
     derived = DerivedValue(repo=repo)
 
     def save_derived(obj, context):
+        assert context.state_repo._topology_leases == 1
         assert derived.bump(managed=ManagedConfig(state_repo=context.state_repo)) is None
+        assert context.state_repo._topology_leases == 1
 
     value.run(managed=ManagedConfig(state_repo=store, callbacks=[save_derived]))
     assert derived.value == 1
@@ -255,3 +258,27 @@ def test_caught_local_interruption_remains_terminal_and_rejects_safe_points(tmp_
     assert value.rejected_safe_points == ["inactive_context", "inactive_context"]
     assert len(callbacks) == 1
     assert (status.state, status.final_state_ref) == ("interrupted", None)
+
+
+def test_post_callback_decision_revalidates_deleted_checkpoint(tmp_path):
+    """No association cut survives a callback or authorizes its later safe-point read."""
+
+    from dryml.managed.errors import ManagedControlError, ManagedRecoveryError
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    value = CallbackValue(repo=repo)
+    observed = []
+
+    def delete(obj, context):
+        assert repo._topology_leases == 1
+        observed.append(context.checkpoint_state_ref)
+        shutil.rmtree(store._snapshot_path(context.checkpoint_state_ref.digest()))
+
+    with pytest.raises(ManagedControlError, match="failure_recording_failed") as caught:
+        value.run(managed=ManagedConfig(state_repo=repo, callbacks=[delete]))
+    assert isinstance(caught.value.__cause__, ManagedRecoveryError)
+    assert len(observed) == 1
+    with pytest.raises(ManagedRecoveryError):
+        value.run.status(state_repo=repo)
+    assert repo._topology_leases == 0

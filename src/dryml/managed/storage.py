@@ -269,6 +269,32 @@ def validate_state_ref(state_repo: Repo, state_ref: StateRef) -> StateRef:
     return state_ref
 
 
+def _validate_control_state_ref(state_repo, state_ref, cut):
+    """Share only successful complete equality matches in one eligible control cut."""
+
+    cut.check()
+    if cut.repo is not state_repo:
+        raise ValueError("Control read cut belongs to another Repo.")
+    if any(_same_control_state_ref(state_ref, previous) for previous in cut.validated_state_refs):
+        cut.check()
+        return
+    _validate_publication_closure(state_repo, state_ref, cut)
+    cut.check()
+    cut.validated_state_refs.append(state_ref)
+
+
+def _same_control_state_ref(left, right):
+    """Tie a public reference match with complete codec content, not graph hashes."""
+
+    if left is right:
+        return True
+    if left != right:
+        return False
+    from dryml.core.cdef_codec import _codec_data_equal
+
+    return _codec_data_equal(left.to_data(), right.to_data())
+
+
 def publish_managed_state(state_repo: Repo, obj: object, *, reservation,
                           snapshot_observer=None):
     """Deep-publish and durably verify one managed state boundary.
@@ -563,15 +589,37 @@ def state_ref_for_digest(state_repo: Repo, digest: str) -> StateRef:
         Reads connected Stores only and never creates or changes authority.
     """
 
+    return _state_ref_for_digest(state_repo, digest)
+
+
+def _state_ref_for_digest(state_repo, digest, *, cut=None):
+    """Resolve against the captured cut, or preserve the public fresh-reader path."""
+
+    if cut is not None:
+        cut.check()
+        if cut.repo is not state_repo:
+            raise ValueError("Control read cut belongs to another Repo.")
+        if digest in cut.resolved_state_refs:
+            return cut.resolved_state_refs[digest]
     matches = []
-    for store in state_repo.stores:
-        record = store.read_state_ref_record(digest)
+    stores = state_repo.stores if cut is None else cut.stores
+    for store in stores:
+        if cut is None:
+            record = store.read_state_ref_record(digest)
+        else:
+            bundle = cut.snapshot(store, digest)
+            record = None if bundle is None else bundle[0]
         if record is not None:
             if type(record.state_ref) is not StateRef or record.state_ref.digest() != digest:
                 raise ManagedRecoveryError("invalid_state_reference", "state Repo has malformed retained StateRef authority")
             matches.append(record.state_ref)
-    if not matches or any(item != matches[0] for item in matches[1:]):
+    if not matches or any(
+            item != matches[0] if cut is None else not _same_control_state_ref(item, matches[0])
+            for item in matches[1:]):
         raise ManagedRecoveryError("missing_state_reference", "state Repo lacks one consistent retained StateRef")
+    if cut is not None:
+        cut.check()
+        cut.resolved_state_refs[digest] = matches[0]
     return matches[0]
 
 

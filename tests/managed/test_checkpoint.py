@@ -80,6 +80,7 @@ def test_checkpoint_saves_exact_intermediate_state_and_associates_it(tmp_path):
     assert value.value == 2
     assert status.checkpoint_state_ref == checkpoint
     assert status.final_state_ref != checkpoint
+
     loaded = Repo._for_state_io((store,))
     try:
         assert loaded.load_state_ref(checkpoint, reuse_live="never").value == 1
@@ -87,12 +88,37 @@ def test_checkpoint_saves_exact_intermediate_state_and_associates_it(tmp_path):
         loaded.close()
 
 
-@pytest.mark.parametrize("share_direct, extra_store, expected", [(False, False, 9), (True, False, 7), (True, True, 9)])
-def test_checkpoint_changed_final_semantic_validation_budget(tmp_path, monkeypatch, share_direct, extra_store, expected):
+@pytest.mark.parametrize("immediate_recheck, share_direct, share_control, extra_store, expected", [
+    (True, False, False, False, 11),
+    (False, False, False, False, 9),
+    (False, True, False, False, 7),
+    (False, True, True, False, 6),
+    (False, False, True, False, 8),
+    (False, True, True, True, 8),
+])
+def test_checkpoint_changed_final_semantic_validation_budget(tmp_path, monkeypatch, immediate_recheck, share_direct, share_control, extra_store, expected):
     """Count complete closure work without replacing guarded Store readers."""
 
     from dryml.core.materialization import _build_exact_state_load_plan
     from dryml.managed import storage
+    from dryml.managed.control import ManagedControlStore, _OwnerFields
+
+    if immediate_recheck:
+        consume = storage._PublicationEvent.consume
+
+        def consume_then_recheck(self, repo, state_ref, report, invocation):
+            consume(self, repo, state_ref, report, invocation)
+            storage.validate_state_ref(repo, state_ref)
+
+        monkeypatch.setattr(storage._PublicationEvent, "consume", consume_then_recheck)
+    if not share_control:
+        def separate_fields(self, operation_id, *, attempt_id, owner_id, kind, digest=None, force_interrupt=False):
+            fields = _OwnerFields(kind, digest, force_interrupt)
+            return self.transition_running_owner(
+                operation_id, attempt_id=attempt_id, owner_id=owner_id, build=fields.apply,
+            )
+
+        monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", separate_fields)
 
     if not share_direct:
         monkeypatch.setattr(storage, "_matching_direct_publication_coverage", lambda *args: False)
@@ -102,6 +128,8 @@ def test_checkpoint_changed_final_semantic_validation_budget(tmp_path, monkeypat
     value = CheckpointValue(repo=repo)
     calls = []
     accelerated = []
+    readers = (DirStore.read_state_ref_record, DirStore.read_snapshot_metadata,
+               DirStore.open_local_state, DirStore._read_snapshot)
     previous = sys.getprofile()
 
     def observe(frame, event, arg):
@@ -117,10 +145,15 @@ def test_checkpoint_changed_final_semantic_validation_budget(tmp_path, monkeypat
         sys.setprofile(previous)
     assert len(calls) == expected
     assert accelerated and all(accelerated)
+    assert readers == (DirStore.read_state_ref_record, DirStore.read_snapshot_metadata,
+                       DirStore.open_local_state, DirStore._read_snapshot)
     assert value.value == 2
     status = value.save_then_change.status(state_repo=repo)
     assert status.checkpoint_state_ref == checkpoint
     assert status.final_state_ref != checkpoint
+    if expected == 6:
+        assert calls == [checkpoint, checkpoint, checkpoint,
+                         status.final_state_ref, checkpoint, status.final_state_ref]
 
 
 def test_context_rejects_cross_thread_and_inactive_checkpoint_use(tmp_path):

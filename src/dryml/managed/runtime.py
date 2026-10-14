@@ -47,6 +47,8 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
         state and completed control authority are both published. A private
         publication event replaces immediate duplicate validation and expires
         before boundary hooks; control association still validates fresh authority.
+        Completion shares equal checkpoint/final references only within its own
+        control-first Repo cut, with each receiver association checked separately.
 
     Raises:
         ManagedError: For lifecycle, storage, compatibility, or cleanup failures.
@@ -212,13 +214,9 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
                 final_state, report = publication.state_ref, publication.report
                 publication.event.consume(state_repo, final_state, report, context)
                 _completion_boundary("final_state_published")
-                control.transition_running_owner(
+                control._transition_running_fields(
                     operation_id, attempt_id=running.attempt_id, owner_id=running.owner_id,
-                    build=lambda current: replace(
-                        current, owner_id=None, generation=current.generation + 1,
-                        state="completed", interrupt_request=None,
-                        final_digest=final_state.digest(), failure_code=None,
-                    ),
+                    kind="completion", digest=final_state.digest(),
                 )
                 _completion_boundary("final_associated")
             except BaseException as error:
@@ -398,13 +396,9 @@ def _record_interruption(control, running: ControlSnapshot, original: KeyboardIn
     """
 
     try:
-        control.transition_running_owner(
+        control._transition_running_fields(
             running.operation_id, attempt_id=running.attempt_id, owner_id=running.owner_id,
-            build=lambda current: replace(
-                current, owner_id=None, generation=current.generation + 1,
-                state="interrupted", interrupt_request=None, final_digest=None,
-                failure_code=None,
-            ),
+            kind="interruption", force_interrupt=True,
         )
     except ManagedConflictError:
         raise ManagedControlError("interruption_recording_failed", "could not publish managed interruption") from original

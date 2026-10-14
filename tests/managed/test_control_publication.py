@@ -6,17 +6,22 @@ import errno
 import hashlib
 import multiprocessing
 import os
+import shutil
+import sys
 from dataclasses import replace
-from threading import Barrier, Event, Thread
+from contextlib import contextmanager
+from threading import Barrier, Event, Thread, current_thread
 from uuid import uuid4
 
 import pytest
 
 from dryml.core import Repo
+from dryml.core.object import Pickleable
+from dryml.core.reference_values import StateRef
 from dryml.core.store.dir import DirStore
 from dryml.managed import control as control_module
 from dryml.managed.control import ControlSnapshot, ManagedControlStore
-from dryml.managed.errors import ManagedConflictError, ManagedControlError, ManagedPublicationError
+from dryml.managed.errors import ManagedConflictError, ManagedControlError, ManagedPublicationError, ManagedRecoveryError
 
 
 def _operation_id(object_digest="b" * 64, member="run"):
@@ -496,3 +501,495 @@ def test_concurrent_initial_operation_has_one_lineage_gate(tmp_path):
     second.join(10)
     assert sum(item == "conflict" for item in outcomes) == 1
     assert sum(isinstance(item, ControlSnapshot) for item in outcomes) == 1
+
+
+def test_owner_transition_rereads_current_under_control_before_store_fences(tmp_path, monkeypatch):
+    """Fresh generation, owner and request reads precede builder invocation under control."""
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    control = ManagedControlStore(store, repo)
+    initial = control.create_initial(_snapshot())
+    requested = replace(initial, generation=2, interrupt_request=(initial.attempt_id, initial.owner_id))
+    control.transition(initial.operation_id, requested, expected_generation=1)
+    held = []
+    events = []
+    original_lock = control._control_lock
+    original_fences = repo._authority_read_fences
+    original_read = control._read_current
+
+    @contextmanager
+    def lock():
+        with original_lock():
+            held.append("control")
+            try:
+                yield
+            finally:
+                held.pop()
+
+    @contextmanager
+    def fences(stores):
+        assert held == ["control"]
+        events.append("fences")
+        with original_fences(stores):
+            yield
+
+    def read(*args):
+        assert held == ["control"]
+        events.append("current")
+        return original_read(*args)
+
+    def build(current):
+        assert held == ["control"]
+        assert current == requested
+        events.append("build")
+        return _next(current)
+
+    monkeypatch.setattr(control, "_control_lock", lock)
+    monkeypatch.setattr(repo, "_authority_read_fences", fences)
+    monkeypatch.setattr(control, "_read_current", read)
+    result = control.transition_running_owner(
+        initial.operation_id, attempt_id=initial.attempt_id, owner_id=initial.owner_id, build=build,
+    )
+    assert result.generation == 3 and result.interrupt_request == requested.interrupt_request
+    assert events == ["current", "build"]
+    with pytest.raises(ManagedConflictError, match="owner_conflict"):
+        control.transition_running_owner(
+            initial.operation_id, attempt_id=initial.attempt_id, owner_id=uuid4().hex,
+            build=lambda current: pytest.fail("stale owner builder ran"),
+        )
+    operation = control._operation_path(initial.operation_id)
+    intent = control_module._PendingIntent(initial.operation_id, 3, control_module._payload_digest(result.to_bytes()), 4, "a" * 64)
+    control._write_new(control._pending_path(operation), intent.to_bytes())
+    with pytest.raises(ManagedControlError, match="pending_reconciliation"):
+        control.transition_running_owner(
+            initial.operation_id, attempt_id=initial.attempt_id, owner_id=initial.owner_id,
+            build=lambda current: pytest.fail("pending builder ran"),
+        )
+
+
+class ControlValue(Pickleable):
+    """Small persisted state for real control-reference authority tests."""
+
+    def __init__(self, value=0):
+        self.value = value
+
+
+@pytest.fixture
+def associated_control(tmp_path, fixed_managed_snapshot_environment):
+    """Create a running owner with one real, already-associated checkpoint."""
+
+    store = DirStore(tmp_path / "state")
+    repo = Repo(store)
+    value = ControlValue(repo=repo)
+    checkpoint = repo.save_object(value, deep_capture=True)
+    control = ManagedControlStore(store, repo)
+    initial = replace(
+        _snapshot(), operation_id=_operation_id(value.object_ref.digest()),
+        object_ref_digest=value.object_ref.digest(), checkpoint_digest=checkpoint.digest(),
+    )
+    control.create_initial(initial)
+    yield control, initial, value, checkpoint
+    repo.close(flush=False)
+
+
+def _owner_fields(control, current, **kwargs):
+    return control._transition_running_fields(
+        current.operation_id, attempt_id=current.attempt_id, owner_id=current.owner_id, **kwargs,
+    )
+
+
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("kind", ["checkpoint", "completion"])
+def test_closed_completion_shares_only_equal_references_in_one_control_first_cut(associated_control, monkeypatch, changed, kind):
+    """Current/proposed checkpoint and identical final share; changed final remains distinct."""
+
+    from dryml.core.materialization import _build_exact_state_load_plan
+
+    control, initial, value, checkpoint = associated_control
+    repo = control.state_repo
+    if changed:
+        value.value = 1
+        final = repo.save_object(value, deep_capture=True)
+    else:
+        final = checkpoint
+    calls, cuts, events = [], [], []
+    held = []
+    original_lock, original_cut = control._control_lock, repo._read_cut
+    original_fences, original_read = repo._authority_read_fences, control._read_current
+
+    @contextmanager
+    def lock():
+        with original_lock():
+            held.append("control")
+            try:
+                yield
+            finally:
+                held.pop()
+
+    def read_cut(**kwargs):
+        assert held == ["control"]
+        events.append("cut")
+        cut = original_cut(**kwargs)
+        cuts.append(cut)
+        return cut
+
+    @contextmanager
+    def fences(stores):
+        assert held == ["control"] and events == ["cut"]
+        events.append("fences")
+        with original_fences(stores):
+            yield
+
+    def read(*args):
+        assert held == ["control"] and cuts[-1].active
+        events.append("current")
+        return original_read(*args)
+
+    def observe(frame, event, arg):
+        if event == "call" and frame.f_code is _build_exact_state_load_plan.__code__:
+            assert cuts[-1].active and held == ["control"]
+            calls.append(frame.f_locals["state_ref"])
+
+    monkeypatch.setattr(control, "_control_lock", lock)
+    monkeypatch.setattr(repo, "_read_cut", read_cut)
+    monkeypatch.setattr(repo, "_authority_read_fences", fences)
+    monkeypatch.setattr(control, "_read_current", read)
+    previous = sys.getprofile()
+    sys.setprofile(observe)
+    try:
+        completed = _owner_fields(control, initial, kind=kind, digest=final.digest())
+    finally:
+        sys.setprofile(previous)
+    assert calls == ([checkpoint, final] if changed else [checkpoint])
+    assert events == ["cut", "fences", "current"]
+    assert completed.generation == 2
+    assert (completed.final_digest if kind == "completion" else completed.checkpoint_digest) == final.digest()
+    assert len(cuts) == 1 and not cuts[0].active
+    assert cuts[0].resolved_state_refs == {} and cuts[0].validated_state_refs == []
+    assert repo._topology_leases == 0
+
+
+def test_every_object_association_is_checked_even_after_a_closure_hit(associated_control):
+    """A prior successful digest/closure match cannot authorize another receiver."""
+
+    control, initial, _, _ = associated_control
+    wrong_digest = "a" * 64
+    wrong = replace(initial, operation_id=_operation_id(wrong_digest), object_ref_digest=wrong_digest)
+    with control._control_lock(), control.state_repo._read_cut() as cut:
+        control._validate_references(initial, _read_cut=cut)
+        assert len(cut.validated_state_refs) == 1
+        with pytest.raises(ManagedRecoveryError, match="state_object_mismatch"):
+            control._validate_references(wrong, _read_cut=cut)
+
+
+def test_control_closure_equality_does_not_accept_a_digest_collision(associated_control, monkeypatch):
+    """A lookup-hash collision never substitutes a different complete StateRef."""
+
+    from dryml.managed.storage import _validate_control_state_ref
+
+    control, _, _, checkpoint = associated_control
+    unequal = StateRef(checkpoint.object, {
+        path: state.rsplit("-", 1)[0] + "-" + "0" * 64 for path, state in checkpoint.states.items()
+    })
+    with control.state_repo._read_cut() as cut:
+        _validate_control_state_ref(control.state_repo, checkpoint, cut)
+        monkeypatch.setattr(StateRef, "digest", lambda self: checkpoint._digest_cache)
+        assert checkpoint != unequal and checkpoint.digest() == unequal.digest()
+        with pytest.raises(ManagedRecoveryError):
+            _validate_control_state_ref(control.state_repo, unequal, cut)
+        assert cut.validated_state_refs == []
+
+
+def test_control_ties_hash_based_public_equality_with_complete_content(associated_control, tmp_path, monkeypatch):
+    """Colliding graph and reference hashes cannot merge unequal replica records."""
+
+    from dryml.core.definition import ConcreteDefinition
+    from dryml.core.reference_values import ObjectRef
+    from dryml.core.store.records import StateRefRecord
+    from dryml.managed.storage import _same_control_state_ref, _state_ref_for_digest
+
+    control, _, _, checkpoint = associated_control
+    other = ControlValue(2, repo=control.state_repo)
+    unequal = StateRef(ObjectRef(other.definition, checkpoint.object.objects), checkpoint.states)
+    equal = StateRef.from_data(checkpoint.to_data())
+    assert equal is not checkpoint and equal == checkpoint and unequal != checkpoint
+    digest = checkpoint.digest()
+    monkeypatch.setattr(ConcreteDefinition, "stable_hash", lambda self: "a" * 64)
+    monkeypatch.setattr(StateRef, "digest", lambda self: digest)
+    assert unequal == checkpoint  # Public equality includes hash-based graph facts.
+    assert _same_control_state_ref(equal, checkpoint)
+    assert not _same_control_state_ref(unequal, checkpoint)
+
+    second = DirStore(tmp_path / "replica")
+    repo = Repo._for_state_io((control.control_store, second))
+    try:
+        with repo._read_cut() as cut:
+            # Isolate resolution's collision tie-breaker from bundle validators.
+            monkeypatch.setattr(cut, "snapshot", lambda store, key: (
+                StateRefRecord(unequal if store is second else checkpoint), None, {},
+            ))
+            with pytest.raises(ManagedRecoveryError, match="one consistent retained StateRef"):
+                _state_ref_for_digest(repo, digest, cut=cut)
+            assert cut.resolved_state_refs == {}
+    finally:
+        repo.close(flush=False)
+
+
+@pytest.mark.parametrize("outcome", ["mutate", "raise", "no_change"])
+def test_arbitrary_builder_keeps_separate_validation_and_original_error_order(associated_control, outcome):
+    """Caller builders run after current validation, without an inherited cut."""
+
+    control, initial, _, checkpoint = associated_control
+    error = KeyboardInterrupt("builder stopped")
+    called = []
+
+    def build(current):
+        assert current == initial and control.state_repo._topology_leases == 0
+        called.append(current)
+        if outcome == "raise":
+            raise error
+        if outcome == "no_change":
+            return None
+        shutil.rmtree(control.control_store._snapshot_path(checkpoint.digest()))
+        return _next(current)
+
+    if outcome == "no_change":
+        assert control.transition_running_owner(initial.operation_id, attempt_id=initial.attempt_id,
+                                                owner_id=initial.owner_id, build=build) is None
+    elif outcome == "raise":
+        with pytest.raises(KeyboardInterrupt) as caught:
+            control.transition_running_owner(initial.operation_id, attempt_id=initial.attempt_id,
+                                             owner_id=initial.owner_id, build=build)
+        assert caught.value is error
+    else:
+        with pytest.raises(ManagedRecoveryError):
+            control.transition_running_owner(initial.operation_id, attempt_id=initial.attempt_id,
+                                             owner_id=initial.owner_id, build=build)
+    assert called == [initial]
+    assert not os.path.exists(control._pending_path(control._operation_path(initial.operation_id)))
+
+
+def test_overridden_reader_keeps_uncached_control_boundaries(associated_control, monkeypatch):
+    """An overridden built-in reader is called at every original reference occurrence."""
+
+    from dryml.core.materialization import _build_exact_state_load_plan
+
+    control, initial, _, checkpoint = associated_control
+    store = control.control_store
+    original = store.read_state_ref_record
+    reads = []
+
+    def read(digest):
+        reads.append(digest)
+        return original(digest)
+
+    monkeypatch.setattr(store, "read_state_ref_record", read)
+    assert not store._can_reuse_exact_validation()
+    plans = []
+    previous = sys.getprofile()
+
+    def observe(frame, event, arg):
+        if event == "call" and frame.f_code is _build_exact_state_load_plan.__code__:
+            plans.append(True)
+
+    sys.setprofile(observe)
+    try:
+        _owner_fields(control, initial, kind="completion", digest=checkpoint.digest())
+    finally:
+        sys.setprofile(previous)
+    assert len(plans) == 3
+    assert reads.count(checkpoint.digest()) >= 3
+    assert control.state_repo._topology_leases == 0
+
+
+@pytest.mark.parametrize("reader", ["read_state_ref_record", "read_snapshot_metadata", "open_local_state"])
+def test_control_fallback_preserves_overridden_reader_errors(associated_control, monkeypatch, reader):
+    """Custom record, metadata and payload errors cannot be bypassed by field reuse."""
+
+    control, initial, _, checkpoint = associated_control
+    error = OSError("custom authority unavailable")
+
+    def unavailable(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(control.control_store, reader, unavailable)
+    assert not control.control_store._can_reuse_exact_validation()
+    with pytest.raises(ManagedRecoveryError) as caught:
+        _owner_fields(control, initial, kind="completion", digest=checkpoint.digest())
+    with pytest.raises(ManagedRecoveryError) as original:
+        control.transition_running_owner(
+            initial.operation_id, attempt_id=initial.attempt_id, owner_id=initial.owner_id,
+            build=lambda current: pytest.fail("unreadable current reached builder"),
+        )
+    assert str(caught.value) == str(original.value)
+    assert type(caught.value.__cause__) is type(original.value.__cause__)
+    assert str(caught.value.__cause__) == str(original.value.__cause__)
+    assert control.state_repo._topology_leases == 0
+    assert not os.path.exists(control._pending_path(control._operation_path(initial.operation_id)))
+
+
+@pytest.mark.parametrize("changed", ["request", "owner", "attempt", "pending", "overflow"])
+def test_closed_updates_use_fresh_current_pending_owner_generation_and_request(associated_control, changed):
+    """The invocation snapshot is never a substitute for locked current authority."""
+
+    control, initial, _, _ = associated_control
+    current = replace(initial, generation=2, interrupt_request=(initial.attempt_id, initial.owner_id))
+    if changed == "owner":
+        current = replace(current, owner_id=uuid4().hex, interrupt_request=None)
+    elif changed == "attempt":
+        current = replace(current, attempt_id=uuid4().hex, interrupt_request=None)
+    elif changed == "overflow":
+        current = replace(current, generation=2**63 - 1)
+    operation = control._operation_path(initial.operation_id)
+    control._replace_file(control._current_path(operation), current.to_bytes())
+    if changed == "pending":
+        intent = control_module._PendingIntent(initial.operation_id, 2, control_module._payload_digest(current.to_bytes()), 3, "a" * 64)
+        control._write_new(control._pending_path(operation), intent.to_bytes())
+    if changed == "request":
+        interrupted = _owner_fields(control, initial, kind="interruption")
+        assert interrupted.generation == 3 and interrupted.state == "interrupted"
+        assert interrupted.checkpoint_digest == initial.checkpoint_digest
+    else:
+        reason = "owner_conflict" if changed in {"owner", "attempt"} else (
+            "pending_reconciliation" if changed == "pending" else "generation_overflow")
+        with pytest.raises((ManagedConflictError, ManagedControlError), match=reason):
+            _owner_fields(control, initial, kind="interruption", force_interrupt=True)
+        assert control._read_current(operation, initial.operation_id)[0] == current
+    assert control.state_repo._topology_leases == 0
+
+
+@pytest.mark.parametrize("delete", [False, True])
+def test_acknowledgement_fault_retires_control_cut_before_fresh_confirmation(associated_control, monkeypatch, delete):
+    """Even an acknowledged identical final must be revalidated after a receipt fault."""
+
+    control, initial, _, checkpoint = associated_control
+    cuts = []
+    original_cut = control.state_repo._read_cut
+
+    def read_cut(**kwargs):
+        cut = original_cut(**kwargs)
+        cuts.append(cut)
+        return cut
+
+    def fail_ack():
+        assert cuts and all(not cut.active for cut in cuts)
+        assert control.state_repo._topology_leases == 0
+        if delete:
+            shutil.rmtree(control.control_store._snapshot_path(checkpoint.digest()))
+        raise KeyboardInterrupt("acknowledgement stopped")
+
+    monkeypatch.setattr(control.state_repo, "_read_cut", read_cut)
+    monkeypatch.setattr(control_module, "_publication_acknowledged", fail_ack)
+    if delete:
+        with pytest.raises(ManagedRecoveryError):
+            _owner_fields(control, initial, kind="completion", digest=checkpoint.digest())
+    else:
+        assert _owner_fields(control, initial, kind="completion", digest=checkpoint.digest()).state == "completed"
+        assert len(cuts) == 3  # transition, then independent checkpoint and final confirmation
+    assert all(not cut.active for cut in cuts)
+
+
+def test_cancelled_replacement_retires_cut_and_reconciliation_reads_fresh(associated_control, monkeypatch):
+    """A pending replacement survives cancellation; old proof cannot heal deleted state."""
+
+    control, initial, _, checkpoint = associated_control
+
+    def cancel(*args):
+        raise KeyboardInterrupt("replacement stopped")
+
+    monkeypatch.setattr(control, "_replace_file", cancel)
+    with pytest.raises(ManagedPublicationError, match="reconciliation") as caught:
+        _owner_fields(control, initial, kind="completion", digest=checkpoint.digest())
+    assert caught.value.outcome == "indeterminate"
+    assert isinstance(caught.value.__cause__, KeyboardInterrupt)
+    assert control.state_repo._topology_leases == 0
+    shutil.rmtree(control.control_store._snapshot_path(checkpoint.digest()))
+    with pytest.raises(ManagedRecoveryError):
+        control.reconcile(initial.operation_id)
+    assert os.path.exists(control._pending_path(control._operation_path(initial.operation_id)))
+
+
+def test_cut_release_fault_after_current_replace_preserves_pending_uncertainty(associated_control, monkeypatch):
+    """A Store-fence cleanup failure cannot misreport an associated current as uncommitted."""
+
+    control, initial, _, checkpoint = associated_control
+    repo = control.state_repo
+    original_fences = repo._authority_read_fences
+    error = OSError("Store-fence release failed")
+
+    @contextmanager
+    def fences(stores):
+        with original_fences(stores):
+            yield
+        raise error
+
+    with monkeypatch.context() as patch:
+        patch.setattr(repo, "_authority_read_fences", fences)
+        with pytest.raises(ManagedPublicationError) as caught:
+            _owner_fields(control, initial, kind="completion", digest=checkpoint.digest())
+    assert caught.value.outcome == "indeterminate" and caught.value.__cause__ is error
+    assert repo._topology_leases == 0
+    with pytest.raises(ManagedControlError, match="pending_reconciliation"):
+        control.inspect(initial.operation_id)
+    settled = control.reconcile(initial.operation_id)
+    assert settled.generation == 2 and settled.state == "completed"
+
+
+def test_publisher_releases_store_fence_before_waiting_for_control(associated_control, monkeypatch, fixed_managed_snapshot_environment):
+    """A barrier-controlled publisher/control overlap cannot invert control-before-Store."""
+
+    from dryml.managed import storage
+
+    control, initial, value, checkpoint = associated_control
+    repo = control.state_repo
+    publishing, control_held = Event(), Event()
+    errors, results = [], []
+    original_closure = storage._validate_publication_closure
+    original_lock = control._control_lock
+
+    @contextmanager
+    def lock():
+        with original_lock():
+            if current_thread().name == "control-transition":
+                assert publishing.is_set()
+                control_held.set()
+            yield
+
+    def closure(*args):
+        if current_thread().name == "publisher":
+            assert args[2].active
+            publishing.set()
+            assert control_held.wait(10)
+        return original_closure(*args)
+
+    def publish():
+        try:
+            with storage._acquire_state_ownership(repo, value) as ownership:
+                storage.publish_managed_state(
+                    repo, value, reservation=ownership.reservation,
+                    snapshot_observer=lambda: fixed_managed_snapshot_environment,
+                )
+                assert repo._topology_leases <= 2  # ownership plus the other thread's cut
+                results.append(control.inspect(initial.operation_id).state)
+        except BaseException as error:
+            errors.append(error)
+
+    def transition():
+        try:
+            results.append(_owner_fields(control, initial, kind="completion", digest=checkpoint.digest()).state)
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(control, "_control_lock", lock)
+    monkeypatch.setattr(storage, "_validate_publication_closure", closure)
+    publisher = Thread(target=publish, name="publisher")
+    controller = Thread(target=transition, name="control-transition")
+    publisher.start()
+    assert publishing.wait(10)
+    controller.start()
+    publisher.join(15)
+    controller.join(15)
+    assert not publisher.is_alive() and not controller.is_alive()
+    assert errors == [] and results == ["completed", "completed"]
+    assert repo._topology_leases == 0

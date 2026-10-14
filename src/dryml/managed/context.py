@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from threading import get_ident
 
-from dataclasses import replace
-
 from dryml.core.reference_values import StateRef
 
 from .errors import ManagedContextError, ManagedControlError, ManagedInterrupted
@@ -121,7 +119,9 @@ class ManagedContext:
             association, invokes callbacks in configured order, and may commit
             terminal interruption. The publisher's one-use completed event removes
             only immediate duplicate validation; control and post-callback reads
-            remain fresh. Incomplete state never receives association.
+            remain fresh. Each framework-owned field transition may validate equal
+            current/proposed references once within its own control-first Repo cut;
+            the cut ends before callbacks. Incomplete state never receives association.
         """
 
         return self._checkpoint(cause=None, force_interrupt=False)
@@ -142,6 +142,8 @@ class ManagedContext:
             Uses the same routed durable checkpoint and callback boundary as
             :meth:`checkpoint`, then marks this context terminal. Catching the
             resulting exception cannot make the managed invocation complete.
+            The interruption decision rereads current authority after callbacks;
+            no checkpoint-association proof survives that boundary.
         """
 
         self._require_active()
@@ -171,12 +173,9 @@ class ManagedContext:
                 state_ref, report = publication.state_ref, publication.report
                 publication.event.consume(self._state_repo, state_ref, report, self)
                 _checkpoint_boundary("state_published")
-                self._control.transition_running_owner(
+                self._control._transition_running_fields(
                     self._operation_id, attempt_id=self._attempt_id, owner_id=self._owner_id,
-                    build=lambda current: replace(
-                        current, generation=current.generation + 1,
-                        checkpoint_digest=state_ref.digest(), final_digest=None, failure_code=None,
-                    ),
+                    kind="checkpoint", digest=state_ref.digest(),
                 )
                 self._checkpoint_state_ref = state_ref
                 _checkpoint_boundary("checkpoint_associated")
@@ -194,11 +193,9 @@ class ManagedContext:
                 self._latch_safe_point_error("callback_error", error)
                 raise
             try:
-                interrupted = self._control.transition_running_owner(
+                interrupted = self._control._transition_running_fields(
                     self._operation_id, attempt_id=self._attempt_id, owner_id=self._owner_id,
-                    build=lambda current: _interrupted_snapshot(current) if (
-                        force_interrupt or current.interrupt_request is not None
-                    ) else None,
+                    kind="interruption", force_interrupt=force_interrupt,
                 )
             except BaseException as error:
                 if force_interrupt:
@@ -275,15 +272,6 @@ def _publish_managed_state():
     from .storage import _publish_managed_state_result
 
     return _publish_managed_state_result
-
-
-def _interrupted_snapshot(current):
-    """Build one terminal interruption replacement from freshly locked authority."""
-
-    return replace(
-        current, owner_id=None, generation=current.generation + 1,
-        state="interrupted", interrupt_request=None, final_digest=None, failure_code=None,
-    )
 
 
 def _checkpoint_boundary(stage: str) -> None:

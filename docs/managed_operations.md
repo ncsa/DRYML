@@ -262,6 +262,24 @@ Control association, post-callback decisions, later status, resume, and recovery
 always observe fresh authority, so deletion after publication can still prevent
 association and deletion after completion can still prevent recovery.
 
+Framework-owned checkpoint, completion, and interruption field updates acquire the
+short control lock, then a new explicit Repo read cut with ordered Store fences.
+They reread current/pending authority and check the running owner and generation;
+an interruption decision uses the newly read request. Within this one cut,
+consistent digest resolution and complete-equality StateRef closure validation may
+be shared across current/proposed checkpoint and final fields. Every occurrence
+still checks its receiver ObjectRef association. A changed final StateRef needs its
+own closure validation, even when a lookup hash collides.
+
+This sharing requires unchanged built-in Store readers; overridden readers retain
+their independent authoritative calls. General caller-supplied control builders
+also retain separate current/proposed validation boundaries and their original
+invocation/error order. The field-update cut ends after synchronized current
+replacement, before acknowledgement hooks and callbacks. An acknowledgement
+fault confirms current authority afresh; pending-intent reconciliation, callback
+work (including disjoint nested invocations), post-callback decisions, later
+status, resume, and recovery never inherit an earlier transition's proof.
+
 Callbacks receive `(live_object, context)` in caller order only after both state
 publication and control association succeed. They may inspect
 `context.checkpoint_state_ref` or save an independent result through

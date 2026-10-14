@@ -156,17 +156,17 @@ def test_checkpoint_association_failure_never_advertises_or_notifies_orphan_stat
 
     store = DirStore(tmp_path / "store")
     value = FailureWindowValue(repo=Repo((store,)))
-    original = ManagedControlStore.transition_running_owner
+    original = ManagedControlStore._transition_running_fields
     calls = 0
 
     def fail_checkpoint(self, operation_id, **kwargs):
         nonlocal calls
-        if kwargs["build"].__name__ == "<lambda>" and calls == 0:
+        if kwargs["kind"] == "checkpoint" and calls == 0:
             calls += 1
             raise OSError("association failed")
         return original(self, operation_id, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "transition_running_owner", fail_checkpoint)
+    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_checkpoint)
     with pytest.raises(OSError, match="association failed"):
         value.checkpoint(managed=ManagedConfig(state_repo=store))
     status = value.checkpoint.status(state_repo=store)
@@ -191,7 +191,7 @@ def test_second_checkpoint_association_failure_retains_prior_checkpoint_without_
 
     store = DirStore(tmp_path / "store")
     value = TwoCheckpoints(repo=Repo((store,)))
-    original = ManagedControlStore.transition_running_owner
+    original = ManagedControlStore._transition_running_fields
     transitions = 0
     callbacks = []
 
@@ -202,7 +202,7 @@ def test_second_checkpoint_association_failure_retains_prior_checkpoint_without_
             raise OSError("second association failed")
         return original(self, operation_id, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "transition_running_owner", fail_second_association)
+    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_second_association)
     with pytest.raises(OSError, match="second association failed"):
         value.checkpoint(managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: callbacks.append(args)]))
     status = value.checkpoint.status(state_repo=store)
@@ -244,7 +244,7 @@ def test_interrupted_transition_failure_is_control_failure_not_success(tmp_path,
 
     store = DirStore(tmp_path / "store")
     value = Interrupting(repo=Repo((store,)))
-    original = ManagedControlStore.transition_running_owner
+    original = ManagedControlStore._transition_running_fields
     calls = 0
 
     def fail_terminal(self, operation_id, **kwargs):
@@ -254,7 +254,7 @@ def test_interrupted_transition_failure_is_control_failure_not_success(tmp_path,
             raise OSError("interruption control write failed")
         return original(self, operation_id, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "transition_running_owner", fail_terminal)
+    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_terminal)
     with pytest.raises(ManagedControlError, match="interruption_recording_failed") as caught:
         value.checkpoint(managed=ManagedConfig(state_repo=store))
     assert type(caught.value.__cause__) is OSError
@@ -373,7 +373,7 @@ def test_private_post_publication_hook_is_not_called_before_completed_associatio
         assert str(caught.value.__cause__.__cause__) == "validation failed"
         assert caught.value.report is not None
     else:
-        original = ManagedControlStore.transition_running_owner
+        original = ManagedControlStore._transition_running_fields
         calls = 0
 
         def fail_final_association(self, operation_id, **kwargs):
@@ -384,7 +384,7 @@ def test_private_post_publication_hook_is_not_called_before_completed_associatio
             return original(self, operation_id, **kwargs)
 
         monkeypatch.setattr(
-            ManagedControlStore, "transition_running_owner", fail_final_association,
+            ManagedControlStore, "_transition_running_fields", fail_final_association,
         )
         with pytest.raises(OSError, match="association failed"):
             value.complete(managed=config)

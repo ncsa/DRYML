@@ -3,6 +3,8 @@
 Only the final ``managed/operations`` namespace is authoritative.  This module
 uses staging directories for first publication and a bounded pending intent for
 every current-file replacement; it intentionally keeps no lifecycle history.
+Closed lifecycle field updates share reference validation only within a fresh
+control-first Repo cut. General builders retain independent validation boundaries.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import re
 import shutil
 import stat
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from collections.abc import Mapping
 from typing import Callable
@@ -31,6 +34,8 @@ from .storage import (
     _bootstrap_managed_namespace,
     _prepare_state_lock_namespace,
     _probe_state_ownership,
+    _state_ref_for_digest,
+    _validate_control_state_ref,
     state_ref_for_digest,
     validate_state_ref,
 )
@@ -40,6 +45,39 @@ _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _FAILURE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _STATES = frozenset({"running", "interrupted", "failed", "completed"})
 _MAX_GENERATION = 2**63 - 1
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnerFields:
+    """Closed framework updates; never an admission rule for caller builders."""
+
+    kind: str
+    digest: str | None = None
+    force_interrupt: bool = False
+
+    def __post_init__(self):
+        if self.kind not in {"checkpoint", "completion", "interruption"}:
+            raise ValueError("Unsupported managed owner field update.")
+        if self.kind in {"checkpoint", "completion"}:
+            _digest(self.digest, "state digest")
+        elif self.digest is not None:
+            raise ValueError("Interruption cannot introduce a StateRef.")
+        if type(self.force_interrupt) is not bool:
+            raise TypeError("force_interrupt must be bool.")
+
+    def apply(self, current):
+        if self.kind == "checkpoint":
+            return replace(current, generation=current.generation + 1,
+                           checkpoint_digest=self.digest, final_digest=None, failure_code=None)
+        if self.kind == "interruption" and not (self.force_interrupt or current.interrupt_request is not None):
+            return None
+        return replace(
+            current, generation=current.generation + 1, owner_id=None,
+            state="completed" if self.kind == "completion" else "interrupted",
+            interrupt_request=None,
+            final_digest=self.digest if self.kind == "completion" else None,
+            failure_code=None,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +279,10 @@ class ManagedControlStore:
     The adapter borrows both resources, creates no Store router, and never
     serializes either handle into control records. Its short control locks are
     same-host coordination boundaries, not a security sandbox.
+    Private checkpoint/completion/interruption field updates acquire control
+    before a Repo read cut and ordered Store fences, recheck every object
+    association, and retire proof before acknowledgement recovery or callbacks.
+    Independent inspection and reconciliation never inherit that proof.
     """
 
     def __init__(self, control_store, state_repo) -> None:
@@ -426,17 +468,47 @@ class ManagedControlStore:
                 published.
 
         Side Effects:
-            Holds only the short control lock while rereading, validating, and
+            Holds the short control lock while rereading, validating, and
             publishing the replacement. A concurrent request is therefore merged
             through ``build`` rather than discarded with a stale generation.
+            Arbitrary builders retain separate current/proposed Store validation
+            boundaries and their original invocation/exception order. Only private
+            framework-owned field updates may share one control-first Repo cut.
         """
+
+        return self._transition_running_owner(
+            operation_id, attempt_id=attempt_id, owner_id=owner_id, build=build,
+        )
+
+    def _transition_running_fields(self, operation_id, *, attempt_id, owner_id,
+                                   kind, digest=None, force_interrupt=False):
+        """Feed closed lifecycle fields into the existing owner transition engine."""
+
+        return self._transition_running_owner(
+            operation_id, attempt_id=attempt_id, owner_id=owner_id,
+            fields=_OwnerFields(kind, digest, force_interrupt),
+        )
+
+    def _transition_running_owner(self, operation_id, *, attempt_id, owner_id,
+                                  build=None, fields=None):
+        """Keep one persistence/error engine for general builders and closed updates."""
 
         _digest(operation_id, "operation_id")
         _uuid(attempt_id, "attempt_id")
         _uuid(owner_id, "owner_id")
         operation = self._operation_path(operation_id)
-        with self._control_lock():
-            current, current_payload = self._read_unpending_current(operation, operation_id)
+        with self._control_lock(), ExitStack() as cleanup:
+            cut = None
+            if fields is not None and all(
+                    getattr(store, "_can_reuse_exact_validation", lambda: False)()
+                    for store in self.state_repo.stores):
+                candidate = cleanup.enter_context(self.state_repo._read_cut())
+                # Overridden readers keep their existing independent boundaries.
+                if all(store._can_reuse_exact_validation() for store in candidate.stores):
+                    cut = candidate
+                else:
+                    cleanup.close()
+            current, current_payload = self._read_unpending_current(operation, operation_id, _read_cut=cut)
             if (
                 current.state != "running"
                 or current.attempt_id != attempt_id
@@ -445,7 +517,7 @@ class ManagedControlStore:
                 raise ManagedConflictError("owner_conflict", "selected running owner changed before publication")
             if current.generation == _MAX_GENERATION:
                 raise ManagedControlError("generation_overflow", "managed generation cannot advance beyond 2**63-1")
-            proposed = build(current)
+            proposed = build(current) if fields is None else fields.apply(current)
             if proposed is None:
                 return None
             if (
@@ -453,8 +525,10 @@ class ManagedControlStore:
                 or proposed.generation != current.generation + 1
             ):
                 raise ManagedConflictError("generation_conflict", "owner transition did not produce the next selected generation")
-            self._validate_references(proposed)
-            return self._publish_replacement(operation, current, current_payload, proposed)
+            self._validate_references(proposed, _read_cut=cut)
+            if cut is None:
+                return self._publish_replacement(operation, current, current_payload, proposed)
+            return self._publish_replacement(operation, current, current_payload, proposed, _read_cut=cut)
 
     def observe_running_owner(self, operation_id: str) -> tuple[ControlSnapshot | None, bool, bool]:
         """Observe a running owner through one generation-rechecked lock probe.
@@ -569,7 +643,7 @@ class ManagedControlStore:
 
         return _probe_state_ownership(self.state_repo, ownership)
 
-    def _read_unpending_current(self, operation: str, operation_id: str) -> tuple[ControlSnapshot, bytes]:
+    def _read_unpending_current(self, operation: str, operation_id: str, *, _read_cut=None) -> tuple[ControlSnapshot, bytes]:
         """Read and validate current authority while the caller holds control lock."""
 
         if not self._operation_directory_present(operation):
@@ -577,7 +651,7 @@ class ManagedControlStore:
         if self._path_present(self._pending_path(operation), "pending authority"):
             raise ManagedControlError("pending_reconciliation", "managed current authority has a pending replacement")
         current, payload = self._read_current(operation, operation_id)
-        self._validate_references(current)
+        self._validate_references(current, _read_cut=_read_cut)
         return current, payload
 
     def _observe_running_owner_locked(
@@ -604,11 +678,13 @@ class ManagedControlStore:
             return observed, False, False
         return observed, ownerless, True
 
-    def _publish_replacement(self, operation: str, current: ControlSnapshot, current_payload: bytes, proposed: ControlSnapshot) -> ControlSnapshot:
+    def _publish_replacement(self, operation: str, current: ControlSnapshot, current_payload: bytes, proposed: ControlSnapshot, *, _read_cut=None) -> ControlSnapshot:
         """Publish intent then current replacement, retaining evidence on uncertainty."""
 
         proposed_payload = proposed.to_bytes()
         intent = _PendingIntent(proposed.operation_id, current.generation, _payload_digest(current_payload), proposed.generation, _payload_digest(proposed_payload))
+        if _read_cut is not None:
+            _read_cut.check()
         pending = self._pending_path(operation)
         if self._path_present(pending, "pending authority"):
             raise ManagedControlError("pending_reconciliation", "managed current authority has a pending replacement")
@@ -621,6 +697,10 @@ class ManagedControlStore:
         try:
             self._replace_file(self._current_path(operation), proposed_payload)
             _sync_directory(operation)
+            # Retire proof before the acknowledgement hook, whose fault path
+            # must confirm fresh authority. Release faults retain pending intent.
+            if _read_cut is not None:
+                _read_cut.__exit__(None, None, None)
         except BaseException as error:
             raise ManagedPublicationError("indeterminate", "managed current replacement may require reconciliation") from error
         self._clear_intent_and_acknowledge(operation, proposed, _payload_digest(proposed_payload))
@@ -707,17 +787,23 @@ class ManagedControlStore:
         payload = self._read_regular(path)
         return ControlSnapshot.from_bytes(payload, operation_id=operation_id), payload
 
-    def _validate_references(self, snapshot: ControlSnapshot) -> None:
+    def _validate_references(self, snapshot: ControlSnapshot, *, _read_cut=None) -> None:
         """Validate every retained StateRef digest before it is accepted as control."""
 
         for digest in (snapshot.checkpoint_digest, snapshot.final_digest):
             if digest is None:
                 continue
             try:
-                state_ref = state_ref_for_digest(self.state_repo, digest)
+                state_ref = (
+                    state_ref_for_digest(self.state_repo, digest) if _read_cut is None
+                    else _state_ref_for_digest(self.state_repo, digest, cut=_read_cut)
+                )
                 if state_ref.object.digest() != snapshot.object_ref_digest:
                     raise ManagedRecoveryError("state_object_mismatch", "managed current StateRef does not match its object reference")
-                validate_state_ref(self.state_repo, state_ref)
+                if _read_cut is None:
+                    validate_state_ref(self.state_repo, state_ref)
+                else:
+                    _validate_control_state_ref(self.state_repo, state_ref, _read_cut)
             except ManagedRecoveryError:
                 raise
             except BaseException as error:
