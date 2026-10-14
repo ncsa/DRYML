@@ -20,6 +20,7 @@ from dryml.core import (
 )
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
+from dryml.core.store.store import StoreAuthorityError
 from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
@@ -48,6 +49,14 @@ class EvidenceRoot(Object):
         self.child = child
 
 
+class StatefulEvidenceRoot(EvidenceValue):
+    """Stateful parent with distinct independently routed child payloads."""
+
+    def __init__(self, children, value=100):
+        self.children = children
+        self.value = value
+
+
 class StatelessEvidenceRoot(Object):
     """Stateless exact-reference root used to exercise unknown lineage facts."""
 
@@ -69,6 +78,8 @@ def exact_work_counts():
     previous = sys.getprofile()
 
     def observe(frame, event, arg):
+        if event == "return" and frame.f_code.co_name == "_read_snapshot" and arg is not None:
+            counts["complete_bundles"] += 1
         if event == "call":
             name = frame.f_code.co_name
             if name in {"_read_snapshot", "_validate_local_state_dir", "validate_payload"}:
@@ -475,6 +486,253 @@ def test_exact_plan_work_budget(tmp_path, size, monkeypatch, record_testsuite_pr
         ledgers.append(counts)
         record_testsuite_property(f"u5_k{size}_{phase}", repr(dict(sorted(counts.items()))))
     assert ledgers[0] == ledgers[2]
+
+
+@pytest.mark.parametrize("size", [1, 3, 7])
+def test_routed_stateful_parent_cut_work_budget(tmp_path, monkeypatch, size, record_testsuite_property):
+    """Delegated child probes preserve parent promotion and successful content admission."""
+    import builtins
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    parent = DirStore(tmp_path / "parent", query_index="none")
+    children = [DirStore(tmp_path / f"child-{i}", query_index="none") for i in range(size)]
+    stores = [parent, *children]
+    writer = Repo(stores, save_routing=SaveRouting((
+        (Selector(StatefulEvidenceRoot), parent),
+        *((Selector(Definition(EvidenceValue, i)), store) for i, store in enumerate(children)),
+    ), graph_mode="per-object"))
+    state = writer.save_object(StatefulEvidenceRoot(
+        [EvidenceValue(i, repo=writer) for i in range(size)], repo=writer,
+    ), deep_capture=True)
+    child_paths = [path for path in state.states if path]
+    expected_stores = {GraphPath(): parent, **dict(zip(child_paths, children))}
+    assert len(state.states) == size + 1
+    assert set(parent._read_snapshot(state.digest())[2]) == {GraphPath()}
+    guarded = {store: tuple(getattr(store, name).__func__ for name in (
+        "_read_snapshot", "_open_local_state_for_cut", "_validate_snapshot_locals",
+    )) for store in stores}
+    original_open = builtins.open
+    payload_reads = []
+
+    def observe_open(path, *args, **kwargs):
+        if Path(path).name == "value" and Path(path).parent.name == "data":
+            payload_reads.append(os.fspath(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", observe_open)
+    reader = Repo(stores)
+    ledgers = []
+    for phase in ("cold", "warm", "cleared"):
+        if phase == "cleared":
+            reader.clear_cache(strong=False, weak=False)
+            assert reader._validation_evidence.accounted_bytes == 0
+        payload_reads.clear()
+        assert all(store._can_reuse_exact_validation() for store in stores)
+        with exact_work_counts() as counts:
+            with reader._read_cut() as cut:
+                # A delegated-first probe must still promote the parent's locals.
+                cut.open_local(parent, state, child_paths[-1])
+                plan = build_exact_state_load_plan(reader, state, _read_cut=cut)
+                joined = build_exact_state_load_plan(reader, state, _read_cut=cut)
+                assert not cut._failed
+                assert len(cut.snapshots) == len(cut.eager_snapshots) == size + 1
+                if phase != "warm":
+                    assert cut._pending
+        assert plan.actions == joined.actions
+        assert len(plan.actions) == size + 1
+        for action in plan.actions:
+            assert action.reference == state
+            assert action.store is expected_stores[action.path]
+            assert action.object_id == state.object.objects[action.path]
+            assert action.state_hash == state.states[action.path] == action.payload.manifest.state_hash
+            assert action.definition.graph_equal(state.object.at(action.path).definition)
+            assert action.payload.eagerly_validated
+        assert counts["complete_bundles"] == size + 1
+        assert counts["json_reads"] == counts["json_shape_checks"] == 3 * (size + 1)
+        assert counts["validate_payload"] == counts["_validate_local_state_dir"] == size + 1
+        assert counts["LocalStateManifest"] == counts["definition_byte_hashes"] == size + 1
+        assert counts["path_definition_checks"] == size + 1
+        assert len(payload_reads) == len(set(payload_reads)) == size + 1
+        assert counts["canonical_json_load_bytes"] == (0 if phase == "warm" else 3 * (size + 1))
+        assert counts["decode_cdef_graph"] == (0 if phase == "warm" else counts["_build_graph_nodes"])
+        assert (counts["_realize_prepared_graph"] > 0) == (phase == "warm")
+        assert (counts["_graph_content_size"] == 0) == (phase == "warm")
+        facility = reader._validation_evidence
+        assert facility._resident and not facility._pending
+        assert facility.accounted_bytes == sum(fact.charge for fact in facility._resident.values())
+        assert reader._topology_leases == 0
+        for store in stores:
+            assert store._can_reuse_exact_validation()
+            assert guarded[store] == tuple(getattr(store, name).__func__ for name in (
+                "_read_snapshot", "_open_local_state_for_cut", "_validate_snapshot_locals",
+            ))
+        ledgers.append(counts)
+        record_testsuite_property(f"routed_k{size}_{phase}", repr(dict(sorted(counts.items()))))
+    assert ledgers[0] == ledgers[2]
+    assert ledgers[1]["_graph_and_labels"] < ledgers[0]["_graph_and_labels"]
+    assert ledgers[1]["_role_paths"] < ledgers[0]["_role_paths"]
+
+
+@pytest.mark.parametrize("operation", ["plan", "load"])
+def test_custom_legacy_validator_routes_per_object_children_uncached(tmp_path, operation):
+    """Legacy eager validators keep generic per-object routing and fresh validation."""
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.store.records import LocalStateManifest
+
+    class CustomDir(DirStore):
+        calls = 0
+
+        def _validate_local_state_dir(self, directory, manifest):
+            assert isinstance(manifest, LocalStateManifest)
+            self.calls += 1
+            super()._validate_local_state_dir(directory, manifest)
+
+    parent = CustomDir(tmp_path / "parent", query_index="none")
+    child_store = DirStore(tmp_path / "child", query_index="none")
+    writer = Repo([parent, child_store], save_routing=SaveRouting((
+        (Selector(StatefulEvidenceRoot), parent), (Selector(EvidenceValue), child_store),
+    ), graph_mode="per-object"))
+    root = StatefulEvidenceRoot([EvidenceValue(1, repo=writer)], repo=writer)
+    root.value = 123
+    root.children[0].value = 456
+    state = writer.save_object(root, deep_capture=True)
+    child_path = next(path for path in state.states if path)
+    assert set(parent._read_snapshot(state.digest())[2]) == {GraphPath()}
+    assert child_store.read_state_ref_record(state.at(child_path).digest()) is not None
+    assert not parent._can_reuse_exact_validation()
+    assert child_store._can_reuse_exact_validation()
+    reader = Repo([parent, child_store])
+    ledgers, validations = [], []
+    for phase in ("cold", "warm", "cleared"):
+        if phase == "cleared":
+            reader.clear_cache(strong=False, weak=False)
+        parent.calls = 0
+        with exact_work_counts() as counts:
+            if operation == "plan":
+                with reader._read_cut() as cut:
+                    plan = build_exact_state_load_plan(reader, state, _read_cut=cut)
+                    assert cut._failed and not cut._pending
+                actions = {action.path: action for action in plan.actions}
+                assert set(actions) == {GraphPath(), child_path}
+                assert actions[GraphPath()].store is parent
+                assert actions[child_path].store is child_store
+                assert all(action.payload.eagerly_validated for action in plan.actions)
+            else:
+                restored = reader.load_state_ref(state, reuse_live="never", cache="none")
+                assert restored.value == 123 and restored.children[0].value == 456
+                assert restored.object_id == state.object.objects[GraphPath()]
+                assert restored.children[0].object_id == state.object.objects[child_path]
+        assert parent.calls > 0
+        assert counts["validate_payload"] >= 2
+        assert counts["canonical_json_load_bytes"] > 0
+        facility = reader._validation_evidence
+        assert not facility._resident and not facility._pending
+        assert facility.accounted_bytes == 0 and reader._topology_leases == 0
+        ledgers.append(counts)
+        validations.append(parent.calls)
+    assert ledgers[0] == ledgers[1] == ledgers[2]
+    assert validations[0] == validations[1] == validations[2]
+
+
+@pytest.mark.parametrize("reader_name", ["open_local_state", "_validate_local_state_dir"])
+@pytest.mark.parametrize("error_type", [KeyError, StoreAuthorityError])
+def test_custom_local_errors_keep_routing_contract(tmp_path, monkeypatch, reader_name, error_type):
+    """Custom KeyError means missing placement; genuine authority errors reject routing."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    parent = DirStore(tmp_path / "parent", query_index="none")
+    writer = Repo(parent)
+    child = EvidenceValue(3, repo=writer)
+    child_state = writer.save_object(child)
+    state = writer.save_object(EvidenceRoot(child, repo=writer), deep_capture=True)
+    replica = DirStore.open_existing(parent.base_dir, query_index="none")
+    assert replica.read_state_ref_record(child_state.digest()).state_ref == child_state
+
+    original = getattr(parent, reader_name)
+    parent_directory = os.fspath(parent.open_local_state(state, next(iter(state.states))).handle)
+    child_directory = parent.open_local_state(child_state, GraphPath()).handle
+
+    def reject(target, *args, **kwargs):
+        if target == state or target == parent_directory:
+            raise error_type("custom reader local failure")
+        return original(target, *args, **kwargs)
+
+    monkeypatch.setattr(parent, reader_name, reject)
+    reader = Repo([parent, replica])
+    assert not parent._can_reuse_exact_validation()
+    with reader._read_cut() as cut:
+        if error_type is KeyError:
+            plan = build_exact_state_load_plan(reader, state, source_store=parent, _read_cut=cut)
+            assert len(plan.actions) == 1 and plan.actions[0].store is parent
+            assert plan.actions[0].payload.handle == child_directory
+            assert os.fspath(child_directory) != parent_directory
+            assert plan.actions[0].payload.eagerly_validated
+        else:
+            with pytest.raises(RepoLoadError, match="custom reader local failure"):
+                build_exact_state_load_plan(reader, state, source_store=parent, _read_cut=cut)
+            assert not cut.snapshots
+        assert cut._failed and not cut._pending
+    assert not reader._validation_evidence._resident
+    assert not reader._validation_evidence._pending
+    assert reader._validation_evidence.accounted_bytes == 0
+
+
+@pytest.mark.parametrize("component", ["manifest.record", "def.pkl", "data/value"])
+def test_delegated_probe_still_poisoned_by_advertised_parent_corruption(tmp_path, component):
+    """Delegated-first eager probes cannot bypass the parent's advertised locals."""
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.store.store import StoreAuthorityError
+
+    parent = DirStore(tmp_path / "parent", query_index="none")
+    child_store = DirStore(tmp_path / "child", query_index="none")
+    writer = Repo([parent, child_store], save_routing=SaveRouting((
+        (Selector(StatefulEvidenceRoot), parent), (Selector(EvidenceValue), child_store),
+    ), graph_mode="per-object"))
+    state = writer.save_object(StatefulEvidenceRoot(
+        [EvidenceValue(1, repo=writer)], repo=writer,
+    ), deep_capture=True)
+    child_path = next(path for path in state.states if path)
+    assert child_store.open_local_state(state.at(child_path), GraphPath()).eagerly_validated
+    local = parent.open_local_state(state, GraphPath())
+    Path(local.handle, component).write_bytes(b"corrupt parent authority")
+    reader = Repo([parent, child_store])
+    with reader._read_cut() as cut:
+        with pytest.raises(StoreAuthorityError):
+            cut.open_local(parent, state, child_path)
+        assert cut._failed and not cut.snapshots and not cut.eager_snapshots and not cut._pending
+    with pytest.raises(RepoLoadError, match="local state"):
+        build_exact_state_load_plan(reader, state, source_store=parent)
+    assert not reader._validation_evidence._resident and not reader._validation_evidence._pending
+
+
+def test_routed_deferred_child_does_not_authorize_eager_promotion(tmp_path):
+    """Normal delegated restore routing keeps deferred and eager evidence distinct."""
+    from dryml.core.materialization import build_exact_state_load_plan
+    from tests.core.test_deferred_local_state import DeferredPayload
+
+    parent = DirStore(tmp_path / "parent", query_index="none")
+    child_store = DirStore(tmp_path / "child", query_index="none")
+    writer = Repo([parent, child_store], save_routing=SaveRouting((
+        (Selector(StatefulEvidenceRoot), parent), (Selector(DeferredPayload), child_store),
+    ), graph_mode="per-object"))
+    state = writer.save_object(StatefulEvidenceRoot(
+        [DeferredPayload(repo=writer)], repo=writer,
+    ), deep_capture=True)
+    child_path = next(path for path in state.states if path)
+    local = child_store.open_local_state(state.at(child_path), GraphPath())
+    Path(local.handle, "data", "payload.bin").write_bytes(b"corrupt")
+    reader = Repo([parent, child_store])
+    with reader._read_cut() as cut:
+        deferred = build_exact_state_load_plan(reader, state, _defer_payload=True, _read_cut=cut)
+        assert not cut._failed and len(cut.snapshots) == 2 and not cut.eager_snapshots
+        actions = {action.path: action for action in deferred.actions}
+        assert actions[GraphPath()].payload.eagerly_validated
+        assert not actions[child_path].payload.eagerly_validated
+        assert actions[child_path].store is child_store
+        with pytest.raises(RepoLoadError, match="payload is invalid"):
+            build_exact_state_load_plan(reader, state, _read_cut=cut)
+        assert cut._failed and not cut.locals and not cut.eager_snapshots and not cut._pending
+    assert not reader._validation_evidence._resident
 
 
 def test_projected_eager_plan_checks_unrequested_corrupt_sibling(tmp_path):

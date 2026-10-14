@@ -124,14 +124,21 @@ merge distinct handles' evidence; ZipStore extractions are always distinct views
 Within an eligible built-in view, preflight validates each complete snapshot
 bundle once. Eager exact planning hashes each distinct physical local payload
 once, checks **every** path/definition association, and validates unrequested
-local siblings even when loading a projected child. Metadata inspection opens no
-payload bytes. Restoration uses path-specific deferred validation: inventory,
+local siblings even when loading a projected child. A confirmed built-in delegated
+placement sentinel routes to child snapshots without discarding parent bundle,
+eager sibling, or staged content evidence. Generic public-reader `KeyError` keeps
+its established missing-local-placement routing meaning, while conservatively
+discarding partial cut evidence and preventing content admission from that cut.
+Advertised built-in local corruption and genuine custom authority errors such as
+`StoreAuthorityError` fail without child/replica fallback. Metadata inspection
+opens no payload bytes. Restoration uses path-specific deferred validation: inventory,
 types, and sizes are checked, while only eager files are hashed. Deferred evidence
 cannot authorize eager copy, fork, publication, or recovery. Custom Stores and
 overridden readers/validators/adapters retain their existing uncached behavior
 and capability errors.
 Eager custom local-state validators keep the legacy `(directory, manifest)` call
-and may return `None` after successful validation. ZipStore wrappers likewise omit
+and may return `None` after successful validation, including for non-deferred
+payloads during exact restoration. ZipStore wrappers likewise omit
 new preparation/cut keywords when those options are absent. Archive acceleration
 checks the captured DirStore implementations beneath the wrappers as well as the
 wrappers themselves; replacing a base reader uses uncached reads and preserves

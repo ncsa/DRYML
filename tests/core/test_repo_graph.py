@@ -193,6 +193,58 @@ def test_failed_scope_discards_staged_facts_and_partial_authority():
     assert not repo._validation_evidence._resident
 
 
+@pytest.mark.parametrize("caught", [False, True])
+def test_prepare_exception_releases_reservations_and_poisoned_scope(tmp_path, monkeypatch, caught):
+    """A failed optional copy releases all charges even if its caller catches it."""
+    from contextlib import contextmanager
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    facility = repo._validation_evidence
+    error = RuntimeError("retention copy failed")
+    events = []
+    original = repo._authority_read_fences
+
+    @contextmanager
+    def fences(stores):
+        with original(stores):
+            events.append("enter")
+            try:
+                yield
+            finally:
+                events.append("exit")
+
+    monkeypatch.setattr(repo, "_authority_read_fences", fences)
+
+    def prepare():
+        assert not facility._lock._is_owned()
+        assert len(facility._pending) == 2 and facility.accounted_bytes > 0
+        raise error
+
+    def operation():
+        with repo._read_cut() as cut:
+            _stage_test_fact(cut, b"first")
+            if caught:
+                with pytest.raises(RuntimeError) as failed:
+                    _stage_test_fact(cut, b"second", prepare=prepare)
+                assert failed.value is error and cut._failed
+                assert not cut._pending and facility.accounted_bytes == 0
+                _stage_test_fact(cut, b"later", prepare=lambda: pytest.fail("failed cut prepared"))
+            else:
+                _stage_test_fact(cut, b"second", prepare=prepare)
+
+    if caught:
+        operation()
+    else:
+        with pytest.raises(RuntimeError) as failed:
+            operation()
+        assert failed.value is error
+    assert events == ["enter", "exit"]
+    assert repo._topology_leases == 0
+    assert not facility._resident and not facility._pending
+    assert facility.accounted_bytes == 0
+    repo.close(flush=False)
+
+
 def test_borrowed_facility_distinct_cuts_lifetime_clear_and_detach():
     """Borrowers lease origin lifetime; only explicit clear shares the epoch."""
     owner = Repo()

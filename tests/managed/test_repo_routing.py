@@ -1051,3 +1051,88 @@ def test_replica_promotion_opens_once_and_checks_every_local_path(tmp_path, corr
         if not corrupt_last:
             assert ledger["path_definition_checks"] == 3
     repo.close(flush=False)
+
+
+@pytest.mark.parametrize("backend", ["direct", "reopened"])
+def test_routed_stateful_parent_replica_cuts_keep_complete_view_evidence(tmp_path, backend):
+    """Connected and required/reopened views each validate every routed replica once."""
+    from collections import Counter
+    from dryml.core import Definition
+    from dryml.core.repo import _AuthorityReadCut
+    from tests.core.test_exact_load_metadata_evidence import (
+        EvidenceValue, StatefulEvidenceRoot, exact_work_counts,
+    )
+
+    def store(name):
+        return (DirStore(tmp_path / name, query_index="none") if backend == "direct"
+                else ZipStore(tmp_path / f"{name}.zip"))
+
+    roots = [store(f"parent-{replica}") for replica in range(2)]
+    children = [[store(f"child-{i}-{replica}") for replica in range(2)] for i in range(3)]
+    required = [*roots, *(item for pair in children for item in pair)]
+    unrelated = DirStore(tmp_path / "unselected", query_index="none")
+    repo = Repo([*required, unrelated], save_routing=SaveRouting((
+        *((Selector(StatefulEvidenceRoot), item) for item in roots),
+        *((Selector(Definition(EvidenceValue, i)), item)
+          for i, pair in enumerate(children) for item in pair),
+    ), graph_mode="per-object", match_mode="all"))
+    root = StatefulEvidenceRoot([EvidenceValue(i, repo=repo) for i in range(3)], repo=repo)
+    state, report = repo.save_object(root, deep_capture=True, report_stores=True)
+    for item in required:
+        if backend == "reopened":
+            item.commit()
+    selected = storage_module._required_managed_publication_stores(report)
+    assert set(selected) == set(required)
+    cuts, validations, bundles, accelerated = [], Counter(), Counter(), []
+    active = None
+    try:
+        with exact_work_counts() as ledger:
+            previous = sys.getprofile()
+
+            def observe(frame, event, arg):
+                nonlocal active
+                if event == "return" and frame.f_code is _AuthorityReadCut.__enter__.__code__:
+                    active = arg
+                    cuts.append(arg)
+                if event == "call" and frame.f_code is _AuthorityReadCut.__exit__.__code__:
+                    active = None
+                if event == "call" and frame.f_code is DirStore._validate_local_state_dir.__code__:
+                    assert active is not None
+                    validations[(active, frame.f_locals["self"], frame.f_locals["directory"])] += 1
+                if event == "return" and frame.f_code is DirStore._read_snapshot.__code__ and arg is not None:
+                    assert active is not None
+                    bundles[(active, frame.f_locals["self"], frame.f_locals["digest"])] += 1
+                if event == "return" and frame.f_code is DirStore._can_reuse_exact_validation.__code__:
+                    accelerated.append(arg)
+                previous(frame, event, arg)
+
+            sys.setprofile(observe)
+            try:
+                storage_module._validate_managed_publication(repo, state, report, selected)
+            finally:
+                sys.setprofile(previous)
+        assert len(cuts) == 2 and cuts[0].repo is repo and cuts[1].repo is not repo
+        assert cuts[0].stores == tuple(repo.stores)
+        assert len(cuts[1].stores) == len(required)
+        assert unrelated not in cuts[1].stores
+        assert cuts[1].repo._closed and cuts[1].repo._topology_leases == 0
+        if backend == "direct":
+            assert set(cuts[1].stores) == set(required)
+        else:
+            assert all(item not in required and item._closed_handle for item in cuts[1].stores)
+            assert all(not Path(item.base_dir).exists() for item in cuts[1].stores)
+        assert len(validations) == len(bundles) == 16
+        assert set(validations.values()) == set(bundles.values()) == {1}
+        for cut in cuts:
+            assert sum(key[0] is cut for key in validations) == 8
+            assert sum(key[0] is cut for key in bundles) == 8
+            assert not cut.active
+        assert ledger["validate_payload"] == ledger["path_definition_checks"] == 16
+        assert accelerated and all(accelerated)
+        assert repo._validation_evidence._resident and not repo._validation_evidence._pending
+        assert repo._topology_leases == 0
+        assert all(item._can_reuse_exact_validation() for item in required)
+    finally:
+        repo.close(flush=False)
+        for item in required:
+            item.close()

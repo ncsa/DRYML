@@ -21,6 +21,9 @@ from .records import (
 )
 
 
+_DELEGATED_LOCAL_STATE = object()
+
+
 class StoreAuthorityError(RuntimeError):
     """Raised when Store authority is malformed, missing, or incompatible."""
 
@@ -423,7 +426,16 @@ class Store(ABC):
         return self.iter_state_ref_records()
 
     def _open_local_state_for_cut(self, cut, reference, path, *, defer_payload=False):
-        """Keep custom openers and deferred adapters authoritative and uncached."""
+        """Keep custom openers and deferred adapters authoritative and uncached.
+
+        Eligible built-ins may return ``_DELEGATED_LOCAL_STATE`` only after their
+        complete matching bundle proves a stateful path is delegated, not local.
+        Eager probes still promote all advertised local siblings before returning
+        that marker without discarding cut evidence. Generic public-reader
+        KeyError keeps its missing-placement routing meaning, but the cut
+        conservatively discards evidence from the failed probe. Authority errors
+        remain failures without child fallback.
+        """
         cut.check(self)
         if defer_payload:
             adapter = getattr(self, "_open_local_state_for_exact_load", None)

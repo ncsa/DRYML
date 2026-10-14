@@ -593,7 +593,9 @@ def test_mean_fold_definition_read_characterization(tmp_path, record_testsuite_p
     state = writer.save_object(fold)
     reader = Repo(store)
     ledgers = []
-    for _ in range(2):
+    for phase in ("cold", "warm", "cleared"):
+        if phase == "cleared":
+            reader.clear_cache(strong=False, weak=False)
         records = []
         method_counts = Counter()
         def observe(frame, event, arg):
@@ -637,7 +639,7 @@ def test_mean_fold_definition_read_characterization(tmp_path, record_testsuite_p
             _eligible_graph_size(fold_graph)
         assert counts["dill_load"] == 14
         assert method_counts["_build_graph_nodes"] == 3
-        if ledgers:
+        if phase == "warm":
             assert method_counts["_graph_and_labels"] == method_counts["_role_paths"] == 0
             assert method_counts["_realize_prepared_graph"] == 3
         else:
@@ -648,6 +650,7 @@ def test_mean_fold_definition_read_characterization(tmp_path, record_testsuite_p
     record_testsuite_property("u6_mean_ledgers", repr(ledgers))
     assert ledgers[1]["_graph_and_labels"] < ledgers[0]["_graph_and_labels"]
     assert ledgers[1]["decode_cdef_graph"] == ledgers[0]["decode_cdef_graph"] - 3
+    assert ledgers[2] == ledgers[0]
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")

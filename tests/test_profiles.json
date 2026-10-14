@@ -688,7 +688,8 @@
             "test_direct_replica_lifecycle_keeps_required_coverage_independent",
             "test_warm_status_and_resume_reject_deleted_associated_checkpoint",
             "test_reopened_selected_replica_payload_corruption_cannot_hide_behind_first",
-            "test_replica_promotion_opens_once_and_checks_every_local_path"
+            "test_replica_promotion_opens_once_and_checks_every_local_path",
+            "test_routed_stateful_parent_replica_cuts_keep_complete_view_evidence"
           ]
         },
         "tests/managed/test_signature_integration.py": {

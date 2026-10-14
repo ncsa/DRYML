@@ -462,6 +462,10 @@ def build_exact_state_load_plan(
         Retains topology and ordered authority fences only during preflight. No
         construction/restore hooks run under this cut; validity is never retained
         across independent calls. Custom/overridden readers remain uncached.
+        Confirmed built-in delegation routes children without discarding evidence.
+        Generic public-reader KeyError retains its missing-placement routing
+        meaning but conservatively discards cut evidence; authority errors reject
+        fallback.
     """
     from .reference_values import StateRef
     from .store.store import Store
@@ -713,10 +717,15 @@ def _build_exact_state_load_plan(
         return projected_matches[0]
 
     def locate_payload(reference, path, source):
-        def open_payload(store, target, target_path):
-            return cut.open_local(
+        from .store.store import _DELEGATED_LOCAL_STATE, StoreAuthorityError
+
+        def open_payload(store, target, target_path, *, allow_delegation=False):
+            payload = cut.open_local(
                 store, target, target_path, defer_payload=_defer_payload,
             )
+            if payload is _DELEGATED_LOCAL_STATE and not allow_delegation:
+                raise StoreAuthorityError("Selected snapshot delegates the requested local state.")
+            return payload
 
         projection = reference.at(path) if path else None
         if projection is not None:
@@ -741,17 +750,20 @@ def _build_exact_state_load_plan(
                     return None
         try:
             authority_path = source.paths[path]
-            return source.store, open_payload(
+            payload = open_payload(
                 source.store, source.authority, authority_path,
+                allow_delegation=True,
             )
         except KeyError:
-            # A missing local placement can be delegated to a projected child
-            # snapshot. Any validation failure below is advertised corruption,
-            # not routing absence, and must not fall back to another snapshot.
+            # Generic public readers retain missing-placement routing semantics;
+            # the cut has already conservatively discarded their partial evidence.
             pass
         except Exception as error:
             missing.append(f"local state {reference.digest()} at {path!s}: {error}")
             return None
+        else:
+            if payload is not _DELEGATED_LOCAL_STATE:
+                return source.store, payload
         if projection is None:
             return None
         selected = (

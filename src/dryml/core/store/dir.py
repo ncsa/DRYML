@@ -25,7 +25,10 @@ from .records import (
     MainRefRecord, ObjectAliasRecord, StateAliasRecord, StateRefRecord,
     StoredRootRecord, StoreFormatRecord, StoreRecordError,
 )
-from .store import LocalStateSource, Store, StoreAuthorityError, StoreCapabilityError, StorePublicationCapabilities
+from .store import (
+    LocalStateSource, Store, StoreAuthorityError, StoreCapabilityError,
+    StorePublicationCapabilities, _DELEGATED_LOCAL_STATE,
+)
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
 from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from ..query.sqlite.index import SQLiteStoreQueryIndex
@@ -1348,6 +1351,7 @@ class DirStore(Store):
         return None if snapshot is None else snapshot[1]
 
     def _open_local_state_for_cut(self, cut, reference, path, *, defer_payload=False):
+        """Promote local siblings once; report validated delegation without failure."""
         if not self._can_reuse_exact_validation():
             return super()._open_local_state_for_cut(
                 cut, reference, path, defer_payload=defer_payload,
@@ -1370,7 +1374,12 @@ class DirStore(Store):
                 cut.check(self)
                 cut.eager_snapshots[key] = manifests
             manifests = cut.eager_snapshots[key]
-        else:
+        if path not in snapshot[2]:
+            if path not in reference.states:
+                raise KeyError(path)
+            cut.check(self)
+            return _DELEGATED_LOCAL_STATE
+        if defer_payload:
             manifests = self._validate_snapshot_locals(
                 snapshot, directory, paths=(path,), defer_payload=True,
                 validated=validated,
@@ -1572,7 +1581,11 @@ class DirStore(Store):
         return LocalStateSource(self, os.path.join(self._snapshot_path(reference.digest()), snapshot[2][path]), manifest)
 
     def _open_local_state_for_exact_load(self, reference, path) -> LocalStateSource:
-        """Open one exact-restore payload after metadata-only deferred validation."""
+        """Open one exact-restore payload after metadata-only deferred validation.
+
+        Non-deferred payloads retain the eager ``(directory, manifest)`` validator
+        call, including custom validators returning None on success.
+        """
 
         from ..reference_values import StateRef
         from ..utils.graph.path import normalize_path
@@ -1593,9 +1606,10 @@ class DirStore(Store):
         if manifest is None or manifest.state_hash != reference.states[path]:
             raise StoreAuthorityError("snapshot payload manifest does not match placement.")
         self._require_deferred_local_state_support(manifest)
-        self._validate_local_state_dir(
-            directory, manifest, defer_payload=bool(manifest.deferred_paths),
-        )
+        if manifest.deferred_paths:
+            self._validate_local_state_dir(directory, manifest, defer_payload=True)
+        else:
+            self._validate_local_state_dir(directory, manifest)
         expected = reference.object.at(path).definition
         definition = self._read_file(os.path.join(directory, "def.pkl"), DefinitionRecord)
         if definition is None or not definition.definition.graph_equal(expected):
