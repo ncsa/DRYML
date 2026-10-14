@@ -329,6 +329,11 @@ directories and local-state sources returned by a ZipStore are borrowed from its
 extraction and expire when the handle closes. See [Persistent Metadata](metadata.md)
 for scopes, queries, capture, recovery, and sharing guidance.
 
+Closing a ZipStore inside its retained writer/authority fence invalidates the
+handle immediately, but extraction removal waits until the outermost native lock
+has been released. This avoids deleting an open lock file on Windows. A deferred
+removal failure is raised at fence exit; calling `close()` again retries cleanup.
+
 ## Portable Repo Definitions
 
 `Repo.to_definition()` exports a detached `RepoDefinition` v1 configuration

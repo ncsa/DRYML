@@ -73,6 +73,8 @@ class ZipStore(DirStore):
         # before the inherited Store writer/archive locks so commit cannot clear
         # dirty state while another same-handle mutation is still publishing.
         self._transaction_lock = RLock()
+        self._writer_depth = 0
+        self._close_pending = False
         self._initializing = True
         self._file_like = _is_file_like(zip_dest)
         try:
@@ -306,14 +308,36 @@ class ZipStore(DirStore):
         return f"{super().authority_fence_key()}:transaction:{id(self)}"
 
     def writer_lock(self):
-        """Acquire the transaction fence before the inherited Store writer lock."""
+        """Fence writes and release deferred extraction cleanup after the final lock.
+
+        Returns:
+            A reentrant context manager over the transaction and native writer lock.
+
+        Raises:
+            RuntimeError: If the transaction is closed on entry.
+            OSError: If deferred extraction cleanup fails on outermost exit.
+
+        Side Effects:
+            Serializes same-handle writers. A close requested inside the fence
+            invalidates the handle immediately but removes its extraction only
+            after the last native writer lock is released.
+        """
 
         @contextmanager
         def locked():
             self._assert_open()
             with self.transaction_fence():
-                with super(ZipStore, self).writer_lock():
-                    yield
+                try:
+                    with super(ZipStore, self).writer_lock():
+                        self._writer_depth += 1
+                        try:
+                            yield
+                        finally:
+                            self._writer_depth -= 1
+                finally:
+                    if self._writer_depth == 0 and self._close_pending:
+                        self._tmp.cleanup()
+                        self._close_pending = False
 
         return locked()
 
@@ -689,6 +713,7 @@ class ZipStore(DirStore):
 
         Raises:
             RuntimeError: If an active Session resource cache retains this Store.
+            OSError: If extraction cleanup fails; retry close after releasing fences.
 
         Returns:
             ``None``. Repeated close calls are no-ops.
@@ -696,11 +721,21 @@ class ZipStore(DirStore):
         Side Effects:
             Acquires the transaction fence, removes the extracted directory, and
             invalidates snapshot and payload paths borrowed from this handle.
+            When called inside a retained writer/authority fence, invalidates the
+            handle immediately and defers removal until that outer fence releases
+            its native lock. Deferred cleanup errors propagate at fence exit.
         """
         with self.transaction_fence():
             if self._closed_handle:
+                if self._close_pending and not self._writer_depth:
+                    self._tmp.cleanup()
+                    self._close_pending = False
                 return
             super().close()
+            if self._writer_depth:
+                self._closed_handle = True
+                self._close_pending = True
+                return
             self._tmp.cleanup()
             self._closed_handle = True
 

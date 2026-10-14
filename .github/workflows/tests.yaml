@@ -33,7 +33,7 @@ jobs:
     name: Lightweight (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     # Durable Store publication adds filesystem work on slower Windows runners.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}
+    timeout-minutes: ${{ (matrix.os == 'windows-latest' || matrix.python-version == '3.13') && 40 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +67,7 @@ jobs:
       - name: Run lightweight tests
         env:
           REQUESTED_SUITE: ${{ github.event_name == 'workflow_dispatch' && inputs.suite || 'good-enough' }}
+          PYTHONTRACEMALLOC: ${{ matrix.python-version == '3.13' && '8' || '' }}
         run: |
           if [[ "$REQUESTED_SUITE" == "good-enough" ]]; then
             ./tests.sh good-enough --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread

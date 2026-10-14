@@ -177,8 +177,10 @@ def test_zip_cut_keeps_extractions_distinct_and_checks_cached_liveness(tmp_path,
             assert cut.snapshot(second, state.digest())[0].state_ref == state
             assert len(cut.snapshots) == 2
             second.close()
+            assert os.path.isdir(second.base_dir)
             with pytest.raises(RuntimeError, match="closed"):
                 cut.snapshot(second, state.digest())
+        assert not os.path.exists(second.base_dir)
     finally:
         first.close()
         second.close()
@@ -207,6 +209,29 @@ def test_exact_inputs_and_captured_selections_precede_fence_admission(tmp_path, 
         build_exact_state_load_plan(repo, state, source_store=detached)
     assert not attempts
     assert repo._topology_leases == 0
+
+
+def test_zip_deferred_close_cleanup_failure_can_be_retried(tmp_path, monkeypatch):
+    """Fence exit reports failed removal while keeping closed-handle cleanup retryable."""
+    store = ZipStore(tmp_path / "store.zip")
+    cleanup = store._tmp.cleanup
+    attempts = []
+
+    def fail_once():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("extraction removal failed")
+        cleanup()
+
+    monkeypatch.setattr(store._tmp, "cleanup", fail_once)
+    with pytest.raises(OSError, match="extraction removal failed"):
+        with store.authority_read_fence():
+            store.close()
+            assert attempts == [] and os.path.isdir(store.base_dir)
+    with pytest.raises(RuntimeError, match="closed"):
+        store.authority_fence_key()
+    store.close()
+    assert attempts == [1, 1] and not os.path.exists(store.base_dir)
 
 
 def test_closing_repo_cut_rejected_before_configuration_lock(tmp_path):

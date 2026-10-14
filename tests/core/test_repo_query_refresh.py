@@ -18,6 +18,17 @@ class RefreshLeaf(Object):
         self.name = name
 
 
+def _warning_diagnostics(observed):
+    import tracemalloc
+
+    details = []
+    for warning in observed:
+        allocation = tracemalloc.get_object_traceback(warning.source)
+        details.append((warning.category.__name__, str(warning.message),
+                        allocation.format() if allocation is not None else None))
+    return details
+
+
 def test_v3_query_observes_committed_external_writes(tmp_path):
     store = DirStore(tmp_path / "store")
     repo_a = Repo(stores=store)
@@ -409,7 +420,7 @@ def test_u3_optional_absence_exact_positive_scan_controls(tmp_path, monkeypatch,
             warnings.simplefilter("always")
             assert query.exists()
             explanation = query.explain(analyze=True)
-        assert observed == [], [(warning.category.__name__, str(warning.message)) for warning in observed]
+        assert observed == [], _warning_diagnostics(observed)
         assert explanation.store_scan_count == 0 and explanation.refresh_action == "none"
         assert store._query_index_instance is None
         if request is not None:
@@ -425,7 +436,7 @@ def test_u3_optional_absence_exact_positive_scan_controls(tmp_path, monkeypatch,
         assert request.completed == request.in_flight == {}
     with pytest.warns(RuntimeWarning, match="inventory scan") as observed:
         assert query.scan_policy("warn").exists()
-    assert len(observed) == 1 and calls == [(store, policy)]
+    assert len(observed) == 1 and calls == [(store, policy)], _warning_diagnostics(observed)
     calls.clear()
     if policy is True:
         assert query.scan_policy("forbid").exists()
