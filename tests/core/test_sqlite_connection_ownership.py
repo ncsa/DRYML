@@ -41,6 +41,31 @@ def test_discarded_manager_closes_owned_handles(tmp_path):
     _assert_closed(con)
 
 
+def test_cyclic_pool_closes_connections_before_their_finalizers(tmp_path):
+    """GC must close pooled handles before SQLite can report them as unclosed."""
+    events = []
+
+    class Connection(connection_module.require_sqlite().Connection):
+        def close(self):
+            events.append("close")
+            super().close()
+
+        def __del__(self):
+            events.append("connection finalizer")
+
+    con = Connection(tmp_path / "cycle.sqlite", check_same_thread=False)
+    con.cycle = con
+    manager = SQLiteConnectionManager(_config(tmp_path / "cycle.sqlite"))
+    manager.cycle = manager
+    key = (connection_module.os.getpid(), threading.get_ident(), False)
+    manager._connections[key] = con
+    del con, manager
+    gc.collect()
+    assert events[0] == "close", events
+    gc.collect()
+    assert "connection finalizer" in events
+
+
 def test_path_publication_barrier_closes_idle_threads_but_preserves_leases(tmp_path):
     """Publication retires idle same-path pools without touching pinned or unrelated reads."""
     path = tmp_path / "shared.sqlite"

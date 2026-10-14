@@ -83,7 +83,9 @@ Windows cannot replace a main file while its protected handles remain open;
 replacement raises retryable `QueryIndexBusy` without closing those handles or
 changing the canonical index. Close the retained reader, then retry the rebuild.
 Discarded connection managers best-effort close their owned current-process
-handles. Explicit close remains the deterministic way to observe cleanup errors;
+handles. Unleased pools close in weak-reference finalization before SQLite's own
+connection finalizers, including cyclic owner graphs.
+Explicit close remains the deterministic way to observe cleanup errors;
 collection in a forked child does not close an inherited parent pool.
 
 Read views also belong to their entry process. A forked child must open a fresh

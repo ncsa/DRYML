@@ -3,6 +3,8 @@
 Standalone scopes roll back pending work and close their handles; managers cache
 autocommit handles by process/thread/access mode and protect leased readers from
 teardown. Validation and SQLite failures propagate to the connection owner.
+Unreachable managers finalize unleased pools before SQLite's own cyclic-GC
+finalizers; inherited parent pools are never explicitly closed in a child.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import os
 from pathlib import Path
 import threading
 from typing import TYPE_CHECKING
-from weakref import WeakSet
+from weakref import WeakSet, finalize
 
 from ....paths import to_file_uri
 from ..model import QueryIndexError
@@ -117,6 +119,18 @@ def _rollback_and_close(con, *, suppress_errors: bool) -> None:
                 raise
 
 
+def _finalize_connections(connections, leases, pid):
+    """Close unleased pool handles before cyclic GC finalizes SQLite connections."""
+    if os.getpid() != pid:
+        return
+    for key, con in list(connections.items()):
+        if key[0] == pid and key not in leases:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+
 class SQLiteConnectionManager:
     """Own SQLite connections for one index path per process and thread.
 
@@ -165,16 +179,10 @@ class SQLiteConnectionManager:
         self._leases = set()
         self._lock = threading.RLock()
         self._lock_pid = os.getpid()
+        # Retain pool bookkeeping, not the manager, so owner cycles remain collectible.
+        self._finalizer = finalize(self, _finalize_connections, self._connections, self._leases, self._lock_pid)
         with self._registry_lock():
             self._instances.add(self)
-
-    def __del__(self):
-        """Best-effort close owned handles on collection; leave inherited pools alone."""
-        try:
-            if getattr(self, "_lock_pid", None) == os.getpid():
-                self.close_all_current_process()
-        except Exception:
-            pass
 
     @property
     def path(self) -> Path:
@@ -238,6 +246,7 @@ class SQLiteConnectionManager:
             self._file_identities = {}
             self._leases = set()
             self._lock_pid = pid
+            self._finalizer = finalize(self, _finalize_connections, self._connections, self._leases, pid)
             with self._registry_lock():
                 self._instances.add(self)
         return self._lock
