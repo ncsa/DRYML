@@ -1,3 +1,5 @@
+import gc
+
 import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
@@ -399,6 +401,10 @@ def test_u3_optional_absence_and_explicit_configured_unavailability(tmp_path, mo
 @pytest.mark.parametrize("scan_policy", ("forbid", "warn"))
 def test_u3_optional_absence_exact_positive_scan_controls(tmp_path, monkeypatch, policy, scan_policy):
     """Absent optional targets need no scan or credit; late ready targets still do."""
+    # Finalize prior fixtures before attributing warnings to this terminal. A
+    # second pass retires resources released by weak-reference finalizers.
+    gc.collect()
+    gc.collect()
     import warnings
     import dryml.core.store.dir as dir_module
     from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
