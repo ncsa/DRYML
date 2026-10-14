@@ -188,6 +188,47 @@ After a mid-epoch restore, native step/window observations remain available, but
 the trainers do not present the resumed suffix's loss or metric aggregate as a
 full-epoch metric.
 
+#### Private one-shot candidate acceptance (U2)
+
+Models now provides a private acceptance helper for opaque-fit backend trainers.
+It collects the authored Dataset through `materialize_supervised(...,
+strict_numpy=True)`, preserving dense NumPy dtypes/order and counting the actual
+examples, including short final batches. It validates proposed accounting on a
+detached `TrainState` before any native fitting: one `record_fit(examples=N)` and
+one `finish_epoch()`. This means one coarse fit step, one completed epoch, N
+exposure, and next-batch zero, with no invented loss, solver/tree iteration
+telemetry, or pending epoch postlude. Unfinished iterative progress is rejected;
+this helper cannot continue inside an opaque fit.
+
+The backend owns fresh private native construction, fit, fitted-fact/convergence
+validation, and final native-byte/canonical-metadata encoding. Model preparation
+and `prep_eval` cleanup finish before encoding and acceptance. Native failure,
+invalid accounting, nonconvergence, cleanup failure, encoding failure, or
+interruption therefore retains the previous accepted native predictions, fitted
+facts, payload, and successful counters. Cleanup never replaces an escaping
+primary error, including a `BaseException` interruption. Accepted state is one
+backend-owned plain instance bundle; its final payload bytes are encoded once.
+The helper installs that bundle and the detached TrainState using a small local
+rollback boundary with no external hooks, I/O, native calls, callbacks, or cleanup
+between installations. Local installation failure restores both previous slots.
+Direct same-model concurrent fit/restore and mutation through borrowed native
+inspection are unsupported.
+
+Intermediate safe-point callbacks and observer-session requests fail before
+source acquisition. Consuming opaque trainers declare both capabilities false;
+`ManagedConfig.callbacks` remain a separate terminal checkpoint lane.
+`Experiment.train` owns lifecycle phase: a failed attempt may set `phase="failed"`
+while prior successful-fit counters and predictions remain intact. It also owns
+the final StateRef, checkpoint association, terminal Artifacts/history, and
+completed-fit replay. A postacceptance publication or evaluation error retains
+the accepted fit and propagates without a successful terminal receipt; the local
+helper cannot repair association or provide continuation within native fitting.
+
+U2 supplies this private seam and contract tests only. The maintained XGBoost and
+statsmodels adapters/codecs and their backend-specific qualification are later
+rollout stages. Existing sklearn training uses its established lifecycle rather
+than this candidate-first helper.
+
 Training prepares declared x/y Dataset specs once in the trainer's inspectable
 `method_graph()`. Its producer/consumer specs and direct dense conversion edges
 are retained as Method-owned graph facts; each yielded value only executes those

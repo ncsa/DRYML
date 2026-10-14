@@ -1091,6 +1091,7 @@
     "tests/managed/test_acceptance_lifecycle.py": "medium",
     "tests/managed/test_annotation_composition.py": "medium",
     "tests/managed/test_public_api.py": "medium",
+    "tests/models/test_estimator_contracts.py": "medium",
     "tests/package/test_public_imports.py": "medium",
     "tests/package/test_release_artifacts.py": "medium",
     "tests/ray/test_core_execute_ray.py": "heavy",
