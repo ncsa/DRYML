@@ -83,7 +83,7 @@ def exact_work_counts():
                         "decode_cdef_graph", "encode_cdef_graph", "_canonical_labels", "_freeze_json_fact",
                          "_thaw_json_fact", "_content_hash", "_primitive_size",
                          "_context_matches", "_graph_and_labels", "_role_paths",
-                         "_eligible_graph_size", "_graph_content_size", "_array_content",
+                         "_eligible_graph_size", "_check_graph_eligibility", "_graph_content_size", "_array_content",
                          "_freeze_graph_content", "_graph_content_matches", "_thaw_graph_content",
                          "_realize_prepared_graph", "_build_graph_nodes", "_topology_projection"}:
                 counts[name] += 1
@@ -161,8 +161,8 @@ def test_snapshot_json_cold_warm_characterization(tmp_path, monkeypatch, record_
         assert counts["_role_paths"] > 0
         assert counts["_build_graph_nodes"] == 3
         assert counts["_realize_prepared_graph"] == (3 if phase == "warm" else 0)
-        assert counts["_eligible_graph_size"] == 3
-        assert counts["_graph_content_size"] > 0
+        assert counts["_check_graph_eligibility"] == 3
+        assert (counts["_graph_content_size"] == 0) == (phase == "warm")
         if phase != "warm":
             assert counts["_graph_content_matches"] == 0
         else:
@@ -171,7 +171,7 @@ def test_snapshot_json_cold_warm_characterization(tmp_path, monkeypatch, record_
     for key in ("json_reads", "decode_snapshot_metadata", "decode_record",
                 "canonical_json_bytes", "validate_payload",
                 "StateRefRecord", "DefinitionRecord", "dill_load",
-                "_build_graph_nodes", "_eligible_graph_size"):
+                "_build_graph_nodes", "_check_graph_eligibility"):
         assert ledgers[0][key] == ledgers[1][key]
     assert ledgers[0]["deep_freeze_json"] == ledgers[1]["deep_freeze_json"] + 3
     assert ledgers[1]["_graph_and_labels"] < ledgers[0]["_graph_and_labels"]

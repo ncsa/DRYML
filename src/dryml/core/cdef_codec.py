@@ -206,6 +206,12 @@ _GRAPH_PREPARATION_POLICY = 1
 
 def _eligible_graph_size(data):
     """Reject unsupported graph contexts before optional retention allocation."""
+    _check_graph_eligibility(data)
+    return _graph_content_size(data)
+
+
+def _check_graph_eligibility(data):
+    """Check the closed retention policy without computing optional owned sizes."""
     from .symbol import ImportRef
 
     if type(data) is not dict or type(data.get("nodes")) is not list:
@@ -224,7 +230,6 @@ def _eligible_graph_size(data):
                 if type(key) not in (str, bytes, int, float, bool, type(None), tuple):
                     raise TypeError("Unsupported mapping key.")
                 validate_canonical_key(key, where="retained graph key")
-                _graph_content_size(key)
                 value(item)
         elif kind in ("list", "tuple", "set"):
             for item in payload["items"]:
@@ -237,7 +242,6 @@ def _eligible_graph_size(data):
         if type(node) is not dict or type(node.get("cls")) is not ImportRef:
             raise TypeError("Only exact ImportRef graph classes are retainable.")
         value(node["parameters"])
-    return _graph_content_size(data)
 
 
 def _array_content(value):

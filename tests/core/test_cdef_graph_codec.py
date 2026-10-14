@@ -238,7 +238,8 @@ def test_prepared_graph_matching_and_detachment_scale_linearly(size):
     assert result._prepared is not None
     assert counts["decode_cdef_graph"] == counts["_graph_and_labels"] == counts["_role_paths"] == 0
     assert counts["_realize_prepared_graph"] == counts["_build_graph_nodes"] == 1
-    assert counts["_eligible_graph_size"] == counts["_content_hash"] == 1
+    assert counts["_check_graph_eligibility"] == counts["_content_hash"] == 1
+    assert counts["_graph_content_size"] == 0
     assert counts["dill_load"] == 2
     # Each phase has a fixed record envelope plus a fixed-size tagged node per
     # child. Array buffer matching/copying is linear in its number of elements.

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import hashlib
 import io
 import json
+from types import FunctionType
 import os
 import re
 import stat
@@ -214,8 +215,7 @@ class _RecordPreparation:
         try:
             graph = (payload["definition"] if record_type is DefinitionRecord
                      else payload["state_ref"]["object"]["definition"])
-            codec._eligible_graph_size(graph)
-            size = codec._graph_content_size(payload)
+            codec._check_graph_eligibility(graph)
             # Functions and code objects are both guarded: rebinding and replacing
             # __code__ must each retire facts without retaining implementations.
             from .. import reference_values, canonical, definition
@@ -223,7 +223,7 @@ class _RecordPreparation:
             from ..cdef_graph import ConcreteDefinitionGraph
             implementations = [value for module in (codec, reference_values, canonical)
                                for value in vars(module).values()
-                               if isinstance(value, type(lambda: None))]
+                               if isinstance(value, FunctionType)]
             implementations += [record_type.from_data.__func__, _Record._decode_framed.__func__,
                                 record_type._from_data_prepared.__func__,
                                 _RecordPreparation.decode, _role_paths, _digest,
@@ -248,6 +248,10 @@ class _RecordPreparation:
         if fact is not None and codec._graph_content_matches(payload, fact.content):
             return record_type._from_data_prepared(payload, fact)
         result = record_type.from_data(payload)
+        try:
+            size = codec._graph_content_size(payload)
+        except (TypeError, ValueError, RecursionError):
+            return result
         # Both complete original graph validation and enclosing record identity /
         # role checks have succeeded before any optional owned copy is reserved.
         graph_hash = result.graph_hash if record_type is DefinitionRecord else result.state_ref.definition.graph_hash()
@@ -255,13 +259,20 @@ class _RecordPreparation:
         roles = result.roles if record_type is DefinitionRecord else None
         definition = result.definition if record_type is DefinitionRecord else result.state_ref.definition
         topology = codec._topology_projection(definition)
+        def prepare():
+            content = codec._freeze_graph_content(payload)
+            prepared_graph = content
+            fields = ("definition",) if record_type is DefinitionRecord else ("state_ref", "object", "definition")
+            for name in fields:
+                prepared_graph = next(item for key, item in prepared_graph[1] if key == ("str", name))
+            return _PreparedRecord(
+                content, prepared_graph, graph_hash, structural_hash,
+                codec._freeze_graph_content(roles), codec._freeze_graph_content(topology),
+            )
+
         self.cut.stage_prepared(context, source, size + codec._graph_content_size(graph)
                                 + codec._graph_content_size(roles) + codec._graph_content_size(topology) + 1024,
-                                lambda: _PreparedRecord(
-                                    codec._freeze_graph_content(payload), codec._freeze_graph_content(graph),
-                                    graph_hash, structural_hash, codec._freeze_graph_content(roles),
-                                    codec._freeze_graph_content(topology),
-                                ))
+                                prepare)
         return result
 
 

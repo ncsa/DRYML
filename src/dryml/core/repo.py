@@ -156,22 +156,23 @@ class _ValidationEvidence:
         with self._lock:
             if self.epoch != cut.epoch:
                 return
-            same_bucket = lambda: sum(fact.bucket == bucket for fact in self._resident.values()) + sum(
+            bucket_count = sum(fact.bucket == bucket for fact in self._resident.values()) + sum(
                 item[0] == bucket for item in self._pending.values())
             while (len(self._resident) + len(self._pending) >= self.max_entries
                    or self.accounted_bytes + charge > self.max_bytes
-                   or same_bucket() >= self.max_bucket):
+                   or bucket_count >= self.max_bucket):
                 victim = next((ticket for ticket, fact in self._resident.items()
-                               if same_bucket() < self.max_bucket or fact.bucket == bucket), None)
+                               if bucket_count < self.max_bucket or fact.bucket == bucket), None)
                 if victim is None:
                     break
                 fact = self._resident.pop(victim)
                 self.accounted_bytes -= fact.charge
+                bucket_count -= fact.bucket == bucket
                 retired.append(fact)
                 del fact
             admitted = (len(self._resident) + len(self._pending) < self.max_entries
                         and self.accounted_bytes + charge <= self.max_bytes
-                        and same_bucket() < self.max_bucket)
+                        and bucket_count < self.max_bucket)
             if admitted:
                 self._serial += 1
                 ticket = self._serial

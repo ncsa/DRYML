@@ -544,6 +544,11 @@ def _validate_replica_locals(cut, store, state_ref, bundle):
     reader and closure-validation fallback.
     """
     if bundle[2] is not None:
+        if type(store) in (DirStore, ZipStore) and store._can_reuse_exact_validation():
+            path = next(iter(bundle[2]), None)
+            if path is not None:
+                cut.open_local(store, state_ref, path)
+            return
         for path in bundle[2]:
             cut.open_local(store, state_ref, path)
 

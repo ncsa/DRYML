@@ -594,7 +594,6 @@ def test_mean_fold_definition_read_characterization(tmp_path, record_testsuite_p
     reader = Repo(store)
     ledgers = []
     for _ in range(2):
-        counts = Counter()
         records = []
         method_counts = Counter()
         def observe(frame, event, arg):
@@ -615,7 +614,6 @@ def test_mean_fold_definition_read_characterization(tmp_path, record_testsuite_p
                         owner = owner.f_back
             if previous is not None:
                 previous(frame, event, arg)
-        previous = sys.getprofile()
         with exact_work_counts() as counts:
             previous = sys.getprofile()
             sys.setprofile(observe)

@@ -165,6 +165,7 @@ def test_prepared_definition_sharing_arrays_roles_and_owned_budget():
         return sys.getsizeof(value) + (sum(owned(item) for item in value) if type(value) is tuple else 0)
     fact = next(iter(repo._validation_evidence._resident.values()))
     prepared = fact.prepared
+    assert prepared.graph is dict(prepared.content[1])[("str", "definition")]
     measured = sum(owned(getattr(prepared, name)) for name in prepared.__slots__)
     assert fact.charge >= measured + sys.getsizeof(source)
     assert repo._validation_evidence.high_water_bytes <= 32 * 1024 * 1024

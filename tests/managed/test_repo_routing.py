@@ -1008,3 +1008,46 @@ def test_reopened_selected_replica_payload_corruption_cannot_hide_behind_first(t
         repo.close(flush=False)
         first.close()
         second.close()
+
+
+@pytest.mark.parametrize("corrupt_last", [False, True])
+def test_replica_promotion_opens_once_and_checks_every_local_path(tmp_path, corrupt_last):
+    """One eager promotion still validates non-first payloads and their bindings."""
+    from dryml.core.store.store import StoreAuthorityError
+    from tests.core.test_exact_load_metadata_evidence import (
+        EvidenceValue, StatelessSeedContainer, exact_work_counts,
+    )
+
+    store = DirStore(tmp_path / "state", query_index="none")
+    repo = Repo(store)
+    root = StatelessSeedContainer([EvidenceValue(i, repo=repo) for i in range(3)], repo=repo)
+    reference = repo.save_object(root, deep_capture=True)
+    if corrupt_last:
+        path = tuple(reference.states)[-1]
+        source = store.open_local_state(reference, path)
+        Path(source.handle, "data", "value").write_bytes(b"corrupt non-first payload")
+    opens = []
+    with repo._read_cut() as cut:
+        bundle = cut.snapshot(store, reference.digest())
+        with exact_work_counts() as ledger:
+            previous = sys.getprofile()
+
+            def observe(frame, event, arg):
+                if event == "call" and frame.f_code is DirStore._open_local_state_for_cut.__code__:
+                    opens.append(frame.f_locals["path"])
+                previous(frame, event, arg)
+
+            sys.setprofile(observe)
+            try:
+                if corrupt_last:
+                    with pytest.raises(StoreAuthorityError, match="payload is invalid"):
+                        storage_module._validate_replica_locals(cut, store, reference, bundle)
+                else:
+                    storage_module._validate_replica_locals(cut, store, reference, bundle)
+            finally:
+                sys.setprofile(previous)
+        assert len(opens) == 1
+        assert ledger["validate_payload"] == 3
+        if not corrupt_last:
+            assert ledger["path_definition_checks"] == 3
+    repo.close(flush=False)
