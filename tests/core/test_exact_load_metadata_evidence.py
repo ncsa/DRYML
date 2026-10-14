@@ -649,11 +649,15 @@ def test_custom_local_errors_keep_routing_contract(tmp_path, monkeypatch, reader
     assert replica.read_state_ref_record(child_state.digest()).state_ref == child_state
 
     original = getattr(parent, reader_name)
-    parent_directory = os.fspath(parent.open_local_state(state, next(iter(state.states))).handle)
+    parent_directory = os.path.normpath(parent.open_local_state(state, next(iter(state.states))).handle)
     child_directory = parent.open_local_state(child_state, GraphPath()).handle
+    rejected = []
 
     def reject(target, *args, **kwargs):
-        if target == state or target == parent_directory:
+        if target == state or (
+                reader_name == "_validate_local_state_dir"
+                and os.path.normpath(target) == parent_directory):
+            rejected.append(target)
             raise error_type("custom reader local failure")
         return original(target, *args, **kwargs)
 
@@ -672,6 +676,7 @@ def test_custom_local_errors_keep_routing_contract(tmp_path, monkeypatch, reader
                 build_exact_state_load_plan(reader, state, source_store=parent, _read_cut=cut)
             assert not cut.snapshots
         assert cut._failed and not cut._pending
+    assert rejected
     assert not reader._validation_evidence._resident
     assert not reader._validation_evidence._pending
     assert reader._validation_evidence.accounted_bytes == 0
