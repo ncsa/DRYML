@@ -48,6 +48,11 @@ class DirStore(Store):
     sibling advisory lock, so simultaneous trusted constructors never mistake a
     live temporary format file for old authority.
 
+    Custom eager local-state validators retain the two-positional-argument
+    ``(directory, manifest)`` call and may return ``None`` on success. Deferred
+    validation passes its option only when requested; unknown overrides use
+    uncached validation rather than built-in read-cut reuse.
+
     Args:
         base_dir (str or PathLike): Direct Store root to open or initialize.
         query_index: Derived-index policy string or SQLiteQueryIndexConfig; it
@@ -1278,8 +1283,10 @@ class DirStore(Store):
                     if manifest is None:
                         raise StoreAuthorityError("snapshot payload manifest does not match placement.")
                 options = {} if preparation is None else {"preparation": preparation}
+                if defer_payload:
+                    options["defer_payload"] = True
                 evidence = self._validate_local_state_dir(
-                    target, manifest, defer_payload=defer_payload, **options,
+                    target, manifest, **options,
                 )
                 if evidence is None:
                     evidence = (manifest, self._read_file(

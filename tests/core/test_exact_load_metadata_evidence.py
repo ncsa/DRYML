@@ -642,15 +642,21 @@ def test_custom_lower_validator_keeps_supplied_manifest_and_none_return(tmp_path
     class CustomDir(DirStore):
         calls = 0
 
-        def _validate_local_state_dir(self, directory, manifest, *, defer_payload=False):
+        def _validate_local_state_dir(self, directory, manifest):
             assert isinstance(manifest, LocalStateManifest)
             self.calls += 1
-            super()._validate_local_state_dir(directory, manifest, defer_payload=defer_payload)
+            super()._validate_local_state_dir(directory, manifest)
 
     store = CustomDir(tmp_path / "store", query_index="none")
     writer = Repo(store)
     state = writer.save_object(EvidenceValue(1, repo=writer))
     assert not store._can_reuse_exact_validation()
+    assert store.read_state_ref_record(state.digest()).state_ref == state
+    assert store.read_snapshot_metadata(state.digest()).state_ref == state
+    manifest = store.validate_local_state(state, GraphPath())
+    source = store.open_local_state(state, GraphPath())
+    assert source.manifest == manifest
+    assert Path(source.handle, "data", "value").read_text(encoding="ascii") == "1"
     reader = Repo(store)
     for phase in ("cold", "warm", "cleared"):
         if phase == "cleared":
@@ -664,6 +670,113 @@ def test_custom_lower_validator_keeps_supplied_manifest_and_none_return(tmp_path
         assert counts["canonical_json_load_bytes"] == 12
         assert counts["validate_payload"] == 1
         assert not reader._validation_evidence._resident
+
+
+def _override_legacy_zip_delegate(monkeypatch, reader_name, calls, *, reject=False):
+    """Replace the actual DirStore delegate with its pre-preparation signature."""
+    original = getattr(DirStore, reader_name)
+
+    def called():
+        calls.append(reader_name)
+        if reject:
+            raise RuntimeError("legacy base reader rejects authority")
+
+    if reader_name == "_read_file":
+        def reader(self, path, record_type):
+            called()
+            return original(self, path, record_type)
+    elif reader_name == "_read_json":
+        def reader(path):
+            called()
+            return original(path)
+        reader = staticmethod(reader)
+    else:
+        def reader(self, digest, *, payloads=False, directory=None):
+            called()
+            return original(self, digest, payloads=payloads, directory=directory)
+    monkeypatch.setattr(DirStore, reader_name, reader)
+
+
+@pytest.mark.parametrize("reader_name", ["_read_file", "_read_json", "_read_snapshot"])
+@pytest.mark.parametrize("phase", ["cold", "warm"])
+def test_zip_legacy_base_reader_override(tmp_path, monkeypatch, reader_name, phase):
+    """Public and exact archive reads honor legacy delegates, even after warming."""
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.store.zip import ZipStore
+
+    store = ZipStore(tmp_path / "store.zip")
+    try:
+        writer = Repo(store)
+        state = writer.save_object(EvidenceValue(1, repo=writer))
+        reader = Repo(store)
+        assert store._can_reuse_exact_validation()
+        if phase == "warm":
+            build_exact_state_load_plan(reader, state)
+            assert reader._validation_evidence._resident
+        retained = tuple(reader._validation_evidence._resident.values())
+        calls = []
+        _override_legacy_zip_delegate(monkeypatch, reader_name, calls)
+
+        assert store.read_state_ref_record(state.digest()).state_ref == state
+        assert store.read_snapshot_metadata(state.digest()).state_ref == state
+        source = store.open_local_state(state, GraphPath())
+        assert source.eagerly_validated
+        assert calls
+        assert not store._can_reuse_exact_validation()
+        for _ in range(2):
+            calls.clear()
+            plan = build_exact_state_load_plan(reader, state)
+            assert plan.state_ref == state
+            assert len(plan.actions) == 1
+            assert plan.actions[0].payload.handle == source.handle
+            assert calls
+            assert tuple(reader._validation_evidence._resident.values()) == retained
+            assert not reader._validation_evidence._pending
+
+        store.close()
+        assert not Path(source.handle).exists()
+        with pytest.raises(RuntimeError, match="closed"):
+            store.read_state_ref_record(state.digest())
+        with pytest.raises(RuntimeError, match="closed"):
+            store._can_reuse_exact_validation()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("reader_name", ["_read_file", "_read_json", "_read_snapshot"])
+@pytest.mark.parametrize("phase", ["cold", "warm"])
+def test_zip_rejecting_base_reader_override(tmp_path, monkeypatch, reader_name, phase):
+    """Actual base delegates disable reuse and preserve custom rejecting errors."""
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.store.zip import ZipStore
+
+    store = ZipStore(tmp_path / "store.zip")
+    try:
+        writer = Repo(store)
+        state = writer.save_object(EvidenceValue(1, repo=writer))
+        reader = Repo(store)
+        assert store._can_reuse_exact_validation()
+        if phase == "warm":
+            build_exact_state_load_plan(reader, state)
+            assert reader._validation_evidence._resident
+        retained = tuple(reader._validation_evidence._resident.values())
+        calls = []
+        _override_legacy_zip_delegate(monkeypatch, reader_name, calls, reject=True)
+
+        assert not store._can_reuse_exact_validation()
+        with pytest.raises(RuntimeError, match="legacy base reader rejects authority"):
+            store.read_state_ref_record(state.digest())
+        assert calls
+        for _ in range(2):
+            calls.clear()
+            with pytest.raises(RepoLoadError, match="legacy base reader rejects authority"):
+                build_exact_state_load_plan(reader, state)
+            assert calls
+            assert tuple(reader._validation_evidence._resident.values()) == retained
+            assert not reader._validation_evidence._pending
+        assert reader._topology_leases == 0
+    finally:
+        store.close()
 
 
 def test_payload_validator_override_keeps_uncached_error(tmp_path, monkeypatch):

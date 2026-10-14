@@ -130,6 +130,12 @@ types, and sizes are checked, while only eager files are hashed. Deferred eviden
 cannot authorize eager copy, fork, publication, or recovery. Custom Stores and
 overridden readers/validators/adapters retain their existing uncached behavior
 and capability errors.
+Eager custom local-state validators keep the legacy `(directory, manifest)` call
+and may return `None` after successful validation. ZipStore wrappers likewise omit
+new preparation/cut keywords when those options are absent. Archive acceleration
+checks the captured DirStore implementations beneath the wrappers as well as the
+wrappers themselves; replacing a base reader uses uncached reads and preserves
+its custom validation errors, including after a Repo has warmed content evidence.
 
 Cuts are process/thread-bound and expire on exit; independent nested calls begin
 fresh cuts. Internal substeps may join only by passing the same cut explicitly.

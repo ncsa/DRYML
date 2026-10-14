@@ -39,6 +39,11 @@ class ZipStore(DirStore):
     remain readable but explicitly reject writable authority because they cannot
     make the required replacement guarantee.
 
+    Reader wrappers preserve legacy DirStore delegate signatures when optional
+    preparation is absent. Exact read-cut reuse requires both these wrappers and
+    their underlying DirStore implementations to remain unmodified; custom
+    delegate results and errors remain authoritative through uncached reads.
+
     Args:
         zip_dest (str, Path, or IOBase): Path-backed archive or read-only file-like
             archive destination. Each handle owns a distinct extraction view.
@@ -475,9 +480,12 @@ class ZipStore(DirStore):
             raise RuntimeError("ZipStore transaction is closed.")
 
     def _can_reuse_exact_validation(self):
-        """Check transaction liveness even when a read-cut bundle is memoized."""
+        """Require live, unmodified wrappers and their captured base delegates."""
         self._assert_open()
-        return super()._can_reuse_exact_validation()
+        return super()._can_reuse_exact_validation() and all(
+            getattr(DirStore, name) is value
+            for name, value in _EXACT_READERS[DirStore].items()
+        )
 
     def preflight_publication(self, operation: str, *, local_state: bool = False) -> None:
         """Validate inherited publication capabilities on an open transaction.
@@ -504,18 +512,24 @@ class ZipStore(DirStore):
         """Read one record only while this extracted transaction remains live."""
 
         self._assert_open()
+        if preparation is None:
+            return super()._read_file(path, record_type)
         return super()._read_file(path, record_type, preparation=preparation)
 
     def _read_json(self, path, *, cut=None, kind=None):
         """Read one JSON sidecar only while this transaction remains live."""
 
         self._assert_open()
+        if cut is None:
+            return super()._read_json(path)
         return super()._read_json(path, cut=cut, kind=kind)
 
     def _read_snapshot(self, digest, *, payloads=False, directory=None, cut=None):
         """Read one snapshot only while this transaction remains live."""
 
         self._assert_open()
+        if cut is None:
+            return super()._read_snapshot(digest, payloads=payloads, directory=directory)
         return super()._read_snapshot(digest, payloads=payloads, directory=directory, cut=cut)
 
     def _query_index_dirty_markers(self):
