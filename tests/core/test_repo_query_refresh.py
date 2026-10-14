@@ -409,7 +409,7 @@ def test_u3_optional_absence_exact_positive_scan_controls(tmp_path, monkeypatch,
             warnings.simplefilter("always")
             assert query.exists()
             explanation = query.explain(analyze=True)
-        assert observed == []
+        assert observed == [], [(warning.category.__name__, str(warning.message)) for warning in observed]
         assert explanation.store_scan_count == 0 and explanation.refresh_action == "none"
         assert store._query_index_instance is None
         if request is not None:

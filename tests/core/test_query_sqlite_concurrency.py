@@ -1003,10 +1003,22 @@ def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, mon
     monkeypatch.setattr(index, "_validate_store_roots", validate)
     monkeypatch.setattr(index, "_build_claim", claim)
     stats = QueryStats()
-    index.refresh(True, stats=stats)
-    assert len(replaced) == 1
-    assert stats.store_scan_count == 2 and stats.refresh_action == "sqlite-rebuild"
-    assert index.status().diagnostics["index_uuid"] != replaced[0]
+    before = index.status().diagnostics["index_uuid"]
+    if os.name == "nt":
+        with pytest.raises(QueryIndexBusy, match="active reader"):
+            index.refresh(True, stats=stats)
+        assert stats.store_scan_count == 1 and stats.refresh_action == "sqlite-validate"
+        assert index.status().diagnostics["index_uuid"] == before
+        assert not replaced
+        monkeypatch.setattr(index, "_validate_store_roots", original)
+        index.refresh(True, stats=stats)
+        assert stats.store_scan_count == 2 and stats.refresh_action == "sqlite-validate"
+        assert index.status().diagnostics["index_uuid"] == before
+    else:
+        index.refresh(True, stats=stats)
+        assert len(replaced) == 1
+        assert stats.store_scan_count == 2 and stats.refresh_action == "sqlite-rebuild"
+        assert index.status().diagnostics["index_uuid"] != replaced[0]
     assert not index._connections._leases and not index._build_claim_path().exists()
     other.close()
 
