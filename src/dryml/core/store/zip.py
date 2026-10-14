@@ -1,4 +1,8 @@
-"""Buffered Zip implementation of the current logical Store interface."""
+"""Buffered Zip Store authority with distinct, live extraction views per handle.
+
+Scoped exact validation never equates equal archive paths with equal transaction
+views. Borrowed sources expire when their owning transaction is closed.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ import zipfile
 from contextlib import contextmanager
 
 from ... import filesystem
-from .dir import DirStore, _REMOVED_ENTRY_PREFIX
+from .dir import DirStore, _REMOVED_ENTRY_PREFIX, _EXACT_READERS, _EXACT_READER_NAMES
 from .records import StoreFormatRecord, StoreRecordError
 from ...locking import interprocess_lock
 from .store import StoreAuthorityError, StorePublicationCapabilities
@@ -34,6 +38,19 @@ class ZipStore(DirStore):
     after comparing the archive bytes observed at open.  File-like destinations
     remain readable but explicitly reject writable authority because they cannot
     make the required replacement guarantee.
+
+    Args:
+        zip_dest (str, Path, or IOBase): Path-backed archive or read-only file-like
+            archive destination. Each handle owns a distinct extraction view.
+
+    Raises:
+        StoreAuthorityError: If existing archive contents are incompatible.
+        OSError: If extraction or filesystem access fails.
+
+    Side Effects:
+        Allocates an extracted transaction directory. Exact read-cut reuse checks
+        this handle's liveness and never substitutes another archive handle's
+        evidence. Closing the handle invalidates borrowed extracted sources.
     """
 
     _supports_deferred_local_state = False
@@ -457,6 +474,11 @@ class ZipStore(DirStore):
         if getattr(self, "_closed_handle", False):
             raise RuntimeError("ZipStore transaction is closed.")
 
+    def _can_reuse_exact_validation(self):
+        """Check transaction liveness even when a read-cut bundle is memoized."""
+        self._assert_open()
+        return super()._can_reuse_exact_validation()
+
     def preflight_publication(self, operation: str, *, local_state: bool = False) -> None:
         """Validate inherited publication capabilities on an open transaction.
 
@@ -670,3 +692,7 @@ class ZipStore(DirStore):
 
 
 ZipStore.publish_snapshot._dryml_annotation_phase_callback = True
+_EXACT_READERS[ZipStore] = {
+    name: getattr(ZipStore, name)
+    for name in (*_EXACT_READER_NAMES, "_assert_open", "transaction_fence")
+}

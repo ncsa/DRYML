@@ -115,6 +115,35 @@ paths before construction. Loading a projection does not synthesize or require a
 independent child snapshot directory; per-object routed descendants still use
 their independently published child authority.
 
+Exact preflight uses a Repo-owned, explicit read cut: it atomically retains the
+connected handle order and acquires ordered cooperating-writer authority fences
+before reading. Supported default/routing changes affect later calls. Read-side
+physical aliases remain permitted, but deduplicating their lock domain does not
+merge distinct handles' evidence; ZipStore extractions are always distinct views.
+
+Within an eligible built-in view, preflight validates each complete snapshot
+bundle once. Eager exact planning hashes each distinct physical local payload
+once, checks **every** path/definition association, and validates unrequested
+local siblings even when loading a projected child. Metadata inspection opens no
+payload bytes. Restoration uses path-specific deferred validation: inventory,
+types, and sizes are checked, while only eager files are hashed. Deferred evidence
+cannot authorize eager copy, fork, publication, or recovery. Custom Stores and
+overridden readers/validators/adapters retain their existing uncached behavior
+and capability errors.
+
+Cuts are process/thread-bound and expire on exit; independent nested calls begin
+fresh cuts. Internal substeps may join only by passing the same cut explicitly.
+No cut spans construction or restore hooks. Exceptions discard partial evidence
+and release fences/topology; foreign-thread or inherited-process unwind cannot
+release the owner's resources. A forked child opens a fresh Repo. `clear_cache()`
+invalidates derived evidence independently of its live-tier flags, and `close()`
+rejects while a cut retains topology. There is no permanent payload-validity cache.
+
+An exact plan's `LocalStateSource` handles retain their established borrowed Store
+lifetime after the cut expires. Direct directories remain Store-owned; closing a
+ZipStore removes its extracted paths. Holding a source does not prove that it is
+valid for another independent operation, which always validates fresh authority.
+
 ## Query V3
 
 `Repo.query()` creates one unevaluated identity universe over connected Store

@@ -1,9 +1,14 @@
 """Exact-load selection preserves one captured metadata authority per snapshot."""
 
 import inspect
+import hashlib
+import sys
+from collections import Counter
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from threading import Thread
 
 import pytest
 
@@ -54,6 +59,324 @@ class StatelessSeedContainer(Object):
 
     def __init__(self, seeds):
         self.seeds = seeds
+
+
+@contextmanager
+def exact_work_counts():
+    """Observe owning work without replacing acceleration-guarded callables."""
+    counts = Counter()
+    previous = sys.getprofile()
+
+    def observe(frame, event, arg):
+        if event == "call":
+            name = frame.f_code.co_name
+            if name in {"_read_snapshot", "_validate_local_state_dir", "validate_payload"}:
+                counts[name] += 1
+            if name == "_read_file":
+                kind = frame.f_locals["record_type"].__name__
+                counts[kind] += 1
+            if name == "_read_json":
+                counts["json_reads"] += 1
+        if event == "c_call" and frame.f_code.co_name == "_validate_local_state_dir" and arg is hashlib.sha256:
+            counts["definition_byte_hashes"] += 1
+        if previous is not None:
+            previous(frame, event, arg)
+
+    sys.setprofile(observe)
+    try:
+        yield counts
+    finally:
+        sys.setprofile(previous)
+
+
+@pytest.mark.parametrize("size", [1, 3, 7])
+def test_exact_plan_work_budget(tmp_path, size, monkeypatch):
+    """One bundle and K physical passes replace baseline 4/8 bundles and 1/9 passes."""
+    import builtins
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    values = [EvidenceValue(i, repo=writer) for i in range(size)]
+    root = values[0] if size == 1 else StatelessSeedContainer(values, repo=writer)
+    state = writer.save_object(root, deep_capture=True)
+    original_open = builtins.open
+    payload_reads = []
+
+    def observe_open(path, *args, **kwargs):
+        if Path(path).name == "value" and Path(path).parent.name == "data":
+            payload_reads.append(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", observe_open)
+    assert store._can_reuse_exact_validation()
+    with exact_work_counts() as counts:
+        plan = build_exact_state_load_plan(Repo(store), state)
+    assert len(plan.actions) == size
+    assert counts["_read_snapshot"] == 1
+    assert counts["validate_payload"] == size
+    assert counts["_validate_local_state_dir"] == size
+    assert counts["LocalStateManifest"] == size
+    assert counts["DefinitionRecord"] == 2 * size + (size != 1)
+    assert counts["definition_byte_hashes"] == size
+    assert counts["json_reads"] == 3
+    assert len(payload_reads) == size
+
+
+def test_projected_eager_plan_checks_unrequested_corrupt_sibling(tmp_path):
+    """Whole-snapshot promotion rejects sibling corruption before any hooks."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(StatelessSeedContainer(
+        [EvidenceValue(1, repo=writer), EvidenceValue(2, repo=writer)], repo=writer,
+    ), deep_capture=True)
+    first, second = state.states
+    Path(store.open_local_state(state, second).handle, "data", "value").write_text("bad")
+    with pytest.raises(RepoLoadError, match="local state"):
+        build_exact_state_load_plan(Repo(store), state.at(first))
+    deferred = build_exact_state_load_plan(Repo(store), state.at(first), _defer_payload=True)
+    assert len(deferred.actions) == 1
+
+
+def test_shared_physical_payload_is_hashed_once_for_distinct_paths(tmp_path):
+    """Physical deduplication preserves both path actions and ObjectIds."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(StatelessSeedContainer(
+        [EvidenceValue(1, repo=writer), EvidenceValue(1, repo=writer)], repo=writer,
+    ), deep_capture=True)
+    assert len(state.states) == 2
+    with exact_work_counts() as counts:
+        plan = build_exact_state_load_plan(Repo(store), state)
+    assert len(plan.actions) == 2
+    assert plan.actions[0].object_id != plan.actions[1].object_id
+    assert plan.actions[0].payload.handle == plan.actions[1].payload.handle
+    assert counts["validate_payload"] == 1
+    assert counts["LocalStateManifest"] == 1
+
+
+def test_shared_payload_still_checks_every_definition_association(tmp_path):
+    """Equal state hashes cannot authorize the wrong definition at a second path."""
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.records import GenericRecord, decode_record, encode_record
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    first, second = EvidenceValue(1, repo=writer), EvidenceValue(2, repo=writer)
+    second.value = first.value
+    state = writer.save_object(StatelessSeedContainer([first, second], repo=writer), deep_capture=True)
+    assert len(set(state.states.values())) == 1
+    directory = store.get_snapshot_directory(state)
+    placement = decode_record(store._read_json(str(directory / "placement.json")))
+    entries = [dict(item) for item in placement.data["local"]]
+    entries[1]["directory"] = entries[0]["directory"]
+    altered = encode_record(GenericRecord(placement.kind, placement.version, {
+        **dict(placement.data), "local": entries,
+    }))
+    association = decode_record(store._read_json(str(directory / "snapshot.json")))
+    store._write_json(str(directory / "placement.json"), altered)
+    store._write_json(str(directory / "snapshot.json"), encode_record(GenericRecord(
+        association.kind, association.version,
+        {**dict(association.data), "placement_id": altered["id"]},
+    )))
+    with pytest.raises(RepoLoadError, match="definition does not match StateRef path"):
+        build_exact_state_load_plan(Repo(store), state)
+
+
+@pytest.mark.parametrize("sibling", ["state-ref.record", "metadata.json", "placement.json", "snapshot.json"])
+def test_exact_plan_requires_every_bundle_sibling(tmp_path, sibling):
+    """A fresh cut never substitutes previous bundle evidence for a missing file."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    reader = Repo(store)
+    plan = build_exact_state_load_plan(reader, state)
+    Path(store.get_snapshot_directory(state), sibling).unlink()
+    with pytest.raises(RepoLoadError, match="preflight is incomplete"):
+        build_exact_state_load_plan(reader, state)
+    assert Path(plan.actions[0].payload.handle).is_dir()
+
+
+def test_exact_plan_retains_order_across_default_change_and_alias_views(tmp_path):
+    """Fence deduplication neither changes captured order nor merges handle views."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    first = DirStore(tmp_path / "first", query_index="none")
+    writer = Repo(first)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    alias = DirStore(first.base_dir, query_index="none")
+    reader = Repo([first, alias])
+    assert first.authority_fence_key() == alias.authority_fence_key()
+    with reader._read_cut() as cut:
+        failures = []
+
+        def reorder():
+            try:
+                reader.set_default_store(alias)
+            except BaseException as error:
+                failures.append(error)
+
+        thread = Thread(target=reorder)
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive() and not failures
+        assert reader.stores[0] is alias
+        with exact_work_counts() as counts:
+            plan = build_exact_state_load_plan(reader, state, _read_cut=cut)
+        assert plan.actions[0].store is first
+        assert cut.stores == (first, alias)
+        assert counts["_read_snapshot"] == 2
+        assert len(cut.snapshots) == 2
+    assert build_exact_state_load_plan(reader, state).actions[0].store is alias
+
+
+@pytest.mark.parametrize("reader_name", [
+    "read_state_ref_record", "read_snapshot_metadata", "open_local_state",
+    "validate_local_state", "_read_snapshot", "_validate_local_state_dir",
+])
+def test_exact_reader_overrides_remain_authoritative(tmp_path, monkeypatch, reader_name):
+    """An overridden built-in reader is called, never bypassed by private proof."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    calls = []
+
+    def reject(*args, **kwargs):
+        calls.append(True)
+        raise RuntimeError("override remains authoritative")
+
+    monkeypatch.setattr(store, reader_name, reject)
+    assert not store._can_reuse_exact_validation()
+    with pytest.raises(RepoLoadError, match="override remains authoritative"):
+        build_exact_state_load_plan(Repo(store), state)
+    assert calls
+
+
+def test_nested_independent_plan_does_not_inherit_outer_payload_proof(tmp_path):
+    """Only explicitly joined internal work shares a cut; independent work is fresh."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    reader = Repo(store)
+    with reader._read_cut() as cut:
+        with exact_work_counts() as counts:
+            outer = build_exact_state_load_plan(reader, state, _read_cut=cut)
+            joined = build_exact_state_load_plan(reader, state, _read_cut=cut)
+            nested = build_exact_state_load_plan(reader, state)
+        assert counts["_read_snapshot"] == 2
+        assert counts["validate_payload"] == 2
+        assert outer.actions[0].payload == joined.actions[0].payload == nested.actions[0].payload
+        assert reader._topology_leases == 1
+    assert reader._topology_leases == 0
+
+
+def test_custom_lower_validator_keeps_supplied_manifest_and_none_return(tmp_path):
+    """Custom subclasses preserve their old validator protocol without acceleration."""
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.store.records import LocalStateManifest
+
+    class CustomDir(DirStore):
+        calls = 0
+
+        def _validate_local_state_dir(self, directory, manifest, *, defer_payload=False):
+            assert isinstance(manifest, LocalStateManifest)
+            self.calls += 1
+            super()._validate_local_state_dir(directory, manifest, defer_payload=defer_payload)
+
+    store = CustomDir(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    assert not store._can_reuse_exact_validation()
+    store.calls = 0
+    with exact_work_counts() as counts:
+        plan = build_exact_state_load_plan(Repo(store), state)
+    assert len(plan.actions) == 1
+    assert store.calls == 1
+    assert counts["_read_snapshot"] == 4
+
+
+def test_payload_validator_override_keeps_uncached_error(tmp_path, monkeypatch):
+    """Lower manifest validation overrides cannot be bypassed by cut promotion."""
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.store.records import LocalStateManifest, StoreRecordError
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+
+    def reject(*args, **kwargs):
+        raise StoreRecordError("overridden payload validator")
+
+    monkeypatch.setattr(LocalStateManifest, "validate_payload", reject)
+    assert not store._can_reuse_exact_validation()
+    with pytest.raises(RepoLoadError, match="overridden payload validator"):
+        build_exact_state_load_plan(Repo(store), state)
+
+
+@pytest.mark.parametrize("component", ["manifest.record", "def.pkl"])
+def test_corrupt_local_authority_rejects_before_hooks(tmp_path, component):
+    """Bundle reuse does not bypass malformed local manifest/definition authority."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    source = store.open_local_state(state, GraphPath())
+    Path(source.handle, component).write_bytes(b"invalid authority")
+    EvidenceValue.constructions = EvidenceValue.restores = 0
+    with pytest.raises(RepoLoadError, match="local state"):
+        build_exact_state_load_plan(Repo(store), state)
+    assert EvidenceValue.constructions == EvidenceValue.restores == 0
+
+
+def test_fallback_checks_record_target_before_custom_metadata_reader(tmp_path, monkeypatch):
+    """Compatibility readers retain record admission and metadata error ordering."""
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.store.records import StateRefRecord
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    other = writer.save_object(EvidenceValue(2, repo=writer))
+    metadata_calls = []
+
+    def metadata(digest):
+        metadata_calls.append(digest)
+        raise AssertionError("incompatible record must precede metadata")
+
+    monkeypatch.setattr(store, "read_state_ref_record", lambda digest: StateRefRecord(other))
+    monkeypatch.setattr(store, "read_snapshot_metadata", metadata)
+    with pytest.raises(RepoLoadError, match="incompatible authority"):
+        build_exact_state_load_plan(Repo(store), state)
+    # Enclosing catalogue selection may inspect real compatible projections;
+    # neither the requested record nor the unrelated saved graph is admitted.
+    assert not metadata_calls
+
+
+def test_fallback_enclosing_catalogue_does_not_require_direct_record_reader(tmp_path, monkeypatch):
+    """Custom catalogue projections keep their original metadata-only selection path."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(
+        EvidenceRoot(EvidenceValue(1, repo=writer), repo=writer), deep_capture=True,
+    )
+    child = state.at(next(iter(state.states)))
+    monkeypatch.setattr(store, "read_state_ref_record", lambda digest: None)
+    assert not store._can_reuse_exact_validation()
+    plan = build_exact_state_load_plan(Repo(store), child)
+    assert len(plan.actions) == 1
 
 
 @pytest.fixture(autouse=True)

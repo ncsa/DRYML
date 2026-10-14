@@ -4,6 +4,8 @@ Repo operations expose authority, lifecycle, and publication failures rather tha
 partial success. Topology retention leases connected Store handles without reading
 inventory; inherited-process retention raises RuntimeError before owner locking.
 Forked children construct fresh Repos instead of resetting parent locks or caches.
+Exact preflight uses explicit owner-bound read cuts; neither borrowed sources nor
+live Object caches extend a cut's payload-validity evidence across operations.
 """
 
 from __future__ import annotations
@@ -22,7 +24,8 @@ from collections import defaultdict
 import atexit
 import time
 import stat
-from threading import RLock
+import sys
+from threading import RLock, current_thread
 from uuid import uuid4
 
 from ..paths import local_path_key
@@ -49,6 +52,122 @@ _active_object_ref_builds: ContextVar[frozenset[tuple[int, str]]] = ContextVar(
 _active_object_ref_results: ContextVar[Mapping[tuple[int, str], Object] | None] = ContextVar(
     "dryml_active_object_ref_results", default=None
 )
+
+
+class _ValidationEvidence:
+    """Repo-owned facility; current authority exists only in explicit read cuts."""
+
+    def __init__(self, repo):
+        self.repo = repo
+        self.epoch = 0
+
+    def clear(self):
+        self.epoch += 1
+
+    def read_cut(self, *, selected_stores=()):
+        return _AuthorityReadCut(self, selected_stores=selected_stores)
+
+
+class _AuthorityReadCut:
+    """One owner-bound topology/fence lease, never an ambient validity cache."""
+
+    def __init__(self, facility, *, selected_stores=()):
+        self.facility = facility
+        self.repo = facility.repo
+        self.pid = os.getpid()
+        self.thread = current_thread()
+        self.epoch = facility.epoch
+        self.active = False
+        self._entered = False
+        self.stores = ()
+        self.selected_stores = tuple(selected_stores)
+        self.snapshots = {}
+        self.locals = {}
+        self.eager_snapshots = set()
+        self._stack = None
+
+    def _check_owner(self):
+        if self.pid != os.getpid() or self.repo._configuration_pid != os.getpid():
+            raise RuntimeError("Read cut inherited from another process; open a fresh Repo.")
+        if self.thread is not current_thread():
+            raise RuntimeError("Read cut belongs to another thread.")
+
+    def check(self, store=None):
+        self._check_owner()
+        if not self.active or self.repo._closing or self.repo._closed:
+            raise RuntimeError("Read cut is inactive or Repo is closing/closed.")
+        if self.epoch != self.facility.epoch:
+            raise RuntimeError("Read cut evidence was cleared.")
+        if store is not None and not any(store is item for item in self.stores):
+            raise ValueError("Store is not connected in this read cut.")
+
+    def __enter__(self):
+        self._check_owner()
+        if self._entered:
+            raise RuntimeError("Read cuts cannot be re-entered.")
+        if self.repo._closing or self.repo._closed:
+            raise RuntimeError("Cannot open read cut after Repo close begins.")
+        with self.repo._configuration_lock:
+            if self.repo._closing or self.repo._closed:
+                raise RuntimeError("Cannot open read cut after Repo close begins.")
+            self.stores = tuple(self.repo._normalize_store_handles(
+                self.repo.stores, reject_physical=False,
+            ))
+            for store in self.selected_stores:
+                if not isinstance(store, Store):
+                    raise TypeError("Store selection must be a connected Store handle.")
+                if not any(store is item for item in self.stores):
+                    raise ValueError("Store selection must be a connected Store handle.")
+            self.repo._topology_leases += 1
+            self.epoch = self.facility.epoch
+            self._entered = True
+        self._stack = ExitStack()
+        try:
+            self._stack.enter_context(self.repo._authority_read_fences(self.stores))
+            self.active = True
+            return self
+        except BaseException:
+            self.__exit__(*sys.exc_info())
+            raise
+
+    def __exit__(self, *exc):
+        # Foreign unwind must leave the owner's fences and lease untouched.
+        self._check_owner()
+        if self._stack is None:
+            return False
+        stack, self._stack = self._stack, None
+        self.active = False
+        self.discard()
+        try:
+            return stack.__exit__(*exc)
+        finally:
+            with self.repo._configuration_lock:
+                self.repo._topology_leases -= 1
+
+    def discard(self):
+        """Drop partial evidence after failure without releasing an owner's lease."""
+        self._check_owner()
+        self.snapshots.clear()
+        self.locals.clear()
+        self.eager_snapshots.clear()
+
+    def snapshot(self, store, digest):
+        self.check(store)
+        return store._read_snapshot_for_cut(self, digest)
+
+    def records(self, store):
+        self.check(store)
+        return store._state_ref_records_for_cut(self)
+
+    def metadata(self, store, digest):
+        self.check(store)
+        return store._snapshot_metadata_for_cut(self, digest)
+
+    def open_local(self, store, reference, path, *, defer_payload=False):
+        self.check(store)
+        return store._open_local_state_for_cut(
+            self, reference, path, defer_payload=defer_payload,
+        )
 
 
 def _node_key(key):
@@ -682,6 +801,7 @@ class Repo:
         self._save_routing = None
         self._closing = False
         self._closed = False
+        self._validation_evidence = _ValidationEvidence(self)
         # Handles supplied by callers remain borrowed.  Paths and file-like
         # specifications opened by this Repo are released on successful close.
         self._owned_stores: list[Store] = []
@@ -1590,6 +1710,10 @@ class Repo:
             for key in sorted(groups):
                 fences.enter_context(groups[key].authority_read_fence())
             yield
+
+    def _read_cut(self, *, selected_stores=()):
+        """Capture selections/topology before fences; substeps pass the cut explicitly."""
+        return self._validation_evidence.read_cut(selected_stores=selected_stores)
 
     def _metadata_holders(self, target, *, store=None) -> tuple[Store, ...]:
         """Select connected target-holding Stores without treating nonholders as votes."""
@@ -5361,10 +5485,14 @@ class Repo:
         Args:
             flush: Whether to commit configured Stores before detaching bindings.
 
+        Returns:
+            None after cleanup, or immediately when already closed.
+
         Raises:
             RuntimeError: If an active retained save context still depends on this
                 Repo's resources, or an active Session resource cache retains this
-                Repo.
+                Repo, a read cut retains topology, or the Repo is inherited from
+                another process.
 
         Side Effects:
             Optionally commits configured Stores, closes Repo-owned query
@@ -5373,10 +5501,14 @@ class Repo:
             A failed commit or cleanup leaves the Repo open for inspection/retry;
             cleanup still attempts every owned Store handle. ``flush=False``
             skips commits and never triggers deletion-save publication.
+            Accepted close discards derived validation evidence before cleanup;
+            a failed close leaves that evidence empty when the Repo reopens.
         """
 
         from .session import _assert_resource_close_allowed
 
+        if self._configuration_pid != os.getpid():
+            raise RuntimeError("Cannot close inherited Repo; open a fresh Repo.")
         _assert_resource_close_allowed(self)
         with self._configuration_lock:
             if self._save_context_leases:
@@ -5386,6 +5518,7 @@ class Repo:
             if self._closed:
                 return
             self._closing = True
+            self._validation_evidence.clear()
         try:
             if flush and not self._state_io:
                 self.flush()
@@ -5443,6 +5576,25 @@ class Repo:
             raise RuntimeError("Repo deletion cleanup failed.") from None
 
     def clear_cache(self, strong=False, weak=True):
+        """Discard derived validation evidence and selected live Object cache tiers.
+
+        Args:
+            strong (bool): Clear strong live candidates when true.
+            weak (bool): Clear weak live candidates when true (the default).
+
+        Returns:
+            None. Existing live Objects and borrowed Store sources remain valid.
+
+        Raises:
+            RuntimeError: If called on a Repo inherited from another process.
+
+        Side Effects:
+            Invalidates active read-cut evidence independently of live-tier flags.
+        """
+        if self._configuration_pid != os.getpid():
+            raise RuntimeError("Cannot clear inherited Repo; open a fresh Repo.")
+        with self._configuration_lock:
+            self._validation_evidence.clear()
         if strong:
             self.strong_obj_cache.clear()
         if weak:

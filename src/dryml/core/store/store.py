@@ -103,6 +103,18 @@ class LocalStateSource:
     borrowed immutable authority and cannot be discarded by its consumer.
     ``eagerly_validated`` is private provenance: metadata-only exact-restore
     sources cannot be rebound, copied, or published as verified authority.
+    A Repo preflight cut may expire while this source remains borrowed: direct
+    paths keep their Store lifetime, and closing a ZipStore removes extracted
+    paths. Consumers must not use this value as proof in a later authority cut.
+
+    Args:
+        store (Store): Backend owning the source and its lifetime.
+        handle (object): Backend-private borrowed directory/staging handle.
+        manifest (LocalStateManifest): Validated local inventory and identity.
+        eagerly_validated (bool): Whether every payload byte was authenticated;
+            false sources are restore-only and fail eager publication/rebinding.
+
+    Creating this frozen value does not perform I/O or extend backend lifetime.
     """
 
     store: "Store"
@@ -112,7 +124,13 @@ class LocalStateSource:
 
 
 class Store(ABC):
-    """Backend-neutral authority contract for complete snapshot-local records."""
+    """Backend-neutral authority contract for complete snapshot-local records.
+
+    Backends own public record/metadata readers, local source lifetimes, and
+    capability failures. Optional protected read-cut seams preserve those public
+    paths by default; explicit backend opt-in may share successful evidence under
+    a retained Repo cut, but cannot establish cross-operation payload validity.
+    """
 
     @property
     @abstractmethod
@@ -373,6 +391,37 @@ class Store(ABC):
         """Validate one snapshot-local payload manifest and return it."""
 
         raise NotImplementedError("This Store does not validate snapshot-local payloads.")
+
+    def _read_snapshot_for_cut(self, cut, digest):
+        """Inspect via public readers by default, without memoizing validity.
+
+        Built-ins may supply a complete bundle under an explicitly owner-checked
+        cut. Custom implementations retain their reader errors and lifetimes.
+        """
+        cut.check(self)
+        record = self.read_state_ref_record(digest)
+        if record is None:
+            return None
+        return record, None, None
+
+    def _snapshot_metadata_for_cut(self, cut, digest):
+        """Read public metadata only after the caller admits the record target."""
+        cut.check(self)
+        return self.read_snapshot_metadata(digest)
+
+    def _state_ref_records_for_cut(self, cut):
+        """Enumerate through the established reader unless a backend opts in."""
+        cut.check(self)
+        return self.iter_state_ref_records()
+
+    def _open_local_state_for_cut(self, cut, reference, path, *, defer_payload=False):
+        """Keep custom openers and deferred adapters authoritative and uncached."""
+        cut.check(self)
+        if defer_payload:
+            adapter = getattr(self, "_open_local_state_for_exact_load", None)
+            if adapter is not None:
+                return adapter(reference, path)
+        return self.open_local_state(reference, path)
 
     def _validate_local_state_source_for_publication(
             self, source: LocalStateSource) -> None:
