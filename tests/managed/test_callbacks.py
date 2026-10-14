@@ -180,15 +180,24 @@ def test_callback_can_save_and_manage_a_disjoint_derived_object(tmp_path):
     repo = Repo((store,))
     value = CallbackValue(repo=repo)
     derived = DerivedValue(repo=repo)
+    callback_reads = []
+    from dryml.core.materialization import build_exact_state_load_plan
+    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
 
     def save_derived(obj, context):
         assert context.state_repo._topology_leases == 1
+        assert context._publication_event is None
+        with exact_work_counts() as counts:
+            build_exact_state_load_plan(context.state_repo, context.checkpoint_state_ref)
+        callback_reads.append(counts)
+        assert counts["_read_snapshot"] == counts["validate_payload"] == 1
         assert derived.bump(managed=ManagedConfig(state_repo=context.state_repo)) is None
         assert context.state_repo._topology_leases == 1
 
     value.run(managed=ManagedConfig(state_repo=store, callbacks=[save_derived]))
     assert derived.value == 1
     assert derived.bump.status(state_repo=store).state == "completed"
+    assert len(callback_reads) == 1
 
 
 def test_callback_cannot_begin_an_overlapping_managed_operation(tmp_path):

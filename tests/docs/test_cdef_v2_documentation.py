@@ -1,6 +1,8 @@
 """Keep public CDef V2 documentation free of removed API guidance."""
 
 from pathlib import Path
+import ast
+import inspect
 import re
 
 from dryml.managed.control import ControlSnapshot
@@ -82,3 +84,60 @@ def test_managed_current_format_documentation_matches_control_codec():
     assert f"`{codec['schema']}` v{codec['version']}" in text
     assert "`dryml-managed` v1" in text
     assert "`dryml-managed-pending` v1" in text
+
+
+def test_validation_reuse_guides_and_public_docstrings_keep_authority_boundaries():
+    """Current guides/API contracts explain bounded preparation and fresh authority."""
+    from dryml.core import Repo
+    from dryml.core.cdef_codec import decode_cdef_graph
+    from dryml.managed.storage import publish_managed_state
+
+    repos = (ROOT / "docs" / "repos.md").read_text(encoding="utf-8")
+    managed = (ROOT / "docs" / "managed_operations.md").read_text(encoding="utf-8")
+    graph = (ROOT / "docs" / "immutable_definition_graph.md").read_text(encoding="utf-8")
+    normalize = lambda text: " ".join(text.split())
+    for phrase in ("256 entries, 32 MiB", "2 MiB per entry", "freshly decodes dill",
+                   "Every independent cut still reads current sibling bytes", "pending reservations",
+                   "MeanInitial", "MeanUpdate", "MeanFinalize", "uncached behavior",
+                   "no permanent payload-validity cache", "Closing that borrower detaches"):
+        assert phrase in normalize(repos)
+    for phrase in ("one-use completed-publication", "Different coverage or overridden readers",
+                   "Every required ZipStore is freshly reopened", "before event delivery",
+                   "later status, resume, and recovery", "Every occurrence"):
+        assert phrase in normalize(managed)
+    assert "repos.md#bounded-snapshot-and-graph-content-reuse" in graph
+    assert "Public graph, reference and framed-record decoders always fully validate input" in normalize(graph)
+    for callable_, phrases in (
+        (Repo.clear_cache, ("live Object cache tiers", "shared epoch", "in-flight")),
+        (Repo.close, ("Borrowed", "borrower", "failed close")),
+        (decode_cdef_graph, ("fresh private tokens", "complete canonical validation", "CDefGraphCodecError")),
+        (publish_managed_state, ("(StateRef, StoreReport)", "fresh authority", "RepoSaveError")),
+    ):
+        text = normalize(inspect.getdoc(callable_)).lower()
+        for phrase in phrases:
+            assert phrase.lower() in text, callable_
+
+
+def test_validation_reuse_owners_keep_one_way_optional_dependencies():
+    """Core preparation never imports managed/product policy or optional frameworks."""
+    core_files = ("repo.py", "materialization.py", "cdef_codec.py", "reference_values.py",
+                  "store/records.py", "store/store.py", "store/dir.py", "store/zip.py")
+    managed_files = ("storage.py", "context.py", "runtime.py", "control.py")
+    optional = {"tensorflow", "torch", "jax", "flax", "optax", "ray"}
+    for package, files in (("core", core_files), ("managed", managed_files)):
+        for name in files:
+            path = ROOT / "src" / "dryml" / package / name
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    modules = [node.module or ""]
+                else:
+                    continue
+                for module in modules:
+                    assert module.split(".")[0] not in optional, (path, node.lineno, module)
+                    if package == "core":
+                        assert not any(module == forbidden or module.startswith(forbidden + ".")
+                                       for forbidden in ("dryml.managed", "dryml.models", "dryml.artifacts",
+                                                         "managed", "models", "artifacts")), (path, node.lineno, module)

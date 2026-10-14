@@ -258,6 +258,8 @@ the cut remains uninterrupted. Different coverage or overridden readers retain
 independent validation. Every required ZipStore is freshly reopened and validated
 under an independent durable cut; temporary Repos and reopened Stores close
 before event delivery. All publisher fences close before control acquisition.
+Each selected built-in replica's locally advertised payloads are checked in its
+own view; a valid first replica cannot hide corruption in another selected replica.
 Control association, post-callback decisions, later status, resume, and recovery
 always observe fresh authority, so deletion after publication can still prevent
 association and deletion after completion can still prevent recovery.

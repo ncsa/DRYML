@@ -544,7 +544,8 @@
             "test_structural_load_without_state_restore_builds_from_definition_authority",
             "test_reopen_v3_query_discovers_definition_authority_without_materializing",
             "test_u7_exact_state_ref_restores_nested_independent_local_states",
-            "test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph"
+            "test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph",
+            "test_real_borrowed_reads_share_budget_but_not_authority_or_public_values"
           ]
         },
         "tests/core/test_repo_save_routing.py": {
@@ -665,18 +666,28 @@
             "test_late_request_does_not_stale_owner_completion_or_failure",
             "test_indeterminate_completion_preserves_pending_authority_and_withholds_result",
             "test_final_save_failure_records_failed_without_a_completion_association",
-            "test_managed_workload_requires_a_materialized_receiver_and_runtime_admission"
+            "test_managed_workload_requires_a_materialized_receiver_and_runtime_admission",
+            "test_integrated_checkpoint_final_phase_budget"
           ]
         },
         "tests/managed/test_repo_routing.py": {
-          "rationale": "Retain checkpoint/final replica routing, Zip commit success/failure/interruption, route-stable resume, partial-publication rejection, reopened closure validation, and borrowed-store ownership; exhaustive mode covers repeated closure/seed layouts.",
+          "rationale": "Retain checkpoint/final replica routing, direct unequal-coverage and override fallback, independent Zip durability/cleanup failures, route-stable resume, warm deletion rejection, partial-publication rejection, and required seed coverage; exhaustive mode covers repeated closure/seed layouts.",
           "functions": [
             "test_checkpoint_and_final_preserve_per_object_replica_closures",
             "test_resume_uses_retained_checkpoint_authority_after_routes_change",
             "test_zip_commit_failure_has_report_and_never_associates_checkpoint",
             "test_interrupted_completed_zip_commit_preserves_prior_checkpoint",
             "test_replica_or_index_failure_never_associates_partial_state",
-            "test_missing_committed_replica_cannot_be_hidden_by_a_valid_replica"
+            "test_missing_committed_replica_cannot_be_hidden_by_a_valid_replica",
+            "test_reopened_nested_payloads_are_validated_once_per_durable_closure",
+            "test_reopened_root_closure_rejects_missing_nested_replica_authority",
+            "test_zip_event_follows_independent_durable_cut_and_resource_cleanup",
+            "test_uncertain_zip_commit_mints_no_event_and_retains_prior_checkpoint",
+            "test_missing_required_embedded_seed_cannot_reuse_connected_proof",
+            "test_overridden_direct_reader_preserves_independent_publication_validation",
+            "test_direct_replica_lifecycle_keeps_required_coverage_independent",
+            "test_warm_status_and_resume_reject_deleted_associated_checkpoint",
+            "test_reopened_selected_replica_payload_corruption_cannot_hide_behind_first"
           ]
         },
         "tests/managed/test_signature_integration.py": {

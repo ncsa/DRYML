@@ -133,7 +133,10 @@ def test_snapshot_json_cold_warm_characterization(tmp_path, monkeypatch, record_
 
     monkeypatch.setattr(builtins, "open", observe_open)
     ledgers = []
-    for phase in range(2):
+    for phase in ("cold", "warm", "cleared"):
+        if phase == "cleared":
+            reader.clear_cache(strong=False, weak=False)
+            assert reader._validation_evidence.accounted_bytes == 0
         sibling_reads.clear()
         with exact_work_counts() as counts:
             plan = build_exact_state_load_plan(reader, state)
@@ -142,7 +145,7 @@ def test_snapshot_json_cold_warm_characterization(tmp_path, monkeypatch, record_
         assert counts["json_shape_checks"] == 3
         assert counts["snapshot_inventory_reads"] == 1
         assert sorted(sibling_reads) == ["metadata.json", "placement.json", "snapshot.json"]
-        assert counts["canonical_json_load_bytes"] == (3 if phase == 0 else 0)
+        assert counts["canonical_json_load_bytes"] == (0 if phase == "warm" else 3)
         assert counts["decode_snapshot_metadata"] == 1
         assert counts["decode_record"] >= 3
         assert counts["canonical_json_bytes"] > 0
@@ -151,16 +154,16 @@ def test_snapshot_json_cold_warm_characterization(tmp_path, monkeypatch, record_
         assert counts["StateRefRecord"] == 1
         assert counts["DefinitionRecord"] == 2
         assert counts["dill_load"] == 8
-        assert counts["decode_cdef_graph"] == (3 if phase == 0 else 0)
-        assert counts["encode_cdef_graph"] == (3 if phase == 0 else 0)
+        assert counts["decode_cdef_graph"] == (0 if phase == "warm" else 3)
+        assert counts["encode_cdef_graph"] == (0 if phase == "warm" else 3)
         assert counts["store_record_id"] > 0 and counts["reference_identity_encode"] > 0
         assert counts["_graph_and_labels"] > 0
         assert counts["_role_paths"] > 0
         assert counts["_build_graph_nodes"] == 3
-        assert counts["_realize_prepared_graph"] == (0 if phase == 0 else 3)
+        assert counts["_realize_prepared_graph"] == (3 if phase == "warm" else 0)
         assert counts["_eligible_graph_size"] == 3
         assert counts["_graph_content_size"] > 0
-        if phase == 0:
+        if phase != "warm":
             assert counts["_graph_content_matches"] == 0
         else:
             assert counts["_graph_content_matches"] > 0
@@ -174,7 +177,8 @@ def test_snapshot_json_cold_warm_characterization(tmp_path, monkeypatch, record_
     assert ledgers[1]["_graph_and_labels"] < ledgers[0]["_graph_and_labels"]
     assert ledgers[1]["_role_paths"] < ledgers[0]["_role_paths"]
     assert ledgers[1]["_graph_content_matches"] > 0
-    for phase, ledger in zip(("cold", "warm"), ledgers):
+    assert ledgers[0] == ledgers[2]
+    for phase, ledger in zip(("cold", "warm", "cleared"), ledgers):
         record_testsuite_property(f"u3_{phase}_ledger", repr(dict(sorted(ledger.items()))))
     assert len(reader._validation_evidence._resident) == 6
     assert not reader._validation_evidence._pending
@@ -314,7 +318,18 @@ def test_reopened_archive_borrows_content_but_revalidates_fresh_view(tmp_path):
         assert warm["validate_payload"] == 1
         assert warm["StateRefRecord"] > 0
         assert warm["dill_load"] > 0
+        assert warm["_realize_prepared_graph"] == 3
+        reader.clear_cache(strong=False, weak=False)
+        assert facility.accounted_bytes == 0
+        with exact_work_counts() as cleared:
+            _validate_reopened_managed_state(reader, state, report, (store,))
+        assert cleared["canonical_json_load_bytes"] == 3
+        assert cleared["decode_cdef_graph"] == 3
+        assert cleared["validate_payload"] == 1
+        assert cleared["dill_load"] == warm["dill_load"]
         assert len(facility._resident) == 6 and not facility._pending
+        assert facility.accounted_bytes == sum(fact.charge for fact in facility._resident.values())
+        assert facility.high_water_bytes <= facility.max_bytes
         assert reader._topology_leases == 0
         assert all(store.base_dir.encode() not in fact.source for fact in facility._resident.values())
         reader.close(flush=False)
@@ -418,7 +433,7 @@ def test_absent_snapshot_is_never_retained(tmp_path):
 
 
 @pytest.mark.parametrize("size", [1, 3, 7])
-def test_exact_plan_work_budget(tmp_path, size, monkeypatch):
+def test_exact_plan_work_budget(tmp_path, size, monkeypatch, record_testsuite_property):
     """One bundle and K physical passes replace baseline 4/8 bundles and 1/9 passes."""
     import builtins
     from dryml.core.materialization import build_exact_state_load_plan
@@ -438,18 +453,28 @@ def test_exact_plan_work_budget(tmp_path, size, monkeypatch):
 
     monkeypatch.setattr(builtins, "open", observe_open)
     assert store._can_reuse_exact_validation()
-    with exact_work_counts() as counts:
-        plan = build_exact_state_load_plan(Repo(store), state)
-    assert len(plan.actions) == size
-    assert counts["_read_snapshot"] == 1
-    assert counts["validate_payload"] == size
-    assert counts["_validate_local_state_dir"] == size
-    assert counts["LocalStateManifest"] == size
-    assert counts["DefinitionRecord"] == 2 * size + (size != 1)
-    assert counts["definition_byte_hashes"] == size
-    assert counts["json_reads"] == 3
-    assert counts["path_definition_checks"] == size
-    assert len(payload_reads) == size
+    reader = Repo(store)
+    ledgers = []
+    for phase in ("cold", "warm", "cleared"):
+        if phase == "cleared":
+            reader.clear_cache(strong=False, weak=False)
+        payload_reads.clear()
+        with exact_work_counts() as counts:
+            plan = build_exact_state_load_plan(reader, state)
+        assert len(plan.actions) == size
+        assert counts["_read_snapshot"] == 1
+        assert counts["validate_payload"] == size
+        assert counts["_validate_local_state_dir"] == size
+        assert counts["LocalStateManifest"] == size
+        assert counts["DefinitionRecord"] == 2 * size + (size != 1)
+        assert counts["definition_byte_hashes"] == size
+        assert counts["json_reads"] == counts["json_shape_checks"] == 3
+        assert counts["path_definition_checks"] == size
+        assert len(payload_reads) == size
+        assert counts["canonical_json_load_bytes"] == (0 if phase == "warm" else 3)
+        ledgers.append(counts)
+        record_testsuite_property(f"u5_k{size}_{phase}", repr(dict(sorted(counts.items()))))
+    assert ledgers[0] == ledgers[2]
 
 
 def test_projected_eager_plan_checks_unrequested_corrupt_sibling(tmp_path):
@@ -626,12 +651,19 @@ def test_custom_lower_validator_keeps_supplied_manifest_and_none_return(tmp_path
     writer = Repo(store)
     state = writer.save_object(EvidenceValue(1, repo=writer))
     assert not store._can_reuse_exact_validation()
-    store.calls = 0
-    with exact_work_counts() as counts:
-        plan = build_exact_state_load_plan(Repo(store), state)
-    assert len(plan.actions) == 1
-    assert store.calls == 1
-    assert counts["_read_snapshot"] == 4
+    reader = Repo(store)
+    for phase in ("cold", "warm", "cleared"):
+        if phase == "cleared":
+            reader.clear_cache(strong=False, weak=False)
+        store.calls = 0
+        with exact_work_counts() as counts:
+            plan = build_exact_state_load_plan(reader, state)
+        assert len(plan.actions) == 1
+        assert store.calls == 1
+        assert counts["_read_snapshot"] == 4
+        assert counts["canonical_json_load_bytes"] == 12
+        assert counts["validate_payload"] == 1
+        assert not reader._validation_evidence._resident
 
 
 def test_payload_validator_override_keeps_uncached_error(tmp_path, monkeypatch):

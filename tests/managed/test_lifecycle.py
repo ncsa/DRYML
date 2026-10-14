@@ -8,6 +8,8 @@ pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 import subprocess
 import sys
 from threading import Event, Thread
+from collections import Counter
+from pathlib import Path
 
 from dryml.core import Object, Repo
 from dryml.core.object import Pickleable
@@ -16,6 +18,88 @@ from dryml.managed import ManagedConfig, managed_operation
 from dryml.managed import control as control_module
 from dryml.managed.control import ManagedControlStore
 from dryml.managed.errors import ManagedControlError, ManagedPublicationError
+
+
+@pytest.mark.parametrize("separate_control", [False, True], ids=["same-control", "separate-control"])
+@pytest.mark.parametrize("phase", ["cold", "warm", "cleared"])
+def test_integrated_checkpoint_final_phase_budget(tmp_path, phase, separate_control, record_testsuite_property):
+    """Six surviving closure obligations keep payload authority fresh in every phase."""
+    from dryml.core.materialization import build_exact_state_load_plan, _build_exact_state_load_plan
+    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
+    from tests.managed.test_checkpoint import CheckpointValue
+
+    store = DirStore(tmp_path / "state", query_index="none")
+    repo = Repo(store)
+    value = CheckpointValue(repo=repo)
+    value.value = 1
+    checkpoint_seed = repo.save_object(value)
+    value.value = 2
+    final_seed = repo.save_object(value)
+    value.value = 0
+    repo.clear_cache(strong=False, weak=False)
+    if phase != "cold":
+        for reference in (checkpoint_seed, final_seed):
+            build_exact_state_load_plan(repo, reference)
+    if phase == "cleared":
+        repo.clear_cache(strong=False, weak=False)
+    control = DirStore(tmp_path / "control", query_index="none") if separate_control else store
+    closures, closure_payloads, closure_bundles = [], [], []
+    bundle_phases = Counter()
+    payload_phases = Counter()
+
+    def observe(frame, event, arg):
+        if event == "call":
+            if frame.f_code is _build_exact_state_load_plan.__code__:
+                closures.append(frame.f_locals["state_ref"])
+            if frame.f_code in (DirStore._read_snapshot.__code__, DirStore._validate_local_state_dir.__code__):
+                parent = frame.f_back
+                while parent is not None:
+                    if parent.f_code is _build_exact_state_load_plan.__code__:
+                        if frame.f_code is DirStore._read_snapshot.__code__:
+                            closure_bundles.append(frame.f_locals["directory"])
+                        else:
+                            closure_payloads.append(frame.f_locals["directory"])
+                        break
+                    parent = parent.f_back
+        if event == "call" and frame.f_code in (DirStore._read_snapshot.__code__, DirStore._validate_local_state_dir.__code__):
+            parent = frame.f_back
+            names, modules = set(), set()
+            while parent is not None:
+                names.add(parent.f_code.co_name)
+                modules.add(parent.f_globals.get("__name__"))
+                parent = parent.f_back
+            boundary = ("publication" if "_validate_managed_publication" in names else
+                        "control" if "dryml.managed.control" in modules else "save-readback")
+            counters = bundle_phases if frame.f_code is DirStore._read_snapshot.__code__ else payload_phases
+            counters[boundary] += 1
+        previous(frame, event, arg)
+
+    with exact_work_counts() as ledger:
+        previous = sys.getprofile()
+        sys.setprofile(observe)
+        try:
+            checkpoint = value.save_then_change(managed=ManagedConfig(state_repo=repo, control_store=control))
+        finally:
+            sys.setprofile(previous)
+    final = value.last_state_ref
+    assert closures == [checkpoint, checkpoint, checkpoint, final, checkpoint, final]
+    assert payload_phases == {"save-readback": 9, "publication": 2, "control": 4}
+    assert bundle_phases == {"save-readback": 13, "publication": 2, "control": 4}
+    # Publisher replica admission and control digest resolution prepare bundles
+    # before their closure plans; publisher promotion also checks every replica.
+    assert not closure_bundles
+    record_testsuite_property(f"u5_{phase}_{separate_control}_bundles", repr(dict(bundle_phases)))
+    record_testsuite_property(f"u5_{phase}_{separate_control}_payloads", repr(dict(payload_phases)))
+    assert all(".staging" not in Path(path).parts for path in closure_payloads)
+    assert store._can_reuse_exact_validation()
+    assert ledger["dill_load"] > 0 and ledger["_build_graph_nodes"] > 0
+    assert ledger["validate_payload"] >= 6
+    record_testsuite_property(f"u5_{phase}_{separate_control}_lifecycle", repr(dict(sorted(ledger.items()))))
+    with exact_work_counts() as independent:
+        status = value.save_then_change.status(state_repo=repo, control_store=control)
+    assert status.checkpoint_state_ref == checkpoint and status.final_state_ref == final
+    assert independent["validate_payload"] == 2
+    assert repo._topology_leases == 0 and not repo._validation_evidence._pending
 
 
 class LifecycleValue(Pickleable):

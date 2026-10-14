@@ -1,7 +1,8 @@
 """Repo selection, topology evidence, and lifetime locks for managed work.
 
-Publication checks use explicit Repo cuts and yield invocation-local completed
-events; independent control and recovery operations always validate fresh state.
+Publication checks use explicit Repo cuts, validate each selected built-in
+replica's local payloads, and yield invocation-local completed events; independent
+control and recovery operations always validate fresh state.
 """
 
 from __future__ import annotations
@@ -306,6 +307,8 @@ def publish_managed_state(state_repo: Repo, obj: object, *, reservation,
     callers consume a private completed-event handoff instead of repeating this
     publication check. The handoff proves no future validity: control association,
     callbacks, status, resume, and recovery still read fresh authority.
+    Each selected built-in replica's locally advertised payloads are validated in
+    that view, even when another replica supplies the root recovery plan.
 
     Args:
         state_repo: Borrowed selected Repo whose current routing policy applies.
@@ -477,6 +480,7 @@ def _validate_managed_publication(state_repo: Repo, state_ref: StateRef, report,
     ):
         raise ManagedRecoveryError("incomplete_state_publication", "managed state report has incomplete authority")
     with state_repo._read_cut(selected_stores=required) as cut:
+        replicas = []
         for snapshot in report.snapshots:
             matches = []
             for store in cut.stores:
@@ -495,7 +499,10 @@ def _validate_managed_publication(state_repo: Repo, state_ref: StateRef, report,
                 bundle = cut.snapshot(store, snapshot.state_ref.digest())
                 if bundle is None or bundle[0].state_ref != snapshot.state_ref:
                     raise ManagedRecoveryError("missing_state_reference", "managed replica StateRef authority is incomplete")
+                replicas.append((store, snapshot.state_ref, bundle))
         _validate_publication_closure(state_repo, state_ref, cut)
+        for store, reference, bundle in replicas:
+            _validate_replica_locals(cut, store, reference, bundle)
         if _matching_direct_publication_coverage(cut, required):
             cut.check()
             return
@@ -525,6 +532,22 @@ def _validate_publication_closure(state_repo, state_ref, cut):
         raise ManagedRecoveryError("missing_state_reference", "state Repo lacks the exact StateRef closure") from error
 
 
+def _validate_replica_locals(cut, store, state_ref, bundle):
+    """Promote each built-in replica's local placement within its captured view.
+
+    The root closure chooses one payload source, so it cannot by itself establish
+    the other selected replicas' payload integrity. Built-in bundles expose their
+    local placement paths; their cut opener validates each physical payload once.
+    Promotion follows root closure discovery, whose routed-absence probes can
+    discard partial memoized evidence before choosing a physical payload source.
+    Generic bundles expose no placement and retain their existing authoritative
+    reader and closure-validation fallback.
+    """
+    if bundle[2] is not None:
+        for path in bundle[2]:
+            cut.open_local(store, state_ref, path)
+
+
 def _validate_reopened_managed_state(state_repo: Repo, state_ref: StateRef, report, required) -> None:
     """Prove the bounded required authority survives fresh buffered archive views.
 
@@ -544,6 +567,7 @@ def _validate_reopened_managed_state(state_repo: Repo, state_ref: StateRef, repo
         ), _content_owner=state_repo)
         cleanup.callback(durable.close, flush=False)
         with durable._read_cut() as cut:
+            replicas = []
             for snapshot in report.snapshots:
                 for store in snapshot.stores:
                     durable_store = reopened.get(id(store), store)
@@ -553,7 +577,10 @@ def _validate_reopened_managed_state(state_repo: Repo, state_ref: StateRef, repo
                             "missing_state_reference",
                             "reopened managed replica authority is incomplete",
                         )
+                    replicas.append((durable_store, snapshot.state_ref, bundle))
             _validate_publication_closure(durable, state_ref, cut)
+            for store, reference, bundle in replicas:
+                _validate_replica_locals(cut, store, reference, bundle)
 
 
 def _raise_managed_publication_error(error: BaseException, report) -> None:

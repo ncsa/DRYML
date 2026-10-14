@@ -397,3 +397,72 @@ def test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph(tmp
     assert first.children[0].value == 20
     assert second is not first
     assert second.children[0] is first.children[0]
+
+
+def test_real_borrowed_reads_share_budget_but_not_authority_or_public_values(tmp_path):
+    """Nested owning reads charge pending facts together and detach decoded values."""
+    from dryml.core import SaveAnnotations
+    from dryml.core.cdef_identity import cdef_node_key
+    from dryml.core.materialization import build_exact_state_load_plan
+    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(RestoreValue(3, repo=writer), annotations=SaveAnnotations(
+        state={"nested": [{"values": [1, 2]}]},
+    ))
+    owner = Repo(store)
+    facility = owner._validation_evidence
+    facility.max_entries = 6
+    borrower = Repo._for_state_io((store,), _content_owner=owner)
+    try:
+        with owner._read_cut() as outer:
+            with exact_work_counts() as cold:
+                build_exact_state_load_plan(owner, state, _read_cut=outer)
+            assert len(facility._pending) == 6 and not facility._resident
+            charge = facility.accounted_bytes
+            with exact_work_counts() as nested:
+                build_exact_state_load_plan(borrower, state)
+            assert nested["validate_payload"] == cold["validate_payload"] == 1
+            assert nested["canonical_json_load_bytes"] == 3
+            assert nested["_freeze_graph_content"] == 0
+            assert len(facility._pending) == 6 and facility.accounted_bytes == charge
+            first = outer.snapshot(store, state.digest())
+        assert not facility._pending
+        assert facility.accounted_bytes == sum(fact.charge for fact in facility._resident.values())
+        with exact_work_counts() as warm:
+            with borrower._read_cut() as cut:
+                build_exact_state_load_plan(borrower, state, _read_cut=cut)
+                second = cut.snapshot(store, state.digest())
+        assert warm["canonical_json_load_bytes"] == 0
+        assert warm["_realize_prepared_graph"] == 3 and warm["validate_payload"] == 1
+        assert cdef_node_key(first[0].state_ref.definition) != cdef_node_key(second[0].state_ref.definition)
+        second[1].captured_state_annotations["nested"][0]["values"].append(99)
+        with borrower._read_cut() as cut:
+            assert cut.metadata(store, state.digest()).captured_state_annotations["nested"] == [{"values": [1, 2]}]
+        owner.clear_cache(strong=False, weak=False)
+        assert facility.accounted_bytes == 0
+        with exact_work_counts() as cleared:
+            build_exact_state_load_plan(borrower, state)
+        assert cleared["canonical_json_load_bytes"] == 3
+        assert cleared["decode_cdef_graph"] == 3 and cleared["validate_payload"] == 1
+        independent = Repo(store)
+        try:
+            with exact_work_counts() as isolated:
+                build_exact_state_load_plan(independent, state)
+            assert isolated["canonical_json_load_bytes"] == 3
+            assert isolated["decode_cdef_graph"] == 3
+            assert independent._validation_evidence is not facility
+        finally:
+            independent.close(flush=False)
+        retained = tuple(facility._resident.values())
+        borrower.close(flush=False)
+        assert tuple(facility._resident.values()) == retained
+        assert facility.high_water_entries == 6
+        assert facility.high_water_bytes <= facility.max_bytes
+        assert owner._topology_leases == 0
+    finally:
+        borrower.close(flush=False)
+        owner.close(flush=False)
+        writer.close(flush=False)
+    assert not facility._resident and facility.accounted_bytes == 0
