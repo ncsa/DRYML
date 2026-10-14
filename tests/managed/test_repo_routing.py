@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import traceback
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -444,24 +446,32 @@ def test_reopened_nested_payloads_are_validated_once_per_durable_closure(tmp_pat
     value = RoutedRoot(RoutedValue(repo=repo), repo=repo)
     reopened = set()
     validations = []
+    accelerated = []
     original_open = ZipStore.open_existing
-    original_validate = ZipStore.validate_local_state
+    previous = sys.getprofile()
 
     def open_existing(path):
         store = original_open(path)
         reopened.add(id(store))
         return store
 
-    def validate_local_state(self, reference, path):
-        if id(self) in reopened:
-            validations.append((reference.digest(), path))
-        return original_validate(self, reference, path)
+    def observe(frame, event, arg):
+        if id(frame.f_locals.get("self")) not in reopened:
+            return
+        if event == "call" and frame.f_code is DirStore._validate_local_state_dir.__code__:
+            validations.append(frame.f_locals["directory"])
+        if event == "return" and frame.f_code is DirStore._can_reuse_exact_validation.__code__:
+            accelerated.append(arg)
 
     monkeypatch.setattr(ZipStore, "open_existing", staticmethod(open_existing))
-    monkeypatch.setattr(ZipStore, "validate_local_state", validate_local_state)
-    value.checkpoint_then_finish(managed=ManagedConfig(state_repo=repo, control_store=control))
+    sys.setprofile(observe)
+    try:
+        value.checkpoint_then_finish(managed=ManagedConfig(state_repo=repo, control_store=control))
+    finally:
+        sys.setprofile(previous)
 
-    assert len(validations) == len(set(validations))
+    assert len(validations) == len(set(validations)) == 2
+    assert accelerated and all(accelerated)
 
 
 @pytest.mark.parametrize("missing", ("record", "payload"))
@@ -535,13 +545,13 @@ def test_dirty_reused_zip_seed_is_required_durable_and_commit_failure_keeps_chec
     value = SeededRoutedRoot(seed, repo=repo)
     reports = []
     from dryml.managed import context as context_module
-    from dryml.managed.storage import publish_managed_state
+    from dryml.managed.storage import _publish_managed_state_result
 
     def capture_publication():
         def publish(*args, **kwargs):
-            state_ref, report = publish_managed_state(*args, **kwargs)
-            reports.append(report)
-            return state_ref, report
+            result = _publish_managed_state_result(*args, **kwargs)
+            reports.append(result.report)
+            return result
 
         return publish
 
@@ -638,13 +648,13 @@ def test_closure_seed_replica_excludes_dirty_historical_source_from_required_com
     value = SeededRoutedRoot(seed, repo=repo)
     reports = []
     from dryml.managed import context as context_module
-    from dryml.managed.storage import publish_managed_state
+    from dryml.managed.storage import _publish_managed_state_result
 
     def capture_publication():
         def publish(*args, **kwargs):
-            state_ref, report = publish_managed_state(*args, **kwargs)
-            reports.append(report)
-            return state_ref, report
+            result = _publish_managed_state_result(*args, **kwargs)
+            reports.append(result.report)
+            return result
 
         return publish
 
@@ -696,3 +706,159 @@ def test_store_shorthand_context_exposes_repo_without_closing_borrowed_store(tmp
     assert isinstance(resolved, Repo)
     assert tuple(resolved.stores) == (state,)
     assert state.read_state_ref_record(final.digest()).state_ref == final
+
+
+@pytest.mark.parametrize("failure", [None, "stale", "validation", "cleanup"])
+def test_zip_event_follows_independent_durable_cut_and_resource_cleanup(tmp_path, monkeypatch, failure):
+    """Even failed durable verification closes every temporary view before delivery."""
+
+    control = DirStore(tmp_path / "control")
+    first, second = (ZipStore(tmp_path / name) for name in ("first.zip", "second.zip"))
+    repo = Repo(
+        [first, second], save_routing=SaveRouting(
+            ((Selector(RoutedValue), first), (Selector(RoutedValue), second)),
+            match_mode="all",
+        ),
+    )
+    value = RoutedValue(repo=repo)
+    repo.save_object(value, deep_capture=True)
+    first.commit()
+    second.commit()
+    stale = tmp_path / "stale.zip"
+    shutil.copyfile(second.archive_path, stale)
+    opened, temporary, minted, closure_cuts = [], [], [], []
+    original_open = ZipStore.open_existing
+    original_closure = storage_module._validate_publication_closure
+    original_event = storage_module._PublicationEvent.__init__
+    previous = sys.getprofile()
+
+    def observe(frame, event, arg):
+        if event == "return" and frame.f_code is Repo._for_state_io.__func__.__code__:
+            temporary.append(arg)
+
+    def open_existing(path):
+        store = original_open(stale if failure == "stale" and path == second.archive_path else path)
+        opened.append(store)
+        if failure == "cleanup" and path == second.archive_path:
+            original_close = store.close
+
+            def close_then_fail():
+                original_close()
+                raise OSError("durable cleanup failed")
+
+            monkeypatch.setattr(store, "close", close_then_fail)
+        return store
+
+    def closure(selected_repo, reference, cut):
+        closure_cuts.append(cut)
+        if failure == "validation" and selected_repo is not repo:
+            raise SystemExit("durable validation stopped")
+        return original_closure(selected_repo, reference, cut)
+
+    def mint(self, *args):
+        assert opened and all(store._closed_handle for store in opened)
+        assert temporary and all(item._closed for item in temporary)
+        assert all(not cut.active for cut in closure_cuts)
+        minted.append(self)
+        original_event(self, *args)
+
+    monkeypatch.setattr(ZipStore, "open_existing", staticmethod(open_existing))
+    monkeypatch.setattr(storage_module, "_validate_publication_closure", closure)
+    monkeypatch.setattr(storage_module._PublicationEvent, "__init__", mint)
+    sys.setprofile(observe)
+    try:
+        if failure is None:
+            assert value.finish(managed=ManagedConfig(state_repo=repo, control_store=control)) == 1
+        else:
+            error_type = SystemExit if failure == "validation" else RepoSaveError
+            with pytest.raises(error_type) as caught:
+                value.finish(managed=ManagedConfig(state_repo=repo, control_store=control))
+            assert caught.value.report is not None
+    finally:
+        sys.setprofile(previous)
+    assert len(opened) == 2 and all(store._closed_handle for store in opened)
+    assert all(not Path(store.base_dir).exists() for store in opened)
+    assert temporary and all(item._closed for item in temporary)
+    assert all(not cut.active for cut in closure_cuts)
+    assert len(minted) == (1 if failure is None else 0)
+    if failure != "stale":
+        assert len(closure_cuts) == 2
+        assert closure_cuts[0] is not closure_cuts[1]
+    status = value.finish.status(state_repo=repo, control_store=control)
+    assert (status.state, status.final_state_ref is not None) == (
+        "completed" if failure is None else "failed", failure is None,
+    )
+
+
+def test_uncertain_zip_commit_mints_no_event_and_retains_prior_checkpoint(tmp_path, monkeypatch):
+    """Indeterminate commit evidence cannot be upgraded to completed publication."""
+
+    state = ZipStore(tmp_path / "state.zip")
+    control = DirStore(tmp_path / "control")
+    repo = Repo(state)
+    value = RoutedValue(repo=repo)
+    config = ManagedConfig(state_repo=repo, control_store=control)
+    with pytest.raises(ManagedInterrupted):
+        value.interrupt_then_finish(managed=config)
+    prior = value.interrupt_then_finish.status(state_repo=repo, control_store=control).checkpoint_state_ref
+    original_commit = state.commit
+
+    def uncertain_commit():
+        original_commit()
+        monkeypatch.setattr(state, "_archive_identity", lambda: (_ for _ in ()).throw(OSError("commit evidence unavailable")))
+
+    def no_event(*args, **kwargs):
+        raise AssertionError("uncertain commit cannot mint an event")
+
+    monkeypatch.setattr(state, "commit", uncertain_commit)
+    monkeypatch.setattr(storage_module._PublicationEvent, "__init__", no_event)
+    with pytest.raises(RepoSaveError) as caught:
+        value.interrupt_then_finish(managed=config)
+    assert isinstance(caught.value.__cause__, ManagedPublicationError)
+    assert caught.value.__cause__.outcome == "indeterminate"
+    assert any(item.phase == "commit" and item.status == "uncertain" for item in caught.value.report.publications)
+    assert value.interrupt_then_finish.status(state_repo=repo, control_store=control).checkpoint_state_ref == prior
+
+
+def test_missing_required_embedded_seed_cannot_reuse_connected_proof(tmp_path, monkeypatch):
+    """A smaller required view cannot borrow an otherwise valid connected closure."""
+
+    dependency, root_store = (DirStore(tmp_path / name) for name in ("dependency", "root"))
+    dependency_repo = Repo(dependency)
+    seed = dependency_repo.save_object(SeedDependency(41, repo=dependency_repo), deep_capture=True)
+    repo = Repo(
+        [dependency, root_store], save_routing=SaveRouting(
+            ((Selector(SeededRoutedRoot), root_store), (Selector(SeedDependency), root_store)),
+            graph_mode="per-object",
+        ),
+    )
+    value = SeededRoutedRoot(seed, repo=repo)
+    monkeypatch.setattr(storage_module, "_required_managed_publication_stores", lambda report: (root_store,))
+    with pytest.raises(RepoSaveError) as caught:
+        value.checkpoint_then_interrupt(managed=ManagedConfig(state_repo=repo))
+    assert caught.value.report is not None
+    assert value.checkpoint_then_interrupt.status(state_repo=repo).checkpoint_state_ref is None
+
+
+def test_overridden_direct_reader_preserves_independent_publication_validation(tmp_path, monkeypatch):
+    """Reader overrides retain their authority behavior and disable proof sharing."""
+
+    store = DirStore(tmp_path / "state")
+    repo = Repo(store)
+    value = RoutedValue(repo=repo)
+    original = store.read_state_ref_record
+    durable_calls = []
+    original_durable = storage_module._validate_reopened_managed_state
+
+    def reader(digest):
+        return original(digest)
+
+    def durable(*args):
+        durable_calls.append(True)
+        return original_durable(*args)
+
+    monkeypatch.setattr(store, "read_state_ref_record", reader)
+    monkeypatch.setattr(storage_module, "_validate_reopened_managed_state", durable)
+    assert not store._can_reuse_exact_validation()
+    assert value.finish(managed=ManagedConfig(state_repo=repo)) == 1
+    assert durable_calls == [True]

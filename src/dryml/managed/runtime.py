@@ -23,7 +23,7 @@ from .identity import _argument_digest_bound, operation_digest
 from .model import InterruptRequestResult, ManagedStatus
 from .storage import (
     _acquire_state_ownership,
-    publish_managed_state,
+    _publish_managed_state_result,
     resolve_stores,
     state_ref_for_digest,
     validate_state_ref,
@@ -44,7 +44,9 @@ def invoke(descriptor, instance: object, args: tuple[object, ...], managed, kwar
     Returns:
         The wrapped method's ordinary result, or the invocation-captured final
         StateRef for a declaration selecting ``return_state_ref``, only after final
-        state and completed control authority are both published.
+        state and completed control authority are both published. A private
+        publication event replaces immediate duplicate validation and expires
+        before boundary hooks; control association still validates fresh authority.
 
     Raises:
         ManagedError: For lifecycle, storage, compatibility, or cleanup failures.
@@ -203,11 +205,12 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
                 raise
             report = None
             try:
-                final_state, report = publish_managed_state(
+                publication = _publish_managed_state_result(
                     state_repo, instance, reservation=ownership.reservation,
-                    snapshot_observer=snapshot_observer,
+                    snapshot_observer=snapshot_observer, invocation=context,
                 )
-                validate_state_ref(state_repo, final_state)
+                final_state, report = publication.state_ref, publication.report
+                publication.event.consume(state_repo, final_state, report, context)
                 _completion_boundary("final_state_published")
                 control.transition_running_owner(
                     operation_id, attempt_id=running.attempt_id, owner_id=running.owner_id,
@@ -224,6 +227,8 @@ def _invoke_selected(descriptor, instance, arguments_boundary, arguments,
                 if not isinstance(error, ManagedPublicationError) or error.outcome == "not_committed":
                     _record_failure(control, running, "publication_error", error)
                 raise
+            finally:
+                context._expire_publication_event()
             _deliver_post_publication(instance, final_state, state_repo, report)
             return final_state if descriptor.return_state_ref else result
     finally:

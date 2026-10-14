@@ -19,6 +19,8 @@ class ManagedContext:
     the running control snapshot are established. They become inactive when the
     method exits and cannot transfer across a thread or process. The context
     borrows its resolved Repo/control Store and owns no caller resource lifetime.
+    Private publication events retire before hooks and never extend the validity
+    of state associated by a checkpoint or independent recovery operation.
     """
 
     def __init__(self, token, *, control_store, operation_id: str,
@@ -49,6 +51,7 @@ class ManagedContext:
         self._terminal_interrupted = False
         self._failure_code: str | None = None
         self._safe_point_error: BaseException | None = None
+        self._publication_event = None
 
     @property
     def active(self) -> bool:
@@ -116,7 +119,9 @@ class ManagedContext:
             Saves through the resolved Repo routing policy, commits only required
             dirty buffered state Stores, verifies exact recovery, commits control
             association, invokes callbacks in configured order, and may commit
-            terminal interruption. Incomplete state never receives association.
+            terminal interruption. The publisher's one-use completed event removes
+            only immediate duplicate validation; control and post-callback reads
+            remain fresh. Incomplete state never receives association.
         """
 
         return self._checkpoint(cause=None, force_interrupt=False)
@@ -159,12 +164,12 @@ class ManagedContext:
             try:
                 self._ownership.require_owner()
                 publish_managed_state = _publish_managed_state()
-                state_ref, report = publish_managed_state(
+                publication = publish_managed_state(
                     self._state_repo, self._obj, reservation=self._ownership.reservation,
-                    snapshot_observer=self._snapshot_observer,
+                    snapshot_observer=self._snapshot_observer, invocation=self,
                 )
-                validate_state_ref = _validate_state_ref()
-                validate_state_ref(self._state_repo, state_ref)
+                state_ref, report = publication.state_ref, publication.report
+                publication.event.consume(self._state_repo, state_ref, report, self)
                 _checkpoint_boundary("state_published")
                 self._control.transition_running_owner(
                     self._operation_id, attempt_id=self._attempt_id, owner_id=self._owner_id,
@@ -215,6 +220,7 @@ class ManagedContext:
             _checkpoint_boundary("interruption_decided")
             return state_ref
         finally:
+            self._expire_publication_event()
             self._checkpointing = False
 
     def _raise_if_interrupted(self) -> None:
@@ -245,7 +251,13 @@ class ManagedContext:
     def _deactivate(self) -> None:
         """Retire this private authority after runtime cleanup completes."""
 
+        self._expire_publication_event()
         self._active = False
+
+    def _expire_publication_event(self):
+        if self._publication_event is not None:
+            self._publication_event.expire()
+            self._publication_event = None
 
 
 _CONTEXT_TOKEN = object()
@@ -257,20 +269,12 @@ def _create_context(**kwargs) -> ManagedContext:
     return ManagedContext(_CONTEXT_TOKEN, **kwargs)
 
 
-def _validate_state_ref():
-    """Load the storage validator lazily to keep context metadata import-light."""
-
-    from .storage import validate_state_ref
-
-    return validate_state_ref
-
-
 def _publish_managed_state():
     """Load the shared managed state publisher without widening import scope."""
 
-    from .storage import publish_managed_state
+    from .storage import _publish_managed_state_result
 
-    return publish_managed_state
+    return _publish_managed_state_result
 
 
 def _interrupted_snapshot(current):

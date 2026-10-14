@@ -240,6 +240,27 @@ including fresh path-backed ZipStore views, before associating the StateRef in t
 control Store. A publication, commit, validation, or association failure leaves
 completed immutable state intact, preserves the prior associated checkpoint, and
 does not report a new checkpoint or final success. Core partial `StoreReport`
+evidence remains available through publication failures.
+
+Checkpoint and final callers consume a private, one-use completed-publication
+event instead of immediately repeating the publisher's exact closure validation.
+It matches the full StateRef, exact report and originating Repo, active invocation
+and graph ownership, process/thread, selected replicas, and required durable
+recovery coverage. This event describes a completed operation, not continuing
+Store validity. It holds no Store fence, topology lease, or open payload source
+and is neither serialized nor recorded in control. It expires before lifecycle
+boundary hooks, callbacks, and invocation exit.
+
+After required commits, the publisher checks connected replicas and exact closure
+within one explicit Repo read cut. Required direct durability shares that proof
+only for the exact same built-in handles, views, and selection coverage while
+the cut remains uninterrupted. Different coverage or overridden readers retain
+independent validation. Every required ZipStore is freshly reopened and validated
+under an independent durable cut; temporary Repos and reopened Stores close
+before event delivery. All publisher fences close before control acquisition.
+Control association, post-callback decisions, later status, resume, and recovery
+always observe fresh authority, so deletion after publication can still prevent
+association and deletion after completion can still prevent recovery.
 
 Callbacks receive `(live_object, context)` in caller order only after both state
 publication and control association succeed. They may inspect

@@ -11,6 +11,7 @@ from dryml.core.object import Pickleable
 from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedConfig, managed_operation
+from dryml.managed import storage
 
 
 class ManagedReportValue(Pickleable):
@@ -40,6 +41,11 @@ def test_managed_completion_rejects_a_partial_snapshot_report(tmp_path, monkeypa
         ),
     )
     value = ManagedReportValue(repo=repo)
+
+    def no_event(*args, **kwargs):
+        raise AssertionError("partial report must not mint a publication event")
+
+    monkeypatch.setattr(storage._PublicationEvent, "__init__", no_event)
     monkeypatch.setattr(
         second,
         "publish_snapshot",

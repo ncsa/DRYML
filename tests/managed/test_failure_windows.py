@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import shutil
 import warnings
 
 import pytest
@@ -12,11 +13,14 @@ pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 
 from dryml.core import Repo
 from dryml.core.object import Pickleable
+from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedConfig, ManagedControlError, ManagedInterrupted, ManagedPublicationError, managed_operation
 from dryml.managed.control import ManagedControlStore
 from dryml.managed import context as context_module
 from dryml.managed import runtime as runtime_module
+from dryml.managed import storage as storage_module
+from dryml.managed.errors import ManagedRecoveryError
 
 
 class FailureWindowValue(Pickleable):
@@ -354,18 +358,20 @@ def test_private_post_publication_hook_is_not_called_before_completed_associatio
                 value.warn(managed=config)
     elif window == "publication":
         monkeypatch.setattr(
-            runtime_module, "publish_managed_state",
+            runtime_module, "_publish_managed_state_result",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("publication failed")),
         )
         with pytest.raises(OSError, match="publication failed"):
             value.complete(managed=config)
     elif window == "validation":
         monkeypatch.setattr(
-            runtime_module, "validate_state_ref",
+            storage_module, "_validate_publication_closure",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("validation failed")),
         )
-        with pytest.raises(OSError, match="validation failed"):
+        with pytest.raises(RepoSaveError) as caught:
             value.complete(managed=config)
+        assert str(caught.value.__cause__.__cause__) == "validation failed"
+        assert caught.value.report is not None
     else:
         original = ManagedControlStore.transition_running_owner
         calls = 0
@@ -384,3 +390,47 @@ def test_private_post_publication_hook_is_not_called_before_completed_associatio
             value.complete(managed=config)
 
     assert value.handoffs == 0
+
+
+@pytest.mark.parametrize("member, stage", [("checkpoint_then_return", "state_published"), ("complete", "final_state_published")])
+def test_deletion_at_publication_hook_fails_fresh_control_association(tmp_path, monkeypatch, member, stage):
+    """An already-consumed event never substitutes for current control validation."""
+
+    store = DirStore(tmp_path / "state")
+    repo = Repo(store)
+    value = CrashWindowValue(repo=repo)
+    callbacks = []
+    deleted = []
+
+    def boundary(current):
+        if current == stage:
+            state_ref = value.last_state_ref
+            shutil.rmtree(store._snapshot_path(state_ref.digest()))
+            deleted.append(state_ref)
+
+    monkeypatch.setattr(context_module, "_checkpoint_boundary", boundary)
+    monkeypatch.setattr(runtime_module, "_completion_boundary", boundary)
+    with pytest.raises(ManagedRecoveryError) as caught:
+        getattr(value, member)(managed=ManagedConfig(
+            state_repo=repo, callbacks=[lambda *args: callbacks.append(args)],
+        ))
+    assert len(deleted) == 1 and callbacks == []
+    assert caught.value.report is not None
+    status = getattr(value, member).status(state_repo=repo)
+    assert status.state == "failed"
+    assert status.checkpoint_state_ref is None and status.final_state_ref is None
+    assert repo._topology_leases == 0
+
+
+def test_later_status_and_invocation_revalidate_deleted_completed_state(tmp_path):
+    """A successful event leaves no continuing authority for independent recovery."""
+
+    store = DirStore(tmp_path / "state")
+    repo = Repo(store)
+    value = CrashWindowValue(repo=repo)
+    assert value.complete(managed=ManagedConfig(state_repo=repo)) == "complete"
+    shutil.rmtree(store._snapshot_path(value.last_state_ref.digest()))
+    with pytest.raises(ManagedRecoveryError):
+        value.complete.status(state_repo=repo)
+    with pytest.raises(ManagedRecoveryError):
+        value.complete(managed=ManagedConfig(state_repo=repo, rerun=True))
