@@ -316,6 +316,113 @@ def test_plain_repo_definition_reads_explicitly_reach_preparation(tmp_path):
     assert not repo._validation_evidence._pending
 
 
+def _isolate_records_decoder_code(monkeypatch):
+    """Keep other decoder bindings intact while replacing only records' code."""
+    from types import FunctionType
+    import dryml.core.cdef_codec as codec
+    import dryml.core.store.records as records
+
+    original = records.decode_cdef_graph
+    delegate = FunctionType(original.__code__, original.__globals__, original.__name__,
+                            original.__defaults__, original.__closure__)
+    monkeypatch.setattr(codec, "decode_cdef_graph", delegate)
+    return original
+
+
+def _reject_records_decoder(monkeypatch, override, original):
+    """Reject graph admission through the records binding or its code object."""
+    import dryml.core.store.records as records
+
+    def reject(data):
+        raise ValueError("records decoder policy rejects graph")
+
+    if override == "alias":
+        monkeypatch.setattr(records, "decode_cdef_graph", reject)
+    else:
+        monkeypatch.setattr(original, "__code__", reject.__code__)
+
+
+@pytest.mark.parametrize("override", ["alias", "code"])
+@pytest.mark.parametrize("phase", ["cold", "warm", "cleared"])
+def test_records_decoder_override_remains_authoritative(tmp_path, monkeypatch, override, phase):
+    """Public Store and light Repo reads obey the actual decoder after warming."""
+    from dryml.core import Repo
+    import dryml.core.store.records as records
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.store import StoreAuthorityError
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    record = DefinitionRecord(Definition(MappingRecordObject, {"value": 1}).concretize())
+    store.write_definition_record(record)
+    original = (_isolate_records_decoder_code(monkeypatch) if override == "code"
+                else records.decode_cdef_graph)
+    repo = Repo(store)
+    if phase != "cold":
+        assert repo.has_cdef_light(record.definition)
+        assert repo._validation_evidence._resident
+    if phase == "cleared":
+        repo.clear_cache(strong=False, weak=False)
+        assert repo._validation_evidence.accounted_bytes == 0
+    retained = tuple(repo._validation_evidence._resident.values())
+    _reject_records_decoder(monkeypatch, override, original)
+    assert store._can_reuse_exact_validation()
+
+    with pytest.raises(StoreRecordError, match="graph authority") as error:
+        DefinitionRecord.from_bytes(record.to_bytes())
+    assert str(error.value.__cause__) == "records decoder policy rejects graph"
+    with pytest.raises(StoreAuthorityError, match="graph authority"):
+        store.read_definition_record(record.digest)
+    for _ in range(2):
+        with pytest.raises(StoreAuthorityError, match="graph authority"):
+            repo.has_cdef_light(record.definition)
+        assert tuple(repo._validation_evidence._resident.values()) == retained
+        assert not repo._validation_evidence._pending
+
+
+@pytest.mark.parametrize("phase", ["cold", "warm", "cleared"])
+def test_records_decoder_delegate_never_retains_custom_policy(tmp_path, monkeypatch, phase):
+    """Successful wrappers stay uncached when policy changes without rebinding."""
+    from dryml.core import Repo
+    import dryml.core.store.records as records
+    from dryml.core.store.dir import DirStore
+    from dryml.core.store.store import StoreAuthorityError
+    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    record = DefinitionRecord(Definition(MappingRecordObject, {"value": 1}).concretize())
+    source = record.to_bytes()
+    store.write_definition_record(record)
+    repo = Repo(store)
+    if phase != "cold":
+        assert repo.has_cdef_light(record.definition)
+    if phase == "cleared":
+        repo.clear_cache(strong=False, weak=False)
+    retained = tuple(repo._validation_evidence._resident.values())
+    original = records.decode_cdef_graph
+    calls = []
+    rejecting = False
+
+    def decoder(data):
+        calls.append(True)
+        if rejecting:
+            raise ValueError("custom decoder now rejects graph")
+        return original(data)
+
+    monkeypatch.setattr(records, "decode_cdef_graph", decoder)
+    for _ in range(2):
+        calls.clear()
+        with exact_work_counts() as counts:
+            assert _prepared_read(repo, source)._prepared is None
+            assert repo.has_cdef_light(record.definition)
+        assert len(calls) == 2
+        assert counts["_realize_prepared_graph"] == 0
+        assert tuple(repo._validation_evidence._resident.values()) == retained
+        assert not repo._validation_evidence._pending
+    rejecting = True
+    with pytest.raises(StoreAuthorityError, match="graph authority"):
+        repo.has_cdef_light(record.definition)
+
+
 @pytest.mark.parametrize("kind", ["source", "atom", "quote"])
 def test_valid_excluded_records_keep_full_decoder_fallback(kind):
     """Valid source/atom/quoted records are decoded twice and never retained."""

@@ -11,6 +11,8 @@ adapter borrows a caller's bounded content facility only after fresh frame/dill
 admission; it owns no cache or Store authority and retains no resolved classes or
 token-bearing graphs. Eligible hits still realize fresh values and check enclosing
 record identities and current path/ObjectId associations.
+Definition preparation requires the original module-local graph decoder binding
+and code; overridden decoders always run uncached, even after successful reads.
 """
 
 from __future__ import annotations
@@ -40,6 +42,8 @@ _FORMAT_MAGIC = b"DRYML-STORE-RECORD/"
 _MAX_RECORD_BYTES = 16 * 1024 * 1024
 _MAX_FILES = 100_000
 _MAX_PATH_BYTES = 4096
+_DEFINITION_GRAPH_DECODER = decode_cdef_graph
+_DEFINITION_GRAPH_DECODER_CODE = decode_cdef_graph.__code__
 
 
 class StoreRecordError(ValueError):
@@ -212,6 +216,10 @@ class _RecordPreparation:
 
         if record_type not in (DefinitionRecord, StateRefRecord):
             return record_type.from_data(payload)
+        if record_type is DefinitionRecord and (
+                decode_cdef_graph is not _DEFINITION_GRAPH_DECODER
+                or decode_cdef_graph.__code__ is not _DEFINITION_GRAPH_DECODER_CODE):
+            return record_type.from_data(payload)
         try:
             graph = (payload["definition"] if record_type is DefinitionRecord
                      else payload["state_ref"]["object"]["definition"])
@@ -380,7 +388,9 @@ class DefinitionRecord(_Record):
         Raises:
             StoreRecordError: For malformed graph, identity or role authority.
         Side Effects:
-            No class resolution or Store IO; all graph derivations run afresh.
+            No class resolution or Store IO; all graph derivations run afresh
+            through the current module-local graph decoder. Overriding that
+            decoder also disables internal definition preparation and retention.
         """
         return cls._from_data_prepared(data, None)
 

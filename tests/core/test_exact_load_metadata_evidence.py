@@ -797,6 +797,82 @@ def test_payload_validator_override_keeps_uncached_error(tmp_path, monkeypatch):
         build_exact_state_load_plan(Repo(store), state)
 
 
+@pytest.mark.parametrize("override", ["alias", "code"])
+@pytest.mark.parametrize("phase", ["cold", "warm", "cleared"])
+def test_exact_records_decoder_override_remains_authoritative(tmp_path, monkeypatch, override, phase):
+    """Eligible exact reads cannot bypass a records-only rejecting decoder."""
+    import dryml.core.store.records as records
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.store.store import StoreAuthorityError
+    from tests.core.test_store_records import _isolate_records_decoder_code, _reject_records_decoder
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    original = (_isolate_records_decoder_code(monkeypatch) if override == "code"
+                else records.decode_cdef_graph)
+    reader = Repo(store)
+    if phase != "cold":
+        build_exact_state_load_plan(reader, state)
+        assert reader._validation_evidence._resident
+    if phase == "cleared":
+        reader.clear_cache(strong=False, weak=False)
+        assert reader._validation_evidence.accounted_bytes == 0
+    retained = tuple(reader._validation_evidence._resident.values())
+    _reject_records_decoder(monkeypatch, override, original)
+    assert store._can_reuse_exact_validation()
+    with pytest.raises(StoreAuthorityError, match="graph authority"):
+        store.open_local_state(state, GraphPath())
+    for _ in range(2):
+        with pytest.raises(RepoLoadError, match="graph authority"):
+            build_exact_state_load_plan(reader, state)
+        assert {id(fact) for fact in reader._validation_evidence._resident.values()} == {
+            id(fact) for fact in retained
+        }
+        assert not reader._validation_evidence._pending
+    assert reader._topology_leases == 0
+
+
+def test_exact_records_decoder_delegate_keeps_uncached_policy(tmp_path, monkeypatch):
+    """A successful alias wrapper runs on every exact cut and can later reject."""
+    import dryml.core.store.records as records
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    reader = Repo(store)
+    original = records.decode_cdef_graph
+    calls = []
+    rejecting = False
+
+    def decoder(data):
+        calls.append(True)
+        if rejecting:
+            raise ValueError("custom decoder now rejects graph")
+        return original(data)
+
+    for phase in ("cold", "warm", "cleared"):
+        if phase == "warm":
+            with monkeypatch.context() as patch:
+                patch.setattr(records, "decode_cdef_graph", original)
+                build_exact_state_load_plan(reader, state)
+        if phase == "cleared":
+            reader.clear_cache(strong=False, weak=False)
+        monkeypatch.setattr(records, "decode_cdef_graph", decoder)
+        for _ in range(2):
+            calls.clear()
+            with exact_work_counts() as counts:
+                assert build_exact_state_load_plan(reader, state).state_ref == state
+            assert len(calls) == 2
+            # StateRef decoding owns a different decoder binding and stays eligible.
+            assert counts["_realize_prepared_graph"] <= 1
+        rejecting = True
+        with pytest.raises(RepoLoadError, match="graph authority"):
+            build_exact_state_load_plan(reader, state)
+        rejecting = False
+
+
 @pytest.mark.parametrize("component", ["manifest.record", "def.pkl"])
 def test_corrupt_local_authority_rejects_before_hooks(tmp_path, component):
     """Bundle reuse does not bypass malformed local manifest/definition authority."""
