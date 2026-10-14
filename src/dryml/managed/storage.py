@@ -541,7 +541,7 @@ def _validate_reopened_managed_state(state_repo: Repo, state_ref: StateRef, repo
                 cleanup.callback(opened.close)
         durable = Repo._for_state_io(tuple(
             reopened.get(id(store), store) for store in required
-        ))
+        ), _content_owner=state_repo)
         cleanup.callback(durable.close, flush=False)
         with durable._read_cut() as cut:
             for snapshot in report.snapshots:

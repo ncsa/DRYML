@@ -2,6 +2,7 @@
 
 import inspect
 import hashlib
+import os
 import sys
 from collections import Counter
 from contextlib import contextmanager
@@ -77,10 +78,22 @@ def exact_work_counts():
                 counts[kind] += 1
             if name == "_read_json":
                 counts["json_reads"] += 1
+            if name in {"canonical_json_load_bytes", "canonical_json_bytes", "deep_freeze_json",
+                        "decode_record", "decode_snapshot_metadata", "_decode_framed",
+                        "decode_cdef_graph", "_canonical_labels", "_freeze_json_fact",
+                        "_thaw_json_fact", "_content_hash", "_primitive_size",
+                        "_context_matches", "_graph_and_labels", "_role_paths"}:
+                counts[name] += 1
+            if name == "load" and frame.f_globals.get("__name__") == "dill._dill":
+                counts["dill_load"] += 1
             if name == "graph_equal" and frame.f_back.f_code.co_name == "_validate_snapshot_locals":
                 counts["path_definition_checks"] += 1
         if event == "c_call" and frame.f_code.co_name == "_validate_local_state_dir" and arg is hashlib.sha256:
             counts["definition_byte_hashes"] += 1
+        if event == "c_call" and frame.f_code.co_name == "_read_json" and arg is os.lstat:
+            counts["json_shape_checks"] += 1
+        if event == "c_call" and frame.f_code.co_name == "_read_snapshot" and arg is os.scandir:
+            counts["snapshot_inventory_reads"] += 1
         if previous is not None:
             previous(frame, event, arg)
 
@@ -89,6 +102,295 @@ def exact_work_counts():
         yield counts
     finally:
         sys.setprofile(previous)
+
+
+def test_snapshot_json_cold_warm_characterization(tmp_path, monkeypatch, record_testsuite_property):
+    """Complete independent preflights reread bytes and isolate mutable returns."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    reader = Repo(store)
+    assert store._can_reuse_exact_validation()
+    import builtins
+    original_open = builtins.open
+    sibling_reads = []
+
+    def observe_open(path, *args, **kwargs):
+        if Path(path).name in {"placement.json", "metadata.json", "snapshot.json"}:
+            sibling_reads.append(Path(path).name)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", observe_open)
+    ledgers = []
+    for phase in range(2):
+        sibling_reads.clear()
+        with exact_work_counts() as counts:
+            plan = build_exact_state_load_plan(reader, state)
+        ledgers.append(counts)
+        assert counts["json_reads"] == 3
+        assert counts["json_shape_checks"] == 3
+        assert counts["snapshot_inventory_reads"] == 1
+        assert sorted(sibling_reads) == ["metadata.json", "placement.json", "snapshot.json"]
+        assert counts["canonical_json_load_bytes"] == (3 if phase == 0 else 0)
+        assert counts["decode_snapshot_metadata"] == 1
+        assert counts["decode_record"] >= 3
+        assert counts["canonical_json_bytes"] > 0
+        assert counts["deep_freeze_json"] > 0
+        assert counts["validate_payload"] == 1
+        assert counts["StateRefRecord"] == 1
+        assert counts["DefinitionRecord"] == 2
+        assert counts["dill_load"] == 8
+        assert counts["decode_cdef_graph"] > 0
+        assert counts["_graph_and_labels"] > 0
+        assert counts["_role_paths"] > 0
+        assert plan.state_ref == state
+    for key in ("json_reads", "decode_snapshot_metadata", "decode_record",
+                "canonical_json_bytes", "validate_payload",
+                "StateRefRecord", "DefinitionRecord", "dill_load",
+                "decode_cdef_graph", "_graph_and_labels", "_role_paths"):
+        assert ledgers[0][key] == ledgers[1][key]
+    assert ledgers[0]["deep_freeze_json"] == ledgers[1]["deep_freeze_json"] + 3
+    for phase, ledger in zip(("cold", "warm"), ledgers):
+        record_testsuite_property(f"u3_{phase}_ledger", repr(dict(sorted(ledger.items()))))
+    assert len(reader._validation_evidence._resident) == 3
+    assert not reader._validation_evidence._pending
+    with reader._read_cut() as cut:
+        first = cut.snapshot(store, state.digest())
+        first[2].clear()
+    with reader._read_cut() as cut:
+        second = cut.snapshot(store, state.digest())
+        assert len(second[2]) == 1
+        assert second[0].state_ref == state
+
+
+def test_json_warm_nested_public_metadata_is_detached(tmp_path):
+    """Lists/maps in decoded annotation values never expose retained primitives."""
+    from dryml.core import SaveAnnotations
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer), annotations=SaveAnnotations(
+        state={"nested": [{"values": [1, 2]}]},
+    ))
+    reader = Repo(store)
+    build_exact_state_load_plan(reader, state)
+    with reader._read_cut() as cut:
+        metadata = cut.metadata(store, state.digest())
+        values = metadata.captured_state_annotations
+        values["nested"][0]["values"].append(3)
+    with exact_work_counts() as counts:
+        with reader._read_cut() as cut:
+            fresh = cut.metadata(store, state.digest())
+    assert counts["canonical_json_load_bytes"] == 0
+    assert fresh.captured_state_annotations["nested"] == [{"values": [1, 2]}]
+
+
+@pytest.mark.parametrize("damage", ["changed", "missing", "malformed", "oversized", "shape"])
+def test_json_warm_reads_still_reject_changed_authority(tmp_path, damage):
+    """Hits cannot replace fresh bytes, canonical parser bounds or file shape."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    reader = Repo(store)
+    build_exact_state_load_plan(reader, state)
+    path = Path(store._snapshot_path(state.digest()), "placement.json")
+    if damage == "changed":
+        path.write_bytes(path.read_bytes().replace(b'"version":1', b'"version":2'))
+    elif damage == "missing":
+        path.unlink()
+    elif damage == "shape":
+        path.unlink()
+        path.mkdir()
+    elif damage == "oversized":
+        path.write_bytes(b'{"value":"' + b"x" * 4097 + b'"}')
+    else:
+        path.write_bytes(b'{"duplicate":1,"duplicate":2}')
+    facility = reader._validation_evidence
+    residents = tuple(facility._resident.values())
+    for _ in range(2):
+        with pytest.raises(RepoLoadError, match="preflight is incomplete"):
+            build_exact_state_load_plan(reader, state)
+        assert tuple(facility._resident.values()) == residents
+        assert not facility._pending
+
+
+def test_json_content_context_change_misses_without_reader_override(tmp_path, monkeypatch):
+    """Changing the existing parser implementation causes fresh eligible parsing."""
+    import dryml.formats as formats
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    reader = Repo(store)
+    build_exact_state_load_plan(reader, state)
+    original = formats.canonical_json_load_bytes
+    calls = []
+
+    def parser(*args, **kwargs):
+        calls.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(formats, "canonical_json_load_bytes", parser)
+    assert store._can_reuse_exact_validation()
+    build_exact_state_load_plan(reader, state)
+    assert len(calls) == 3
+    build_exact_state_load_plan(reader, state)
+    assert len(calls) == 3
+
+
+def test_unknown_parser_identity_uses_uncached_existing_parser(tmp_path, monkeypatch):
+    """An unretainable callable context is not a reason to reject valid input."""
+    import dryml.formats as formats
+    from dryml.core.materialization import build_exact_state_load_plan
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    original = formats.canonical_json_load_bytes
+    calls = []
+    class Parser:
+        __slots__ = ()
+        def __call__(self, *args, **kwargs):
+            calls.append(True)
+            return original(*args, **kwargs)
+    monkeypatch.setattr(formats, "canonical_json_load_bytes", Parser())
+    reader = Repo(store)
+    assert store._can_reuse_exact_validation()
+    for _ in range(2):
+        build_exact_state_load_plan(reader, state)
+    assert len(calls) == 6
+    assert not reader._validation_evidence._resident
+
+
+def test_reopened_archive_borrows_content_but_revalidates_fresh_view(tmp_path):
+    """Durable reopen avoids JSON parsing, never fresh frame/payload authority."""
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.store.zip import ZipStore
+    from dryml.managed.storage import _validate_reopened_managed_state
+
+    store = ZipStore(tmp_path / "store.zip")
+    writer = Repo(store)
+    try:
+        state, report = writer.save_object(EvidenceValue(3, repo=writer), report_stores=True)
+        store.commit()
+        reader = Repo(store)
+        assert store._can_reuse_exact_validation()
+        with exact_work_counts() as cold:
+            build_exact_state_load_plan(reader, state)
+        facility = reader._validation_evidence
+        with exact_work_counts() as warm:
+            _validate_reopened_managed_state(reader, state, report, (store,))
+        # Known Zip liveness wrappers and their Dir implementation both count.
+        assert cold["json_reads"] == warm["json_reads"] == 6
+        assert cold["canonical_json_load_bytes"] == 3
+        assert warm["canonical_json_load_bytes"] == 0
+        assert warm["validate_payload"] == 1
+        assert warm["StateRefRecord"] > 0
+        assert warm["dill_load"] > 0
+        assert len(facility._resident) == 3 and not facility._pending
+        assert reader._topology_leases == 0
+        assert all(store.base_dir.encode() not in fact.source for fact in facility._resident.values())
+        reader.close(flush=False)
+        assert not facility._resident
+    finally:
+        writer.close(flush=False)
+        store.close()
+
+
+def test_complete_snapshot_reads_under_forced_content_hash_collisions(tmp_path, monkeypatch):
+    """Full owning reads distinguish component kind and bytes within four slots."""
+    import dryml.core.repo as repo_module
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    monkeypatch.setattr(repo_module, "_content_hash", lambda source: b"collision")
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    first = writer.save_object(EvidenceValue(1, repo=writer))
+    second = writer.save_object(EvidenceValue(2, repo=writer))
+    reader = Repo(store)
+    build_exact_state_load_plan(reader, first)
+    build_exact_state_load_plan(reader, second)
+    assert len(reader._validation_evidence._resident) == 4
+    with exact_work_counts() as counts:
+        plan = build_exact_state_load_plan(reader, second)
+    assert counts["canonical_json_load_bytes"] == 0
+    assert counts["json_reads"] == 3 and counts["validate_payload"] == 1
+    assert plan.state_ref == second and plan.state_ref != first
+    with exact_work_counts() as counts:
+        plan = build_exact_state_load_plan(reader, first)
+    assert counts["canonical_json_load_bytes"] > 0
+    assert plan.state_ref == first
+    assert reader._validation_evidence.high_water_entries <= 4
+
+
+def test_caught_bundle_failure_still_poisoned_for_retention(tmp_path):
+    """Catching an internal read error cannot admit its earlier parsed siblings."""
+    from dryml.core.store.store import StoreAuthorityError
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    Path(store._snapshot_path(state.digest()), "snapshot.json").write_bytes(b"malformed")
+    reader = Repo(store)
+    with reader._read_cut() as cut:
+        with pytest.raises(StoreAuthorityError):
+            cut.snapshot(store, state.digest())
+        assert not cut.snapshots and not cut._pending
+    assert not reader._validation_evidence._resident
+    assert reader._validation_evidence.accounted_bytes == 0
+
+
+def test_failed_aggregate_preflight_drops_all_pending_json(tmp_path):
+    """Successful bundle parsing is not admitted before late payload validation."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    Path(store.open_local_state(state, GraphPath()).handle, "data", "value").write_text("bad")
+    reader = Repo(store)
+    for _ in range(2):
+        with exact_work_counts() as counts:
+            with pytest.raises(RepoLoadError):
+                build_exact_state_load_plan(reader, state)
+        assert counts["canonical_json_load_bytes"] == 3
+        assert not reader._validation_evidence._resident
+        assert not reader._validation_evidence._pending
+        assert reader._validation_evidence.accounted_bytes == 0
+
+
+def test_failed_live_lineage_preflight_drops_pending_json(tmp_path):
+    """Late cached-identity checks precede content admission even after warming."""
+    from dryml.core.materialization import build_exact_state_load_plan
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    state = writer.save_object(EvidenceValue(1, repo=writer))
+    reader = Repo(store)
+    cached = reader.load_state_ref(state, reuse_live="never")
+    reader.clear_cache(strong=False, weak=False)
+    cached._lineage_created_at += timedelta(seconds=1)
+    with exact_work_counts() as counts:
+        with pytest.raises(MetadataConflictError, match="Live cached identity"):
+            build_exact_state_load_plan(reader, state)
+    assert counts["canonical_json_load_bytes"] == 3
+    assert not reader._validation_evidence._resident
+    assert not reader._validation_evidence._pending
+
+
+def test_absent_snapshot_is_never_retained(tmp_path):
+    """An absence can become successful authority without clearing a Repo."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    reader = Repo(store)
+    for _ in range(2):
+        with reader._read_cut() as cut:
+            assert cut.snapshot(store, "a" * 64) is None
+    assert not reader._validation_evidence._resident
+    assert reader._validation_evidence.accounted_bytes == 0
 
 
 @pytest.mark.parametrize("size", [1, 3, 7])

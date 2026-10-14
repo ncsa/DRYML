@@ -506,17 +506,17 @@ class ZipStore(DirStore):
         self._assert_open()
         return super()._read_file(path, record_type)
 
-    def _read_json(self, path):
+    def _read_json(self, path, *, cut=None, kind=None):
         """Read one JSON sidecar only while this transaction remains live."""
 
         self._assert_open()
-        return super()._read_json(path)
+        return super()._read_json(path, cut=cut, kind=kind)
 
-    def _read_snapshot(self, digest, *, payloads=False, directory=None):
+    def _read_snapshot(self, digest, *, payloads=False, directory=None, cut=None):
         """Read one snapshot only while this transaction remains live."""
 
         self._assert_open()
-        return super()._read_snapshot(digest, payloads=payloads, directory=directory)
+        return super()._read_snapshot(digest, payloads=payloads, directory=directory, cut=cut)
 
     def _query_index_dirty_markers(self):
         """Read dirty tokens only while this transaction remains live."""

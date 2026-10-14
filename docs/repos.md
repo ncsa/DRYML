@@ -144,6 +144,60 @@ lifetime after the cut expires. Direct directories remain Store-owned; closing a
 ZipStore removes its extracted paths. Holding a source does not prove that it is
 valid for another independent operation, which always validates fresh authority.
 
+### Bounded Snapshot Content Reuse
+
+The same Repo-owned validation facility may retain parsed primitive content for
+the snapshot's `placement.json`, `metadata.json`, and `snapshot.json` siblings.
+Eligible built-in reads through explicit authority cuts, including exact preflight
+and managed durable validation, use this private path. Direct public Store readers
+continue their fully validating uncached path. Custom Stores, subclasses and
+overridden readers keep their established authoritative fallback.
+
+A warm hit avoids the existing canonical JSON parser and its primitive projection
+preparation. **Every independent cut still reads current sibling bytes and checks
+filesystem shape.** Matching includes exact source bytes, component kind, parser
+bounds, schema/representation and policy versions, and live parser/preparation
+implementation identities. Hashes only select buckets, with at most four candidates
+per bucket. Collisions, changed context or changed bytes cannot substitute another
+fact. Envelope freezing, encoding/ID verification, domain decoding, sibling/target
+association, aggregate closure and live-lineage checks still run. No decoded domain
+objects, references, live Objects, CDefs, annotations, resource handles, extraction
+paths, or payload-validity verdicts are retained. This is JSON primitive reuse;
+graph preparation is not accelerated by this tier.
+
+The internal LRU admits at most **256 entries, 32 MiB of accounted owned data, and
+2 MiB per entry**. Resident facts and pending reservations share those limits
+across threads, independent nested cuts and internal borrowers. Charges include
+keys/implementation weak identities, source bytes, prospective immutable
+containers and leaves, and a conservative per-entry bookkeeping surcharge. Repeated
+immutable leaves are deliberately overcounted. Budget is reserved **before** optional
+retention copies; failed admission uses ordinary uncached processing and does not
+reject input. Necessary decoding, detached public returns and cut-local evidence
+have independent input-dependent working memory: these bounds are not a process
+memory ceiling. Eviction causes recomputation, never loss of Store authority.
+
+Facts are staged until the complete owning cut succeeds, including aggregate and
+live-lineage validation. Failures/absences are never cached; a failed scope drops
+pending facts and partial authority evidence. Hits rebuild detached primitive
+containers and existing owners decode fresh public graphs/metadata, so mutating
+nested returned lists/maps cannot affect retained content or later reads.
+
+`clear_cache(strong=..., weak=...)` keeps the existing live-tier flag meanings and
+also drops content facts and advances a shared epoch. An in-flight optional copy
+keeps its budget reservation until preparation finishes, but cannot repopulate the
+cleared epoch. Accepted owner close clears facts before cleanup; a failed close may
+leave the Repo open with empty facts for retry. PID/closing checks precede evidence
+lock acquisition, and cuts remain thread-bound. Cache locking covers bookkeeping
+only; reading, parsing, preparation, matching, decoding and cleanup run outside it.
+
+Managed durable reopen creates a temporary Repo that **explicitly borrows** the
+originating Repo's facility while retaining its lifetime through a topology lease.
+It owns a distinct authority cut over freshly reopened Stores; buffered validity
+never authorizes the reopened view. Closing that borrower detaches without clearing
+the owner's facts. Owner clear invalidates the shared epoch for every borrower,
+and owner close rejects while a borrower retains its lifetime. No reopened path or
+resource is stored in a content fact.
+
 ## Query V3
 
 `Repo.query()` creates one unevaluated identity universe over connected Store

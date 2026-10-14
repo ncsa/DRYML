@@ -6,6 +6,8 @@ inventory; inherited-process retention raises RuntimeError before owner locking.
 Forked children construct fresh Repos instead of resetting parent locks or caches.
 Exact preflight uses explicit owner-bound read cuts; neither borrowed sources nor
 live Object caches extend a cut's payload-validity evidence across operations.
+The same facility retains bounded immutable content only after successful cuts;
+every independent operation establishes fresh Store authority before using it.
 """
 
 from __future__ import annotations
@@ -20,7 +22,8 @@ from pathlib import Path
 import weakref
 from contextvars import ContextVar
 from collections.abc import Iterable, Mapping
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
+import hashlib
 import atexit
 import time
 import stat
@@ -37,6 +40,7 @@ from .store.store import (
 )
 from .policies import CachePolicy, LiveReusePolicy, RepoGraphOptions
 from .canonical import from_canonical
+from ._content_facts import _primitive_size, _context_matches
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
 from .query.federation import RepoQueryIndex
 from .query.memory import AggregateMemoryQueryIndex
@@ -54,18 +58,169 @@ _active_object_ref_results: ContextVar[Mapping[tuple[int, str], Object] | None] 
 )
 
 
+def _content_hash(source):
+    return hashlib.sha256(source).digest()
+
+
+@dataclass(frozen=True)
+class _ContentFact:
+    bucket: bytes
+    context: tuple
+    source: bytes
+    prepared: Any
+    charge: int
+
+
 class _ValidationEvidence:
-    """Repo-owned facility; current authority exists only in explicit read cuts."""
+    """One Repo's bounded content facts and separate cut-local authority facility.
+
+    Only bookkeeping runs under the lock. Pending reservations consume the same
+    slots/bytes as residents before any optional owned preparation is allocated.
+    The fixed per-entry surcharge bounds LRU, ticket, bucket and cut bookkeeping;
+    primitive sizing deliberately overcounts shared scalars and container slots.
+    """
+
+    max_entries = 256
+    max_bytes = 32 * 1024 * 1024
+    max_entry_bytes = 2 * 1024 * 1024
+    max_bucket = 4
 
     def __init__(self, repo):
         self.repo = repo
         self.epoch = 0
+        self._lock = RLock()
+        self._resident = OrderedDict()
+        self._pending = {}
+        self._serial = 0
+        self.accounted_bytes = 0
+        self.high_water_bytes = 0
+        self.high_water_entries = 0
+
+    def check(self):
+        if self.repo._configuration_pid != os.getpid():
+            raise RuntimeError("Content evidence inherited from another process; open a fresh Repo.")
+        if self.repo._closing or self.repo._closed:
+            raise RuntimeError("Content evidence owner is closing/closed.")
 
     def clear(self):
-        self.epoch += 1
+        if self.repo._configuration_pid != os.getpid():
+            raise RuntimeError("Cannot clear inherited content evidence; open a fresh Repo.")
+        with self._lock:
+            old = self._resident, self._pending
+            self._resident = OrderedDict()
+            # A preparing copy still owns its reservation until its creator
+            # returns. Clear retires its epoch, not its in-flight memory charge.
+            self._pending = {ticket: item for ticket, item in self._pending.items()
+                             if item[2] is None}
+            self.accounted_bytes = sum(item[1] for item in self._pending.values())
+            self.epoch += 1
+        del old
 
-    def read_cut(self, *, selected_stores=()):
-        return _AuthorityReadCut(self, selected_stores=selected_stores)
+    def read_cut(self, repo, *, selected_stores=()):
+        return _AuthorityReadCut(self, repo, selected_stores=selected_stores)
+
+    def lookup(self, cut, context, source):
+        cut.check()
+        if type(context) is not tuple or type(source) is not bytes:
+            raise TypeError("Content facts require tuple context and exact source bytes.")
+        _primitive_size(context)
+        bucket = _content_hash(source)
+        with self._lock:
+            candidates = tuple((ticket, fact) for ticket, fact in self._resident.items()
+                               if fact.bucket == bucket)
+        for ticket, fact in candidates:
+            if fact.source == source and _context_matches(fact.context, context):
+                cut.check()
+                with self._lock:
+                    if self.epoch == cut.epoch and self._resident.get(ticket) is fact:
+                        self._resident.move_to_end(ticket)
+                return fact.prepared
+        return None
+
+    def stage(self, cut, context, source, owned_size, prepare):
+        """Reserve then prepare outside locks; admit only on successful cut exit.
+
+        ``context`` is a closed primitive tuple including kind, policy, versions
+        and implementation identities. ``owned_size`` bounds the prepared value;
+        ``prepare`` must return owned immutable, token/resource-free content.
+        Admission failure omits optional preparation, never ordinary validation.
+        """
+        cut.check()
+        if type(context) is not tuple or type(source) is not bytes:
+            raise TypeError("Content facts require tuple context and exact source bytes.")
+        charge = 2048 + _primitive_size(context) + sys.getsizeof(source) + owned_size
+        if cut._failed or charge > self.max_entry_bytes or charge > self.max_bytes:
+            return
+        bucket = _content_hash(source)
+        retired = []
+        with self._lock:
+            if self.epoch != cut.epoch:
+                return
+            same_bucket = lambda: sum(fact.bucket == bucket for fact in self._resident.values()) + sum(
+                item[0] == bucket for item in self._pending.values())
+            while (len(self._resident) + len(self._pending) >= self.max_entries
+                   or self.accounted_bytes + charge > self.max_bytes
+                   or same_bucket() >= self.max_bucket):
+                victim = next((ticket for ticket, fact in self._resident.items()
+                               if same_bucket() < self.max_bucket or fact.bucket == bucket), None)
+                if victim is None:
+                    break
+                fact = self._resident.pop(victim)
+                self.accounted_bytes -= fact.charge
+                retired.append(fact)
+                del fact
+            admitted = (len(self._resident) + len(self._pending) < self.max_entries
+                        and self.accounted_bytes + charge <= self.max_bytes
+                        and same_bucket() < self.max_bucket)
+            if admitted:
+                self._serial += 1
+                ticket = self._serial
+                self._pending[ticket] = (bucket, charge, None)
+                cut._pending.add(ticket)
+                self.accounted_bytes += charge
+                self.high_water_bytes = max(self.high_water_bytes, self.accounted_bytes)
+                self.high_water_entries = max(self.high_water_entries, len(self._resident) + len(self._pending))
+        del retired
+        if not admitted:
+            return
+        try:
+            prepared = prepare()
+            fact = _ContentFact(bucket, context, source, prepared, charge)
+            with self._lock:
+                if self.epoch == cut.epoch and ticket in self._pending:
+                    self._pending[ticket] = (bucket, charge, fact)
+                    accepted = True
+                else:
+                    accepted = False
+            if not accepted:
+                del fact, prepared
+                with self._lock:
+                    item = self._pending.pop(ticket, None)
+                    if item is not None:
+                        self.accounted_bytes -= charge
+                cut._pending.discard(ticket)
+        except BaseException:
+            cut.discard()
+            raise
+
+    def finish(self, cut, *, success):
+        """Atomically publish staged facts, or drop reservations after failure."""
+        retired = []
+        with self._lock:
+            for ticket in cut._pending:
+                item = self._pending.pop(ticket, None)
+                if item is None:
+                    continue
+                _, charge, fact = item
+                if (success and self.epoch == cut.epoch and fact is not None
+                        and not self.repo._closing and not self.repo._closed
+                        and not cut.repo._closing and not cut.repo._closed):
+                    self._resident[ticket] = fact
+                else:
+                    self.accounted_bytes -= charge
+                    retired.append(item)
+            cut._pending.clear()
+        del retired
 
 
 class _AuthorityReadCut:
@@ -76,9 +231,9 @@ class _AuthorityReadCut:
     and exit clear those values alongside bundle/payload evidence.
     """
 
-    def __init__(self, facility, *, selected_stores=()):
+    def __init__(self, facility, repo, *, selected_stores=()):
         self.facility = facility
-        self.repo = facility.repo
+        self.repo = repo
         self.pid = os.getpid()
         self.thread = current_thread()
         self.epoch = facility.epoch
@@ -92,12 +247,15 @@ class _AuthorityReadCut:
         self.resolved_state_refs = {}
         self.validated_state_refs = []
         self._stack = None
+        self._pending = set()
+        self._failed = False
 
     def _check_owner(self):
         if self.pid != os.getpid() or self.repo._configuration_pid != os.getpid():
             raise RuntimeError("Read cut inherited from another process; open a fresh Repo.")
         if self.thread is not current_thread():
             raise RuntimeError("Read cut belongs to another thread.")
+        self.facility.check()
 
     def check(self, store=None):
         self._check_owner()
@@ -144,39 +302,67 @@ class _AuthorityReadCut:
             return False
         stack, self._stack = self._stack, None
         self.active = False
-        self.discard()
         try:
-            return stack.__exit__(*exc)
+            result = stack.__exit__(*exc)
+            self.facility.finish(self, success=exc[0] is None and not self._failed)
+            return result
         finally:
+            self.active = False
+            self.discard()
             with self.repo._configuration_lock:
                 self.repo._topology_leases -= 1
 
     def discard(self):
         """Drop partial evidence after failure without releasing an owner's lease."""
         self._check_owner()
+        self._failed = True
+        self.facility.finish(self, success=False)
         self.snapshots.clear()
         self.locals.clear()
         self.eager_snapshots.clear()
         self.resolved_state_refs.clear()
         self.validated_state_refs.clear()
 
+    def prepared(self, context, source):
+        """Return exact-matched immutable content, never a validity verdict."""
+        return self.facility.lookup(self, context, source)
+
+    def stage_prepared(self, context, source, owned_size, prepare):
+        self.facility.stage(self, context, source, owned_size, prepare)
+
     def snapshot(self, store, digest):
         self.check(store)
-        return store._read_snapshot_for_cut(self, digest)
+        try:
+            return store._read_snapshot_for_cut(self, digest)
+        except BaseException:
+            self.discard()
+            raise
 
     def records(self, store):
         self.check(store)
-        return store._state_ref_records_for_cut(self)
+        try:
+            return store._state_ref_records_for_cut(self)
+        except BaseException:
+            self.discard()
+            raise
 
     def metadata(self, store, digest):
         self.check(store)
-        return store._snapshot_metadata_for_cut(self, digest)
+        try:
+            return store._snapshot_metadata_for_cut(self, digest)
+        except BaseException:
+            self.discard()
+            raise
 
     def open_local(self, store, reference, path, *, defer_payload=False):
         self.check(store)
-        return store._open_local_state_for_cut(
-            self, reference, path, defer_payload=defer_payload,
-        )
+        try:
+            return store._open_local_state_for_cut(
+                self, reference, path, defer_payload=defer_payload,
+            )
+        except BaseException:
+            self.discard()
+            raise
 
 
 def _node_key(key):
@@ -712,6 +898,12 @@ class Repo:
     rejects while a retained save or managed topology lease needs resources.
     Topology access through a Repo inherited after fork raises RuntimeError before
     acquiring its parent-process lock; children must construct a fresh Repo.
+    One internal validation facility owns both explicit authority cuts and bounded
+    immutable snapshot JSON facts. Successful cuts may retain primitive content;
+    later reads still check current file shape/bytes and domain associations.
+    Retention does not change live Object weak/strong cache policies or expose
+    shared mutable public values. ``clear_cache`` and accepted owner close discard
+    facts independently of those live-cache policies.
     """
     # Trackers
     _num_saves: int
@@ -811,6 +1003,7 @@ class Repo:
         self._closing = False
         self._closed = False
         self._validation_evidence = _ValidationEvidence(self)
+        self._content_owner_lease = None
         # Handles supplied by callers remain borrowed.  Paths and file-like
         # specifications opened by this Repo are released on successful close.
         self._owned_stores: list[Store] = []
@@ -1246,6 +1439,8 @@ class Repo:
 
         if self._configuration_pid != os.getpid():
             raise RuntimeError("Cannot retain Repo topology inherited from another process; open a fresh Repo.")
+        if self._closing or self._closed:
+            raise RuntimeError("Cannot retain topology after Repo close begins.")
         with self._configuration_lock:
             if self._closing or self._closed:
                 raise RuntimeError("Cannot retain topology after Repo close begins.")
@@ -1511,12 +1706,15 @@ class Repo:
         return reservation
 
     @classmethod
-    def _for_state_io(cls, stores):
+    def _for_state_io(cls, stores, *, _content_owner=None):
         """Create a non-owning authority-only Repo view over caller Stores.
 
         Args:
             stores: Existing Store instances selected by the caller for exact
                 state authority and any immutable seed reads.
+            _content_owner: Optional originating Repo whose bounded content
+                facility is explicitly borrowed. A topology lease retains its
+                lifetime; this view still owns distinct authority cuts.
 
         Returns:
             A call-owned Repo with independent memory caches and query federation
@@ -1525,9 +1723,22 @@ class Repo:
         Side Effects:
             Does not close, commit, or otherwise take ownership of caller Stores
             or their existing query-index connections.
+            A borrowing view detaches on successful close without clearing the
+            originating facility. Explicit clear advances the shared epoch.
         """
 
-        return cls(stores, _state_io=True)
+        if _content_owner is None:
+            return cls(stores, _state_io=True)
+        lease = _content_owner.retain_topology(allow_physical_duplicates=True)
+        lease.__enter__()
+        try:
+            result = cls(stores, _state_io=True)
+            result._validation_evidence = _content_owner._validation_evidence
+            result._content_owner_lease = lease
+            return result
+        except BaseException:
+            lease.__exit__(*sys.exc_info())
+            raise
 
     def get_cached(self, cdef):
         """Return a cached Object after live-object admission.
@@ -1722,7 +1933,7 @@ class Repo:
 
     def _read_cut(self, *, selected_stores=()):
         """Capture selections/topology before fences; substeps pass the cut explicitly."""
-        return self._validation_evidence.read_cut(selected_stores=selected_stores)
+        return self._validation_evidence.read_cut(self, selected_stores=selected_stores)
 
     def _metadata_holders(self, target, *, store=None) -> tuple[Store, ...]:
         """Select connected target-holding Stores without treating nonholders as votes."""
@@ -5512,6 +5723,8 @@ class Repo:
             skips commits and never triggers deletion-save publication.
             Accepted close discards derived validation evidence before cleanup;
             a failed close leaves that evidence empty when the Repo reopens.
+            An internal content borrower instead detaches on successful close;
+            its owner retains facts and cannot close while the borrower is open.
         """
 
         from .session import _assert_resource_close_allowed
@@ -5527,7 +5740,8 @@ class Repo:
             if self._closed:
                 return
             self._closing = True
-            self._validation_evidence.clear()
+            if self._content_owner_lease is None:
+                self._validation_evidence.clear()
         try:
             if flush and not self._state_io:
                 self.flush()
@@ -5543,11 +5757,16 @@ class Repo:
             if errors:
                 raise errors[0]
             if self._state_io:
-                self.clear_cache(strong=True, weak=True)
+                self.strong_obj_cache.clear()
+                self.weak_obj_cache.clear()
         except BaseException:
             with self._configuration_lock:
                 self._closing = False
             raise
+        if self._content_owner_lease is not None:
+            lease, self._content_owner_lease = self._content_owner_lease, None
+            self._validation_evidence = _ValidationEvidence(self)
+            lease.__exit__(None, None, None)
         with self._configuration_lock:
             self._closing = False
             self._closed = True
@@ -5599,6 +5818,10 @@ class Repo:
 
         Side Effects:
             Invalidates active read-cut evidence independently of live-tier flags.
+            Empties retained content facts and advances their shared epoch,
+            preventing in-flight preparation from repopulating cleared facts.
+            In-flight optional copies keep their reservations until preparation
+            finishes; ordinary decoding working memory is independent.
         """
         if self._configuration_pid != os.getpid():
             raise RuntimeError("Cannot clear inherited Repo; open a fresh Repo.")

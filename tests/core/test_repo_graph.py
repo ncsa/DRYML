@@ -10,8 +10,351 @@ from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.core.workspaces import WorkspaceManager
+from dryml.core._content_facts import _primitive_size
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
+
+
+def _stage_test_fact(cut, source, *, context=("test-primitive", 1), prepare=None):
+    """Exercise the narrow prepared-content interface without domain shortcuts."""
+    import sys
+    cut.stage_prepared(context, source, sys.getsizeof(source),
+                       (lambda: source) if prepare is None else prepare)
+
+
+def test_content_pending_budget_nested_cuts_and_admission_bypass():
+    """All active cuts share slots, and a denied reservation allocates no copy."""
+    repo = Repo()
+    facility = repo._validation_evidence
+    copies = []
+    with repo._read_cut() as outer:
+        for i in range(257):
+            source = str(i).encode()
+            _stage_test_fact(outer, source, prepare=lambda value=source: (copies.append(value), value)[1])
+        assert len(copies) == 256
+        assert len(facility._pending) == 256
+        assert not facility._resident
+        with repo._read_cut() as nested:
+            _stage_test_fact(nested, b"nested", prepare=lambda: pytest.fail("budget bypass copied"))
+        borrower = Repo._for_state_io((), _content_owner=repo)
+        with borrower._read_cut() as borrowed:
+            _stage_test_fact(borrowed, b"borrowed", prepare=lambda: pytest.fail("borrowed bypass copied"))
+        borrower.close(flush=False)
+        assert facility.high_water_entries == 256
+        assert facility.accounted_bytes <= facility.max_bytes
+    assert len(facility._resident) == 256
+    assert not facility._pending
+    with repo._read_cut() as cut:
+        _stage_test_fact(cut, b"new")
+    assert len(facility._resident) == 256
+    with repo._read_cut() as cut:
+        assert cut.prepared(("test-primitive", 1), b"0") is None
+        assert cut.prepared(("test-primitive", 1), b"new") == b"new"
+
+
+def test_content_exact_combined_entry_and_total_byte_limits():
+    """Key/source/value/bookkeeping, including pending copies, obey exact limits."""
+    import sys
+    repo = Repo()
+    facility = repo._validation_evidence
+    context = ("near-limit", 1)
+    source = b""
+    overhead = 2048 + _primitive_size(context) + sys.getsizeof(source) + sys.getsizeof(b"")
+    value = b"x" * (facility.max_entry_bytes - overhead)
+    with repo._read_cut() as cut:
+        for i in range(17):
+            # Distinct source bytes keep lookup buckets distinct while holding
+            # the combined charge exactly at the single-entry ceiling.
+            current = bytes([i])
+            cut.stage_prepared(context, current, sys.getsizeof(value) - 1,
+                               lambda: value[:-1])
+        assert len(facility._pending) == 16
+        assert facility.accounted_bytes == facility.max_bytes
+        assert facility.high_water_bytes == facility.max_bytes
+        cut.stage_prepared(context, source, sys.getsizeof(value) + 1,
+                           lambda: pytest.fail("oversized fact copied"))
+    assert len(facility._resident) == 16
+    with repo._read_cut() as cut:
+        cut.stage_prepared(context, b"later", sys.getsizeof(b"small"), lambda: b"small")
+    assert len(facility._resident) == 16
+    assert facility.accounted_bytes < facility.max_bytes
+
+
+def test_content_lru_touch_and_forced_bucket_collisions(monkeypatch):
+    """Four candidates, exact fresh bytes and context, never hash equality alone."""
+    import dryml.core.repo as repo_module
+    monkeypatch.setattr(repo_module, "_content_hash", lambda source: b"collision")
+    repo = Repo()
+    for source in (b"one", b"two", b"three", b"four"):
+        with repo._read_cut() as cut:
+            _stage_test_fact(cut, source)
+    with repo._read_cut() as cut:
+        assert cut.prepared(("test-primitive", 1), b"one") == b"one"
+        assert cut.prepared(("test-primitive", 2), b"one") is None
+        assert cut.prepared(("different-kind", 1), b"one") is None
+        assert cut.prepared(("test-primitive", 1), b"other") is None
+        _stage_test_fact(cut, b"five")
+    with repo._read_cut() as cut:
+        assert cut.prepared(("test-primitive", 1), b"two") is None
+        assert cut.prepared(("test-primitive", 1), b"one") == b"one"
+        assert cut.prepared(("test-primitive", 1), b"five") == b"five"
+    assert len(repo._validation_evidence._resident) == 4
+    assert repo._validation_evidence.high_water_entries == 4
+
+
+def test_prepared_implementation_identity_does_not_keep_callable_alive():
+    """Weak implementation identities cannot substitute a new or expired parser."""
+    import weakref
+    repo = Repo()
+    def first():
+        pass
+    def second():
+        pass
+    identity = weakref.ref(first)
+    with repo._read_cut() as cut:
+        _stage_test_fact(cut, b"same", context=("implementation", identity))
+    with repo._read_cut() as cut:
+        assert cut.prepared(("implementation", weakref.ref(second)), b"same") is None
+    del first
+    assert identity() is None
+    with repo._read_cut() as cut:
+        assert cut.prepared(("implementation", identity), b"same") is None
+
+
+def test_clear_during_preparation_keeps_charge_and_cannot_repopulate():
+    """Epoch clear retires in-flight facts while preserving their reservations."""
+    repo = Repo()
+    facility = repo._validation_evidence
+    with repo._read_cut() as cut:
+        def prepare():
+            assert not facility._lock._is_owned()
+            before = facility.accounted_bytes
+            assert before > 0
+            repo.clear_cache(strong=False, weak=False)
+            assert facility.accounted_bytes == before
+            assert not facility._resident
+            return b"value"
+        _stage_test_fact(cut, b"value", prepare=prepare)
+        assert facility.accounted_bytes == 0
+        with pytest.raises(RuntimeError, match="cleared"):
+            cut.check()
+    assert not facility._pending and not facility._resident
+
+
+def test_concurrent_misses_reserve_before_copy_and_do_not_hold_lock():
+    """A second thread can miss during preparation, but cannot exceed the budget."""
+    from threading import Event, Thread
+    repo = Repo()
+    facility = repo._validation_evidence
+    facility.max_entries = 1
+    entered, release = Event(), Event()
+    failures = []
+
+    def worker():
+        try:
+            with repo._read_cut() as cut:
+                def prepare():
+                    assert not facility._lock._is_owned()
+                    entered.set()
+                    assert release.wait(5)
+                    return b"same"
+                _stage_test_fact(cut, b"same", prepare=prepare)
+        except BaseException as error:
+            failures.append(error)
+
+    thread = Thread(target=worker)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        with repo._read_cut() as cut:
+            assert cut.prepared(("test-primitive", 1), b"same") is None
+            _stage_test_fact(cut, b"same", prepare=lambda: pytest.fail("concurrent bypass copied"))
+        assert len(facility._pending) == 1 and not facility._resident
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive() and not failures
+    assert facility.high_water_entries == 1
+    assert len(facility._resident) == 1 and not facility._pending
+
+
+def test_failed_scope_discards_staged_facts_and_partial_authority():
+    """Even a caught substep failure prevents admission from its owning cut."""
+    repo = Repo()
+    with repo._read_cut() as cut:
+        _stage_test_fact(cut, b"first")
+        cut.snapshots["partial"] = object()
+        cut.resolved_state_refs["partial"] = object()
+        cut.validated_state_refs.append(object())
+        cut.discard()
+        _stage_test_fact(cut, b"later", prepare=lambda: pytest.fail("failed scope prepared"))
+        assert not cut.snapshots and not cut.resolved_state_refs and not cut.validated_state_refs
+    assert repo._validation_evidence.accounted_bytes == 0
+    assert not repo._validation_evidence._resident
+
+
+def test_borrowed_facility_distinct_cuts_lifetime_clear_and_detach():
+    """Borrowers lease origin lifetime; only explicit clear shares the epoch."""
+    owner = Repo()
+    with owner._read_cut() as cut:
+        _stage_test_fact(cut, b"retained")
+    facility = owner._validation_evidence
+    borrower = Repo._for_state_io((), _content_owner=owner)
+    assert borrower._validation_evidence is facility
+    assert owner._topology_leases == 1
+    with pytest.raises(RuntimeError, match="topology lease"):
+        owner.close(flush=False)
+    with owner._read_cut() as outer, borrower._read_cut() as inner:
+        assert inner.repo is borrower and outer.repo is owner
+        assert inner.snapshots is not outer.snapshots
+        assert inner.prepared(("test-primitive", 1), b"retained") == b"retained"
+        owner.clear_cache(strong=False, weak=False)
+        for cut in (inner, outer):
+            with pytest.raises(RuntimeError, match="cleared"):
+                cut.check()
+    with owner._read_cut() as cut:
+        _stage_test_fact(cut, b"again")
+    borrower.close(flush=False)
+    assert borrower._validation_evidence is not facility
+    assert owner._topology_leases == 0
+    assert len(facility._resident) == 1
+    with Repo()._read_cut() as independent:
+        assert independent.prepared(("test-primitive", 1), b"again") is None
+    owner.close(flush=False)
+    assert not facility._resident and facility.accounted_bytes == 0
+
+
+def test_failed_owner_close_leaves_open_empty_facility(monkeypatch):
+    """Accepted close clears before flush; retry remains possible after failure."""
+    repo = Repo()
+    with repo._read_cut() as cut:
+        _stage_test_fact(cut, b"retained")
+    original = repo.flush
+    monkeypatch.setattr(repo, "flush", lambda: (_ for _ in ()).throw(RuntimeError("flush failed")))
+    with pytest.raises(RuntimeError, match="flush failed"):
+        repo.close()
+    assert not repo._closed and not repo._closing
+    assert not repo._validation_evidence._resident
+    assert repo._validation_evidence.accounted_bytes == 0
+    monkeypatch.setattr(repo, "flush", original)
+    repo.close(flush=False)
+
+
+def test_duplicate_concurrent_misses_share_accounting_not_authority():
+    """Concurrent preparation may duplicate, with both candidates charged."""
+    from threading import Barrier, Thread
+    repo = Repo()
+    facility = repo._validation_evidence
+    barrier = Barrier(2)
+    failures = []
+    def worker():
+        try:
+            with repo._read_cut() as cut:
+                def prepare():
+                    assert not facility._lock._is_owned()
+                    barrier.wait(timeout=5)
+                    return b"same"
+                _stage_test_fact(cut, b"same", prepare=prepare)
+        except BaseException as error:
+            failures.append(error)
+    threads = [Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert all(not thread.is_alive() for thread in threads) and not failures
+    assert len(facility._resident) == 2 and not facility._pending
+    assert facility.accounted_bytes == sum(fact.charge for fact in facility._resident.values())
+    assert facility.high_water_entries == 2
+    assert repo._topology_leases == 0
+
+
+def test_failed_borrower_close_keeps_owner_lease_and_content(monkeypatch):
+    """A borrower cleanup failure cannot clear or release the originating Repo."""
+    owner = Repo()
+    with owner._read_cut() as cut:
+        _stage_test_fact(cut, b"retained")
+    facility = owner._validation_evidence
+    borrower = Repo._for_state_io((), _content_owner=owner)
+    original = borrower._query_index.close
+    def fail():
+        raise RuntimeError("borrower cleanup failed")
+    monkeypatch.setattr(borrower._query_index, "close", fail)
+    with pytest.raises(RuntimeError, match="borrower cleanup failed"):
+        borrower.close(flush=False)
+    assert not borrower._closing and not borrower._closed
+    assert owner._topology_leases == 1 and len(facility._resident) == 1
+    monkeypatch.setattr(borrower._query_index, "close", original)
+    borrower.close(flush=False)
+    assert owner._topology_leases == 0 and len(facility._resident) == 1
+
+
+def test_content_foreign_thread_rejected_before_facility_bookkeeping():
+    """Foreign reads, staging and unwind leave owner reservations/resources intact."""
+    from threading import Thread
+    repo = Repo()
+    errors = []
+    with repo._read_cut() as cut:
+        _stage_test_fact(cut, b"pending")
+        def foreign():
+            for operation in (
+                lambda: cut.prepared(("test-primitive", 1), b"pending"),
+                lambda: _stage_test_fact(cut, b"foreign"),
+                lambda: cut.__exit__(None, None, None),
+            ):
+                try:
+                    operation()
+                except RuntimeError as error:
+                    errors.append(str(error))
+        thread = Thread(target=foreign)
+        thread.start()
+        thread.join(5)
+        assert not thread.is_alive()
+        assert len(errors) == 3 and all("thread" in error for error in errors)
+        assert len(repo._validation_evidence._pending) == 1
+        assert repo._topology_leases == 1
+    assert len(repo._validation_evidence._resident) == 1
+
+
+def test_content_inherited_owner_and_borrower_rejected_before_locks():
+    """Inherited content access cannot acquire either Repo's or the facility lock."""
+    import os
+    if not hasattr(os, "fork"):
+        pytest.skip("requires fork")
+    owner = Repo()
+    borrower = Repo._for_state_io((), _content_owner=owner)
+    with borrower._read_cut() as cut:
+        _stage_test_fact(cut, b"pending")
+        pid = os.fork()
+        if pid == 0:
+            class ForbiddenLock:
+                def __enter__(self):
+                    os._exit(2)
+                def __exit__(self, *args):
+                    os._exit(3)
+            owner._configuration_lock = borrower._configuration_lock = owner._validation_evidence._lock = ForbiddenLock()
+            for operation in (
+                lambda: cut.prepared(("test-primitive", 1), b"pending"),
+                lambda: _stage_test_fact(cut, b"foreign"),
+                lambda: cut.__exit__(None, None, None),
+                lambda: borrower._read_cut().__enter__(),
+                lambda: Repo._for_state_io((), _content_owner=owner),
+                borrower.clear_cache, owner._validation_evidence.clear,
+                lambda: borrower.close(flush=False),
+            ):
+                try:
+                    operation()
+                except RuntimeError:
+                    continue
+                except BaseException:
+                    os._exit(4)
+                os._exit(5)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        cut.check()
+    borrower.close(flush=False)
+    assert owner._topology_leases == 0
 
 
 class GraphLeaf(Object):

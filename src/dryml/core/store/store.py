@@ -397,6 +397,9 @@ class Store(ABC):
 
         Built-ins may supply a complete bundle under an explicitly owner-checked
         cut. Custom implementations retain their reader errors and lifetimes.
+        Only an eligible built-in read receives the cut's narrow prepared-content
+        interface. Fresh sibling bytes/shape and enclosing domain checks remain
+        mandatory; this seam establishes no ambient or Store-attached fact owner.
         """
         cut.check(self)
         record = self.read_state_ref_record(digest)

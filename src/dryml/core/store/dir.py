@@ -907,15 +907,48 @@ class DirStore(Store):
         return tuple(records)
 
     @staticmethod
-    def _read_json(path: str):
+    def _read_json(path: str, *, cut=None, kind=None):
         from dryml.formats import canonical_json_load_bytes
+        from dryml.formats import canonical as parser
+        from .._content_facts import _primitive_size, _freeze_json_fact, _thaw_json_fact
+        from weakref import ref
 
         try:
             mode = os.lstat(path).st_mode
             if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
                 raise StoreAuthorityError("snapshot metadata is not a regular file.")
             with open(path, "rb") as source:
-                return canonical_json_load_bytes(source.read(), max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
+                payload = source.read()
+            bounds = dict(max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
+            if cut is not None:
+                if kind not in {"placement.json", "metadata.json", "snapshot.json"}:
+                    raise ValueError("Only snapshot JSON siblings support retained primitives.")
+                implementations = (
+                    canonical_json_load_bytes, parser.canonical_json_loads,
+                    parser.deep_freeze_json, parser.json.loads,
+                    parser._reject_constant, parser._reject_duplicate_keys,
+                    parser.check_string, _freeze_json_fact, _thaw_json_fact,
+                    _primitive_size,
+                )
+                try:
+                    context = ("snapshot-json", kind, 1, "canonical-json", 1,
+                               tuple(bounds.items()), "exact-primitives", 1,
+                               tuple((ref(value), ref(getattr(value, "__code__", value)))
+                                     for value in implementations))
+                except TypeError:
+                    context = None
+                if context is not None:
+                    prepared = cut.prepared(context, payload)
+                    if prepared is not None:
+                        return _thaw_json_fact(prepared)
+            value = canonical_json_load_bytes(payload, **bounds)
+            if cut is not None and context is not None:
+                try:
+                    owned_size = _primitive_size(value)
+                except TypeError:
+                    return value
+                cut.stage_prepared(context, payload, owned_size, lambda: _freeze_json_fact(value))
+            return value
         except FileNotFoundError:
             return None
         except StoreAuthorityError:
@@ -1091,7 +1124,7 @@ class DirStore(Store):
 
     def _read_snapshot(
             self, digest: str, *, payloads: bool = False,
-            directory: str | None = None):
+            directory: str | None = None, cut=None):
         """Validate one v3 snapshot association without opening payloads by default."""
 
         from dryml.core.metadata import decode_snapshot_metadata
@@ -1117,9 +1150,14 @@ class DirStore(Store):
         record = self._read_file(os.path.join(directory, "state-ref.record"), StateRefRecord)
         if record is None or record.digest != digest:
             raise StoreAuthorityError("snapshot StateRef record does not match its directory.")
-        placement_envelope = self._read_json(os.path.join(directory, "placement.json"))
-        metadata_envelope = self._read_json(os.path.join(directory, "metadata.json"))
-        snapshot_envelope = self._read_json(os.path.join(directory, "snapshot.json"))
+
+        def sibling(name):
+            path = os.path.join(directory, name)
+            return self._read_json(path) if cut is None else self._read_json(path, cut=cut, kind=name)
+
+        placement_envelope = sibling("placement.json")
+        metadata_envelope = sibling("metadata.json")
+        snapshot_envelope = sibling("snapshot.json")
         try:
             placement_record = decode_record(placement_envelope)
             snapshot_record = decode_record(snapshot_envelope)
@@ -1242,7 +1280,7 @@ class DirStore(Store):
         key = self._cut_snapshot_key(cut, digest)
         snapshot = cut.snapshots.get(key)
         if snapshot is None:
-            snapshot = self._read_snapshot(digest)
+            snapshot = self._read_snapshot(digest, cut=cut)
             if snapshot is not None:
                 cut.check(self)
                 cut.snapshots[key] = snapshot
