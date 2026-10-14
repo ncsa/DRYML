@@ -255,8 +255,8 @@ def materialize_supervised(dataset, *, strict_numpy: bool = False):
                 x, y = np.asarray(x).copy(), np.asarray(y).copy()
             if flags[0]:
                 for index in range(count):
-                    x_values.append(nested_slice(x, index))
-                    y_values.append(nested_slice(y, index))
+                    x_values.append(x[index] if strict_numpy else nested_slice(x, index))
+                    y_values.append(y[index] if strict_numpy else nested_slice(y, index))
             else:
                 x_values.append(x)
                 y_values.append(y)

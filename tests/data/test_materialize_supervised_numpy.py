@@ -257,6 +257,7 @@ def test_convertible_foreign_and_masked_values_are_never_coerced():
             pytest.fail("foreign conversion attempted")
 
     for value in (Convertible(), np.ma.array([1, 2], dtype=np.float32, mask=[0, 1])):
+        # Runtime-only invalid values must bypass Definition argument freezing.
         source = TrackingDataset(())
         source.values = ((value, np.int64(1)), pair())
         source.cardinality = 2
