@@ -775,11 +775,11 @@ def _build_exact_state_load_plan(
         valid = False
         for store in cut.stores:
             try:
-                record = store.read_definition_record(expected.digest)
+                record = store._definition_record_for_cut(cut, expected.digest)
             except Exception as error:
                 missing.append(f"DefinitionRecord {label} in {store!r}: {error}")
                 continue
-            if record is not None and record.definition.graph_equal(definition):
+            if record is not None and record._matches_definition(definition):
                 valid = True
         if not valid:
             missing.append(f"DefinitionRecord {label}")

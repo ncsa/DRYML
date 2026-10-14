@@ -407,6 +407,11 @@ class Store(ABC):
             return None
         return record, None, None
 
+    def _definition_record_for_cut(self, cut, digest):
+        """Preserve custom public definition readers under an explicit cut."""
+        cut.check(self)
+        return self.read_definition_record(digest)
+
     def _snapshot_metadata_for_cut(self, cut, digest):
         """Read public metadata only after the caller admits the record target."""
         cut.check(self)

@@ -80,13 +80,22 @@ def exact_work_counts():
                 counts["json_reads"] += 1
             if name in {"canonical_json_load_bytes", "canonical_json_bytes", "deep_freeze_json",
                         "decode_record", "decode_snapshot_metadata", "_decode_framed",
-                        "decode_cdef_graph", "_canonical_labels", "_freeze_json_fact",
-                        "_thaw_json_fact", "_content_hash", "_primitive_size",
-                        "_context_matches", "_graph_and_labels", "_role_paths"}:
+                        "decode_cdef_graph", "encode_cdef_graph", "_canonical_labels", "_freeze_json_fact",
+                         "_thaw_json_fact", "_content_hash", "_primitive_size",
+                         "_context_matches", "_graph_and_labels", "_role_paths",
+                         "_eligible_graph_size", "_graph_content_size", "_array_content",
+                         "_freeze_graph_content", "_graph_content_matches", "_thaw_graph_content",
+                         "_realize_prepared_graph", "_build_graph_nodes", "_topology_projection"}:
                 counts[name] += 1
+            if name == "_digest" and frame.f_globals.get("__name__") == "dryml.core.store.records":
+                counts["store_record_id"] += 1
+            if name == "_canonical_bytes" and frame.f_globals.get("__name__") == "dryml.core.reference_values":
+                counts["reference_identity_encode"] += 1
+            if name == "dumps" and frame.f_globals.get("__name__") == "json":
+                counts["json_dumps"] += 1
             if name == "load" and frame.f_globals.get("__name__") == "dill._dill":
                 counts["dill_load"] += 1
-            if name == "graph_equal" and frame.f_back.f_code.co_name == "_validate_snapshot_locals":
+            if name == "_matches_definition" and frame.f_back.f_code.co_name == "_validate_snapshot_locals":
                 counts["path_definition_checks"] += 1
         if event == "c_call" and frame.f_code.co_name == "_validate_local_state_dir" and arg is hashlib.sha256:
             counts["definition_byte_hashes"] += 1
@@ -142,19 +151,32 @@ def test_snapshot_json_cold_warm_characterization(tmp_path, monkeypatch, record_
         assert counts["StateRefRecord"] == 1
         assert counts["DefinitionRecord"] == 2
         assert counts["dill_load"] == 8
-        assert counts["decode_cdef_graph"] > 0
+        assert counts["decode_cdef_graph"] == (3 if phase == 0 else 0)
+        assert counts["encode_cdef_graph"] == (3 if phase == 0 else 0)
+        assert counts["store_record_id"] > 0 and counts["reference_identity_encode"] > 0
         assert counts["_graph_and_labels"] > 0
         assert counts["_role_paths"] > 0
+        assert counts["_build_graph_nodes"] == 3
+        assert counts["_realize_prepared_graph"] == (0 if phase == 0 else 3)
+        assert counts["_eligible_graph_size"] == 3
+        assert counts["_graph_content_size"] > 0
+        if phase == 0:
+            assert counts["_graph_content_matches"] == 0
+        else:
+            assert counts["_graph_content_matches"] > 0
         assert plan.state_ref == state
     for key in ("json_reads", "decode_snapshot_metadata", "decode_record",
                 "canonical_json_bytes", "validate_payload",
                 "StateRefRecord", "DefinitionRecord", "dill_load",
-                "decode_cdef_graph", "_graph_and_labels", "_role_paths"):
+                "_build_graph_nodes", "_eligible_graph_size"):
         assert ledgers[0][key] == ledgers[1][key]
     assert ledgers[0]["deep_freeze_json"] == ledgers[1]["deep_freeze_json"] + 3
+    assert ledgers[1]["_graph_and_labels"] < ledgers[0]["_graph_and_labels"]
+    assert ledgers[1]["_role_paths"] < ledgers[0]["_role_paths"]
+    assert ledgers[1]["_graph_content_matches"] > 0
     for phase, ledger in zip(("cold", "warm"), ledgers):
         record_testsuite_property(f"u3_{phase}_ledger", repr(dict(sorted(ledger.items()))))
-    assert len(reader._validation_evidence._resident) == 3
+    assert len(reader._validation_evidence._resident) == 6
     assert not reader._validation_evidence._pending
     with reader._read_cut() as cut:
         first = cut.snapshot(store, state.digest())
@@ -215,7 +237,7 @@ def test_json_warm_reads_still_reject_changed_authority(tmp_path, damage):
     for _ in range(2):
         with pytest.raises(RepoLoadError, match="preflight is incomplete"):
             build_exact_state_load_plan(reader, state)
-        assert tuple(facility._resident.values()) == residents
+        assert {id(fact) for fact in facility._resident.values()} == {id(fact) for fact in residents}
         assert not facility._pending
 
 
@@ -264,7 +286,7 @@ def test_unknown_parser_identity_uses_uncached_existing_parser(tmp_path, monkeyp
     for _ in range(2):
         build_exact_state_load_plan(reader, state)
     assert len(calls) == 6
-    assert not reader._validation_evidence._resident
+    assert all(fact.context[0] != "snapshot-json" for fact in reader._validation_evidence._resident.values())
 
 
 def test_reopened_archive_borrows_content_but_revalidates_fresh_view(tmp_path):
@@ -292,7 +314,7 @@ def test_reopened_archive_borrows_content_but_revalidates_fresh_view(tmp_path):
         assert warm["validate_payload"] == 1
         assert warm["StateRefRecord"] > 0
         assert warm["dill_load"] > 0
-        assert len(facility._resident) == 3 and not facility._pending
+        assert len(facility._resident) == 6 and not facility._pending
         assert reader._topology_leases == 0
         assert all(store.base_dir.encode() not in fact.source for fact in facility._resident.values())
         reader.close(flush=False)
@@ -318,6 +340,8 @@ def test_complete_snapshot_reads_under_forced_content_hash_collisions(tmp_path, 
     assert len(reader._validation_evidence._resident) == 4
     with exact_work_counts() as counts:
         plan = build_exact_state_load_plan(reader, second)
+    # The first four pending components fill this bucket on a cold cut. Later
+    # graph candidates use fallback rather than exceeding the shared limit.
     assert counts["canonical_json_load_bytes"] == 0
     assert counts["json_reads"] == 3 and counts["validate_payload"] == 1
     assert plan.state_ref == second and plan.state_ref != first
@@ -543,7 +567,7 @@ def test_exact_plan_retains_order_across_default_change_and_alias_views(tmp_path
 
 @pytest.mark.parametrize("reader_name", [
     "read_state_ref_record", "read_snapshot_metadata", "open_local_state",
-    "validate_local_state", "_read_snapshot", "_validate_local_state_dir",
+    "validate_local_state", "_read_snapshot", "_validate_local_state_dir", "read_definition_record",
 ])
 def test_exact_reader_overrides_remain_authoritative(tmp_path, monkeypatch, reader_name):
     """An overridden built-in reader is called, never bypassed by private proof."""

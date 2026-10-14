@@ -29,6 +29,7 @@ from .store import LocalStateSource, Store, StoreAuthorityError, StoreCapability
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
 from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from ..query.sqlite.index import SQLiteStoreQueryIndex
+from ..reference_values import ObjectRef, StateRef
 
 
 QueryIndexPolicy = Literal["auto", "sqlite", "memory", "none"]
@@ -477,7 +478,7 @@ class DirStore(Store):
                 raise StoreAuthorityError("Store lacks current store-format.record; old or mixed authority is unsupported.")
             self._atomic_write(self.store_format_path, StoreFormatRecord().to_bytes())
 
-    def _read_file(self, path: str, record_type):
+    def _read_file(self, path: str, record_type, *, preparation=None):
         try:
             mode = os.lstat(path).st_mode
         except FileNotFoundError:
@@ -486,7 +487,10 @@ class DirStore(Store):
             raise StoreAuthorityError(f"Store record is not a regular file: {path!r}.")
         try:
             with open(path, "rb") as source:
-                return record_type.from_bytes(source.read())
+                payload = source.read()
+            if preparation is not None:
+                return record_type._from_bytes_prepared(payload, preparation)
+            return record_type.from_bytes(payload)
         except StoreRecordError as error:
             raise StoreAuthorityError(f"Malformed Store record {path!r}: {error}") from error
 
@@ -633,11 +637,38 @@ class DirStore(Store):
         )
 
     def read_definition_record(self, digest: str) -> DefinitionRecord | None:
-        """Read a validated DefinitionRecord and recompute its path key."""
-        record = self._read_file(self._definition_path(digest), DefinitionRecord)
+        """Fully validate current definition bytes and their direct path association.
+
+        Args:
+            digest (str): DefinitionRecord digest naming the direct record path.
+        Returns:
+            Fresh DefinitionRecord, or None when absent.
+        Raises:
+            StoreAuthorityError: For malformed bytes, file shape or path mismatch.
+        Side Effects:
+            Reads and freshly decodes trusted dill; public reads retain no facts.
+        """
+        return self._read_definition_record(digest)
+
+    def _read_definition_record(self, digest, preparation=None):
+        if preparation is None:
+            record = self._read_file(self._definition_path(digest), DefinitionRecord)
+        else:
+            record = self._read_file(self._definition_path(digest), DefinitionRecord, preparation=preparation)
         if record is not None and record.digest != digest:
             raise StoreAuthorityError("DefinitionRecord digest does not match its direct path.")
         return record
+
+    def _definition_record_for_cut(self, cut, digest):
+        if not self._can_reuse_exact_validation():
+            return super()._definition_record_for_cut(cut, digest)
+        from .records import _RecordPreparation
+        cut.check(self)
+        try:
+            return self._read_definition_record(digest, _RecordPreparation(cut))
+        except BaseException:
+            cut.discard()
+            raise
 
     def write_definition_record(
             self, record: DefinitionRecord, *, stored_root: bool = True
@@ -834,7 +865,7 @@ class DirStore(Store):
 
     def _validate_local_state_dir(
             self, directory: str, manifest: LocalStateManifest | None,
-            *, defer_payload: bool = False):
+            *, defer_payload: bool = False, preparation=None):
         """Validate a physical payload once and return its manifest/definition.
 
         A supplied manifest is additionally matched to on-disk authority. Passing
@@ -863,7 +894,10 @@ class DirStore(Store):
         definition_bytes = Path(directory, "def.pkl").read_bytes()
         if hashlib.sha256(definition_bytes).hexdigest() != manifest.definition_file_digest:
             raise StoreAuthorityError("local state definition file bytes do not match manifest authority.")
-        definition = self._read_file(os.path.join(directory, "def.pkl"), DefinitionRecord)
+        if preparation is None:
+            definition = self._read_file(os.path.join(directory, "def.pkl"), DefinitionRecord)
+        else:
+            definition = self._read_file(os.path.join(directory, "def.pkl"), DefinitionRecord, preparation=preparation)
         if definition is None or definition.digest != manifest.definition_digest or definition.graph_hash != manifest.graph_hash:
             raise StoreAuthorityError("local state definition does not match manifest graph and definition digests.")
         try:
@@ -1147,7 +1181,12 @@ class DirStore(Store):
         if not required.issubset(entries) or any(
                 not entries[name].is_file(follow_symlinks=False) for name in required):
             raise StoreAuthorityError("snapshot lacks required complete metadata siblings.")
-        record = self._read_file(os.path.join(directory, "state-ref.record"), StateRefRecord)
+        if cut is None:
+            record = self._read_file(os.path.join(directory, "state-ref.record"), StateRefRecord)
+        else:
+            from .records import _RecordPreparation
+            record = self._read_file(os.path.join(directory, "state-ref.record"), StateRefRecord,
+                                     preparation=_RecordPreparation(cut))
         if record is None or record.digest != digest:
             raise StoreAuthorityError("snapshot StateRef record does not match its directory.")
 
@@ -1215,7 +1254,7 @@ class DirStore(Store):
 
     def _validate_snapshot_locals(
             self, snapshot, directory, *, paths=None, defer_payload=False,
-            validated=None):
+            validated=None, preparation=None):
         """Share physical work while checking every placement/definition binding."""
         record, _, local = snapshot
         validated = {} if validated is None else validated
@@ -1238,8 +1277,9 @@ class DirStore(Store):
                     )
                     if manifest is None:
                         raise StoreAuthorityError("snapshot payload manifest does not match placement.")
+                options = {} if preparation is None else {"preparation": preparation}
                 evidence = self._validate_local_state_dir(
-                    target, manifest, defer_payload=defer_payload,
+                    target, manifest, defer_payload=defer_payload, **options,
                 )
                 if evidence is None:
                     evidence = (manifest, self._read_file(
@@ -1251,7 +1291,7 @@ class DirStore(Store):
             if defer_payload:
                 self._require_deferred_local_state_support(manifest)
             expected = record.state_ref.object.at(path).definition
-            if definition is None or not definition.definition.graph_equal(expected):
+            if definition is None or not definition._matches_definition(expected):
                 raise StoreAuthorityError("snapshot payload definition does not match StateRef path.")
             if reusable:
                 validated[key] = evidence
@@ -1314,9 +1354,12 @@ class DirStore(Store):
         key = self._cut_snapshot_key(cut, reference.digest())
         directory = key[-1]
         validated = cut.locals.setdefault(key, {})
+        from .records import _RecordPreparation
+        preparation = _RecordPreparation(cut)
         if not defer_payload:
             if key not in cut.eager_snapshots:
-                manifests = self._validate_snapshot_locals(snapshot, directory, validated=validated)
+                manifests = self._validate_snapshot_locals(snapshot, directory, validated=validated,
+                                                            preparation=preparation)
                 cut.check(self)
                 cut.eager_snapshots[key] = manifests
             manifests = cut.eager_snapshots[key]
@@ -1324,6 +1367,7 @@ class DirStore(Store):
             manifests = self._validate_snapshot_locals(
                 snapshot, directory, paths=(path,), defer_payload=True,
                 validated=validated,
+                preparation=preparation,
             )
         manifest = manifests[path]
         cut.check(self)
@@ -1872,7 +1916,7 @@ DirStore.publish_snapshot._dryml_annotation_phase_callback = True
 _EXACT_READER_NAMES = (
     "read_state_ref_record", "read_snapshot_metadata", "iter_state_ref_records",
     "open_local_state", "validate_local_state", "_open_local_state_for_exact_load",
-    "read_definition_record", "_read_snapshot", "_validate_local_state_dir",
+    "read_definition_record", "_read_definition_record", "_read_snapshot", "_validate_local_state_dir",
     "_validate_snapshot_locals", "_read_file", "_read_json", "_snapshot_path",
     "_require_deferred_local_state_support", "authority_fence_key",
     "authority_read_fence", "writer_lock", "_cut_snapshot_key",
@@ -1882,6 +1926,7 @@ _EXACT_READER_NAMES = (
 _EXACT_READERS = {DirStore: {name: getattr(DirStore, name) for name in _EXACT_READER_NAMES}}
 _EXACT_PAYLOAD_VALIDATOR = LocalStateManifest.validate_payload
 _EXACT_RECORD_VALIDATORS = tuple(
-    (owner, "from_bytes", owner.from_bytes.__func__)
+    (owner, name, getattr(owner, name).__func__)
     for owner in (StateRefRecord, DefinitionRecord, LocalStateManifest)
-)
+    for name in ("from_bytes", "from_data", "_decode_framed")
+) + tuple((owner, "from_data", owner.from_data.__func__) for owner in (ObjectRef, StateRef))

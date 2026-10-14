@@ -899,8 +899,10 @@ class Repo:
     Topology access through a Repo inherited after fork raises RuntimeError before
     acquiring its parent-process lock; children must construct a fresh Repo.
     One internal validation facility owns both explicit authority cuts and bounded
-    immutable snapshot JSON facts. Successful cuts may retain primitive content;
-    later reads still check current file shape/bytes and domain associations.
+    immutable snapshot JSON and eligible token-neutral graph preparation facts.
+    Successful cuts may retain primitive content; later reads still check current
+    file shape/bytes, fresh framed dill and domain associations. Graph realization
+    allocates fresh tokens, symbols, containers and arrays on every independent read.
     Retention does not change live Object weak/strong cache policies or expose
     shared mutable public values. ``clear_cache`` and accepted owner close discard
     facts independently of those live-cache policies.
@@ -3996,11 +3998,21 @@ class Repo:
         return value
 
     def has_cdef_light(self, cdef: ConcreteDefinition) -> bool:
-        """Return whether current definition authority exists in any Store."""
-        from .store.records import DefinitionRecord
+        """Inspect whether current definition authority exists in a connected Store.
 
-        digest = DefinitionRecord(cdef).digest
-        return any(store.read_definition_record(digest) is not None for store in self.stores)
+        Args:
+            cdef (ConcreteDefinition): Exact structural graph authority to inspect.
+        Returns:
+            bool: Whether a validated DefinitionRecord currently exists.
+        Raises:
+            StoreAuthorityError: For corrupt advertised definition authority.
+            RuntimeError: If an eligible built-in read cannot retain this Repo.
+        Side Effects:
+            Reads fresh bytes and dill without payloads or construction. Eligible
+            built-ins explicitly borrow bounded preparation in a fresh read cut;
+            custom/overridden readers retain their public uncached behavior.
+        """
+        return self._first_store_with(cdef) is not None
 
     def hydrate_from_stores(self):
         """
@@ -4345,6 +4357,13 @@ class Repo:
         from .store.records import DefinitionRecord
 
         digest = DefinitionRecord(cdef).digest
+        if self.stores and all(getattr(store, "_can_reuse_exact_validation", lambda: False)()
+                               for store in self.stores):
+            with self._read_cut() as cut:
+                for store in cut.stores:
+                    if store._definition_record_for_cut(cut, digest) is not None:
+                        return store
+            return None
         for st in self.stores:
             if st.read_definition_record(digest) is not None:
                 return st

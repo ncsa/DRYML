@@ -500,11 +500,11 @@ class ZipStore(DirStore):
         self._assert_open()
         super().preflight_publication(operation, local_state=local_state)
 
-    def _read_file(self, path, record_type):
+    def _read_file(self, path, record_type, *, preparation=None):
         """Read one record only while this extracted transaction remains live."""
 
         self._assert_open()
-        return super()._read_file(path, record_type)
+        return super()._read_file(path, record_type, preparation=preparation)
 
     def _read_json(self, path, *, cut=None, kind=None):
         """Read one JSON sidecar only while this transaction remains live."""

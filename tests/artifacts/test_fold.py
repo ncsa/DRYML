@@ -577,6 +577,107 @@ def test_fold_named_mean_program_keeps_the_first_batch_and_uneven_weighting(tmp_
     assert (CountingDataset.iterations, CountingDataset.yields) == (1, 2)
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+def test_mean_fold_definition_read_characterization(tmp_path, record_testsuite_property):
+    """Ordinary exact Fold validation reaches independent simple Method records."""
+    from collections import Counter
+    from dryml.artifacts import mean
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.symbol import ImportRef
+    from dryml.core.cdef_codec import _eligible_graph_size
+    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
+
+    store = DirStore(tmp_path / "mean", query_index="none")
+    writer = Repo(store)
+    fold = mean(CountingDataset([np.ones((1, 2), dtype=np.float32)]), mode="coordinate")
+    state = writer.save_object(fold)
+    reader = Repo(store)
+    ledgers = []
+    for _ in range(2):
+        counts = Counter()
+        records = []
+        method_counts = Counter()
+        def observe(frame, event, arg):
+            if event == "call":
+                name = frame.f_code.co_name
+                if name == "decode" and getattr(frame.f_locals.get("record_type"), "__name__", None) == "DefinitionRecord":
+                    records.append(frame.f_locals["payload"]["definition"])
+                if name in {"_graph_and_labels", "_role_paths", "_build_graph_nodes", "_realize_prepared_graph"}:
+                    owner = frame.f_back
+                    while owner is not None:
+                        if owner.f_code.co_name == "decode" and "record_type" in owner.f_locals:
+                            payload = owner.f_locals["payload"]
+                            if payload.get("schema") == "definition":
+                                label = payload["definition"]["nodes"][0]["cls"].qualname
+                                if label in {"MeanInitial", "MeanUpdate", "MeanFinalize"}:
+                                    method_counts[name] += 1
+                            break
+                        owner = owner.f_back
+            if previous is not None:
+                previous(frame, event, arg)
+        previous = sys.getprofile()
+        with exact_work_counts() as counts:
+            previous = sys.getprofile()
+            sys.setprofile(observe)
+            try:
+                plan = build_exact_state_load_plan(reader, state)
+            finally:
+                sys.setprofile(previous)
+        assert store._can_reuse_exact_validation()
+        names = [graph["nodes"][0]["cls"].qualname for graph in records]
+        for name in ("MeanInitial", "MeanUpdate", "MeanFinalize"):
+            graph = next(graph for graph in records if graph["nodes"][0]["cls"].qualname == name)
+            assert len(graph["nodes"]) == 1
+            assert type(graph["nodes"][0]["cls"]) is ImportRef
+            assert graph["nodes"][0]["parameters"]["kind"] == "dict"
+            assert _eligible_graph_size(graph) > 0
+        assert "Fold" in names
+        fold_graph = next(graph for graph in records if graph["nodes"][0]["cls"].qualname == "Fold")
+        source = dict(fold_graph["nodes"][0]["parameters"]["items"])["src"]
+        assert source["kind"] == "link" and source["edge_kind"] == "ref"
+        with pytest.raises(TypeError):
+            _eligible_graph_size(fold_graph)
+        assert counts["dill_load"] == 14
+        assert method_counts["_build_graph_nodes"] == 3
+        if ledgers:
+            assert method_counts["_graph_and_labels"] == method_counts["_role_paths"] == 0
+            assert method_counts["_realize_prepared_graph"] == 3
+        else:
+            assert method_counts["_graph_and_labels"] > 0
+            assert method_counts["_role_paths"] > 0
+        assert plan.state_ref == state
+        ledgers.append(dict(counts))
+    record_testsuite_property("u6_mean_ledgers", repr(ledgers))
+    assert ledgers[1]["_graph_and_labels"] < ledgers[0]["_graph_and_labels"]
+    assert ledgers[1]["decode_cdef_graph"] == ledgers[0]["decode_cdef_graph"] - 3
+
+
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+def test_mean_fold_embedded_source_reference_uses_full_graph_fallback(tmp_path):
+    """An exact saved source remains inert, excluded data in the Fold root."""
+    from dryml.artifacts import mean
+    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core.cdef_codec import _eligible_graph_size, encode_cdef_graph
+    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
+    store = DirStore(tmp_path / "store", query_index="none")
+    writer = Repo(store)
+    source = writer.save_object(CountingDataset([np.ones((1, 2), dtype=np.float32)]))
+    fold = mean(source, mode="coordinate")
+    state = writer.save_object(fold)
+    graph = encode_cdef_graph(state.definition)
+    src = dict(graph["nodes"][0]["parameters"]["items"])["src"]
+    assert src["kind"] == "link" and src["target"]["kind"] == "state_ref"
+    with pytest.raises(TypeError):
+        _eligible_graph_size(graph)
+    reader = Repo(store)
+    build_exact_state_load_plan(reader, state)
+    with exact_work_counts() as counts:
+        plan = build_exact_state_load_plan(reader, state)
+    assert counts["decode_cdef_graph"] > 0
+    assert counts["_realize_prepared_graph"] == 3
+    assert len(plan.actions) == 1
+
+
 @pytest.mark.parametrize("backend", ("torch", "tf"))
 def test_fold_rejects_restored_native_tensor_payloads(tmp_path, backend, request):
     """The result-only persistence boundary never admits a heavyweight tensor."""

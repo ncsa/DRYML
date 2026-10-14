@@ -144,7 +144,7 @@ lifetime after the cut expires. Direct directories remain Store-owned; closing a
 ZipStore removes its extracted paths. Holding a source does not prove that it is
 valid for another independent operation, which always validates fresh authority.
 
-### Bounded Snapshot Content Reuse
+### Bounded Snapshot And Graph Content Reuse
 
 The same Repo-owned validation facility may retain parsed primitive content for
 the snapshot's `placement.json`, `metadata.json`, and `snapshot.json` siblings.
@@ -162,8 +162,39 @@ per bucket. Collisions, changed context or changed bytes cannot substitute anoth
 fact. Envelope freezing, encoding/ID verification, domain decoding, sibling/target
 association, aggregate closure and live-lineage checks still run. No decoded domain
 objects, references, live Objects, CDefs, annotations, resource handles, extraction
-paths, or payload-validity verdicts are retained. This is JSON primitive reuse;
-graph preparation is not accelerated by this tier.
+paths, or payload-validity verdicts are retained.
+
+The same facility also retains token-neutral preparation for eligible
+`DefinitionRecord` and `StateRefRecord` graphs, through the existing record and
+reference owners. Exact preflight and plain built-in `Repo.has_cdef_light()` reads
+pass this private interface explicitly. Each read first checks current file shape,
+frame, size and trailing bytes and **freshly decodes dill**. A graph hit additionally
+requires lossless fresh-content matching (types, tags, labels, order, role bits,
+scalar bits and array representation), exact source bytes, and matching codec,
+normalizer and decoding-policy implementation/version context. Neither a digest
+nor public graph/reference equality is sufficient. Malformed data cannot be
+sorted, relabelled or deduplicated into a hit.
+
+Eligible graphs have exact `ImportRef` class symbols, primitive scalar/container
+and link tags, canonical primitive mapping keys, and standard non-object numeric
+or bool ndarrays (including exact `FrozenNDArray`). Arrays are retained as owned
+immutable bytes with dtype/shape/representation descriptors. SourceSpec classes,
+quotations, embedded ObjectRef/StateRef leaves, arbitrary atoms/subclasses and
+object/extension dtypes fall back to ordinary complete decoding. In an ordinary
+small mean Fold exact preflight, the separately stored `MeanInitial`, `MeanUpdate`
+and `MeanFinalize` records benefit; the Ref-bearing Fold root containing unsupported
+source data follows the full path.
+
+Warm eligible reads omit repeated canonical label/order proof and graph topology,
+hash and role derivation inside the prepared record path. Existing codec node
+construction still allocates fresh private tokens, ImportRefs, containers and
+arrays, preserving sharing within one graph but never across independent decodes.
+Current path/ObjectId/state/target associations and materializing class abstractness
+and recorded-role admission remain mandatory. Prepared topology comparison still
+derives the current target's topology; there is no universal live-definition
+equality cache. Whole snapshot environment/requirements envelopes still undergo
+freezing, encoding/ID verification and domain decoding. Fresh matching, hashing,
+realization, association checks and payload validation remain size-dependent work.
 
 The internal LRU admits at most **256 entries, 32 MiB of accounted owned data, and
 2 MiB per entry**. Resident facts and pending reservations share those limits

@@ -5,11 +5,17 @@ stored, but every backend must use these validators before authority becomes
 visible.  Record bytes use a framed dill payload so arbitrary trailing bytes
 cannot be accepted as authority; record identity is always derived from the
 validated logical fields rather than from serializer output.
+
+Public decoders fully validate each read. A private explicitly passed preparation
+adapter borrows a caller's bounded content facility only after fresh frame/dill
+admission; it owns no cache or Store authority and retains no resolved classes or
+token-bearing graphs. Eligible hits still realize fresh values and check enclosing
+record identities and current path/ObjectId associations.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import io
 import json
@@ -139,7 +145,22 @@ class _Record:
 
     @classmethod
     def from_bytes(cls, data: bytes):
-        """Decode one complete framed record and reject trailing or wrong bytes."""
+        """Fully validate a framed record, freshly decoding its dill payload.
+
+        Args:
+            data (bytes): Complete current-schema frame and trusted dill payload.
+        Returns:
+            A fresh record with fresh graph tokens and caller-owned values.
+        Raises:
+            StoreRecordError: For oversized, malformed, trailing, incompatible,
+                or logically inconsistent authority.
+        Side Effects:
+            Executes trusted dill decoding; retains no cross-call content.
+        """
+        return cls.from_data(cls._decode_framed(data))
+
+    @classmethod
+    def _decode_framed(cls, data):
         if not isinstance(data, bytes) or len(data) > _MAX_RECORD_BYTES:
             raise StoreRecordError(f"{cls.schema} record bytes are missing or oversized.")
         prefix = _FORMAT_MAGIC + cls.schema.encode("ascii") + b"/1\n"
@@ -152,7 +173,96 @@ class _Record:
             raise StoreRecordError(f"Malformed {cls.schema} record payload.") from error
         if stream.read(1):
             raise StoreRecordError(f"{cls.schema} record has trailing data.")
-        return cls.from_data(payload)
+        return payload
+
+    @classmethod
+    def _from_bytes_prepared(cls, data, preparation):
+        """Fresh frame/dill admission precedes exact-matched prepared content."""
+        try:
+            payload = cls._decode_framed(data)
+            return preparation.decode(cls, data, payload)
+        except BaseException:
+            preparation.discard()
+            raise
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRecord:
+    content: tuple
+    graph: tuple
+    graph_hash: str
+    structural_hash: str | None
+    roles: tuple | None
+    topology: tuple
+
+
+class _RecordPreparation:
+    """Narrow explicit adapter to a cut's bounded, success-staged content API."""
+
+    def __init__(self, cut):
+        self.cut = cut
+
+    def discard(self):
+        self.cut.discard()
+
+    def decode(self, record_type, source, payload):
+        from .. import cdef_codec as codec
+        from weakref import ref
+
+        if record_type not in (DefinitionRecord, StateRefRecord):
+            return record_type.from_data(payload)
+        try:
+            graph = (payload["definition"] if record_type is DefinitionRecord
+                     else payload["state_ref"]["object"]["definition"])
+            codec._eligible_graph_size(graph)
+            size = codec._graph_content_size(payload)
+            # Functions and code objects are both guarded: rebinding and replacing
+            # __code__ must each retire facts without retaining implementations.
+            from .. import reference_values, canonical, definition
+            from ..freeze import FrozenNDArray
+            from ..cdef_graph import ConcreteDefinitionGraph
+            implementations = [value for module in (codec, reference_values, canonical)
+                               for value in vars(module).values()
+                               if isinstance(value, type(lambda: None))]
+            implementations += [record_type.from_data.__func__, _Record._decode_framed.__func__,
+                                record_type._from_data_prepared.__func__,
+                                _RecordPreparation.decode, _role_paths, _digest,
+                                ObjectRef.__init__, StateRef.__init__,
+                                ObjectRef._from_data_prepared.__func__, StateRef._from_data_prepared.__func__,
+                                ObjectRef._identity_data, ObjectRef.digest, StateRef.digest,
+                                ConcreteDefinition._from_bound_record.__func__,
+                                definition.validate_canonical_bound_arguments,
+                                FrozenNDArray.from_array]
+            implementations += [ConcreteDefinitionGraph.from_root.__func__,
+                                definition._structural_value_equal,
+                                DefinitionRecord.graph_hash.fget, DefinitionRecord.structural_hash.fget,
+                                DefinitionRecord.roles.fget, DefinitionRecord.digest.fget,
+                                DefinitionRecord._matches_definition]
+            context = ("store-graph-preparation", record_type.schema, record_type.version,
+                       codec.CDEF_GRAPH_CODEC_VERSION, reference_values._REFERENCE_CODEC_VERSION,
+                       codec._GRAPH_PREPARATION_POLICY, _MAX_RECORD_BYTES,
+                       tuple((ref(value), ref(value.__code__)) for value in implementations))
+        except (TypeError, ValueError, KeyError, AttributeError, RecursionError):
+            return record_type.from_data(payload)
+        fact = self.cut.prepared(context, source)
+        if fact is not None and codec._graph_content_matches(payload, fact.content):
+            return record_type._from_data_prepared(payload, fact)
+        result = record_type.from_data(payload)
+        # Both complete original graph validation and enclosing record identity /
+        # role checks have succeeded before any optional owned copy is reserved.
+        graph_hash = result.graph_hash if record_type is DefinitionRecord else result.state_ref.definition.graph_hash()
+        structural_hash = result.structural_hash if record_type is DefinitionRecord else None
+        roles = result.roles if record_type is DefinitionRecord else None
+        definition = result.definition if record_type is DefinitionRecord else result.state_ref.definition
+        topology = codec._topology_projection(definition)
+        self.cut.stage_prepared(context, source, size + codec._graph_content_size(graph)
+                                + codec._graph_content_size(roles) + codec._graph_content_size(topology) + 1024,
+                                lambda: _PreparedRecord(
+                                    codec._freeze_graph_content(payload), codec._freeze_graph_content(graph),
+                                    graph_hash, structural_hash, codec._freeze_graph_content(roles),
+                                    codec._freeze_graph_content(topology),
+                                ))
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,32 +289,69 @@ class StoreFormatRecord(_Record):
 
 @dataclass(frozen=True, slots=True)
 class DefinitionRecord(_Record):
-    """Immutable graph-aware CDef authority grouped by structural identity."""
+    """Graph-aware CDef authority grouped by structural identity.
+
+    Args:
+        definition (ConcreteDefinition): Root graph with recorded role authority.
+    Raises:
+        StoreRecordError: If the root is not a ConcreteDefinition.
+    Side Effects:
+        None at construction. Public decoding fully validates graph/record
+        identity. Internal exact-matched preparation realizes fresh graph tokens,
+        symbols, containers and arrays; role results are always detached.
+    """
 
     schema: ClassVar[str] = "definition"
     definition: ConcreteDefinition
+    _prepared: _PreparedRecord | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.definition, ConcreteDefinition):
             raise StoreRecordError("DefinitionRecord definition must be a ConcreteDefinition.")
 
+    def _matches_definition(self, definition):
+        if self._prepared is None:
+            return self.definition.graph_equal(definition)
+        from ..cdef_codec import _topology_projection, _graph_content_matches
+        return _graph_content_matches(_topology_projection(definition), self._prepared.topology)
+
     @property
     def graph_hash(self) -> str:
+        """Return the validated topology digest (str), without Store IO."""
+        if self._prepared is not None:
+            return self._prepared.graph_hash
         return self.definition.graph_hash()
 
     @property
     def structural_hash(self) -> str:
+        """Return the validated structural digest (str), without Store IO."""
+        if self._prepared is not None:
+            return self._prepared.structural_hash
         return self.definition.stable_hash()
 
     @property
     def roles(self) -> tuple[dict[str, Any], ...]:
+        """Return detached primary-path/role mappings; mutation affects no fact."""
+        if self._prepared is not None:
+            from ..cdef_codec import _thaw_graph_content
+            return _thaw_graph_content(self._prepared.roles)
         return _role_paths(self.definition)
 
     @property
     def digest(self) -> str:
+        """Return the canonical graph/hash/role record digest (str), without IO."""
         return _digest("dryml-definition-record-v1", {"graph_hash": self.graph_hash, "structural_hash": self.structural_hash, "roles": self.roles})
 
     def to_data(self) -> dict[str, Any]:
+        """Return detached logical authority, freshly encoding the graph.
+
+        Returns:
+            dict: Closed current-schema graph, role, hash and digest fields.
+        Raises:
+            ValueError: If graph authority cannot be canonically encoded.
+        Side Effects:
+            No Store IO or class resolution; does not expose retained containers.
+        """
         return {
             "schema": self.schema, "version": self.version, "digest": self.digest,
             "graph_hash": self.graph_hash, "structural_hash": self.structural_hash,
@@ -213,6 +360,21 @@ class DefinitionRecord(_Record):
 
     @classmethod
     def from_data(cls, data: Any) -> "DefinitionRecord":
+        """Validate logical authority and return a fresh DefinitionRecord.
+
+        Args:
+            data (Mapping): Closed current-schema graph, hashes, digest and roles.
+        Returns:
+            Fresh graph-aware record with regenerated private node tokens.
+        Raises:
+            StoreRecordError: For malformed graph, identity or role authority.
+        Side Effects:
+            No class resolution or Store IO; all graph derivations run afresh.
+        """
+        return cls._from_data_prepared(data, None)
+
+    @classmethod
+    def _from_data_prepared(cls, data, prepared):
         data = _require_exact(data, {"schema", "version", "digest", "graph_hash", "structural_hash", "definition", "roles"}, cls.schema)
         if data["schema"] != cls.schema or data["version"] != cls.version:
             raise StoreRecordError("Unsupported DefinitionRecord version.")
@@ -220,10 +382,15 @@ class DefinitionRecord(_Record):
         _digest_value(data["graph_hash"], "definition graph hash")
         _digest_value(data["structural_hash"], "definition structural hash")
         try:
-            definition = decode_cdef_graph(data["definition"])
+            if prepared is None:
+                definition = decode_cdef_graph(data["definition"])
+            else:
+                from ..cdef_codec import _realize_prepared_graph
+                definition = _realize_prepared_graph(prepared.graph)
         except Exception as error:
             raise StoreRecordError("DefinitionRecord graph authority is invalid.") from error
         result = cls(definition)
+        object.__setattr__(result, "_prepared", prepared)
         if data["graph_hash"] != result.graph_hash or data["structural_hash"] != result.structural_hash or data["digest"] != result.digest:
             raise StoreRecordError("DefinitionRecord digest or hash fields do not match graph authority.")
         if not isinstance(data["roles"], list) or tuple(data["roles"]) != result.roles:
@@ -439,7 +606,16 @@ class LocalStateManifest(_Record):
 
 @dataclass(frozen=True, slots=True)
 class StateRefRecord(_Record):
-    """Immutable complete StateRef authority record."""
+    """Complete StateRef authority with fresh graph/reference decoding.
+
+    Args:
+        state_ref (StateRef): Complete exact object/path/local-state association.
+    Raises:
+        StoreRecordError: If the value is not a StateRef.
+    Side Effects:
+        None at construction. Internal eligible preparation still validates every
+        current ObjectId/path/state association; public decoding fully validates.
+    """
 
     schema: ClassVar[str] = "state-ref"
     state_ref: StateRef
@@ -457,11 +633,28 @@ class StateRefRecord(_Record):
 
     @classmethod
     def from_data(cls, data: Any) -> "StateRefRecord":
+        """Fully validate a closed StateRefRecord mapping and return fresh values.
+
+        Args:
+            data (Mapping): Current schema/version, digest and reference payload.
+        Returns:
+            Fresh StateRefRecord preserving ObjectIds and exact path associations.
+        Raises:
+            StoreRecordError: For malformed references or inconsistent digests.
+        Side Effects:
+            No resolution or Store IO. Public decoding never borrows preparation.
+        """
+        return cls._from_data_prepared(data, None)
+
+    @classmethod
+    def _from_data_prepared(cls, data, prepared):
         data = _require_exact(data, {"schema", "version", "digest", "state_ref"}, cls.schema)
         if data["schema"] != cls.schema or data["version"] != cls.version:
             raise StoreRecordError("Unsupported StateRefRecord version.")
         try:
-            result = cls(StateRef.from_data(data["state_ref"]))
+            reference = (StateRef.from_data(data["state_ref"]) if prepared is None
+                         else StateRef._from_data_prepared(data["state_ref"], prepared))
+            result = cls(reference)
         except Exception as error:
             raise StoreRecordError("StateRefRecord state reference is invalid.") from error
         if data["digest"] != result.digest:
