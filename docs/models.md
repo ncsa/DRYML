@@ -466,6 +466,95 @@ Examples include:
 
 Backend wrappers should keep external runtime state in object state and keep stable configuration in definitions.
 
+### XGBoost and statsmodels: Native Characterization (U1)
+
+The maintained adapter rollout starts with native-only reference tests in
+`tests/models/test_xgb_models.py` and `tests/models/test_statsmodels_models.py`.
+This stage changes no adapter runtime. The current XGBoost implementation still
+uses retired `Meta`/`Component` and compute hooks; statsmodels has no maintained
+adapter yet. Native evidence below does not qualify DRYML Dataset, Method,
+Experiment, Repo, recovery, or worker integration.
+
+On Linux x86-64, Python 3.12.13, CPU XGBoost 3.4.2, statsmodels 0.15.0,
+NumPy 2.1.3, SciPy 1.18.0, pandas 3.0.5, and sklearn 1.9.0 (XGBoost only),
+the seeded dense-array references establish:
+
+| Reference | Observed held-out behavior | Native facts |
+|---|---|---|
+| XGBoost binary / multiclass | Accuracy 1.0000 / 0.9375; majority baselines 0.5625 / 0.4375 | `(N, K)` float32 probabilities, class columns `0..K-1`, `(N,)` int64 labels |
+| XGBoost scalar regression | MSE 0.256744; constant baseline 11.263378 | `(N,)` float32 predictions |
+| OLS, intercept off/on and duplicate columns | MSE approximately 0.000885; all below half the corresponding constant baseline | `(N,)` float64; pseudoinverse coefficients agree with NumPy least squares within `2e-15` |
+| Binary Logit, intercept off/on | Accuracy 0.96875; majority baseline 0.578125 | Newton converges in 7 iterations; native positive-class probabilities agree with the logistic formula exactly on these fixtures |
+
+XGBoost uses CPU `gbtree`/`hist`, 48 depth-three trees, one thread, seed zero,
+and task-specific `binary:logistic`, `multi:softprob`, or `reg:squarederror`.
+Training has 128 rows and held-out prediction has 64. NaN features are exercised;
+infinite features and nonfinite regression targets fail natively. Native unfitted,
+wrong-width, invalid class-vocabulary, and corrupt-payload failures are covered.
+Classification quality must exceed majority accuracy by at least 0.10; regression
+MSE must be below half the constant baseline, independently of reopen parity.
+
+OLS uses 96 training rows and 64 held-out rows. Intercept-off passes the original
+design; intercept-on prepends exactly one constant without detecting existing
+constants. Duplicated features and constants retain native pseudoinverse/rank
+semantics (including `SingularMatrixWarning`) with finite parameters. Logit uses
+128 nonseparable training rows, Newton `maxiter=100`, `tol=1e-8`, `disp=False`,
+and full convergence output. A one-iteration fit returns finite parameters with
+`converged=False`: returning Results is insufficient acceptance evidence.
+Perfect prediction raises with `raise_on_perfect_prediction=True` on that instance
+only; a deterministic perfect starting prediction exercises this boundary without
+claiming a universal separation detector. One-row native predictions retain the
+batch axis. The reference class conversion uses `[1-p, p]`, columns `[0, 1]`,
+float64 probabilities and int64 labels, with threshold equality selecting 1.
+`missing='raise'` rejects NaN design/targets without dropping rows, but is **not**
+a finite-parameter guard: OLS can return nonfinite coefficients for infinite
+targets. Later adapters must validate both finite inputs and candidate parameters.
+
+#### Native payload inventory and identity
+
+XGBoost native `.ubj` files contain the learned model, feature/class facts exposed
+by the sklearn interface, and its `scikit_learn` attribute. File and bytearray
+loads reproduce predictions with measured maximum error zero (`1e-6` comparison
+tolerance). Binary, multiclass, and regression payloads measured 36,051, 133,451,
+and 53,163 bytes; save/load/save bytes matched on this stack. Model IO is not a
+complete training-configuration snapshot: future wrapper metadata still owns
+task, original feature width, class order/dtypes, and compatibility facts.
+
+Statsmodels `Results.save(..., remove_data=False)` writes one complete native
+pickle. Live and restored Results retain `exog`, `endog`, `data.orig_exog`, and
+`data.orig_endog`, coefficients, predictions, standard errors, covariance,
+confidence intervals, likelihood, observation count, and summary inspection.
+Saving does not remove live data or populate diagnostic caches in these cases.
+Native save/load/save nevertheless **does not preserve bytes**: the OLS pickle
+measured 8,502 then 8,597 bytes; Logit measured 6,348 then 6,421 bytes. Read-only
+diagnostic inspection populated caches, producing 10,579 / 6,782 byte pickles,
+while prediction and inspection semantics remained equal (`1e-8` tolerance).
+These sizes are characterization facts, not portable format constants.
+
+The planned `xgboost1` / `statsmodels1` codecs therefore must encode accepted
+native bytes plus canonical version-one metadata once and retain those exact
+bytes for unchanged restored saves. Semantic equality or native reserialization
+cannot replace exact checkpoint replay. These codecs are not implemented by U1.
+Full Results **and** their retained payload bytes occupy workload-sized memory;
+the pickle retains training arrays on disk too. Data removal is outside this
+contract. Native Results inspection may populate nonsemantic caches; external
+native mutation is outside the planned accepted-fit contract.
+
+The initial reader policy is exact native, applicable sklearn, numerical-stack,
+and Python major/minor matching. The above is one Linux native observation, not
+cross-version, Windows, isolated statsmodels-only, or DRYML integration evidence.
+Native qualification must fail on absent/mismatched dependencies, not skip.
+
+Legacy source inspection found an archive member `model.text`, temporary `.text`
+files, eager `xgboost` import, and retired `load_compute_imp`/`save_compute_imp`
+hooks. U1 does not execute or migrate this format. The maintained core hooks are
+additive: every class-local state hook in the MRO receives the unchanged codec.
+`Pickleable` contributes `heavy.pkl` independently, so later native-codec wrappers
+must use `Serializable` without inheriting automatic native-object pickling.
+Existing `tests/core/test_state_codec_hooks.py` owns the additive-hook regression;
+U1 reuses it instead of duplicating it. Legacy rejection, malformed metadata,
+candidate-first installation, and core restore invalidation remain later gates.
+
 ### Experimental JAX Models
 
 `dryml.models.jax.Model` is an **experimental** functional wrapper. Its

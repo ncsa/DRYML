@@ -364,6 +364,60 @@ The tier-administration tests require every maintained category to have an
 explicit default, reject stale metadata paths, and prove the union of all tiers
 covers every maintained test file.
 
+## Native XGBoost/statsmodels Reference Stage (U1)
+
+The maintained native-only references are
+`tests/models/test_xgb_models.py` and `tests/models/test_statsmodels_models.py`.
+They import native packages inside admitted fixtures/cases, never at collection,
+and require Python 3.12 with the exact candidate versions: CPU XGBoost 3.4.2,
+sklearn 1.9.0 for XGBoost, statsmodels 0.15.0, NumPy 2.1.3, SciPy 1.18.0,
+and pandas 3.0.5. Missing packages or mismatched versions fail the requested
+native cases; there is no `importorskip`. The statsmodels file does not require
+sklearn. No installation or environment mutation is part of these tests.
+
+For local native characterization, activate the existing `big_env` and place
+all disposable artifacts below a caller-approved task directory. The following
+assumes `$scratch` is an existing task directory (on the characterization host,
+under `/data1/matthew/dryml-review-20261012`, overriding `/tmp/dryml`):
+
+```bash
+source ~/conda.sh
+conda activate big_env
+export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$scratch" XDG_CACHE_HOME="$scratch/cache"
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+./tests.sh tests/models/test_xgb_models.py tests/models/test_statsmodels_models.py \
+  --no-cov -x -q --basetemp="$scratch/pytest-native" \
+  -o cache_dir="$scratch/pytest-cache" -o junit_family=legacy \
+  --junitxml="$scratch/native.xml"
+```
+
+The explicit paths must precede options. JUnit `native_evidence` properties
+record actual versions/platform, held-out scores/baselines, numerical errors,
+native payload sizes, SHA-256 hashes, and save/load/save byte comparisons.
+`tmp_path` retains the `.ubj` and full Results `.pkl` payloads under `--basetemp`;
+the cache override prevents an in-checkout pytest cache. Reusing `--basetemp`
+lets pytest replace that task-owned directory; choose a new subdirectory when
+preserving earlier evidence. Neither focused mode nor these cases updates the
+pre-existing timing JSONs. No global framework bootstrap is needed.
+
+The local focused Linux run on Python 3.12.13 passed **31 cases, zero skips**:
+18 new native references plus the 8 existing sklearn Experiment cases and
+5 additive codec-hook cases, in 93.86 seconds. All ran before adapter changes. See
+[Models native characterization](models.md#xgboost-and-statsmodels-native-characterization-u1)
+for scientific and payload observations. XGBoost reopen error was zero; complete
+statsmodels Results remained semantically equal but native reserialization bytes
+changed. Exact retained-payload replay remains mandatory for the future adapters.
+
+This stage supplies native reference/failure evidence only. Dataset parity,
+pure Method inference/selected/prepared calls, adapter fit acceptance/accounting,
+versioned DRYML state, Repo replay, Experiment and Core workers are subsequent
+qualification gates. Existing sklearn and additive codec-hook tests are reused
+without changing their owners. Native CI configuration and routine node selection
+are deferred to the rollout's packaging unit. The planned Ubuntu/Windows Python
+3.12 statsmodels-only and XGBoost-plus-sklearn cells remain unqualified; a local
+Linux mixed-environment run does not satisfy them. Do not use old/dev, broad
+heavy/profile, exhaustive/coverage, external datasets, or GPU runs for this stage.
+
 ## Hosted Matrix
 
 The ten-job lightweight matrix installs only package and test dependencies on
