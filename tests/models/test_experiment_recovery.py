@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import hashlib
+import json
 
+import numpy as np
 import pytest
 
 from dryml.artifacts import Value
@@ -557,3 +560,176 @@ def test_completed_status_publish_error_reuses_completed_artifact_without_retrai
     )
     assert repaired.evaluation_status == "completed"
     assert OrderedValue.events == ["only"]
+
+
+@pytest.mark.speed_heavy
+@pytest.mark.parametrize("kind", ("xgb-regressor", "stats-logit"))
+@pytest.mark.parametrize("stage", (
+    "checkpoint_associated", "artifact_completed", "pending_row_published",
+    "artifact_compute", "completed_status_publish",
+))
+def test_native_terminal_replay_reemits_exact_associated_checkpoint(
+        tmp_path, monkeypatch, kind, stage, record_property):
+    """Real codec replay preserves one fit, occurrence, timestamp and exact pin."""
+    from dryml.managed import context as managed_context
+    from .test_estimator_experiments import (
+        _arrays, _assert_row, _experiment, _forbid_native_encoding, _native_fit_counter,
+    )
+    from .test_experiment_artifacts import SavedModelValue
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    SavedModelValue.calls.clear()
+    exp = _experiment(kind, repo)
+    calls = _native_fit_counter(kind, monkeypatch)
+    triggered = []
+
+    def interrupt(boundary):
+        if boundary == stage and not triggered:
+            triggered.append(boundary)
+            raise RuntimeError(f"injected native {stage}")
+
+    owner = managed_context if stage == "checkpoint_associated" else experiment_module
+    name = "_checkpoint_boundary" if owner is managed_context else "_experiment_boundary"
+    monkeypatch.setattr(owner, name, interrupt)
+    if stage == "artifact_compute":
+        install = SavedModelValue._install_value_payload
+
+        def fail_compute(artifact, payload):
+            if payload["present"]:
+                interrupt("artifact_compute")
+            return install(artifact, payload)
+
+        monkeypatch.setattr(SavedModelValue, "_install_value_payload", fail_compute)
+    elif stage == "completed_status_publish":
+        publish = ExperimentData.publish
+
+        def fail_history(history, *args, **kwargs):
+            if any(operation[0] == "update" and operation[2]["evaluation_status"] == "completed"
+                   for operation in history._pending_operations):
+                interrupt("completed_status_publish")
+            return publish(history, *args, **kwargs)
+
+        monkeypatch.setattr(ExperimentData, "publish", fail_history)
+    try:
+        with pytest.raises(RuntimeError, match=f"injected native {stage}"):
+            exp.train(managed=ManagedConfig(state_repo=repo))
+        failed_status = exp.train.status(state_repo=repo)
+        checkpoint = failed_status.checkpoint_state_ref
+        assert checkpoint is not None and failed_status.final_state_ref is None
+        retained = repo.load_state_ref(checkpoint, reuse_live="never", cache="none")
+        observation = retained.state.pending_observation
+        occurrence = retained._occurrence_key(retained.state.pending_observation_attempt_id, observation.sequence)
+        timestamp = retained.state.pending_observation_time
+        payload, metadata = retained.model._accepted_fit.payload, retained.model._accepted_fit.metadata
+        expected = retained.model(_arrays(kind)[0])
+        if kind == "stats-logit":
+            assert np.isfinite(retained.model.results.bse).all()
+            assert np.isfinite(retained.model.results.conf_int()).all()
+        _forbid_native_encoding(retained.model, monkeypatch)
+        replayed = []
+        save = type(retained.model).save_state_to_dir_imp
+
+        def reemit(model, directory, *, codec):
+            assert model._accepted_fit.payload == payload
+            assert model._accepted_fit.metadata == metadata
+            replayed.append(codec)
+            return save(model, directory, codec=codec)
+
+        monkeypatch.setattr(type(retained.model), "save_state_to_dir_imp", reemit)
+        # Independent handles and a fresh exact graph rule out recovery by live reuse.
+        resumed_repo = Repo(DirStore(tmp_path / "store"))
+        try:
+            resumed = resumed_repo.load_state_ref(checkpoint, reuse_live="never", cache="none")
+            publication_refs = []
+            publisher_factory = managed_context._publish_managed_state
+
+            def checked_publisher():
+                publisher = publisher_factory()
+
+                def publish(*args, **kwargs):
+                    result = publisher(*args, **kwargs)
+                    assert result.state_ref == checkpoint
+                    publication_refs.append(result.state_ref)
+                    return result
+
+                return publish
+
+            monkeypatch.setattr(managed_context, "_publish_managed_state", checked_publisher)
+            final = resumed.train(managed=ManagedConfig(state_repo=resumed_repo))
+            completed = resumed.train.status(state_repo=resumed_repo)
+            rows = ExperimentData.find(final.object_projection(), repo=resumed_repo).data
+            assert calls == [48] and replayed and publication_refs == [checkpoint]
+            assert triggered == [stage]
+            assert completed.attempt_id == failed_status.attempt_id
+            assert completed.final_state_ref == final
+            assert len(rows) == 1
+            row = rows.iloc[0]
+            assert len(SavedModelValue.calls) == (2 if stage == "artifact_compute" else 1)
+            assert (row.row_key, row.time, row.state_ref, row.examples_seen) == (occurrence, timestamp, checkpoint, 48)
+            _assert_row(resumed_repo, row)
+            assert (resumed.state.step, resumed.state.epoch, resumed.state.examples_seen) == (1, 1, 48)
+            np.testing.assert_array_equal(resumed.model(_arrays(kind)[0]), expected)
+            # The Experiment replay guard checks this same full StateRef before
+            # continuing the row; independently republishing proves codec identity.
+            assert resumed_repo.save_object(retained, deep_capture=True) == checkpoint
+            record_property("native_replay", json.dumps({
+                "kind": kind, "stage": stage, "checkpoint": checkpoint.digest(),
+                "final": final.digest(), "row_key": occurrence, "time": timestamp,
+                "native_fit_rows": calls, "examples_seen": int(row.examples_seen),
+                "payload_sha256": hashlib.sha256(payload).hexdigest(),
+                "replayed_checkpoint": publication_refs[0].digest(),
+            }, sort_keys=True))
+        finally:
+            resumed_repo.close(flush=False)
+    finally:
+        repo.close(flush=False)
+
+
+@pytest.mark.speed_heavy
+@pytest.mark.parametrize("kind", ("xgb-regressor", "stats-logit"))
+def test_native_preassociation_failure_retains_live_fit_but_prior_authority_refits(
+        tmp_path, monkeypatch, kind, record_property):
+    """Published-but-unassociated native work is not a completed-fit resume pin."""
+    from dryml.managed import context as managed_context
+    from .test_estimator_experiments import _arrays, _experiment, _native_fit_counter
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    exp = _experiment(kind, repo)
+    prior = repo.save_object(exp, deep_capture=True)
+    calls = _native_fit_counter(kind, monkeypatch)
+    triggered = []
+
+    def fail(stage):
+        if stage == "state_published" and not triggered:
+            triggered.append(stage)
+            raise OSError("native checkpoint not associated")
+
+    monkeypatch.setattr(managed_context, "_checkpoint_boundary", fail)
+    try:
+        with pytest.raises(OSError, match="not associated"):
+            exp.train(managed=ManagedConfig(state_repo=repo))
+        status = exp.train.status(state_repo=repo)
+        assert status.state == "failed"
+        assert status.checkpoint_state_ref is status.final_state_ref is None
+        assert exp.model._accepted_fit is not None
+        assert (exp.state.step, exp.state.epoch, exp.state.examples_seen) == (1, 1, 48)
+        assert exp.state.pending_observation_terminal
+        assert exp.model(_arrays(kind)[0]).shape[0] == 48
+        assert ExperimentData.find(prior.object_projection(), repo=repo) is None
+        fresh_repo = Repo(DirStore(tmp_path / "store"))
+        try:
+            restarted = fresh_repo.load_state_ref(prior, reuse_live="never", cache="none")
+            assert restarted.model._accepted_fit is None and restarted.state.step == 0
+            final = restarted.train(managed=ManagedConfig(state_repo=fresh_repo, rerun=True))
+            assert calls == [48, 48]
+            assert (restarted.state.step, restarted.state.epoch, restarted.state.examples_seen) == (1, 1, 48)
+            assert restarted.train.status(state_repo=fresh_repo).final_state_ref == final
+            record_property("preassociation_restart", json.dumps({
+                "kind": kind, "prior": prior.digest(), "final": final.digest(),
+                "native_fit_rows": calls, "restarted_exposure": restarted.state.examples_seen,
+                "failed_checkpoint_associated": status.checkpoint_state_ref is not None,
+            }, sort_keys=True))
+        finally:
+            fresh_repo.close(flush=False)
+    finally:
+        repo.close(flush=False)

@@ -186,6 +186,23 @@ preservation, Method/Map refits, complete inspection/exact byte replay, fresh Re
 restore, entered-hook invalidation and local managed terminal history. Native
 references remain mandatory at explicit execution, with no pass-by-skip behavior.
 
+U5 additionally exercises both OLS and Logit through real Experiment Artifacts and
+terminal managed callbacks, then real same-host CPU Core subprocess fit/publication
+and fresh exact caller reopen. Independent submissions use separate state/control
+Stores and temporary-resource roots. Representative Logit recovery tests prove
+one native fit, one occurrence/time and unchanged exposure after associated
+checkpoint, Artifact compute/completion or history failure. Replay re-emits exact
+retained Results pickle/metadata bytes with native `save` disabled and must match
+the retained full checkpoint StateRef before continuing its row. Pre-association
+failure keeps live accepted facts but permits refit from prior authority; an
+already-trained live Experiment is not a terminal-staging repair guarantee.
+DirStore and committed ZipStore fitted/unfitted aliased graphs obey Core's
+entered-hook invalidation, receipt clearing, cache eviction and fresh exact
+recovery. Real workers also exercise missing/incompatible dependency refusal and
+independent workload/teardown failure evidence under the existing protocol.
+See [Models recovery boundary](models.md#opaque-fit-recovery-and-worker-evidence-u5)
+and `tests/models/test_estimator_experiments.py` for the evidence scope.
+
 The local mixed environment does not qualify isolated statsmodels-only installs,
-Windows, other native/Python reader pairs, Core subprocess workers, external data
-or GPU execution. Those future integration/matrix gates are not claimed here.
+Windows, other native/Python reader pairs, external data or GPU execution.
+Those future installation/platform matrix gates are not claimed here.

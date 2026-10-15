@@ -439,6 +439,60 @@ it; revisiting the same StateRef through a later trajectory creates a distinct r
 History remains readable if a referenced checkpoint payload later becomes
 unavailable, but explicitly loading that checkpoint still fails.
 
+### Opaque-fit recovery and worker evidence (U5)
+
+For the maintained CPU XGBoost and statsmodels trainers, the boundary is:
+
+1. Accept the native fit and coarse progress (one fit step, one epoch, actual N).
+2. Stage the terminal observation, then publish the Experiment state.
+3. Associate that checkpoint in managed control authority.
+4. Evaluate/publish history and Artifacts, then run configured managed callbacks
+   and request checks.
+5. Return logically, followed by managed final publication, completion and final
+   association.
+
+An accepted fit or published snapshot **before step 3** is not a durable
+completed-fit resume guarantee. Failure propagates without a final receipt while
+the live accepted native state and counters remain truthful. Reopening prior
+unfitted authority and explicitly starting a new attempt can fit again. Calling
+the already-trained live Experiment is not a guarantee of repairing terminal
+staging or association.
+
+After association, an unfinished terminal observation can be restored through
+ordinary managed resume. It reuses the same occurrence key, timestamp and exposure
+without another native fit. If its history row is unfinished, the actual codec
+re-emits retained native bytes and canonical metadata; the full replayed StateRef
+must equal the retained checkpoint **before continuing evaluation**. Prediction
+parity alone is insufficient. Completed Artifact receipts survive a later history
+failure. Native statsmodels diagnostic caches may change without changing these
+retained bytes; replay never invokes native serialization again.
+
+The successful return must match the operation's actual `final_state_ref`.
+History rows bind to their own evaluated checkpoints; each Artifact binds to that
+row's exact model projection and its own completed compute receipt. Do not assume
+different publication moments necessarily produce equal StateRefs. Neither native
+payload validity nor an accepted fit substitutes for managed association authority.
+Unavailable training loss and parameter counts remain missing in history, not zero.
+
+`tests/models/test_estimator_experiments.py` and the native cases in
+`test_experiment_recovery.py` exercise these boundaries on small synthetic CPU
+arrays. All four model families also fit/publish in actual same-host Core
+subprocesses, followed by fresh exact caller Repo reconstruction and prediction
+parity. Independent worker submissions use distinct Store/control, spool and
+temporary-resource roots. Missing/incompatible dependency admission leaves no
+accepted fit or successful counters; an injected workload error and teardown error
+remain independently visible as invocation failure and incomplete-cleanup evidence.
+These tests use the existing worker protocol, not a new runtime or sandbox.
+
+Fitted and unfitted aliased native graphs are exercised through both DirStore and
+committed ZipStore. An entered restore-hook failure invalidates the covered graph,
+clears state receipts/hashes and evicts live candidates even when a backend retains
+its prior private bundle. Recovery loads fresh exact authority with
+`reuse_live="never"`; prior native predictions do not rescue graph validity.
+This evidence is limited to the specified Linux/Python 3.12 mixed environment;
+Windows, isolated installations and wider reader-version combinations remain
+separate qualification gates.
+
 For completed `Value` Artifacts, history scalar columns retain finite Python
 scalars and lossless zero-dimensional native values. Conversion is bounded and
 lazy (`item()` and, where needed, zero-dimensional `numpy()`); non-scalar values

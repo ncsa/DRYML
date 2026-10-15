@@ -182,8 +182,24 @@ tests are retained. Dependency-light import/config/spec/admission contracts stay
 in `tests/models/test_estimator_contracts.py`; exact native qualification stays
 in the heavy-by-default `tests/models/test_xgb_models.py`.
 
+U5 adds real Experiment/Artifact/callback associations and same-host Core CPU
+workers for both classification and regression in
+`tests/models/test_estimator_experiments.py`. Two independent submissions per
+family publish into separate state/control Stores and scratch roots, then reopen
+fresh exact caller graphs with matching predictions and retained payload digests.
+Representative regression recovery cases inject pre-association publication,
+post-association, Artifact compute/completion, and history publication failures.
+Only an **associated** terminal checkpoint can replay one occurrence/time/N
+without refitting; replay must reproduce its exact StateRef from retained UBJSON
+and metadata before continuing history, with native serialization disabled.
+Pre-association failure retains live accepted work but reopening prior authority
+may refit. DirStore/ZipStore graph restore cases verify fitted/unfitted state,
+entered-hook invalidation and fresh recovery. Worker dependency and teardown
+failures retain honest, separate invocation/cleanup outcomes. See
+[Models recovery boundary](models.md#opaque-fit-recovery-and-worker-evidence-u5).
+
 Windows, isolated installation, cross-version models, GPU, sparse/categorical
-data, worker/platform qualification and complete Experiment recovery matrices
-are not qualified by U3. Packaging/extras and wider CI qualification are later
+data and broader platform/recovery matrices remain unqualified. Packaging/extras
+and wider CI qualification are later
 rollout units. See [Models](models.md), [Methods](methods.md), and [Data](data.md)
 for lower-layer ownership and lifecycle contracts.
