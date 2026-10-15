@@ -211,7 +211,14 @@ def test_core_cpu_worker_publication_fresh_reopen_and_isolation(tmp_path, kind, 
         executor, temporary = _executor(root, repo, control)
         try:
             future = executor.submit(_worker_fit, kind)
-            result = future.result(timeout=150)
+            try:
+                result = future.result(timeout=150)
+            except BaseException:
+                output = future.output.snapshot()
+                evidence = json.dumps({"stdout": output.stdout, "stderr": output.stderr})
+                record_property("failed_worker_output", evidence)
+                print("Failed native worker output: " + evidence)
+                raise
             assert result["origins"] == coordinator_origins
             assert result["pid"] != os.getpid()
             assert Path(result["work"]).parent == temporary
