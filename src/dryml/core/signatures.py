@@ -29,7 +29,8 @@ class SignatureError(TypeError):
 
     Args:
         reason: Fixed diagnostic category describing the failed contract.
-        slot: Optional parameter or return slot path.
+        slot: Optional parameter or return slot path, including a known
+            unexpected keyword name when binding a closed constructor signature.
 
     Errors never include caller value representations. Chained lower-level errors
     remain available as causes.
@@ -547,6 +548,8 @@ class SignaturePlan:
 
         Raises:
             SignatureError: If binding, controls, or assertions are invalid.
+                Unexpected keywords in closed constructor signatures identify
+                the keyword in the error's slot without rendering its value.
             Exception: Propagates explicitly requested Repo metadata failures
                 without changing their type.
 
@@ -566,7 +569,16 @@ class SignaturePlan:
             bound = self.signature.bind(*args, **dict(kwargs))
             bound.apply_defaults()
         except TypeError as error:
-            raise SignatureError("argument binding failed") from error
+            slot = None
+            if self.constructor and not any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in self.signature.parameters.values()
+            ):
+                slot = next((
+                    name for name in kwargs
+                    if type(name) is str and name not in self.signature.parameters
+                ), None)
+            raise SignatureError("argument binding failed", slot) from error
         controls = _validate_controls(
             controls, _selection_keys(self.signature, bound.arguments)
         )

@@ -293,6 +293,14 @@ binding, discovery, context ownership, wrapper conflicts, and unavailable or
 ambiguous authority. Repo and lifecycle errors retain their own types and cleanup
 semantics during Mat realization.
 
+For a closed constructor signature, a known unexpected keyword is included in
+`SignatureError.slot` and the primary message, including through
+`Definition(...).build()`. For example, a misspelled `chlid` keyword reports
+`Signature normalization failed: argument binding failed at chlid.` The reason
+remains `"argument binding failed"`, argument values are excluded, and the
+original Python `TypeError` remains the chained cause. Accepted variadic keyword
+names are not labeled as unexpected when another binding requirement fails.
+
 Symbolic Definition failures use `ParameterizationError(ValueError)`. Its
 specializations are `UnresolvedDefinitionError` for required resolution,
 `ParameterizationLimitError` for bounded traversal or generation work, and
