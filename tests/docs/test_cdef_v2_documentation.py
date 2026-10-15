@@ -1,9 +1,10 @@
-"""Keep public CDef V2 documentation free of removed API guidance."""
+"""Keep public CDef V2 guidance current and relative documentation links valid."""
 
 from pathlib import Path
 import ast
 import inspect
 import re
+from urllib.parse import urlsplit
 
 from dryml.managed.control import ControlSnapshot
 from dryml.managed.identity import _operation_digest_from_object_ref_digest
@@ -38,6 +39,9 @@ def test_local_markdown_links_in_cdef_v2_docs_resolve():
 
     for document in DOCUMENTS:
         for target in re.findall(r"\[[^]]+\]\(([^)#]+)(?:#[^)]+)?\)", document.read_text(encoding="utf-8")):
+            parsed = urlsplit(target)
+            if parsed.scheme or parsed.netloc:
+                continue
             assert (document.parent / target).exists(), f"{document}: {target}"
 
 
