@@ -217,9 +217,18 @@ independent workload/teardown failure evidence under the existing protocol.
 See [Models recovery boundary](models.md#opaque-fit-recovery-and-worker-evidence-u5)
 and `tests/models/test_estimator_experiments.py` for the evidence scope.
 
-The local mixed environment does not qualify isolated statsmodels-only installs,
-Windows, other native/Python reader pairs, external data or GPU execution.
-The [native CI configuration](testing.md#native-estimator-qualification) requires
-Ubuntu and Windows Python 3.12 statsmodels-only cells, with sklearn/XGBoost absent
-and all 56 assigned cases executed with zero skips. Those installation/platform
-cells remain unqualified until CI passes on the exact revision.
+The required isolated Ubuntu and Windows statsmodels-only cells passed at
+`fa01d177` on 2026-10-15, using Python 3.12.15 and the exact reader stack above,
+with sklearn/XGBoost absent and all 56 assigned cases per cell executed with zero
+skips. See [native qualification evidence](testing.md#required-hosted-cells) for
+the run, build facts and executed inventories. Other native/Python reader pairs,
+external data and GPU execution remain unqualified.
+
+For a Windows Conda Core worker, supply the selected runtime's existing
+`Library/bin` directory alongside `os.defpath` in
+`SubProcessConfig.env_vars["PATH"]`. Execute's default minimal environment does not
+activate Conda; delayed BLAS loading can terminate an otherwise importable worker
+during OLS SVD or Logit Newton fitting. When using a different worker Python,
+derive this directory from that runtime rather than the coordinator's prefix.
+Qualification supplies this narrow path explicitly without inheriting the full
+coordinator environment or changing product-global native configuration.

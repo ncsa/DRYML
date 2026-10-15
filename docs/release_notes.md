@@ -23,11 +23,13 @@ Method, ExperimentData, TrainState and Store formats are unchanged by these adap
 
 Bounded Linux Python 3.12 evidence covers native held-out quality/parity, state,
 association-sensitive recovery and real independent same-host Core workers.
-Four required isolated conda-forge Ubuntu/Windows Python 3.12 CI cells are now
-configured for statsmodels-only and CPU XGBoost-plus-sklearn, with exact-version,
-extra/dependency, CPU-build and executed-case guards. These cells remain **unrun**
-until hosted CI succeeds on the revision; local mixed-environment success does not
-qualify Windows, isolated installs, other reader pairs or GPU. Fast backend-neutral
+Four required isolated conda-forge Ubuntu/Windows Python 3.12 CI cells passed at
+`fa01d177` on 2026-10-15 for statsmodels-only and CPU XGBoost-plus-sklearn: 194
+assigned cases with zero native skips, exact-version/extra/dependency/CPU-build
+guards and matching installed-wheel worker evidence. Both platforms used Python
+3.12.15. Windows Conda workers explicitly receive their selected runtime's native
+DLL directory; Execute's minimal-environment policy is unchanged. Other reader
+pairs and GPU remain unqualified. Fast backend-neutral
 contracts remain routine; native matrices remain targeted heavy qualification.
 This rollout does not automatically close issue #38. See [XGBoost](xgboost.md),
 [statsmodels](statsmodels.md) and [Testing](testing.md#native-estimator-qualification).

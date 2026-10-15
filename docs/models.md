@@ -489,12 +489,13 @@ committed ZipStore. An entered restore-hook failure invalidates the covered grap
 clears state receipts/hashes and evicts live candidates even when a backend retains
 its prior private bundle. Recovery loads fresh exact authority with
 `reuse_live="never"`; prior native predictions do not rescue graph validity.
-This evidence is limited to the specified Linux/Python 3.12 mixed environment;
-Windows, isolated installations and wider reader-version combinations remain
-separate qualification gates. The four required Ubuntu/Windows Python 3.12
-isolated CI cells and their executed-case guards are configured in
-[Testing](testing.md#native-estimator-qualification); configuration alone does not
-qualify those cells.
+The initial evidence above used the specified Linux/Python 3.12 mixed environment.
+Subsequent isolated Ubuntu/Windows Python 3.12.15 qualification passed all four
+required cells at `fa01d177`, including real installed-wheel workers, with exact
+inventories and zero native skips. See
+[Testing](testing.md#required-hosted-cells) for revision-specific evidence and the
+explicit Windows Conda worker DLL path. Wider reader-version combinations remain
+unqualified; configuring a cell alone is not evidence that it passed.
 
 For completed `Value` Artifacts, history scalar columns retain finite Python
 scalars and lossless zero-dimensional native values. Conversion is bounded and
@@ -687,7 +688,8 @@ Existing `tests/core/test_state_codec_hooks.py` owns the additive-hook regressio
 it is reused rather than duplicated. Legacy rejection, malformed metadata,
 candidate-first installation, and core restore invalidation are now exercised
 for both adapters. Experiment/recovery/worker evidence is described above;
-isolated platform qualification remains pending CI execution. This rollout does
+the four isolated platform cells passed at the revision recorded in
+[Testing](testing.md#required-hosted-cells). This rollout does
 not automatically close issue #38 or broaden sklearn, Data, Method, ExperimentData,
 TrainState, or Store formats.
 

@@ -483,17 +483,35 @@ evidence is emitted before fitting; matching coordinator/worker paths and hashes
 are retained in JUnit properties for successful and injected-failure cases.
 Without this mode, ordinary local workers continue to use checkout source.
 
+Windows Conda workers explicitly receive the selected base Python's existing
+`Library/bin` directory plus `os.defpath` through `SubProcessConfig.env_vars["PATH"]`.
+Conda's delayed BLAS procedure loading requires that directory during SVD/Newton
+execution even when native imports succeeded. This test-owned configuration does
+not inherit the coordinator's full PATH or environment, and does not change
+Execute's minimal-environment policy. Worker failures retain bounded captured
+output and enable Python's fatal fault handler for native crash evidence.
+
 The separately requested hosted heavy/coverage jobs exclude these exact native
 files and functions: they cannot qualify the native readers on their broader
 Python/dependency matrices. The dedicated cells own their uninstrumented native
 evidence; they do not add the full exact-pin matrix to routine or broad framework
 CI. Explicit local path-first native runs remain available.
 
-All four hosted cells remain **unrun/unqualified** until they pass on the exact
-revision. A Linux mixed-environment run cannot qualify Windows or isolated
-statsmodels-only/XGBoost-plus-sklearn installs. Configuration does not imply
-branch-protection settings or remote execution. Cross-version readers, GPU,
-external datasets and broader native platform combinations are not claimed.
+All four hosted cells passed on 2026-10-15 at revision
+[`fa01d177`](https://github.com/ncsa/DRYML/commit/fa01d177d8704a5a2dc09a038bfffb263cf0bebd),
+in [the qualification run](https://github.com/ncsa/DRYML/actions/runs/38732719366).
+The artifacts verify **194 assigned cases, zero skips/errors/failures**, exact
+collected/executed inventories, and matching installed-wheel coordinator/worker
+receipts. Each statsmodels-only cell ran 56 cases; each CPU XGBoost-plus-sklearn
+cell ran 41. Linux used CPython 3.12.15 built with GCC 15.3.0; Windows AMD64 used
+conda-forge CPython 3.12.15 built with MSC v.1944. Exact build/platform and Conda
+package records are retained in each cell's `preflight.json`.
+
+These are revision-specific isolated-installation results, distinct from the
+earlier local mixed-environment evidence. Later runtime/test changes require
+their own qualification; configuration alone does not imply success or branch
+protection. Cross-version readers, GPU, external datasets and broader native
+platform combinations are not claimed.
 Existing sklearn and additive codec-hook tests keep their owners and contracts;
 the native rollout does not automatically close issue #38.
 

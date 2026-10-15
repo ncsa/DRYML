@@ -218,10 +218,11 @@ entered-hook invalidation and fresh recovery. Worker dependency and teardown
 failures retain honest, separate invocation/cleanup outcomes. See
 [Models recovery boundary](models.md#opaque-fit-recovery-and-worker-evidence-u5).
 
-Windows and isolated installation remain unqualified until the required
-Ubuntu/Windows Python 3.12 XGBoost-plus-sklearn cells pass on the exact revision.
-The [native CI configuration](testing.md#native-estimator-qualification) requires
-41 assigned cases per XGBoost cell with zero skips. Cross-version models, GPU,
+The required isolated Ubuntu and Windows CPU XGBoost-plus-sklearn cells passed at
+`fa01d177` on 2026-10-15, using Python 3.12.15 and the exact reader stack above.
+Each executed all 41 assigned cases with zero skips and matching installed-wheel
+worker evidence. See [native qualification evidence](testing.md#required-hosted-cells)
+for the run, build facts and inventories. Cross-version models, GPU,
 sparse/categorical data and broader platform/recovery matrices remain unqualified.
 See [Models](models.md), [Methods](methods.md), and [Data](data.md)
 for lower-layer ownership and lifecycle contracts.
