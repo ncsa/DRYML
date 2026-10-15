@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 _EXPECTED_CODE_EXPORTS = [
     "AccessCollection",
@@ -641,7 +642,7 @@ print(json.dumps({
 def test_installed_declaration_imports_are_passive(
     installed_python: Path,
 ) -> None:
-    """Ensure root and declaration imports do not load optional frameworks."""
+    """Resolve wheel declarations/recipes without optional native import attempts."""
 
     result = _installed_probe(
         installed_python,
@@ -650,12 +651,19 @@ import importlib.util
 import json
 import importlib
 import sys
+class RejectNative:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'xgboost', 'statsmodels', 'sklearn', 'scipy', 'pandas'}:
+            raise AssertionError('unexpected native import: ' + fullname)
+sys.meta_path.insert(0, RejectNative())
 import dryml
 import dryml.annotations
 import dryml.environments
 import dryml.formats
 import dryml.jax
 import dryml.models.jax
+import dryml.models.xgb
+import dryml.models.statsmodels
 import dryml.ray
 import dryml.runtime
 import dryml.session
@@ -676,6 +684,13 @@ assert set(dryml.models.jax.__all__) == {
     "EarlyStoppingTraining", "FlaxModel", "JaxStateError", "Model", "NNXModel",
     "Optimizer", "Training", "TrainFunction", "pure_training_transition",
 }
+for backend in (dryml.models.xgb, dryml.models.statsmodels):
+    assert backend.__all__ == ["Model", "ClassifierModel", "RegressionModel", "BasicTraining"]
+    assert all(isinstance(name, str) and hasattr(backend, name) for name in backend.__all__)
+    for cls in (backend.ClassifierModel, backend.RegressionModel, backend.BasicTraining):
+        cls()
+assert dryml.models.xgb.RegressionModel().mdl is None
+assert dryml.models.statsmodels.RegressionModel().results is None
 for name in ("decorators", "env", "world", "runtime", "merge", "namespaces", "storage"):
     try:
         importlib.import_module(f"dryml.annotations.{name}")
@@ -688,12 +703,48 @@ try:
 except ModuleNotFoundError:
     retired = False
 print(json.dumps({
-    "heavy": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib", "flax", "optax", "ray") if name in sys.modules),
+    "heavy": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib", "flax", "optax", "ray", "xgboost", "statsmodels", "sklearn", "scipy", "pandas") if name in sys.modules),
     "retired": retired,
 }))
 """,
     )
     assert json.loads(result.stdout) == {"heavy": [], "retired": False}
+
+
+def test_installed_native_extras_match_exact_reader_stacks(installed_python: Path) -> None:
+    """Require real wheel metadata to request every reader dependency without markers."""
+    result = _installed_probe(
+        installed_python,
+        """
+from importlib.metadata import metadata, requires
+import json
+from packaging.requirements import Requirement
+from packaging.markers import default_environment
+
+extras = ('xgboost', 'statsmodels')
+assert set(extras) <= set(metadata('dryml').get_all('Provides-Extra'))
+selected = {}
+for extra in extras:
+    by_python = {}
+    for python in ('3.10', '3.11', '3.12', '3.13', '3.14'):
+        environment = {**default_environment(), 'extra': extra, 'python_version': python}
+        by_python[python] = sorted(
+            str(req.name) + str(req.specifier)
+            for value in requires('dryml')
+            if (req := Requirement(value)).marker is not None
+            and req.marker.evaluate(environment)
+        )
+    selected[extra] = by_python
+print(json.dumps(selected))
+""",
+    )
+    common = ["numpy==2.1.3", "pandas==3.0.5", "scipy==1.18.0"]
+    for extra, native in (("xgboost", ["scikit-learn==1.9.0", "xgboost==3.4.2"]),
+                          ("statsmodels", ["statsmodels==0.15.0"])):
+        assert json.loads(result.stdout)[extra] == {
+            python: sorted(common + native)
+            for python in ("3.10", "3.11", "3.12", "3.13", "3.14")
+        }
 
 
 def test_installed_requirement_domain_surface_has_no_defaults_or_fragment_shims(
@@ -1119,7 +1170,7 @@ print(json.dumps({
 }))
 """,
         ],
-        cwd="/tmp/dryml",
+        cwd=tempfile.gettempdir(),
         env=env,
         capture_output=True,
         text=True,
@@ -1161,7 +1212,7 @@ print(json.dumps({
 }))
 """,
         ],
-        cwd="/tmp/dryml",
+        cwd=tempfile.gettempdir(),
         env=env,
         capture_output=True,
         text=True,
@@ -1656,13 +1707,13 @@ with tempfile.TemporaryDirectory() as directory:
 def _installed_probe(
     python: Path, code: str
 ) -> subprocess.CompletedProcess[str]:
-    """Run a probe outside the checkout with inherited source paths removed."""
+    """Run in the system temp override with inherited source paths removed."""
 
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     return subprocess.run(
         [str(python), "-c", code],
-        cwd="/tmp/dryml",
+        cwd=tempfile.gettempdir(),
         env=env,
         check=True,
         text=True,

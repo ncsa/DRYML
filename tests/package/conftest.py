@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import uuid
 import venv
 
@@ -33,9 +34,9 @@ def _run_package_subprocess(args: list[str], *, cwd: Path) -> None:
 
 @pytest.fixture(scope="session")
 def release_artifacts() -> tuple[Path, Path]:
-    """Build and return one sdist and wheel beneath the workspace temp root."""
+    """Build an offline sdist/wheel pair under the system temp override's dryml child."""
 
-    output = Path("/tmp/dryml/package-tests") / uuid.uuid4().hex
+    output = Path(tempfile.gettempdir()) / "dryml/package-tests" / uuid.uuid4().hex
     output.mkdir(parents=True)
     _run_package_subprocess(
         [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(output)],
@@ -51,10 +52,15 @@ def release_artifacts() -> tuple[Path, Path]:
 
 @pytest.fixture(scope="session")
 def installed_python(release_artifacts: tuple[Path, Path]) -> Path:
-    """Build a wheel from the sdist, install it, and return its interpreter."""
+    """Yield an offline installed-wheel interpreter under the system temp override.
+
+    The ephemeral venv inherits existing site packages; no dependencies are
+    downloaded. Build/install failures propagate, and the venv is removed after
+    the session. Release artifacts are retained separately for inspection.
+    """
 
     sdist, _ = release_artifacts
-    root = Path("/tmp/dryml/package-installs") / uuid.uuid4().hex
+    root = Path(tempfile.gettempdir()) / "dryml/package-installs" / uuid.uuid4().hex
     venv.EnvBuilder(with_pip=True, system_site_packages=True).create(root)
     python = root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     source = root / "source"

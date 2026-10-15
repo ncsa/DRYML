@@ -176,7 +176,14 @@ jobs:
 
       - name: Run heavy framework tests
         run: |
-          ./tests.sh heavy --ignore tests/old --ignore tests/dev -x
+          # Exact native reader cases belong to the isolated Python 3.12 cells.
+          ./tests.sh heavy --ignore tests/old --ignore tests/dev -x \
+            --deselect tests/models/test_xgb_models.py \
+            --deselect tests/models/test_statsmodels_models.py \
+            --deselect tests/models/test_estimator_experiments.py \
+            --deselect tests/models/test_experiment_recovery.py::test_native_terminal_replay_reemits_exact_associated_checkpoint \
+            --deselect tests/models/test_experiment_recovery.py::test_native_preassociation_failure_retains_live_fit_but_prior_authority_refits \
+            --deselect tests/core/test_state_ref_restore_into.py::test_native_graph_restore_unfitted_fitted_invalidation_and_fresh_recovery
 
   jax-training-qualification:
     name: JAX training qualification (${{ matrix.install }}, Python 3.12)
@@ -262,6 +269,270 @@ jobs:
             tests/models/test_jax_training.py::test_jax_training_updates_first_class_flax_nnx_model \
             --no-cov -x
 
+  native-estimator-qualification:
+    name: Native estimators (${{ matrix.os }}, Python 3.12, ${{ matrix.backend }})
+    runs-on: ${{ matrix.os }}
+    # Real independent workers and exact replay are bounded but startup is costly.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        backend: [statsmodels, xgboost]
+    defaults:
+      run:
+        shell: bash -el {0}
+    env:
+      QUALIFICATION_BACKEND: ${{ matrix.backend }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      TMPDIR: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
+      TEMP: ${{ runner.temp }}
+      XDG_CACHE_HOME: ${{ runner.temp }}/native-cache
+      PIP_CACHE_DIR: ${{ runner.temp }}/native-pip-cache
+      MPLCONFIGDIR: ${{ runner.temp }}/native-matplotlib
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      BLIS_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up isolated Python 3.12 candidate environment
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: dryml-native
+          auto-activate-base: false
+          python-version: "3.12"
+          channels: conda-forge
+          channel-priority: strict
+
+      - name: Require exact conda-forge CPU candidate packages
+        run: |
+          native=("statsmodels=0.15.0")
+          if [[ "$QUALIFICATION_BACKEND" == "xgboost" ]]; then
+            native=("py-xgboost=3.4.2=cpu_*" "scikit-learn=1.9.0")
+          fi
+          conda install --yes --override-channels -c conda-forge \
+            "python=3.12" "numpy=2.1.3" "scipy=1.18.0" "pandas=3.0.5" \
+            "${native[@]}" "ml_dtypes>=0.6.0" dill tqdm gputil packaging \
+            pip build setuptools wheel flake8 pytest pytest-cov pytest-timeout pyyaml
+
+      - name: Build and install DRYML artifact without replacing the CPU stack
+        run: |
+          python -m build --no-isolation --outdir "$RUNNER_TEMP/native-artifact"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          wheel, = (Path(os.environ['RUNNER_TEMP']) / 'native-artifact').glob('*.whl')
+          subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-deps',
+                          str(wheel) + '[' + os.environ['QUALIFICATION_BACKEND'] + ']'], check=True)
+          PY
+          python -m pip check
+
+      - name: Fail closed on missing extras, wrong readers or non-CPU builds
+        run: |
+          python - <<'PY'
+          from importlib import metadata, util
+          import json
+          import os
+          import platform
+          from pathlib import Path
+          import subprocess
+          import sys
+          from packaging.markers import default_environment
+          from packaging.requirements import Requirement
+
+          backend = os.environ['QUALIFICATION_BACKEND']
+          expected = {'numpy': '2.1.3', 'scipy': '1.18.0', 'pandas': '3.0.5'}
+          expected.update({'xgboost': '3.4.2', 'scikit-learn': '1.9.0'} if backend == 'xgboost'
+                          else {'statsmodels': '0.15.0'})
+          assert sys.version_info[:2] == (3, 12), sys.version
+          assert backend in metadata.metadata('dryml').get_all('Provides-Extra')
+          environment = {**default_environment(), 'extra': backend}
+          extra_requirements = {}
+          for value in metadata.requires('dryml'):
+              requirement = Requirement(value)
+              if requirement.marker is not None and requirement.marker.evaluate(environment):
+                  extra_requirements[requirement.name] = str(requirement.specifier)
+          assert extra_requirements == {name: '==' + value for name, value in expected.items()}, extra_requirements
+          for name, required in expected.items():
+              assert metadata.version(name) == required, (name, required, metadata.version(name))
+          forbidden = {'tensorflow': 'tensorflow', 'torch': 'torch', 'jax': 'jax',
+                       'jaxlib': 'jaxlib', 'ray': 'ray'}
+          forbidden.update({'statsmodels': 'statsmodels'} if backend == 'xgboost'
+                           else {'xgboost': 'xgboost', 'scikit-learn': 'sklearn'})
+          for distribution, module in forbidden.items():
+              try:
+                  metadata.version(distribution)
+              except metadata.PackageNotFoundError:
+                  pass
+              else:
+                  raise AssertionError('unexpected optional distribution: ' + distribution)
+              assert util.find_spec(module) is None, module
+          records = json.loads(subprocess.check_output(['conda', 'list', '--json'], text=True))
+          builds = [{key: record.get(key) for key in ('name', 'version', 'build_string', 'channel', 'platform')}
+                    for record in records if record['name'] in
+                    {'python', 'numpy', 'scipy', 'pandas', 'py-xgboost', 'libxgboost', 'statsmodels', 'scikit-learn'}]
+          if backend == 'xgboost':
+              cpu = [record for record in records if record['name'] == 'py-xgboost']
+              assert len(cpu) == 1 and cpu[0]['version'] == '3.4.2' and cpu[0]['build_string'].startswith('cpu_'), cpu
+              import xgboost
+              facts = xgboost.build_info()
+              assert facts['USE_CUDA'] is False, facts
+              print('xgboost build:', json.dumps(facts, sort_keys=True))
+          else:
+              from statsmodels.regression.linear_model import OLS
+              from statsmodels.discrete.discrete_model import Logit
+              assert OLS is not None and Logit is not None
+              assert not {'sklearn', 'xgboost'} & sys.modules.keys()
+          evidence = {'python': sys.version, 'python_build': platform.python_build(),
+                      'platform': platform.platform(), 'machine': platform.machine(),
+                      'versions': {name: metadata.version(name) for name in ('dryml', *expected)},
+                      'conda_builds': builds}
+          if backend == 'xgboost':
+              evidence['xgboost_build'] = facts
+          destination = Path(os.environ['RUNNER_TEMP']) / 'native-evidence' / backend
+          destination.mkdir(parents=True, exist_ok=True)
+          (destination / 'preflight.json').write_text(json.dumps(evidence, indent=2, sort_keys=True))
+          print(json.dumps(evidence, indent=2, sort_keys=True))
+          PY
+
+      - name: Execute assigned native cases with collection and zero-skip evidence
+        run: |
+          for phase in native recovery association workers; do
+            QUALIFICATION_PHASE="$phase" python - <<'PY'
+          from collections import Counter
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import xml.etree.ElementTree as ET
+          import pytest
+
+          backend = os.environ['QUALIFICATION_BACKEND']
+          phase = os.environ['QUALIFICATION_PHASE']
+          root = Path(os.environ['RUNNER_TEMP']) / 'native-evidence' / backend / phase
+          root.mkdir(parents=True)
+          experiments = 'tests/models/test_estimator_experiments.py'
+          recovery = 'tests/models/test_experiment_recovery.py'
+          graph = 'tests/core/test_state_ref_restore_into.py'
+          kinds = ('xgb-classifier', 'xgb-regressor') if backend == 'xgboost' else ('stats-ols', 'stats-logit')
+          representative = kinds[1]
+          if phase == 'native':
+              paths = ['tests/models/test_xgb_models.py' if backend == 'xgboost'
+                       else 'tests/models/test_statsmodels_models.py']
+              expected_count = 26 if backend == 'xgboost' else 41
+              cases = {
+                  'test_native_xgb_quality_and_ubjson_reopen': ('binary', 'multiclass', 'regression'),
+                  'test_native_xgb_failure_boundaries': (None,),
+                  'test_native_xgb_rejects_nonfinite_regression_targets': (None,),
+                  'test_adapter_cpu_dense_fit_and_prediction': (None,),
+                  'test_adapter_quality_parity_and_authored_batch_exposure': ('binary', 'multiclass', 'regression'),
+                  'test_adapter_selected_calls_prepared_map_and_refit_facts': ('classification', 'regression'),
+                  'test_adapter_explicit_spec_checked_at_fit_and_prefit_preparation': (None,),
+                  'test_adapter_invalid_input_preserves_previous_bundle': (None,),
+                  'test_adapter_candidate_failure_keeps_native_facts_bytes_and_counts': (
+                      'native-RuntimeError', 'validate-RuntimeError', 'encode-RuntimeError', 'encode-KeyboardInterrupt'),
+                  'test_adapter_invalid_native_predictions_cannot_be_accepted': (None,),
+                  'test_adapter_cleanup_precedes_single_native_encoding': (None,),
+                  'test_adapter_local_experiment_publishes_native_model_and_terminal_history': (None,),
+                  'test_adapter_exact_repo_restore_and_retained_payload_identity': ('binary', 'multiclass', 'regression', 'unfitted'),
+                  'test_adapter_restore_malformed_metadata_is_candidate_first': (None,),
+                  'test_adapter_failed_entered_restore_obeys_core_invalidation': (None,),
+              } if backend == 'xgboost' else {
+                  'test_native_ols_rank_intercept_and_quality': ('no-intercept', 'intercept', 'duplicate', 'duplicate-intercept'),
+                  'test_native_logit_convergence_probabilities_and_quality': ('False', 'True'),
+                  'test_native_full_results_pickle_retention_and_byte_stability': ('ols', 'logit'),
+                  'test_native_logit_nonconvergence_is_a_returned_failure_fact': (None,),
+                  'test_native_logit_perfect_prediction_raising_is_instance_local': (None,),
+                  'test_native_statsmodels_missing_raise_never_drops_rows': ('ols', 'logit'),
+                  'test_native_ols_missing_raise_is_not_a_finite_parameter_guard': (None,),
+                  'test_adapter_ols_native_parity_quality_and_original_width': tuple('ols_reference' + str(i) for i in range(4)),
+                  'test_adapter_logit_native_parity_quality_and_threshold': ('False', 'True'),
+                  'test_adapter_dataset_order_exposure_and_float64_copy': ('False', 'True'),
+                  'test_adapter_selected_prepared_calls_use_current_fit_and_refuse_changed_width': ('False', 'True'),
+                  'test_adapter_invalid_data_and_fit_options_preserve_prior_state': (None,),
+                  'test_adapter_native_failure_preserves_results_bytes_and_success_counts': (
+                      'params', 'false_convergence', 'missing_convergence', 'perfect_prediction', 'prediction', 'encode_interrupt', 'cleanup'),
+                  'test_adapter_real_logit_nonconvergence_is_not_accepted': (None,),
+                  'test_adapter_complete_results_exact_repo_restore_and_diagnostic_reemission': ('ols', 'logit', 'unfitted'),
+                  'test_adapter_corrupt_incompatible_and_inconsistent_state_is_candidate_first': (None,),
+                  'test_adapter_local_managed_experiment_terminal_history_and_restore': (None,),
+                  'test_adapter_failed_entered_restore_obeys_core_identity_invalidation': (None,),
+                  'test_adapter_real_fit_and_fitted_restore_never_require_sklearn_or_xgb': (None,),
+                  'test_adapter_ols_cleanup_precedes_single_encoding_and_nonfinite_params_refuse': (None,),
+                  'test_adapter_incompatible_native_reader_refuses_fit_and_restore': (None,),
+              }
+              required = {paths[0] + '::' + name + ('' if parameter is None else '[' + parameter + ']')
+                          for name, parameters in cases.items() for parameter in parameters}
+          elif phase == 'recovery':
+              replay = recovery + '::test_native_terminal_replay_reemits_exact_associated_checkpoint'
+              prior = recovery + '::test_native_preassociation_failure_retains_live_fit_but_prior_authority_refits'
+              paths = [replay, prior, '-k', representative]
+              required = {replay + '[' + stage + '-' + representative + ']' for stage in (
+                  'checkpoint_associated', 'artifact_completed', 'pending_row_published',
+                  'artifact_compute', 'completed_status_publish')}
+              required.add(prior + '[' + representative + ']')
+              expected_count = 6
+          elif phase == 'association':
+              terminal = experiments + '::test_terminal_artifacts_callbacks_and_fresh_final_authority'
+              restore = graph + '::test_native_graph_restore_unfitted_fitted_invalidation_and_fresh_recovery'
+              paths = [terminal, restore, '-k', ' or '.join(kinds)]
+              required = {terminal + '[' + kind + ']' for kind in kinds}
+              required.update(restore + '[' + store + '-' + representative + ']' for store in ('dir', 'zip'))
+              expected_count = 4
+          else:
+              worker = experiments + '::test_core_cpu_worker_publication_fresh_reopen_and_isolation'
+              failure = experiments + '::test_core_worker_failure_keeps_admission_and_cleanup_evidence_separate'
+              paths = [worker, failure, '-k', ' or '.join(kinds)]
+              required = {worker + '[' + kind + ']' for kind in kinds}
+              required.update(failure + '[' + stage + '-' + representative + ']'
+                              for stage in ('missing', 'incompatible', 'workload-cleanup'))
+              expected_count = 5
+
+          class Inventory:
+              def pytest_collection_finish(self, session):
+                  self.nodes = [item.nodeid for item in session.items]
+
+          inventory = Inventory()
+          common = ['--no-cov', '--import-mode=importlib', '-o', 'cache_dir=' + str(root / 'cache')]
+          status = pytest.main([*paths, *common, '--collect-only', '-q'], plugins=[inventory])
+          assert status == 0, status
+          nodes = inventory.nodes
+          assert len(nodes) == len(set(nodes)) == expected_count, nodes
+          assert set(nodes) == required, (set(nodes) - required, required - set(nodes))
+          (root / 'collected.json').write_text(json.dumps(nodes, indent=2))
+          # Execute exact collected nodes: no global -k can omit a backend file.
+          subprocess.run(['bash', './tests.sh', *nodes, *common, '-q',
+                          '--timeout=600', '--timeout-method=thread',
+                          '--basetemp=' + str(root / 'pytest'), '-o', 'junit_family=legacy',
+                          '--junitxml=' + str(root / 'results.xml'),
+                          '--dryml-timing-output=' + str(root / 'executed.json')], check=True)
+          records = json.loads((root / 'executed.json').read_text())['records']
+          assert Counter(record['nodeid'] for record in records) == Counter(nodes), records
+          assert all(record['outcome'] == 'passed' for record in records), records
+          cases = ET.parse(root / 'results.xml').findall('.//testcase')
+          assert len(cases) == expected_count, len(cases)
+          assert not any(case.find(tag) is not None for case in cases for tag in ('skipped', 'failure', 'error'))
+          print(f'{backend}/{phase}: {expected_count} required cases executed, zero skips')
+          PY
+          done
+
+      - name: Retain native collection, execution and JUnit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.os }}-py312-${{ matrix.backend }}
+          path: ${{ runner.temp }}/native-evidence
+          if-no-files-found: warn
+
   ray-integration:
     name: Existing Ray integration (Ubuntu, Python 3.12)
     if: github.event_name == 'workflow_dispatch' && (inputs.suite == 'exhaustive' || inputs.suite == 'coverage')
@@ -333,4 +604,11 @@ jobs:
 
       - name: Run combined coverage
         run: |
-          ./tests.sh coverage --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread
+          # Native cells retain their own uninstrumented execution evidence.
+          ./tests.sh coverage --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread \
+            --deselect tests/models/test_xgb_models.py \
+            --deselect tests/models/test_statsmodels_models.py \
+            --deselect tests/models/test_estimator_experiments.py \
+            --deselect tests/models/test_experiment_recovery.py::test_native_terminal_replay_reemits_exact_associated_checkpoint \
+            --deselect tests/models/test_experiment_recovery.py::test_native_preassociation_failure_retains_live_fit_but_prior_authority_refits \
+            --deselect tests/core/test_state_ref_restore_into.py::test_native_graph_restore_unfitted_fitted_invalidation_and_fresh_recovery

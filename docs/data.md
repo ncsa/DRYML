@@ -468,6 +468,13 @@ tensor or model frameworks or adding conversion edges. Caller-authored NumPy
 conversion in the Dataset graph is allowed. NaN/Inf handling and backend-specific
 missing-value or numeric-conversion policies belong to the consuming trainer.
 
+The maintained [CPU XGBoost](xgboost.md) and [OLS/binary Logit](statsmodels.md)
+trainers opt into this strict collector. Their recipes and pure Method selection
+remain usable without native packages; fitting requires the exact optional reader
+stack. Neither trainer inserts a foreign-backend conversion. This does not change
+the permissive default used by sklearn or require optional model dependencies for
+ordinary Data operations.
+
 ## Specs And Data
 
 Dataset specs are important because models and methods use them to infer outputs and verify structure. A dataset yielding `(x, y)` pairs should usually expose a matching spec tree.

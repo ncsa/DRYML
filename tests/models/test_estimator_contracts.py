@@ -681,3 +681,68 @@ def test_statsmodels_unsupported_controls_reject_before_source_acquisition(monke
         with pytest.raises((TypeError, NotImplementedError)):
             exp.train_fn(exp, **controls)
     assert exp.model.results is None and exp.state == TrainState()
+
+
+def test_routine_estimator_selection_keeps_fast_contracts_without_native_imports(tmp_path):
+    """Audit actual file/tier/profile selection over only the named estimator owners."""
+    script = """
+import json
+from pathlib import Path
+import sys
+
+class RejectNative:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'tensorflow', 'torch', 'jax', 'jaxlib', 'xgboost', 'statsmodels', 'sklearn'}:
+            raise AssertionError('unexpected native collection import: ' + fullname)
+sys.meta_path.insert(0, RejectNative())
+import pytest
+from tests.tools import test_buckets as buckets
+
+paths = (
+    'tests/models/test_estimator_contracts.py',
+    'tests/data/test_materialize_supervised_numpy.py',
+    'tests/models/test_xgb_models.py',
+    'tests/models/test_statsmodels_models.py',
+    'tests/models/test_estimator_experiments.py',
+    'tests/models/test_experiment_recovery.py',
+    'tests/core/test_state_ref_restore_into.py',
+)
+# Limit the runner's filesystem input to this contract's explicit owners.
+buckets.iter_test_files = lambda: [Path(path) for path in paths]
+baseline = json.loads(Path('tests/test_tiers.json').read_text())
+profile = json.loads(Path('tests/test_profiles.json').read_text())['profiles']['good-enough']
+selected = buckets.select_profile_files(baseline, {'smoke', 'medium'}, profile)
+assert set(selected) == {'./' + paths[index] for index in (0, 1, 6)}, selected
+
+class Inventory:
+    def pytest_collection_finish(self, session):
+        nodes = [item.nodeid for item in session.items]
+        Path(sys.argv[1]).write_text(json.dumps(nodes))
+
+raise SystemExit(pytest.main([
+    *selected, '--collect-only', '-q', '--no-cov', '--import-mode=importlib',
+    '--dryml-runner-tiers=smoke,medium', '--dryml-test-profile=good-enough',
+    '-o', 'cache_dir=' + sys.argv[2],
+], plugins=[Inventory()]))
+"""
+    inventory = tmp_path / "routine-nodes.json"
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(inventory), str(tmp_path / "cache")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    nodes = json.loads(inventory.read_text())
+    assert len([node for node in nodes if "/test_materialize_supervised_numpy.py::" in node]) == 47
+    functions = {node.split("::", 1)[1].split("[", 1)[0] for node in nodes}
+    assert {
+        "test_one_shot_accepts_exact_collected_exposure_once_without_telemetry",
+        "test_preacceptance_failure_preserves_prior_predictions_facts_and_success_counts",
+        "test_xgb_recipe_selection_and_inference_are_native_free",
+        "test_xgb_pure_specs_and_closed_configuration",
+        "test_xgb_missing_extra_and_reader_version_errors_are_actionable",
+        "test_statsmodels_recipe_selection_and_map_are_native_free",
+        "test_statsmodels_pure_specs_and_closed_configuration",
+        "test_statsmodels_raw_foreign_refusal_and_missing_extra_error",
+        "test_statsmodels_unsupported_controls_reject_before_source_acquisition",
+    } <= functions
+    assert not any("test_native_" in node for node in nodes)

@@ -188,7 +188,7 @@ After a mid-epoch restore, native step/window observations remain available, but
 the trainers do not present the resumed suffix's loss or metric aggregate as a
 full-epoch metric.
 
-#### Private one-shot candidate acceptance (U2)
+#### Private one-shot candidate acceptance
 
 Models now provides a private acceptance helper for opaque-fit backend trainers.
 It collects the authored Dataset through `materialize_supervised(...,
@@ -224,8 +224,8 @@ completed-fit replay. A postacceptance publication or evaluation error retains
 the accepted fit and propagates without a successful terminal receipt; the local
 helper cannot repair association or provide continuation within native fitting.
 
-U2 supplies this private seam and contract tests. The maintained CPU XGBoost
-adapter now consumes it; see [XGBoost](xgboost.md) for the U3 API, strict NumPy
+The maintained CPU XGBoost
+adapter consumes this seam; see [XGBoost](xgboost.md) for its API, strict NumPy
 boundary, retained UBJSON codec, and bounded native qualification. The maintained
 [statsmodels adapter](statsmodels.md) also consumes it for OLS and binary Logit,
 with complete retained Results state. Existing sklearn training uses its established
@@ -491,7 +491,10 @@ its prior private bundle. Recovery loads fresh exact authority with
 `reuse_live="never"`; prior native predictions do not rescue graph validity.
 This evidence is limited to the specified Linux/Python 3.12 mixed environment;
 Windows, isolated installations and wider reader-version combinations remain
-separate qualification gates.
+separate qualification gates. The four required Ubuntu/Windows Python 3.12
+isolated CI cells and their executed-case guards are configured in
+[Testing](testing.md#native-estimator-qualification); configuration alone does not
+qualify those cells.
 
 For completed `Value` Artifacts, history scalar columns retain finite Python
 scalars and lossless zero-dimensional native values. Conversion is bounded and
@@ -564,7 +567,7 @@ Examples include:
 
 Backend wrappers should keep external runtime state in object state and keep stable configuration in definitions.
 
-### Maintained CPU XGBoost (U3)
+### Maintained CPU XGBoost
 
 `dryml.models.xgb` exports passive `Model`, `ClassifierModel`, `RegressionModel`
 and `BasicTraining` recipes. Native CPU gbtree/hist fitting uses detached
@@ -575,7 +578,7 @@ explicit selected element lifting, foreign-spec rejection and exact retained
 See [XGBoost](xgboost.md) for closed options, supported reader versions, failure
 behavior, concurrency limitations and current qualification scope.
 
-### Maintained CPU statsmodels (U4)
+### Maintained CPU statsmodels
 
 `dryml.models.statsmodels` exports passive `Model`, `RegressionModel`,
 `ClassifierModel` and `BasicTraining`. OLS uses native pseudoinverse rank semantics;
@@ -591,11 +594,11 @@ scientific policy, inspection/state contracts and current bounded qualification.
 
 ### XGBoost and statsmodels: Native Characterization (U1)
 
-The maintained adapter rollout starts with native-only reference tests in
+Native-only reference tests remain in
 `tests/models/test_xgb_models.py` and `tests/models/test_statsmodels_models.py`.
-That stage changed no adapter runtime. U3 has since replaced the retired
-XGBoost `Meta`/`Component` compute integration; U4 adds the maintained statsmodels
-adapter. The historical native evidence below, by itself, does not qualify
+The maintained XGBoost API replaces the retired `Meta`/`Component` compute
+integration, and statsmodels has its own backend namespace. Native evidence below,
+by itself, does not qualify
 DRYML Dataset, Method, Experiment, Repo, recovery, or worker integration.
 
 On Linux x86-64, Python 3.12.13, CPU XGBoost 3.4.2, statsmodels 0.15.0,
@@ -640,7 +643,7 @@ by the sklearn interface, and its `scikit_learn` attribute. File and bytearray
 loads reproduce predictions with measured maximum error zero (`1e-6` comparison
 tolerance). Binary, multiclass, and regression payloads measured 36,051, 133,451,
 and 53,163 bytes; save/load/save bytes matched on this stack. Model IO is not a
-complete training-configuration snapshot: future wrapper metadata still owns
+complete training-configuration snapshot: the wrapper metadata owns
 task, original feature width, class order/dtypes, and compatibility facts.
 
 Statsmodels `Results.save(..., remove_data=False)` writes one complete native
@@ -657,28 +660,36 @@ These sizes are characterization facts, not portable format constants.
 The `xgboost1` / `statsmodels1` codecs therefore encode accepted
 native bytes plus canonical version-one metadata once and retain those exact
 bytes for unchanged restored saves. Semantic equality or native reserialization
-cannot replace exact checkpoint replay. U3 implements `xgboost1`, U4 implements
-`statsmodels1`; U1 implemented neither codec.
+cannot replace exact checkpoint replay. Both codecs retain the accepted encoding.
 Full Results **and** their retained payload bytes occupy workload-sized memory;
 the pickle retains training arrays on disk too. Data removal is outside this
 contract. Native Results inspection may populate nonsemantic caches; external
 native mutation is outside the supported accepted-fit contract.
 
 The initial reader policy is exact native, applicable sklearn, numerical-stack,
-and Python major/minor matching. The above is one Linux native observation, not
-cross-version, Windows, isolated statsmodels-only, or DRYML integration evidence.
-Native qualification must fail on absent/mismatched dependencies, not skip.
+and Python major/minor matching. `dryml[xgboost]` and `dryml[statsmodels]` pin their
+respective complete reader stacks above; core's looser NumPy/pandas requirements
+do not qualify other native combinations. Native use requires Python 3.12 even
+though core supports Python >=3.10. Extras do not silently omit native packages on
+other Python versions; successful dependency resolution alone is not native
+qualification. Python patch/build/platform details are recorded, while the reader
+gate uses major/minor. The above is one Linux native observation, not
+cross-version or isolated Windows evidence. The [native CI contract](testing.md#native-estimator-qualification)
+requires all four isolated cells to execute their assigned cases with zero skips.
 
 Legacy source inspection found an archive member `model.text`, temporary `.text`
 files, eager `xgboost` import, and retired `load_compute_imp`/`save_compute_imp`
-hooks. U1 does not execute or migrate this format. The maintained core hooks are
+hooks. The maintained adapter rejects rather than migrates this format. Core hooks are
 additive: every class-local state hook in the MRO receives the unchanged codec.
-`Pickleable` contributes `heavy.pkl` independently, so later native-codec wrappers
-must use `Serializable` without inheriting automatic native-object pickling.
+`Pickleable` contributes `heavy.pkl` independently, so native-codec wrappers
+use `Serializable` without inheriting automatic native-object pickling.
 Existing `tests/core/test_state_codec_hooks.py` owns the additive-hook regression;
-U1 reuses it instead of duplicating it. Legacy rejection, malformed metadata,
+it is reused rather than duplicated. Legacy rejection, malformed metadata,
 candidate-first installation, and core restore invalidation are now exercised
-for XGBoost by U3 and statsmodels by U4; broader integration gates remain later units.
+for both adapters. Experiment/recovery/worker evidence is described above;
+isolated platform qualification remains pending CI execution. This rollout does
+not automatically close issue #38 or broaden sklearn, Data, Method, ExperimentData,
+TrainState, or Store formats.
 
 ### Experimental JAX Models
 

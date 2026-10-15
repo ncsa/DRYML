@@ -6,8 +6,13 @@ Method selection/preparation are passive: they do not import statsmodels,
 sklearn, XGBoost, TensorFlow, Torch or JAX, scan the host, open data, or acquire
 runtime resources. Statsmodels never requires the XGBoost or sklearn adapter.
 Missing native dependencies at fit/fitted restore report `dryml[statsmodels]`.
-Package-extra declarations and the isolated native CI matrix are a later rollout
-unit; this implementation does not install or provision dependencies.
+Install with `python -m pip install 'dryml[statsmodels]'` in a Python 3.12
+environment. The extra pins statsmodels 0.15.0, NumPy 2.1.3, SciPy 1.18.0 and
+pandas 3.0.5, without sklearn or XGBoost. It declares the native dependencies
+without Python markers that could silently omit the requested backend. Resolution
+on another Python version is not support evidence: core's Python >=3.10 and
+loose numerical dependencies do not expand the native reader gate. DRYML itself
+does not install or provision dependencies.
 
 ## Public recipes and prediction
 
@@ -205,4 +210,7 @@ and `tests/models/test_estimator_experiments.py` for the evidence scope.
 
 The local mixed environment does not qualify isolated statsmodels-only installs,
 Windows, other native/Python reader pairs, external data or GPU execution.
-Those future installation/platform matrix gates are not claimed here.
+The [native CI configuration](testing.md#native-estimator-qualification) requires
+Ubuntu and Windows Python 3.12 statsmodels-only cells, with sklearn/XGBoost absent
+and all 56 assigned cases executed with zero skips. Those installation/platform
+cells remain unqualified until CI passes on the exact revision.

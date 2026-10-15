@@ -7,6 +7,16 @@ or sklearn import, estimator construction, host scan, data acquisition, or nativ
 resource allocation occurs. Missing native dependencies at fit/fitted restore
 raise an actionable error naming `dryml[xgboost]`; DRYML never installs packages.
 
+Install with `python -m pip install 'dryml[xgboost]'` in a Python 3.12
+environment. The extra pins XGBoost 3.4.2, scikit-learn 1.9.0, NumPy 2.1.3,
+SciPy 1.18.0 and pandas 3.0.5 to the reader stack below. It declares the native
+dependencies on every Python version rather than silently omitting the requested
+backend; resolution on another Python version is not support evidence. Core's
+Python >=3.10 and loose numerical dependencies do not expand this native gate.
+For the CPU-only qualification installation, CI uses conda-forge
+`py-xgboost=3.4.2=cpu_*` and installs the DRYML wheel with `--no-deps` against the
+already satisfied stack; it does not let pip replace that build with GPU packages.
+
 ## Supported recipes and arrays
 
 ```python
@@ -198,8 +208,10 @@ entered-hook invalidation and fresh recovery. Worker dependency and teardown
 failures retain honest, separate invocation/cleanup outcomes. See
 [Models recovery boundary](models.md#opaque-fit-recovery-and-worker-evidence-u5).
 
-Windows, isolated installation, cross-version models, GPU, sparse/categorical
-data and broader platform/recovery matrices remain unqualified. Packaging/extras
-and wider CI qualification are later
-rollout units. See [Models](models.md), [Methods](methods.md), and [Data](data.md)
+Windows and isolated installation remain unqualified until the required
+Ubuntu/Windows Python 3.12 XGBoost-plus-sklearn cells pass on the exact revision.
+The [native CI configuration](testing.md#native-estimator-qualification) requires
+41 assigned cases per XGBoost cell with zero skips. Cross-version models, GPU,
+sparse/categorical data and broader platform/recovery matrices remain unqualified.
+See [Models](models.md), [Methods](methods.md), and [Data](data.md)
 for lower-layer ownership and lifecycle contracts.
