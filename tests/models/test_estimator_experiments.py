@@ -183,7 +183,7 @@ def _executor(tmp_path, repo, control):
     checkout = Path(__file__).resolve().parents[2]
     installed = os.environ.get(ORIGIN_MODE) == "1"
     paths = (checkout,) if installed else (checkout, checkout / "src")
-    environment = {"PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(temporary),
+    environment = {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONFAULTHANDLER": "1", "TMPDIR": str(temporary),
                    "TMP": str(temporary), "TEMP": str(temporary),
                    "XDG_CACHE_HOME": str(cache), "MPLCONFIGDIR": str(cache / "matplotlib"),
                    ORIGIN_MODE: "1" if installed else "0",
