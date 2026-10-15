@@ -85,7 +85,7 @@ def _json_bytes(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
-def _array(value, *, name, rank):
+def _validate_array(value, *, name, rank):
     if (not isinstance(value, np.ndarray)
             or isinstance(value, (np.ma.MaskedArray, np.matrix))):
         raise TypeError(f"statsmodels {name} requires a dense NumPy array; author conversion explicitly.")
@@ -95,7 +95,11 @@ def _array(value, *, name, rank):
         raise ValueError(f"statsmodels {name} requires a nonempty rank-{rank} array.")
     if not np.isfinite(value).all():
         raise ValueError(f"statsmodels {name} rejects nonfinite values.")
-    return value.astype(np.float64, copy=True)
+    return value
+
+
+def _array(value, *, name, rank):
+    return _validate_array(value, name=name, rank=rank).astype(np.float64, copy=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +275,7 @@ class Model(BaseModel, Serializable):
             result = native.fit(method="newton", full_output=True, **self.fit_options)
         candidate = _Candidate(result, x.shape[1], classes)
         self._validate_native(candidate)
-        self._check_output(result.predict(self._design(x)), rows=len(x))
+        self._check_output(result.predict(result.model.exog), rows=len(x))
         return candidate
 
     def _metadata(self, *, candidate=None, payload=b"", versions=None, python_patch=None):
@@ -333,7 +337,7 @@ class Model(BaseModel, Serializable):
         return self._predict(x, labels=True)
 
     def _runtime_selection_facts(self, args, kwargs):
-        _array(args[0] if args else kwargs.get("x"), name="features", rank=2)
+        _validate_array(args[0] if args else kwargs.get("x"), name="features", rank=2)
         return Backend.numpy, None
 
     @traits(backend="numpy")
@@ -353,7 +357,7 @@ class Model(BaseModel, Serializable):
         Copies input to float64. Invalid inputs, width or unfitted state raise
         TypeError/ValueError; native errors propagate without accepted-state changes.
         """
-        x = _array(x, name="element features", rank=1)
+        x = _validate_array(x, name="element features", rank=1)
         return self._predict(x[None, :])[0]
 
     def _input_spec(self, spec):

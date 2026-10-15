@@ -61,11 +61,11 @@ def _options(options):
                 finite = False
             if not finite or not 0 <= value <= float(np.finfo(np.float32).max):
                 raise ValueError(f"XGBoost {name} must be finite, nonnegative and representable in float32.")
-            if name == "learning_rate" and not 0 < value <= 1:
-                raise ValueError("XGBoost learning_rate must be in (0, 1].")
-            if name in ("subsample", "colsample_bytree", "colsample_bylevel", "colsample_bynode"):
-                if not 0 < value <= 1:
-                    raise ValueError(f"XGBoost {name} must be in (0, 1].")
+            if name in (
+                "learning_rate", "subsample", "colsample_bytree",
+                "colsample_bylevel", "colsample_bynode",
+            ) and not 0 < value <= 1:
+                raise ValueError(f"XGBoost {name} must be in (0, 1].")
     return result
 
 
