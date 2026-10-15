@@ -21,7 +21,7 @@ Important public types:
 - `model_parameter_counts`
 - `parameter_counts_from_parameters`
 
-Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBoost, and other frameworks. The JAX/Flax NNX/Optax APIs described below are **experimental** and may change based on use.
+Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBoost, statsmodels, and other frameworks. The JAX/Flax NNX/Optax APIs described below are **experimental** and may change based on use.
 
 ## Model As Method
 
@@ -226,8 +226,9 @@ helper cannot repair association or provide continuation within native fitting.
 
 U2 supplies this private seam and contract tests. The maintained CPU XGBoost
 adapter now consumes it; see [XGBoost](xgboost.md) for the U3 API, strict NumPy
-boundary, retained UBJSON codec, and bounded native qualification. The statsmodels
-adapter is a later rollout stage. Existing sklearn training uses its established
+boundary, retained UBJSON codec, and bounded native qualification. The maintained
+[statsmodels adapter](statsmodels.md) also consumes it for OLS and binary Logit,
+with complete retained Results state. Existing sklearn training uses its established
 lifecycle rather than this candidate-first helper.
 
 Training prepares declared x/y Dataset specs once in the trainer's inspectable
@@ -505,6 +506,7 @@ Examples include:
 - PyTorch wrappers and training functions
 - sklearn model wrappers
 - XGBoost model wrappers
+- statsmodels OLS and binary Logit wrappers
 
 Backend wrappers should keep external runtime state in object state and keep stable configuration in definitions.
 
@@ -519,13 +521,27 @@ explicit selected element lifting, foreign-spec rejection and exact retained
 See [XGBoost](xgboost.md) for closed options, supported reader versions, failure
 behavior, concurrency limitations and current qualification scope.
 
+### Maintained CPU statsmodels (U4)
+
+`dryml.models.statsmodels` exports passive `Model`, `RegressionModel`,
+`ClassifierModel` and `BasicTraining`. OLS uses native pseudoinverse rank semantics;
+binary Logit requires explicit Newton convergence and finite parameters. Both use
+finite dense float64 copies, optional exactly-one prepended intercept, pure NumPy
+metadata and guarded Method/Map selection. OLS predictions are `(N,)` float64;
+Logit call/probabilities are `(N,2)` float64 with columns `[0,1]`, and labels are
+`(N,)` int64 with threshold equality selecting 1. Complete version-bound native
+Results and exact retained payload bytes belong to the `statsmodels1` codec.
+Borrowed Results inspection retains training data on disk and duplicates native
+Results/bytes in memory. See [statsmodels](statsmodels.md) for options, lifecycle,
+scientific policy, inspection/state contracts and current bounded qualification.
+
 ### XGBoost and statsmodels: Native Characterization (U1)
 
 The maintained adapter rollout starts with native-only reference tests in
 `tests/models/test_xgb_models.py` and `tests/models/test_statsmodels_models.py`.
 That stage changed no adapter runtime. U3 has since replaced the retired
-XGBoost `Meta`/`Component` compute integration; statsmodels has no maintained
-adapter yet. The historical native evidence below, by itself, does not qualify
+XGBoost `Meta`/`Component` compute integration; U4 adds the maintained statsmodels
+adapter. The historical native evidence below, by itself, does not qualify
 DRYML Dataset, Method, Experiment, Repo, recovery, or worker integration.
 
 On Linux x86-64, Python 3.12.13, CPU XGBoost 3.4.2, statsmodels 0.15.0,
@@ -561,7 +577,7 @@ batch axis. The reference class conversion uses `[1-p, p]`, columns `[0, 1]`,
 float64 probabilities and int64 labels, with threshold equality selecting 1.
 `missing='raise'` rejects NaN design/targets without dropping rows, but is **not**
 a finite-parameter guard: OLS can return nonfinite coefficients for infinite
-targets. Later adapters must validate both finite inputs and candidate parameters.
+targets. The maintained statsmodels adapter validates both finite inputs and candidate parameters.
 
 #### Native payload inventory and identity
 
@@ -584,15 +600,15 @@ diagnostic inspection populated caches, producing 10,579 / 6,782 byte pickles,
 while prediction and inspection semantics remained equal (`1e-8` tolerance).
 These sizes are characterization facts, not portable format constants.
 
-The `xgboost1` / planned `statsmodels1` codecs therefore must encode accepted
+The `xgboost1` / `statsmodels1` codecs therefore encode accepted
 native bytes plus canonical version-one metadata once and retain those exact
 bytes for unchanged restored saves. Semantic equality or native reserialization
-cannot replace exact checkpoint replay. U3 implements `xgboost1`; U1 implemented
-neither codec, and `statsmodels1` remains a later unit.
+cannot replace exact checkpoint replay. U3 implements `xgboost1`, U4 implements
+`statsmodels1`; U1 implemented neither codec.
 Full Results **and** their retained payload bytes occupy workload-sized memory;
 the pickle retains training arrays on disk too. Data removal is outside this
 contract. Native Results inspection may populate nonsemantic caches; external
-native mutation is outside the planned accepted-fit contract.
+native mutation is outside the supported accepted-fit contract.
 
 The initial reader policy is exact native, applicable sklearn, numerical-stack,
 and Python major/minor matching. The above is one Linux native observation, not
@@ -608,7 +624,7 @@ must use `Serializable` without inheriting automatic native-object pickling.
 Existing `tests/core/test_state_codec_hooks.py` owns the additive-hook regression;
 U1 reuses it instead of duplicating it. Legacy rejection, malformed metadata,
 candidate-first installation, and core restore invalidation are now exercised
-for XGBoost by U3; statsmodels and full integration gates remain later units.
+for XGBoost by U3 and statsmodels by U4; broader integration gates remain later units.
 
 ### Experimental JAX Models
 

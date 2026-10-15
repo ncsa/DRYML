@@ -558,3 +558,126 @@ def test_terminal_publication_failure_keeps_accepted_fit_without_claiming_receip
     assert (exp.state.step, exp.state.epoch, exp.state.examples_seen) == (1, 1, 3)
     np.testing.assert_array_equal(exp.model(np.zeros((1, 1))), [3.0])
     assert exp.train.status(state_repo=repo).final_state_ref is None
+
+
+def test_statsmodels_pure_specs_and_closed_configuration():
+    """Both algorithms have known pure output shapes before native construction."""
+    from dryml.core import TensorSpec
+    from dryml.models.statsmodels import Model, ClassifierModel, RegressionModel, BasicTraining
+
+    spec = TensorSpec("float32", shape=(3,), batch=5, backend="numpy")
+    for cls, shape in ((RegressionModel, ()), (ClassifierModel, (2,))):
+        model = cls()
+        assert model.results is None
+        assert model.definition.parameters["intercept"] is False
+        assert model.infer_output_spec(spec).equal_exact(
+            TensorSpec("float64", shape=shape, batch=5, backend="numpy"))
+        assert model.find_implementation(spec).conversion_edge is None
+    for options in ({"intercept": 1}, {"threshold": True}, {"threshold": 0},
+                    {"threshold": 1}, {"threshold": float("nan")},
+                    {"fit_options": {"maxiter": True}}, {"fit_options": {"maxiter": 0}},
+                    {"fit_options": {"tol": float("inf")}}, {"fit_options": {"disp": 1}},
+                    {"fit_options": {"method": "bfgs"}}, {"fit_options": {"start_params": [1]}}):
+        with pytest.raises((TypeError, ValueError)):
+            ClassifierModel(**options)
+    with pytest.raises(ValueError):
+        RegressionModel(fit_options={"maxiter": 1})
+    with pytest.raises(ValueError):
+        Model("GLM")
+    with pytest.raises(TypeError):
+        BasicTraining(maxiter=2)
+    for output in (TensorSpec("float32", shape=(2,), backend="numpy"),
+                   TensorSpec("float64", shape=(2,), backend="torch"),
+                   TensorSpec("float64", shape=(1,), backend="numpy")):
+        with pytest.raises((TypeError, ValueError)):
+            ClassifierModel(output_spec=output)
+
+
+def test_statsmodels_recipe_selection_and_map_are_native_free():
+    """Foreign producer declarations fail before conversion planning or source open."""
+    script = """
+import sys
+class RejectNative:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'statsmodels', 'sklearn', 'xgboost', 'torch', 'tensorflow', 'jax'}:
+            raise AssertionError('unexpected native import: ' + fullname)
+sys.meta_path.insert(0, RejectNative())
+import dryml
+import dryml.models
+from dryml.models.statsmodels import ClassifierModel, RegressionModel, BasicTraining, base
+from dryml.core import TensorSpec
+from dryml.data import Map
+from dryml.methods import ImplementationSelectionError, conversion
+from tests.data.test_materialize_supervised_numpy import TrackingDataset, pair
+base.version = lambda name: (_ for _ in ()).throw(AssertionError('package inspection'))
+def reject_conversion(*args, **kwargs):
+    raise AssertionError('unexpected conversion planning/activation')
+conversion.make_edge = conversion.convert = reject_conversion
+spec = TensorSpec('float32', shape=(2,), backend='numpy')
+for model in (ClassifierModel(), RegressionModel()):
+    assert model.results is None
+    assert model.infer_output_spec(spec).dtype.name == 'float64'
+    model.find_implementation(spec).prepared_invoker()
+    model.learn(spec)
+    for backend in ('torch', 'tf', 'jax', None):
+        foreign = TensorSpec('float32', shape=(2,), backend=backend)
+        source = TrackingDataset((pair(),), spec=foreign)
+        for action in (lambda: model.find_implementation(foreign), lambda: model.learn(foreign),
+                       lambda: model._prepare_implementation(foreign, backend=foreign.backend, batch_mode=None),
+                       lambda: Map(source, model).prepare()):
+            try:
+                action()
+            except ImplementationSelectionError:
+                pass
+            else:
+                raise AssertionError('foreign selection admitted')
+        assert source.opens == 0
+assert BasicTraining().supports_safe_points is False
+assert BasicTraining().supports_observers is False
+assert not {'statsmodels', 'sklearn', 'xgboost', 'torch', 'tensorflow', 'jax'} & sys.modules.keys()
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+
+
+def test_statsmodels_raw_foreign_refusal_and_missing_extra_error(monkeypatch):
+    """Foreign __array__ never runs; admitted fit gets actionable dependency errors."""
+    from importlib.metadata import PackageNotFoundError
+    from dryml.models.statsmodels import RegressionModel, base
+
+    class Convertible:
+        def __array__(self, *args, **kwargs):
+            pytest.fail("foreign coercion attempted")
+
+    model = RegressionModel()
+    x, y = np.ones((3, 1)), np.arange(3, dtype=np.float64)
+    for action in (model, model.predict):
+        with pytest.raises(TypeError, match="dense NumPy"):
+            action(Convertible())
+        with pytest.raises(ValueError, match="unfitted"):
+            action(x)
+    with pytest.raises(TypeError, match="dense NumPy"):
+        model.fit(Convertible(), y)
+    with pytest.raises(TypeError, match="dense NumPy"):
+        model.fit(x, Convertible())
+
+    def missing(name):
+        raise PackageNotFoundError(name)
+
+    with monkeypatch.context() as guard:
+        guard.setattr(base, "version", missing)
+        with pytest.raises(ImportError, match=r"dryml\[statsmodels\]"):
+            model.fit(x, y)
+    assert model.results is None
+
+
+def test_statsmodels_unsupported_controls_reject_before_source_acquisition(monkeypatch):
+    from dryml.models.statsmodels import RegressionModel, BasicTraining
+
+    exp = Experiment(RegressionModel(), BasicTraining(), train_data=_data())
+    monkeypatch.setattr(exp.train_data, "iterator", lambda *a, **k: pytest.fail("opened source"))
+    for controls in ({"callbacks": (lambda: None,)}, {"observer_session": object()},
+                     {"callbacks": None}, {"sample_weight": np.ones(3)}, {"maxiter": 1}):
+        with pytest.raises((TypeError, NotImplementedError)):
+            exp.train_fn(exp, **controls)
+    assert exp.model.results is None and exp.state == TrainState()
