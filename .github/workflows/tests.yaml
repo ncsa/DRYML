@@ -332,7 +332,7 @@ jobs:
           conda install --yes --override-channels -c conda-forge \
             "python=3.12" "numpy=2.1.3" "scipy=1.18.0" "pandas=3.0.5" \
             "${native[@]}" "ml_dtypes>=0.6.0" dill tqdm gputil packaging \
-            pip build setuptools wheel flake8 pytest pytest-cov pytest-timeout pyyaml
+            pip python-build setuptools wheel flake8 pytest pytest-cov pytest-timeout pyyaml
 
       - name: Build and install DRYML artifact without replacing the CPU stack
         run: |
