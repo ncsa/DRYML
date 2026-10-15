@@ -390,7 +390,7 @@ jobs:
               else:
                   raise AssertionError('unexpected optional distribution: ' + distribution)
               assert util.find_spec(module) is None, module
-          records = json.loads(subprocess.check_output(['conda', 'list', '--json'], text=True))
+          records = json.loads(subprocess.check_output([os.environ['CONDA_EXE'], 'list', '--json'], text=True))
           builds = [{key: record.get(key) for key in ('name', 'version', 'build_string', 'channel', 'platform')}
                     for record in records if record['name'] in
                     {'python', 'numpy', 'scipy', 'pandas', 'py-xgboost', 'libxgboost', 'statsmodels', 'scikit-learn'}]

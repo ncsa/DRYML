@@ -388,7 +388,7 @@ def test_adapter_dataset_order_exposure_and_float64_copy(native_stats, classific
 
 @pytest.mark.parametrize("classification", [False, True])
 def test_adapter_selected_prepared_calls_use_current_fit_and_refuse_changed_width(native_stats, classification, monkeypatch):
-    """Learning and weak selected invokers retain width guards, including trait-only use."""
+    """Keep fitted-fact guards and strict numerical parity across BLAS batch shapes."""
     np, _, _, _, _ = native_stats
     from dryml.core import TensorSpec
     from dryml.data import ArrayDataset, Batch, Map
@@ -425,15 +425,15 @@ def test_adapter_selected_prepared_calls_use_current_fit_and_refuse_changed_widt
         with dataset.iterator() as cursor:
             return list(cursor)
 
-    np.testing.assert_array_equal(element(x[0]), expected[0])
-    np.testing.assert_array_equal(batched(x[:4]), expected[:4])
-    np.testing.assert_array_equal(model(x[:4]), expected[:4])
+    np.testing.assert_allclose(element(x[0]), expected[0], rtol=1e-12, atol=1e-12, strict=True)
+    np.testing.assert_allclose(batched(x[:4]), expected[:4], rtol=1e-12, atol=1e-12, strict=True)
+    np.testing.assert_allclose(model(x[:4]), expected[:4], rtol=1e-12, atol=1e-12, strict=True)
     np.testing.assert_allclose(np.asarray(collect(mapped)), expected, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(np.concatenate(collect(batch_map)), expected, rtol=1e-12, atol=1e-12)
     assert model.default_batched is None
     model.eager()
-    np.testing.assert_array_equal(model(x[:4]), expected[:4])
-    np.testing.assert_array_equal(model(x=x[:4]), expected[:4])
+    np.testing.assert_allclose(model(x[:4]), expected[:4], rtol=1e-12, atol=1e-12, strict=True)
+    np.testing.assert_allclose(model(x=x[:4]), expected[:4], rtol=1e-12, atol=1e-12, strict=True)
     for keyword in (True, False):
         model.learn()
         assert model.call_mode == "learning" and model.cached_signature is None
@@ -441,13 +441,13 @@ def test_adapter_selected_prepared_calls_use_current_fit_and_refuse_changed_widt
         def learned_call():
             return model(x=x[:4]) if keyword else model(x[:4])
 
-        np.testing.assert_array_equal(learned_call(), expected[:4])
+        np.testing.assert_allclose(learned_call(), expected[:4], rtol=1e-12, atol=1e-12, strict=True)
         assert model.call_mode == "cached" and model.cached_signature is not None
         signature = model.cached_signature
         assert signature.batch_mode is None
-        np.testing.assert_array_equal(learned_call(), expected[:4])
+        np.testing.assert_allclose(learned_call(), expected[:4], rtol=1e-12, atol=1e-12, strict=True)
         model.fit(x, y)
-        np.testing.assert_array_equal(learned_call(), expected[:4])
+        np.testing.assert_allclose(learned_call(), expected[:4], rtol=1e-12, atol=1e-12, strict=True)
         assert model.cached_signature == signature
     model.fit(x, 1 - y if classification else y + 100)
     current = model.predict_proba(x) if classification else model.predict(x)
@@ -455,7 +455,7 @@ def test_adapter_selected_prepared_calls_use_current_fit_and_refuse_changed_widt
     for invoke in (prefit, trait_only):
         np.testing.assert_array_equal(invoke(x=x), current)
     np.testing.assert_allclose(np.asarray(collect(mapped)), current, rtol=1e-12, atol=1e-12)
-    np.testing.assert_array_equal(model(x[:4]), current[:4])
+    np.testing.assert_allclose(model(x[:4]), current[:4], rtol=1e-12, atol=1e-12, strict=True)
     model.fit(x[:, :1], y)
     for invoke in (prefit, trait_only, uninvoked):
         with pytest.raises(MethodError, match="re-prepare"):
