@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 import numpy as np
@@ -191,6 +192,9 @@ def _executor(tmp_path, repo, control):
     environment.update({name: "1" for name in (
         "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "BLIS_NUM_THREADS",
         "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")})
+    native_dlls = Path(sys.base_prefix) / "Library" / "bin"
+    if os.name == "nt" and native_dlls.is_dir():
+        environment["PATH"] = os.pathsep.join((str(native_dlls), os.defpath))
     return Executor(SubProcessConfig(
         spool_directory=spool, env_vars=environment, execution_timeout=90,
         automatic_environment_discovery=False, admission_timeout=60,
