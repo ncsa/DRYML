@@ -286,12 +286,6 @@ jobs:
       QUALIFICATION_BACKEND: ${{ matrix.backend }}
       DRYML_TEST_INSTALLED_ESTIMATORS: "1"
       PYTHONDONTWRITEBYTECODE: "1"
-      TMPDIR: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
-      TEMP: ${{ runner.temp }}
-      XDG_CACHE_HOME: ${{ runner.temp }}/native-cache
-      PIP_CACHE_DIR: ${{ runner.temp }}/native-pip-cache
-      MPLCONFIGDIR: ${{ runner.temp }}/native-matplotlib
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
@@ -310,6 +304,24 @@ jobs:
           python-version: "3.12"
           channels: conda-forge
           channel-priority: strict
+
+      - name: Set native scratch paths before imports
+        env:
+          TMPDIR: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+          XDG_CACHE_HOME: ${{ runner.temp }}/native-cache
+          PIP_CACHE_DIR: ${{ runner.temp }}/native-pip-cache
+          MPLCONFIGDIR: ${{ runner.temp }}/native-matplotlib
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as output:
+              for name in ('TMPDIR', 'TMP', 'TEMP', 'XDG_CACHE_HOME', 'PIP_CACHE_DIR', 'MPLCONFIGDIR'):
+                  output.write(f'{name}={os.environ[name]}\n')
+          PY
 
       - name: Require exact conda-forge CPU candidate packages
         run: |
