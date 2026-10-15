@@ -437,8 +437,10 @@ Each job uses an isolated strict conda-forge environment. XGBoost specifically
 requires `py-xgboost=3.4.2=cpu_*`; statsmodels requires `statsmodels=0.15.0`.
 Both use NumPy 2.1.3, SciPy 1.18.0 and pandas 3.0.5; only XGBoost adds
 scikit-learn 1.9.0. Unavailable exact packages fail the environment solve rather
-than substituting versions. CI builds DRYML and installs the wheel with the
-requested extra and `--no-deps`, preserving the already satisfied CPU stack.
+than substituting versions. DRYML's core `ml_dtypes>=0.6.0` requirement is
+installed from PyPI with `--no-deps` inside that environment; conda-forge's older
+`ml_dtypes` package cannot satisfy it. CI then builds DRYML and installs the wheel
+with the requested extra and `--no-deps`, preserving the conda-installed CPU stack.
 `pip check` and preflight validate the wheel's real extra metadata, required
 versions, absence of unrelated optional model stacks and, for XGBoost, both the
 Conda CPU selector/build string and `build_info()['USE_CUDA'] is False`.
