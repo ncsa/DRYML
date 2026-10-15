@@ -105,6 +105,64 @@ def test_constructor_mode_uses_the_constructor_annotation_snapshot() -> None:
     assert compile_signature(ConstructorTarget, constructor=True).slots["value"].role == "ref"
 
 
+def test_definition_build_names_unexpected_constructor_keyword_without_values() -> None:
+    """Definition builds expose the typo in the primary error before construction."""
+
+    with pytest.raises(SignatureError) as caught:
+        Definition(SignatureContainer, child=None, chlid="private argument value").build()
+
+    assert caught.value.reason == "argument binding failed"
+    assert caught.value.slot == "chlid"
+    assert "at chlid" in str(caught.value)
+    assert "private argument value" not in str(caught.value)
+    assert isinstance(caught.value.__cause__, TypeError)
+    assert "chlid" in str(caught.value.__cause__)
+
+
+def test_constructor_keyword_diagnostic_does_not_render_argument_values() -> None:
+    """Finding a constructor typo never invokes a rejected value's repr hook."""
+
+    class Unprintable:
+        def __repr__(self):
+            pytest.fail("binding diagnostics must not render argument values")
+
+    plan = compile_signature(SignatureContainer, constructor=True)
+    with pytest.raises(SignatureError) as caught:
+        plan.prepare_args((), {"child": None, "chlid": Unprintable()})
+
+    assert caught.value.slot == "chlid"
+    assert "at chlid" in str(caught.value)
+
+
+@pytest.mark.parametrize("mode", ("function", "variadic-constructor", "nonstring-key"))
+def test_binding_errors_do_not_guess_unexpected_constructor_keywords(mode) -> None:
+    """Function calls, accepted variadic keys and malformed keys keep generic errors."""
+
+    def target(child=None):
+        return child
+
+    class VariadicConstructor:
+        def __init__(self, required, **options):
+            pytest.fail("invalid calls must fail before the constructor runs")
+
+    if mode == "function":
+        plan = compile_signature(target)
+        kwargs = {"chlid": "private argument value"}
+    elif mode == "variadic-constructor":
+        plan = compile_signature(VariadicConstructor, constructor=True)
+        kwargs = {"valid_extra": "private argument value"}
+    else:
+        plan = compile_signature(SignatureContainer, constructor=True)
+        kwargs = {1: "private argument value"}
+
+    with pytest.raises(SignatureError) as caught:
+        plan.prepare_args((), kwargs)
+
+    assert caught.value.reason == "argument binding failed"
+    assert caught.value.slot is None
+    assert str(caught.value) == "Signature normalization failed: argument binding failed."
+
+
 @pytest.mark.parametrize(
     "annotation",
     (

@@ -2,6 +2,11 @@
 
 ## 0.3.0b1 (unreleased)
 
+Constructor signature errors now identify an unexpected keyword in the primary
+`SignatureError` message and `slot`, including through `Definition(...).build()`.
+The stable `"argument binding failed"` reason and original exception cause are
+retained; argument values are not rendered. See [Signatures](signatures.md#errors).
+
 Maintained dense CPU estimator adapters now provide XGBoost classification and
 scalar regression (`dryml.models.xgb`) and statsmodels OLS/binary Logit
 (`dryml.models.statsmodels`). Imports and configuration are passive; fitting and
