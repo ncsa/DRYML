@@ -4,12 +4,14 @@ Explicit execution requires the exact candidate stack; missing packages fail rat
 than skip. Native imports occur only in fixtures/test bodies after collection.
 """
 
+import gc
 import hashlib
 from importlib.metadata import version
 import json
 from pathlib import Path
 import platform
 import sys
+import weakref
 
 import pytest
 
@@ -249,7 +251,7 @@ def test_adapter_quality_parity_and_authored_batch_exposure(native_reference, na
 
 @pytest.mark.parametrize("task", ["classification", "regression"])
 def test_adapter_selected_calls_prepared_map_and_refit_facts(native_xgb, task, monkeypatch):
-    """Preparation is native-free, same-fact refits stay live, changed facts refuse reuse."""
+    """Learning and weak selected invokers retain refit guards, with or without specs."""
     np, _, _ = native_xgb
     from dryml.core import TensorSpec
     from dryml.data import ArrayDataset, Batch, Map
@@ -260,6 +262,9 @@ def test_adapter_selected_calls_prepared_map_and_refit_facts(native_xgb, task, m
     y = (np.arange(20) % 2).astype(np.int64) if task == "classification" else np.arange(20, dtype=np.float32)
     cls = ClassifierModel if task == "classification" else RegressionModel
     model = cls(n_estimators=4, max_depth=2, min_child_weight=0)
+    prefit = model.find_implementation(backend="numpy", batch_mode="batched").prepared_invoker()
+    with pytest.raises(ValueError, match="unfitted"):
+        prefit(x)
     model.fit(x, y)
     spec = TensorSpec("float32", shape=(3,), backend="numpy")
     source = ArrayDataset(x)
@@ -269,12 +274,16 @@ def test_adapter_selected_calls_prepared_map_and_refit_facts(native_xgb, task, m
         guard.setattr(model.mdl, "predict_proba", lambda *a: pytest.fail("prediction during preparation"), raising=False)
         element = model.find_implementation(spec)
         batched = model.find_implementation(spec.with_batch(4))
+        trait_only = model.find_implementation(backend="numpy", batch_mode="batched").prepared_invoker()
+        uninvoked = model.find_implementation(backend="numpy", batch_mode="batched").prepared_invoker()
         model.learn(spec.with_batch(4))
         mapped = Map(source, model).prepare()
         batch_map = Map(Batch(source, 7), model).prepare()
         assert mapped.spec.dtype.name == batch_map.spec.dtype.name == "float32"
         assert mapped.spec.shape == (() if task == "regression" else (2,))
     raw = model.predict_proba(x) if task == "classification" else model.predict(x)
+    for invoke in (prefit, trait_only):
+        np.testing.assert_array_equal(invoke(x), raw)
     assert element(x[0]).shape == raw[0].shape
     assert element(x[0]).dtype == np.float32
     np.testing.assert_array_equal(element(x[0]), raw[0])
@@ -282,23 +291,59 @@ def test_adapter_selected_calls_prepared_map_and_refit_facts(native_xgb, task, m
     np.testing.assert_array_equal(model(x[:4]), raw[:4])
     np.testing.assert_array_equal(np.asarray(_collect_prepared(mapped)), raw)
     np.testing.assert_array_equal(np.concatenate(_collect_prepared(batch_map)), raw)
+    assert model.default_batched is None
+    model.eager()
+    np.testing.assert_array_equal(model(x[:4]), raw[:4])
+    np.testing.assert_array_equal(model(x=x[:4]), raw[:4])
+    for keyword in (True, False):
+        model.learn()
+        assert model.call_mode == "learning" and model.cached_signature is None
+
+        def learned_call():
+            return model(x=x[:4]) if keyword else model(x[:4])
+
+        np.testing.assert_array_equal(learned_call(), raw[:4])
+        assert model.call_mode == "cached" and model.cached_signature is not None
+        signature = model.cached_signature
+        assert signature.batch_mode is None
+        np.testing.assert_array_equal(learned_call(), raw[:4])
+        model.fit(x, y)
+        np.testing.assert_array_equal(learned_call(), raw[:4])
+        assert model.cached_signature == signature
     before = raw.copy()
     model.fit(x, 1 - y if task == "classification" else y + 100)
     current = model.predict_proba(x) if task == "classification" else model.predict(x)
     assert not np.array_equal(before, current)
+    for invoke in (prefit, trait_only):
+        np.testing.assert_array_equal(invoke(x=x), current)
     np.testing.assert_array_equal(np.asarray(_collect_prepared(mapped)), current)
     np.testing.assert_array_equal(model(x[:4]), current[:4])
     if task == "classification":
         model.fit(x, (np.arange(20) % 3).astype(np.int64))
     else:
         model.fit(x[:, :2], y)
+    actual_x = x if task == "classification" else x[:, :2]
+    for invoke in (prefit, trait_only, uninvoked):
+        with pytest.raises(MethodError, match="re-prepare"):
+            invoke(actual_x)
     for invoke in (lambda: element(x[0]), lambda: _collect_prepared(mapped), lambda: model(x[:4])):
         with pytest.raises((MethodError, ValueError), match="re-prepare|width"):
             invoke()
     changed_source = source if task == "classification" else ArrayDataset(x[:, :2])
     remapped = Map(changed_source, model).prepare()
-    actual_x = x if task == "classification" else x[:, :2]
     np.testing.assert_array_equal(np.asarray(_collect_prepared(remapped)), model.predict_proba(actual_x) if task == "classification" else model.predict(actual_x))
+    fresh = model.find_implementation(backend="numpy", batch_mode="batched").prepared_invoker()
+    np.testing.assert_array_equal(fresh(actual_x), model.predict_proba(actual_x) if task == "classification" else model.predict(actual_x))
+
+    def discarded_owner():
+        owner = cls(n_estimators=2).fit(x, y)
+        return weakref.ref(owner), owner.find_implementation(backend="numpy", batch_mode="batched").prepared_invoker()
+
+    owner_ref, orphan = discarded_owner()
+    gc.collect()
+    assert owner_ref() is None
+    with pytest.raises(MethodError, match="no longer live"):
+        orphan(x)
 
 
 def _collect_prepared(dataset):

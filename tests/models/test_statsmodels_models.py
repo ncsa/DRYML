@@ -5,6 +5,7 @@ Full Results payloads deliberately retain training data; pickle byte stability
 is recorded independently from numerical and inspection equivalence.
 """
 
+import gc
 import hashlib
 from importlib.metadata import version
 import io
@@ -14,6 +15,7 @@ import platform
 import subprocess
 import sys
 import warnings
+import weakref
 
 import pytest
 
@@ -386,7 +388,7 @@ def test_adapter_dataset_order_exposure_and_float64_copy(native_stats, classific
 
 @pytest.mark.parametrize("classification", [False, True])
 def test_adapter_selected_prepared_calls_use_current_fit_and_refuse_changed_width(native_stats, classification, monkeypatch):
-    """Pre-fit preparation is pure; refits update weights, not captured native handles."""
+    """Learning and weak selected invokers retain width guards, including trait-only use."""
     np, _, _, _, _ = native_stats
     from dryml.core import TensorSpec
     from dryml.data import ArrayDataset, Batch, Map
@@ -400,17 +402,24 @@ def test_adapter_selected_prepared_calls_use_current_fit_and_refuse_changed_widt
         guard.setattr(model, "_new_native", lambda *a: pytest.fail("construction during preparation"))
         element = model.find_implementation(spec)
         batched = model.find_implementation(spec.with_batch(4)).prepared_invoker()
+        prefit = model.find_implementation(backend="numpy", batch_mode="batched").prepared_invoker()
         mapped = Map(ArrayDataset(x), model).prepare()
         batch_map = Map(Batch(ArrayDataset(x), 17), model).prepare()
         model.learn(spec.with_batch(4))
         assert mapped.spec.shape == (() if not classification else (2,))
         assert mapped.spec.dtype.name == "float64"
+    with pytest.raises(ValueError, match="unfitted"):
+        prefit(x)
     model.fit(x, y)
     with monkeypatch.context() as guard:
         guard.setattr(model.results, "predict", lambda *a: pytest.fail("prediction during inference"))
         assert model.infer_output_spec(spec).shape == mapped.spec.shape
         model.find_implementation(spec).prepared_invoker()
+        trait_only = model.find_implementation(backend="numpy", batch_mode="batched").prepared_invoker()
+        uninvoked = model.find_implementation(backend="numpy", batch_mode="batched").prepared_invoker()
     expected = model.predict_proba(x) if classification else model.predict(x)
+    for invoke in (prefit, trait_only):
+        np.testing.assert_array_equal(invoke(x), expected)
 
     def collect(dataset):
         with dataset.iterator() as cursor:
@@ -421,18 +430,54 @@ def test_adapter_selected_prepared_calls_use_current_fit_and_refuse_changed_widt
     np.testing.assert_array_equal(model(x[:4]), expected[:4])
     np.testing.assert_allclose(np.asarray(collect(mapped)), expected, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(np.concatenate(collect(batch_map)), expected, rtol=1e-12, atol=1e-12)
+    assert model.default_batched is None
+    model.eager()
+    np.testing.assert_array_equal(model(x[:4]), expected[:4])
+    np.testing.assert_array_equal(model(x=x[:4]), expected[:4])
+    for keyword in (True, False):
+        model.learn()
+        assert model.call_mode == "learning" and model.cached_signature is None
+
+        def learned_call():
+            return model(x=x[:4]) if keyword else model(x[:4])
+
+        np.testing.assert_array_equal(learned_call(), expected[:4])
+        assert model.call_mode == "cached" and model.cached_signature is not None
+        signature = model.cached_signature
+        assert signature.batch_mode is None
+        np.testing.assert_array_equal(learned_call(), expected[:4])
+        model.fit(x, y)
+        np.testing.assert_array_equal(learned_call(), expected[:4])
+        assert model.cached_signature == signature
     model.fit(x, 1 - y if classification else y + 100)
     current = model.predict_proba(x) if classification else model.predict(x)
     assert not np.array_equal(expected, current)
+    for invoke in (prefit, trait_only):
+        np.testing.assert_array_equal(invoke(x=x), current)
     np.testing.assert_allclose(np.asarray(collect(mapped)), current, rtol=1e-12, atol=1e-12)
     np.testing.assert_array_equal(model(x[:4]), current[:4])
     model.fit(x[:, :1], y)
+    for invoke in (prefit, trait_only, uninvoked):
+        with pytest.raises(MethodError, match="re-prepare"):
+            invoke(x[:, :1])
     for action in (lambda: element(x[0]), lambda: batched(x[:4]), lambda: collect(mapped), lambda: model(x[:4])):
         with pytest.raises((MethodError, ValueError), match="re-prepare|width"):
             action()
     remapped = Map(ArrayDataset(x[:, :1]), model).prepare()
     np.testing.assert_allclose(np.asarray(collect(remapped)), model.predict_proba(x[:, :1]) if classification
                                else model.predict(x[:, :1]), rtol=1e-12, atol=1e-12)
+    fresh = model.find_implementation(backend="numpy", batch_mode="batched").prepared_invoker()
+    np.testing.assert_array_equal(fresh(x[:, :1]), model.predict_proba(x[:, :1]) if classification else model.predict(x[:, :1]))
+
+    def discarded_owner():
+        owner = (ClassifierModel if classification else RegressionModel)(intercept=True).fit(x, y)
+        return weakref.ref(owner), owner.find_implementation(backend="numpy", batch_mode="batched").prepared_invoker()
+
+    owner_ref, orphan = discarded_owner()
+    gc.collect()
+    assert owner_ref() is None
+    with pytest.raises(MethodError, match="no longer live"):
+        orphan(x)
 
 
 def test_adapter_invalid_data_and_fit_options_preserve_prior_state(native_stats):

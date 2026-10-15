@@ -412,6 +412,9 @@ class Model(BaseModel, Serializable):
         backend/batch constraints and runtime output assertion. Returns a pure
         selected carrier; raises ImplementationSelectionError for invalid facts.
         Imports/acquires/converts nothing and does not change preparation state.
+        Invokers borrow this model weakly and raise MethodError if it is gone or
+        fitted width/classes change, including trait-only selections. Unfitted
+        selections capture fitted facts lazily on first fitted invocation.
         """
         self._admit_selection(input_spec, additional_input_specs, backend)
         selected = super().find_implementation(input_spec, backend=backend, batch_mode=batch_mode,
@@ -419,15 +422,20 @@ class Model(BaseModel, Serializable):
         return self._specialize(selected, input_spec)
 
     def _prepare_implementation(self, input_spec, *, backend, batch_mode):
+        # Unknown-intent learning supplies physical shape; raw calls own this batch axis.
+        if (batch_mode is None and isinstance(input_spec, TensorSpec)
+                and input_spec.backend is Backend.numpy and input_spec.layout is Layout.DENSE
+                and input_spec.batch is None and input_spec.shape is not None and len(input_spec.shape) == 2):
+            input_spec = replace(input_spec, shape=input_spec.shape[1:], batch=input_spec.shape[0],
+                                 axis_names=None if input_spec.axis_names is None else input_spec.axis_names[1:],
+                                 batch_axis_name="batch")
         self._admit_selection(input_spec, backend=backend)
         selected = super()._prepare_implementation(input_spec, backend=backend, batch_mode=batch_mode)
         return self._specialize(selected, input_spec)
 
     def _specialize(self, selected, input_spec):
-        if input_spec is None:
-            return selected
         try:
-            output = self.infer_output_spec(input_spec)
+            output = None if input_spec is None else self.infer_output_spec(input_spec)
         except NotImplementedError:
             output = None
         facts = None if self._accepted_fit is None else (self._accepted_fit.feature_width, self._accepted_fit.classes)

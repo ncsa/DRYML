@@ -62,6 +62,11 @@ exactly 0 and 1, **both observed**; finite float targets with these values are v
 
 Selected element calls explicitly lift one row and squeeze one result; selected
 batches do not add a second axis. `Map` and prepared calls use the same semantics.
+With the default `default_batched=None`, `model.learn()` accepts the same 2D
+NumPy batch as eager `model(x)` or `model(x=x)` and caches that call layout.
+First-call learning normalizes physical `(N,F)` to logical sample `(F,)` with
+batch `N`, retaining raw-call selection for unknown batch intent. Explicit input
+specifications still require logical sample shape `(F,)`.
 Pure `infer_output_spec` knows scalar OLS and `(2,)` Logit **before fitting**,
 with float64 dtype and propagated input batching. It never constructs native
 models, calls `predict`, or fabricates samples. Optional `output_spec` is an
@@ -72,8 +77,12 @@ Backend-local selection and learning guards refuse foreign/unknown producer
 backends before generic Method conversion planning, including `Map.prepare()`.
 An explicitly authored upstream conversion producing NumPy remains valid. Method
 preparations are process-local. They read current accepted weights after a
-same-width refit; changing fitted width requires explicit re-preparation. No
-Method preparation is persisted.
+same-width refit; changing fitted width requires explicit re-preparation and stale
+invokers raise `MethodError`. This includes trait-only selection such as
+`model.find_implementation(backend='numpy', batch_mode='batched').prepared_invoker()`.
+Unfitted selections capture width lazily on their first fitted invocation.
+Invokers hold only a weak model reference and raise `MethodError` after the owner
+is collected. No Method preparation is persisted.
 
 ## Scientific policy
 

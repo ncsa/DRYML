@@ -112,6 +112,12 @@ remove exactly that batch axis. `Map` and reusable preparation use the same
 semantics. A Method-local eager `default_batched` does not authorize raw 1D calls;
 use an explicit element TensorSpec/Map for element adaptation.
 
+With the default `default_batched=None`, `model.learn()` accepts the same 2D
+NumPy batch as eager `model(x)` or `model(x=x)` and caches that call layout.
+First-call learning normalizes the physical `(N,F)` shape locally to sample
+`(F,)` with batch `N`, while retaining raw-call selection for unknown batch intent.
+Explicitly declared input specs still require logical sample shape `(F,)`.
+
 `infer_output_spec` uses only pure recipe/fitted facts. Its input must be one
 dense real NumPy TensorSpec with sample shape `(F,)`; the result preserves its
 batch axis. Regression output is known even while unfitted. Classification K is
@@ -127,8 +133,12 @@ Raw prediction also refuses foreign arrays before `__array__` coercion.
 
 Prepared calls read current accepted weights on same-fact refits. Changed fitted
 feature width/class vocabulary requires explicit re-preparation; stale selected
-calls/Maps fail instead of silently returning changed output facts. Preparations
-are process-local and are never saved in model state.
+calls/Maps fail instead of silently returning changed output facts. Trait-only
+invokers also raise `MethodError` on changed fitted facts, for example with
+`model.find_implementation(backend='numpy', batch_mode='batched').prepared_invoker()`.
+An unfitted selection captures facts lazily on its first fitted invocation.
+Invokers hold only a weak model reference and raise `MethodError` after the owner
+is collected. Preparations are process-local and are never saved in model state.
 
 `mdl` borrows the accepted native estimator (None if unfitted),
 `n_features_in_` exposes the original fitted width and `classes_` returns a

@@ -418,8 +418,8 @@ assert reg.infer_output_spec(spec).shape == ()
 assert clf.infer_output_spec(spec).shape == (2,)
 reg.find_implementation(spec).prepared_invoker()
 reg.learn(spec)
-for backend in ('torch', 'tf', 'jax', None):
-    foreign = TensorSpec('float32', shape=(2,), backend=backend)
+for backend, shape in ((b, s) for b in ('torch', 'tf', 'jax', None) for s in ((2,), (3, 2))):
+    foreign = TensorSpec('float32', shape=shape, backend=backend)
     source = TrackingDataset((pair(),), spec=foreign)
     for action in (lambda: reg.find_implementation(foreign), lambda: reg.learn(foreign),
                    lambda: reg._prepare_implementation(foreign, backend=foreign.backend, batch_mode=None),
@@ -431,6 +431,15 @@ for backend in ('torch', 'tf', 'jax', None):
         else:
             raise AssertionError('foreign selection admitted')
     assert source.opens == 0
+for batch in (None, 3):
+    invalid = TensorSpec('float32', shape=(3, 2), batch=batch, backend='numpy')
+    for action in (lambda: reg.find_implementation(invalid), lambda: reg.learn(invalid)):
+        try:
+            action()
+        except ImplementationSelectionError:
+            pass
+        else:
+            raise AssertionError('declared rank-two sample admitted')
 assert not {'xgboost', 'sklearn', 'torch', 'tensorflow', 'jax'} & sys.modules.keys()
 """
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
@@ -619,8 +628,8 @@ for model in (ClassifierModel(), RegressionModel()):
     assert model.infer_output_spec(spec).dtype.name == 'float64'
     model.find_implementation(spec).prepared_invoker()
     model.learn(spec)
-    for backend in ('torch', 'tf', 'jax', None):
-        foreign = TensorSpec('float32', shape=(2,), backend=backend)
+    for backend, shape in ((b, s) for b in ('torch', 'tf', 'jax', None) for s in ((2,), (3, 2))):
+        foreign = TensorSpec('float32', shape=shape, backend=backend)
         source = TrackingDataset((pair(),), spec=foreign)
         for action in (lambda: model.find_implementation(foreign), lambda: model.learn(foreign),
                        lambda: model._prepare_implementation(foreign, backend=foreign.backend, batch_mode=None),
@@ -632,6 +641,15 @@ for model in (ClassifierModel(), RegressionModel()):
             else:
                 raise AssertionError('foreign selection admitted')
         assert source.opens == 0
+    for batch in (None, 3):
+        invalid = TensorSpec('float32', shape=(3, 2), batch=batch, backend='numpy')
+        for action in (lambda: model.find_implementation(invalid), lambda: model.learn(invalid)):
+            try:
+                action()
+            except ImplementationSelectionError:
+                pass
+            else:
+                raise AssertionError('declared rank-two sample admitted')
 assert BasicTraining().supports_safe_points is False
 assert BasicTraining().supports_observers is False
 assert not {'statsmodels', 'sklearn', 'xgboost', 'torch', 'tensorflow', 'jax'} & sys.modules.keys()
