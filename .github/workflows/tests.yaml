@@ -420,6 +420,10 @@ jobs:
 
       - name: Execute assigned native cases with collection and zero-skip evidence
         run: |
+          export DRYML_TEST_BASH="$BASH"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            export DRYML_TEST_BASH="$(cygpath -w "$BASH")"
+          fi
           for phase in native recovery association workers; do
             QUALIFICATION_PHASE="$phase" python - <<'PY'
           from collections import Counter
@@ -524,7 +528,7 @@ jobs:
           assert set(nodes) == required, (set(nodes) - required, required - set(nodes))
           (root / 'collected.json').write_text(json.dumps(nodes, indent=2))
           # Execute exact collected nodes: no global -k can omit a backend file.
-          subprocess.run(['bash', './tests.sh', *nodes, *common, '-q',
+          subprocess.run([os.environ['DRYML_TEST_BASH'], './tests.sh', *nodes, *common, '-q',
                           '--timeout=600', '--timeout-method=thread',
                           '--basetemp=' + str(root / 'pytest'), '-o', 'junit_family=legacy',
                           '--junitxml=' + str(root / 'results.xml'),
