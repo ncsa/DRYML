@@ -284,6 +284,7 @@ jobs:
         shell: bash -el {0}
     env:
       QUALIFICATION_BACKEND: ${{ matrix.backend }}
+      DRYML_TEST_INSTALLED_ESTIMATORS: "1"
       PYTHONDONTWRITEBYTECODE: "1"
       TMPDIR: ${{ runner.temp }}
       TMP: ${{ runner.temp }}

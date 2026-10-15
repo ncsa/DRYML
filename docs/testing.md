@@ -467,6 +467,20 @@ are set before imports through the job environment, with a 600-second per-test
 watchdog and 60-minute job bound to allow real worker startup. These limits do
 not alter product-global thread policy.
 
+The native job enables the test-only `DRYML_TEST_INSTALLED_ESTIMATORS=1` mode.
+Core workers receive only the checkout root on `PYTHONPATH` for `tests.*`
+callables, never `checkout/src`. Before native fitting, coordinator and worker
+verify `dryml`, `dryml.execute._worker`, the selected backend package and its
+`base` module against the installed distribution's actual WHEEL/RECORD metadata:
+resolved module paths must equal the recorded installation paths and module
+bytes must match RECORD SHA-256/size entries. Editable installs and missing wheel
+manifests fail qualification. The worker also checks its running `__main__`
+bootstrap origin. Checks use resolved `Path` comparisons on Linux and Windows,
+not a `site-packages` substring or a caller-provided trusted prefix. Worker
+evidence is emitted before fitting; matching coordinator/worker paths and hashes
+are retained in JUnit properties for successful and injected-failure cases.
+Without this mode, ordinary local workers continue to use checkout source.
+
 The separately requested hosted heavy/coverage jobs exclude these exact native
 files and functions: they cannot qualify the native readers on their broader
 Python/dependency matrices. The dedicated cells own their uninstrumented native
@@ -497,6 +511,13 @@ from the medium Core file. No default Data test is forced to run a native backen
 Installed-wheel package checks also resolve both backend manifests and construct
 unfitted recipes with native imports blocked, and check extras on Python
 3.10–3.14 for silent marker omission. Package tests remain outside routine runs.
+The installed-artifact `test_installed_estimator_core_worker_origins` guard uses
+the same Core executor and an actual worker to construct inert recipes with
+native imports blocked, then compares both backends' root/bootstrap/backend
+origins with the wheel manifest. It also rejects explicit `checkout/src`
+overrides separately in coordinator and worker, recording failed-worker cleanup.
+This package guard requires neither native extras nor Python 3.12; real native
+fits remain in the dedicated qualification cells.
 
 ## Hosted Matrix
 

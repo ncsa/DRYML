@@ -25,6 +25,7 @@ from dryml.managed import ManagedConfig
 from dryml.models import Experiment, ExperimentData
 
 from .test_experiment_artifacts import SavedModelValue
+from ._estimator_qualification import ORIGIN_MODE, qualification_origins
 
 
 pytestmark = [pytest.mark.speed_heavy,
@@ -136,6 +137,7 @@ def _worker_fit(kind, failure=None):
     dependency admission, workload, or teardown errors. Accepted-state and failure
     evidence is printed before propagation; no live handles cross transport.
     """
+    origins = qualification_origins(kind, worker=True)
     context = current_context()
     exp = _experiment(kind, context.repo)
     backend = import_module("dryml.models." + ("xgb" if kind.startswith("xgb") else "statsmodels") + ".base")
@@ -163,9 +165,10 @@ def _worker_fit(kind, failure=None):
             status = exp.train.status(state_repo=context.repo, control_store=context.control_store)
             print(json.dumps({"pid": os.getpid(), "accepted": exp.model._accepted_fit is not None,
                               "step": exp.state.step, "examples": exp.state.examples_seen,
-                              "final": status.final_state_ref is not None}), flush=True)
+                              "final": status.final_state_ref is not None,
+                              "origins": origins}), flush=True)
             raise
-        return {"final": final, "pid": os.getpid(), "work": work,
+        return {"final": final, "pid": os.getpid(), "work": work, "origins": origins,
                 "prediction": exp.model(_arrays(kind)[0]).tolist(),
                 "payload_sha256": hashlib.sha256(exp.model._accepted_fit.payload).hexdigest()}
 
@@ -177,9 +180,14 @@ def _executor(tmp_path, repo, control):
     temporary.mkdir()
     cache = tmp_path / "worker-cache"
     cache.mkdir()
+    checkout = Path(__file__).resolve().parents[2]
+    installed = os.environ.get(ORIGIN_MODE) == "1"
+    paths = (checkout,) if installed else (checkout, checkout / "src")
     environment = {"PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(temporary),
+                   "TMP": str(temporary), "TEMP": str(temporary),
                    "XDG_CACHE_HOME": str(cache), "MPLCONFIGDIR": str(cache / "matplotlib"),
-                   "PYTHONPATH": os.pathsep.join((str(Path.cwd()), str(Path.cwd() / "src")))}
+                   ORIGIN_MODE: "1" if installed else "0",
+                   "PYTHONPATH": os.pathsep.join(map(str, paths))}
     environment.update({name: "1" for name in (
         "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "BLIS_NUM_THREADS",
         "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")})
@@ -192,6 +200,8 @@ def _executor(tmp_path, repo, control):
 @pytest.mark.parametrize("kind", KINDS)
 def test_core_cpu_worker_publication_fresh_reopen_and_isolation(tmp_path, kind, record_property):
     """Two serial real workers own separate native state, authority and scratch paths."""
+    coordinator_origins = qualification_origins(kind)
+    record_property("coordinator_origins", json.dumps(coordinator_origins, sort_keys=True))
     results = []
     for index in range(2):
         root = tmp_path / str(index)
@@ -202,6 +212,7 @@ def test_core_cpu_worker_publication_fresh_reopen_and_isolation(tmp_path, kind, 
         try:
             future = executor.submit(_worker_fit, kind)
             result = future.result(timeout=150)
+            assert result["origins"] == coordinator_origins
             assert result["pid"] != os.getpid()
             assert Path(result["work"]).parent == temporary
             assert not Path(result["work"]).exists()
@@ -222,6 +233,7 @@ def test_core_cpu_worker_publication_fresh_reopen_and_isolation(tmp_path, kind, 
             record_property(f"worker_{index}", json.dumps({
                 "pid": result["pid"], "final": result["final"].digest(),
                 "cleanup": snapshot.cleanup_state, "payload": result["payload_sha256"],
+                "origins": result["origins"],
             }, sort_keys=True))
         finally:
             executor.close(cancel=True, timeout=20)
@@ -239,6 +251,8 @@ def test_core_cpu_worker_publication_fresh_reopen_and_isolation(tmp_path, kind, 
 def test_core_worker_failure_keeps_admission_and_cleanup_evidence_separate(
         tmp_path, kind, failure, record_property):
     """Worker errors never install accepted state or masquerade as completion."""
+    coordinator_origins = qualification_origins(kind)
+    record_property("coordinator_origins", json.dumps(coordinator_origins, sort_keys=True))
     repo = Repo(DirStore(tmp_path / "store"))
     control = DirStore(tmp_path / "control")
     executor, _ = _executor(tmp_path, repo, control)
@@ -251,6 +265,7 @@ def test_core_worker_failure_keeps_admission_and_cleanup_evidence_separate(
         assert expected in str(caught.value)
         output = future.output.snapshot()
         facts = json.loads(output.stdout.strip().splitlines()[-1])
+        assert facts["origins"] == coordinator_origins
         assert facts["pid"] != os.getpid()
         assert facts["accepted"] is facts["final"] is False
         assert facts["step"] == facts["examples"] == 0

@@ -711,6 +711,82 @@ print(json.dumps({
     assert json.loads(result.stdout) == {"heavy": [], "retired": False}
 
 
+def test_installed_estimator_core_worker_origins(installed_python: Path, record_property) -> None:
+    """Check real inert Core workers against wheel RECORD and reject source overrides.
+
+    Uses the ephemeral artifact interpreter; optional native packages and Python
+    3.12 are not required. The same executor is used by native qualification.
+    """
+    root = Path(__file__).resolve().parents[2]
+    code = """
+import json
+import os
+from pathlib import Path
+import tempfile
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
+from tests.models.test_estimator_experiments import _executor
+from tests.models._estimator_qualification import installed_origins, inert_worker_origins
+
+coordinator = {kind: installed_origins(kind) for kind in ('xgb-regressor', 'stats-logit')}
+with tempfile.TemporaryDirectory(prefix='installed-origin-') as directory:
+    root = Path(directory)
+    repo = Repo(DirStore(root / 'store'))
+    control = DirStore(root / 'control')
+    if os.environ.get('FORCE_SOURCE_WORKER') == '1':
+        # Exercise the ordinary source-path launch as a controlled bad worker.
+        os.environ['DRYML_TEST_INSTALLED_ESTIMATORS'] = '0'
+    executor, temporary = _executor(root, repo, control)
+    try:
+        future = executor.submit(inert_worker_origins)
+        try:
+            result = future.result(timeout=150)
+        except Exception:
+            future.cleanup(timeout=15)
+            snapshot = future.snapshot()
+            assert snapshot.cleanup_state == 'complete' and not snapshot.cleanup_issues
+            print(json.dumps({'rejected_worker_cleanup': snapshot.cleanup_state}), flush=True)
+            raise
+        assert result['pid'] != os.getpid()
+        assert result['origins'] == coordinator
+        future.cleanup(timeout=15)
+        snapshot = future.snapshot()
+        assert snapshot.cleanup_state == 'complete' and not snapshot.cleanup_issues
+        print(json.dumps({'coordinator': coordinator, 'worker': result,
+                          'cleanup': snapshot.cleanup_state}))
+    finally:
+        executor.close(cancel=True, timeout=20)
+        repo.close(flush=False)
+        control.close()
+"""
+    environment = {**os.environ, "DRYML_TEST_INSTALLED_ESTIMATORS": "1", "PYTHONPATH": str(root)}
+    positive = subprocess.run(
+        [str(installed_python), "-c", code], cwd=root, env=environment,
+        capture_output=True, text=True, timeout=240,
+    )
+    assert positive.returncode == 0, positive.stdout + positive.stderr
+    evidence = json.loads(positive.stdout)
+    assert evidence["cleanup"] == "complete"
+    record_property("installed_worker_origins", json.dumps(evidence, sort_keys=True))
+    for target, overrides in (
+        ("coordinator", {"PYTHONPATH": os.pathsep.join((str(root), str(root / "src")))}),
+        ("worker", {"FORCE_SOURCE_WORKER": "1"}),
+    ):
+        negative = subprocess.run(
+            [str(installed_python), "-c", code], cwd=root, env={**environment, **overrides},
+            capture_output=True, text=True, timeout=240,
+        )
+        assert negative.returncode != 0, f"{target} accepted checkout/src: {negative.stdout}"
+        assert any(message in negative.stderr for message in (
+            "non-wheel origin", "installed wheel WHEEL/RECORD metadata required", "editable DRYML",
+        )), negative.stderr
+        if target == "worker":
+            assert json.loads(negative.stdout) == {"rejected_worker_cleanup": "complete"}
+        record_property(target + "_source_override_rejected", json.dumps({
+            "returncode": negative.returncode, "stdout": negative.stdout, "stderr": negative.stderr,
+        }, sort_keys=True))
+
+
 def test_installed_native_extras_match_exact_reader_stacks(installed_python: Path) -> None:
     """Require real wheel metadata to request every reader dependency without markers."""
     result = _installed_probe(
