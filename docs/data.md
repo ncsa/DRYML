@@ -373,6 +373,7 @@ Utility functions help with common supervised-learning structures:
 - `iter_xy(dataset)`
 - `collect_xy(dataset)`
 - `collate_xy(dataset)`
+- `materialize_supervised(dataset, *, strict_numpy=False)`
 - `Collect`
 
 `as_supervised(dataset, inputs, targets)` builds a persisted ordinary Dataset
@@ -417,6 +418,62 @@ Native trainers consume this authored Dataset as-is. Put `Batch`, `Shuffle`,
 Experiment; trainers do not add hidden batching, selection, or shuffling.
 
 These utilities assume an element structure where `x` and `y` can be selected by path.
+
+### Strict NumPy Materialization
+
+`materialize_supervised` collects one canonical `(inputs, targets)` Dataset in
+authored order and returns `(inputs, targets, actual_examples)`. It flattens
+authored batches, including a short final batch, and owns/closes its traversal.
+The default remains permissive, including unknown-cardinality sources used by
+sklearn. Source and consumer failures or interruption remain primary when cleanup
+also fails; a cleanup-only failure propagates instead of returning success.
+
+Opt in with `materialize_supervised(dataset, strict_numpy=True)` for finite,
+runtime-validated dense CPU NumPy collection:
+
+- Before opening any source, require finite **logical yield** cardinality and
+  exactly two dense `TensorSpec` branches with `backend="numpy"`. Unknown or
+  infinite yield counts require an authored finite bound such as `Take`.
+- Features have sample shape `(width,)` and targets sample shape `()`. Both
+  branches must be unbatched or coherently batched. Batched runtime features are
+  matrices and targets are vectors. A fixed batch size is enforced; `Dynamic`
+  permits differing positive sizes, including the final short batch.
+- Each branch declares `int8/16/32/64`, `uint8/16/32/64`, `float32`, or `float64`.
+  Boolean, object, string, complex, float16, sparse, ragged, Python-layout and
+  foreign/unspecified backend declarations are rejected before acquisition.
+- Every runtime value must be a pair tuple of dense NumPy ndarrays or NumPy
+  scalars with the exact declared dtype, rank, shape and batch facts. Python
+  scalars/lists, foreign arrays and masked arrays are rejected. Dense ndarray
+  subclasses (such as memory-mapped arrays) are normalized to ordinary arrays
+  only after their native facts have been validated, without changing dtype.
+  Validated values are copied before advancing the source, so a producer reusing
+  a mutable NumPy buffer cannot overwrite already collected yields.
+  Feature width must be positive and consistent; a declared `Dynamic` width
+  still cannot drift between yields. Validation precedes NumPy stacking, so
+  mixed runtime dtypes cannot be silently promoted.
+- Actual aligned nonempty rows determine the returned example count. Unknown
+  example-count metadata is accepted when the logical yield bound is finite.
+  Short logical traversal raises `DatasetExhaustedError` with requested and
+  observed counts. The first excess logical yield raises `ValueError` immediately,
+  before its value is validated or collated. Authored cursor EOF remains
+  authoritative: the collector never reads underneath `Take` or a source cutoff.
+
+Strict results are arrays shaped `(actual_examples, width)` and
+`(actual_examples,)`, preserving their respective dtypes. Invalid declarations,
+runtime structures, layouts, backends or dtypes raise `TypeError`; invalid counts,
+shapes, batches, width or empty collections raise `ValueError`. Source acquisition,
+read and cleanup errors propagate. `strict_numpy` must be an exact boolean.
+The collector uses declared-backend NumPy collation without importing optional
+tensor or model frameworks or adding conversion edges. Caller-authored NumPy
+conversion in the Dataset graph is allowed. NaN/Inf handling and backend-specific
+missing-value or numeric-conversion policies belong to the consuming trainer.
+
+The maintained [CPU XGBoost](xgboost.md) and [OLS/binary Logit](statsmodels.md)
+trainers opt into this strict collector. Their recipes and pure Method selection
+remain usable without native packages; fitting requires the exact optional reader
+stack. Neither trainer inserts a foreign-backend conversion. This does not change
+the permissive default used by sklearn or require optional model dependencies for
+ordinary Data operations.
 
 ## Specs And Data
 

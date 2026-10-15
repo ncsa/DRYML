@@ -21,7 +21,7 @@ Important public types:
 - `model_parameter_counts`
 - `parameter_counts_from_parameters`
 
-Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBoost, and other frameworks. The JAX/Flax NNX/Optax APIs described below are **experimental** and may change based on use.
+Backend packages add specialized wrappers for TensorFlow, PyTorch, sklearn, XGBoost, statsmodels, and other frameworks. The JAX/Flax NNX/Optax APIs described below are **experimental** and may change based on use.
 
 ## Model As Method
 
@@ -187,6 +187,49 @@ because it has no per-update boundary.
 After a mid-epoch restore, native step/window observations remain available, but
 the trainers do not present the resumed suffix's loss or metric aggregate as a
 full-epoch metric.
+
+#### Private one-shot candidate acceptance
+
+Models now provides a private acceptance helper for opaque-fit backend trainers.
+It collects the authored Dataset through `materialize_supervised(...,
+strict_numpy=True)`, preserving dense NumPy dtypes/order and counting the actual
+examples, including short final batches. It validates proposed accounting on a
+detached `TrainState` before any native fitting: one `record_fit(examples=N)` and
+one `finish_epoch()`. This means one coarse fit step, one completed epoch, N
+exposure, and next-batch zero, with no invented loss, solver/tree iteration
+telemetry, or pending epoch postlude. Unfinished iterative progress is rejected;
+this helper cannot continue inside an opaque fit.
+
+The backend owns fresh private native construction, fit, fitted-fact/convergence
+validation, and final native-byte/canonical-metadata encoding. Model preparation
+and `prep_eval` cleanup finish before encoding and acceptance. Native failure,
+invalid accounting, nonconvergence, cleanup failure, encoding failure, or
+interruption therefore retains the previous accepted native predictions, fitted
+facts, payload, and successful counters. Cleanup never replaces an escaping
+primary error, including a `BaseException` interruption. Accepted state is one
+backend-owned plain instance bundle; its final payload bytes are encoded once.
+The helper installs that bundle and the detached TrainState using a small local
+rollback boundary with no external hooks, I/O, native calls, callbacks, or cleanup
+between installations. Local installation failure restores both previous slots.
+Direct same-model concurrent fit/restore and mutation through borrowed native
+inspection are unsupported.
+
+Intermediate safe-point callbacks and observer-session requests fail before
+source acquisition. Consuming opaque trainers declare both capabilities false;
+`ManagedConfig.callbacks` remain a separate terminal checkpoint lane.
+`Experiment.train` owns lifecycle phase: a failed attempt may set `phase="failed"`
+while prior successful-fit counters and predictions remain intact. It also owns
+the final StateRef, checkpoint association, terminal Artifacts/history, and
+completed-fit replay. A postacceptance publication or evaluation error retains
+the accepted fit and propagates without a successful terminal receipt; the local
+helper cannot repair association or provide continuation within native fitting.
+
+The maintained CPU XGBoost
+adapter consumes this seam; see [XGBoost](xgboost.md) for its API, strict NumPy
+boundary, retained UBJSON codec, and bounded native qualification. The maintained
+[statsmodels adapter](statsmodels.md) also consumes it for OLS and binary Logit,
+with complete retained Results state. Existing sklearn training uses its established
+lifecycle rather than this candidate-first helper.
 
 Training prepares declared x/y Dataset specs once in the trainer's inspectable
 `method_graph()`. Its producer/consumer specs and direct dense conversion edges
@@ -396,6 +439,64 @@ it; revisiting the same StateRef through a later trajectory creates a distinct r
 History remains readable if a referenced checkpoint payload later becomes
 unavailable, but explicitly loading that checkpoint still fails.
 
+### Opaque-fit recovery and worker evidence (U5)
+
+For the maintained CPU XGBoost and statsmodels trainers, the boundary is:
+
+1. Accept the native fit and coarse progress (one fit step, one epoch, actual N).
+2. Stage the terminal observation, then publish the Experiment state.
+3. Associate that checkpoint in managed control authority.
+4. Evaluate/publish history and Artifacts, then run configured managed callbacks
+   and request checks.
+5. Return logically, followed by managed final publication, completion and final
+   association.
+
+An accepted fit or published snapshot **before step 3** is not a durable
+completed-fit resume guarantee. Failure propagates without a final receipt while
+the live accepted native state and counters remain truthful. Reopening prior
+unfitted authority and explicitly starting a new attempt can fit again. Calling
+the already-trained live Experiment is not a guarantee of repairing terminal
+staging or association.
+
+After association, an unfinished terminal observation can be restored through
+ordinary managed resume. It reuses the same occurrence key, timestamp and exposure
+without another native fit. If its history row is unfinished, the actual codec
+re-emits retained native bytes and canonical metadata; the full replayed StateRef
+must equal the retained checkpoint **before continuing evaluation**. Prediction
+parity alone is insufficient. Completed Artifact receipts survive a later history
+failure. Native statsmodels diagnostic caches may change without changing these
+retained bytes; replay never invokes native serialization again.
+
+The successful return must match the operation's actual `final_state_ref`.
+History rows bind to their own evaluated checkpoints; each Artifact binds to that
+row's exact model projection and its own completed compute receipt. Do not assume
+different publication moments necessarily produce equal StateRefs. Neither native
+payload validity nor an accepted fit substitutes for managed association authority.
+Unavailable training loss and parameter counts remain missing in history, not zero.
+
+`tests/models/test_estimator_experiments.py` and the native cases in
+`test_experiment_recovery.py` exercise these boundaries on small synthetic CPU
+arrays. All four model families also fit/publish in actual same-host Core
+subprocesses, followed by fresh exact caller Repo reconstruction and prediction
+parity. Independent worker submissions use distinct Store/control, spool and
+temporary-resource roots. Missing/incompatible dependency admission leaves no
+accepted fit or successful counters; an injected workload error and teardown error
+remain independently visible as invocation failure and incomplete-cleanup evidence.
+These tests use the existing worker protocol, not a new runtime or sandbox.
+
+Fitted and unfitted aliased native graphs are exercised through both DirStore and
+committed ZipStore. An entered restore-hook failure invalidates the covered graph,
+clears state receipts/hashes and evicts live candidates even when a backend retains
+its prior private bundle. Recovery loads fresh exact authority with
+`reuse_live="never"`; prior native predictions do not rescue graph validity.
+The initial evidence above used the specified Linux/Python 3.12 mixed environment.
+Subsequent isolated Ubuntu/Windows Python 3.12.15 qualification passed all four
+required cells at `fa01d177`, including real installed-wheel workers, with exact
+inventories and zero native skips. See
+[Testing](testing.md#required-hosted-cells) for revision-specific evidence and the
+explicit Windows Conda worker DLL path. Wider reader-version combinations remain
+unqualified; configuring a cell alone is not evidence that it passed.
+
 For completed `Value` Artifacts, history scalar columns retain finite Python
 scalars and lossless zero-dimensional native values. Conversion is bounded and
 lazy (`item()` and, where needed, zero-dimensional `numpy()`); non-scalar values
@@ -463,8 +564,134 @@ Examples include:
 - PyTorch wrappers and training functions
 - sklearn model wrappers
 - XGBoost model wrappers
+- statsmodels OLS and binary Logit wrappers
 
 Backend wrappers should keep external runtime state in object state and keep stable configuration in definitions.
+
+### Maintained CPU XGBoost
+
+`dryml.models.xgb` exports passive `Model`, `ClassifierModel`, `RegressionModel`
+and `BasicTraining` recipes. Native CPU gbtree/hist fitting uses detached
+candidates and Models' one-shot accounting; call/probabilities are `(N,K)` float32,
+classifier labels `(N,)` int64, and regression `(N,)` float32. Pure NumPy metadata,
+explicit selected element lifting, foreign-spec rejection and exact retained
+`xgboost1` UBJSON state use the existing Method/Data/Core ownership boundaries.
+See [XGBoost](xgboost.md) for closed options, supported reader versions, failure
+behavior, concurrency limitations and current qualification scope.
+
+### Maintained CPU statsmodels
+
+`dryml.models.statsmodels` exports passive `Model`, `RegressionModel`,
+`ClassifierModel` and `BasicTraining`. OLS uses native pseudoinverse rank semantics;
+binary Logit requires explicit Newton convergence and finite parameters. Both use
+finite dense float64 copies, optional exactly-one prepended intercept, pure NumPy
+metadata and guarded Method/Map selection. OLS predictions are `(N,)` float64;
+Logit call/probabilities are `(N,2)` float64 with columns `[0,1]`, and labels are
+`(N,)` int64 with threshold equality selecting 1. Complete version-bound native
+Results and exact retained payload bytes belong to the `statsmodels1` codec.
+Borrowed Results inspection retains training data on disk and duplicates native
+Results/bytes in memory. See [statsmodels](statsmodels.md) for options, lifecycle,
+scientific policy, inspection/state contracts and current bounded qualification.
+
+### XGBoost and statsmodels: Native Characterization (U1)
+
+Native-only reference tests remain in
+`tests/models/test_xgb_models.py` and `tests/models/test_statsmodels_models.py`.
+The maintained XGBoost API replaces the retired `Meta`/`Component` compute
+integration, and statsmodels has its own backend namespace. Native evidence below,
+by itself, does not qualify
+DRYML Dataset, Method, Experiment, Repo, recovery, or worker integration.
+
+On Linux x86-64, Python 3.12.13, CPU XGBoost 3.4.2, statsmodels 0.15.0,
+NumPy 2.1.3, SciPy 1.18.0, pandas 3.0.5, and sklearn 1.9.0 (XGBoost only),
+the seeded dense-array references establish:
+
+| Reference | Observed held-out behavior | Native facts |
+|---|---|---|
+| XGBoost binary / multiclass | Accuracy 1.0000 / 0.9375; majority baselines 0.5625 / 0.4375 | `(N, K)` float32 probabilities, class columns `0..K-1`, `(N,)` int64 labels |
+| XGBoost scalar regression | MSE 0.256744; constant baseline 11.263378 | `(N,)` float32 predictions |
+| OLS, intercept off/on and duplicate columns | MSE approximately 0.000885; all below half the corresponding constant baseline | `(N,)` float64; pseudoinverse coefficients agree with NumPy least squares within `2e-15` |
+| Binary Logit, intercept off/on | Accuracy 0.96875; majority baseline 0.578125 | Newton converges in 7 iterations; native positive-class probabilities agree with the logistic formula exactly on these fixtures |
+
+XGBoost uses CPU `gbtree`/`hist`, 48 depth-three trees, one thread, seed zero,
+and task-specific `binary:logistic`, `multi:softprob`, or `reg:squarederror`.
+Training has 128 rows and held-out prediction has 64. NaN features are exercised;
+infinite features and nonfinite regression targets fail natively. Native unfitted,
+wrong-width, invalid class-vocabulary, and corrupt-payload failures are covered.
+Classification quality must exceed majority accuracy by at least 0.10; regression
+MSE must be below half the constant baseline, independently of reopen parity.
+
+OLS uses 96 training rows and 64 held-out rows. Intercept-off passes the original
+design; intercept-on prepends exactly one constant without detecting existing
+constants. Duplicated features and constants retain native pseudoinverse/rank
+semantics (including `SingularMatrixWarning`) with finite parameters. Logit uses
+128 nonseparable training rows, Newton `maxiter=100`, `tol=1e-8`, `disp=False`,
+and full convergence output. A one-iteration fit returns finite parameters with
+`converged=False`: returning Results is insufficient acceptance evidence.
+Perfect prediction raises with `raise_on_perfect_prediction=True` on that instance
+only; a deterministic perfect starting prediction exercises this boundary without
+claiming a universal separation detector. One-row native predictions retain the
+batch axis. The reference class conversion uses `[1-p, p]`, columns `[0, 1]`,
+float64 probabilities and int64 labels, with threshold equality selecting 1.
+`missing='raise'` rejects NaN design/targets without dropping rows, but is **not**
+a finite-parameter guard: OLS can return nonfinite coefficients for infinite
+targets. The maintained statsmodels adapter validates both finite inputs and candidate parameters.
+
+#### Native payload inventory and identity
+
+XGBoost native `.ubj` files contain the learned model, feature/class facts exposed
+by the sklearn interface, and its `scikit_learn` attribute. File and bytearray
+loads reproduce predictions with measured maximum error zero (`1e-6` comparison
+tolerance). Binary, multiclass, and regression payloads measured 36,051, 133,451,
+and 53,163 bytes; save/load/save bytes matched on this stack. Model IO is not a
+complete training-configuration snapshot: the wrapper metadata owns
+task, original feature width, class order/dtypes, and compatibility facts.
+
+Statsmodels `Results.save(..., remove_data=False)` writes one complete native
+pickle. Live and restored Results retain `exog`, `endog`, `data.orig_exog`, and
+`data.orig_endog`, coefficients, predictions, standard errors, covariance,
+confidence intervals, likelihood, observation count, and summary inspection.
+Saving does not remove live data or populate diagnostic caches in these cases.
+Native save/load/save nevertheless **does not preserve bytes**: the OLS pickle
+measured 8,502 then 8,597 bytes; Logit measured 6,348 then 6,421 bytes. Read-only
+diagnostic inspection populated caches, producing 10,579 / 6,782 byte pickles,
+while prediction and inspection semantics remained equal (`1e-8` tolerance).
+These sizes are characterization facts, not portable format constants.
+
+The `xgboost1` / `statsmodels1` codecs therefore encode accepted
+native bytes plus canonical version-one metadata once and retain those exact
+bytes for unchanged restored saves. Semantic equality or native reserialization
+cannot replace exact checkpoint replay. Both codecs retain the accepted encoding.
+Full Results **and** their retained payload bytes occupy workload-sized memory;
+the pickle retains training arrays on disk too. Data removal is outside this
+contract. Native Results inspection may populate nonsemantic caches; external
+native mutation is outside the supported accepted-fit contract.
+
+The initial reader policy is exact native, applicable sklearn, numerical-stack,
+and Python major/minor matching. `dryml[xgboost]` and `dryml[statsmodels]` pin their
+respective complete reader stacks above; core's looser NumPy/pandas requirements
+do not qualify other native combinations. Native use requires Python 3.12 even
+though core supports Python >=3.10. Extras do not silently omit native packages on
+other Python versions; successful dependency resolution alone is not native
+qualification. Python patch/build/platform details are recorded, while the reader
+gate uses major/minor. The above is one Linux native observation, not
+cross-version or isolated Windows evidence. The [native CI contract](testing.md#native-estimator-qualification)
+requires all four isolated cells to execute their assigned cases with zero skips.
+
+Legacy source inspection found an archive member `model.text`, temporary `.text`
+files, eager `xgboost` import, and retired `load_compute_imp`/`save_compute_imp`
+hooks. The maintained adapter rejects rather than migrates this format. Core hooks are
+additive: every class-local state hook in the MRO receives the unchanged codec.
+`Pickleable` contributes `heavy.pkl` independently, so native-codec wrappers
+use `Serializable` without inheriting automatic native-object pickling.
+Existing `tests/core/test_state_codec_hooks.py` owns the additive-hook regression;
+it is reused rather than duplicated. Legacy rejection, malformed metadata,
+candidate-first installation, and core restore invalidation are now exercised
+for both adapters. Experiment/recovery/worker evidence is described above;
+the four isolated platform cells passed at the revision recorded in
+[Testing](testing.md#required-hosted-cells). This rollout does
+not automatically close issue #38 or broaden sklearn, Data, Method, ExperimentData,
+TrainState, or Store formats.
 
 ### Experimental JAX Models
 

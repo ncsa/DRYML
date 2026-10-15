@@ -1,4 +1,8 @@
-"""Native training preparation, Dataset admission, and retained update helpers."""
+"""Model-owned training preparation, Dataset admission, and accounting helpers.
+
+Private one-shot acceptance coordinates backend-owned candidates with TrainState;
+it does not publish checkpoints or implement native fitting or persistence codecs.
+"""
 
 from __future__ import annotations
 
@@ -281,6 +285,102 @@ def validate_training_callbacks(callbacks) -> tuple:
     if not all(callable(callback) for callback in frozen):
         raise TypeError("training callbacks must be callable.")
     return frozen
+
+
+def _fit_one_shot(exp, *, fit_candidate, encode_candidate, callbacks=(), observer_session=None):
+    """Collect, prepare, and locally accept one opaque fresh-candidate fit.
+
+    Args:
+        exp: Experiment with a Model whose ordinary ``_accepted_fit`` instance
+            attribute holds all accepted native state, fitted facts, and encoded
+            payload bytes (initially None), and an exact TrainState in ``state``.
+        fit_candidate: Callable ``(x, y) -> candidate``. Owns fresh native
+            construction, fitting, and complete fitted-fact/convergence validation.
+            It must not mutate the previously accepted bundle or TrainState.
+        encode_candidate: Callable ``(candidate) -> accepted_bundle``. Encodes
+            final native bytes and canonical metadata exactly once, returning a
+            non-None backend-owned bundle ready for installation. It must not
+            install state or mutate the prior bundle. Runs after prep_eval.
+        callbacks: Intermediate safe-point requests; any nonempty validated
+            collection is unsupported and rejected before source acquisition.
+        observer_session: Intermediate observer request; any non-None value is
+            unsupported and rejected before source acquisition.
+
+    Returns:
+        The exact bundle installed in ``exp.model._accepted_fit``. Backends may
+        extract their native return from this bundle for direct trainer callers.
+
+    Raises:
+        TypeError: For invalid callbacks, owner slots, or TrainState fields.
+        NotImplementedError: For intermediate callbacks or observers.
+        ValueError: For invalid accounting, unfinished iterative progress, strict
+            Dataset admission/collection, or an absent encoded bundle.
+        BaseException: Propagates collection, preparation, native validation,
+            encoding, or local installation failure, including interruption.
+            Preparation cleanup never replaces an escaping primary failure.
+
+    Side Effects:
+        Materializes the canonical Dataset using strict NumPy admission and exact
+        collected N. Before native work, validates detached proposed accounting
+        using record_fit(examples=N) and finish_epoch(), without loss telemetry or
+        an epoch postlude. Calls model prep_train/prep_eval before acceptance.
+        Only after cleanup and final encoding succeed, replaces the plain Model
+        bundle and Experiment TrainState slots, rolling both back on BaseException.
+        These local assignments bypass owner hooks; no I/O, native call, callback,
+        or cleanup occurs between them. Preparation hooks must leave accepted
+        native/fitted facts intact. Same-model concurrent fit/restore and external
+        mutation of the borrowed native state are unsupported. Experiment owns
+        phase, terminal association, and publication; later publication failure
+        must retain this accepted fit, not roll it back.
+    """
+
+    from dryml.data import materialize_supervised
+
+    callbacks = validate_training_callbacks(callbacks)
+    if callbacks or observer_session is not None:
+        raise NotImplementedError("One-shot training does not support intermediate safe points or observers.")
+    model_slots, exp_slots = vars(exp.model), vars(exp)
+    if (type(model_slots) is not dict or type(exp_slots) is not dict
+            or "_accepted_fit" not in model_slots or "state" not in exp_slots):
+        raise TypeError("One-shot acceptance requires ordinary accepted-fit and state instance slots.")
+    prior_fit, prior_state = model_slots["_accepted_fit"], exp_slots["state"]
+    if type(prior_state) is not TrainState:
+        raise TypeError("One-shot acceptance requires an exact TrainState.")
+    proposed = TrainState()
+    proposed.__setstate__(prior_state.__getstate__())
+    if (proposed.next_batch != 0 or proposed.target_epoch is not None
+            or proposed.pending_epoch_postlude is not None):
+        raise ValueError("One-shot fitting cannot continue unfinished iterative training progress.")
+    require_supervised_dataset(exp.train_data, batched=False)
+    x, y, examples = materialize_supervised(exp.train_data, strict_numpy=True)
+    proposed.record_fit(examples=examples)
+    proposed.finish_epoch()
+    TrainState._validate_restored_state(proposed.__getstate__())
+
+    try:
+        exp.model.prep_train()
+        candidate = fit_candidate(x, y)
+    except BaseException:
+        try:
+            exp.model.prep_eval()
+        except BaseException:
+            pass
+        raise
+    else:
+        exp.model.prep_eval()
+    accepted = encode_candidate(candidate)
+    if accepted is None:
+        raise ValueError("One-shot encoding must return an accepted native-state bundle.")
+
+    # Existing plain dictionary slots avoid descriptors or user installation hooks.
+    try:
+        dict.__setitem__(model_slots, "_accepted_fit", accepted)
+        dict.__setitem__(exp_slots, "state", proposed)
+    except BaseException:
+        dict.__setitem__(model_slots, "_accepted_fit", prior_fit)
+        dict.__setitem__(exp_slots, "state", prior_state)
+        raise
+    return accepted
 
 
 def record_train_update(

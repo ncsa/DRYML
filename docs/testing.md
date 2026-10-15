@@ -243,7 +243,8 @@ tier-management CLI across calls or change tier membership.
 
 `heavy` tests include TensorFlow, Torch, JAX, Ray, multi-framework, MNIST/tfds, training, and other long integration paths.
 
-`package` tests build an sdist and wheel beneath `/tmp/dryml`, inspect their
+`package` tests build an sdist and wheel beneath the system temporary directory's
+`dryml/` child (normally `/tmp/dryml`; a caller's `TMPDIR`/`TEMP` override is honored), inspect their
 contents, install the wheel into an isolated interpreter, verify exact public
 exports, and prove declaration imports remain free of optional frameworks.
 
@@ -363,6 +364,180 @@ If a new file is not listed in `path_tiers`, it inherits its category tier.
 The tier-administration tests require every maintained category to have an
 explicit default, reject stale metadata paths, and prove the union of all tiers
 covers every maintained test file.
+
+## Native Estimator Qualification
+
+The maintained native references and adapter contracts are
+`tests/models/test_xgb_models.py` and `tests/models/test_statsmodels_models.py`.
+They import native packages inside admitted fixtures/cases, never at collection,
+and require Python 3.12 with the exact candidate versions: CPU XGBoost 3.4.2,
+sklearn 1.9.0 for XGBoost, statsmodels 0.15.0, NumPy 2.1.3, SciPy 1.18.0,
+and pandas 3.0.5. Missing packages or mismatched versions fail the requested
+native cases; there is no `importorskip`. The statsmodels file does not require
+sklearn. No installation or environment mutation is part of these tests.
+
+For explicitly requested local native diagnosis, activate the existing `big_env` and place
+all disposable artifacts below a caller-approved task directory. The following
+assumes `$scratch` is an existing task directory (on the characterization host,
+under `/data1/matthew/dryml-review-20261012`, overriding `/tmp/dryml`):
+
+```bash
+source ~/conda.sh
+conda activate big_env
+export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$scratch" XDG_CACHE_HOME="$scratch/cache"
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+./tests.sh tests/models/test_xgb_models.py tests/models/test_statsmodels_models.py \
+  --no-cov -x -q --basetemp="$scratch/pytest-native" \
+  -o cache_dir="$scratch/pytest-cache" -o junit_family=legacy \
+  --junitxml="$scratch/native.xml"
+```
+
+The explicit paths must precede options. JUnit `native_evidence` properties
+record actual versions/platform, held-out scores/baselines, numerical errors,
+native payload sizes, SHA-256 hashes, and save/load/save byte comparisons.
+`tmp_path` retains the `.ubj` and full Results `.pkl` payloads under `--basetemp`;
+the cache override prevents an in-checkout pytest cache. Reusing `--basetemp`
+lets pytest replace that task-owned directory; choose a new subdirectory when
+preserving earlier evidence. Neither focused mode nor these cases updates the
+pre-existing timing JSONs. No global framework bootstrap is needed.
+
+See
+[Models native characterization](models.md#xgboost-and-statsmodels-native-characterization-u1)
+for scientific and payload observations from the initial native-only references.
+XGBoost reopen error was zero; complete
+statsmodels Results remained semantically equal but native reserialization bytes
+changed. Both maintained codecs now retain exact accepted payload bytes instead
+of serializing restored native objects again.
+
+Subsequent bounded Linux/Python 3.12 mixed-environment runs qualify adapter
+quality/parity (`1e-6` XGBoost, `1e-8` statsmodels), pure selected/prepared calls,
+authored short-batch exposure, candidate failure preservation, exact Repo replay,
+associated terminal recovery and actual independent same-host Core workers. The
+two native backend files now contain 26 XGBoost and 41 statsmodels cases. U5's
+12 recovery cases passed in 340.80 seconds; 18 association/worker/Dir/Zip cases
+passed in 565.91 seconds, including eight independent real workers. An earlier
+combined run exceeded 720 seconds with an untraced failure marker; the complete
+30-case set subsequently passed in two bounded batches. No root cause was
+established for that earlier marker. These are local owning-unit results, not
+hosted or isolated-installation qualification.
+
+### Required hosted cells
+
+`native-estimator-qualification` in `.github/workflows/tests.yaml` configures four
+required support cells on every push, pull request and manual workflow dispatch:
+
+| OS | Python | Isolated installation | Assigned cases |
+|---|---|---|---:|
+| Ubuntu | 3.12 | statsmodels only; no sklearn/XGBoost | 56 |
+| Windows | 3.12 | statsmodels only; no sklearn/XGBoost | 56 |
+| Ubuntu | 3.12 | CPU XGBoost plus sklearn; no statsmodels | 41 |
+| Windows | 3.12 | CPU XGBoost plus sklearn; no statsmodels | 41 |
+
+Each job uses an isolated strict conda-forge environment. XGBoost specifically
+requires `py-xgboost=3.4.2=cpu_*`; statsmodels requires `statsmodels=0.15.0`.
+Both use NumPy 2.1.3, SciPy 1.18.0 and pandas 3.0.5; only XGBoost adds
+scikit-learn 1.9.0. Unavailable exact packages fail the environment solve rather
+than substituting versions. DRYML's core `ml_dtypes>=0.6.0` requirement is
+installed from PyPI with `--no-deps` inside that environment; conda-forge's older
+`ml_dtypes` package cannot satisfy it. CI then builds DRYML and installs the wheel
+with the requested extra and `--no-deps`, preserving the conda-installed CPU stack.
+`pip check` and preflight validate the wheel's real extra metadata, required
+versions, absence of unrelated optional model stacks and, for XGBoost, both the
+Conda CPU selector/build string and `build_info()['USE_CUDA'] is False`.
+Statsmodels imports OLS/Logit without sklearn/XGBoost. Python patch/build,
+platform, architecture, resolved versions and Conda build facts are printed;
+the codec compatibility gate itself uses Python major/minor, not patch.
+
+Every cell executes four bounded **path-first** phases, never a broad heavy
+profile or a global `-k` over backend files:
+
+| Phase | Selection per backend | Count (XGBoost / statsmodels) |
+|---|---|---:|
+| native | Entire corresponding `test_xgb_models.py` or `test_statsmodels_models.py` | 26 / 41 |
+| recovery | Two `test_native_*` functions in `test_experiment_recovery.py`, filtered to `xgb-regressor` or `stats-logit` | 6 / 6 |
+| association | Terminal Artifact/callback function in `test_estimator_experiments.py` for both families, plus native Dir/Zip restore function in `test_state_ref_restore_into.py` | 4 / 4 |
+| workers | Two independent-worker family cases plus missing/incompatible/workload-cleanup cases in `test_estimator_experiments.py` | 5 / 5 |
+
+Collection preflight requires each phase's exact count and exact requested
+node inventory. It then passes the collected node IDs directly to `./tests.sh`.
+Executed call-phase JSON must match the collected inventory exactly, with every
+outcome passed; JUnit must contain the required number of cases and zero skips,
+failures or errors, including fixture/teardown failures. A successful pytest exit
+alone is insufficient. `collected.json`, `executed.json` and `results.xml` are
+uploaded per cell, including partial evidence on failure. Native thread limits
+are set before imports through the job environment, with a 600-second per-test
+watchdog and 60-minute job bound to allow real worker startup. These limits do
+not alter product-global thread policy.
+
+The native job enables the test-only `DRYML_TEST_INSTALLED_ESTIMATORS=1` mode.
+Core workers receive only the checkout root on `PYTHONPATH` for `tests.*`
+callables, never `checkout/src`. Before native fitting, coordinator and worker
+verify `dryml`, `dryml.execute._worker`, the selected backend package and its
+`base` module against the installed distribution's actual WHEEL/RECORD metadata:
+resolved module paths must equal the recorded installation paths and module
+bytes must match RECORD SHA-256/size entries. Editable installs and missing wheel
+manifests fail qualification. The worker also checks its running `__main__`
+bootstrap origin. Checks use resolved `Path` comparisons on Linux and Windows,
+not a `site-packages` substring or a caller-provided trusted prefix. Worker
+evidence is emitted before fitting; matching coordinator/worker paths and hashes
+are retained in JUnit properties for successful and injected-failure cases.
+Without this mode, ordinary local workers continue to use checkout source.
+
+Windows Conda workers explicitly receive the selected base Python's existing
+`Library/bin` directory plus `os.defpath` through `SubProcessConfig.env_vars["PATH"]`.
+Conda's delayed BLAS procedure loading requires that directory during SVD/Newton
+execution even when native imports succeeded. This test-owned configuration does
+not inherit the coordinator's full PATH or environment, and does not change
+Execute's minimal-environment policy. Worker failures retain bounded captured
+output and enable Python's fatal fault handler for native crash evidence.
+
+The separately requested hosted heavy/coverage jobs exclude these exact native
+files and functions: they cannot qualify the native readers on their broader
+Python/dependency matrices. The dedicated cells own their uninstrumented native
+evidence; they do not add the full exact-pin matrix to routine or broad framework
+CI. Explicit local path-first native runs remain available.
+
+All four hosted cells passed on 2026-10-15 at revision
+[`fa01d177`](https://github.com/ncsa/DRYML/commit/fa01d177d8704a5a2dc09a038bfffb263cf0bebd),
+in [the qualification run](https://github.com/ncsa/DRYML/actions/runs/38732719366).
+The artifacts verify **194 assigned cases, zero skips/errors/failures**, exact
+collected/executed inventories, and matching installed-wheel coordinator/worker
+receipts. Each statsmodels-only cell ran 56 cases; each CPU XGBoost-plus-sklearn
+cell ran 41. Linux used CPython 3.12.15 built with GCC 15.3.0; Windows AMD64 used
+conda-forge CPython 3.12.15 built with MSC v.1944. Exact build/platform and Conda
+package records are retained in each cell's `preflight.json`.
+
+These are revision-specific isolated-installation results, distinct from the
+earlier local mixed-environment evidence. Later runtime/test changes require
+their own qualification; configuration alone does not imply success or branch
+protection. Cross-version readers, GPU, external datasets and broader native
+platform combinations are not claimed.
+Existing sklearn and additive codec-hook tests keep their owners and contracts;
+the native rollout does not automatically close issue #38.
+
+### Dependency-light routine coverage
+
+`tests/models/test_estimator_contracts.py` is medium-tier and retains its complete
+fast acceptance/config/spec/admission/missing-extra/control-boundary set.
+`tests/data/test_materialize_supervised_numpy.py` inherits Data's medium tier;
+all 47 strict collector cases remain routine without importing tensor/model
+frameworks. Neither file needs a representative allowlist. The fresh-process
+`test_routine_estimator_selection_keeps_fast_contracts_without_native_imports`
+guard supplies only seven named owning files to the actual runner file-selection
+policy, then exercises pytest's tier/profile collection with native imports
+blocked. It proves these two fast files remain selected, the native backend and
+worker/recovery files stay out, and the heavy native graph cases remain excluded
+from the medium Core file. No default Data test is forced to run a native backend.
+Installed-wheel package checks also resolve both backend manifests and construct
+unfitted recipes with native imports blocked, and check extras on Python
+3.10–3.14 for silent marker omission. Package tests remain outside routine runs.
+The installed-artifact `test_installed_estimator_core_worker_origins` guard uses
+the same Core executor and an actual worker to construct inert recipes with
+native imports blocked, then compares both backends' root/bootstrap/backend
+origins with the wheel manifest. It also rejects explicit `checkout/src`
+overrides separately in coordinator and worker, recording failed-worker cleanup.
+This package guard requires neither native extras nor Python 3.12; real native
+fits remain in the dedicated qualification cells.
 
 ## Hosted Matrix
 

@@ -1,13 +1,18 @@
-"""
-Utility functions for data methods
+"""Dataset projection, nested-value utilities and owned one-shot collection.
+
+Supervised collection retains permissive consumers by default and offers an
+opt-in finite, runtime-validated dense NumPy boundary without foreign conversion.
 """
 
 import inspect
 from typing import Callable
 
+import numpy as np
+
 from dryml.core.authoring import authoring_helper
-from dryml.core.tensor_spec import iter_specs
-from dryml.data.collate import default_collate
+from dryml.core.backend import Backend
+from dryml.core.tensor_spec import Dynamic, Layout, TensorSpec, iter_specs
+from dryml.data.collate import collate_for_spec, default_collate
 from dryml.data.methods import Project, Select
 
 
@@ -164,29 +169,64 @@ def collate_xy(dataset, *, x_path=0, y_path=1, collate=default_collate):
     return collate(x_values), collate(y_values), len(x_values)
 
 
-def materialize_supervised(dataset):
+def materialize_supervised(dataset, *, strict_numpy: bool = False):
     """Materialize a canonical supervised Dataset for one-shot consumers.
 
     Args:
         dataset: Dataset yielding exactly ``(inputs, targets)`` pairs. It may
             yield examples directly or authored batches with dynamic final sizes.
+        strict_numpy: Exact bool, default false. When true, require finite logical
+            yield cardinality and two dense NumPy TensorSpec branches before
+            opening a source. Features must be vectors and targets scalars per
+            example, with fixed-width real integer or float32/float64 dtypes.
+            Validate runtime pairs, native NumPy values, exact dtypes, declared
+            rank/shape and batch facts before collation. Dynamic feature width
+            must be positive and consistent; dynamic batches may vary in size.
+            Dense ndarray subclasses are accepted, but masked arrays are not.
 
     Returns:
         ``(inputs, targets, examples)`` with authored batches flattened to one
-        dense collection and the exact submitted example count.
+        dense collection and the exact submitted example count. Strict mode
+        returns NumPy arrays of shapes ``(examples, features)`` and ``(examples,)``
+        retaining each declared dtype and authored order. Unknown example-count
+        metadata is allowed when logical yield cardinality is finite.
 
     Raises:
-        ValueError: If the Dataset is noncanonical or empty.
-        TypeError: If its values cannot be collated by the declared data backend.
+        ValueError: If the Dataset is noncanonical or empty; in strict mode, also
+            for unbounded logical cardinality, excess yields, invalid shapes,
+            feature-width drift, or inconsistent batching.
+        DatasetExhaustedError: In strict mode, if traversal ends before its
+            declared logical yield count, with requested and observed counts.
+        TypeError: If strict_numpy is not an exact bool, values cannot be collated,
+            or strict declarations/runtime values have unsupported trees, layouts,
+            backends or dtypes (including Python scalar/list conversion).
+        BaseException: Source acquisition, reading, validation, interruption or
+            cleanup failure. A primary failure is preserved when cleanup fails.
 
     Side Effects:
         Opens and closes Dataset cursors. Existing Dataset batching and order are
-        preserved; no trainer policy is applied.
+        preserved; no trainer policy is applied. Strict mode opens nothing for
+        invalid declarations, reads at most the first excess logical yield, and
+        respects authored cursor bounds such as Take without reaching underneath
+        their EOF. It imports no optional tensor/model framework and adds no
+        conversion edges. NaN/Inf policy remains the consumer's responsibility.
+        Strict mode copies validated native values before advancing the source,
+        preserving each yield even when a producer reuses its NumPy buffers.
+        The default retains permissive, including unknown-cardinality, collection.
     """
 
-    if not isinstance(dataset.spec, tuple) or len(dataset.spec) != 2:
+    from dryml.data.dataset import DatasetCursor
+
+    if type(strict_numpy) is not bool:
+        raise TypeError("strict_numpy must be an exact bool.")
+    spec = dataset.spec
+    if not isinstance(spec, tuple) or len(spec) != 2:
         raise ValueError("Expected a canonical Dataset yielding (inputs, targets).")
-    branches = tuple(tuple(iter_specs(branch)) for branch in dataset.spec)
+    expected = None
+    if strict_numpy:
+        expected = dataset.yield_cardinality().require_finite()
+        _admit_numpy_supervised(spec)
+    branches = tuple(tuple(iter_specs(branch)) for branch in spec)
     if not all(branches):
         raise TypeError("Supervised Dataset branches require TensorSpec leaves.")
     flags = []
@@ -200,23 +240,93 @@ def materialize_supervised(dataset):
     examples = 0
     x_values = []
     y_values = []
-    cursor = dataset.iterator()
-    try:
+    feature_width = None
+    cursor = DatasetCursor._from_generator(
+        lambda owner: _supervised_yields(dataset, expected, owner),
+    )
+    with cursor:
         for value in cursor:
-            examples += dataset.examples_in(value)
+            if strict_numpy:
+                feature_width = _validate_numpy_supervised(value, spec, feature_width)
+            count = dataset.examples_in(value)
+            examples += count
             x, y = value
+            if strict_numpy:
+                x, y = np.asarray(x).copy(), np.asarray(y).copy()
             if flags[0]:
-                for index in range(dataset.examples_in(value)):
-                    x_values.append(nested_slice(x, index))
-                    y_values.append(nested_slice(y, index))
+                for index in range(count):
+                    x_values.append(x[index] if strict_numpy else nested_slice(x, index))
+                    y_values.append(y[index] if strict_numpy else nested_slice(y, index))
             else:
                 x_values.append(x)
                 y_values.append(y)
-    finally:
-        cursor.close()
     if not x_values:
         raise ValueError("Cannot materialize an empty supervised Dataset.")
-    return default_collate(x_values), default_collate(y_values), examples
+    collate = collate_for_spec(spec) if strict_numpy else default_collate
+    return collate(x_values), collate(y_values), examples
+
+
+def _admit_numpy_supervised(spec):
+    """Check strict dense declarations without source access or native discovery."""
+
+    for branch in spec:
+        if not isinstance(branch, TensorSpec):
+            raise TypeError("Strict NumPy supervision requires two TensorSpec branches.")
+        if branch.backend is not Backend.numpy or branch.layout is not Layout.DENSE:
+            raise TypeError("Strict supervision requires declared dense NumPy inputs and targets.")
+        dtype = branch.dtype
+        if not ((dtype.kind in {"int", "uint"} and dtype.bits in {8, 16, 32, 64})
+                or (dtype.kind == "float" and dtype.bits in {32, 64})):
+            raise TypeError("Strict NumPy supervision requires real integer or float32/float64 dtypes.")
+        if branch.batch == 0:
+            raise ValueError("Strict NumPy supervision cannot declare zero-example batches.")
+    x, y = spec
+    if x.rank != 1 or y.shape != ():
+        raise ValueError("Strict NumPy supervision requires feature vectors and scalar targets.")
+    if x.shape[0] != Dynamic and x.shape[0] <= 0:
+        raise ValueError("Strict NumPy supervision requires positive feature width.")
+    if (x.batched != y.batched or
+            (x.batched and x.batch is not Dynamic and y.batch is not Dynamic and x.batch != y.batch)):
+        raise ValueError("Strict NumPy supervision requires matching batch declarations.")
+
+
+def _validate_numpy_supervised(value, spec, feature_width):
+    """Validate native facts before any stack can convert values or promote dtypes."""
+
+    if not isinstance(value, tuple) or len(value) != 2:
+        raise TypeError("Expected a canonical runtime (inputs, targets) tuple.")
+    for name, runtime, declared in zip(("inputs", "targets"), value, spec):
+        if (not isinstance(runtime, (np.ndarray, np.generic))
+                or np.ma.isMaskedArray(runtime)):
+            raise TypeError(f"Strict {name} must be a dense NumPy ndarray or NumPy scalar.")
+        if runtime.dtype != np.dtype(declared.dtype.np()):
+            raise TypeError(f"Strict {name} dtype differs from its declared dtype.")
+        if not declared.compatible_with_shape(runtime.shape):
+            raise ValueError(f"Strict {name} rank/shape differs from its declared shape or batch size.")
+    width = value[0].shape[-1]
+    if width <= 0 or (feature_width is not None and width != feature_width):
+        raise ValueError("Strict NumPy supervision requires positive, consistent feature width.")
+    return width
+
+
+def _supervised_yields(dataset, expected, owner):
+    """Check logical counts inside the cursor's primary-error/cleanup boundary."""
+
+    from dryml.data.dataset import DatasetExhaustedError
+
+    source = owner._own(owner._call(dataset.iterator))
+    yielded = 0
+    while True:
+        try:
+            value = owner._pull(source)
+        except StopIteration as error:
+            if expected is not None and yielded != expected:
+                raise DatasetExhaustedError(expected, yielded) from error
+            return
+        if expected is not None and yielded >= expected:
+            raise ValueError(f"Supervised Dataset exceeds its declared yield count of {expected}.")
+        yielded += 1
+        yield value
 
 
 _MISSING = object()

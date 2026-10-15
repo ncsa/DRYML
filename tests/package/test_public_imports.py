@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 _EXPECTED_CODE_EXPORTS = [
     "AccessCollection",
@@ -641,7 +642,7 @@ print(json.dumps({
 def test_installed_declaration_imports_are_passive(
     installed_python: Path,
 ) -> None:
-    """Ensure root and declaration imports do not load optional frameworks."""
+    """Resolve wheel declarations/recipes without optional native import attempts."""
 
     result = _installed_probe(
         installed_python,
@@ -650,12 +651,19 @@ import importlib.util
 import json
 import importlib
 import sys
+class RejectNative:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'xgboost', 'statsmodels', 'sklearn', 'scipy', 'pandas'}:
+            raise AssertionError('unexpected native import: ' + fullname)
+sys.meta_path.insert(0, RejectNative())
 import dryml
 import dryml.annotations
 import dryml.environments
 import dryml.formats
 import dryml.jax
 import dryml.models.jax
+import dryml.models.xgb
+import dryml.models.statsmodels
 import dryml.ray
 import dryml.runtime
 import dryml.session
@@ -676,6 +684,13 @@ assert set(dryml.models.jax.__all__) == {
     "EarlyStoppingTraining", "FlaxModel", "JaxStateError", "Model", "NNXModel",
     "Optimizer", "Training", "TrainFunction", "pure_training_transition",
 }
+for backend in (dryml.models.xgb, dryml.models.statsmodels):
+    assert backend.__all__ == ["Model", "ClassifierModel", "RegressionModel", "BasicTraining"]
+    assert all(isinstance(name, str) and hasattr(backend, name) for name in backend.__all__)
+    for cls in (backend.ClassifierModel, backend.RegressionModel, backend.BasicTraining):
+        cls()
+assert dryml.models.xgb.RegressionModel().mdl is None
+assert dryml.models.statsmodels.RegressionModel().results is None
 for name in ("decorators", "env", "world", "runtime", "merge", "namespaces", "storage"):
     try:
         importlib.import_module(f"dryml.annotations.{name}")
@@ -688,12 +703,124 @@ try:
 except ModuleNotFoundError:
     retired = False
 print(json.dumps({
-    "heavy": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib", "flax", "optax", "ray") if name in sys.modules),
+    "heavy": sorted(name for name in ("tensorflow", "torch", "jax", "jaxlib", "flax", "optax", "ray", "xgboost", "statsmodels", "sklearn", "scipy", "pandas") if name in sys.modules),
     "retired": retired,
 }))
 """,
     )
     assert json.loads(result.stdout) == {"heavy": [], "retired": False}
+
+
+def test_installed_estimator_core_worker_origins(installed_python: Path, record_property) -> None:
+    """Check real inert Core workers against wheel RECORD and reject source overrides.
+
+    Uses the ephemeral artifact interpreter; optional native packages and Python
+    3.12 are not required. The same executor is used by native qualification.
+    """
+    root = Path(__file__).resolve().parents[2]
+    code = """
+import json
+import os
+from pathlib import Path
+import tempfile
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
+from tests.models.test_estimator_experiments import _executor
+from tests.models._estimator_qualification import installed_origins, inert_worker_origins
+
+coordinator = {kind: installed_origins(kind) for kind in ('xgb-regressor', 'stats-logit')}
+with tempfile.TemporaryDirectory(prefix='installed-origin-') as directory:
+    root = Path(directory)
+    repo = Repo(DirStore(root / 'store'))
+    control = DirStore(root / 'control')
+    if os.environ.get('FORCE_SOURCE_WORKER') == '1':
+        # Exercise the ordinary source-path launch as a controlled bad worker.
+        os.environ['DRYML_TEST_INSTALLED_ESTIMATORS'] = '0'
+    executor, temporary = _executor(root, repo, control)
+    try:
+        future = executor.submit(inert_worker_origins)
+        try:
+            result = future.result(timeout=150)
+        except Exception:
+            future.cleanup(timeout=15)
+            snapshot = future.snapshot()
+            assert snapshot.cleanup_state == 'complete' and not snapshot.cleanup_issues
+            print(json.dumps({'rejected_worker_cleanup': snapshot.cleanup_state}), flush=True)
+            raise
+        assert result['pid'] != os.getpid()
+        assert result['origins'] == coordinator
+        future.cleanup(timeout=15)
+        snapshot = future.snapshot()
+        assert snapshot.cleanup_state == 'complete' and not snapshot.cleanup_issues
+        print(json.dumps({'coordinator': coordinator, 'worker': result,
+                          'cleanup': snapshot.cleanup_state}))
+    finally:
+        executor.close(cancel=True, timeout=20)
+        repo.close(flush=False)
+        control.close()
+"""
+    environment = {**os.environ, "DRYML_TEST_INSTALLED_ESTIMATORS": "1", "PYTHONPATH": str(root)}
+    positive = subprocess.run(
+        [str(installed_python), "-c", code], cwd=root, env=environment,
+        capture_output=True, text=True, timeout=240,
+    )
+    assert positive.returncode == 0, positive.stdout + positive.stderr
+    evidence = json.loads(positive.stdout)
+    assert evidence["cleanup"] == "complete"
+    record_property("installed_worker_origins", json.dumps(evidence, sort_keys=True))
+    for target, overrides in (
+        ("coordinator", {"PYTHONPATH": os.pathsep.join((str(root), str(root / "src")))}),
+        ("worker", {"FORCE_SOURCE_WORKER": "1"}),
+    ):
+        negative = subprocess.run(
+            [str(installed_python), "-c", code], cwd=root, env={**environment, **overrides},
+            capture_output=True, text=True, timeout=240,
+        )
+        assert negative.returncode != 0, f"{target} accepted checkout/src: {negative.stdout}"
+        assert any(message in negative.stderr for message in (
+            "non-wheel origin", "installed wheel WHEEL/RECORD metadata required", "editable DRYML",
+        )), negative.stderr
+        if target == "worker":
+            assert json.loads(negative.stdout) == {"rejected_worker_cleanup": "complete"}
+        record_property(target + "_source_override_rejected", json.dumps({
+            "returncode": negative.returncode, "stdout": negative.stdout, "stderr": negative.stderr,
+        }, sort_keys=True))
+
+
+def test_installed_native_extras_match_exact_reader_stacks(installed_python: Path) -> None:
+    """Require real wheel metadata to request every reader dependency without markers."""
+    result = _installed_probe(
+        installed_python,
+        """
+from importlib.metadata import metadata, requires
+import json
+from packaging.requirements import Requirement
+from packaging.markers import default_environment
+
+extras = ('xgboost', 'statsmodels')
+assert set(extras) <= set(metadata('dryml').get_all('Provides-Extra'))
+selected = {}
+for extra in extras:
+    by_python = {}
+    for python in ('3.10', '3.11', '3.12', '3.13', '3.14'):
+        environment = {**default_environment(), 'extra': extra, 'python_version': python}
+        by_python[python] = sorted(
+            str(req.name) + str(req.specifier)
+            for value in requires('dryml')
+            if (req := Requirement(value)).marker is not None
+            and req.marker.evaluate(environment)
+        )
+    selected[extra] = by_python
+print(json.dumps(selected))
+""",
+    )
+    common = ["numpy==2.1.3", "pandas==3.0.5", "scipy==1.18.0"]
+    for extra, native in (("xgboost", ["scikit-learn==1.9.0", "xgboost==3.4.2"]),
+                          ("statsmodels", ["statsmodels==0.15.0"])):
+        assert json.loads(result.stdout)[extra] == {
+            python: sorted(common + native)
+            for python in ("3.10", "3.11", "3.12", "3.13", "3.14")
+        }
 
 
 def test_installed_requirement_domain_surface_has_no_defaults_or_fragment_shims(
@@ -1119,7 +1246,7 @@ print(json.dumps({
 }))
 """,
         ],
-        cwd="/tmp/dryml",
+        cwd=tempfile.gettempdir(),
         env=env,
         capture_output=True,
         text=True,
@@ -1161,7 +1288,7 @@ print(json.dumps({
 }))
 """,
         ],
-        cwd="/tmp/dryml",
+        cwd=tempfile.gettempdir(),
         env=env,
         capture_output=True,
         text=True,
@@ -1656,13 +1783,13 @@ with tempfile.TemporaryDirectory() as directory:
 def _installed_probe(
     python: Path, code: str
 ) -> subprocess.CompletedProcess[str]:
-    """Run a probe outside the checkout with inherited source paths removed."""
+    """Run in the system temp override with inherited source paths removed."""
 
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     return subprocess.run(
         [str(python), "-c", code],
-        cwd="/tmp/dryml",
+        cwd=tempfile.gettempdir(),
         env=env,
         check=True,
         text=True,

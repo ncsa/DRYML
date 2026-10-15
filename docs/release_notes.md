@@ -2,6 +2,38 @@
 
 ## 0.3.0b1 (unreleased)
 
+Maintained dense CPU estimator adapters now provide XGBoost classification and
+scalar regression (`dryml.models.xgb`) and statsmodels OLS/binary Logit
+(`dryml.models.statsmodels`). Imports and configuration are passive; fitting and
+fitted restore require their exact optional reader stacks. `dryml[xgboost]` pins
+XGBoost 3.4.2/sklearn 1.9.0 and `dryml[statsmodels]` pins statsmodels 0.15.0;
+both pin NumPy 2.1.3, SciPy 1.18.0 and pandas 3.0.5. Native use requires Python
+3.12; core's Python >=3.10 and Ubuntu/Windows 3.10–3.14 matrix are unchanged.
+Extras have no Python markers that silently omit a requested native package.
+
+Both adapters use finite authored dense NumPy Datasets, pure Method/Map metadata
+and candidate-first one-shot acceptance: one successful fit step, one epoch and
+actual example exposure, with no fabricated loss/iteration telemetry or
+intermediate safe points. Retained `xgboost1` UBJSON and `statsmodels1` complete
+Results pickle/metadata bytes preserve exact unchanged checkpoint replay. Full
+statsmodels Results persist training arrays on disk and occupy memory alongside
+their encoded bytes. Legacy XGBoost compute state and incompatible reader versions
+fail explicitly without migration or Store rewrites. Existing sklearn, Data,
+Method, ExperimentData, TrainState and Store formats are unchanged by these adapters.
+
+Bounded Linux Python 3.12 evidence covers native held-out quality/parity, state,
+association-sensitive recovery and real independent same-host Core workers.
+Four required isolated conda-forge Ubuntu/Windows Python 3.12 CI cells passed at
+`fa01d177` on 2026-10-15 for statsmodels-only and CPU XGBoost-plus-sklearn: 194
+assigned cases with zero native skips, exact-version/extra/dependency/CPU-build
+guards and matching installed-wheel worker evidence. Both platforms used Python
+3.12.15. Windows Conda workers explicitly receive their selected runtime's native
+DLL directory; Execute's minimal-environment policy is unchanged. Other reader
+pairs and GPU remain unqualified. Fast backend-neutral
+contracts remain routine; native matrices remain targeted heavy qualification.
+This rollout does not automatically close issue #38. See [XGBoost](xgboost.md),
+[statsmodels](statsmodels.md) and [Testing](testing.md#native-estimator-qualification).
+
 Query `refresh(True)` now creates a lazy process-local **one-shot request**, shared
 by ordinary derivation, shallow copies, closure, occurrences, and owner/target
 projections. Each compatible persistent destination completes it once. Later

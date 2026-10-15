@@ -199,3 +199,77 @@ def test_pickleable_targeted_restore_preserves_live_graph_bindings(tmp_path):
     assert root.value == 1
     assert not hasattr(root, "extra")
     assert root.object_ref == state.object
+
+
+@pytest.mark.speed_heavy
+@pytest.mark.parametrize("kind", ("xgb-regressor", "stats-logit"))
+@pytest.mark.parametrize("store_kind", ("dir", "zip"))
+def test_native_graph_restore_unfitted_fitted_invalidation_and_fresh_recovery(
+        tmp_path, monkeypatch, kind, store_kind):
+    """Native candidate isolation cannot rescue a Core-invalidated aliased graph."""
+    import numpy as np
+    from dryml.core.store.zip import ZipStore
+    from tests.models.test_estimator_experiments import _arrays, _recipe
+
+    destination = tmp_path / ("store" if store_kind == "dir" else "store.zip")
+    store_cls = DirStore if store_kind == "dir" else ZipStore
+    repo = Repo(store_cls(destination))
+    model, _ = _recipe(kind)
+    root = RestoreIntoPair(model, repo=repo)
+    x, y = _arrays(kind)
+    try:
+        empty = repo.save_object(root, deep_capture=True)
+        model.fit(x, y)
+        fitted = repo.save_object(root, deep_capture=True)
+        repo.default_store.commit()
+        payload, metadata = model._accepted_fit.payload, model._accepted_fit.metadata
+        expected = model(x)
+        object_id = model.object_id
+        repo.restore_state_ref_into(root, empty)
+        assert root.first is root.second is model and model.object_id == object_id
+        assert model._accepted_fit is None
+        with pytest.raises(ValueError, match="unfitted"):
+            model(x)
+        repo.restore_state_ref_into(root, fitted)
+        assert root.first is root.second is model and model.object_id == object_id
+        assert model._accepted_fit.payload == payload
+        assert model._accepted_fit.metadata == metadata
+        np.testing.assert_array_equal(model(x), expected)
+        prior = model._accepted_fit
+        assert root.last_state_ref == fitted
+        assert model._last_state_hash is not None
+        for node in (root, model):
+            assert any(candidate is node for candidate in repo._all_live_candidates())
+
+        def reject(candidate):
+            raise ValueError("entered native restore validation")
+
+        monkeypatch.setattr(model, "_validate_native", reject)
+        with pytest.raises(RepoLoadError, match="Targeted exact restore failed"):
+            repo.restore_state_ref_into(root, fitted)
+        assert model._accepted_fit is prior
+        for node in (root, model):
+            assert node._restore_failed
+            assert node.last_state_ref is None and node._last_state_hash is None
+            assert all(candidate is not node for candidate in repo._all_live_candidates())
+            with pytest.raises(RepoSaveError, match="invalidated"):
+                repo.save_object(node)
+        with pytest.raises(RepoLoadError, match="invalidated"):
+            repo.restore_state_ref_into(root, fitted)
+        fresh_repo = Repo(store_cls(destination))
+        try:
+            fresh_empty = fresh_repo.load_state_ref(empty, reuse_live="never", cache="none")
+            fresh = fresh_repo.load_state_ref(fitted, reuse_live="never", cache="none")
+            assert fresh_empty.first._accepted_fit is None
+            assert fresh is not root and fresh.first is not model
+            assert fresh.first is fresh.second
+            assert fresh.first.object_id == object_id and fresh.object_ref == fitted.object
+            assert not fresh._restore_failed and not fresh.first._restore_failed
+            assert fresh.last_state_ref == fitted
+            assert fresh.first._accepted_fit.payload == payload
+            assert fresh.first._accepted_fit.metadata == metadata
+            np.testing.assert_array_equal(fresh.first(x), expected)
+        finally:
+            fresh_repo.close(flush=False)
+    finally:
+        repo.close(flush=False)
