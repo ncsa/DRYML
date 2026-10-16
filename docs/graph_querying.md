@@ -23,9 +23,10 @@ model = repo.load_object(models.one())
 `sel()` composes structural Definitions, complete CDefs, `Selector` values,
 Generator selectors, and exact references. Complete Definitions remain structural;
 complete CDefs and exact references retain their complete graph identity. Query
-results are `IdentitySet` values with deterministic identity ordering. `collect()`
-fixes membership before iteration, while `take(n)` is the explicit bounded prefix
-operation and retains visible boundedness on its returned set.
+collected results are `IdentitySet` values with deterministic identity ordering.
+`collect()` fixes matching membership before iteration; `iter()` yields matches
+on demand. `take(n)` is the explicit eager bounded-prefix operation and retains
+visible boundedness on its returned set.
 
 Exact live StateRef selection restricts the complete knowledge universe: embedded
 references in definitions, materializing subtree projections, and retained cache
@@ -91,6 +92,61 @@ release every fence before fallback or recovery; frontiers and selective proofs
 are discarded without refunding cumulative verification or IO work. Rebuild cannot
 close another active same-process read view. Per-Store cuts do not promise a global
 federated snapshot, broader V3 acceleration, or indexed exact-miss/count execution.
+
+## Lazy Iteration
+
+`IdentityQuery.iter()` is an explicit terminal returning a single-use, closeable
+Python generator. Query plans themselves remain non-iterable. It yields the same
+complete CDef, ObjectRef or StateRef values in the same identity order as
+`collect()`, without constructing a final matching `IdentitySet`:
+
+```python
+for obj_ref in repo.query().sel(cached_test_ds_def).object_refs().iter():
+    print(obj_ref)
+```
+
+Creating an iterator performs no query work. Its first `next()` retains producer
+topology, candidate knowledge, required metadata and authority proofs using the
+normal terminal retry/refresh rules. Later Store/cache mutations are observed by
+a new iterator, not spliced into an already-started one. This remains one cut per
+contributing Store, not a global federated transaction. Iterator matching and
+relationship traversal advance with consumer demand.
+
+Candidate inventories and metadata can still require complete capture before
+the first value. Verification admits the complete detached candidate domain, and
+metadata predicates validate their eligible domain before output, just as with
+scalar terminals. Algebra, closure and owner/target projections may need fixed
+intermediate memberships. Consequently, this API avoids a final result collection
+but does not promise bounded-memory or one-record-at-a-time Store IO. It preserves
+existing scan/index controls rather than introducing broader indexed coverage.
+
+No Store fence or SQLite reader spans a yield, so a paused consumer does not hold
+back Store writers. Exhaustion, error or explicit `.close()` releases the
+iterator's retained execution. A `break` alone does not close a retained generator;
+use `contextlib.closing` when consumption may stop early:
+
+```python
+from contextlib import closing
+from itertools import islice
+
+with closing(repo.query().object_refs().iter()) as refs:
+    for obj_ref in islice(refs, 10):
+        print(obj_ref)
+```
+
+Advance a started iterator only in the process and thread that first advanced it;
+other consumers receive `QueryError` before further evaluation. Independent
+iterators may run concurrently. Pre-output source recapture uses normal retries;
+a recapture after a value was delivered raises `QueryError` instead of restarting
+and replaying a prefix. Other late failures and interruptions propagate and end
+that iterator; a delivered prefix is not a successful complete-query result.
+
+`OccurrenceQuery.iter()` yields typed occurrences with raw occurrence caps intact.
+It walks roots in identity order and paths in deterministic depth-first
+relationship order. This avoids globally collecting/sorting every matching path;
+its traversal order need not match `OccurrenceSet`'s global ordering (for example
+in owner-digest collision buckets). Necessary root and target-metadata validation
+still precedes output. A zero raw-occurrence cap performs no source work.
 
 ## Identity Restrictions
 

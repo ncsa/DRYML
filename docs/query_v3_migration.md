@@ -16,7 +16,7 @@ retired spellings only to map existing applications to their replacement.
 | strong-only versus weak Repo cache producer | `repo.query(weak=False)` for strong-only initial knowledge; the default includes both tiers |
 | `find_defs`, `find_occurrences`, `find_owner_defs` | compose an identity or occurrence query and call `collect()` |
 | `find`, `find_owners` | select identities, then call an explicit Repo load method |
-| lazy result iteration | `collect()` before ordinary iteration; use `take(n)` for a bounded prefix |
+| lazy result iteration | explicit `.iter()` for incremental consumption; `collect()` for a fixed iterable result; `take(n)` for an eager bounded prefix |
 | `defs()`, `execute()`, `refine()` | `collect()`, scalar terminals, or `result.query().sel(...)` |
 
 `Repo.query()` and `Store.query()` provide their producer's initial universe, so
@@ -31,6 +31,13 @@ projection on `IdentitySet`. It maps ObjectRef and StateRef members to recursive
 `ObjectSelector` values, omits CDefs, merges evidence for equal projections, and
 returns a fixed `ObjectSelectorSet`. Exact reference selection remains unchanged;
 an ObjectSelector is the separate state-independent graph-selection value.
+
+`.iter()` now returns a single-use closeable generator on both identity and
+occurrence queries. It starts on first advancement and matches/traverses on
+demand, retaining normal upfront candidate, authority and metadata validation.
+Close early-abandoned iterators with `contextlib.closing`; a `break` alone does
+not close a retained generator. See [Lazy Iteration](graph_querying.md#lazy-iteration)
+for snapshot, ordering, ownership, error and memory semantics.
 
 The producer option `repo.query(weak=...)` controls which cache tiers enter the
 initial universe. It is distinct from `query.cached(scope=..., weak=...)`, which
