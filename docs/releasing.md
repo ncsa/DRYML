@@ -23,13 +23,15 @@ only GitHub's short-lived OIDC identity; do not add PyPI passwords or tokens.
 
 ## Rehearsal
 
-Set the intended version in `setup.cfg`, merge the release commit, and wait for
-its normal CI checks to pass. The rehearsal tag is exactly
-`test-v<package-version>`. For version `0.3.0b1`:
+Set the intended version in `setup.cfg` and `src/dryml/__init__.py`, update the
+installed-version assertion in `tests/package/test_public_imports.py` and the
+release notes, then merge the release commit and wait for its normal CI checks
+to pass. The rehearsal tag is exactly `test-v<package-version>`. For version
+`0.3.0b2`:
 
 ```bash
-git tag -a test-v0.3.0b1 -m "Rehearse 0.3.0b1"
-git push origin test-v0.3.0b1
+git tag -a test-v0.3.0b2 -m "Rehearse 0.3.0b2"
+git push origin test-v0.3.0b2
 ```
 
 `.github/workflows/release-rehearsal.yaml` checks that the tag suffix exactly
@@ -47,7 +49,7 @@ python -m venv /tmp/dryml/release-test
 /tmp/dryml/release-test/bin/python -m pip install \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
-  dryml==0.3.0b1
+  dryml==0.3.0b2
 ```
 
 ## Official Release
@@ -56,8 +58,8 @@ After the rehearsal succeeds, tag the same reviewed commit with exactly
 `v<package-version>` and push it:
 
 ```bash
-git tag -a v0.3.0b1 -m "Release 0.3.0b1"
-git push origin v0.3.0b1
+git tag -a v0.3.0b2 -m "Release 0.3.0b2"
+git push origin v0.3.0b2
 ```
 
 `.github/workflows/release.yaml` validates the tag, builds and checks one wheel,
