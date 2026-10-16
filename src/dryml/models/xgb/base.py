@@ -1,6 +1,8 @@
 """Passive CPU XGBoost recipes, NumPy prediction, and retained native model IO.
 
 Native imports and version admission occur only for fitting or fitted restoration.
+The supported reader/writer uses XGBoost 3.4.1; fitted state written with other
+XGBoost versions is rejected rather than migrated or silently reinterpreted.
 One accepted bundle owns the borrowed estimator, fitted facts, and exact bytes;
 same-model concurrent fit/restore and external estimator mutation are unsupported.
 """
@@ -29,7 +31,7 @@ from dryml.models.utils import _fit_one_shot
 
 
 _VERSIONS = {
-    "xgboost": "3.4.2", "scikit-learn": "1.9.0", "numpy": "2.1.3",
+    "xgboost": "3.4.1", "scikit-learn": "1.9.0", "numpy": "2.1.3",
     "scipy": "1.18.0", "pandas": "3.0.5", "python": "3.12",
 }
 _DEFAULTS = {

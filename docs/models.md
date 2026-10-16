@@ -494,7 +494,9 @@ Subsequent isolated Ubuntu/Windows Python 3.12.15 qualification passed all four
 required cells at `fa01d177`, including real installed-wheel workers, with exact
 inventories and zero native skips. See
 [Testing](testing.md#required-hosted-cells) for revision-specific evidence and the
-explicit Windows Conda worker DLL path. Wider reader-version combinations remain
+historical Windows Conda worker DLL path. Current CI consolidates framework tests
+on Linux with one pip-installed stack and selects XGBoost 3.4.1; the older
+XGBoost 3.4.2 evidence does not qualify that new stack. Wider reader-version combinations remain
 unqualified; configuring a cell alone is not evidence that it passed.
 
 For completed `Value` Artifacts, history scalar columns retain finite Python
@@ -667,9 +669,10 @@ the pickle retains training arrays on disk too. Data removal is outside this
 contract. Native Results inspection may populate nonsemantic caches; external
 native mutation is outside the supported accepted-fit contract.
 
-The initial reader policy is exact native, applicable sklearn, numerical-stack,
+The reader policy is exact native, applicable sklearn, numerical-stack,
 and Python major/minor matching. `dryml[xgboost]` and `dryml[statsmodels]` pin their
-respective complete reader stacks above; core's looser NumPy/pandas requirements
+respective complete reader stacks in the backend documentation (currently
+XGBoost 3.4.1, replacing the historical 3.4.2 candidate above); core's looser NumPy/pandas requirements
 do not qualify other native combinations. Native use requires Python 3.12 even
 though core supports Python >=3.10. Extras do not silently omit native packages on
 other Python versions; successful dependency resolution alone is not native
@@ -741,7 +744,9 @@ reserved `rngs` keyword, and receive wrapper-owned `nnx.Rngs` only after runtime
 admission. It partitions `Param` variables from remaining mutable/module-RNG
 state, not a live NNX GraphDef or device object. The separate external model RNG
 is split away from construction and remains distinct from module RNG streams.
-Public prediction clones module state and discards candidate BatchNorm, dropout,
+Prediction and training candidates explicitly copy NNX Variables when merging
+module state, so Flax's shared-variable default cannot mutate the live owner
+before candidate installation. Public prediction discards candidate BatchNorm, dropout,
 and external-RNG changes rather than mutating authoritative state.
 
 `dryml.models.jax.Training` is the matching **experimental** Dataset-owned
