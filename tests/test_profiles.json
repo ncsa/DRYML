@@ -536,8 +536,10 @@
           ]
         },
         "tests/core/test_repo_save_load.py": {
-          "rationale": "Retain public and explicit-store publication, failure atomicity, structural and reopened query authority, read-only main hydration, and exact nested/shared restoration; lower Store suites retain exhaustive format and publication branches.",
+          "rationale": "Retain main-defined class round trips, public and explicit-store publication, failure atomicity, structural and reopened query authority, read-only main hydration, and exact nested/shared restoration; lower Store suites retain exhaustive format and publication branches.",
           "functions": [
+            "test_main_module_object_save_load_preserves_definition",
+            "test_main_module_state_load_without_live_class_preserves_identity",
             "test_public_save_returns_state_ref_and_publishes_local_state",
             "test_explicit_store_save_copies_reusable_state_into_its_closure",
             "test_failed_local_state_save_never_publishes_a_state_ref",

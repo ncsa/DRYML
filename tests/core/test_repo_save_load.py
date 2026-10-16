@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,100 @@ def _run_fresh_process(code: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         env=env,
     )
+
+
+def _run_main_script(tmp_path: Path, code: str) -> subprocess.CompletedProcess[str]:
+    """Run file-backed source as ``__main__`` so class source inspection works."""
+
+    script = tmp_path / "main_namespace.py"
+    script.write_text(textwrap.dedent(code), encoding="utf-8")
+    return _run_fresh_process(
+        f"import runpy; runpy.run_path({str(script)!r}, run_name='__main__')"
+    )
+
+
+@pytest.mark.parametrize("store_name", ("store", "store.zip"), ids=("dir", "zip"))
+def test_main_module_object_save_load_preserves_definition(tmp_path, store_name):
+    """Issue #25: a main-defined Object reloads with its class, recipe, and data."""
+
+    completed = _run_main_script(tmp_path, f"""
+        from contextlib import closing
+        from dryml.core import Object, Repo
+        from dryml.core.symbol import SourceSpec
+        from tests.conftest import _synthetic_environment_record
+
+        class Data(Object):
+            def __init__(self, data):
+                self.data = data
+
+        assert Data.__module__ == "__main__"
+        with closing(Repo({str(tmp_path / store_name)!r})) as repo:
+            saved = Data([1, 2, 3, 4, 5], repo=repo)
+            definition = saved.definition
+            assert isinstance(definition.cls, SourceSpec)
+            repo.save_object(
+                saved, main=True, _snapshot_observer=_synthetic_environment_record,
+            )
+
+        with closing(Repo({str(tmp_path / store_name)!r})) as reopened:
+            assert reopened.main_def.graph_equal(definition)
+            loaded = reopened.load_object(reopened.main_def)
+            assert loaded is not saved
+            assert type(loaded) is Data
+            assert loaded.definition.graph_equal(definition)
+            assert loaded.data == [1, 2, 3, 4, 5]
+    """)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("store_name", ("store", "store.zip"), ids=("dir", "zip"))
+def test_main_module_state_load_without_live_class_preserves_identity(tmp_path, store_name):
+    """A fresh reader restores a main-defined class, exact ObjectId, and payload."""
+
+    saved = _run_main_script(tmp_path, f"""
+        from contextlib import closing
+        from dryml.core import Repo
+        from dryml.core.object import Pickleable
+        from tests.conftest import _synthetic_environment_record
+
+        class Data(Pickleable):
+            def __init__(self, data):
+                self.data = data
+
+        assert Data.__module__ == "__main__"
+        with closing(Repo({str(tmp_path / store_name)!r})) as repo:
+            obj = Data([1, 2, 3, 4, 5], repo=repo)
+            obj.result = {{"answer": 42}}
+            state = repo.save_object(
+                obj, main=True, _snapshot_observer=_synthetic_environment_record,
+            )
+            assert state.object == obj.object_ref
+            print(state.digest())
+    """)
+    assert saved.returncode == 0, saved.stderr
+
+    loaded = _run_fresh_process(f"""
+import __main__
+from contextlib import closing
+from dryml.core import Repo
+from dryml.core.symbol import SourceSpec
+
+assert "Data" not in vars(__main__)
+with closing(Repo({str(tmp_path / store_name)!r})) as repo:
+    state = repo.default_store.read_state_ref_record({saved.stdout.strip()!r}).state_ref
+    assert isinstance(state.definition.cls, SourceSpec)
+    assert repo.main_def.graph_equal(state.definition)
+    restored = repo.load_state_ref(state, reuse_live="never")
+    assert type(restored).__name__ == "Data"
+    assert restored.definition.graph_equal(state.definition)
+    assert restored.object_ref == state.object
+    assert restored.last_state_ref == state
+    assert restored.data == [1, 2, 3, 4, 5]
+    assert restored.result == {{"answer": 42}}
+""")
+
+    assert loaded.returncode == 0, loaded.stderr
 
 
 def test_public_save_returns_state_ref_and_publishes_local_state(tmp_path):
