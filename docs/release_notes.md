@@ -1,6 +1,6 @@
 # Release Notes
 
-## 0.3.0b1 (unreleased)
+## 0.3.0b2 (unreleased)
 
 Identity and occurrence queries now provide an explicit `.iter()` terminal for
 single-use lazy consumption. First advancement captures required authority and
@@ -245,6 +245,8 @@ mixed-point Experiment is published as a new exact terminal StateRef. Keras uses
 this dedicated DRYML behavior adapter with managed safe points and supported
 validation, without claiming recovery for arbitrary native callbacks or deferred
 `validation_freq` scheduling.
+
+## 0.3.0b1 (2026-09-29)
 
 `CachedDataset`, `CacheCodec`, and `CacheIntegrityError` are now concrete public
 Artifact APIs. Finite dense Dataset trees can be streamed into built-in NumPy,
