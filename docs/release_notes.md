@@ -2,6 +2,13 @@
 
 ## 0.3.0b1 (unreleased)
 
+Identity and occurrence queries now provide an explicit `.iter()` terminal for
+single-use lazy consumption. First advancement captures required authority and
+metadata; matching or relationship traversal then advances on demand without a
+final result collection. Iterators retain no Store locks/readers across yields
+and support `.close()` for early cleanup. Candidate inventory and intermediate
+stages can still require eager work. See [Lazy Iteration](graph_querying.md#lazy-iteration).
+
 Constructor signature errors now identify an unexpected keyword in the primary
 `SignatureError` message and `slot`, including through `Definition(...).build()`.
 The stable `"argument binding failed"` reason and original exception cause are

@@ -11,6 +11,8 @@ Absent optional indexes create neither maintenance scan obligations nor completi
 Terminals expose authority, budget, and cardinality failures rather than partial
 answers. Evaluation may read records and refresh permitted derived indexes but
 never constructs Objects, reads state payloads, or changes Store authority.
+Explicit iterators start on first advancement and retain detached captures, not
+Store fences or SQLite views, between incremental matches or traversal steps.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from dataclasses import dataclass, field, replace
 from functools import cmp_to_key
 import os
 import threading
-from typing import Any
+from typing import Any, Generator
 
 from ..canonical import matching_container_family
 from ..definition import ConcreteDefinition, Definition, selector_match
@@ -53,6 +55,11 @@ from .utils import cdef_equal
 
 
 _DEFAULT_GENERATOR_WITNESS_LIMIT = 65_536
+
+
+def _iterator_owner():
+    """Identify the process and thread that started a streaming terminal."""
+    return os.getpid(), threading.current_thread()
 
 
 class _RefreshAttempt:
@@ -1058,9 +1065,9 @@ class IdentityQuery:
     Instances come from :meth:`dryml.core.Repo.query`, :meth:`Store.query`, or a
     fixed :class:`IdentitySet`. Restriction methods return immutable plans; an
     explicit terminal captures required Store facts once and returns an
-    :class:`IdentitySet` or scalar identity. Query evaluation reads no payloads
-    and never constructs Objects, allocates ObjectIds, writes authority, observes
-    host state, or executes workloads.
+    :class:`IdentitySet`, closeable iterator, or scalar identity. Query evaluation
+    reads no payloads and never constructs Objects, allocates ObjectIds, writes
+    authority, observes host state, or executes workloads.
 
     The terminal's outer controls govern producers, external restriction scopes,
     algebra, closure, occurrence targets, and projections. Algebra operands must
@@ -1940,6 +1947,75 @@ class IdentityQuery:
 
         return self._run_terminal(self._collect_with_capture)
 
+    def iter(self) -> Generator[Any, None, None]:
+        """Yield matching identities incrementally from a detached terminal cut.
+
+        Returns:
+            A single-use, closeable generator of ConcreteDefinition, ObjectRef,
+            or StateRef values in the same identity order as ``collect()``.
+            Construction performs no query work; the first advancement captures
+            source topology, candidate knowledge and required metadata. Matching
+            then advances on demand without building a final IdentitySet.
+
+        Raises:
+            QueryError: On advancement if authority, policy, metadata or budget
+                validation fails, or a started iterator changes process/thread.
+                Pre-output cut changes retain normal retries; later cut changes
+                fail without replaying values already delivered.
+
+        Side Effects:
+            First advancement may read complete candidate/metadata inventories
+            and refresh permitted derived indexes. Candidate admissions and
+            metadata validation precede output, so this is not a bounded-memory
+            Store scan. No Store fence or SQLite view is retained across yields.
+            Close early-abandoned iterators, for example with contextlib.closing,
+            to release their snapshot. Independent iterators may run concurrently.
+        """
+
+        yield from self._iterate_terminal(self._iter_values)
+
+    def _iter_values(self, capture):
+        """Preserve explicit bounds and identity order without a final result set."""
+        if self.take_limit is not None:
+            from .identity import _ordered_keys
+
+            entries, _ = self._bounded_terminal_entries(capture)
+            for key in _ordered_keys(entries):
+                yield entries[key][0]
+        else:
+            items = self._iter_terminal_members(capture, ordered=True)
+            try:
+                for _, (value, _) in items:
+                    yield value
+            finally:
+                items.close()
+
+    def _iterate_terminal(self, create_iterator, *, occurrence=None):
+        """Prime retryable validation before output and own suspended cleanup."""
+        from .model import QueryError
+        from .source import _SourceRecapture
+
+        def prepare(capture):
+            items = create_iterator(capture)
+            try:
+                return next(items, None), items
+            except BaseException:
+                items.close()
+                raise
+
+        owner = _iterator_owner()
+        current, items = self._run_terminal(prepare, occurrence=occurrence)
+        try:
+            while current is not None:
+                yield current
+                if _iterator_owner() != owner:
+                    raise QueryError("Query iterator must stay in its starting process and thread.")
+                current = next(items, None)
+        except _SourceRecapture:
+            raise QueryError("Query source changed after iteration began; start a new iterator.") from None
+        finally:
+            items.close()
+
     def object_projection(self):
         """Collect and deduplicate reference members as ObjectSelectors.
 
@@ -2581,13 +2657,14 @@ class IdentityQuery:
             for item in stored
         )
 
-    def _iter_terminal_members(self, capture, captured=None):
+    def _iter_terminal_members(self, capture, captured=None, *, ordered=False):
         """Yield qualified entries without constructing a final IdentitySet.
 
         Metadata predicates are validated across their eligible candidate domain
         before this iterator can stop.  That preserves late authority failures
         while allowing structural cardinality sinks to retain only one or two
-        members.
+        members. Streaming identity terminals request canonical candidate order
+        before matching, while scalar terminals retain unordered early stopping.
         """
 
         if capture.indexed_required and self._requires_authority_inventory():
@@ -2622,7 +2699,14 @@ class IdentityQuery:
                     key: entry for key, entry in validation_domain.items()
                     if self._source_evidence(restriction.value) in entry[1].sources
                 }
-        for key, entry in members.items():
+        if ordered:
+            from .identity import _ordered_keys
+
+            keys = _ordered_keys(members)
+        else:
+            keys = iter(members)
+        for key in keys:
+            entry = members[key]
             for restriction in self.restrictions:
                 if restriction.kind == "metadata":
                     if not metadata_matches[id(restriction)].get(key, False):
@@ -3466,6 +3550,34 @@ class OccurrenceQuery:
         """
 
         return self.roots._run_terminal(self._collect_with_capture, occurrence=self)
+
+    def iter(self) -> Generator[Any, None, None]:
+        """Yield typed occurrences incrementally in deterministic traversal order.
+
+        Returns:
+            A single-use, closeable generator of Occurrence values. Roots use
+            identity order; paths use deterministic depth-first relationship
+            order, rather than globally sorting all emitted occurrences as
+            ``collect()`` does. Raw occurrence caps remain in effect.
+
+        Raises:
+            QueryError: On advancement for root/metadata authority, policy or
+                verification failures, a post-output recapture, or a different
+                consumer process/thread. Traversal errors and interruptions
+                propagate without restarting already emitted output.
+
+        Side Effects:
+            No work occurs before first advancement. Root capture, necessary
+            metadata validation and permitted refresh precede lazy path matching;
+            intermediate root/algebra stages may require fixed membership. A
+            zero raw cap reads nothing. No Store locks/readers span yields. Close
+            abandoned generators (for example with contextlib.closing) to release
+            their detached snapshot; independent iterators may run concurrently.
+        """
+
+        if self.occurrence_limit == 0:
+            return
+        yield from self.roots._iterate_terminal(self._iter_occurrences, occurrence=self)
 
     def _collect_with_capture(self, capture):
         """Capture roots and target metadata in the same retryable terminal."""
