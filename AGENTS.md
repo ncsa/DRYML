@@ -59,8 +59,13 @@ Pass this restriction to delegated agents as well.
 require an explicit user request, as do broad `medium`, `heavy`, and `profile`
 runs that bypass the representative selection. Do not substitute `pytest tests`
 or a broad focused-directory invocation to bypass this policy. Targeted tests
-for an actual change or failure remain appropriate. Routine automated runners
-and CI use `good-enough`; there is no scheduled exhaustive gate.
+for an actual change or failure remain appropriate. Routine platform CI jobs use
+`good-enough`; one Linux Python 3.12 heavy job runs the explicitly scoped
+`tests/framework_tests.txt` and `tests/native_estimator_tests.txt` selections in a
+shared pip environment. This hosted exception does not authorize local broad
+heavy or exhaustive runs; there is no scheduled exhaustive gate.
+Automatic test CI runs on pull requests only, with superseded runs cancelled per
+PR. Manual suite dispatch remains available and uses a separate concurrency group.
 
 When adding code, add the smallest set of meaningful routine tests covering its
 new behavior and important failure boundaries. Keep exhaustive parameter and

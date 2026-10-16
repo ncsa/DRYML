@@ -260,10 +260,18 @@ def test_nnx_prediction_discards_mutable_candidate_and_keeps_external_rng_distin
     model = NNXModel(F(_nnx_batch_norm_factory), output_spec=_spec(), seed=11)
     init_key, expected_rng = jax.random.split(jax.random.key(11))
     before = model._state_tree()
+    prior_mean = np.asarray(before["mutable_state"]["mean"].value).copy()
     _, candidate_mutable, candidate_rng = model._candidate_apply(
         jax.numpy.asarray([[1.0], [3.0]], dtype=jax.numpy.float32), training=True,
     )
     assert not np.array_equal(np.asarray(candidate_mutable["mean"].value), np.asarray(before["mutable_state"]["mean"].value))
+    np.testing.assert_array_equal(model.obj.mean.value, prior_mean)
+    _, training_mutable, _ = model._training_apply(
+        before["parameters"], before["mutable_state"], before["rng"],
+        jax.numpy.asarray([[1.0], [3.0]], dtype=jax.numpy.float32),
+    )
+    assert not np.array_equal(np.asarray(training_mutable["mean"].value), prior_mean)
+    np.testing.assert_array_equal(model.obj.mean.value, prior_mean)
     assert not np.array_equal(jax.random.key_data(candidate_rng), jax.random.key_data(model.rng))
     model(jax.numpy.asarray([[1.0], [3.0]], dtype=jax.numpy.float32))
     np.testing.assert_array_equal(model.obj.mean.value, before["mutable_state"]["mean"].value)

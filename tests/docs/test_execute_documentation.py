@@ -264,7 +264,11 @@ def test_ci_workflow_keeps_comprehensive_and_coverage_suites_opt_in() -> None:
     suite = events["workflow_dispatch"]["inputs"]["suite"]
     assert suite["default"] == "good-enough"
     assert suite["options"] == ["good-enough", "exhaustive", "coverage"]
-    assert set(events) == {"push", "pull_request", "workflow_dispatch"}
+    assert set(events) == {"pull_request", "workflow_dispatch"}
+    assert workflow["concurrency"] == {
+        "group": "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": True,
+    }
 
     jobs = workflow["jobs"]
     lightweight_step = jobs["lightweight"]["steps"][-1]
@@ -273,12 +277,24 @@ def test_ci_workflow_keeps_comprehensive_and_coverage_suites_opt_in() -> None:
     assert "github.event_name == 'workflow_dispatch'" in lightweight_step["env"]["REQUESTED_SUITE"]
     assert "'good-enough'" in lightweight_step["env"]["REQUESTED_SUITE"]
 
-    for name in ("heavy", "ray-integration"):
-        condition = jobs[name]["if"]
-        assert condition == (
-            "github.event_name == 'workflow_dispatch' && "
-            "(inputs.suite == 'exhaustive' || inputs.suite == 'coverage')"
-        )
+    explicit_extended = (
+        "github.event_name == 'workflow_dispatch' && "
+        "(inputs.suite == 'exhaustive' || inputs.suite == 'coverage')"
+    )
+    assert jobs["ray-integration"]["if"] == explicit_extended
+
+    heavy = jobs["heavy"]
+    assert "if" not in heavy and "strategy" not in heavy
+    assert heavy["runs-on"] == "ubuntu-latest"
+    assert heavy["timeout-minutes"] == 60
+    for step in heavy["steps"]:
+        command = step.get("run", "")
+        assert "./tests.sh good-enough" not in command
+        if "./tests.sh heavy" in command:
+            assert step["if"] == explicit_extended
+    heavy_runs = "\n".join(step.get("run", "") for step in heavy["steps"])
+    assert "@tests/framework_tests.txt" in heavy_runs
+    assert "@tests/native_estimator_tests.txt" in heavy_runs
 
     coverage = jobs["coverage"]
     assert coverage["if"] == (
@@ -292,13 +308,20 @@ def test_ci_workflow_keeps_comprehensive_and_coverage_suites_opt_in() -> None:
     assert "python -m pip install ." in coverage_runs
     assert "./tests.sh coverage" in coverage_runs
 
-    publication = jobs["local-filesystem-publication"]
-    assert publication["strategy"]["matrix"]["os"] == ["macos-latest"]
-    assert any("brew install bash" in step.get("run", "") for step in publication["steps"])
-    routine_steps = [step for step in publication["steps"] if "./tests.sh" in step.get("run", "")]
-    for step in routine_steps:
-        if "./tests.sh package" in step["run"]:
-            assert step["if"] == jobs["heavy"]["if"]
-        else:
-            assert "bash ./tests.sh good-enough" in step["run"]
-    assert any("./tests.sh good-enough" in step["run"] for step in routine_steps)
+    platform = jobs["lightweight"]
+    matrix = platform["strategy"]["matrix"]
+    assert matrix["os"] == ["ubuntu-latest"]
+    assert matrix["python-version"] == ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    assert matrix["include"] == [
+        {"os": "windows-latest", "python-version": "3.12"},
+        {"os": "macos-latest", "python-version": "3.12"},
+    ]
+    assert '$RUNNER_OS" == "Linux"' in lightweight_step["run"]
+    bash_setup = next(step for step in platform["steps"]
+                      if "brew install bash" in step.get("run", ""))
+    assert bash_setup["if"] == "runner.os == 'macOS'"
+    notebook = next(step for step in platform["steps"]
+                    if "ipykernel==" in step.get("run", ""))
+    assert notebook["if"] == "matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'"
+    assert not {"notebook-dispatch", "local-filesystem-publication",
+                "jax-training-qualification", "native-estimator-qualification"} & jobs.keys()

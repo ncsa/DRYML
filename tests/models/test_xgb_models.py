@@ -20,7 +20,7 @@ import pytest
 def native_xgb():
     """Admit the qualified candidate versions before importing native code."""
     expected = {
-        "xgboost": "3.4.2", "scikit-learn": "1.9.0", "numpy": "2.1.3",
+        "xgboost": "3.4.1", "scikit-learn": "1.9.0", "numpy": "2.1.3",
         "scipy": "1.18.0", "pandas": "3.0.5",
     }
     assert sys.version_info[:2] == (3, 12), "native reference requires Python 3.12"

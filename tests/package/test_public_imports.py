@@ -815,7 +815,7 @@ print(json.dumps(selected))
 """,
     )
     common = ["numpy==2.1.3", "pandas==3.0.5", "scipy==1.18.0"]
-    for extra, native in (("xgboost", ["scikit-learn==1.9.0", "xgboost==3.4.2"]),
+    for extra, native in (("xgboost", ["scikit-learn==1.9.0", "xgboost==3.4.1"]),
                           ("statsmodels", ["statsmodels==0.15.0"])):
         assert json.loads(result.stdout)[extra] == {
             python: sorted(common + native)

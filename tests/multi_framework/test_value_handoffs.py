@@ -169,7 +169,10 @@ def test_jax_narrowing_rejects_before_target_construction(monkeypatch):
     """A runtime x64-disabled target cannot silently narrow an admitted host leaf."""
     jax = pytest.importorskip("jax")
     monkeypatch.setattr(jax, "device_put", lambda *a, **k: pytest.fail("narrowed target construction"))
-    with jax.experimental.enable_x64(False):
+    enable_x64 = getattr(jax, "enable_x64", None)
+    if enable_x64 is None:
+        enable_x64 = jax.experimental.enable_x64
+    with enable_x64(False):
         with pytest.raises(TypeError, match="cannot represent this dtype exactly"):
             convert(make_edge(TensorSpec("float64", shape=(2,), backend="numpy"), "jax"),
                     np.ones(2, dtype=np.float64))

@@ -27,8 +27,9 @@ runs took roughly 2.5 hours. A generic request to implement, verify, review,
 commit, push, release, or fix CI is not permission to launch one. This policy
 supersedes full-closeout requirements in older plans and applies to delegated
 agents too. Do not bypass it with broad direct pytest runs, `medium`, `heavy`,
-`coverage`, or `profile`. Routine automated runners use `good-enough`; there is
-no scheduled exhaustive job. A user selecting `exhaustive` or `coverage` in
+`coverage`, or `profile`. Routine platform runners use `good-enough`; the Linux
+framework job runs the explicitly scoped selection described under Hosted Matrix.
+There is no scheduled exhaustive job. A user selecting `exhaustive` or `coverage` in
 GitHub's manual workflow dispatch is an explicit request.
 
 Named suite modes require Bash 4 or newer. On macOS, use a modern Bash with
@@ -370,7 +371,7 @@ covers every maintained test file.
 The maintained native references and adapter contracts are
 `tests/models/test_xgb_models.py` and `tests/models/test_statsmodels_models.py`.
 They import native packages inside admitted fixtures/cases, never at collection,
-and require Python 3.12 with the exact candidate versions: CPU XGBoost 3.4.2,
+and require Python 3.12 with the exact candidate versions: CPU XGBoost 3.4.1,
 sklearn 1.9.0 for XGBoost, statsmodels 0.15.0, NumPy 2.1.3, SciPy 1.18.0,
 and pandas 3.0.5. Missing packages or mismatched versions fail the requested
 native cases; there is no `importorskip`. The statsmodels file does not require
@@ -421,55 +422,33 @@ combined run exceeded 720 seconds with an untraced failure marker; the complete
 established for that earlier marker. These are local owning-unit results, not
 hosted or isolated-installation qualification.
 
-### Required hosted cells
+### Current Linux qualification
 
-`native-estimator-qualification` in `.github/workflows/tests.yaml` configures four
-required support cells on every push, pull request and manual workflow dispatch:
+The single `heavy` job installs all frameworks together with pip on Linux/Python
+3.12. `heavy_test_requirements.txt` pins the shared stack, including XGBoost 3.4.1;
+the package extras and native reader/writer gates use the same native versions.
+This replaces the former isolated Conda/backend/platform matrix. XGBoost's pip
+wheel may include GPU support, but the adapters always request CPU execution.
+The job preflights every framework, verifies native versions, builds and installs
+the DRYML wheel, and runs `pip check` before testing.
 
-| OS | Python | Isolated installation | Assigned cases |
-|---|---|---|---:|
-| Ubuntu | 3.12 | statsmodels only; no sklearn/XGBoost | 56 |
-| Windows | 3.12 | statsmodels only; no sklearn/XGBoost | 56 |
-| Ubuntu | 3.12 | CPU XGBoost plus sklearn; no statsmodels | 41 |
-| Windows | 3.12 | CPU XGBoost plus sklearn; no statsmodels | 41 |
+`tests/native_estimator_tests.txt` includes all 97 previously assigned Linux native
+cases: 26 XGBoost references/adapters, 41 statsmodels references/adapters,
+12 recovery cases, eight association/graph-restore cases and ten worker cases.
+The JUnit gate requires 97 executed native cases and zero skips, errors or
+failures, including teardown failures. The shared job uploads JUnit and per-test
+execution records, including partial evidence after failure. Native thread
+limits are set before imports, with a 600-second per-test watchdog and a
+60-minute job bound. These limits do not change product-global thread policy.
 
-Each job uses an isolated strict conda-forge environment. XGBoost specifically
-requires `py-xgboost=3.4.2=cpu_*`; statsmodels requires `statsmodels=0.15.0`.
-Both use NumPy 2.1.3, SciPy 1.18.0 and pandas 3.0.5; only XGBoost adds
-scikit-learn 1.9.0. Unavailable exact packages fail the environment solve rather
-than substituting versions. DRYML's core `ml_dtypes>=0.6.0` requirement is
-installed from PyPI with `--no-deps` inside that environment; conda-forge's older
-`ml_dtypes` package cannot satisfy it. CI then builds DRYML and installs the wheel
-with the requested extra and `--no-deps`, preserving the conda-installed CPU stack.
-`pip check` and preflight validate the wheel's real extra metadata, required
-versions, absence of unrelated optional model stacks and, for XGBoost, both the
-Conda CPU selector/build string and `build_info()['USE_CUDA'] is False`.
-Statsmodels imports OLS/Logit without sklearn/XGBoost. Python patch/build,
-platform, architecture, resolved versions and Conda build facts are printed;
-the codec compatibility gate itself uses Python major/minor, not patch.
+Local verification of the shared pip stack on 2026-10-15 used CPython 3.12.13
+on Linux: framework preflight and `pip check` passed, followed by 274 framework
+tests in 766.11 seconds and all 97 native-estimator tests in 921.12 seconds,
+with zero skips in either selection. The native JUnit gate and installed-wheel
+worker-origin checks passed. This is local mixed-environment evidence, not a
+hosted Windows/macOS or isolated-backend qualification claim.
 
-Every cell executes four bounded **path-first** phases, never a broad heavy
-profile or a global `-k` over backend files:
-
-| Phase | Selection per backend | Count (XGBoost / statsmodels) |
-|---|---|---:|
-| native | Entire corresponding `test_xgb_models.py` or `test_statsmodels_models.py` | 26 / 41 |
-| recovery | Two `test_native_*` functions in `test_experiment_recovery.py`, filtered to `xgb-regressor` or `stats-logit` | 6 / 6 |
-| association | Terminal Artifact/callback function in `test_estimator_experiments.py` for both families, plus native Dir/Zip restore function in `test_state_ref_restore_into.py` | 4 / 4 |
-| workers | Two independent-worker family cases plus missing/incompatible/workload-cleanup cases in `test_estimator_experiments.py` | 5 / 5 |
-
-Collection preflight requires each phase's exact count and exact requested
-node inventory. It then passes the collected node IDs directly to `./tests.sh`.
-Executed call-phase JSON must match the collected inventory exactly, with every
-outcome passed; JUnit must contain the required number of cases and zero skips,
-failures or errors, including fixture/teardown failures. A successful pytest exit
-alone is insufficient. `collected.json`, `executed.json` and `results.xml` are
-uploaded per cell, including partial evidence on failure. Native thread limits
-are set before imports through the job environment, with a 600-second per-test
-watchdog and 60-minute job bound to allow real worker startup. These limits do
-not alter product-global thread policy.
-
-The native job enables the test-only `DRYML_TEST_INSTALLED_ESTIMATORS=1` mode.
+The heavy job enables the test-only `DRYML_TEST_INSTALLED_ESTIMATORS=1` mode.
 Core workers receive only the checkout root on `PYTHONPATH` for `tests.*`
 callables, never `checkout/src`. Before native fitting, coordinator and worker
 verify `dryml`, `dryml.execute._worker`, the selected backend package and its
@@ -477,25 +456,31 @@ verify `dryml`, `dryml.execute._worker`, the selected backend package and its
 resolved module paths must equal the recorded installation paths and module
 bytes must match RECORD SHA-256/size entries. Editable installs and missing wheel
 manifests fail qualification. The worker also checks its running `__main__`
-bootstrap origin. Checks use resolved `Path` comparisons on Linux and Windows,
+bootstrap origin. Checks use resolved `Path` comparisons,
 not a `site-packages` substring or a caller-provided trusted prefix. Worker
 evidence is emitted before fitting; matching coordinator/worker paths and hashes
 are retained in JUnit properties for successful and injected-failure cases.
 Without this mode, ordinary local workers continue to use checkout source.
 
-Windows Conda workers explicitly receive the selected base Python's existing
-`Library/bin` directory plus `os.defpath` through `SubProcessConfig.env_vars["PATH"]`.
+Historical Windows Conda workers explicitly received the selected base Python's
+existing `Library/bin` directory plus `os.defpath` through
+`SubProcessConfig.env_vars["PATH"]`.
 Conda's delayed BLAS procedure loading requires that directory during SVD/Newton
 execution even when native imports succeeded. This test-owned configuration does
 not inherit the coordinator's full PATH or environment, and does not change
 Execute's minimal-environment policy. Worker failures retain bounded captured
 output and enable Python's fatal fault handler for native crash evidence.
 
-The separately requested hosted heavy/coverage jobs exclude these exact native
-files and functions: they cannot qualify the native readers on their broader
-Python/dependency matrices. The dedicated cells own their uninstrumented native
-evidence; they do not add the full exact-pin matrix to routine or broad framework
-CI. Explicit local path-first native runs remain available.
+The separately requested coverage job excludes these exact native files and
+functions; the shared heavy job owns their uninstrumented evidence. Explicit
+local path-first native runs remain available.
+
+### Required hosted cells
+
+The following is historical evidence for the former XGBoost 3.4.2 configuration,
+not qualification of the current XGBoost 3.4.1 pip stack. The old matrix used
+isolated conda-forge statsmodels-only and CPU XGBoost-plus-sklearn environments
+on Ubuntu and Windows; it is no longer configured to run.
 
 All four hosted cells passed on 2026-10-15 at revision
 [`fa01d177`](https://github.com/ncsa/DRYML/commit/fa01d177d8704a5a2dc09a038bfffb263cf0bebd),
@@ -537,15 +522,30 @@ native imports blocked, then compares both backends' root/bootstrap/backend
 origins with the wheel manifest. It also rejects explicit `checkout/src`
 overrides separately in coordinator and worker, recording failed-worker cleanup.
 This package guard requires neither native extras nor Python 3.12; real native
-fits remain in the dedicated qualification cells.
+fits run in the shared Linux heavy job.
 
 ## Hosted Matrix
 
-The ten-job lightweight matrix installs only package and test dependencies on
-Ubuntu and Windows for Python 3.10 through 3.14. Ordinary pushes and pull
-requests run `good-enough`. Only manually requested `exhaustive`
-or `coverage` suites run `medium` there so every smoke/medium parameter
-combination is exercised. Python 3.14 is explicitly framework-reduced.
+Pull requests and manual `good-enough` dispatches run eight jobs. Pushes do not
+trigger this test workflow. Workflow-level concurrency cancels running and
+pending CI for the same PR when a newer eligible run supersedes it. The group
+includes the workflow name, event name and PR number (or branch/tag ref for a
+manual dispatch), keeping different PRs and manual dispatches independent.
+Repeated manual dispatches on the same ref also supersede earlier manual runs.
+
+| Target | Python versions | Selection | Jobs |
+|---|---|---|---:|
+| Ubuntu | 3.10, 3.11, 3.12, 3.13, 3.14 | `good-enough` | 5 |
+| Windows | 3.12 | `good-enough` | 1 |
+| macOS | 3.12 | `good-enough` | 1 |
+| Ubuntu, all frameworks installed together | 3.12 | Framework and native-estimator argument files | 1 |
+
+The seven platform jobs install `test_requirements.txt` and `dryml[test]`,
+including optional filesystem-publication readers, without ML frameworks.
+Linux is the primary compatibility target. Only manually requested `exhaustive`
+or `coverage` suites run `medium` on Linux so every smoke/medium parameter
+combination is exercised there. Windows and macOS always use `good-enough` on
+Python 3.12. Python 3.14 is explicitly framework-reduced.
 
 The `tf` extra declares TensorFlow and tensorflow-datasets only for
 `python_version < '3.14'`, matching that framework-reduced boundary. TFDS has no
@@ -559,46 +559,48 @@ thread watchdog with a 180-second per-test limit (including fixture work).
 A stalled test dumps thread stacks and fails the process instead of hanging
 indefinitely; the watchdog does not turn unfinished tests into passes or define
 profile membership. Ubuntu jobs have a 20-minute job limit and Windows jobs a
-40-minute limit. Local commands have no per-test timeout unless the caller
-supplies one explicitly, and no selection-level performance cutoff has been
+40-minute limit; macOS has a 20-minute limit. Local commands have no per-test
+timeout unless the caller supplies one explicitly, and no selection-level performance cutoff has been
 introduced.
 
-An additional macOS Python 3.12 job also runs `good-enough`, including native
-filesystem publication tests. Ubuntu and Windows native publication checks are
-already included in their routine jobs, avoiding duplicate runners. Package
-tests run only for manually requested exhaustive/coverage verification, through
-`medium` on Ubuntu/Windows and a package-only step on macOS.
-
-A separate Ubuntu Python 3.12 notebook job installs ipykernel 7.2.0 and
-jupyter-client 8.8.0 and runs the real-kernel Dispatch regression on every push
-and pull request. The general lightweight matrix does not install those optional
-dependencies, so its skipped notebook case is not the notebook verification gate.
+The Ubuntu Python 3.12 platform job also installs ipykernel 7.2.0 and
+jupyter-client 8.8.0. Its existing `good-enough` selection then executes the
+real-kernel Dispatch regression; no separate notebook runner is needed.
+Other platform/version jobs do not install those notebook dependencies.
 The test uses a job-owned kernel, temporary Store, and worker spool; it checks
 repeated publication/query, shell liveness, task ownership, and interrupt recovery.
 
-The heavy matrix runs on Ubuntu for Python 3.10 through 3.13 only when a user
-manually dispatches `exhaustive` or `coverage`. It
-installs and preflights TensorFlow, Torch, JAX/JAXlib, and pinned
-`ray[default]==2.56.0` before heavy tests so missing or broken frameworks fail
-rather than skip. Each job prints the resolved Python, DRYML, and framework
-versions. Workflow configuration is not support evidence until the jobs pass on
-the exact child commit.
+The single Linux `heavy` job uses pip to install `heavy_test_requirements.txt`
+and DRYML's framework extras in one Python 3.12 environment. The shared pins are
+TensorFlow 2.21.0, tensorflow-datasets 4.9.10, CPU PyTorch 2.14.1+cpu,
+JAX/JAXlib 0.11.2, Flax 0.12.10, Optax 0.2.8, Ray 2.56.0,
+XGBoost 3.4.1, scikit-learn 1.9.0, statsmodels 0.15.0, NumPy 2.1.3,
+SciPy 1.18.0 and pandas 3.0.5. JAX/Flax/Optax pins are included from
+`jax_training_test_requirements.txt`; they are test dependencies, not new base
+dependencies or package extras. The job requires all frameworks to import and
+preflights CPU JAX/Flax/Optax and CPU Torch optimizer construction before testing.
 
-The separate `JAX training qualification` matrix runs for pushes, pull requests,
-and manually dispatched workflows on Python 3.12. It
-installs `jax_training_test_requirements.txt` for two clean dependency sets:
-the CPU JAX stack alone and the same stack with DRYML's existing `tf` and
-`torch` extras. It pins JAX/JAXlib, Flax (including `flax.nnx`), and Optax,
-requires their imports, and records a CPU backend with CPU devices before
-running focused JAX import, first-class training, Dataset delivery, and managed
-local/subprocess restoration tests. The mixed installation uses PyTorch
-`2.14.1+cpu` from the official CPU wheel index, avoiding CUDA/Triton initialization
-in this CPU qualification. Its preflight asserts a CPU-only Torch build and
-constructs an optimizer so native import failures fail before the tests.
-This file is qualification-only: DRYML's
-existing lazy `jax` extra remains unchanged, and Flax/Optax are neither base
-dependencies nor a new package extra. The experimental training API remains
-responsible for selecting and reporting those dependencies.
+The path-first commands `bash ./tests.sh @tests/framework_tests.txt` and
+`bash ./tests.sh @tests/native_estimator_tests.txt` use pytest's
+argument-file support (pytest >=8.2). The explicit selection runs native
+installation tests, JAX/TensorFlow/PyTorch models and training, sklearn training,
+framework value handoffs/runtime integration, and the 97 native-estimator cases.
+It includes the former JAX qualification representatives, including managed
+local/subprocess restoration. It does not rerun the broad `good-enough` suite.
+MNIST downloads, the real ML qualification matrix, GPUs and existing-Ray service
+integration are outside this selection. Tests bootstrap framework contexts only
+in the framework process; the platform and native-estimator processes keep them
+uninitialized. Both heavy selections share the same installed environment but
+run in fresh interpreters. CUDA visibility is disabled for tensor-framework
+tests only: an empty `CUDA_VISIBLE_DEVICES` triggers XGBoost 3.4.1 multiclass
+metric failures on the verification host even with `device='cpu'`. Native tests
+leave CUDA visibility alone and explicitly select CPU recipes. The job has a
+60-minute bound and uploads JUnit/execution evidence. Workflow configuration is
+not support evidence until the job passes on the exact child commit.
+
+Manual `exhaustive` and `coverage` dispatches additionally run the remaining
+heavy-tier combinations, excluding the framework selection already run above,
+as described by their workflow steps. Package tests run through Linux `medium`.
 
 The separately gated `Existing Ray integration (Ubuntu, Python 3.12)` job uses an
 ephemeral Conda coordinator and a venv derived from that same interpreter. It
@@ -610,18 +612,17 @@ local-probe/Ray-workload, Ray-probe/local-workload, Ray-probe/in-process,
 same-config independent ownership, and exact Conda/venv pin identity. Its final
 cleanup stops only the fixture it started. This CI preparation does not change the product contract: normal DRYML
 runtime and tests require caller-supplied existing environments and an existing
-Ray address, and never provision them. Like the heavy matrix, this job runs only
+Ray address, and never provision them. This job runs only
 for a manually requested `exhaustive` or `coverage` suite. There are no scheduled
-exhaustive, framework, or Ray runs.
+exhaustive or Ray runs.
 
 An Ubuntu Python 3.12 coverage job runs only when manual dispatch explicitly
 selects `coverage`. It installs test and heavy dependencies and runs
 `./tests.sh coverage`; ordinary and manual `good-enough` or
 `exhaustive` events do not run that job.
 
-The lightweight Ubuntu/Windows Python 3.10 through 3.14 matrix remains
-framework-reduced, does not install Ray, and supplies common and subprocess
-coverage. Package tests require an explicitly requested extended run. This is
+The platform matrix remains framework-reduced, does not install Ray, and supplies
+common and subprocess coverage. Package tests require an explicitly requested extended run. This is
 not native Windows Ray or GPU evidence. Workflow configuration
 becomes evidence only after the remote job passes for the pushed child revision.
 

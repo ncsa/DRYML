@@ -11,9 +11,19 @@ Maintained dense CPU estimator adapters now provide XGBoost classification and
 scalar regression (`dryml.models.xgb`) and statsmodels OLS/binary Logit
 (`dryml.models.statsmodels`). Imports and configuration are passive; fitting and
 fitted restore require their exact optional reader stacks. `dryml[xgboost]` pins
-XGBoost 3.4.2/sklearn 1.9.0 and `dryml[statsmodels]` pins statsmodels 0.15.0;
+XGBoost 3.4.1/sklearn 1.9.0 and `dryml[statsmodels]` pins statsmodels 0.15.0;
 both pin NumPy 2.1.3, SciPy 1.18.0 and pandas 3.0.5. Native use requires Python
-3.12; core's Python >=3.10 and Ubuntu/Windows 3.10–3.14 matrix are unchanged.
+3.12; core supports Python >=3.10. Linux CI covers Python 3.10–3.14;
+Windows and macOS run `good-enough` on Python 3.12 only. Framework-specific
+tests share one pip-installed Linux Python 3.12 heavy job, replacing separate
+JAX and native-estimator matrices. Notebook coverage runs inside Linux's
+Python 3.12 `good-enough` job with its optional kernel dependencies installed.
+Automatic test CI runs on pull requests only and cancels superseded runs for the
+same PR; explicit manual suite dispatch remains available independently.
+The shared heavy stack uses XGBoost 3.4.1 from PyPI; fitted envelopes from the
+previous 3.4.2 candidate remain incompatible under the exact reader-version gate.
+The combined framework gate also covers explicit NNX candidate-variable copying,
+so prediction and training do not mutate the live Flax owner before acceptance.
 Extras have no Python markers that silently omit a requested native package.
 
 Both adapters use finite authored dense NumPy Datasets, pure Method/Map metadata
@@ -28,11 +38,12 @@ Method, ExperimentData, TrainState and Store formats are unchanged by these adap
 
 Bounded Linux Python 3.12 evidence covers native held-out quality/parity, state,
 association-sensitive recovery and real independent same-host Core workers.
-Four required isolated conda-forge Ubuntu/Windows Python 3.12 CI cells passed at
+Four historical isolated conda-forge Ubuntu/Windows Python 3.12 CI cells passed at
 `fa01d177` on 2026-10-15 for statsmodels-only and CPU XGBoost-plus-sklearn: 194
 assigned cases with zero native skips, exact-version/extra/dependency/CPU-build
 guards and matching installed-wheel worker evidence. Both platforms used Python
-3.12.15. Windows Conda workers explicitly receive their selected runtime's native
+3.12.15 with the former XGBoost 3.4.2 stack; this is not qualification of the new
+3.4.1 mixed pip stack. Windows Conda workers explicitly receive their selected runtime's native
 DLL directory; Execute's minimal-environment policy is unchanged. Other reader
 pairs and GPU remain unqualified. Fast backend-neutral
 contracts remain routine; native matrices remain targeted heavy qualification.

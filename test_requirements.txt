@@ -1,5 +1,5 @@
 flake8
-pytest
+pytest>=8.2
 pytest-cov
 pytest-timeout
 build

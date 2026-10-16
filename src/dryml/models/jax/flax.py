@@ -1,4 +1,8 @@
-"""Experimental Flax NNX adapter sharing the JAX Model candidate seam."""
+"""Experimental Flax NNX adapter sharing the JAX Model candidate seam.
+
+Candidate modules copy NNX Variables so execution cannot mutate authoritative
+parameters, mutable state, or RNG streams before explicit candidate installation.
+"""
 
 from __future__ import annotations
 
@@ -35,7 +39,9 @@ class NNXModel(Model):
     The adapter injects its reserved ``rngs`` argument after runtime admission.
     Parameters, remaining mutable variables, and module RNG streams stay
     partitioned in one shared candidate/training seam. Public prediction runs a
-    cloned module snapshot and discards every candidate state change. This API is
+    cloned module snapshot and discards every candidate state change. Both
+    prediction and training candidates explicitly copy mutable NNX Variables;
+    Flax's default shared-variable merge is not used. This API is
     experimental and may change.
 
     Raises:
@@ -94,7 +100,7 @@ class NNXModel(Model):
         graphdef, parameters, mutable_state = nnx.split(
             self.obj, nnx.Param, nnx.Not(nnx.Param),
         )
-        candidate = nnx.merge(graphdef, parameters, mutable_state)
+        candidate = nnx.merge(graphdef, parameters, mutable_state, copy=True)
         if hasattr(candidate, "train") and hasattr(candidate, "eval"):
             candidate.train() if training else candidate.eval()
         predictions = candidate(_tree_to_jax(value, jax))
@@ -128,7 +134,7 @@ class NNXModel(Model):
         from flax import nnx
 
         graphdef, _, _ = nnx.split(self.obj, nnx.Param, nnx.Not(nnx.Param))
-        candidate = nnx.merge(graphdef, parameters, mutable_state)
+        candidate = nnx.merge(graphdef, parameters, mutable_state, copy=True)
         if hasattr(candidate, "train"):
             candidate.train()
         predictions = candidate(value)

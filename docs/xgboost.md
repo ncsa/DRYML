@@ -8,14 +8,14 @@ resource allocation occurs. Missing native dependencies at fit/fitted restore
 raise an actionable error naming `dryml[xgboost]`; DRYML never installs packages.
 
 Install with `python -m pip install 'dryml[xgboost]'` in a Python 3.12
-environment. The extra pins XGBoost 3.4.2, scikit-learn 1.9.0, NumPy 2.1.3,
+environment. The extra pins XGBoost 3.4.1, scikit-learn 1.9.0, NumPy 2.1.3,
 SciPy 1.18.0 and pandas 3.0.5 to the reader stack below. It declares the native
 dependencies on every Python version rather than silently omitting the requested
 backend; resolution on another Python version is not support evidence. Core's
 Python >=3.10 and loose numerical dependencies do not expand this native gate.
-For the CPU-only qualification installation, CI uses conda-forge
-`py-xgboost=3.4.2=cpu_*` and installs the DRYML wheel with `--no-deps` against the
-already satisfied stack; it does not let pip replace that build with GPU packages.
+CI installs this stack with pip alongside the other frameworks in one Linux
+Python 3.12 heavy job. XGBoost's pip wheel may include GPU support, but these
+recipes explicitly select CPU execution; this is not GPU qualification.
 
 ## Supported recipes and arrays
 
@@ -177,13 +177,15 @@ automatic `heavy.pkl` or extra native pickle is produced. Unfitted restore clear
 all fitted facts. Recipe/training options remain in the definition, not the
 native-state envelope.
 
-The initial reader/writer accepts exactly XGBoost **3.4.2**, sklearn **1.9.0**,
+The reader/writer accepts exactly XGBoost **3.4.1**, sklearn **1.9.0**,
 NumPy **2.1.3**, SciPy **1.18.0**, pandas **3.0.5**, and Python major/minor
 **3.12**. Fit/fitted restore checks installed package versions only at native-use
 admission. Restore requires the same exact envelope versions and validates native
 objective, feature width, class/target counts, CPU and gbtree facts before install.
 Python patch versions are not part of this reader gate. This deliberately does
 not generalize XGBoost's upstream portable model IO promise into DRYML support.
+Fitted envelopes from the previous 3.4.2 candidate are rejected by the exact
+writer-version check; there is no automatic conversion of saved state.
 
 Malformed/noncanonical/unknown metadata, inconsistent native/fitted facts,
 unsupported codec/version and legacy `model.text` compute state fail actionably.
@@ -218,11 +220,12 @@ entered-hook invalidation and fresh recovery. Worker dependency and teardown
 failures retain honest, separate invocation/cleanup outcomes. See
 [Models recovery boundary](models.md#opaque-fit-recovery-and-worker-evidence-u5).
 
-The required isolated Ubuntu and Windows CPU XGBoost-plus-sklearn cells passed at
-`fa01d177` on 2026-10-15, using Python 3.12.15 and the exact reader stack above.
+Historical isolated Ubuntu and Windows CPU XGBoost-plus-sklearn cells passed at
+`fa01d177` on 2026-10-15, using Python 3.12.15 and the former XGBoost 3.4.2 stack.
 Each executed all 41 assigned cases with zero skips and matching installed-wheel
 worker evidence. See [native qualification evidence](testing.md#required-hosted-cells)
-for the run, build facts and inventories. Cross-version models, GPU,
+for the run, build facts and inventories. Those results do not qualify the new
+3.4.1 mixed pip installation. Cross-version models, GPU,
 sparse/categorical data and broader platform/recovery matrices remain unqualified.
 See [Models](models.md), [Methods](methods.md), and [Data](data.md)
 for lower-layer ownership and lifecycle contracts.
