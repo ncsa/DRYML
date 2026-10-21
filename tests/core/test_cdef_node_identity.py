@@ -35,8 +35,8 @@ def test_shared_and_independent_nodes_have_separate_graph_identity_projections()
         [Definition(NodeLeaf, "same"), Definition(NodeLeaf, "same")],
     ).concretize()
 
-    assert shared == independent
-    assert hash(shared) == hash(independent)
+    assert shared != independent
+    assert shared.recipe_equal(independent)
     assert shared.stable_hash() == independent.stable_hash()
     assert not shared.graph_equal(independent)
     assert shared.graph_hash() != independent.graph_hash()
@@ -48,7 +48,7 @@ def test_copy_graph_rekeys_every_node_and_cow_rekeys_only_changed_ancestors():
     leaf = Definition(NodeLeaf, "same")
     root = Definition(NodeParent, [leaf, leaf]).concretize()
     copied = root.copy_graph()
-    changed = root.at(
+    changed = root.lens(
         GraphPath((Parameter("children"), Index(0), Parameter("value")))
     ).set("changed")
 

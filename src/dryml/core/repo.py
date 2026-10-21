@@ -4429,7 +4429,8 @@ class Repo:
 
         Returns:
             A tuple of runtime values in ``roots`` order, preserving aliases across
-            all roots and ordinary supported containers.
+            all roots and supported container families, including distinct built-in
+            ``frozenset`` and tagged ``FrozenSet`` containers.
 
         Raises:
             RepoLoadError: If exact authority is incomplete or incompatible,
@@ -4515,6 +4516,8 @@ class Repo:
                     result = set()
                     memo[key] = result
                     result.update(concretize_definitions(item, memo) for item in value)
+                elif type(value) is frozenset:
+                    result = frozenset(concretize_definitions(item, memo) for item in value)
                 elif is_value_container_kind(kind):
                     if kind is NodeKind.FROZEN_DICT:
                         result = rebuild_dict_kind(
@@ -4863,6 +4866,8 @@ class Repo:
                             result = set()
                             memo[key] = result
                             result.update(realize(item, memo) for item in value)
+                        elif type(value) is frozenset:
+                            result = frozenset(realize(item, memo) for item in value)
                         elif is_value_container_kind(kind):
                             if kind is NodeKind.FROZEN_DICT:
                                 result = rebuild_dict_kind(

@@ -38,7 +38,7 @@ def test_graph_codec_round_trip_preserves_topology_and_regenerates_tokens():
     encoded = encode_cdef_graph(root)
     restored = decode_cdef_graph(encoded)
 
-    assert restored == root
+    assert restored.recipe_equal(root)
     assert restored.graph_equal(root)
     assert restored.graph_hash() == root.graph_hash()
     assert cdef_node_key(restored) is not cdef_node_key(root)

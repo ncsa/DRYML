@@ -1,16 +1,106 @@
 # Objects and Definitions
 
-`Definition` is a soft declaration for construction, selection, and search. A
-finalized `ConcreteDefinition` (CDef) is a V2 fully bound semantic recipe. CDef
+`Definition(...)` authors an immutable `Node` for construction, selection, and
+search. `concretize()` returns a `ConcreteNode`, using the existing fully bound
+`ConcreteDefinition` (CDef) record representation. Concreteness does not imply
+identity or saved-state completeness. CDef
 exposes import-free `.cls` and `.parameters`; `.args` and `.kwargs` project the
 current class signature and may import the class. `Arg` and `Kwarg` represent soft
 Definition spelling only. CDef paths use `Parameter` segments.
 
-Two CDefs can compare structurally equal while describing different graph
-topology. Equality, `hash()`, and `stable_hash()` compare class and parameters.
-`graph_equal()` and `graph_hash()` additionally distinguish a shared child from
-two independent equal children. Private CDef node tokens are neither persisted
-nor public diagnostic identity.
+Node equality and `hash()` identify an immutable occurrence/view handle. Two
+independently authored equal recipes remain two set members; repeating one handle
+remains one. Use `recipe_equal(other)` for recipe comparison and
+`graph_equal(other)` for exact roles, facets and alias topology. The latter also
+matches unordered incidence without using `repr` as identity. Python pickle
+round trips preserve the alias partition and facets, with fresh process-local
+handles rather than handle equality with the source.
+
+Constructor values retain distinct list, tuple, set, frozenset and mapping tags.
+`Repo.materialize_boundary` also preserves runtime container families, including
+built-in `frozenset` versus tagged `FrozenSet`, while retaining reference aliases
+across containers and roots.
+Mappings admit exact string/integer keys (not bool-as-int keys). Mutable arrays
+are snapshotted with dtype, shape, byte order and logical contents retained,
+including across Python pickle; object-dtype arrays are rejected.
+
+The existing plain `ConcreteDefinition` construction-view API retains structural
+equality for existing consumers. Legacy `stable_hash()` and `graph_hash()` remain
+construction-view keys, not new facet-aware Node keys or saved-graph encodings.
+The versioned CDef construction codec likewise remains a construction-view codec.
+This authoring API does not change Store formats, Generator policies, signatures,
+or Repo realization of identity/state constraints.
+`Node.build()` retains ordinary unbound-recipe construction and rejects new
+identity/state-bearing Node graphs before entering the existing Repo boundary;
+it does not silently discard those facets.
+
+## Node Constraints And Navigation
+
+Identity and state controls are Node methods, never special constructor keywords.
+For example, `Definition(Target, state=value)` still supplies an ordinary
+constructor parameter named `state`; `node.state` inspects the independent facet.
+
+```python
+from dryml.core import Definition, ObjectId
+
+child = Definition(Target, width=32)
+recipe = Definition(Parent, left=child, right=child)
+identified = recipe.bind(identities={"$.left": ObjectId()})
+assert identified.at("$.left") is identified.at("$.right")
+assert child.object_id is None
+```
+
+`bind(identities=..., states=...)` accepts rooted maps or extracted `IdentitySpec`
+and `StateSpec` mappings. State assignments must be exact `LocalState` values,
+not alternatives, alias selectors, bare hashes, or bare StateKeys. Repeated equal
+assignments are idempotent; complementary identity/state assignments compose.
+Different exact assignments to a shared occurrence raise `ValueError`, even when
+supplied through different paths. Independently authored equal nodes remain
+independent. Embedding complementary immutable views of one occurrence composes
+them at authoring; contradictory embedded views fail instead of taking precedence.
+
+`with_identity(id)` and `with_state(local_state)` constrain the root. Deliberate
+`replace_bindings(identities=..., states=...)` replaces existing facets and accepts
+`None` to remove them. `without_identity()` and `without_state()` remove the root
+facet. Bulk replacement rejects contradictions within the edit itself.
+`replace(path, replacement_node)` replaces every alias of the selected occurrence
+in the returned graph, leaving independent equal nodes and the original unchanged.
+A soft replacement weakens affected concrete ancestors to general Node views.
+
+`node.at(path, traverse_refs=False, traverse_quoted=False)` returns **Node endpoints
+only**, for soft and concrete metadata. Ordinary materializing structure is
+traversable by default. A path can terminate at a Ref-held or quoted Node without
+either opt-in; further descent needs the corresponding independent flag. Neither
+flag changes the link's role or ownership. Scalar/container endpoints and blocked
+descent raise `GraphPathError`. Typed `Arg`/`Kwarg` address soft call spelling;
+`Parameter` addresses a concrete named record (or safely named soft parameters).
+Use `node.lens(path).set(value)` for the former structural-slot editing API,
+including scalar endpoints. A lens edits one slot; `replace` edits an occurrence.
+
+`identity_spec()` and `state_spec()` are read-only rooted map adapters over facets,
+not independently stored authority. They choose one primary path per owned
+occurrence, rebase at the selected root, and preserve sharing. References and
+quotations do not enlarge materializing ownership. `object_view()` retains
+identities and alias topology while removing graph-reference state facets;
+quoted configuration stays exact.
+
+`with_realization(identities=..., states=...)` records supplied realization facets
+as an immutable overlay. Its `construction_view` retains the prior immutable
+construction selections: recording a child capture S1 does not overwrite an
+explicit construction pin S0. This records metadata only; it does not capture,
+restore, allocate, read payloads, or publish. Navigation, binding, replacement and
+extraction likewise perform none of those effects or target resolution.
+
+`require_saved(concrete_node)` validates that every owned stateful occurrence has
+an exact ObjectId and LocalState, with no independent identity collisions. It
+returns the **same handle**, typed as the named `SavedNode` completeness
+refinement. It adds no graph wrapper and asserts neither payload availability nor
+current restore compatibility. Ephemeral nodes need no own private-state facet.
+Mixed owned legacy ObjectRef/StateRef leaves are rejected by this new completeness
+validator, rather than treated as an empty owned closure. Existing reference
+consumers retain their separate APIs. `copy_graph()` preserves facets and the
+alias partition while creating fresh private Node handles, without ObjectId
+allocation or encoding.
 
 ## Live Objects And Exact State
 

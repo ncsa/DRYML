@@ -1,5 +1,5 @@
 from tests.core import core_objects as objects
-from dryml.core.definition import Definition, ConcreteDefinition, SKIP_ARGS, selector_match, \
+from dryml.core.definition import Definition, ConcreteNode, SKIP_ARGS, selector_match, \
     concretize_func, thaw_concrete
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 import numpy as np
@@ -13,7 +13,7 @@ def test_definition_concrete_1():
 
     new_def = definition.concretize()
     assert definition != new_def
-    assert type(new_def) is ConcreteDefinition
+    assert type(new_def) is ConcreteNode
     assert new_def.identity_version == V2_IDENTITY_VERSION
 
 
@@ -24,7 +24,10 @@ def test_public_concretization_uses_the_bound_v2_pipeline():
 
     assert private_v2.identity_version == V2_IDENTITY_VERSION
     assert definition.concretize().identity_version == V2_IDENTITY_VERSION
-    assert definition.concretize() == private_v2
+    repeated = definition.concretize()
+    assert repeated is not private_v2
+    assert repeated != private_v2
+    assert repeated.graph_equal(private_v2)
 
 
 def test_definition_concrete_2():
@@ -36,7 +39,7 @@ def test_definition_concrete_2():
     new_def = definition.concretize()
     assert selector_match(definition, new_def, verbose=True)
     assert definition != new_def
-    assert type(new_def) is ConcreteDefinition
+    assert type(new_def) is ConcreteNode
     assert new_def.parameters["discriminator"] is None
 
 

@@ -143,6 +143,7 @@ COMPATIBLE_CONTAINERS = {
     "list": (list, FrozenList),
     "tuple": (tuple, FrozenTuple),
     "set": (set, FrozenSet),
+    "frozenset": (frozenset,),
 }
 
 CONTAINER_FAMILY_ORDER = (
@@ -150,6 +151,7 @@ CONTAINER_FAMILY_ORDER = (
     "list",
     "tuple",
     "set",
+    "frozenset",
 )
 
 
@@ -231,6 +233,16 @@ class NodeKind(Enum):
 
 
 def node_kind(x: Any) -> NodeKind:
+    """Classify a supported semantic value without resolving or constructing it.
+
+    Args:
+        x (Any): Value to inspect, including a tagged or built-in frozenset.
+    Returns:
+        NodeKind: Its traversal category, or UNSUPPORTED. FrozenSet and frozenset
+        share an unordered traversal category but retain their distinct tags.
+    Side Effects:
+        May import dependency-light Core owners; never resolves user targets.
+    """
     from .definition import ConcreteDefinition, Definition
     from .links import DefLink
     from .object import Object
@@ -263,6 +275,8 @@ def node_kind(x: Any) -> NodeKind:
     if isinstance(x, FrozenTuple):
         return NodeKind.FROZEN_TUPLE
     if isinstance(x, FrozenSet):
+        return NodeKind.FROZEN_SET
+    if type(x) is frozenset:
         return NodeKind.FROZEN_SET
     if isinstance(x, FrozenDict):
         return NodeKind.FROZEN_DICT
@@ -570,19 +584,22 @@ def transform_container(
     target: str = "same",
     transform_keys: bool = False,
 ):
-    """
-    Generic container entry/exit helper.
+    """Map constructor container children while retaining semantic tags.
 
-    - `value_fn(path_part, value)` maps child values
-    - `target` controls whether the rebuilt container is:
-        * same kind
-        * canonical kind
-        * runtime kind
-
-    Dict key policy:
-      - keys must be canonical keys (str or int)
-      - keys are preserved, not transformed
-      - `transform_keys=True` is not supported
+    Args:
+        x (Any): Supported tagged or built-in container.
+        value_fn (Callable): Receives each path part and child value.
+        target (str): ``same``, ``canonical`` (freeze), or ``runtime`` (thaw).
+        transform_keys (bool): Must be False; keys remain exact str/int values,
+            excluding bool. A built-in frozenset always retains its own tag.
+    Returns:
+        Any: New container of mapped children under the requested mode.
+    Raises:
+        TypeError: If the container or mapping key is unsupported.
+        ValueError: For unsupported target/key-transformation controls.
+        Exception: Propagates child mapping failures.
+    Side Effects:
+        Invokes value_fn once per child; never mutates the input container.
     """
     kind = node_kind(x)
     if not is_value_container_kind(kind):
@@ -599,6 +616,8 @@ def transform_container(
     # sequence / set families
     if kind in (RUNTIME_SEQ_KINDS | CANONICAL_SEQ_KINDS):
         mapped = [value_fn(p, v) for p, v in iter_value_children(x)]
+        if type(x) is frozenset:
+            return frozenset(mapped)
         return rebuild_sequence_kind(out_kind, mapped)
 
     # dict families
@@ -655,6 +674,8 @@ class _ToCanonicalTransformer(GraphTransformer):
         repo = ctx.state["repo"]
 
         if kind is NodeKind.NDARRAY:
+            if obj.dtype.hasobject:
+                raise TypeError("Object-dtype arrays are not immutable construction values.")
             return FrozenNDArray.from_array(obj)
 
         if kind is NodeKind.TYPE:
@@ -1159,7 +1180,21 @@ def thaw_definition_surface_value(value: Any, *, memo: dict | None = None) -> An
 
 
 def freeze_def_value(value: Any) -> Any:
-    """Deep-freeze values admitted into Definition expressions."""
+    """Snapshot supported immutable constructor/soft-expression values.
+
+    Args:
+        value (Any): Scalar, supported semantic leaf, Node/link, quotation,
+            symbolic expression, tagged container, or nonobject array.
+    Returns:
+        Any: Immutable value retaining list/tuple/set/frozenset/mapping tags and
+        array dtype, shape, byte order and logical contents.
+    Raises:
+        TypeError: For unsupported values, object-dtype arrays or invalid keys.
+        CycleError: For cyclic containers.
+        ParameterizationError: For a Distribution in Definition-owned structure.
+    Side Effects:
+        Copies arrays and containers without resolving targets or performing IO.
+    """
 
     return _freeze_def_value(value, stack=set())
 
@@ -1186,7 +1221,9 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
     if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, ObjectSelector, Match, Expr, ObjectRef, StateRef, StateSelectorRef)):
         return value
     kind = node_kind(value)
-    if kind is NodeKind.NDARRAY:
+    if kind in {NodeKind.NDARRAY, NodeKind.FROZEN_NDARRAY}:
+        if value.dtype.hasobject:
+            raise TypeError("Object-dtype arrays are not immutable construction values.")
         return FrozenNDArray.from_array(value)
     if kind in {
         NodeKind.LIST,

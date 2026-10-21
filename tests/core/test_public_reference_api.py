@@ -15,6 +15,8 @@ def test_root_and_core_export_exact_reference_values_and_repo_apis():
         "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "ObjectSelector",
         "object_namespace", "Repo", "load_object", "load_state_ref",
         "save_object",
+        "Node", "ConcreteNode", "SavedNode", "require_saved", "StateKey",
+        "LocalState", "IdentitySpec", "StateSpec",
     }
     assert required <= set(dryml.__all__)
     assert required <= set(core.__all__)
@@ -23,6 +25,11 @@ def test_root_and_core_export_exact_reference_values_and_repo_apis():
     assert not hasattr(core, "load_alias")
     assert not hasattr(Repo, "load_alias")
     assert "SaveRouting" in core.__all__
+    for name in required:
+        assert getattr(dryml, name) is getattr(core, name)
+    from typing import Annotated, get_origin
+    assert get_origin(core.SavedNode[Object]) is Annotated
+    assert get_origin(core.ConcreteNode[Object]) is core.ConcreteNode
 
 
 def test_public_save_and_load_signatures_exclude_retired_controls():

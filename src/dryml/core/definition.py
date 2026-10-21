@@ -1,3 +1,5 @@
+"""Immutable authored Node graphs and retained normalized construction views."""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -8,7 +10,7 @@ import sys
 from collections.abc import Mapping
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator
+from typing import Annotated, Any, Callable, Iterator, TypeAlias, TypeVar
 
 from .utils.stable_hash import stable_int_hash, stable_hash_function
 from .cdef_identity import (
@@ -31,17 +33,20 @@ from .canonical import (
     node_kind)
 from .symbol import ImportRef, SourceSpec, maybe_symbol_ref, resolve_symbol
 from .bound_args import BoundArguments, validate_canonical_bound_arguments
+from .node import Node, _init_node, _coalesce, concretize_node
 
 # Special value to skip args
 SKIP_ARGS = object()
+_NodeT = TypeVar("_NodeT")
 
 
 class DefInterface(ABC):
     """Common read, exact-construction, and matching interface for definitions.
 
     Implementations expose a class reference and constructor representation.
-    ``Definition`` is a partial expression, while ``ConcreteDefinition`` is an
-    exact identity that can be materialized through a repository.
+    ``Definition`` authors a partial Node; ``ConcreteNode`` is its normalized
+    occurrence view. ``ConcreteDefinition`` retains the construction-view API
+    over the same record representation for existing repository consumers.
     """
     @property
     @abstractmethod
@@ -176,8 +181,8 @@ class DefInterface(ABC):
 
 
 @dataclass(frozen=True, slots=True, init=False, eq=False)
-class Definition(DefInterface, Mapping):
-    """Immutable, partial structural graph expression.
+class Definition(Node, DefInterface, Mapping):
+    """Author an immutable, partial Node-rooted graph expression.
 
     Values supplied at construction and update boundaries are deeply frozen so
     user-owned containers cannot mutate the Definition after creation. A
@@ -185,7 +190,10 @@ class Definition(DefInterface, Mapping):
     supplied values and never applies constructor defaults. It can therefore
     represent partial selector or search-space intent as well as a construction
     recipe. ``concretize()`` produces a fully bound exact V2
-    ``ConcreteDefinition`` when its class and values are materializable.
+    ``ConcreteNode`` when its class and values are materializable. Equality and
+    hashing identify this occurrence/view; ``recipe_equal`` and ``graph_equal``
+    compare semantic structure. Identity/state facets use the Node binding API,
+    independently of any constructor parameters with those names.
     Definitions may contain :class:`Par` and supported symbolic expressions.
     ``names``, ``is_resolved``, ``sub(...)``, and ``remap(...)`` inspect or
     rewrite authored structure without resolving targets or interpreting
@@ -213,6 +221,10 @@ class Definition(DefInterface, Mapping):
     _cls: Callable[..., Any] | type | ImportRef | SourceSpec | None
     _args: FrozenTuple | None
     _kwargs: FrozenDict[str, Any]
+    _occurrence: object = field(init=False, repr=False, compare=False)
+    _view: object = field(init=False, repr=False, compare=False)
+    _facets: object = field(init=False, repr=False, compare=False)
+    _construction: object = field(init=False, repr=False, compare=False)
     _stable_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
     def __init__(self, *args, **kwargs):
@@ -231,6 +243,7 @@ class Definition(DefInterface, Mapping):
             Deeply freezes supplied definition values; caller-owned containers
             cannot subsequently mutate this expression.
         """
+        _init_node(self)
         object.__setattr__(self, "_stable_hash_cache", None)
         if len(args) > 0:
             if not callable(args[0]) and not isclass(args[0]) and not isinstance(args[0], (ImportRef, SourceSpec)):
@@ -239,6 +252,7 @@ class Definition(DefInterface, Mapping):
                     object.__setattr__(self, "_args", None)
                     object.__setattr__(self, "_kwargs", self._freeze_kwargs(kwargs))
                     _validate_symbolic_sets(self)
+                    self._adopt_composed_aliases()
                     return
                 else:
                     raise ValueError("First positional argument must be a class, callable, or symbol reference.")
@@ -259,6 +273,13 @@ class Definition(DefInterface, Mapping):
             object.__setattr__(self, "_args", FrozenTuple())
             object.__setattr__(self, "_kwargs", self._freeze_kwargs(kwargs))
         _validate_symbolic_sets(self)
+        self._adopt_composed_aliases()
+
+    def _adopt_composed_aliases(self):
+        composed = _coalesce(self)
+        if composed is not self:
+            object.__setattr__(self, "_args", composed.args)
+            object.__setattr__(self, "_kwargs", composed.kwargs)
 
     @classmethod
     def _from_prepared_parameters(cls, selector_cls, parameters) -> "Definition":
@@ -280,6 +301,7 @@ class Definition(DefInterface, Mapping):
 
         _validate_distribution_free({"parameters": parameters})
         result = object.__new__(cls)
+        _init_node(result)
         object.__setattr__(result, "_stable_hash_cache", None)
         object.__setattr__(result, "_cls", selector_cls)
         object.__setattr__(result, "_args", None)
@@ -297,6 +319,7 @@ class Definition(DefInterface, Mapping):
         constructor deliberately does not rescan each rebuilt subtree.
         """
         result = object.__new__(cls)
+        _init_node(result)
         object.__setattr__(result, "_stable_hash_cache", None)
         object.__setattr__(result, "_cls", definition_cls)
         object.__setattr__(result, "_args", args)
@@ -306,7 +329,8 @@ class Definition(DefInterface, Mapping):
     @staticmethod
     def _freeze_value(value):
         from .canonical import freeze_def_value
-        return freeze_def_value(value)
+        from .node import _as_node_view
+        return _as_node_view(freeze_def_value(value))
 
     @classmethod
     def _freeze_kwargs(cls, kwargs):
@@ -411,12 +435,10 @@ class Definition(DefInterface, Mapping):
         return 1 + (1 if self._args is not None else 0) + (1 if self.cls is not None else 0)
 
     def __eq__(self, rhs):
-        if type(self) is not type(rhs):
-            return False
-        return _structural_value_equal(self.cls, rhs.cls) and _structural_value_equal(self.args, rhs.args) and _structural_value_equal(self.kwargs, rhs.kwargs)
+        return Node.__eq__(self, rhs)
 
     def __hash__(self) -> int:
-        return stable_int_hash(self.stable_hash())
+        return Node.__hash__(self)
 
     def stable_hash(self) -> str:
         cached = self._stable_hash_cache
@@ -449,10 +471,15 @@ class Definition(DefInterface, Mapping):
         return {
             'cls': self._cls,
             'args': self._args,
-            'kwargs': self._kwargs
+            'kwargs': self._kwargs,
+            'node_view': (self._occurrence, self._view, self._facets, self._construction),
         }
 
     def _pickle_setstate(self, state):
+        _init_node(self)
+        if 'node_view' in state:
+            for name, value in zip(("_occurrence", "_view", "_facets", "_construction"), state['node_view']):
+                object.__setattr__(self, name, value)
         object.__setattr__(self, "_cls", self._freeze_value(state['cls']))
         object.__setattr__(self, "_args", None if state['args'] is None else FrozenTuple(self._freeze_value(v) for v in state['args']))
         object.__setattr__(self, "_kwargs", self._freeze_kwargs(dict(state['kwargs'])))
@@ -495,8 +522,8 @@ class Definition(DefInterface, Mapping):
                 values during canonicalization.
 
         Returns:
-            An exact ``ConcreteDefinition`` whose semantic record includes all
-            effective declared defaults.
+            A ``ConcreteNode`` whose semantic record includes all effective
+            declared defaults, with occurrence sharing and exact facets retained.
 
         Raises:
             TypeError: If required arguments are missing or a bound value cannot
@@ -506,7 +533,7 @@ class Definition(DefInterface, Mapping):
             May run the class preparation hook once and resolve values required
             for exact canonicalization.
         """
-        return to_canonical(self, repo=repo)
+        return concretize_node(self, repo=repo)
 
     def with_cls(self, cls) -> "Definition":
         args = (SKIP_ARGS,) if self.args is None else tuple(self.args)
@@ -543,8 +570,7 @@ class Definition(DefInterface, Mapping):
             return Definition(*args, **kwargs)
         return Definition(self.cls, *args, **kwargs)
 
-    def at(self, path) -> "DefinitionLens":
-        return DefinitionLens(self, path)
+    at = Node.at
 
     def ref(self):
         """Assert reference delivery for this Definition at an activated boundary.
@@ -808,10 +834,30 @@ Definition.__setstate__ = Definition._pickle_setstate
 
 @dataclass(frozen=True, slots=True)
 class DefinitionLens:
+    """Copy-on-write structural-slot editor retained by ``Node.lens``.
+
+    Args:
+        definition (Node): Immutable graph root to edit.
+        path (GraphPathLike): Structural path, which may end at any value.
+    Side Effects:
+        None; ``set`` freezes its replacement and returns a new graph.
+    """
     definition: Definition
     path: Any
 
     def set(self, value: Any) -> Definition:
+        """Freeze value and replace one slot, returning a new immutable graph.
+
+        Args:
+            value (Any): Supported replacement constructor value.
+        Returns:
+            Node: Copy-on-write root with the selected slot replaced.
+        Raises:
+            TypeError: If value is not admitted as constructor data.
+            GraphPathError: If the structural path cannot be resolved.
+        Side Effects:
+            None. Use ``Node.replace`` to replace an occurrence at all aliases.
+        """
         from .canonical import freeze_def_value
         from .utils.graph.value import replace_subtree
 
@@ -923,6 +969,8 @@ class ConcreteDefinition(DefInterface, Mapping):
     def _copy_record(self, record: "ConcreteDefinition") -> None:
         """Populate this shell from a private, already-validated identity."""
 
+        if isinstance(self, Node):
+            _init_node(self, source=record if isinstance(record, Node) else None)
         object.__setattr__(self, "cls", record.cls)
         object.__setattr__(self, "_args", record._args)
         object.__setattr__(self, "_kwargs", record._kwargs)
@@ -1050,6 +1098,8 @@ class ConcreteDefinition(DefInterface, Mapping):
         if type(stateful_role) is not bool:
             raise TypeError("CDef stateful role must be a bool.")
         result = object.__new__(cls)
+        if isinstance(result, Node):
+            _init_node(result)
         object.__setattr__(result, "cls", cdef_cls)
         object.__setattr__(result, "_args", FrozenTuple())
         object.__setattr__(result, "_kwargs", FrozenDict({}))
@@ -1321,23 +1371,67 @@ class ConcreteDefinition(DefInterface, Mapping):
 
         return get_subtree(self, path)
 
-    def at(self, path: Any) -> DefinitionLens:
-        """Return a copy-on-write lens rooted at this exact CDef graph.
+    def at(self, path):
+        """Return the legacy structural editing lens for a CDef construction view.
 
         Args:
-            path: A typed or textual path into this CDef's semantic values.
-
+            path (GraphPathLike): Typed or textual structural value path.
         Returns:
-            A lens whose ``set`` operation reconstructs only ancestors on the
-            selected path and preserves untouched private descendant nodes.
+            DefinitionLens: Copy-on-write editor, with path failures raised on set.
+        Side Effects:
+            None. ConcreteNode overrides this with metadata-only Node navigation.
         """
-
         return DefinitionLens(self, path)
+
+    recipe_equal = Node.recipe_equal
 
 
 # Preserve the versioned record codec on Python 3.10; see the Definition note.
 ConcreteDefinition.__getstate__ = ConcreteDefinition._pickle_getstate
 ConcreteDefinition.__setstate__ = ConcreteDefinition._pickle_setstate
+
+
+class ConcreteNode(Node[_NodeT], ConcreteDefinition):
+    """Normalized immutable Node using the existing CDef constructor record.
+
+    Create through ``Definition.concretize()``; direct construction accepts the
+    same class/args/kwargs inputs and binding failures as ConcreteDefinition.
+    Equality/hash use occurrence/view identity. ``recipe_equal`` and
+    ``graph_equal`` compare structure explicitly. Optional ObjectId/LocalState
+    constraints do not imply saved completeness, publication or availability.
+    Metadata methods perform no IO; concretization returns this same handle.
+    """
+
+    __slots__ = ("_occurrence", "_view", "_facets", "_construction")
+    __eq__ = Node.__eq__
+    __ne__ = Node.__ne__
+    __hash__ = Node.__hash__
+    graph_equal = Node.graph_equal
+
+    def __setattr__(self, name, value):
+        from dataclasses import FrozenInstanceError
+        raise FrozenInstanceError(f"cannot assign to field {name!r}")
+
+    def __delattr__(self, name):
+        from dataclasses import FrozenInstanceError
+        raise FrozenInstanceError(f"cannot delete field {name!r}")
+
+    def _pickle_getstate(self):
+        state = super()._pickle_getstate()
+        state["node_view"] = (self._occurrence, self._view, self._facets, self._construction)
+        return state
+
+    def _pickle_setstate(self, state):
+        super()._pickle_setstate({key: value for key, value in state.items() if key != "node_view"})
+        for name, value in zip(("_occurrence", "_view", "_facets", "_construction"), state["node_view"]):
+            object.__setattr__(self, name, value)
+
+
+ConcreteNode.__getstate__ = ConcreteNode._pickle_getstate
+ConcreteNode.__setstate__ = ConcreteNode._pickle_setstate
+
+# A completeness refinement, not a wrapper or a second graph representation.
+SavedNode: TypeAlias = Annotated[ConcreteNode[_NodeT], "saved-complete; validate with require_saved"]
 
 
 def freeze(value: Any) -> Any:
@@ -1385,10 +1479,11 @@ def _structural_value_equal(left: Any, right: Any) -> bool:
         return left.module == right.__module__ and left.qualname == right.__qualname__
     if isinstance(right, ImportRef) and isinstance(left, type):
         return right.module == left.__module__ and right.qualname == left.__qualname__
+    if (isinstance(left, ConcreteDefinition) and isinstance(right, ConcreteDefinition)
+            or isinstance(left, Definition) and isinstance(right, Definition)):
+        return left.recipe_equal(right)
     if type(left) is not type(right):
         return False
-    if isinstance(left, (Definition, ConcreteDefinition)):
-        return left == right
     if isinstance(left, DefLink):
         return left.kind is right.kind and _structural_value_equal(left.target, right.target)
     if isinstance(left, QuotedDef):

@@ -278,7 +278,13 @@ def test_finalized_links_round_trip_but_assertions_fail_persistence() -> None:
 
     cdef = _cdef()
     finalized = DefLink.finalized(Ref.kind, cdef)
-    assert pickle.loads(pickle.dumps(finalized)) == finalized
+    decoded = pickle.loads(pickle.dumps(finalized))
+    assert type(decoded) is DefLink
+    assert decoded.is_finalized
+    assert decoded.kind is finalized.kind is Ref.kind
+    assert decoded.target is not cdef
+    assert decoded.target != cdef
+    assert decoded.target.graph_equal(cdef)
     assert encode_cdef_graph(Definition(SignatureContainer, finalized).concretize())
 
     assertion = Ref(cdef)

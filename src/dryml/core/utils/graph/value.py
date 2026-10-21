@@ -46,6 +46,14 @@ def iter_set_members(values: Iterable[Any]) -> tuple[tuple[SetMember, Any], ...]
 
     out: list[tuple[SetMember, Any]] = []
     for fp in sorted(buckets):
+        from ...node import Node
+
+        if all(isinstance(value, Node) for value in buckets[fp]):
+            # Equal recipes remain distinct occurrences. Ordinals address this
+            # immutable view only; they are not portable graph identity evidence.
+            bucket = sorted(buckets[fp], key=lambda value: id(value._occurrence))
+            out.extend((SetMember(fp, ordinal), value) for ordinal, value in enumerate(bucket))
+            continue
         repr_groups: dict[str, list[Any]] = defaultdict(list)
         for value in buckets[fp]:
             repr_groups[repr(value)].append(value)
@@ -164,6 +172,8 @@ def _get_child(obj: Any, seg: PathSegment) -> Any:
         raise TypeError(f"{seg!s} is not valid on a concrete definition; use Parameter.")
 
     if isinstance(obj, (Definition, ConcreteDefinition)):
+        if isinstance(seg, Parameter):
+            return obj.parameters[seg.name]
         if isinstance(seg, Kwarg):
             return obj.kwargs[seg.name]
         if isinstance(seg, Arg):

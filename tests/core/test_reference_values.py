@@ -69,3 +69,57 @@ def test_reference_values_import_without_optional_backends():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_local_state_exact_values_and_no_alternative_bindings():
+    from dryml.core import LocalState, StateKey
+
+    definition = Definition(ReferenceStateful).concretize()
+    key = StateKey("a" * 64, "pkl-" + "b" * 64)
+    state = LocalState(key, definition)
+    same = LocalState(key, Definition(ReferenceStateful).concretize())
+    assert definition.with_state(state).with_state(same).state is state
+    assert state.codec == "pkl"
+    with pytest.raises(ValueError):
+        StateKey("not-a-digest", key.codec_hash)
+    with pytest.raises(ValueError):
+        StateKey(key.cdef_digest, "bare-codec-hash")
+    with pytest.raises(TypeError):
+        LocalState(key, Definition(ReferenceStateful))
+    with pytest.raises(TypeError, match="LocalState"):
+        definition.with_state(key)
+    with pytest.raises(TypeError, match="LocalState"):
+        definition.with_state({state, same})
+
+
+def test_saved_subtree_maps_are_rebased_and_exclude_reference_ownership(monkeypatch):
+    from dryml.core import IdentitySpec, LocalState, StateKey, StateSpec, require_saved
+    from dryml.core.cdef_graph import EdgeKind
+    from dryml.core.links import DefLink
+    from dryml.core.repo import Repo
+
+    child = Definition(ReferenceStateful).concretize()
+    state = LocalState(StateKey("a" * 64, "pkl-" + "b" * 64), child)
+    child = child.with_identity(ObjectId()).with_state(state)
+    root = Definition(children=[child, child], ref=child.ref(), quoted=child.quote())
+    # Pure metadata must not enter any existing materialization/publication seam.
+    def forbidden(*args, **kwargs):
+        pytest.fail("metadata performed runtime or payload IO")
+    monkeypatch.setattr(Repo, "load_or_build", forbidden)
+    monkeypatch.setattr(Repo, "load_state_ref", forbidden)
+    monkeypatch.setattr(Repo, "save", forbidden)
+    monkeypatch.setattr(ObjectId, "__init__", forbidden)
+    monkeypatch.setattr(ReferenceStateful, "__init__", forbidden)
+    monkeypatch.setattr("dryml.core.symbol.ImportRef.resolve", forbidden)
+    assert len(root.identity_spec()) == len(root.state_spec()) == 1
+    assert isinstance(root.identity_spec(), IdentitySpec)
+    assert isinstance(root.state_spec(), StateSpec)
+    selected = root.at("$.children[1]")
+    assert selected is child and require_saved(selected) is child
+    assert dict(selected.state_spec()) == {GraphPath(): state}
+    assert selected.object_id == child.object_id
+    assert root.at("$.ref") is child and root.at("$.quoted") is child
+    for operation in (root.identity_spec, root.state_spec):
+        assert all("ref" not in str(path) and "quoted" not in str(path) for path in operation())
+    with pytest.raises(AttributeError):
+        root.state_spec()._root = child

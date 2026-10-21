@@ -1,7 +1,9 @@
 """Typed, serializable paths through canonical definition graph values.
 
-CDef V2 addresses constructor fields with ``Parameter`` segments. ``Arg`` and
-``Kwarg`` remain soft Definition syntax only and cannot address CDef authority.
+CDef V2 addresses constructor fields with ``Parameter`` segments. Soft Node
+metadata also accepts ``Parameter`` when supplied values can be safely named,
+without resolution or defaults. ``Arg`` and ``Kwarg`` remain soft Definition
+syntax only and cannot address CDef authority.
 These types describe paths only; resolving a path is owned by graph-value
 utilities.
 """
