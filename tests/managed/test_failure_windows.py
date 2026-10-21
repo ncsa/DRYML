@@ -318,19 +318,78 @@ def test_spawned_crash_preserves_only_associated_checkpoint_or_final_state(
         assert (status.state, status.failure_code) == ("failed", "owner_lost")
 
 
-def test_spawned_callback_window_recovery_does_not_replay_observers(tmp_path):
-    """A callback delivered before process death is not redelivered merely by resume."""
+def test_spawned_callback_window_recovery_does_not_replay_observers(
+        tmp_path, monkeypatch, record_testsuite_property):
+    """Characterize restore ownership across materialization and managed reentry.
+
+    The current two owning boundaries each restore the selected receiver. R19's
+    later cutover must strengthen this to one selected restore across the handoff;
+    metadata/preparation/hash observations below are measurements, not budgets.
+    """
+
+    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
 
     store, value = _terminate_at_boundary(tmp_path, "checkpoint_then_return", "callbacks_finished")
     calls = []
+    hooks = []
+    publications = []
+    phase = "materialization"
+    original_restore = CrashWindowValue.restore_state_from_dir_imp
+    original_capture = CrashWindowValue.save_state_to_dir_imp
+    original_publish = runtime_module._publish_managed_state_result
+
+    def restore(obj, directory, *, codec):
+        original_restore(obj, directory, codec=codec)
+        hooks.append((phase, "restore", id(obj), obj.value))
+
+    def capture(obj, directory, *, codec):
+        hooks.append((phase, "capture", id(obj), obj.value))
+        return original_capture(obj, directory, codec=codec)
+
+    def publish(*args, **kwargs):
+        result = original_publish(*args, **kwargs)
+        publications.append(result)
+        return result
+
+    monkeypatch.setattr(CrashWindowValue, "restore_state_from_dir_imp", restore)
+    monkeypatch.setattr(CrashWindowValue, "save_state_to_dir_imp", capture)
+    monkeypatch.setattr(runtime_module, "_publish_managed_state_result", publish)
     recovered = Repo._for_state_io((store,))
     try:
-        live = recovered.load_state_ref(value.checkpoint_then_return.status(state_repo=store).checkpoint_state_ref, reuse_live="never")
-        assert live.checkpoint_then_return(
-            managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: calls.append(args)]),
-        ) == "resumed"
+        selected = value.checkpoint_then_return.status(state_repo=store).checkpoint_state_ref
+        with exact_work_counts() as materialization:
+            live = recovered.load_state_ref(selected, reuse_live="never")
+        assert live.object_ref == value.object_ref and live.value == 1
+        assert hooks == [("materialization", "restore", id(live), 1)]
+        assert publications == []
+
+        assert live.last_state_ref == selected
+        phase = "managed"
+        with exact_work_counts() as managed_entry:
+            assert live.checkpoint_then_return(
+                managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: calls.append(args)]),
+            ) == "resumed"
+        assert hooks == [
+            ("materialization", "restore", id(live), 1),
+            ("managed", "restore", id(live), 1),
+            ("managed", "capture", id(live), 1),
+        ]
+        assert live.value == 1
+        status = live.checkpoint_then_return.status(state_repo=store)
+        assert status.state == "completed"
+        assert status.checkpoint_state_ref == selected
+        assert len(publications) == 1
+        assert publications[0].state_ref == status.final_state_ref
+        assert publications[0].report is not None
+
+        for stage, counts in (("materialization", materialization), ("managed", managed_entry)):
+            record_testsuite_property(f"u01_{stage}_work", repr(dict(sorted(counts.items()))))
+        record_testsuite_property("u01_hook_work", repr([
+            (stage, hook, value) for stage, hook, _, value in hooks
+        ]))
+        record_testsuite_property("u01_publications", len(publications))
     finally:
-        recovered.close()
+        recovered.close(flush=False)
     assert calls == []
 
 

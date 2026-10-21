@@ -634,20 +634,32 @@ def test_managed_store_control_uses_definition_transport_and_returns_state_ref(t
     assert override.read_state_ref_record(outcome["result"].digest()).state_ref == outcome["result"]
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_unrelated_nested_function_keeps_its_own_normalization_boundary(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+        tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A managed handoff never suppresses a separate nested function boundary."""
+
+    class NestedFunctionValue(Pickleable):
+        """Exercise an independent function inside an M(F(method)) handoff."""
+
+        @managed_operation()
+        @function
+        def run(self, *, managed) -> int:
+            """Normalize the nested call while the owning lifecycle is active."""
+
+            assert managed.active
+            return nested_unrelated_function(2)
 
     observed = []
     original_args = signatures.SignaturePlan._prepare_ambient_args
     original_return = signatures.SignaturePlan._prepare_ambient_return
 
     def observe_args(plan, args, kwargs):
-        observed.append("args")
+        observed.append(("args", plan))
         return original_args(plan, args, kwargs)
 
     def observe_return(plan, value, **kwargs):
-        observed.append("return")
+        observed.append(("return", plan))
         return original_return(plan, value, **kwargs)
 
     monkeypatch.setattr(
@@ -656,8 +668,19 @@ def test_unrelated_nested_function_keeps_its_own_normalization_boundary(
     monkeypatch.setattr(
         signatures.SignaturePlan, "_prepare_ambient_return", observe_return,
     )
-    assert nested_unrelated_function(2) == 3
-    assert observed == ["args", "return"]
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    subject = NestedFunctionValue(repo=repo)
+    try:
+        assert subject.run(managed=ManagedConfig(state_repo=repo)) == 3
+        assert [stage for stage, _ in observed] == ["args", "return"]
+        nested_plan = observed[0][1]
+        assert observed[1][1] is nested_plan
+        assert nested_plan.target.__qualname__.startswith(
+            f"{nested_unrelated_function.__qualname__}."
+        )
+        assert subject.run.status(state_repo=repo).state == "completed"
+    finally:
+        repo.close(flush=False)
 
 
 @pytest.mark.parametrize("placement", ("local", "subprocess"))

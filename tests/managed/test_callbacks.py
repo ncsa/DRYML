@@ -117,7 +117,7 @@ def test_callbacks_receive_exact_committed_receipt_in_list_order(tmp_path):
 
 
 def test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails(tmp_path):
-    """A failed observer is not replayed or hidden behind final completion."""
+    """Observer failure preserves the associated payload across a fresh Store/Repo."""
 
     store = DirStore(tmp_path / "store")
     value = CallbackValue(repo=Repo((store,)))
@@ -125,6 +125,7 @@ def test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails(tmp_p
 
     def fail(obj, context):
         calls.append(context.checkpoint_state_ref)
+        obj.value = 99
         raise RuntimeError("observer failed")
 
     def never(obj, context):
@@ -134,8 +135,24 @@ def test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails(tmp_p
         value.run(managed=ManagedConfig(state_repo=store, callbacks=[fail, never]))
     status = value.run.status(state_repo=store)
     assert (status.state, status.failure_code) == ("failed", "callback_error")
-    assert status.checkpoint_state_ref == calls[0]
-    assert calls != ["late"]
+    assert calls == [status.checkpoint_state_ref]
+    assert status.final_state_ref is None
+    assert value.value == 99
+
+    reopened = DirStore.open_existing(store.base_dir, query_index="none")
+    reader = Repo._for_state_io((reopened,))
+    try:
+        restored = reader.load_state_ref(status.checkpoint_state_ref, reuse_live="never")
+        assert restored.object_ref == value.object_ref
+        assert restored.value == 4
+        persisted = restored.run.status(state_repo=reader)
+        assert (persisted.state, persisted.failure_code) == ("failed", "callback_error")
+        assert persisted.checkpoint_state_ref == status.checkpoint_state_ref
+        assert persisted.final_state_ref is None
+        assert calls == [status.checkpoint_state_ref]
+    finally:
+        reader.close(flush=False)
+        reopened.close()
 
 
 def test_caught_callback_error_remains_terminal_without_final_state(tmp_path):
